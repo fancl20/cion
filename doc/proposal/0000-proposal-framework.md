@@ -28,12 +28,14 @@ human developers and automated agents.
 ### Goals
 
 Establish a standardized format for documenting and tracking proposed changes.
+
 ### Non-Goals
 
 This framework does not replace Architectural Decision Records (ADRs). ADRs
 record high-level architectural decisions, whereas proposals focus on concrete
 implementation tasks. It also does not mandate specific implementation
 approaches.
+
 ## Proposal
 
 Implement a proposal documentation framework with the following structure:
@@ -44,7 +46,7 @@ Implement a proposal documentation framework with the following structure:
   - **Non-Goals**: Explicitly excluded items
 - **Proposal**: Detailed specifications.
 - **Test Plan**: Validation strategy
-- **Implementation History**: Implementation history related to the proposal.
+- **Implementation History**: Implementation history related to the proposal
 
 ## Test Plan
 
