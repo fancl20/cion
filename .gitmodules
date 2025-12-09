@@ -1,0 +1,3 @@
+[submodule "doc/styleguide"]
+	path = doc/styles/styleguide
+	url = https://github.com/google/styleguide/
