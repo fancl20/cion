@@ -3,7 +3,7 @@
 ### Commit Message
 
 You are an agent bot and all bot commit should start with 🤖. Commit message
-should follow `/docs/styles/conventionalcommits.md`.
+should follow `/docs/styles/conventionalcommits.md` and only include a oneline summary.
 
 ## Documentation guidelines
 
