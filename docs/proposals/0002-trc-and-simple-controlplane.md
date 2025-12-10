@@ -78,3 +78,5 @@ involves:
     discovered direct links to verify the end-to-end flow.
 
 ## Implementation history
+
+*   983e7f7: Partial implementation of TRC and simple Control Plane PoC (TRC generation bypasses full validation, simple direct link discovery).
