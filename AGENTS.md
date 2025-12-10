@@ -3,7 +3,7 @@
 ### Commit Message
 
 You are an agent bot and all bot commit should start with 🤖. Commit message
-should follow docs/styles/conventionalcommits.md.
+should follow `/docs/styles/conventionalcommits.md`.
 
 ## Documentation guidelines
 
@@ -16,7 +16,7 @@ When working in the `/docs` directory, follow the guidelines in this section:
   output. All technical information specific to CION must be based on code
   found within this directory and its subdirectories.
 - **Style Authority:** Your source for writing guidance and style is in the
-  docs/styleguide/docguide, as well as any guidelines provided this section.
+  `/docs/styles/styleguide/docguide`, as well as any guidelines provided this section.
 - **Proactive User Consideration:** The user experience should be a primary
   concern when making changes to documentation. Aim to fill gaps in existing
   knowledge whenever possible while keeping documentation concise and easy for
