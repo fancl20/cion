@@ -1,20 +1,11 @@
 package pki
 
-import "context"
+import (
+	"context"
+	"crypto/x509"
 
-// TRC represents a Trust Root Configuration.
-type TRC struct {
-	ISD     int
-	Version int
-	// Content would go here
-}
-
-// Certificate represents a SCION certificate.
-type Certificate struct {
-	ISD int
-	AS  int
-	// Content would go here
-}
+	"github.com/scionproto/scion/pkg/scrypto/cppki"
+)
 
 // Verifier defines the interface for cryptographic verification.
 type Verifier interface {
@@ -25,11 +16,11 @@ type Verifier interface {
 // TrustStore defines the interface for retrieving trust material.
 type TrustStore interface {
 	// GetTRC retrieves a specific TRC.
-	GetTRC(ctx context.Context, isd int, version int) (TRC, error)
+	GetTRC(ctx context.Context, isd int, version int) (cppki.TRC, error)
 
 	// GetCertificate retrieves a specific certificate.
-	GetCertificate(ctx context.Context, isd int, as int) (Certificate, error)
+	GetCertificate(ctx context.Context, isd int, as int) (*x509.Certificate, error)
 
 	// GetLatestTRC retrieves the latest TRC for an ISD.
-	GetLatestTRC(ctx context.Context, isd int) (TRC, error)
+	GetLatestTRC(ctx context.Context, isd int) (cppki.TRC, error)
 }
