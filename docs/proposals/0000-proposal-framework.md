@@ -1,23 +1,11 @@
 # Use Proposal to Document and Guide Implementation
 
-## Table of Contents
-
-<!-- toc -->
-- [Summary](#summary)
-- [Motivation](#motivation)
-  - [Goals](#goals)
-  - [Non-Goals](#non-goals)
-- [Proposal](#proposal)
-- [Test Plan](#test-plan)
-- [Implementation History](#implementation-history)
-<!-- /toc -->
-
-## Summary
-
 This proposal establishes a standardized framework for documenting project
 changes and guiding implementation. The framework ensures clear communication
 of intentions and alignment between human contributors and automated agents
 during development.
+
+[TOC]
 
 ## Motivation
 
@@ -29,7 +17,7 @@ human developers and automated agents.
 
 Establish a standardized format for documenting and tracking proposed changes.
 
-### Non-Goals
+### Non-goals
 
 This framework does not replace Architectural Decision Records (ADRs). ADRs
 record high-level architectural decisions, whereas proposals focus on concrete
@@ -48,12 +36,12 @@ Implement a proposal documentation framework with the following structure:
 - **Test Plan**: Validation strategy
 - **Implementation History**: Implementation history related to the proposal
 
-## Test Plan
+## Test plan
 
 - Validate the clarity of implementation guidance.
 - Verify alignment between written documentation and the resulting codebase.
 - Assess usability for both human contributors and automated agents.
 
-## Implementation History
+## Implementation history
 
 - 119a11d: Initial framework proposal created with standardized structure
