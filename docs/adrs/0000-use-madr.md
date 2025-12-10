@@ -3,40 +3,42 @@
 *   Status: accepted
 *   Date: 2025-12-10
 
-## Context and Problem Statement
+[TOC]
+
+## Context and problem statement
 
 We want to record architectural decisions, but we do not have a standard way to
 do so yet.
 
-## Decision Drivers
+## Decision drivers
 
 *   We need a way to track architectural decisions in the repository.
 *   The format should be lightweight and easy to read.
 *   It should be version-controlled alongside the code.
 
-## Considered Options
+## Considered options
 
 *   Wiki pages
 *   Google Docs
 *   Markdown Architectural Decision Records (MADR)
 
-## Decision Outcome
+## Decision outcome
 
 Chosen option: "Markdown Architectural Decision Records (MADR)", because it
 meets all our requirements for a lightweight, version-controlled decision log
 that lives with the code.
 
-### Positive Consequences
+### Positive consequences
 
 *   Decisions are versioned with the code.
 *   Easy to read and write (Markdown).
 *   No external tools required.
 
-### Negative Consequences
+### Negative consequences
 
 *   Requires discipline to keep updated.
 
-## Pros and Cons of the Options
+## Pros and cons of the options
 
 ### Wiki pages
 
