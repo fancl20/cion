@@ -1,9 +1,38 @@
-## Commit Change
+## Coding
 
-### Commit Message
+### Coding style
 
-You are an agent bot and all bot commit should start with 🤖. Commit message
-should follow `/docs/styles/conventionalcommits.md` and only include a oneline summary.
+Go coding style should follow `/doc/styles/styleguide/go`, as well as any
+guidelines provided in this section. If not specified, maintain consistent
+style across the codebase.
+
+When adding comments, consider whether they provide additional context to the
+surrounding code or if similar information can be extracted from function
+names, variable names, or other context. Evaluate the cognitive cost of the
+added comment.
+
+### Writing tests
+
+Avoid introducing third-party assertion libraries. If tests need to compare
+complex structures, prefer using `https://github.com/google/go-cmp` over
+`reflect`.
+
+## Commit change
+
+### Before commit
+
+Review changes to ensure they conform to all style requirements. For code
+changes, run tests first.
+
+Pause and wait for human review before committing changes to the codebase.
+It's acceptable to amend a local commit if a later commit is a refinement of
+the first.
+
+### Commit message
+
+As an agent bot, all commits should start with 🤖. Commit messages should
+follow `/docs/styles/conventionalcommits.md` and include only a one-line
+summary.
 
 ## Documentation guidelines
 
@@ -16,7 +45,8 @@ When working in the `/docs` directory, follow the guidelines in this section:
   output. All technical information specific to CION must be based on code
   found within this directory and its subdirectories.
 - **Style Authority:** Your source for writing guidance and style is in the
-  `/docs/styles/styleguide/docguide`, as well as any guidelines provided this section.
+  `/docs/styles/styleguide/docguide`, as well as any guidelines provided in this
+  section.
 - **Proactive User Consideration:** The user experience should be a primary
   concern when making changes to documentation. Aim to fill gaps in existing
   knowledge whenever possible while keeping documentation concise and easy for
@@ -25,6 +55,6 @@ When working in the `/docs` directory, follow the guidelines in this section:
 
 ## General requirements
 
-- Use a neutral and calm tone for all the messages and keep text concise.
-- If there is something you do not understand or is ambiguous, seek confirmation
-  or clarification from the user before making changes based on assumptions.
+- Use a neutral and calm tone for all messages and keep text concise.
+- If something is unclear or ambiguous, seek confirmation or clarification from
+  the user before making changes based on assumptions.
