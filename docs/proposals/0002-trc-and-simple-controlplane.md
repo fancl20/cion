@@ -1,7 +1,7 @@
-# Implement TRC and a Simple Control Plane for Direct Links
+# Implement TRC and a simple Control Plane for direct links
 
 This proposal outlines the implementation of Trust Root Configuration (TRC) and
-a simplified control plane for the CION project. The control plane will
+a simplified Control Plane for the CION project. The Control Plane will
 initially focus on path discovery and establishment over direct links.
 
 [TOC]
@@ -11,7 +11,7 @@ initially focus on path discovery and establishment over direct links.
 This proposal drives the next phase of CION's development by establishing its
 security foundation and basic connectivity. It involves implementing the Trust
 Root Configuration (TRC) mechanism to enable cryptographic trust. Concurrently,
-it proposes a minimal control plane capable of discovering and using direct
+it proposes a minimal Control Plane capable of discovering and using direct
 links, serving as a functional testing ground and proof-of-concept before fuller
 SCION pathing is implemented.
 
@@ -19,8 +19,8 @@ SCION pathing is implemented.
 
 To operate securely and effectively, CION requires a root of trust and a
 mechanism to exchange routing information. TRCs provide the necessary security
-anchor. A simplified control plane focusing on direct links allows for
-incremental development, enabling early testing of the data plane and basic node
+anchor. A simplified Control Plane focusing on direct links allows for
+incremental development, enabling early testing of the Data Plane and basic node
 interactions without the complexity of full multi-hop routing and beaconing
 immediately.
 
@@ -28,7 +28,7 @@ immediately.
 
 *   Implement Trust Root Configuration (TRC) generation, distribution, and
     validation mechanisms.
-*   Develop a minimal control plane that supports neighbor discovery and path
+*   Develop a minimal Control Plane that supports neighbor discovery and path
     usage over direct links.
 *   Define messages and APIs for direct link management.
 *   Validate the cryptographic foundations of the network.
@@ -42,7 +42,7 @@ immediately.
 
 ## Proposal
 
-### Trust Root Configuration (TRC) Implementation
+### Trust Root Configuration (TRC) implementation
 
 We will implement the logic required to handle TRCs, which act as the root of
 trust for the CION network. This includes:
@@ -52,20 +52,19 @@ trust for the CION network. This includes:
 *   **Validation**: Logic within CION nodes to parse and cryptographically
     verify received TRCs.
 *   **Storage & Access**: A mechanism to securely store and retrieve active TRCs
-    for use by other components (like the Control Plane and PKI).
+    for use by other components (like the Control Plane and CP-PKI).
 
-### Simple Control Plane (Direct Links)
+### Simple Control Plane (direct links)
 
-The control plane implementation will be scoped to "direct links" only. This
+The Control Plane implementation will be scoped to "direct links" only. This
 involves:
 
-*   **Discovery**: A mechanism for CION nodes to detect directly connected
-    peers.
-*   **Path Representation**: Representing a direct connection as a valid SCION
+*   **Discovery**: A mechanism for CION nodes to detect neighbor ASes.
+*   **Path Representation**: Representing a link to a neighbor AS as a valid SCION
     path segment.
 *   **Signaling**: Defining a minimal set of control messages to exchange link
     capabilities and status.
-*   **Integration**: Exposing these direct paths to the data plane so traffic
+*   **Integration**: Exposing these direct paths to the Data Plane so traffic
     can be forwarded to neighbors.
 
 ## Test plan
