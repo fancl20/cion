@@ -25,7 +25,7 @@ func TestTRCSpecCompliance(t *testing.T) {
 	coreASes := []addr.AS{addr.MustParseAS("ff00:0:110"), addr.MustParseAS("ff00:0:111")}
 	authASes := []addr.AS{addr.MustParseAS("ff00:0:110")} // Subset of Core ASes
 
-	trc, _, err := pki.GenerateTRC(isd, version, baseVersion, description, validity, coreASes, authASes)
+	trc, _, err := pki.GenerateBaseTRC(isd, version, baseVersion, description, validity, coreASes, authASes)
 	if err != nil {
 		t.Fatalf("TRC generation failed: %v", err)
 	}
@@ -97,18 +97,28 @@ func TestTRCSpecCompliance(t *testing.T) {
 		if len(trc.Certificates) == 0 {
 			t.Fatal("TRC must contain certificates")
 		}
-		// Since we generate 1 root cert, check it's there.
-		if len(trc.Certificates) != 1 {
-			t.Errorf("Expected 1 certificate, got %d", len(trc.Certificates))
+		// We generate 3 certificates (root, sensitive voting, regular voting).
+		if len(trc.Certificates) != 3 {
+			t.Errorf("Expected 3 certificates, got %d", len(trc.Certificates))
 		}
-		cert := trc.Certificates[0]
+		// Check uniqueness by comparing raw DER bytes
+		seen := make(map[string]bool)
+		for _, cert := range trc.Certificates {
+			key := string(cert.Raw)
+			if seen[key] {
+				t.Error("Duplicate certificate found")
+			}
+			seen[key] = true
+		}
 
 		// Spec: "Every certificate MUST have a validity period that fully contains the validity period of this TRC."
-		if !cert.NotBefore.Before(trc.Validity.NotBefore) && !cert.NotBefore.Equal(trc.Validity.NotBefore) {
-			t.Errorf("Cert NotBefore (%s) should be <= TRC NotBefore (%s)", cert.NotBefore, trc.Validity.NotBefore)
-		}
-		if !cert.NotAfter.After(trc.Validity.NotAfter) && !cert.NotAfter.Equal(trc.Validity.NotAfter) {
-			t.Errorf("Cert NotAfter (%s) should be >= TRC NotAfter (%s)", cert.NotAfter, trc.Validity.NotAfter)
+		for _, cert := range trc.Certificates {
+			if !cert.NotBefore.Before(trc.Validity.NotBefore) && !cert.NotBefore.Equal(trc.Validity.NotBefore) {
+				t.Errorf("Cert NotBefore (%s) should be <= TRC NotBefore (%s)", cert.NotBefore, trc.Validity.NotBefore)
+			}
+			if !cert.NotAfter.After(trc.Validity.NotAfter) && !cert.NotAfter.Equal(trc.Validity.NotAfter) {
+				t.Errorf("Cert NotAfter (%s) should be >= TRC NotAfter (%s)", cert.NotAfter, trc.Validity.NotAfter)
+			}
 		}
 	})
 
@@ -126,7 +136,7 @@ func TestTRCUpdateSpec(t *testing.T) {
 	baseVersion := 1
 
 	// Initial TRC (v1)
-	v1, _, err := pki.GenerateTRC(isd, 1, baseVersion, "Base TRC", cppki.Validity{
+	v1, _, err := pki.GenerateBaseTRC(isd, 1, baseVersion, "Base TRC", cppki.Validity{
 		NotBefore: time.Now(),
 		NotAfter:  time.Now().Add(1 * time.Hour),
 	}, []addr.AS{addr.MustParseAS("ff00:0:110")}, []addr.AS{addr.MustParseAS("ff00:0:110")})
@@ -135,7 +145,7 @@ func TestTRCUpdateSpec(t *testing.T) {
 	}
 
 	// Update TRC (v2) - Regular Update
-	v2, _, err := pki.GenerateTRC(isd, 2, baseVersion, "Update TRC", cppki.Validity{
+	v2, _, err := pki.GenerateBaseTRC(isd, 2, baseVersion, "Update TRC", cppki.Validity{
 		NotBefore: time.Now(),
 		NotAfter:  time.Now().Add(1 * time.Hour),
 	}, []addr.AS{addr.MustParseAS("ff00:0:110")}, []addr.AS{addr.MustParseAS("ff00:0:110")})
