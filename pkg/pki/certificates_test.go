@@ -8,7 +8,7 @@ import (
 	"github.com/scionproto/scion/pkg/scrypto/cppki"
 )
 
-func TestCertificatesCreateRoot(t *testing.T) {
+func TestCertificatesCreateCore(t *testing.T) {
 	certs := NewCertificates()
 	ia := addr.MustParseIA("1-ff00:0:110")
 	validity := cppki.Validity{
@@ -16,63 +16,52 @@ func TestCertificatesCreateRoot(t *testing.T) {
 		NotAfter:  time.Now().Add(24 * time.Hour),
 	}
 
-	// Create root certificate
-	if err := certs.Create(ia, "Test Root", VotingRoleRoot, validity); err != nil {
+	// Create Core AS - should generate Root, Sensitive, and Regular certs
+	if err := certs.Create(ia, ASTypeCore, validity); err != nil {
 		t.Fatalf("Create failed: %v", err)
 	}
 
-	// Verify certificate is stored
-	if !certs.HasCertificate() {
-		t.Error("HasCertificate returned false after Create")
+	// Verify Root certificate
+	rootCert, ok := certs.certs[CertTypeRoot]
+	if !ok {
+		t.Error("Root certificate not found in certs.certs map")
 	}
-	cert := certs.Certificate()
-	if cert == nil {
-		t.Fatal("Certificate returned nil")
-	}
-
-	// Verify classification
-	ct, err := cppki.ValidateCert(cert)
+	ct, err := cppki.ValidateCert(rootCert)
 	if err != nil {
-		t.Fatalf("ValidateCert failed: %v", err)
+		t.Fatalf("ValidateCert(Root) failed: %v", err)
 	}
 	if ct != cppki.Root {
 		t.Errorf("expected Root classification, got %v", ct)
 	}
-}
 
-func TestCertificatesCreateSensitive(t *testing.T) {
-	certs := NewCertificates()
-	ia := addr.MustParseIA("1-ff00:0:110")
-	validity := cppki.Validity{
-		NotBefore: time.Now().Add(-time.Hour),
-		NotAfter:  time.Now().Add(24 * time.Hour),
+	// Verify Sensitive certificate
+	sensitiveCert, ok := certs.certs[CertTypeSensitive]
+	if !ok {
+		t.Error("Sensitive certificate not found in certs.certs map")
 	}
-
-	// Create sensitive voting certificate
-	if err := certs.Create(ia, "Sensitive Voting", VotingRoleSensitive, validity); err != nil {
-		t.Fatalf("Create failed: %v", err)
-	}
-
-	// Verify certificate is stored
-	if !certs.HasCertificate() {
-		t.Error("HasCertificate returned false after Create")
-	}
-	cert := certs.Certificate()
-	if cert == nil {
-		t.Fatal("Certificate returned nil")
-	}
-
-	// Verify classification
-	ct, err := cppki.ValidateCert(cert)
+	ct, err = cppki.ValidateCert(sensitiveCert)
 	if err != nil {
-		t.Fatalf("ValidateCert failed: %v", err)
+		t.Fatalf("ValidateCert(Sensitive) failed: %v", err)
 	}
 	if ct != cppki.Sensitive {
 		t.Errorf("expected Sensitive classification, got %v", ct)
 	}
+
+	// Verify Regular certificate
+	regularCert, ok := certs.certs[CertTypeRegular]
+	if !ok {
+		t.Error("Regular certificate not found in certs.certs map")
+	}
+	ct, err = cppki.ValidateCert(regularCert)
+	if err != nil {
+		t.Fatalf("ValidateCert(Regular) failed: %v", err)
+	}
+	if ct != cppki.Regular {
+		t.Errorf("expected Regular classification, got %v", ct)
+	}
 }
 
-func TestCertificatesCreateRegular(t *testing.T) {
+func TestCertificatesCreateAuthoritative(t *testing.T) {
 	certs := NewCertificates()
 	ia := addr.MustParseIA("1-ff00:0:110")
 	validity := cppki.Validity{
@@ -80,27 +69,45 @@ func TestCertificatesCreateRegular(t *testing.T) {
 		NotAfter:  time.Now().Add(24 * time.Hour),
 	}
 
-	// Create regular voting certificate
-	if err := certs.Create(ia, "Regular Voting", VotingRoleRegular, validity); err != nil {
+	// Create Authoritative AS - should generate ONLY Regular cert
+	if err := certs.Create(ia, ASTypeAuthoritative, validity); err != nil {
 		t.Fatalf("Create failed: %v", err)
 	}
 
-	// Verify certificate is stored
-	if !certs.HasCertificate() {
-		t.Error("HasCertificate returned false after Create")
+	// Verify Regular certificate
+	if _, ok := certs.certs[CertTypeRegular]; !ok {
+		t.Error("Regular certificate not found after Create(ASTypeAuthoritative)")
 	}
-	cert := certs.Certificate()
-	if cert == nil {
-		t.Fatal("Certificate returned nil")
+	// Verify NO Root/Sensitive
+	if _, ok := certs.certs[CertTypeRoot]; ok {
+		t.Error("Root certificate found after Create(ASTypeAuthoritative)")
+	}
+	if _, ok := certs.certs[CertTypeSensitive]; ok {
+		t.Error("Sensitive certificate found after Create(ASTypeAuthoritative)")
+	}
+}
+
+func TestCertificatesCreateNormal(t *testing.T) {
+	certs := NewCertificates()
+	ia := addr.MustParseIA("1-ff00:0:110")
+	validity := cppki.Validity{
+		NotBefore: time.Now().Add(-time.Hour),
+		NotAfter:  time.Now().Add(24 * time.Hour),
 	}
 
-	// Verify classification
-	ct, err := cppki.ValidateCert(cert)
-	if err != nil {
-		t.Fatalf("ValidateCert failed: %v", err)
+	// Create Normal AS - should generate NO TRC certs
+	if err := certs.Create(ia, ASTypeNormal, validity); err != nil {
+		t.Fatalf("Create failed: %v", err)
 	}
-	if ct != cppki.Regular {
-		t.Errorf("expected Regular classification, got %v", ct)
+
+	if _, ok := certs.certs[CertTypeRoot]; ok {
+		t.Error("Root certificate found after Create(ASTypeNormal)")
+	}
+	if _, ok := certs.certs[CertTypeSensitive]; ok {
+		t.Error("Sensitive certificate found after Create(ASTypeNormal)")
+	}
+	if _, ok := certs.certs[CertTypeRegular]; ok {
+		t.Error("Regular certificate found after Create(ASTypeNormal)")
 	}
 }
 
@@ -112,38 +119,38 @@ func TestCertificatesCreateReplacesExisting(t *testing.T) {
 		NotAfter:  time.Now().Add(24 * time.Hour),
 	}
 
-	// Create root certificate
-	if err := certs.Create(ia, "First Root", VotingRoleRoot, validity); err != nil {
+	// Create Core AS
+	if err := certs.Create(ia, ASTypeCore, validity); err != nil {
 		t.Fatalf("Create failed: %v", err)
 	}
-	firstCert := certs.Certificate()
+	firstCert := certs.certs[CertTypeRoot]
 
-	// Create sensitive certificate (should replace root)
-	if err := certs.Create(ia, "Sensitive Voting", VotingRoleSensitive, validity); err != nil {
+	// Create Core AS again (should replace)
+	if err := certs.Create(ia, ASTypeCore, validity); err != nil {
 		t.Fatalf("Create failed: %v", err)
 	}
-	secondCert := certs.Certificate()
+	secondCert := certs.certs[CertTypeRoot]
 
 	if firstCert == secondCert {
 		t.Error("Create did not replace existing certificate")
 	}
 
-	// Verify new certificate is sensitive
+	// Verify classification still Root
 	ct, err := cppki.ValidateCert(secondCert)
 	if err != nil {
 		t.Fatalf("ValidateCert failed: %v", err)
 	}
-	if ct != cppki.Sensitive {
-		t.Errorf("expected Sensitive classification after replacement, got %v", ct)
+	if ct != cppki.Root {
+		t.Errorf("expected Root classification after replacement, got %v", ct)
 	}
 }
 
 func TestCertificatesEmpty(t *testing.T) {
 	certs := NewCertificates()
-	if certs.HasCertificate() {
-		t.Error("HasCertificate returned true for empty Certificates")
+	if len(certs.certs) != 0 {
+		t.Error("certs.certs map is not empty for new Certificates instance")
 	}
-	if certs.Certificate() != nil {
-		t.Error("Certificate returned non-nil for empty Certificates")
+	if certs.certs[CertTypeRoot] != nil {
+		t.Error("certs.certs[CertTypeRoot] returned non-nil for empty Certificates")
 	}
 }

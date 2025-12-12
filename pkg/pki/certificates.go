@@ -15,96 +15,151 @@ import (
 	"github.com/scionproto/scion/pkg/scrypto/cppki"
 )
 
-// VotingRole represents the voting authority of an AS in the SCION PKI.
-type VotingRole int
+// CertType represents the type of certificate in the SCION PKI.
+type CertType int
 
 const (
-	// VotingRoleRoot indicates root authority (can sign CA certificates and vote on TRCs).
-	VotingRoleRoot VotingRole = iota
-	// VotingRoleSensitive indicates sensitive voting authority (higher trust level).
-	VotingRoleSensitive
-	// VotingRoleRegular indicates regular voting authority.
-	VotingRoleRegular
+	CertTypeUnknown CertType = iota
+	// CertTypeRegular indicates a regular voting certificate.
+	CertTypeRegular
+	// CertTypeSensitive indicates a sensitive voting certificate.
+	CertTypeSensitive
+	// CertTypeRoot indicates a root certificate (can sign CA certificates).
+	CertTypeRoot
+)
+
+// ASType represents the role of an AS in the SCION ISD.
+type ASType int
+
+const (
+	// ASTypeCore indicates a Core AS (holds Root, Sensitive, and Regular voting rights).
+	// Matches spec "Core AS" governing the ISD.
+	ASTypeCore ASType = iota
+	// ASTypeAuthoritative indicates an Authoritative AS (holds Regular voting rights).
+	// In this simplified model, Authoritative ASes are ASes that participate in regular voting.
+	ASTypeAuthoritative
+	// ASTypeNormal indicates a regular AS (no voting rights).
+	ASTypeNormal
 )
 
 // Certificates manages the certificates and private keys owned by a single AS.
 // Private keys are kept internal for security and never exposed outside the interface.
-// An AS typically has one voting certificate (root, sensitive, or regular) depending on its authority.
 type Certificates struct {
-	// certificate and private key for voting (one of root, sensitive, or regular)
-	votingCert *x509.Certificate
-	votingKey  crypto.PrivateKey
+	// certificate and private key by type
+	certs map[CertType]*x509.Certificate
+	keys  map[CertType]crypto.PrivateKey
 
 	// TODO: support for CA and AS certificates in future
 }
 
 // NewCertificates creates an empty certificate manager.
 func NewCertificates() *Certificates {
-	return &Certificates{}
+	return &Certificates{
+		certs: make(map[CertType]*x509.Certificate),
+		keys:  make(map[CertType]crypto.PrivateKey),
+	}
 }
 
-// Create generates a new voting certificate and private key for the given AS.
-// The votingRole determines the type of certificate (root, sensitive, or regular).
-// This method replaces any existing certificate and key.
-func (c *Certificates) Create(ia addr.IA, commonName string, votingRole VotingRole, validity cppki.Validity) error {
+// Create generates the necessary certificates and private keys for the given AS based on its type.
+// This method replaces any existing certificates and keys.
+func (c *Certificates) Create(ia addr.IA, asType ASType, validity cppki.Validity) error {
+	switch asType {
+	case ASTypeCore:
+		// Core AS gets Root, Sensitive, and Regular certificates
+		if err := c.generateCert(ia, CertTypeRoot, validity); err != nil {
+			return err
+		}
+		if err := c.generateCert(ia, CertTypeSensitive, validity); err != nil {
+			return err
+		}
+		if err := c.generateCert(ia, CertTypeRegular, validity); err != nil {
+			return err
+		}
+	case ASTypeAuthoritative:
+		// Authoritative AS gets Regular voting certificate
+		if err := c.generateCert(ia, CertTypeRegular, validity); err != nil {
+			return err
+		}
+	case ASTypeNormal:
+		// Normal AS gets no TRC-level certificates (will get AS cert in future)
+		return nil
+	default:
+		return fmt.Errorf("invalid AS type: %v", asType)
+	}
+	return nil
+}
+
+func (c *Certificates) generateCert(ia addr.IA, certType CertType, validity cppki.Validity) error {
 	var cert *x509.Certificate
 	var privKey crypto.PrivateKey
 	var err error
+	var commonName string
 
-	switch votingRole {
-	case VotingRoleRoot:
+	switch certType {
+	case CertTypeRoot:
+		commonName = fmt.Sprintf("ISD%d-AS%s Root", ia.ISD(), ia.AS())
 		cert, privKey, err = generateRootCert(ia, commonName, validity)
-	case VotingRoleSensitive:
+	case CertTypeSensitive:
+		commonName = fmt.Sprintf("ISD%d-AS%s Sensitive Voting", ia.ISD(), ia.AS())
 		cert, privKey, err = generateVotingCert(ia, commonName, cppki.OIDExtKeyUsageSensitive, validity)
-	case VotingRoleRegular:
+	case CertTypeRegular:
+		commonName = fmt.Sprintf("ISD%d-AS%s Regular Voting", ia.ISD(), ia.AS())
 		cert, privKey, err = generateVotingCert(ia, commonName, cppki.OIDExtKeyUsageRegular, validity)
 	default:
-		return fmt.Errorf("invalid voting role: %v", votingRole)
-	}
-	if err != nil {
-		return fmt.Errorf("failed to generate certificate: %w", err)
+		return fmt.Errorf("invalid cert type: %v", certType)
 	}
 
-	c.votingCert = cert
-	c.votingKey = privKey
+	if err != nil {
+		return fmt.Errorf("failed to generate certificate for %v: %w", certType, err)
+	}
+
+	c.certs[certType] = cert
+	c.keys[certType] = privKey
 	return nil
 }
 
 // Load is a placeholder for loading certificates from persistent storage.
 // Not implemented in this PoC.
 func (c *Certificates) Load() error {
-	return fmt.Errorf("Load not implemented")
+	return fmt.Errorf("load not implemented")
 }
 
 // Vote signs a TRC with the AS's private key and returns the updated SignedTRC.
 // This implements the voting use case where an AS adds its signature to a TRC proposal.
 func (c *Certificates) Vote(signedTRC cppki.SignedTRC) (cppki.SignedTRC, error) {
-	// TODO: implement actual signing using c.votingKey
+	// TODO: implement actual signing using the appropriate key from c.keys
 	// For PoC, return the input unchanged
-	return signedTRC, fmt.Errorf("Vote not implemented yet")
+	return signedTRC, fmt.Errorf("vote not implemented yet")
 }
 
 // Join adds the AS's voting certificate to a TRC and returns the updated TRC.
 // This is used when an AS wants to join an ISD and needs its certificate included in the TRC.
 // The returned TRC is unsigned and would need to be voted on by existing members.
-// Note: In the current PoC, only the AS's single voting certificate is added.
-// A future enhancement could allow adding root and multiple voting certificates
-// when joining a base TRC that lacks them.
 func (c *Certificates) Join(trc cppki.TRC) (cppki.TRC, error) {
-	if c.votingCert == nil {
+	if len(c.certs) == 0 {
 		return cppki.TRC{}, fmt.Errorf("no voting certificate available")
 	}
 
-	// Check if certificate is already in TRC to avoid duplicates
-	for _, cert := range trc.Certificates {
-		if cert.Equal(c.votingCert) {
-			// Certificate already present, return unchanged
-			return trc, nil
+	// Iterate in deterministic order: Root -> Sensitive -> Regular
+	types := []CertType{CertTypeRoot, CertTypeSensitive, CertTypeRegular}
+	for _, t := range types {
+		myCert, ok := c.certs[t]
+		if !ok {
+			continue
+		}
+
+		// Check if certificate is already in TRC to avoid duplicates
+		found := false
+		for _, cert := range trc.Certificates {
+			if cert.Equal(myCert) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			trc.Certificates = append(trc.Certificates, myCert)
 		}
 	}
-
-	// Append certificate to Certificates slice
-	trc.Certificates = append(trc.Certificates, c.votingCert)
 
 	// Re-encode TRC to update Raw field
 	raw, err := trc.Encode()
@@ -116,14 +171,10 @@ func (c *Certificates) Join(trc cppki.TRC) (cppki.TRC, error) {
 	return trc, nil
 }
 
-// Certificate returns the AS's voting certificate, if any.
-func (c *Certificates) Certificate() *x509.Certificate {
-	return c.votingCert
-}
-
-// HasCertificate returns true if the AS has a voting certificate.
-func (c *Certificates) HasCertificate() bool {
-	return c.votingCert != nil
+// HasCertificate returns true if the AS has a certificate of the specified type.
+func (c *Certificates) HasCertificate(t CertType) bool {
+	_, ok := c.certs[t]
+	return ok
 }
 
 // generateRootCert creates a SCION-compliant root certificate for a given IA.
