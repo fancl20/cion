@@ -5,11 +5,13 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/asn1"
 	"fmt"
 	"math/big"
+	"net"
 
 	"github.com/scionproto/scion/pkg/addr"
 	"github.com/scionproto/scion/pkg/scrypto/cppki"
@@ -26,6 +28,8 @@ const (
 	CertTypeSensitive
 	// CertTypeRoot indicates a root certificate (can sign CA certificates).
 	CertTypeRoot
+	// CertTypeAS indicates an AS certificate (used for TLS).
+	CertTypeAS
 )
 
 // ASType represents the role of an AS in the SCION ISD.
@@ -75,14 +79,25 @@ func (c *Certificates) Create(ia addr.IA, asType ASType, validity cppki.Validity
 		if err := c.generateCert(ia, CertTypeRegular, validity); err != nil {
 			return err
 		}
+		// Generate AS cert signed by the Root we just generated
+		if err := c.generateASCert(ia, validity); err != nil {
+			return err
+		}
 	case ASTypeAuthoritative:
 		// Authoritative AS gets Regular voting certificate
 		if err := c.generateCert(ia, CertTypeRegular, validity); err != nil {
 			return err
 		}
+		// For now, self-signed AS cert as we don't have a CA service in PoC
+		if err := c.generateASCertSelfSigned(ia, validity); err != nil {
+			return err
+		}
 	case ASTypeNormal:
 		// Normal AS gets no TRC-level certificates (will get AS cert in future)
-		return nil
+		// For now, self-signed AS cert
+		if err := c.generateASCertSelfSigned(ia, validity); err != nil {
+			return err
+		}
 	default:
 		return fmt.Errorf("invalid AS type: %v", asType)
 	}
@@ -116,6 +131,63 @@ func (c *Certificates) generateCert(ia addr.IA, certType CertType, validity cppk
 	c.certs[certType] = cert
 	c.keys[certType] = privKey
 	return nil
+}
+
+// generateASCert generates an AS certificate signed by the local Root key (must exist).
+func (c *Certificates) generateASCert(ia addr.IA, validity cppki.Validity) error {
+	rootKey, ok := c.keys[CertTypeRoot]
+	if !ok {
+		return fmt.Errorf("cannot generate AS cert: missing root key")
+	}
+	rootCert, ok := c.certs[CertTypeRoot]
+	if !ok {
+		return fmt.Errorf("cannot generate AS cert: missing root cert")
+	}
+
+	commonName := fmt.Sprintf("ISD%d-AS%s AS Certificate", ia.ISD(), ia.AS())
+	cert, privKey, err := generateASCert(ia, commonName, validity, rootCert, rootKey)
+	if err != nil {
+		return err
+	}
+
+	c.certs[CertTypeAS] = cert
+	c.keys[CertTypeAS] = privKey
+	return nil
+}
+
+// generateASCertSelfSigned generates a self-signed AS certificate (for non-Core AS PoC).
+func (c *Certificates) generateASCertSelfSigned(ia addr.IA, validity cppki.Validity) error {
+	commonName := fmt.Sprintf("ISD%d-AS%s AS Certificate (Self-Signed)", ia.ISD(), ia.AS())
+
+	// Pass nil parent/key to trigger self-signing logic in helper
+	cert, privKey, err := generateASCert(ia, commonName, validity, nil, nil)
+	if err != nil {
+		return err
+	}
+
+	c.certs[CertTypeAS] = cert
+	c.keys[CertTypeAS] = privKey
+	return nil
+}
+
+// GetTLSCertificate returns the AS certificate and private key as a tls.Certificate.
+// This is used for configuring the control plane's QUIC/TLS server.
+func (c *Certificates) GetTLSCertificate() (*tls.Certificate, error) {
+	cert, ok := c.certs[CertTypeAS]
+	if !ok {
+		return nil, fmt.Errorf("AS certificate not found")
+	}
+	key, ok := c.keys[CertTypeAS]
+	if !ok {
+		return nil, fmt.Errorf("AS private key not found")
+	}
+
+	tlsCert := &tls.Certificate{
+		Certificate: [][]byte{cert.Raw},
+		PrivateKey:  key,
+		Leaf:        cert,
+	}
+	return tlsCert, nil
 }
 
 // Load is a placeholder for loading certificates from persistent storage.
@@ -227,6 +299,7 @@ func generateRootCert(ia addr.IA, commonName string, validity cppki.Validity) (*
 		SignatureAlgorithm:    x509.ECDSAWithSHA256,
 		PublicKey:             pubKey,
 		SubjectKeyId:          subjectKeyID,
+		IPAddresses:           []net.IP{net.ParseIP("127.0.0.1")},
 		// SCION-specific extended key usage for root certificates
 		UnknownExtKeyUsage: []asn1.ObjectIdentifier{cppki.OIDExtKeyUsageRoot},
 	}
@@ -306,6 +379,79 @@ func generateVotingCert(ia addr.IA, commonName string, votingOID asn1.ObjectIden
 	cert, err := x509.ParseCertificate(certBytes)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to parse generated certificate: %w", err)
+	}
+
+	return cert, privKey, nil
+}
+
+// generateASCert creates a SCION-compliant AS certificate.
+// If issuer is nil, it creates a self-signed certificate (for PoC or Root creation).
+func generateASCert(ia addr.IA, commonName string, validity cppki.Validity, issuer *x509.Certificate, issuerKey crypto.PrivateKey) (*x509.Certificate, crypto.PrivateKey, error) {
+	// Generate ECDSA P-256 key pair for the AS certificate
+	privKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to generate ECDSA key: %w", err)
+	}
+	pubKey := privKey.Public()
+
+	// Serial number
+	serialNumberLimit := new(big.Int).Lsh(big.NewInt(1), 128)
+	serialNumber, err := rand.Int(rand.Reader, serialNumberLimit)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to generate serial number: %w", err)
+	}
+
+	// Subject Name with SCION IA OID in ExtraNames
+	subject := pkix.Name{
+		CommonName: commonName,
+		ExtraNames: []pkix.AttributeTypeAndValue{
+			{Type: cppki.OIDNameIA, Value: ia.String()},
+		},
+	}
+
+	// Subject key identifier
+	subjectKeyID, err := cppki.SubjectKeyID(pubKey)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to compute subject key identifier: %w", err)
+	}
+
+	tpl := x509.Certificate{
+		SerialNumber:          serialNumber,
+		Subject:               subject,
+		NotBefore:             validity.NotBefore,
+		NotAfter:              validity.NotAfter,
+		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth},
+		BasicConstraintsValid: true,
+		IsCA:                  false,
+		Version:               3,
+		PublicKeyAlgorithm:    x509.ECDSA,
+		SignatureAlgorithm:    x509.ECDSAWithSHA256,
+		PublicKey:             pubKey,
+		SubjectKeyId:          subjectKeyID,
+		IPAddresses:           []net.IP{net.ParseIP("127.0.0.1")},
+	}
+
+	var parent *x509.Certificate
+	var signerKey crypto.PrivateKey
+
+	if issuer != nil {
+		parent = issuer
+		signerKey = issuerKey
+	} else {
+		// Self-signed
+		parent = &tpl
+		signerKey = privKey
+	}
+
+	certBytes, err := x509.CreateCertificate(rand.Reader, &tpl, parent, pubKey, signerKey)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to create AS certificate: %w", err)
+	}
+
+	cert, err := x509.ParseCertificate(certBytes)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to parse generated AS certificate: %w", err)
 	}
 
 	return cert, privKey, nil
