@@ -3,6 +3,7 @@ package controlplane_test
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -29,15 +30,18 @@ func TestIntegrationDirectLink(t *testing.T) {
 	coreASes := []addr.AS{addr.MustParseAS("ff00:0:110"), addr.MustParseAS("ff00:0:111")}
 	authoritativeASes := []addr.AS{addr.MustParseAS("ff00:0:110"), addr.MustParseAS("ff00:0:111")}
 
-	trc, privKey, err := pki.GenerateTRC(isd, version, baseVersion, description, validity, coreASes, authoritativeASes)
+	coreASIA := addr.MustParseIA(fmt.Sprintf("%d-%s", isd, coreASes[0])) // Assuming the first core AS will be used for cert generation
+	coreCerts := pki.NewCertificates()
+	if err := coreCerts.Create(coreASIA, pki.ASTypeCore, validity); err != nil {
+		t.Fatalf("Failed to create core certificates: %v", err)
+	}
+
+	trc, err := pki.GenerateBaseTRC(isd, version, baseVersion, description, validity, coreASes, authoritativeASes, coreCerts)
 	if err != nil {
 		t.Fatalf("TRC generation failed: %v", err)
 	}
 	if trc == nil {
 		t.Fatal("Generated TRC is nil")
-	}
-	if privKey == nil {
-		t.Fatal("Generated private key is nil")
 	}
 
 	// Create TrustStore for both nodes
@@ -47,8 +51,13 @@ func TestIntegrationDirectLink(t *testing.T) {
 	// Add the generated TRC and root cert to both trust stores
 	trustStoreNodeA.AddTRC(*trc)
 	trustStoreNodeB.AddTRC(*trc)
-	trustStoreNodeA.AddCertificate(trc.Certificates[0])
-	trustStoreNodeB.AddCertificate(trc.Certificates[0])
+	// In this PoC, we add the first certificate from the TRC as a root cert. A more robust implementation might
+	// iterate through all root certificates in the TRC or manage them at the AS level.
+	if len(trc.Certificates) > 0 {
+		trustStoreNodeA.AddCertificate(trc.Certificates[0])
+		trustStoreNodeB.AddCertificate(trc.Certificates[0])
+	}
+
 
 	// 2. Create two controlplane.Engine instances (Node A and Node B)
 	localIA_A := addr.MustParseIA("1-ff00:0:110")

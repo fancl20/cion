@@ -11,6 +11,15 @@ import (
 	"cion/pkg/pki"
 )
 
+func createSpecTestCerts(t *testing.T, isd int, as addr.AS, validity cppki.Validity) *pki.Certificates {
+	certs := pki.NewCertificates()
+	ia := addr.MustIAFrom(addr.ISD(isd), as)
+	if err := certs.Create(ia, pki.ASTypeCore, validity); err != nil {
+		t.Fatalf("Failed to create root cert: %v", err)
+	}
+	return certs
+}
+
 // TestTRCSpecCompliance tests TRC properties against requirements from
 // draft-dekater-scion-pki.
 func TestTRCSpecCompliance(t *testing.T) {
@@ -24,8 +33,9 @@ func TestTRCSpecCompliance(t *testing.T) {
 	}
 	coreASes := []addr.AS{addr.MustParseAS("ff00:0:110"), addr.MustParseAS("ff00:0:111")}
 	authASes := []addr.AS{addr.MustParseAS("ff00:0:110")} // Subset of Core ASes
+	certs := createSpecTestCerts(t, isd, coreASes[0], validity)
 
-	trc, _, err := pki.GenerateBaseTRC(isd, version, baseVersion, description, validity, coreASes, authASes)
+	trc, err := pki.GenerateBaseTRC(isd, version, baseVersion, description, validity, coreASes, authASes, certs)
 	if err != nil {
 		t.Fatalf("TRC generation failed: %v", err)
 	}
@@ -136,19 +146,22 @@ func TestTRCUpdateSpec(t *testing.T) {
 	baseVersion := 1
 
 	// Initial TRC (v1)
-	v1, _, err := pki.GenerateBaseTRC(isd, 1, baseVersion, "Base TRC", cppki.Validity{
+	validity := cppki.Validity{
 		NotBefore: time.Now(),
 		NotAfter:  time.Now().Add(1 * time.Hour),
-	}, []addr.AS{addr.MustParseAS("ff00:0:110")}, []addr.AS{addr.MustParseAS("ff00:0:110")})
+	}
+	coreAS := []addr.AS{addr.MustParseAS("ff00:0:110")}
+	authAS := []addr.AS{addr.MustParseAS("ff00:0:110")}
+	certs := createSpecTestCerts(t, isd, coreAS[0], validity)
+
+	v1, err := pki.GenerateBaseTRC(isd, 1, baseVersion, "Base TRC", validity, coreAS, authAS, certs)
 	if err != nil {
 		t.Fatalf("Base TRC generation failed: %v", err)
 	}
 
 	// Update TRC (v2) - Regular Update
-	v2, _, err := pki.GenerateBaseTRC(isd, 2, baseVersion, "Update TRC", cppki.Validity{
-		NotBefore: time.Now(),
-		NotAfter:  time.Now().Add(1 * time.Hour),
-	}, []addr.AS{addr.MustParseAS("ff00:0:110")}, []addr.AS{addr.MustParseAS("ff00:0:110")})
+	// We reuse certs, they should still be valid
+	v2, err := pki.GenerateBaseTRC(isd, 2, baseVersion, "Update TRC", validity, coreAS, authAS, certs)
 	if err != nil {
 		t.Fatalf("Update TRC generation failed: %v", err)
 	}

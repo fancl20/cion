@@ -12,6 +12,16 @@ import (
 	"github.com/scionproto/scion/pkg/scrypto/cppki"
 )
 
+func createTestCerts(t *testing.T, isd int, as addr.AS, validity cppki.Validity) *Certificates {
+	certs := NewCertificates()
+	ia := addr.MustIAFrom(addr.ISD(isd), as)
+	// Use ASTypeCore to generate Root, Sensitive, and Regular certs
+	if err := certs.Create(ia, ASTypeCore, validity); err != nil {
+		t.Fatalf("Failed to create root cert: %v", err)
+	}
+	return certs
+}
+
 func TestTRCsNew(t *testing.T) {
 	trcs := NewTRCs(1)
 	if trcs == nil {
@@ -37,7 +47,9 @@ func TestTRCsUpdateBaseTRC(t *testing.T) {
 	}
 	coreAS := []addr.AS{addr.MustParseAS("ff00:0:110")}
 	authAS := []addr.AS{addr.MustParseAS("ff00:0:111")}
-	trc, _, err := GenerateBaseTRC(1, 1, 1, "Test base TRC", validity, coreAS, authAS)
+	certs := createTestCerts(t, 1, coreAS[0], validity)
+
+	trc, err := GenerateBaseTRC(1, 1, 1, "Test base TRC", validity, coreAS, authAS, certs)
 	if err != nil {
 		t.Fatalf("GenerateBaseTRC failed: %v", err)
 	}
@@ -72,7 +84,8 @@ func TestTRCsUpdateBaseTRC(t *testing.T) {
 		t.Errorf("expected 2 voting certificates, got %d", len(voters))
 	}
 	// Pool should remain empty (no automatic addition)
-	if pool.HasCertificate() {
+	if pool.HasCertificate(CertTypeRoot) { // Checked generally before, now we need to check specifically or general method
+		// pool is empty NewCertificates()
 		t.Error("pool should not have any certificate")
 	}
 }
@@ -87,7 +100,9 @@ func TestTRCsUpdateWrongISD(t *testing.T) {
 	}
 	coreAS := []addr.AS{addr.MustParseAS("ff00:0:110")}
 	authAS := []addr.AS{addr.MustParseAS("ff00:0:111")}
-	trc, _, err := GenerateBaseTRC(2, 1, 1, "Test TRC ISD2", validity, coreAS, authAS)
+	certs := createTestCerts(t, 2, coreAS[0], validity)
+
+	trc, err := GenerateBaseTRC(2, 1, 1, "Test TRC ISD2", validity, coreAS, authAS, certs)
 	if err != nil {
 		t.Fatalf("GenerateBaseTRC failed: %v", err)
 	}
@@ -108,8 +123,10 @@ func TestTRCsUpdateNonBaseAsFirst(t *testing.T) {
 	}
 	coreAS := []addr.AS{addr.MustParseAS("ff00:0:110")}
 	authAS := []addr.AS{addr.MustParseAS("ff00:0:111")}
+	certs := createTestCerts(t, 1, coreAS[0], validity)
+
 	// serial 2, base 1
-	trc, _, err := GenerateBaseTRC(1, 2, 1, "Test update TRC", validity, coreAS, authAS)
+	trc, err := GenerateBaseTRC(1, 2, 1, "Test update TRC", validity, coreAS, authAS, certs)
 	if err != nil {
 		t.Fatalf("GenerateBaseTRC failed: %v", err)
 	}
@@ -130,7 +147,9 @@ func TestTRCsUpdateUpdateRejected(t *testing.T) {
 	}
 	coreAS := []addr.AS{addr.MustParseAS("ff00:0:110")}
 	authAS := []addr.AS{addr.MustParseAS("ff00:0:111")}
-	baseTRC, _, err := GenerateBaseTRC(1, 1, 1, "Base TRC", validity, coreAS, authAS)
+	certs := createTestCerts(t, 1, coreAS[0], validity)
+
+	baseTRC, err := GenerateBaseTRC(1, 1, 1, "Base TRC", validity, coreAS, authAS, certs)
 	if err != nil {
 		t.Fatalf("GenerateBaseTRC failed: %v", err)
 	}
@@ -142,7 +161,7 @@ func TestTRCsUpdateUpdateRejected(t *testing.T) {
 	// GenerateBaseTRC cannot produce a proper update (would need votes), but we can
 	// still generate a TRC with serial 2, base 1. It will lack proper votes,
 	// but our PoC logic rejects all updates anyway.
-	updateTRC, _, err := GenerateBaseTRC(1, 2, 1, "Update TRC", validity, coreAS, authAS)
+	updateTRC, err := GenerateBaseTRC(1, 2, 1, "Update TRC", validity, coreAS, authAS, certs)
 	if err != nil {
 		t.Fatalf("GenerateBaseTRC for update failed: %v", err)
 	}
@@ -164,17 +183,15 @@ func TestGenerateAndValidateTRC(t *testing.T) {
 	}
 	coreASes := []addr.AS{addr.MustParseAS("ff00:0:110")}
 	authoritativeASes := []addr.AS{addr.MustParseAS("ff00:0:110")}
+	certs := createTestCerts(t, isd, coreASes[0], validity)
 
 	// Generate TRC
-	trc, privKey, err := GenerateBaseTRC(isd, version, baseVersion, description, validity, coreASes, authoritativeASes)
+	trc, err := GenerateBaseTRC(isd, version, baseVersion, description, validity, coreASes, authoritativeASes, certs)
 	if err != nil {
 		t.Fatalf("TRC generation failed: %v", err)
 	}
 	if trc == nil {
 		t.Fatal("Generated TRC is nil")
-	}
-	if privKey == nil {
-		t.Fatal("Generated private key is nil")
 	}
 
 	// Assert basic TRC fields (without full cppki validation)
@@ -233,6 +250,7 @@ func TestGenerateAndValidateTRC(t *testing.T) {
 		t.Fatal("Regular voting certificate not found")
 	}
 	// Verify root cert public key matches generated private key
+	privKey := certs.keys[CertTypeRoot]
 	if !reflect.DeepEqual(rootCert.PublicKey, privKey.(crypto.Signer).Public()) {
 		t.Error("Root cert public key should match generated private key")
 	}

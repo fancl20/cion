@@ -1,9 +1,7 @@
 package pki
 
 import (
-	"crypto"
 	"crypto/x509"
-	"encoding/asn1"
 	"errors"
 	"fmt"
 	"time"
@@ -202,7 +200,7 @@ var (
 //
 // The generated TRC passes cppki.TRC.Validate() and can be used as a base TRC.
 func GenerateBaseTRC(isd int, version, baseVersion int, description string,
-	validity cppki.Validity, coreASes []addr.AS, authASes []addr.AS) (*cppki.TRC, crypto.PrivateKey, error) {
+	validity cppki.Validity, coreASes []addr.AS, authASes []addr.AS, certs *Certificates) (*cppki.TRC, error) {
 
 	// TRC validity must be truncated to whole seconds for ASN.1 encoding.
 	// Certificates also encode validity with second precision, so we align both.
@@ -211,78 +209,16 @@ func GenerateBaseTRC(isd int, version, baseVersion int, description string,
 		NotAfter:  validity.NotAfter.UTC().Truncate(time.Second),
 	}
 
-	// Generate a SCION-compliant root certificate for the TRC.
-	isd_addr := addr.ISD(isd)
-	rootIA := addr.MustIAFrom(isd_addr, coreASes[0]) // Use first core AS as root for simplicity
-	rootCert, privKey, err := generateRootCert(rootIA, fmt.Sprintf("ISD%d-AS%s Root", isd, rootIA.AS()), truncValidity)
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to generate compliant root certificate for TRC: %w", err)
-	}
-
-	// Generate sensitive voting certificate for the TRC.
-	sensitiveCert, _, err := generateVotingCert(rootIA, fmt.Sprintf("ISD%d-AS%s Sensitive Voting", isd, rootIA.AS()), cppki.OIDExtKeyUsageSensitive, truncValidity)
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to generate sensitive voting certificate for TRC: %w", err)
-	}
-	// Generate regular voting certificate for the TRC.
-	regularCert, _, err := generateVotingCert(rootIA, fmt.Sprintf("ISD%d-AS%s Regular Voting", isd, rootIA.AS()), cppki.OIDExtKeyUsageRegular, truncValidity)
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to generate regular voting certificate for TRC: %w", err)
-	}
-	// Collect all certificates (root, sensitive, regular).
-	allCerts := []*x509.Certificate{rootCert, sensitiveCert, regularCert}
-
-	// Certificates for ASN.1 encoding
-	var rawCerts []asn1.RawValue
-	for _, cert := range allCerts {
-		// Each certificate is already a DER-encoded ASN.1 SEQUENCE
-		rawCerts = append(rawCerts, asn1.RawValue{Bytes: cert.Raw})
-	}
-
 	// Determine if this is a base TRC (serial == base)
-	isBase := version == baseVersion
-	quorum := 1
-
-	// Populate asn1TRCPayload for encoding
-	a := asn1TRCPayload{
-		Version: int64(0), // Version 0 in ASN.1 is TRC Version 1
-		ID: asn1ID{
-			ISD:    int64(isd),
-			Serial: int64(version),
-			Base:   int64(baseVersion),
-		},
-		Validity: asn1Validity{
-			NotBefore: truncValidity.NotBefore,
-			NotAfter:  truncValidity.NotAfter,
-		},
-		GracePeriod:       int64(0),
-		NoTrustReset:      false,
-		Votes:             []int64{},                      // Empty for base TRC, would need voting cert indices for updates
-		Quorum:            int64(quorum),                  // Quorum must be at least 1 when voting certificates are present
-		CoreASes:          []string{coreASes[0].String()}, // Use first core AS string for simplicity
-		AuthoritativeASes: make([]string, len(authASes)),
-		Description:       description,
-		Certificates:      rawCerts,
-	}
-	// For non-base TRC, we would need voting certificates and proper quorum
-	// For PoC, we only generate base TRCs
-	if !isBase {
-		// In a real implementation, we would need to generate voting certificates
-		// and set appropriate votes and quorum
-		a.Votes = []int64{0}
-	}
-	for i, as := range authASes {
-		a.AuthoritativeASes[i] = as.String()
+	// For PoC, we only generate base TRCs, so checking serial == baseVersion is good practice
+	if version != baseVersion {
+		// In a real implementation we would support updates.
+		// For now we just proceed, but note that Join works for updates too.
 	}
 
-	rawTRCBytes, err := asn1.Marshal(a)
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to marshal TRC payload: %w", err)
-	}
-
-	// Populate cppki.TRC fields.
-	trc := &cppki.TRC{
-		Raw:     rawTRCBytes,
+	// Populate cppki.TRC fields with initial values.
+	// Certificates will be added by Join.
+	trc := cppki.TRC{
 		Version: 1, // SCION TRC format version
 		ID: cppki.TRCID{
 			ISD:    addr.ISD(isd),
@@ -290,17 +226,24 @@ func GenerateBaseTRC(isd int, version, baseVersion int, description string,
 			Serial: scrypto.Version(version),
 		},
 		Validity:          truncValidity,
-		Quorum:            quorum,
+		Quorum:            1, // Quorum must be at least 1 when voting certificates are present
 		CoreASes:          coreASes,
 		AuthoritativeASes: authASes,
 		Description:       description,
-		Certificates:      allCerts,
+		Certificates:      []*x509.Certificate{},
+	}
+
+	// Use Join to add certificates from the pool and encode the TRC.
+	// Join will append certificates in a deterministic order (Root, Sensitive, Regular).
+	updatedTRC, err := certs.Join(trc)
+	if err != nil {
+		return nil, fmt.Errorf("failed to join certificates to TRC: %w", err)
 	}
 
 	// Validate the generated TRC to ensure it complies with SCION PKI spec.
-	if err := trc.Validate(); err != nil {
-		return nil, nil, fmt.Errorf("generated TRC failed cppki validation: %w", err)
+	if err := updatedTRC.Validate(); err != nil {
+		return nil, fmt.Errorf("generated TRC failed cppki validation: %w", err)
 	}
 
-	return trc, privKey, nil
+	return &updatedTRC, nil
 }
