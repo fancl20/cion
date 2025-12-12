@@ -30,7 +30,7 @@ func BenchmarkRouter_Process(b *testing.B) {
 
 	// Mock MAC that returns all 0s (length 6)
 	mockMac := [6]byte{0, 0, 0, 0, 0, 0}
-	
+
 	router := &Router{
 		LocalIA: localIA,
 		ExternalNextHops: map[uint16]netip.AddrPort{
@@ -67,7 +67,7 @@ func BenchmarkRouter_Process(b *testing.B) {
 			{ConsIngress: 0, ConsEgress: 0, ExpTime: 63},
 		},
 	}
-	
+
 	rawPath := make([]byte, decodedPath.Len())
 	if err := decodedPath.SerializeTo(rawPath); err != nil {
 		b.Fatalf("Failed to serialize path: %v", err)
@@ -87,15 +87,15 @@ func BenchmarkRouter_Process(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		// Copy packet to simulate fresh receive
-		// In reality, we modify in place, so reusing the same buffer 
+		// In reality, we modify in place, so reusing the same buffer
 		// would cause the Path Index to increment until overflow.
 		// So we must reset the packet or copy it.
 		// Copying adds overhead, but it's necessary for correctness of the loop.
 		// To minimize overhead, we only copy.
-		
+
 		pktCopy := make([]byte, len(rawPacket))
 		copy(pktCopy, rawPacket)
-		
+
 		_, err := router.Process(pktCopy, 1)
 		if err != nil {
 			b.Fatalf("Process failed: %v", err)

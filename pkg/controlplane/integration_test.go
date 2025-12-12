@@ -1,8 +1,10 @@
-package controlplane_test
+package controlplane
 
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"fmt"
 	"testing"
 	"time"
@@ -10,7 +12,6 @@ import (
 	"github.com/scionproto/scion/pkg/addr"
 	"github.com/scionproto/scion/pkg/scrypto/cppki"
 
-	"cion/pkg/controlplane"
 	"cion/pkg/pki"
 )
 
@@ -51,6 +52,7 @@ func TestIntegrationDirectLink(t *testing.T) {
 	// Add the generated TRC and root cert to both trust stores
 	trustStoreNodeA.AddTRC(*trc)
 	trustStoreNodeB.AddTRC(*trc)
+
 	// In this PoC, we add the first certificate from the TRC as a root cert. A more robust implementation might
 	// iterate through all root certificates in the TRC or manage them at the AS level.
 	if len(trc.Certificates) > 0 {
@@ -58,24 +60,89 @@ func TestIntegrationDirectLink(t *testing.T) {
 		trustStoreNodeB.AddCertificate(trc.Certificates[0])
 	}
 
-
-	// 2. Create two controlplane.Engine instances (Node A and Node B)
+	// 2. Create two control plane instances (Node A and Node B)
 	localIA_A := addr.MustParseIA("1-ff00:0:110")
 	localIA_B := addr.MustParseIA("1-ff00:0:111")
+	addrA := "127.0.0.1:30000"
 	addrB := "127.0.0.1:30001"
 
+	// Prepare TLS config for Node A (server and client)
+	tlsCertA, err := coreCerts.GetTLSCertificate()
+	if err != nil {
+		t.Fatalf("Failed to get TLS cert for A: %v", err)
+	}
+	tlsConfigA := &tls.Config{
+		Certificates: []tls.Certificate{*tlsCertA},
+		NextProtos:   []string{"h3"},
+		ClientAuth:   tls.RequireAnyClientCert, // Require client certificates for mTLS
+	}
+
+	// Prepare TLS config for Node B (server and client)
+	coreCertsB := pki.NewCertificates()
+	if err := coreCertsB.Create(localIA_B, pki.ASTypeCore, validity); err != nil {
+		t.Fatalf("Failed to create certificates for B: %v", err)
+	}
+	tlsCertB, err := coreCertsB.GetTLSCertificate()
+	if err != nil {
+		t.Fatalf("Failed to get TLS cert for B: %v", err)
+	}
+	tlsConfigB := &tls.Config{
+		Certificates: []tls.Certificate{*tlsCertB},
+		NextProtos:   []string{"h3"},
+		ClientAuth:   tls.RequireAnyClientCert,
+	}
+
 	// Node A setup
-	discoveryA := controlplane.NewDiscovery()
-	discoveryA.AddNeighbor(controlplane.SCIONAddress(localIA_B.String()), addrB) // Node A knows Node B
-	engineA := controlplane.NewEngine(discoveryA, controlplane.SCIONAddress(localIA_A.String()))
+	discoveryA := NewDiscovery()
+	discoveryA.AddNeighbor(SCIONAddress(localIA_B.String()), addrB) // Node A knows Node B
+	serviceA := NewControlPlaneImpl(discoveryA, SCIONAddress(localIA_A.String()), trustStoreNodeA)
+	serverA := NewServer(addrA, tlsConfigA, serviceA)
+	// Start Server A
+	go func() {
+		if err := serverA.ListenAndServe(); err != nil {
+			t.Logf("Server A stopped: %v", err)
+		}
+	}()
+	defer serverA.Close()
+
+	// Node A client to talk to Node B
+	clientATLSConfig := &tls.Config{
+		Certificates: []tls.Certificate{*tlsCertA},
+		RootCAs:      x509.NewCertPool(),
+		NextProtos:   []string{"h3"},
+	}
+	clientATLSConfig.RootCAs.AddCert(tlsCertB.Leaf) // Trust Node B's certificate
+	clientA := NewDirectLinkClient(SCIONAddress(localIA_A.String()), discoveryA, clientATLSConfig, serviceA)
+	go clientA.MonitorNeighbors(ctx, 50*time.Millisecond)
 
 	// Node B setup (Node B doesn't necessarily need to know Node A for A to find B, but good practice)
-	discoveryB := controlplane.NewDiscovery()
-	discoveryB.AddNeighbor(controlplane.SCIONAddress(localIA_A.String()), "127.0.0.1:30000") // Node B knows Node A
-	_ = controlplane.NewEngine(discoveryB, controlplane.SCIONAddress(localIA_B.String()))    // Declared but not used
+	discoveryB := NewDiscovery()
+	discoveryB.AddNeighbor(SCIONAddress(localIA_A.String()), addrA) // Node B knows Node A
+	serviceB := NewControlPlaneImpl(discoveryB, SCIONAddress(localIA_B.String()), trustStoreNodeB)
+	serverB := NewServer(addrB, tlsConfigB, serviceB)
+	// Start Server B
+	go func() {
+		if err := serverB.ListenAndServe(); err != nil {
+			t.Logf("Server B stopped: %v", err)
+		}
+	}()
+	defer serverB.Close()
+
+	// Node B client to talk to Node A
+	clientBTLSConfig := &tls.Config{
+		Certificates: []tls.Certificate{*tlsCertB},
+		RootCAs:      x509.NewCertPool(),
+		NextProtos:   []string{"h3"},
+	}
+	clientBTLSConfig.RootCAs.AddCert(tlsCertA.Leaf) // Trust Node A's certificate
+	clientB := NewDirectLinkClient(SCIONAddress(localIA_B.String()), discoveryB, clientBTLSConfig, serviceB)
+	go clientB.MonitorNeighbors(ctx, 50*time.Millisecond)
+
+	// Give servers and clients a moment to start and exchange beacons
+	time.Sleep(200 * time.Millisecond)
 
 	// 3. Node A requests a path to Node B
-	paths, err := engineA.GetPaths(ctx, controlplane.SCIONAddress(localIA_A.String()), controlplane.SCIONAddress(localIA_B.String()))
+	paths, err := serviceA.GetPaths(ctx, SCIONAddress(localIA_A.String()), SCIONAddress(localIA_B.String()))
 	if err != nil {
 		t.Fatalf("Path lookup from A to B failed: %v", err)
 	}
@@ -95,4 +162,3 @@ func TestIntegrationDirectLink(t *testing.T) {
 		t.Errorf("Segment ID mismatch: got %s, want %s", segment.ID, addrB)
 	}
 }
-
