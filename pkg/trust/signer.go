@@ -1,0 +1,159 @@
+package trust
+
+import (
+	"bytes"
+	"context"
+	"crypto"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"fmt"
+	"time"
+
+	"google.golang.org/protobuf/proto"
+
+	"github.com/scionproto/scion/pkg/addr"
+	"github.com/scionproto/scion/pkg/log"
+	"github.com/scionproto/scion/pkg/private/serrors"
+	cppb "github.com/scionproto/scion/pkg/proto/control_plane"
+	cryptopb "github.com/scionproto/scion/pkg/proto/crypto"
+	"github.com/scionproto/scion/pkg/scrypto/cms/protocol"
+	"github.com/scionproto/scion/pkg/scrypto/cppki"
+	"github.com/scionproto/scion/pkg/scrypto/signed"
+)
+
+// Signer is used to sign control plane messages with the AS private key.
+type Signer struct {
+	PrivateKey    crypto.Signer
+	Algorithm     signed.SignatureAlgorithm
+	IA            addr.IA
+	Subject       pkix.Name
+	Chain         []*x509.Certificate
+	SubjectKeyID  []byte
+	Expiration    time.Time
+	TRCID         cppki.TRCID
+	ChainValidity cppki.Validity
+	InGrace       bool
+}
+
+// Sign signs the message with the associated data and returns a SignedMessage protobuf payload. The
+// associated data is not included in the header or body of the signed message.
+func (s Signer) Sign(
+	ctx context.Context,
+	msg []byte,
+	associatedData ...[]byte,
+) (*cryptopb.SignedMessage, error) {
+
+	now := time.Now()
+
+	id := &cppb.VerificationKeyID{
+		IsdAs:        uint64(s.IA),
+		TrcBase:      uint64(s.TRCID.Base),   // nolint - name from published protobuf
+		TrcSerial:    uint64(s.TRCID.Serial), // nolint - name from published protobuf
+		SubjectKeyId: s.SubjectKeyID,
+	}
+	rawID, err := proto.Marshal(id)
+	if err != nil {
+		return nil, serrors.Wrap("packing verification_key_id", err)
+	}
+	hdr := signed.Header{
+		SignatureAlgorithm:   s.Algorithm,
+		VerificationKeyID:    rawID,
+		Timestamp:            now,
+		AssociatedDataLength: associatedDataLen(associatedData...),
+	}
+	signedMsg, err := signed.Sign(hdr, msg, s.PrivateKey, associatedData...)
+	if err != nil {
+		return nil, err
+	}
+	return signedMsg, nil
+}
+
+// SignCMS signs the message and returns a CMS/PKCS7 encoded payload.
+func (s Signer) SignCMS(ctx context.Context, msg []byte) ([]byte, error) {
+	if err := s.validate(ctx, time.Now()); err != nil {
+		return nil, err
+	}
+
+	eci, err := protocol.NewDataEncapsulatedContentInfo(msg)
+	if err != nil {
+		return nil, err
+	}
+	sd, err := protocol.NewSignedData(eci)
+	if err != nil {
+		return nil, err
+	}
+	if err := sd.AddSignerInfo(s.Chain, s.PrivateKey); err != nil {
+		return nil, err
+	}
+	encoded, err := sd.ContentInfoDER()
+	if err != nil {
+		return nil, err
+	}
+	return encoded, nil
+}
+
+func (s Signer) validate(ctx context.Context, now time.Time) error {
+	expDiff := s.Expiration.Sub(now)
+	if expDiff < 0 {
+		return serrors.New("signer is expired",
+			"subject_key_id", fmt.Sprintf("%x", s.SubjectKeyID),
+			"expiration", s.Expiration)
+	}
+	if expDiff < time.Hour {
+		log.FromCtx(ctx).Info("Signer expiration time is near",
+			"subject_key_id", fmt.Sprintf("%x", s.SubjectKeyID),
+			"expiration", s.Expiration)
+	}
+
+	return nil
+}
+
+func (s Signer) Validity() cppki.Validity {
+	return cppki.Validity{
+		NotBefore: s.ChainValidity.NotBefore,
+		NotAfter:  s.Expiration,
+	}
+}
+
+func (s Signer) Equal(o Signer) bool {
+	return s.IA.Equal(o.IA) &&
+		bytes.Equal(s.SubjectKeyID, o.SubjectKeyID) &&
+		s.Expiration.Equal(o.Expiration) &&
+		s.TRCID == o.TRCID &&
+		s.ChainValidity == o.ChainValidity &&
+		s.InGrace == o.InGrace
+}
+
+// LastExpiring returns the Signer with the latest expiration time that covers
+// the given validity. If no signer is found an error is returned.
+func LastExpiring[T interface{ Validity() cppki.Validity }](
+	signers []T, validity cppki.Validity,
+) (T, error) {
+	// First find candidates that cover the given period.
+	var candidates []T
+	for _, s := range signers {
+		if s.Validity().Covers(validity) {
+			candidates = append(candidates, s)
+		}
+	}
+	if len(candidates) == 0 {
+		var zero T
+		return zero, serrors.New("no signer covers the given validity")
+	}
+
+	latest := candidates[0]
+	for _, s := range candidates[1:] {
+		if s.Validity().NotAfter.After(latest.Validity().NotAfter) {
+			latest = s
+		}
+	}
+	return latest, nil
+}
+
+func associatedDataLen(associatedData ...[]byte) int {
+	var associatedDataLen int
+	for _, d := range associatedData {
+		associatedDataLen += len(d)
+	}
+	return associatedDataLen
+}
