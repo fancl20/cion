@@ -16,6 +16,7 @@ import (
 
 	"github.com/scionproto/scion/pkg/addr"
 
+	"github.com/fancl20/cion/pkg/controlplane"
 	"github.com/fancl20/cion/pkg/dataplane"
 )
 
@@ -26,6 +27,9 @@ type Config struct {
 	// Internal is the UDP address the router listens on for traffic from
 	// hosts in the local AS, e.g. "127.0.0.1:30041".
 	Internal string `json:"internal"`
+	// Control is the UDP address the control service listens on and
+	// advertises to neighbors, e.g. "127.0.0.1:30043".
+	Control string `json:"control"`
 	// Key is the hex-encoded secret key used for hop field MAC computation.
 	Key string `json:"key"`
 	// Interfaces are the external links to neighboring ASes.
@@ -39,6 +43,8 @@ type ConfigInterface struct {
 	Local string `json:"local"`
 	// Remote is the UDP address of the neighbor router, e.g. "192.0.2.2:50000".
 	Remote string `json:"remote"`
+	// NeighborIA is the ISD-AS of the neighbor, e.g. "1-ff00:0:2".
+	NeighborIA string `json:"neighborIA"`
 }
 
 func main() {
@@ -107,9 +113,54 @@ func run(configPath string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	discovery, err := newDiscovery(cfg, ia, key, provider)
+	if err != nil {
+		return err
+	}
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				slog.Error("Panic in discovery", "panic", r)
+			}
+		}()
+		discovery.Run(ctx)
+	}()
+
 	slog.Info("Starting CION", "ia", ia, "internal", cfg.Internal,
-		"interfaces", len(cfg.Interfaces))
+		"control", cfg.Control, "interfaces", len(cfg.Interfaces))
 	return d.Serve(ctx)
+}
+
+// newDiscovery creates the discovery service from the node configuration.
+func newDiscovery(
+	cfg *Config,
+	ia addr.IA,
+	key []byte,
+	provider *dataplane.UDPProvider,
+) (*controlplane.Discovery, error) {
+
+	links := make(map[uint16]addr.IA, len(cfg.Interfaces))
+	for _, iface := range cfg.Interfaces {
+		neighborIA, err := addr.ParseIA(iface.NeighborIA)
+		if err != nil {
+			return nil, fmt.Errorf("parsing neighbor IA of interface %d: %w", iface.ID, err)
+		}
+		links[iface.ID] = neighborIA
+	}
+	discovery, err := controlplane.NewDiscovery(controlplane.DiscoveryConfig{
+		IA:           ia,
+		ControlAddr:  cfg.Control,
+		MACKey:       key,
+		InternalAddr: cfg.Internal,
+		Links:        links,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if err := discovery.Register(provider); err != nil {
+		return nil, fmt.Errorf("registering control service: %w", err)
+	}
+	return discovery, nil
 }
 
 // parseInternalHost returns the local host address derived from the internal
