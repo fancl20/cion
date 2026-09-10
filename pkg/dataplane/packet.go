@@ -13,7 +13,10 @@ const (
 	// usually ~1500B, but 9000B to support jumbo frames.
 	// TODO(multi_underlay): The buffer size should be a function of the collection of
 	// underlays (the largest frame size of all the enabled ones).
-	bufSize = 9000
+	BufferSize = 9000
+
+	// bufSize is an alias of BufferSize for internal use.
+	bufSize = BufferSize
 
 	// For SCMP packet quoting. A strict minimum of 28 is required. Much more is recommended.
 	minHeadroom      = 512
