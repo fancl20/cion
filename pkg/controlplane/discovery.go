@@ -213,6 +213,12 @@ func (d *Discovery) Register(provider *dataplane.UDPProvider) error {
 	return provider.AddSvc(addr.SvcCS, addr.HostIP(d.controlAddr.Addr()), d.controlAddr.Port())
 }
 
+// Close releases the resources of the discovery service, unblocking Run.
+// The instance cannot be used afterwards.
+func (d *Discovery) Close() error {
+	return d.conn.Close()
+}
+
 // Run sends greetings on every configured link and processes incoming ones
 // until the context is canceled.
 func (d *Discovery) Run(ctx context.Context) {
@@ -258,10 +264,8 @@ func (d *Discovery) receive(ctx context.Context) {
 	for {
 		n, _, err := d.conn.ReadFromUDP(buf)
 		if err != nil {
-			select {
-			case <-ctx.Done():
+			if ctx.Err() != nil || errors.Is(err, net.ErrClosed) {
 				return
-			default:
 			}
 			slog.Error("Reading greeting", "err", err)
 			continue

@@ -16,6 +16,18 @@ import (
 	"github.com/scionproto/scion/pkg/slayers/path/scion"
 )
 
+// freeUDPAddr returns a loopback UDP address with a port picked by the
+// kernel, so that concurrent test runs do not collide on fixed ports.
+func freeUDPAddr(t *testing.T) string {
+	t.Helper()
+	c, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	return c.LocalAddr().String()
+}
+
 // node bundles one CION node of the two-node test topology.
 type node struct {
 	d        *DataPlane
@@ -67,10 +79,10 @@ func startTwoNodes(t *testing.T) (a, b *node) {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	a = newNode(addr.MustIAFrom(1, 0xff0000000001), "127.0.0.1:31051",
-		"127.0.0.1:31151", "127.0.0.1:31152")
-	b = newNode(addr.MustIAFrom(1, 0xff0000000002), "127.0.0.1:31052",
-		"127.0.0.1:31152", "127.0.0.1:31151")
+	intA, intB := freeUDPAddr(t), freeUDPAddr(t)
+	extA, extB := freeUDPAddr(t), freeUDPAddr(t)
+	a = newNode(addr.MustIAFrom(1, 0xff0000000001), intA, extA, extB)
+	b = newNode(addr.MustIAFrom(1, 0xff0000000002), intB, extB, extA)
 
 	go func() { _ = a.d.Serve(ctx) }()
 	go func() { _ = b.d.Serve(ctx) }()

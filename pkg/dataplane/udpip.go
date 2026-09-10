@@ -263,15 +263,20 @@ type udpConnection struct {
 	receiverDone chan struct{}
 	senderDone   chan struct{}
 	running      atomic.Bool
-	connected    bool // If true, the underlying UDP socket is connected
+	stopped      atomic.Bool // Set by stop; a stopped connection cannot start.
+	connected    bool        // If true, the underlying UDP socket is connected
 }
 
 // start puts the connection in the running state. In that state, the
 // connection delivers incoming packets and sends packets present on its input
 // channel.
 func (u *udpConnection) start(ctx context.Context, batchSize int, pool PacketPool) {
+	if u.stopped.Load() {
+		return
+	}
 	wasRunning := u.running.Swap(true)
-	if wasRunning {
+	if wasRunning || u.stopped.Load() {
+		// The double-check catches a stop racing with this start.
 		return
 	}
 
@@ -294,10 +299,14 @@ func (u *udpConnection) start(ctx context.Context, batchSize int, pool PacketPoo
 // no longer delivers incoming packets and ignores packets present on its input
 // channel. The connection is fully stopped when this method returns.
 func (u *udpConnection) stop() {
+	u.stopped.Store(true)
 	wasRunning := u.running.Swap(false)
 
+	// The socket is released even if the connection never started, so that a
+	// provider that is abandoned before Serve still frees its addresses.
+	u.conn.Close() // Also unblocks the receiver.
+
 	if wasRunning {
-		u.conn.Close() // Unblock receiver
 		close(u.queue) // Unblock sender
 		<-u.receiverDone
 		<-u.senderDone

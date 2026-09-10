@@ -140,7 +140,8 @@ func TestExternalLinkSendReceive(t *testing.T) {
 // over the UDP/IP underlay, including address resolution.
 func TestInternalLinkSendReceive(t *testing.T) {
 	provider := NewUDPProvider(64, 0, 0)
-	link, err := provider.NewInternalLink("127.0.0.1:31041", 64, newTestMetrics(t, 0))
+	internal := freeUDPAddr(t)
+	link, err := provider.NewInternalLink(internal, 64, newTestMetrics(t, 0))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -157,10 +158,7 @@ func TestInternalLinkSendReceive(t *testing.T) {
 
 	// Receive: a SCION-like datagram from a local host must be dispatched to
 	// one of the processor queues with the source address recorded.
-	host, err := net.DialUDP("udp4", nil, &net.UDPAddr{
-		IP:   net.IPv4(127, 0, 0, 1),
-		Port: 31041,
-	})
+	host, err := net.DialUDP("udp4", nil, mustUDPAddr(t, internal))
 	if err != nil {
 		t.Fatal(err)
 	}
