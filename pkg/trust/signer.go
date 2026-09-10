@@ -12,9 +12,7 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	"github.com/scionproto/scion/pkg/addr"
-	"github.com/scionproto/scion/pkg/log"
-	"github.com/scionproto/scion/pkg/private/serrors"
-	cppb "github.com/scionproto/scion/pkg/proto/control_plane"
+	"github.com/scionproto/scion/pkg/proto/control_plane"
 	cryptopb "github.com/scionproto/scion/pkg/proto/crypto"
 	"github.com/scionproto/scion/pkg/scrypto/cms/protocol"
 	"github.com/scionproto/scion/pkg/scrypto/cppki"
@@ -45,7 +43,7 @@ func (s Signer) Sign(
 
 	now := time.Now()
 
-	id := &cppb.VerificationKeyID{
+	id := &control_plane.VerificationKeyID{
 		IsdAs:        uint64(s.IA),
 		TrcBase:      uint64(s.TRCID.Base),   // nolint - name from published protobuf
 		TrcSerial:    uint64(s.TRCID.Serial), // nolint - name from published protobuf
@@ -53,7 +51,7 @@ func (s Signer) Sign(
 	}
 	rawID, err := proto.Marshal(id)
 	if err != nil {
-		return nil, serrors.Wrap("packing verification_key_id", err)
+		return nil, fmt.Errorf("packing verification_key_id: %w", err)
 	}
 	hdr := signed.Header{
 		SignatureAlgorithm:   s.Algorithm,
@@ -95,14 +93,7 @@ func (s Signer) SignCMS(ctx context.Context, msg []byte) ([]byte, error) {
 func (s Signer) validate(ctx context.Context, now time.Time) error {
 	expDiff := s.Expiration.Sub(now)
 	if expDiff < 0 {
-		return serrors.New("signer is expired",
-			"subject_key_id", fmt.Sprintf("%x", s.SubjectKeyID),
-			"expiration", s.Expiration)
-	}
-	if expDiff < time.Hour {
-		log.FromCtx(ctx).Info("Signer expiration time is near",
-			"subject_key_id", fmt.Sprintf("%x", s.SubjectKeyID),
-			"expiration", s.Expiration)
+		return fmt.Errorf("signer is expired: subject_key_id: %x, expiration: %s", s.SubjectKeyID, s.Expiration)
 	}
 
 	return nil
@@ -138,7 +129,7 @@ func LastExpiring[T interface{ Validity() cppki.Validity }](
 	}
 	if len(candidates) == 0 {
 		var zero T
-		return zero, serrors.New("no signer covers the given validity")
+		return zero, fmt.Errorf("no signer covers the given validity")
 	}
 
 	latest := candidates[0]
