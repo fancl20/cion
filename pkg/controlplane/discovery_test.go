@@ -2,6 +2,7 @@ package controlplane
 
 import (
 	"context"
+	"net"
 	"net/netip"
 	"testing"
 	"time"
@@ -70,6 +71,7 @@ func startNode(t *testing.T, ia addr.IA, internal, extLocal, extRemote, control 
 	t.Cleanup(func() {
 		cancel()
 		provider.Stop()
+		discovery.Close() //nolint:errcheck
 	})
 	go func() { _ = d.Serve(ctx) }()
 	go discovery.Run(ctx)
@@ -90,6 +92,18 @@ func waitNeighbor(t *testing.T, d *Discovery) Neighbor {
 	return Neighbor{}
 }
 
+// freeUDPAddr returns a loopback UDP address with a port picked by the
+// kernel, so that concurrent test runs do not collide on fixed ports.
+func freeUDPAddr(t *testing.T) string {
+	t.Helper()
+	c, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	return c.LocalAddr().String()
+}
+
 // TestDiscoveryTwoNodes checks that two directly connected nodes learn each
 // other's IA, interface ID, and control address via the greeting handshake,
 // with all traffic forwarded by the data plane over the direct link.
@@ -97,10 +111,12 @@ func TestDiscoveryTwoNodes(t *testing.T) {
 	iaA := addr.MustIAFrom(1, 0xff0000000001)
 	iaB := addr.MustIAFrom(1, 0xff0000000002)
 
-	a := startNode(t, iaA, "127.0.0.1:31051",
-		"127.0.0.1:31151", "127.0.0.1:31152", "127.0.0.1:31061")
-	b := startNode(t, iaB, "127.0.0.1:31052",
-		"127.0.0.1:31152", "127.0.0.1:31151", "127.0.0.1:31062")
+	intA, intB := freeUDPAddr(t), freeUDPAddr(t)
+	extA, extB := freeUDPAddr(t), freeUDPAddr(t)
+	ctrlA, ctrlB := freeUDPAddr(t), freeUDPAddr(t)
+
+	a := startNode(t, iaA, intA, extA, extB, ctrlA)
+	b := startNode(t, iaB, intB, extB, extA, ctrlB)
 
 	nb := waitNeighbor(t, a)
 	if nb.IA != iaB {
@@ -109,7 +125,10 @@ func TestDiscoveryTwoNodes(t *testing.T) {
 	if nb.IfID != ifID {
 		t.Fatalf("learned ifID = %d, want %d", nb.IfID, ifID)
 	}
-	want := netip.MustParseAddrPort("127.0.0.1:31062")
+	want, err := netip.ParseAddrPort(ctrlB)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if nb.ControlAddr != want {
 		t.Fatalf("learned control address = %v, want %v", nb.ControlAddr, want)
 	}
