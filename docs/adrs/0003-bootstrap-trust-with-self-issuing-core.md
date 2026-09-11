@@ -75,30 +75,47 @@ by a **WebPKI-anchored core endpoint**, realized as follows:
     and persists it in a local state directory. No secrets appear in the
     configuration file; the existing `key` field remains data-plane-only.
 2.  **TRC genesis:** The first `ASTypeCore` node of an ISD (the *founding
-    core*) generates its voting certificates and its regular CP CA certificate,
-    and self-issues the ISD's base TRC containing them. The TRC is validated
+    core*) generates its sensitive voting certificate, its regular voting
+    certificate, and a self-signed CP root certificate, and self-issues the
+    ISD's base TRC containing exactly those three, CMS-signed with both voting
+    keys — the specification admits only voting and CP root certificates in a
+    TRC (PKI draft, Sections 2.1.5.2 and 3.1.2.2.11). The TRC is validated
     with `cppki` and persisted through the trust DB.
 3.  **Core control endpoint:** The founding core serves its control services
-    (ConnectRPC over HTTP/3/QUIC) at a DNS domain with a WebPKI certificate
-    managed via ACME (for example, certmagic). Explicit certificate files
-    remain supported as a fallback for offline deployments.
+    (ConnectRPC over HTTP/3/QUIC riding the SCION network, reached the same
+    way greetings are) at a DNS domain with a WebPKI certificate managed
+    via ACME (for example, certmagic; challenges answered on public TCP
+    ports). The domain is a TLS identity, not a locator — a fresh node never
+    resolves it; the node's locator is the SCION link. Explicit certificate
+    files remain supported as a fallback for offline deployments.
 4.  **Initial trust and TRC fetch:** A fresh node is configured with the
     core's domain and a neighbor link; it needs nothing else. It fetches the
     base TRC from the core over the TLS-verified channel. After the first
     fetch, the TRC is pinned in the trust DB and SCION-native verification
     takes over; WebPKI is a bootstrap-only anchor.
 5.  **Chain enrollment:** Every AS (including the core itself) holds an AS
-    certificate chained to the core's CP CA certificate, which is contained in
-    the base TRC. A joining node sends a certificate request to the core over
-    the verified channel; the chain is `[AS certificate ← core CP CA
-    certificate ← TRC]`. Enrollment is open to any node that can reach the
-    core's endpoint; operators who want tighter control configure an ISD-AS
-    allowlist on the core.
-6.  **Neighbor relay:** A node without a direct link to the core uses a
-    discovered neighbor as a UDP relay to the core's endpoint. The relay
-    forwards datagrams and is untrusted by construction: TLS is end-to-end to
-    the core's domain, so the relay cannot tamper with or impersonate the
-    core. The relay bridges control traffic until multi-hop SCION paths exist.
+    certificate chained to the core's CP CA certificate, which the core signs
+    with its CP root key; the CP CA certificate is never placed in the TRC. A
+    joining node sends a certificate request to the core over the verified
+    channel; the chain is `[AS certificate ← CP CA certificate ← CP root
+    certificate ∈ TRC]`, verified against the root pool extracted from the
+    TRC (PKI draft, Section 4.2.2). Enrollment is open to any node that can
+    reach the core's endpoint; operators who want tighter control configure
+    an ISD-AS allowlist on the core.
+6.  **SCION-native control traffic, one-hop first:** Control RPCs ride the
+    SCION network from day one, TLS end-to-end against the core's WebPKI
+    certificate, so nothing in between can tamper with or impersonate the
+    core. Using the SCION network requires no trust material — the data
+    plane forwards on hop-field MACs alone, exactly as any SCION
+    application — so a fresh node reaches the core over the same one-hop
+    SCION path greetings use, and its first TRC fetch is authenticated by
+    the WebPKI certificate alone. After that fetch, verification is
+    SCION-native, anchored in the TRC. Until beaconing provides multi-hop
+    paths, enrollment therefore requires a direct SCION link to the core.
+    An IP-underlay channel to the core's endpoint and a neighbor UDP relay
+    were both considered and rejected: SCION forwarding provides the
+    transport natively in every phase, so either would be a second,
+    throwaway channel beside the data plane.
 7.  **Unauthenticated discovery, authenticated beacons:** Greetings remain
     unauthenticated link-bootstrap messages, mirroring the specification:
     neighbor identity is configured out-of-band (control plane draft,
@@ -110,9 +127,10 @@ by a **WebPKI-anchored core endpoint**, realized as follows:
     a fresh node therefore bootstraps with no trust material at all. Signed
     greetings may be added later as hardening.
 
-Control RPCs ride the underlay (HTTP/3/QUIC to the core's endpoint, directly
-or relayed) rather than in-band SCION packets. In-band control-plane messaging
-is revisited when multi-hop control traffic exists.
+Control RPCs ride SCION packets (Connect over HTTP/3/QUIC per control plane
+draft, Sections 1.8 and 6) — one-hop paths until multi-hop paths exist. The
+WebPKI certificate anchors a fresh node's first TRC fetch on that channel,
+because SCION forwarding requires no trust material.
 
 TRC updates, voting workflows, certificate renewal, and cross-ISD operation are
 out of scope for now. The system is anchored to a single base TRC; changing the
@@ -127,7 +145,8 @@ is frozen.
     neighbor link.
 *   The ported trust DB, signer, and verifier become live without new
     abstractions.
-*   End-to-end TLS through relays keeps intermediate neighbors untrusted.
+*   End-to-end TLS keeps intermediate networks untrusted, with no forwarding
+    component to operate.
 *   Spec-formatted artifacts keep the door open to reference tooling and
     future TRC updates.
 *   Greetings follow the specification's link-bootstrap model; a fresh node
@@ -141,8 +160,8 @@ is frozen.
     bounded: ongoing operation and verification are SCION-native.
 *   Open enrollment by default: any node that can reach the core can join the
     ISD; the allowlist is opt-in.
-*   Relays forward encrypted traffic for other nodes and add availability load
-    to neighbor links.
+*   Until multi-hop SCION paths exist, nodes without a direct SCION link to
+    the core cannot bootstrap.
 *   The founding core is a single point of trust: its CA key can issue for the
     entire ISD, and its loss halts enrollment.
 *   No TRC update path exists yet; trust-root evolution requires redeployment.
@@ -206,7 +225,8 @@ is frozen.
 
 *   Good, because a domain name is a natural, operator-friendly identifier and
     ACME automates certificate management.
-*   Good, because end-to-end TLS works unchanged through untrusted relays.
+*   Good, because end-to-end TLS works over untrusted paths, on any
+    transport.
 *   Bad, because bootstrap depends on an external CA and public DNS
     reachability.
 *   Bad, because offline deployments must fall back to manual certificates.
