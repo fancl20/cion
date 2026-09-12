@@ -30,9 +30,7 @@ deferred to multi-hop paths.
 This ADR decides the architecture of the path layer: how path segments come to
 exist (exploration), how they are stored (the path segment database), how they
 are published (registration), and how they are consumed (lookup and the
-control-plane transport). The implementation proposal that follows is proposal
-0004, which proposal 0003 and the control-plane code already name as the
-beaconing milestone. The decision builds on
+control-plane transport). The decision builds on
 [ADR-0001](/docs/adrs/0001-adopt-scion-architecture.md),
 [ADR-0002](/docs/adrs/0002-simplify-as-roles-and-types.md), and ADR-0003, and
 follows
@@ -143,12 +141,11 @@ realized as follows:
     dedicated package beside `pkg/trust`. Segments are stored in CION-owned
     domain types wrapping the vendored `proto/control_plane` messages; the
     reference implementation's `pathdb` and beacon-server packages stay
-    unvendored per proposal 0001's boundary. A newly registered segment
-    replaces the stored segment with the same identity (originating core,
-    segment ID, creation timestamp); segments are evicted when their
-    timestamp-relative expiration passes, on access and by a periodic sweep.
-    There is no revocation mechanism in this milestone; expiration bounds
-    staleness.
+    unvendored. A newly registered segment replaces the stored segment with
+    the same identity (originating core, segment ID, creation timestamp);
+    segments are evicted when their timestamp-relative expiration passes, on
+    access and by a periodic sweep. There is no revocation mechanism in this
+    milestone; expiration bounds staleness.
 4.  **Link roles without link-type configuration.** A link's roles are not
     configured; they emerge from beacon flow. A core originates beacons on
     all of its links; an interface a beacon arrives on is the node's parent
