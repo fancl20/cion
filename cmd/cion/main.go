@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"crypto"
+	"crypto/tls"
 	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
@@ -17,12 +18,14 @@ import (
 	"path/filepath"
 	"runtime"
 	"syscall"
-	"time"
 
 	"github.com/scionproto/scion/pkg/addr"
+	"github.com/scionproto/scion/pkg/slayers/path/scion"
 
 	"github.com/fancl20/cion/pkg/controlplane"
 	"github.com/fancl20/cion/pkg/dataplane"
+	"github.com/fancl20/cion/pkg/pathdb"
+	pathdbbbolt "github.com/fancl20/cion/pkg/pathdb/impl/bbolt"
 	"github.com/fancl20/cion/pkg/trust"
 	"github.com/fancl20/cion/pkg/trust/impl/bbolt"
 )
@@ -155,16 +158,17 @@ func run(configPath string) error {
 		return err
 	}
 
-	// Trust material comes up before the network services: the database and
-	// key material first, then TRC genesis and the control endpoint on the
-	// core, or trust fetch and enrollment on every other node. Enrollment
-	// runs in the background and waits for the first neighbor greeting to
-	// learn the core's locator, so discovery runs alongside it.
-	db, err := setupTrust(ctx, cfg, ia, asType, key, neighborLinks, discovery)
+	// Trust material and the path layer come up before the network
+	// services: the databases and key material first, then TRC genesis and
+	// the control endpoint on the core or the enrollment loop on every
+	// other node, the trust engine, the two segment stores, and the
+	// beaconer. Enrollment and beaconing run in the background; discovery
+	// runs alongside them.
+	node, err := setupControlPlane(ctx, cfg, ia, asType, key, neighborLinks, discovery)
 	if err != nil {
 		return err
 	}
-	defer db.Close() //nolint:errcheck
+	defer node.Close()
 
 	go func() {
 		defer func() {
@@ -174,17 +178,39 @@ func run(configPath string) error {
 		}()
 		discovery.Run(ctx)
 	}()
+	go func() {
+		defer handleControlPanic()
+		node.beaconer.Run(ctx)
+	}()
 
 	slog.Info("Starting CION", "ia", ia, "asType", asType, "internal", cfg.Internal,
 		"control", cfg.Control, "interfaces", len(cfg.Interfaces))
 	return d.Serve(ctx)
 }
 
-// setupTrust brings up the node's trust material: the trust database and AS
-// key for every node, then TRC genesis, self-enrollment, and the control
-// endpoint on the founding core, or enrollment against the core endpoint on
-// every other node.
-func setupTrust(
+// controlPlaneNode holds the state a running node's control plane needs to
+// release at shutdown.
+type controlPlaneNode struct {
+	trustDB  trust.DB
+	pathDB   pathdb.DB
+	peerClt  *controlplane.PeerClient
+	beaconer *controlplane.Beaconer
+}
+
+func (n *controlPlaneNode) Close() {
+	n.peerClt.Close() //nolint:errcheck
+	n.pathDB.Close()  //nolint:errcheck
+	n.trustDB.Close() //nolint:errcheck
+}
+
+// setupControlPlane brings up the node's control plane per proposal 0004:
+// the trust database and AS key for every node; TRC genesis, synchronous
+// self-enrollment, and the WebPKI channel on the founding core, or the
+// enrollment loop against the core on every other node; the control
+// endpoint on every node; the trust engine; the beacon store and path
+// database; and the beaconing originator (core) or
+// receiver/propagator/registrant (non-core).
+func setupControlPlane(
 	ctx context.Context,
 	cfg *Config,
 	ia addr.IA,
@@ -192,16 +218,21 @@ func setupTrust(
 	key []byte,
 	links map[uint16]addr.IA,
 	discovery *controlplane.Discovery,
-) (trust.DB, error) {
+) (*controlPlaneNode, error) {
 
-	db, err := bbolt.New(filepath.Join(cfg.State, "trust.db"), nil)
+	trustDB, err := bbolt.New(filepath.Join(cfg.State, "trust.db"), nil)
 	if err != nil {
 		return nil, fmt.Errorf("opening trust DB: %w", err)
 	}
 	asKey, err := trust.LoadOrCreateASKey(cfg.State)
 	if err != nil {
-		db.Close() //nolint:errcheck
+		trustDB.Close() //nolint:errcheck
 		return nil, fmt.Errorf("loading AS key: %w", err)
+	}
+	pathDB, err := pathdbbbolt.New(filepath.Join(cfg.State, "path.db"), nil)
+	if err != nil {
+		trustDB.Close() //nolint:errcheck
+		return nil, fmt.Errorf("opening path DB: %w", err)
 	}
 
 	scionConn := func(port uint16) (*controlplane.SCIONConn, error) {
@@ -218,122 +249,250 @@ func setupTrust(
 		})
 	}
 
-	if asType != trust.ASTypeCore {
+	// The path provider resolves routes; its consumers below close the
+	// cycle through the beaconer, the lookup service, and this route.
+	var pathProvider *controlplane.PathProvider
+	coreRoute := func() *controlplane.Addr {
+		coreIA, coreEndpoint, ok := discovery.CoreEndpoint()
+		if !ok {
+			return nil
+		}
+		// The one-hop path when the core is a neighbor...
+		for _, n := range discovery.Neighbors() {
+			if n.IA.Equal(coreIA) {
+				return &controlplane.Addr{
+					IA:   coreIA,
+					Addr: netip.AddrPortFrom(n.ControlAddr.Addr(), controlplane.EndpointPort),
+				}
+			}
+		}
+		// ...else the reversed freshest up segment, which exists from
+		// beaconing alone, or the bootstrap route before the TRC is pinned.
+		// Local state only: resolving a route inside a dial must not spawn
+		// RPCs over the transport being dialed.
+		if pathProvider != nil {
+			if path, err := pathProvider.LocalPath(coreIA); err == nil {
+				return &controlplane.Addr{IA: coreIA, Addr: coreEndpoint, Path: path}
+			}
+		}
+		return nil
+	}
+
+	var (
+		issuer  *trust.Issuer
+		coreClt *controlplane.CoreClient
+	)
+	if asType == trust.ASTypeCore {
+		keys, err := trust.LoadOrCreateCoreKeys(cfg.State)
+		if err != nil {
+			trustDB.Close() //nolint:errcheck
+			pathDB.Close()  //nolint:errcheck
+			return nil, err
+		}
+		trc, err := trust.Genesis(ctx, trustDB, ia, keys)
+		if err != nil {
+			trustDB.Close() //nolint:errcheck
+			pathDB.Close()  //nolint:errcheck
+			return nil, fmt.Errorf("TRC genesis: %w", err)
+		}
+		issuer, err = trust.NewIssuer(ia, keys, trc)
+		if err != nil {
+			trustDB.Close() //nolint:errcheck
+			pathDB.Close()  //nolint:errcheck
+			return nil, fmt.Errorf("creating issuer: %w", err)
+		}
+		// The synchronous startup self-enrollment is the core chain
+		// lifecycle's first pass.
+		if _, err := selfEnroll(ctx, trustDB, issuer, ia, asKey); err != nil {
+			trustDB.Close() //nolint:errcheck
+			pathDB.Close()  //nolint:errcheck
+			return nil, fmt.Errorf("self-enrolling core: %w", err)
+		}
+	} else {
 		// The client socket takes an ephemeral port on the control address;
 		// the local router delivers the core's replies to it.
 		conn, err := scionConn(0)
 		if err != nil {
-			db.Close() //nolint:errcheck
+			trustDB.Close() //nolint:errcheck
+			pathDB.Close()  //nolint:errcheck
 			return nil, err
 		}
-		core, err := controlplane.NewCoreClient(controlplane.CoreClientConfig{
-			Domain: cfg.CoreDomain,
-			Conn:   conn,
+		coreClt, err = controlplane.NewCoreClient(controlplane.CoreClientConfig{
+			Domain:  cfg.CoreDomain,
+			Conn:    conn,
+			Locator: coreRoute,
 		})
 		if err != nil {
-			db.Close() //nolint:errcheck
+			trustDB.Close() //nolint:errcheck
+			pathDB.Close()  //nolint:errcheck
 			return nil, err
 		}
-		go func() {
-			defer handleControlPanic()
-			runEnrollment(ctx, ia, core, db, asKey, discovery)
-		}()
-		return db, nil
 	}
 
-	keys, err := trust.LoadOrCreateCoreKeys(cfg.State)
-	if err != nil {
-		db.Close() //nolint:errcheck
-		return nil, err
+	// The provider behind the engine is DB-first: non-core nodes fall back
+	// to the core's endpoint over the SCION-native transport; the core uses
+	// none, since its DB holds every chain it issued.
+	remote := trust.Remote(nil)
+	if coreClt != nil {
+		remote = coreClt
 	}
-	trc, err := trust.Genesis(ctx, db, ia, keys)
-	if err != nil {
-		db.Close() //nolint:errcheck
-		return nil, fmt.Errorf("TRC genesis: %w", err)
-	}
-	issuer, err := trust.NewIssuer(ia, keys, trc)
-	if err != nil {
-		db.Close() //nolint:errcheck
-		return nil, fmt.Errorf("creating issuer: %w", err)
-	}
-	if _, err := selfEnroll(ctx, db, issuer, ia, asKey); err != nil {
-		db.Close() //nolint:errcheck
-		return nil, fmt.Errorf("self-enrolling core: %w", err)
+	trustProvider := &trust.NetworkProvider{DB: trustDB, Remote: remote}
+	engine := trust.NewEngine(ia, asKey, trustProvider)
+
+	cores := func(isd addr.ISD) []addr.IA {
+		ias, err := engine.CoreASes(isd)
+		if err != nil {
+			slog.Warn("Enumerating core ASes from the pinned TRC", "err", err)
+			return nil
+		}
+		return ias
 	}
 
-	allowAS, err := parseAllowIAS(cfg.AllowIAS)
+	peerConn, err := scionConn(0)
 	if err != nil {
-		db.Close() //nolint:errcheck
+		trustDB.Close() //nolint:errcheck
+		pathDB.Close()  //nolint:errcheck
 		return nil, err
 	}
-	svc := &controlplane.TrustService{DB: db, Issuer: issuer, AllowAS: allowAS}
-	tlsConf, err := controlplane.ManageTLSCert(ctx, controlplane.TLSCertConfig{
-		Domain:   cfg.Domain,
-		CertFile: cfg.CertFile,
-		KeyFile:  cfg.KeyFile,
-		Storage:  filepath.Join(cfg.State, "certs"),
+	peerClt := controlplane.NewPeerClient(controlplane.PeerClientConfig{
+		Engine: engine,
+		Conn:   peerConn,
+		PathTo: func(dst addr.IA) *scion.Decoded {
+			path, err := pathProvider.LocalPath(dst)
+			if err != nil {
+				return nil
+			}
+			return path
+		},
+	})
+
+	lookup := controlplane.NewLookupService()
+	lookup.IA = ia
+	lookup.DB = pathDB
+	lookup.IsCore = asType == trust.ASTypeCore
+	lookup.Cores = cores
+	lookup.Fetch = peerClt.Segments
+	lookup.CoreRoute = coreRoute
+
+	store := controlplane.NewBeaconStore()
+	beaconer, err := controlplane.NewBeaconer(controlplane.BeaconerConfig{
+		IA:        ia,
+		Engine:    engine,
+		MACKey:    key,
+		Store:     store,
+		DB:        pathDB,
+		Links:     links,
+		Neighbors: discovery.Neighbors,
+		Sender:    peerClt,
+		CoreRoute: coreRoute,
+		Core:      asType == trust.ASTypeCore,
 	})
 	if err != nil {
-		db.Close() //nolint:errcheck
+		peerClt.Close() //nolint:errcheck
+		trustDB.Close() //nolint:errcheck
+		pathDB.Close()  //nolint:errcheck
 		return nil, err
 	}
-	// The endpoint serves on the control address's host with the fixed
-	// endpoint port.
-	conn, err := scionConn(controlplane.EndpointPort)
+
+	pathProvider = &controlplane.PathProvider{
+		IA:        ia,
+		DB:        pathDB,
+		Lookup:    lookup,
+		Bootstrap: beaconer.BootstrapRoute,
+		Cores:     cores,
+	}
+
+	// Every node serves its ConnectRPC services over HTTP/3 on the endpoint
+	// port, since beacons terminate on each node's SegmentCreationService.
+	// The core's endpoint additionally serves the bootstrap channel for
+	// clients offering its domain as the TLS server name.
+	var webPKIConf *tls.Config
+	if asType == trust.ASTypeCore {
+		webPKIConf, err = controlplane.ManageTLSCert(ctx, controlplane.TLSCertConfig{
+			Domain:   cfg.Domain,
+			CertFile: cfg.CertFile,
+			KeyFile:  cfg.KeyFile,
+			Storage:  filepath.Join(cfg.State, "certs"),
+		})
+		if err != nil {
+			peerClt.Close() //nolint:errcheck
+			trustDB.Close() //nolint:errcheck
+			pathDB.Close()  //nolint:errcheck
+			return nil, err
+		}
+	}
+	endpointConn, err := scionConn(controlplane.EndpointPort)
 	if err != nil {
-		db.Close() //nolint:errcheck
+		peerClt.Close() //nolint:errcheck
+		trustDB.Close() //nolint:errcheck
+		pathDB.Close()  //nolint:errcheck
 		return nil, err
+	}
+	allowAS, err := parseAllowIAS(cfg.AllowIAS)
+	if err != nil {
+		peerClt.Close() //nolint:errcheck
+		trustDB.Close() //nolint:errcheck
+		pathDB.Close()  //nolint:errcheck
+		return nil, err
+	}
+	svc := &controlplane.Services{
+		TrustService: &controlplane.TrustService{
+			DB:      trustDB,
+			Issuer:  issuer,
+			AllowAS: allowAS,
+		},
+		SegmentService: &controlplane.SegmentService{
+			Beaconer: beaconer,
+			Lookup:   lookup,
+		},
 	}
 	go func() {
 		defer handleControlPanic()
-		if err := controlplane.ServeHTTP3(conn, controlplane.NewServer(svc).Handler,
-			tlsConf); err != nil {
+		if err := controlplane.ServeHTTP3(endpointConn, controlplane.NewServer(svc).Handler,
+			controlplane.EndpointTLS(controlplane.EndpointTLSConfig{
+				Domain: cfg.Domain,
+				WebPKI: webPKIConf,
+				Engine: engine,
+			})); err != nil {
 
 			slog.Error("Control endpoint exited", "err", err)
 		}
 	}()
-	slog.Info("Serving control endpoint", "trc", trc.TRC.ID, "domain", cfg.Domain)
-	return db, nil
-}
 
-// runEnrollment enrolls this node against the core once its locator is
-// learned from a neighbor greeting. With several neighbors, each is tried in
-// turn: only the core's endpoint presents a certificate for the configured
-// domain, so enrollment against any other neighbor fails the TLS handshake.
-func runEnrollment(
-	ctx context.Context,
-	ia addr.IA,
-	core *controlplane.CoreClient,
-	db trust.DB,
-	asKey crypto.Signer,
-	discovery *controlplane.Discovery,
-) {
-
-	ticker := time.NewTicker(enrollInterval)
-	defer ticker.Stop()
-	for {
-		for _, n := range discovery.Neighbors() {
-			core.SetCore(n.IA,
-				netip.AddrPortFrom(n.ControlAddr.Addr(), controlplane.EndpointPort))
-			if _, err := trust.Enroll(ctx, db, core, ia, asKey); err != nil {
-				slog.Warn("Enrollment against neighbor failed",
-					"neighbor", n.IA, "err", err)
-				continue
-			}
-			slog.Info("Enrolled with core", "core_ia", n.IA)
-			return
-		}
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-		}
+	// The chain lifecycle keeps a valid chain on every node — the core
+	// included — by re-enrolling before expiry.
+	if asType == trust.ASTypeCore {
+		endpoint := endpointConn.LocalAddr().(*controlplane.Addr).Addr
+		discovery.SetCoreEndpoint(ia, endpoint)
+		go func() {
+			defer handleControlPanic()
+			controlplane.RunCoreEnrollment(ctx, controlplane.EnrollmentConfig{
+				IA:     ia,
+				DB:     trustDB,
+				Key:    asKey,
+				Issuer: issuer,
+			})
+		}()
+	} else {
+		go func() {
+			defer handleControlPanic()
+			controlplane.RunEnrollment(ctx, controlplane.EnrollmentConfig{
+				IA:     ia,
+				DB:     trustDB,
+				Key:    asKey,
+				Remote: coreClt,
+			})
+		}()
 	}
-}
 
-// enrollInterval is the pause between enrollment attempts; a node whose
-// links do not include the core keeps trying until multi-hop paths exist.
-const enrollInterval = 5 * time.Second
+	slog.Info("Serving control endpoint", "port", controlplane.EndpointPort)
+	return &controlPlaneNode{
+		trustDB:  trustDB,
+		pathDB:   pathDB,
+		peerClt:  peerClt,
+		beaconer: beaconer,
+	}, nil
+}
 
 // selfEnroll issues the core's own certificate chain locally, through the
 // same issuer that serves enrollment requests.

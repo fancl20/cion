@@ -46,8 +46,8 @@ type Neighbor struct {
 
 // Greeting is the discovery message exchanged between directly connected
 // nodes. It is carried as the payload of a SCION/UDP packet addressed to the
-// CS service of the neighbor, over a one-hop path; the one-hop path both
-// directions of the link and requires no path state on either side.
+// CS service of the neighbor, over a one-hop path; the one-hop path serves
+// both directions of the link and requires no path state on either side.
 type Greeting struct {
 	// IA is the ISD-AS of the sender.
 	IA addr.IA
@@ -55,6 +55,13 @@ type Greeting struct {
 	IfID uint16
 	// ControlAddr is the underlay address of the sender's control service.
 	ControlAddr netip.AddrPort
+	// CoreIA and CoreAddr name the control endpoint of the core the sender
+	// reaches — itself, on the core. Nodes relay what they learned, so a
+	// node without a direct link to the core learns where its enrollment
+	// fetch is aimed once beaconing supplies the path. Zero CoreIA omits
+	// the fields.
+	CoreIA   addr.IA
+	CoreAddr netip.AddrPort
 }
 
 func (g Greeting) Marshal() []byte {
@@ -64,7 +71,14 @@ func (g Greeting) Marshal() []byte {
 	buf = binary.BigEndian.AppendUint16(buf, g.IfID)
 	buf = binary.BigEndian.AppendUint64(buf, uint64(g.IA))
 	buf = binary.BigEndian.AppendUint16(buf, uint16(len(a)))
-	return append(buf, a...)
+	buf = append(buf, a...)
+	if g.CoreIA.IsZero() {
+		return buf
+	}
+	core := g.CoreAddr.String()
+	buf = binary.BigEndian.AppendUint64(buf, uint64(g.CoreIA))
+	buf = binary.BigEndian.AppendUint16(buf, uint16(len(core)))
+	return append(buf, core...)
 }
 
 func ParseGreeting(b []byte) (Greeting, error) {
@@ -90,6 +104,22 @@ func ParseGreeting(b []byte) (Greeting, error) {
 		return Greeting{}, fmt.Errorf("parsing control address: %w", err)
 	}
 	g.ControlAddr = controlAddr
+	// The core endpoint is trailing and optional; greetings without it come
+	// from nodes that know no core yet.
+	if len(rd.b) == 0 {
+		return g, nil
+	}
+	g.CoreIA = addr.IA(rd.uint64())
+	n = int(rd.uint16())
+	core := rd.bytes(n)
+	if rd.err != nil {
+		return Greeting{}, fmt.Errorf("reading greeting core endpoint: %w", rd.err)
+	}
+	coreAddr, err := netip.ParseAddrPort(string(core))
+	if err != nil {
+		return Greeting{}, fmt.Errorf("parsing core endpoint address: %w", err)
+	}
+	g.CoreAddr = coreAddr
 	return g, nil
 }
 
@@ -143,9 +173,19 @@ type Discovery struct {
 
 	mtx       sync.Mutex
 	neighbors map[uint16]Neighbor // By local interface ID.
+	// core is the core endpoint learned from greetings — itself announced by
+	// the core, relayed by every other node.
+	core coreState
 
 	interval time.Duration
 	timeout  time.Duration
+}
+
+// coreState is the core control endpoint learned from a greeting.
+type coreState struct {
+	ia       addr.IA
+	addr     netip.AddrPort
+	lastSeen time.Time
 }
 
 // DiscoveryConfig configures a Discovery instance.
@@ -244,10 +284,11 @@ func (d *Discovery) send(ctx context.Context) {
 }
 
 func (d *Discovery) sendOnce() {
-	g := Greeting{IA: d.localIA, ControlAddr: d.controlAddr}
+	coreIA, coreAddr := d.greetingCore()
+	g := Greeting{IA: d.localIA, ControlAddr: d.controlAddr, CoreIA: coreIA, CoreAddr: coreAddr}
 	for ifID, neighborIA := range d.links {
 		g.IfID = ifID
-		raw, err := d.greetingPacket(neighborIA, ifID)
+		raw, err := d.greetingPacket(g, neighborIA, ifID)
 		if err != nil {
 			slog.Error("Building greeting", "interface", ifID, "err", err)
 			continue
@@ -288,11 +329,18 @@ func (d *Discovery) record(ifID uint16, g Greeting) {
 			"interface", ifID, "expected", neighborIA, "got", g.IA)
 		return
 	}
+	now := time.Now()
 	d.neighbors[ifID] = Neighbor{
 		IA:          g.IA,
 		IfID:        g.IfID,
 		ControlAddr: g.ControlAddr,
-		LastSeen:    time.Now(),
+		LastSeen:    now,
+	}
+	// Relay the freshest core endpoint: every node includes the one it
+	// reaches in its greetings, so nodes without a direct link to the core
+	// learn where their enrollment fetch and registrations are aimed.
+	if !g.CoreIA.IsZero() {
+		d.core = coreState{ia: g.CoreIA, addr: g.CoreAddr, lastSeen: now}
 	}
 }
 
@@ -312,9 +360,39 @@ func (d *Discovery) Neighbors() map[uint16]Neighbor {
 	return out
 }
 
+// SetCoreEndpoint names the core this node serves or reaches, announced in
+// every greeting. The founding core sets its own endpoint; every other node
+// relays what it learned.
+func (d *Discovery) SetCoreEndpoint(ia addr.IA, addr netip.AddrPort) {
+	d.mtx.Lock()
+	defer d.mtx.Unlock()
+	d.core = coreState{ia: ia, addr: addr, lastSeen: time.Now()}
+}
+
+// CoreEndpoint returns the core control endpoint learned from greetings,
+// fresh within the greeting timeout.
+func (d *Discovery) CoreEndpoint() (addr.IA, netip.AddrPort, bool) {
+	d.mtx.Lock()
+	defer d.mtx.Unlock()
+	if d.core.ia.IsZero() || time.Since(d.core.lastSeen) > d.timeout {
+		return 0, netip.AddrPort{}, false
+	}
+	return d.core.ia, d.core.addr, true
+}
+
+// greetingCore returns the core endpoint to announce, if any.
+func (d *Discovery) greetingCore() (addr.IA, netip.AddrPort) {
+	d.mtx.Lock()
+	defer d.mtx.Unlock()
+	if d.core.ia.IsZero() || time.Since(d.core.lastSeen) > d.timeout {
+		return 0, netip.AddrPort{}
+	}
+	return d.core.ia, d.core.addr
+}
+
 // greetingPacket returns a serialized SCION packet carrying a greeting for
 // the given neighbor, to be sent over the link with the given interface ID.
-func (d *Discovery) greetingPacket(neighborIA addr.IA, ifID uint16) ([]byte, error) {
+func (d *Discovery) greetingPacket(g Greeting, neighborIA addr.IA, ifID uint16) ([]byte, error) {
 	segID := make([]byte, 2)
 	if _, err := rand.Read(segID); err != nil {
 		return nil, err
@@ -341,7 +419,6 @@ func (d *Discovery) greetingPacket(neighborIA addr.IA, ifID uint16) ([]byte, err
 		return nil, err
 	}
 	udp := &slayers.UDP{SrcPort: DiscoveryPort, DstPort: DiscoveryPort}
-	g := Greeting{IA: d.localIA, IfID: ifID, ControlAddr: d.controlAddr}
 
 	buffer := gopacket.NewSerializeBuffer()
 	err := gopacket.SerializeLayers(buffer, gopacket.SerializeOptions{FixLengths: true},

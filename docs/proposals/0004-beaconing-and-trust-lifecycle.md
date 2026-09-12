@@ -355,4 +355,64 @@ existing style.
 
 ## Implementation history
 
-Nothing implemented yet.
+*   Trust engine: `trust.Engine` (`pkg/trust/engine.go`) composes the signer,
+    verifier, and DB-first provider; `NewestChain` and `RenewChain` support
+    the chain lifecycle, and `NetworkProvider` resolves a nil remote — the
+    founding core's local-only provider — to "not found" instead of a
+    panic. The engine's chain lookup for the SCION-native TLS channel reads
+    local state only, so no handshake ever spawns a trust fetch.
+*   Chain lifecycle: `controlplane.RunEnrollment` and
+    `controlplane.RunCoreEnrollment` (`pkg/controlplane/lifecycle.go`) run
+    the lifetime loops — re-enrollment below `trust.ChainRenewalThreshold`,
+    warnings approaching expiry, errors past it, and the log-only TRC watch.
+    Every enrollment attempt is bounded by a timeout, so a wedged connection
+    cannot stall the loop.
+*   Control endpoints everywhere: `controlplane.EndpointTLS`
+    (`pkg/controlplane/mtls.go`) serves the unchanged bootstrap channel for
+    clients offering the core's domain as the TLS server name and the
+    SCION-native channel — AS chains verified against the pinned TRC's root
+    pool — for everything else. Nodes without a pinned TRC accept peers
+    unauthenticated for the window in which they receive the beacons that
+    route their enrollment; beacon sends ride client-authenticated
+    connections whose server certificate is not verified, the PCB
+    signatures authenticating the path authoritatively.
+*   Beaconing: the `controlplane.Beaconer`
+    (`pkg/controlplane/beacon.go`) originates, verifies (Section 2.3.1
+    checks against `pkg/segment`'s parsed beacons), stores
+    (`controlplane.BeaconStore`), propagates with the TRC pruning core
+    interfaces, terminates (Section 4.1.1), and registers up, down, and
+    core segments. `pkg/segment` wraps the vendored protobuf messages in
+    CION-owned domain types: parsing, AS-entry creation and signature
+    inputs (Section 2.2.2.6), hop-field MAC chaining, and data-plane path
+    construction.
+*   The two stores: the in-memory beacon store
+    (`pkg/controlplane/beaconstore.go`) and the persistent path database
+    (`pkg/pathdb` with the bbolt implementation in `pkg/pathdb/impl/bbolt`
+    and contract tests in `pkg/pathdb/impl/dbtest`), replacing by segment
+    identity and evicting expired segments on access and by sweep.
+*   Lookup and the provider: `controlplane.LookupService`
+    (`pkg/controlplane/lookup.go`) implements the source-AS handler of
+    Section 5.2.2 (and the core handler of Section 5.2.3) with
+    expiry-aware caching and wildcard expansion per Table 4;
+    `controlplane.PathProvider` (`pkg/controlplane/provider.go`) composes
+    up, core, and down segments into end-to-end paths — the only consumer
+    seam.
+*   Transport: `controlplane.SCIONConn` sends over provider-supplied SCION
+    paths and reverses full-path arrivals for replies; the discovery
+    greeting relays the core's endpoint address, so nodes without a direct
+    core link learn where enrollment and registrations are aimed. The
+    bootstrap route — an unverified beacon reversed and extended with the
+    node's own unsigned hop — carries the enrollment fetch and the trust
+    fetches around it until the first verified up segment exists.
+*   Data plane: one crash fix the new traffic surfaced — the slow path's
+    SCMP responses no longer panic on the absent DRKey provider.
+*   Tests: unit coverage per package — engine signer selection and
+    round trips, segment MAC chaining and path math, each reception check,
+    propagation pruning, termination, path-database persistence and
+    eviction, wildcard expansion and caching, provider composition,
+    lifecycle decisions with an injected clock, and the TLS channels — plus
+    the integration tests of a three-node line topology in
+    `pkg/controlplane/network_test.go`: beacons propagate A→B→C verified,
+    C enrolls through the reversed beacon over B, C registers a down
+    segment at A through B, and the provider resolves the end-to-end path;
+    a restarted node serves up segments from the persistent database.

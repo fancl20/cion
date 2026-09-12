@@ -29,15 +29,31 @@ type Remote interface {
 }
 
 // NetworkProvider is a DB-first trust.Provider: lookups go to the local
-// database and fall back to a Remote on a miss, caching the result.
+// database and fall back to a Remote on a miss, caching the result. The
+// founding core runs without a Remote — its DB holds every chain it issued —
+// and a nil Remote resolves to "not found", never a panic.
 type NetworkProvider struct {
 	// DB is the local trust database.
 	DB DB
-	// Remote resolves missing trust material over the network.
+	// Remote resolves missing trust material over the network. Nil means the
+	// provider is local-only.
 	Remote Remote
 }
 
 var _ Provider = (*NetworkProvider)(nil)
+var _ DBProvider = (*NetworkProvider)(nil)
+
+// LocalTRC looks up the TRC in the local database only.
+func (p *NetworkProvider) LocalTRC(id cppki.TRCID) (cppki.SignedTRC, error) {
+	return p.DB.SignedTRC(context.Background(), id)
+}
+
+// LocalChains looks up chains in the local database only.
+func (p *NetworkProvider) LocalChains(
+	ctx context.Context, q ChainQuery) ([][]*x509.Certificate, error) {
+
+	return p.DB.Chains(ctx, q)
+}
 
 // GetSignedTRC returns the TRC with the given ID, fetching and validating it
 // from the Remote if it is not in the DB. A base TRC is verified with its
@@ -54,6 +70,9 @@ func (p *NetworkProvider) GetSignedTRC(
 	}
 	if !trc.IsZero() {
 		return trc, nil
+	}
+	if p.Remote == nil {
+		return cppki.SignedTRC{}, nil
 	}
 	return fetchTRC(ctx, p.DB, p.Remote, id)
 }
@@ -73,6 +92,9 @@ func (p *NetworkProvider) GetChains(
 	}
 	if len(chains) != 0 {
 		return chains, nil
+	}
+	if p.Remote == nil {
+		return nil, nil
 	}
 	chains, err = p.Remote.Chains(ctx, q)
 	if err != nil {
@@ -132,7 +154,24 @@ func Enroll(
 	} else if len(chains) != 0 {
 		return chains[0], nil
 	}
+	return RenewChain(ctx, db, remote, ia, key)
+}
 
+// RenewChain requests a fresh chain for the node's key from the core and
+// stores it, without regard to chains still valid in the DB: the enrollment
+// loop calls it once a chain's remaining validity drops below the renewal
+// threshold.
+func RenewChain(
+	ctx context.Context,
+	db DB,
+	remote Remote,
+	ia addr.IA,
+	key crypto.Signer,
+) ([]*x509.Certificate, error) {
+
+	if err := validateISD(ia); err != nil {
+		return nil, err
+	}
 	csr, err := CreateCSR(ia, key)
 	if err != nil {
 		return nil, fmt.Errorf("creating CSR: %w", err)

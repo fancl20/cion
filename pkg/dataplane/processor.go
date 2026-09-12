@@ -787,7 +787,10 @@ type slowPathPacketProcessor struct {
 	// to be used in the hasValidAuth() method.
 	validAuthBuf []byte
 
-	// DRKey key derivation for SCMP authentication
+	// drkeyProvider derives DRKey material for authenticating SCMP
+	// messages. CION runs without DRKey — the drafts leave SCMP
+	// authentication experimental — so the field is nil and SCMP messages
+	// are sent unauthenticated; see needsAuth and hasValidAuth.
 	drkeyProvider drkeyProvider
 }
 
@@ -973,9 +976,13 @@ func (p *slowPathPacketProcessor) prepareSCMP(
 	scmpH := slayers.SCMP{TypeCode: typeCode}
 	scmpH.SetNetworkLayerForChecksum(&scionL)
 
-	needsAuth := isError ||
+	// SCMP errors and authenticated traceroute replies need DRKey material;
+	// without a DRKey provider they are sent unauthenticated — the drafts
+	// leave SCMP authentication experimental — rather than crashing the slow
+	// path.
+	needsAuth := p.drkeyProvider != nil && (isError ||
 		(scmpH.TypeCode.Type() == slayers.SCMPTypeTracerouteReply &&
-			p.hasValidAuth(time.Now()))
+			p.hasValidAuth(time.Now())))
 
 	sopts := gopacket.SerializeOptions{
 		ComputeChecksums: true,
@@ -1120,6 +1127,10 @@ func (p *slowPathPacketProcessor) resetSPAOMetadata(key drkey.ASHostKey, now tim
 }
 
 func (p *slowPathPacketProcessor) hasValidAuth(t time.Time) bool {
+	// Without a DRKey provider an authenticator can never be verified.
+	if p.drkeyProvider == nil {
+		return false
+	}
 	// Check if e2eLayer was parsed for this packet
 	if !p.lastLayer.CanDecode().Contains(slayers.LayerTypeEndToEndExtn) {
 		return false
