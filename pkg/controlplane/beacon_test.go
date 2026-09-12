@@ -386,8 +386,8 @@ func TestPropagateOnce(t *testing.T) {
 	}
 }
 
-// TestRegisterOnce checks termination per Section 4.1.1 and registration per
-// Sections 4.1.2 and 4.1.3: the up segment lands in the local path database,
+// TestRegisterOnce checks termination per Section 3.1.1 and registration per
+// Sections 3.1.2 and 3.1.3: the up segment lands in the local path database,
 // the down segment at the core.
 func TestRegisterOnce(t *testing.T) {
 	f := newBeaconFixture(t)
@@ -430,7 +430,7 @@ func TestRegisterOnce(t *testing.T) {
 	}
 }
 
-// TestHandleRegistration checks the receiving core's checks (Section 4.1.3).
+// TestHandleRegistration checks the receiving core's checks (Section 3.1.3).
 func TestHandleRegistration(t *testing.T) {
 	f := newBeaconFixture(t)
 	ctx := context.Background()

@@ -63,7 +63,7 @@ against its ADR surfaced two gaps this proposal closes on the way:
 *   Register segments per the draft: non-cores terminate PCBs into up and down
     segments, down segments registered with the originating core; cores
     terminate core beacons into core segments.
-*   Implement the draft's source-AS segment-request handler (Section 5.2.2)
+*   Implement the draft's source-AS segment-request handler (Section 4.2.2)
     and the in-node path provider that composes up, core, and down segments
     into end-to-end paths.
 *   Generalize the QUIC-over-SCION transport through the provider, carrying
@@ -158,7 +158,7 @@ Every node — not just the core — serves its ConnectRPC services over HTTP/3 
 leaves the neighbor channel's certificate model open: today's channel is the
 WebPKI-anchored one, which only the core can serve. This proposal decides the
 model the drafts prescribe — AS certificates as control-plane TLS
-certificates (PKI draft, Section 2.2.2.4), which `cppki.CAPolicy.CreateChain`
+certificates (PKI draft, Section 2.7.4), which `cppki.CAPolicy.CreateChain`
 already issues with id-kp-serverAuth and id-kp-clientAuth:
 
 *   The bootstrap channel, unchanged: the core presents its WebPKI/ACME (or
@@ -207,7 +207,7 @@ toward a core. A node that has not pinned the TRC yet cannot know the cores
 and floods upward too; that is harmless, because in a single-core ISD every
 beacon already contains the core, and the core drops any beacon containing
 itself. On core links — none exist while the ISD has one core — core beacons
-flow in both directions (Section 2.3.5.2), carried by the same mechanism.
+flow in both directions (Section 2.3.5), carried by the same mechanism.
 
 Reception applies the checks of Section 2.3.1 before anything is stored:
 
@@ -259,26 +259,26 @@ ADR-0004's two stores with different lifetimes:
 ### Registration
 
 Each registration period (a constant on the order of a minute), non-core
-nodes terminate selected PCBs per Section 4.1.1 — a final AS entry with unset
+nodes terminate selected PCBs per Section 3.1.1 — a final AS entry with unset
 next AS and egress interface, signed — producing:
 
-*   Up segments, kept in the local path database (Section 4.1.2). They are
+*   Up segments, kept in the local path database (Section 3.1.2). They are
     the node's paths to the core: the provider's route for enrollment, trust
     fetches, and registration itself.
 *   Down segments, registered with the control service of the core that
-    originated the PCB (Sections 4.1.3 and 4.3), riding the reversed up
+    originated the PCB (Sections 3.1.3 and 3.3), riding the reversed up
     segment.
 
 The receiving core verifies each registered segment as on beacon reception
-and rejects segments whose first AS entry is not its own IA (Section 4.1.3).
+and rejects segments whose first AS entry is not its own IA (Section 3.1.3).
 Cores likewise terminate core beacons into core segments in their own path
-database (Section 4.2) — no core beacons exist while the ISD has a single
+database (Section 3.2) — no core beacons exist while the ISD has a single
 core, but the path is exercised by the same termination code.
 
 ### Lookup and the in-node path provider
 
 The node implements the draft's source-AS segment-request handler
-(Section 5.2.2): up segments from the local path database; core and down
+(Section 4.2.2): up segments from the local path database; core and down
 segments fetched from the core's control service with expiry-aware caching;
 source wildcards expanded into the separate requests the section specifies —
 per reachable core AS of the source ISD for core segments, per core AS of the
@@ -332,7 +332,7 @@ existing style.
     neighbors, and the core drops beacons containing itself; termination
     zeroes egress and `next_isd_as`; the path database persists across
     restart, replaces by identity, and evicts expired segments on access and
-    sweep; the lookup handler expands wildcards per Section 5.2.2 and serves
+    sweep; the lookup handler expands wildcards per Section 4.2.2 and serves
     from cache until expiry; the provider composes up/core/down segments and
     reverses up segments; the multi-hop transport sends over a supplied path
     and reverses arrival paths; mTLS verification accepts a TRC-anchored
@@ -380,7 +380,7 @@ existing style.
     (`pkg/controlplane/beacon.go`) originates, verifies (Section 2.3.1
     checks against `pkg/segment`'s parsed beacons), stores
     (`controlplane.BeaconStore`), propagates with the TRC pruning core
-    interfaces, terminates (Section 4.1.1), and registers up, down, and
+    interfaces, terminates (Section 3.1.1), and registers up, down, and
     core segments. `pkg/segment` wraps the vendored protobuf messages in
     CION-owned domain types: parsing, AS-entry creation and signature
     inputs (Section 2.2.2.6), hop-field MAC chaining, and data-plane path
@@ -392,7 +392,7 @@ existing style.
     identity and evicting expired segments on access and by sweep.
 *   Lookup and the provider: `controlplane.LookupService`
     (`pkg/controlplane/lookup.go`) implements the source-AS handler of
-    Section 5.2.2 (and the core handler of Section 5.2.3) with
+    Section 4.2.2 (and the core handler of Section 4.2.3) with
     expiry-aware caching and wildcard expansion per Table 4;
     `controlplane.PathProvider` (`pkg/controlplane/provider.go`) composes
     up, core, and down segments into end-to-end paths — the only consumer

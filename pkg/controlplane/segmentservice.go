@@ -27,7 +27,7 @@ var _ control_planeconnect.SegmentCreationServiceHandler = (*SegmentService)(nil
 var _ control_planeconnect.SegmentRegistrationServiceHandler = (*SegmentService)(nil)
 var _ control_planeconnect.SegmentLookupServiceHandler = (*SegmentService)(nil)
 
-// Beacon receives a propagated PCB (draft Section 2.3.5.3), applying the
+// Beacon receives a propagated PCB (draft Section 2.3.5.1), applying the
 // reception checks of Section 2.3.1 before anything is stored. Beacons
 // terminate on each node's control service, so every node serves this RPC.
 func (s *SegmentService) Beacon(
@@ -55,7 +55,7 @@ func (s *SegmentService) Beacon(
 }
 
 // SegmentsRegistration receives down segments registered by a non-core
-// (Sections 4.1.3 and 4.3); the receiving core verifies each registered
+// (Sections 3.1.3 and 3.3); the receiving core verifies each registered
 // segment as on beacon reception.
 func (s *SegmentService) SegmentsRegistration(
 	ctx context.Context,

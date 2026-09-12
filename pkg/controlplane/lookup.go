@@ -19,10 +19,10 @@ import (
 const lookupCacheTTL = time.Minute
 
 // LookupService implements the draft's segment-request handlers: the source-
-// AS handler of a non-core (Section 5.2.2) — up segments from the local path
+// AS handler of a non-core (Section 4.2.2) — up segments from the local path
 // database, core and down segments fetched from the core's control service
 // with expiry-aware caching, source wildcards expanded per Table 4 — and the
-// core handler (Section 5.2.3), which serves from the local database.
+// core handler (Section 4.2.3), which serves from the local database.
 type LookupService struct {
 	// IA is the local ISD-AS.
 	IA addr.IA
@@ -98,7 +98,7 @@ func (s *LookupService) lookup(
 	return s.sourceLookup(ctx, src, dst)
 }
 
-// coreLookup implements the core's handler (Section 5.2.3): the source must
+// coreLookup implements the core's handler (Section 4.2.3): the source must
 // be this core; core and wildcard destinations are served from the core
 // segments, everything else from the down segments.
 func (s *LookupService) coreLookup(src, dst addr.IA) []typedSegments {
@@ -118,7 +118,7 @@ func (s *LookupService) coreLookup(src, dst addr.IA) []typedSegments {
 		list: s.DBGet(pathdb.Query{Type: pathdb.SegmentTypeDown, DstIA: dst})}}
 }
 
-// sourceLookup implements the non-core source-AS handler (Section 5.2.2).
+// sourceLookup implements the non-core source-AS handler (Section 4.2.2).
 func (s *LookupService) sourceLookup(ctx context.Context, src, dst addr.IA) []typedSegments {
 	var out []typedSegments
 	srcIsLocal := src.IsZero() || src.Equal(s.IA)

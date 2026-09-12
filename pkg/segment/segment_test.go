@@ -161,7 +161,7 @@ func TestHopFieldMACChain(t *testing.T) {
 }
 
 // TestTermination checks that terminating a PCB appends a final entry with
-// unset next AS and egress interface (Section 4.1.1).
+// unset next AS and egress interface (Section 3.1.1).
 func TestTermination(t *testing.T) {
 	f := newSegFixture(t, iaA, iaB, iaC)
 	pcb := buildLineBeacon(t, f, time.Now())

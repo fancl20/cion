@@ -24,7 +24,7 @@ import (
 
 // The SCION-native channel (proposal 0004): peers present their AS
 // certificate chains — issued with id-kp-serverAuth and id-kp-clientAuth
-// (PKI draft, Section 2.2.2.4) — mutually authenticated by verifying the
+// (PKI draft, Section 2.7.4) — mutually authenticated by verifying the
 // chain against the pinned TRC's root pool instead of WebPKI roots, with the
 // peer's IA extracted from the certificate subject. A node that has not
 // pinned the TRC yet cannot authenticate anyone: its handshakes degrade to

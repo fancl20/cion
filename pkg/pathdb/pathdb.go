@@ -22,12 +22,12 @@ const (
 	// SegmentTypeUnspecified matches the draft's unspecified type.
 	SegmentTypeUnspecified SegmentType = 0
 	// SegmentTypeUp is a segment from a core to this node, kept locally as
-	// this node's route to the core (Section 4.1.2).
+	// this node's route to the core (Section 3.1.2).
 	SegmentTypeUp SegmentType = 1
 	// SegmentTypeDown is a segment from a core to a non-core, registered
-	// with the originating core (Sections 4.1.3 and 4.3).
+	// with the originating core (Sections 3.1.3 and 3.3).
 	SegmentTypeDown SegmentType = 2
-	// SegmentTypeCore is a segment between cores (Section 4.2).
+	// SegmentTypeCore is a segment between cores (Section 3.2).
 	SegmentTypeCore SegmentType = 3
 )
 

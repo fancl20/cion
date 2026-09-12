@@ -105,7 +105,7 @@ func terminatedSegment(
 	return seg
 }
 
-// TestLookupSourceHandler checks the source-AS handler (Section 5.2.2): up
+// TestLookupSourceHandler checks the source-AS handler (Section 4.2.2): up
 // segments from the local database, down segments fetched from the core with
 // the source wildcard expanded to the core AS of the destination ISD.
 func TestLookupSourceHandler(t *testing.T) {
@@ -180,7 +180,7 @@ func TestLookupCacheUntilExpiry(t *testing.T) {
 	fx.fetch.mtx.Unlock()
 }
 
-// TestLookupCoreHandler checks the core's handler (Section 5.2.3): the
+// TestLookupCoreHandler checks the core's handler (Section 4.2.3): the
 // source must be this core; core destinations are served from the core
 // segments, everything else from the down segments.
 func TestLookupCoreHandler(t *testing.T) {

@@ -81,12 +81,12 @@ already owns the trust-material types (`Signer`, `SignedTRC`, chains) and
 their storage, so issuance lives in the same package and no separate `pkg/pki`
 is re-introduced.
 
-Per the specification's certificate model (PKI draft, Section 2.1, Table 2),
+Per the specification's certificate model (PKI draft, Section 2.5, Table 2),
 the founding core generates the three self-signed certificates that make up
 the base TRC: a sensitive voting certificate, a regular voting certificate,
 and a CP root certificate (a CA certificate carrying `id-kp-root`). Nothing
 else may appear in the TRC's certificate list — CA certificates are
-explicitly excluded (PKI draft, Sections 2.1.5.2 and 3.1.2.2.11), and
+explicitly excluded (PKI draft, Section 3.2.11), and
 `cppki` rejects them. Separately, the core creates a CP CA certificate signed
 by the CP root key — never placed in the TRC — and uses it to sign AS
 certificates; the resulting chain is `[AS certificate ← CP CA certificate ←
@@ -145,7 +145,7 @@ which is acceptable for a development network.
 ### Core reachability
 
 Control traffic rides SCION — one-hop paths to direct neighbors in this
-milestone (control plane draft, Section 6: neighboring ASes craft one-hop
+milestone (control plane draft, Section 5: neighboring ASes craft one-hop
 paths directly and respond by reversing them), multi-hop paths in proposal
 0004 — TLS-verified end-to-end against the core's domain; nothing in between
 terminates or needs trust. A node therefore needs a direct SCION link to
@@ -187,8 +187,8 @@ The `cion` binary gains the following configuration fields: `asType` (`core`,
 `authoritative`, or `normal`), the state directory, the core's domain (for
 non-core nodes), and the domain plus certificate mode (`acme` or file paths,
 for core nodes). ISD numbers should come from the private range 16-63
-(control plane draft, Section 1.5.1); the PKI draft restricts TRC ISDs to
-the public range 64-4094, and nothing in `cppki` enforces the choice.
+(control plane draft, Section 1.5.1); the PKI draft does not constrain the
+TRC's ISD number, and nothing in `cppki` enforces the choice.
 Startup order: trust DB, key material, TRC genesis (core only), control
 endpoint (core) or trust fetch and enrollment (non-core), then discovery as
 today. The data plane and its forwarding `key` configuration are unchanged.

@@ -25,7 +25,7 @@ const (
 	// floor of five seconds (Section 2.3.4).
 	PropagationInterval = 5 * time.Second
 
-	// RegistrationInterval is the registration period (Section 4.1), on the
+	// RegistrationInterval is the registration period (Section 3.1), on the
 	// order of a minute.
 	RegistrationInterval = time.Minute
 
@@ -221,7 +221,7 @@ func (b *Beaconer) HandleBeacon(
 }
 
 // HandleRegistration verifies a down segment registered with this core and
-// stores it in the path database (Sections 4.1.3 and 4.3).
+// stores it in the path database (Sections 3.1.3 and 3.3).
 func (b *Beaconer) HandleRegistration(
 	ctx context.Context,
 	pb *control_plane.PathSegment,
@@ -315,7 +315,7 @@ func (b *Beaconer) checkBeacon(pcb *segment.PCB, ingress uint16) error {
 }
 
 // checkRegistered applies the receiving core's checks to a registered down
-// segment (Section 4.1.3): verification as on beacon reception, plus the
+// segment (Section 3.1.3): verification as on beacon reception, plus the
 // first AS entry naming this core. The loop check does not apply — the
 // segment is addressed to this core.
 func (b *Beaconer) checkRegistered(pcb *segment.PCB) error {
@@ -462,11 +462,11 @@ func (b *Beaconer) propagateOnce(ctx context.Context) {
 	}
 }
 
-// registerOnce terminates the freshest candidates per Section 4.1.1 — a
+// registerOnce terminates the freshest candidates per Section 3.1.1 — a
 // final AS entry with unset next AS and egress interface, signed — storing
 // the resulting up segments in the local path database and registering the
 // down segments with the control service of the core that originated the
-// PCB, riding the reversed up segment (Sections 4.1.2, 4.1.3, and 4.3).
+// PCB, riding the reversed up segment (Sections 3.1.2, 3.1.3, and 3.3).
 func (b *Beaconer) registerOnce(ctx context.Context) {
 	peers := make(map[addr.IA][]*control_plane.PathSegment)
 	for _, cand := range b.store.BestSet(BestSetSize) {
@@ -506,7 +506,7 @@ func (b *Beaconer) registerOnce(ctx context.Context) {
 }
 
 // registerCoreOnce terminates core beacons — those received over core links
-// — into core segments in the core's own path database (Section 4.2). No
+// — into core segments in the core's own path database (Section 3.2). No
 // core beacons exist while the ISD has a single core; the path is exercised
 // by the same termination code.
 func (b *Beaconer) registerCoreOnce(ctx context.Context) {
@@ -532,7 +532,7 @@ func (b *Beaconer) registerCoreOnce(ctx context.Context) {
 }
 
 // terminate appends the terminating AS entry to a candidate: ingress the
-// receiving interface, egress and next AS unset, signed (Section 4.1.1).
+// receiving interface, egress and next AS unset, signed (Section 3.1.1).
 func (b *Beaconer) terminate(cand Candidate) (*segment.PCB, error) {
 	terminated, err := cand.PCB.Clone()
 	if err != nil {

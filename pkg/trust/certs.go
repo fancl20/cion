@@ -15,7 +15,7 @@ import (
 )
 
 // Recommended validity periods of the trust material (proposal 0003; PKI
-// draft, Section 2.1.6). There is no automated renewal yet: an expired node
+// draft, Section 2.5). There is no automated renewal yet: an expired node
 // re-runs enrollment, and a new base TRC means redeploying.
 const (
 	TRCValidity     = 365 * 24 * time.Hour
@@ -152,8 +152,7 @@ func createRootCert(ia addr.IA, key crypto.Signer, now time.Time) (*x509.Certifi
 }
 
 // createCACert creates the CP CA certificate for caKey, signed by the CP
-// root key. It is never placed in the TRC (PKI draft, Sections 2.1.5.2 and
-// 3.1.2.2.11); the resulting chain is [AS certificate, CP CA certificate]
+// root key. It is never placed in the TRC (PKI draft, Section 3.2.11); the resulting chain is [AS certificate, CP CA certificate]
 // anchored in the TRC's root certificate.
 func createCACert(
 	ia addr.IA,
