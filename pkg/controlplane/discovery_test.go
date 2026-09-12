@@ -142,6 +142,48 @@ func TestDiscoveryTwoNodes(t *testing.T) {
 	}
 }
 
+// TestDiscoveryRejectsMismatchedIA checks the neighbor cross-check of the
+// link-bootstrap model: a greeting advertising an ISD-AS that does not match
+// the configured neighbor of the receiving interface is dropped.
+func TestDiscoveryRejectsMismatchedIA(t *testing.T) {
+	iaA := addr.MustIAFrom(1, 0xff0000000001)
+	iaB := addr.MustIAFrom(1, 0xff0000000002)
+
+	d, err := NewDiscovery(DiscoveryConfig{
+		IA:           iaA,
+		ControlAddr:  freeUDPAddr(t),
+		MACKey:       []byte("0123456789abcdef"),
+		InternalAddr: freeUDPAddr(t),
+		Links:        map[uint16]addr.IA{ifID: iaB},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := d.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	foreign := addr.MustIAFrom(1, 0xff0000000f0f)
+	d.record(ifID, Greeting{
+		IA:          foreign,
+		IfID:        ifID,
+		ControlAddr: netip.MustParseAddrPort("127.0.0.1:30043"),
+	})
+	if ns := d.Neighbors(); len(ns) != 0 {
+		t.Errorf("neighbors after foreign greeting = %v, want none", ns)
+	}
+
+	// The legitimate neighbor is accepted on the same interface.
+	d.record(ifID, Greeting{
+		IA:          iaB,
+		IfID:        ifID,
+		ControlAddr: netip.MustParseAddrPort("127.0.0.1:30044"),
+	})
+	if ns := d.Neighbors(); len(ns) != 1 || !ns[ifID].IA.Equal(iaB) {
+		t.Errorf("neighbors after legitimate greeting = %v, want %v", ns, iaB)
+	}
+}
+
 // TestParseGreetingRoundTrip checks the greeting wire format.
 func TestParseGreetingRoundTrip(t *testing.T) {
 	g := Greeting{
