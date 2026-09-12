@@ -96,7 +96,15 @@ func waitNeighbor(t *testing.T, d *Discovery) Neighbor {
 // kernel, so that concurrent test runs do not collide on fixed ports.
 func freeUDPAddr(t *testing.T) string {
 	t.Helper()
-	c, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	return freeUDPAddrOn(t, netip.MustParseAddr("127.0.0.1"))
+}
+
+// freeUDPAddrOn returns an unused port on the given local address; distinct
+// loopback addresses let several nodes share one test host even with fixed
+// ports.
+func freeUDPAddrOn(t *testing.T, ip netip.Addr) string {
+	t.Helper()
+	c, err := net.ListenUDP("udp4", net.UDPAddrFromAddrPort(netip.AddrPortFrom(ip, 0)))
 	if err != nil {
 		t.Fatal(err)
 	}

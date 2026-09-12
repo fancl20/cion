@@ -18,6 +18,16 @@ type ControlPlane interface {
 	control_planeconnect.ChainRenewalServiceHandler
 }
 
+// Services composes the trust and segment services into one ControlPlane;
+// the segment service's methods take precedence over the trust service's
+// unimplemented embeds.
+type Services struct {
+	*TrustService
+	*SegmentService
+}
+
+var _ ControlPlane = (*Services)(nil)
+
 // Server implements the control plane server.
 type Server struct {
 	Handler http.Handler

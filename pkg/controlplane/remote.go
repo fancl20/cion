@@ -5,6 +5,7 @@ import (
 	"crypto"
 	"crypto/tls"
 	"crypto/x509"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -25,12 +26,13 @@ import (
 // CoreClient resolves trust material from the core's control endpoint:
 // ConnectRPC over HTTP/3 (QUIC) riding the SCION network, TLS-verified
 // end-to-end against the core's domain. The domain is a TLS identity, not a
-// locator; SetCore supplies the SCION locator learned from neighbor
-// discovery.
+// locator; the locator supplies the SCION route — a one-hop neighbor's
+// address from discovery, or the provider's multi-hop path.
 type CoreClient struct {
-	conn *SCIONConn
-	qclt *quic.Transport
-	clt  *Client
+	conn    *SCIONConn
+	qclt    *quic.Transport
+	clt     *Client
+	locator func() *Addr
 
 	mtx  sync.Mutex
 	core *Addr
@@ -44,13 +46,18 @@ type CoreClientConfig struct {
 	Conn *SCIONConn
 	// RootCAs anchors the TLS verification; nil means the system roots.
 	RootCAs *x509.CertPool
+	// Locator resolves the core's SCION address: its IA, underlay endpoint,
+	// and path — the one-hop path when the core is a neighbor, else the
+	// reversed freshest up segment (proposal 0004). It is consulted at dial
+	// time, so later dials pick up fresh paths. Nil falls back to SetCore.
+	Locator func() *Addr
 }
 
 // NewCoreClient dials the core's control endpoint. The client fails on use,
-// not on creation: until SetCore names a reachable core, requests fail
+// not on creation: until the locator names a reachable core, requests fail
 // fast and are retried by the caller.
 func NewCoreClient(cfg CoreClientConfig) (*CoreClient, error) {
-	c := &CoreClient{conn: cfg.Conn}
+	c := &CoreClient{conn: cfg.Conn, locator: cfg.Locator}
 	c.qclt = &quic.Transport{Conn: cfg.Conn}
 
 	// QUIC datagrams are capped so a datagram wrapped in a SCION header
@@ -65,11 +72,15 @@ func NewCoreClient(cfg CoreClientConfig) (*CoreClient, error) {
 		TLSClientConfig: tlsConf,
 		QUICConfig:      quicConf,
 		// The request URL carries the domain, a TLS identity; the dialer
-		// routes to the SCION locator of the core set with SetCore.
+		// routes to the SCION locator of the core.
 		Dial: func(ctx context.Context, _ string, tlsCfg *tls.Config,
 			cfg *quic.Config) (*quic.Conn, error) {
 
-			return c.qclt.Dial(ctx, c.coreAddr(), tlsCfg, cfg)
+			addr := c.coreAddr()
+			if addr == nil {
+				return nil, errors.New("core locator unknown")
+			}
+			return c.qclt.Dial(ctx, addr, tlsCfg, cfg)
 		},
 	}
 	c.clt = NewClient(&http.Client{Transport: h3t}, "https://"+cfg.Domain)
@@ -85,13 +96,27 @@ func (c *CoreClient) SetCore(ia addr.IA, addr netip.AddrPort) {
 	c.core = &Addr{IA: ia, Addr: addr}
 }
 
+// SetLocator sets the locator resolving the core's SCION address at dial
+// time; it overrides SetCore's address.
+func (c *CoreClient) SetLocator(locator func() *Addr) {
+	c.locator = locator
+}
+
+// coreAddr resolves the core's current address: the locator when configured,
+// else the address set with SetCore. Nil means the locator is unknown.
 func (c *CoreClient) coreAddr() net.Addr {
-	c.mtx.Lock()
-	defer c.mtx.Unlock()
-	if c.core == nil {
+	var a *Addr
+	if c.locator != nil {
+		a = c.locator()
+	} else {
+		c.mtx.Lock()
+		a = c.core
+		c.mtx.Unlock()
+	}
+	if a == nil {
 		return nil
 	}
-	return c.core
+	return a
 }
 
 // Close releases the underlying QUIC transport.

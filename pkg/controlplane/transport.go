@@ -21,6 +21,7 @@ import (
 	"github.com/scionproto/scion/pkg/slayers"
 	"github.com/scionproto/scion/pkg/slayers/path"
 	"github.com/scionproto/scion/pkg/slayers/path/onehop"
+	"github.com/scionproto/scion/pkg/slayers/path/scion"
 
 	"github.com/fancl20/cion/pkg/dataplane"
 )
@@ -31,11 +32,13 @@ import (
 const EndpointPort = 30044
 
 // Addr is the SCION network address of a control endpoint. It doubles as the
-// return route: replies leave on the IfID the peer's packet arrived on.
+// return route: replies leave on the IfID the peer's packet arrived on, or
+// over the reversed arrival path when the peer reached us over a full SCION
+// path.
 //
-// The interface ID is deliberately not part of String, so the address quic-go
-// sees for a connection stays stable regardless of the interface a
-// particular packet traveled on.
+// The interface ID and path are deliberately not part of String, so the
+// address quic-go sees for a connection stays stable regardless of the
+// interface a particular packet traveled on.
 type Addr struct {
 	// IA is the ISD-AS of the peer.
 	IA addr.IA
@@ -44,6 +47,11 @@ type Addr struct {
 	// IfID is the local egress interface toward the peer; zero means it is
 	// resolved from the link table on write.
 	IfID uint16
+	// Path is the full data-plane path to the peer, supplied by the path
+	// provider; nil sends over a one-hop path resolved from the link table.
+	// The hop-field MACs come from the segment, computed by each on-path AS
+	// at beacon time, not by the sender.
+	Path *scion.Decoded
 }
 
 func (a *Addr) Network() string { return "scion" }
@@ -173,17 +181,19 @@ func (c *SCIONConn) ReadFrom(b []byte) (int, net.Addr, error) {
 	}
 }
 
-// WriteTo sends the datagram to the peer as a SCION packet over a one-hop
-// path. The path is created fresh for every packet: the egress interface is
-// taken from the address if the peer set one (replies), and resolved from
-// the link table otherwise (client traffic).
+// WriteTo sends the datagram to the peer as a SCION packet. A peer address
+// carrying a path sends over that path — serialized fresh for every packet,
+// so the routers' in-flight segment-ID updates never accumulate. A one-hop
+// peer address has its path created fresh for every packet instead: the
+// egress interface is taken from the address if the peer set one (replies),
+// and resolved from the link table otherwise (client traffic).
 func (c *SCIONConn) WriteTo(b []byte, addr net.Addr) (int, error) {
 	peer, ok := addr.(*Addr)
-	if !ok {
+	if !ok || peer == nil {
 		return 0, fmt.Errorf("unexpected address type %T", addr)
 	}
 	ifID := peer.IfID
-	if ifID == 0 {
+	if peer.Path == nil && ifID == 0 {
 		var err error
 		if ifID, err = c.resolveLink(peer.IA); err != nil {
 			return 0, err
@@ -194,7 +204,15 @@ func (c *SCIONConn) WriteTo(b []byte, addr net.Addr) (int, error) {
 	if c.closed {
 		return 0, net.ErrClosed
 	}
-	raw, err := c.datagramPacket(peer, ifID, b)
+	var (
+		raw []byte
+		err error
+	)
+	if peer.Path != nil {
+		raw, err = c.pathDatagramPacket(peer, b)
+	} else {
+		raw, err = c.datagramPacket(peer, ifID, b)
+	}
 	if err != nil {
 		return 0, err
 	}
@@ -266,9 +284,37 @@ func (c *SCIONConn) datagramPacket(peer *Addr, ifID uint16, payload []byte) ([]b
 	return buffer.Bytes(), nil
 }
 
+// pathDatagramPacket returns a serialized SCION packet carrying the datagram
+// to the peer over the given data-plane path.
+func (c *SCIONConn) pathDatagramPacket(peer *Addr, payload []byte) ([]byte, error) {
+	scn := &slayers.SCION{
+		NextHdr:  slayers.L4UDP,
+		PathType: scion.PathType,
+		Path:     peer.Path,
+		SrcIA:    c.localIA,
+		DstIA:    peer.IA,
+	}
+	if err := scn.SetSrcAddr(addr.HostIP(c.local.Addr())); err != nil {
+		return nil, err
+	}
+	if err := scn.SetDstAddr(addr.HostIP(peer.Addr.Addr())); err != nil {
+		return nil, err
+	}
+	udp := &slayers.UDP{SrcPort: c.local.Port(), DstPort: peer.Addr.Port()}
+
+	buffer := gopacket.NewSerializeBuffer()
+	err := gopacket.SerializeLayers(buffer, gopacket.SerializeOptions{FixLengths: true},
+		scn, udp, gopacket.Payload(payload))
+	if err != nil {
+		return nil, err
+	}
+	return buffer.Bytes(), nil
+}
+
 // parseDatagramPacket extracts the datagram and the peer's address from a
-// received SCION packet. The peer's address records the interface the packet
-// arrived on, so replies reverse the path.
+// received SCION packet. A one-hop arrival records the interface it arrived
+// on, so replies take a fresh one-hop path over that link; a full SCION path
+// is reversed for the reply, generalizing the one-hop case.
 func parseDatagramPacket(raw []byte) ([]byte, *Addr, error) {
 	pkt := gopacket.NewPacket(raw, slayers.LayerTypeSCION, gopacket.NoCopy)
 	scnL := pkt.Layer(slayers.LayerTypeSCION)
@@ -276,10 +322,6 @@ func parseDatagramPacket(raw []byte) ([]byte, *Addr, error) {
 		return nil, nil, errors.New("no SCION layer")
 	}
 	scn := scnL.(*slayers.SCION)
-	ohp, ok := scn.Path.(*onehop.Path)
-	if !ok {
-		return nil, nil, errors.New("not a one-hop path")
-	}
 	udpL := pkt.Layer(slayers.LayerTypeSCIONUDP)
 	if udpL == nil {
 		return nil, nil, errors.New("no UDP layer")
@@ -299,9 +341,28 @@ func parseDatagramPacket(raw []byte) ([]byte, *Addr, error) {
 	from := &Addr{
 		IA:   scn.SrcIA,
 		Addr: netip.AddrPortFrom(srcAddr, udp.SrcPort),
+	}
+	switch p := scn.Path.(type) {
+	case *onehop.Path:
 		// The router fills the second hop's ingress interface with the link
 		// the packet came in on; that is the interface replies leave on.
-		IfID: ohp.SecondHop.ConsIngress,
+		from.IfID = p.SecondHop.ConsIngress
+	case *scion.Raw:
+		// Replies reverse the arrival path. The routers updated the path's
+		// segment IDs in flight, so the reversed path starts with the IDs
+		// this end's hop MACs verify against. ToDecoded copies the values
+		// out of the receive buffer, and Reverse reverses the copy.
+		decoded, err := p.ToDecoded()
+		if err != nil {
+			return nil, nil, err
+		}
+		reversed, err := decoded.Reverse()
+		if err != nil {
+			return nil, nil, err
+		}
+		from.Path = reversed.(*scion.Decoded)
+	default:
+		return nil, nil, fmt.Errorf("unsupported path type %v", scn.PathType)
 	}
 	return udp.LayerPayload(), from, nil
 }
