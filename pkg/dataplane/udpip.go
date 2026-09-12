@@ -199,6 +199,7 @@ func (u *UDPProvider) newConnectedLink(
 		name:         el.name,
 		link:         el,
 		queue:        queue,
+		stopSend:     make(chan struct{}),
 		metrics:      metrics, // send() needs them.
 		receiverDone: make(chan struct{}),
 		senderDone:   make(chan struct{}),
@@ -241,6 +242,7 @@ func (u *UDPProvider) NewInternalLink(
 		name:         "internal",
 		link:         il,
 		queue:        queue,
+		stopSend:     make(chan struct{}),
 		metrics:      metrics, // send() needs them.
 		receiverDone: make(chan struct{}),
 		senderDone:   make(chan struct{}),
@@ -259,6 +261,7 @@ type udpConnection struct {
 	name         string  // for logs. It's more informative than ifID.
 	link         udpLink // Link with exclusive use of the connection.
 	queue        chan *Packet
+	stopSend     chan struct{} // Closed by stop; unblocks the sender without closing the queue.
 	metrics      *InterfaceMetrics
 	receiverDone chan struct{}
 	senderDone   chan struct{}
@@ -307,7 +310,11 @@ func (u *udpConnection) stop() {
 	u.conn.Close() // Also unblocks the receiver.
 
 	if wasRunning {
-		close(u.queue) // Unblock sender
+		// The queue itself stays open: producers (the data plane processors
+		// and the links) may still be pushing packets, and a send on a
+		// closed channel would panic. The sender drains what made it in and
+		// returns the buffers to the pool.
+		close(u.stopSend)
 		<-u.receiverDone
 		<-u.senderDone
 	}
@@ -405,9 +412,30 @@ func (u *udpConnection) send(ctx context.Context, batchSize int, pool PacketPool
 	metrics := u.metrics
 	toWrite := 0
 
+	// On the way out, whether by stop signal or by the running flag, the
+	// unsent packets and everything stranded on the queue go back to the
+	// pool.
+	defer func() {
+		for _, p := range pkts[:toWrite] {
+			pool.Put(p)
+		}
+		u.drain(queue, pool)
+	}()
+
 	for u.running.Load() {
-		// Top-up our batch.
-		toWrite += readUpTo(queue, batchSize-toWrite, toWrite == 0, pkts[toWrite:])
+		// Top-up our batch. The blocking wait for the first packet of a
+		// batch also watches for the stop signal, so the queue never has to
+		// be closed to unblock us.
+		if toWrite == 0 {
+			select {
+			case p := <-queue:
+				pkts[0] = p
+				toWrite = 1
+			case <-u.stopSend:
+				return
+			}
+		}
+		toWrite += readUpTo(queue, batchSize-toWrite, false, pkts[toWrite:])
 
 		// Turn the packets into underlay messages that WriteBatch can send.
 		for i, p := range pkts[:toWrite] {
@@ -444,6 +472,19 @@ func (u *udpConnection) send(ctx context.Context, batchSize int, pool PacketPool
 			}
 		} else {
 			toWrite = 0
+		}
+	}
+}
+
+// drain returns the packets stranded on the stopped connection's queue to
+// the pool.
+func (u *udpConnection) drain(queue <-chan *Packet, pool PacketPool) {
+	for {
+		select {
+		case p := <-queue:
+			pool.Put(p)
+		default:
+			return
 		}
 	}
 }
@@ -549,10 +590,14 @@ type internalLink struct {
 	egressQ  chan *Packet
 	procStop chan struct{}
 	procDone chan struct{}
-	metrics  *InterfaceMetrics
-	pool     PacketPool
-	svc      *Services[netip.AddrPort]
-	seed     uint32
+	// lifeMtx guards the lifecycle fields below against a stop racing with
+	// a late start.
+	lifeMtx sync.Mutex
+	stopped bool
+	metrics *InterfaceMetrics
+	pool    PacketPool
+	svc     *Services[netip.AddrPort]
+	seed    uint32
 }
 
 func (l *internalLink) start(
@@ -563,6 +608,12 @@ func (l *internalLink) start(
 	maxCap := 0
 	for _, q := range procQs {
 		maxCap = max(maxCap, cap(q))
+	}
+	l.lifeMtx.Lock()
+	defer l.lifeMtx.Unlock()
+	if l.stopped {
+		// A stop raced with this start; do not resurrect the link.
+		return
 	}
 	l.procQ = make(chan *Packet, maxCap)
 	l.procStop = make(chan struct{})
@@ -604,6 +655,9 @@ func (l *internalLink) runProcessor() {
 }
 
 func (l *internalLink) stop() {
+	l.lifeMtx.Lock()
+	defer l.lifeMtx.Unlock()
+	l.stopped = true
 	if l.procStop == nil { // Not started.
 		return
 	}
