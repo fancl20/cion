@@ -52,9 +52,7 @@ func ParseASType(s string) (ASType, error) {
 }
 
 // minPrivateISD and maxPrivateISD delimit the ISD range recommended for
-// private installations (control plane draft, Section 1.5.1). The PKI draft
-// restricts TRC ISDs to the public range 64-4094, and nothing in cppki
-// enforces the choice, so genesis and issuance check it here.
+// private installations (control plane draft, Section 1.5.1).
 const (
 	minPrivateISD = 16
 	maxPrivateISD = 63

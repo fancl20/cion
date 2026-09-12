@@ -97,7 +97,7 @@ func NewPeerClient(cfg PeerClientConfig) *PeerClient {
 }
 
 // Beacon propagates the extended PCB to the peer's beacon service (draft
-// Section 2.3.5.3).
+// Section 2.3.5.1).
 func (c *PeerClient) Beacon(ctx context.Context, peer *Addr, pcb *cppb.PathSegment) error {
 	clt := c.client(peer, c.beaconHCLT, c.beaconClt)
 	_, err := clt.Beacon(ctx, connect.NewRequest(&cppb.BeaconRequest{Segment: pcb}))
@@ -105,7 +105,7 @@ func (c *PeerClient) Beacon(ctx context.Context, peer *Addr, pcb *cppb.PathSegme
 }
 
 // RegisterSegments registers down segments with the core's control service
-// (Sections 4.1.3 and 4.3).
+// (Sections 3.1.3 and 3.3).
 func (c *PeerClient) RegisterSegments(
 	ctx context.Context,
 	peer *Addr,

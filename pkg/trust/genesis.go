@@ -58,7 +58,7 @@ func Genesis(ctx context.Context, db DB, ia addr.IA, keys CoreKeys) (cppki.Signe
 		AuthoritativeASes: []addr.AS{ia.AS()},
 		Description:       fmt.Sprintf("CION genesis TRC for ISD %d", ia.ISD()),
 		// Nothing but voting and CP root certificates may appear in the TRC
-		// (PKI draft, Sections 2.1.5.2 and 3.1.2.2.11); cppki rejects CA
+		// (PKI draft, Section 3.2.11); cppki rejects CA
 		// certificates here.
 		Certificates: []*x509.Certificate{sensitive, regular, root},
 	}

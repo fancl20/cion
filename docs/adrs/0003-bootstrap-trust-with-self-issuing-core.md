@@ -79,7 +79,7 @@ by a **WebPKI-anchored core endpoint**, realized as follows:
     certificate, and a self-signed CP root certificate, and self-issues the
     ISD's base TRC containing exactly those three, CMS-signed with both voting
     keys — the specification admits only voting and CP root certificates in a
-    TRC (PKI draft, Sections 2.1.5.2 and 3.1.2.2.11). The TRC is validated
+    TRC (PKI draft, Sections 2.4 and 3.2.11). The TRC is validated
     with `cppki` and persisted through the trust DB.
 3.  **Core control endpoint:** The founding core serves its control services
     (ConnectRPC over HTTP/3/QUIC riding the SCION network, reached the same
@@ -101,7 +101,12 @@ by a **WebPKI-anchored core endpoint**, realized as follows:
     certificate ∈ TRC]`, verified against the root pool extracted from the
     TRC (PKI draft, Section 4.2.2). Enrollment is open to any node that can
     reach the core's endpoint; operators who want tighter control configure
-    an ISD-AS allowlist on the core.
+    an ISD-AS allowlist on the core. This deviates from the specification's
+    issuance flow, where the first certificate signing request is sent out
+    of band as part of the formalities of joining an ISD and only renewals
+    are automated (PKI draft, Section 4.3); CION automates the first
+    enrollment deliberately, trading the joining formality for zero-config
+    deployment.
 6.  **SCION-native control traffic, one-hop first:** Control RPCs ride the
     SCION network from day one, TLS end-to-end against the core's WebPKI
     certificate, so nothing in between can tamper with or impersonate the
@@ -128,7 +133,7 @@ by a **WebPKI-anchored core endpoint**, realized as follows:
     greetings may be added later as hardening.
 
 Control RPCs ride SCION packets (Connect over HTTP/3/QUIC per control plane
-draft, Sections 1.8 and 6) — one-hop paths until multi-hop paths exist. The
+draft, Sections 1.7 and 5) — one-hop paths until multi-hop paths exist. The
 WebPKI certificate anchors a fresh node's first TRC fetch on that channel,
 because SCION forwarding requires no trust material.
 

@@ -9,14 +9,15 @@
 
 The SCION architecture defines a flexible and granular set of roles and
 attributes for Autonomous Systems (ASes) within an Isolation Domain (ISD). An AS
-can be a **Core AS** or a **Non-Core AS**. Among Core ASes, distinctions are
+can be a **Core AS** or a **Non-Core AS**. Beyond that split, distinctions are
 made based on:
 
 1.  **Voting Rights**: An AS can be a "Voting AS" capable of signing Trust Root
-    Configurations (TRCs). Voting rights are further split into **Root**,
-    **Sensitive**, and **Regular** types.
+    Configurations (TRCs). Voting rights are split into **Sensitive** and
+    **Regular** types (PKI draft, Section 2.4).
 2.  **Authoritative Status**: An "Authoritative AS" is responsible for
-    distributing TRCs and knowing the latest version.
+    distributing TRCs and knowing the latest version; every authoritative
+    AS must be a core AS (PKI draft, Section 3.2.9).
 
 Implementing this full matrix of capabilities requires complex configuration
 structures and logic in the PKI and Control Plane subsystems. For CION's goal of
@@ -47,16 +48,17 @@ The defined types are:
 
 | CION Role | Standard SCION Equivalent | Capabilities / Certificates |
 | :--- | :--- | :--- |
-| `ASTypeCore` | Core AS, Voting (Root, Sensitive, Regular), Authoritative | Generates **Root**, **Sensitive**, and **Regular** voting certificates. Can sign all TRC updates. |
-| `ASTypeAuthoritative` | Core AS, Voting (Regular only), Authoritative | Generates **Regular** voting certificate only. Participates in regular TRC updates but not sensitive/root updates. |
+| `ASTypeCore` | Core AS, Voting (Sensitive, Regular), Authoritative | Generates **Sensitive** and **Regular** voting certificates. Can sign all TRC updates. |
+| `ASTypeAuthoritative` | Core AS, Voting (Regular only), Authoritative | Generates **Regular** voting certificate only. Participates in regular TRC updates but not sensitive updates. |
 | `ASTypeNormal` | Non-Core AS (Leaf or Transit) | No voting certificates. Standard AS certificate only. |
 
 ### Comparison with spec
 
 *   **Spec**: The SCION specification treats "Core", "Voting", and
-    "Authoritative" as orthogonal or semi-orthogonal properties. A Core AS might
+    "Authoritative" as largely independent properties. A Core AS might
     be non-voting. A Voting AS might hold only "Sensitive" rights but not
-    "Regular".
+    "Regular". Every authoritative AS must be a core AS, but core ASes need
+    hold no voting certificates at all (PKI draft, Sections 2.4 and 3.2.8-9).
 *   **CION**: We couple these properties. If you are `ASTypeCore`, you are
     automatically Authoritative and hold *all* voting rights. If you are
     `ASTypeAuthoritative`, you are automatically Core and hold *Regular* voting

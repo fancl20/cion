@@ -73,7 +73,7 @@ How path segments are stored:
 *   **Two Stores, Two Lifetimes:** An in-memory beacon store for candidate
     PCBs and a persistent path database for registered segments, per the
     draft's separation of candidate storage (Section 2.3.2) from path
-    databases (Section 4).
+    databases (Section 3).
 *   **One Persistent Store:** Candidate PCBs and registered segments in a
     single durable database.
 *   **All In-Memory:** Both stores volatile; a restarted node waits one
@@ -119,11 +119,12 @@ realized as follows:
     4.1). Beacons travel between neighboring control services over the
     existing QUIC/SCION channel — one-hop paths, as greetings do today —
     and are forwarded on every external interface except the one they
-    arrived on and except interfaces whose neighbor the TRC names as a
-    core — beacons never travel toward a core, which drops any beacon
-    containing itself and needs no up segment, so the trust material
-    that verifies beacons also prunes the upward sends a pure flood
-    would make. The draft's PCB selection policies (Section 2.3.3)
+    arrived on and — except on a core, whose links to other cores carry
+    beacons both ways — except interfaces whose neighbor the TRC names
+    as a core: a non-core never sends a beacon toward a core, which
+    drops any beacon containing itself and needs no up segment, so the
+    trust material that verifies beacons also prunes the upward sends a
+    pure flood would make. The draft's PCB selection policies (Section 2.3.3)
     collapse to a fixed bounded set; no policy engine, no per-policy
     configuration.
 2.  **Authenticated reception.** The beacon handler verifies each AS entry's
@@ -162,14 +163,14 @@ realized as follows:
     and paths combine only up, core, and down segments.
 5.  **Registration per the draft.** Non-cores periodically terminate selected
     PCBs — appending a final AS entry with unset next AS and egress
-    interface, signed (Section 4.1.1) — into up segments, kept in the local
-    path database (Section 4.1.2), and down segments, registered with the
-    control service of the core that originated the PCB (Sections 4.1.3 and
-    4.3). Cores likewise terminate core beacons into core segments in their
-    own path database (Section 4.2). Intervals are code defaults, not
+    interface, signed (Section 3.1.1) — into up segments, kept in the local
+    path database (Section 3.1.2), and down segments, registered with the
+    control service of the core that originated the PCB (Sections 3.1.3 and
+    3.3). Cores likewise terminate core beacons into core segments in their
+    own path database (Section 3.2). Intervals are code defaults, not
     configuration.
 6.  **Lookup and the in-node path provider.** The node implements the
-    draft's source-AS segment-request handler (Section 5.2.2): up segments
+    draft's source-AS segment-request handler (Section 4.2.2): up segments
     from the local path database, core and down segments fetched from the
     core's control service with expiry-aware caching, wildcards expanded as
     specified. One in-node provider composes up, core, and down segments

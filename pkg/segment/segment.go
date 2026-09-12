@@ -62,7 +62,7 @@ type ASEntry struct {
 	// IA is the ISD-AS of the AS that created this entry.
 	IA addr.IA
 	// Next is the ISD-AS of the downstream AS the beacon is forwarded to;
-	// zero on a terminating entry (Section 4.1.1).
+	// zero on a terminating entry (Section 3.1.1).
 	Next addr.IA
 	// IngressMTU is the MTU of the ingress interface in beaconing direction.
 	IngressMTU uint32
@@ -220,7 +220,7 @@ func (p *PCB) AssociatedData(i int) [][]byte {
 // EntryOptions describes the AS entry to append to the segment.
 type EntryOptions struct {
 	// Next is the ISD-AS of the neighbor the beacon is propagated to; zero
-	// terminates the segment (Section 4.1.1).
+	// terminates the segment (Section 3.1.1).
 	Next addr.IA
 	// IngressIfID is the interface the beacon entered this AS on; zero on
 	// the originating core.
