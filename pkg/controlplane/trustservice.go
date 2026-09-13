@@ -20,8 +20,8 @@ import (
 )
 
 // TrustService implements the trust material and chain renewal RPCs of the
-// control endpoint. The segment services are not implemented yet; they
-// arrive with beaconing (proposal 0004).
+// control endpoint. The segment service RPCs it embeds unimplemented come
+// from SegmentService, which takes precedence in the Services composition.
 type TrustService struct {
 	control_planeconnect.UnimplementedSegmentCreationServiceHandler
 	control_planeconnect.UnimplementedSegmentRegistrationServiceHandler
