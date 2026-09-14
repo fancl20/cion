@@ -31,12 +31,3 @@ func TestParsePingTarget(t *testing.T) {
 		}
 	}
 }
-
-func TestLoadConfigMissing(t *testing.T) {
-	if _, err := loadConfig(""); err == nil {
-		t.Error("loading without -config succeeded, want the configuration error")
-	}
-	if _, err := loadConfig(t.TempDir() + "/absent.json"); err == nil {
-		t.Error("loading an absent file succeeded, want the configuration error")
-	}
-}

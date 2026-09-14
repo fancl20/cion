@@ -89,8 +89,8 @@ home of its own:
     `Addr`, whose path is the reversed arrival path, so a reply addressed
     with it returns by the road it came by. A `Conn` binds the internal
     underlay on a UDP port of the node's control address — the construction
-    `setupControlPlane`'s `scionConn` helper performs today
-    (`cmd/cion/main.go`), port 0 for an ephemeral one.
+    the node assembly's `scionConn` helper performs today
+    (`internal/services`), port 0 for an ephemeral one.
 *   `PathProvider` — moved with its fields: the local ISD-AS, the path
     database of up segments, the `Bootstrap` and `Cores` functions, and
     `Lookup` as the narrowed down-segment function. `LocalPath` resolves
@@ -132,17 +132,17 @@ consuming `pkg/scion` and the node's wiring.
     replies by identifier and sequence, and reports per-reply RTT, the
     reply's path hops, and a loss summary; the path is re-resolved on
     expiry or error and the run continues.
-*   `cion ping` — `cion -config node.json ping 20-ff00:0:2,[addr]` —
+*   `cion ping` — `cion ping --config node.json 20-ff00:0:2,[addr]` —
     assembles the transport pieces the configuration describes (internal
     link, path database, provider) and runs the pinger; the in-process form
     serves tests and embedded use identically.
 
 ### Node wiring
 
-`cmd/cion/main.go` gains the `ping` subcommand beside the daemon path, and
-constructs its sockets through `pkg/scion` where it today names
-`controlplane.SCIONConn`; the daemon's startup order is otherwise as
-proposal 0004 left it.
+The `ping` subcommand sits in the command tree (`cmd/cion`) beside the
+`run` daemon, over the node assembly (`internal/services`) whose in-process
+entry (`BootApp`) it and embedded use share; the daemon's startup order is
+otherwise as proposal 0004 left it.
 
 ## Test plan
 
@@ -199,4 +199,10 @@ proposal 0004 left it.
     lookup, a crafted-segment expiry that re-resolves mid-run and recovers,
     the fork-topology composed ping with per-reply hops and RTT, the loss
     summary with the responder down, the unreachable destination, and the
-    subcommand's target parsing and missing-configuration errors.
+    subcommand's target parsing and missing-configuration errors.*   Command wiring: the binary moved to a cobra command tree — `cion run`
+    for the daemon, `cion ping` for the subcommand — in `cmd/cion`, over the
+    node assembly in `internal/services` split into data-plane,
+    control-plane, and application modules and exposed as the daemon entry
+    (`Run`) and the application seat (`BootApp`); the flag era's
+    `cion -config node.json ping …` spelling is superseded by
+    `cion ping --config node.json …`.

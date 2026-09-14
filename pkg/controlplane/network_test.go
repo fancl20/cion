@@ -31,8 +31,8 @@ const (
 )
 
 // netNode is one fully-wired node of a test topology — the same components
-// run() wires in cmd/cion: data plane, discovery, trust, the control
-// endpoint, and the beaconer.
+// the run command wires in internal/services: data plane, discovery,
+// trust, the control endpoint, and the beaconer.
 type netNode struct {
 	ia        addr.IA
 	internal  string
