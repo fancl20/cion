@@ -15,8 +15,9 @@ import (
 	"github.com/quic-go/quic-go/http3"
 	"github.com/scionproto/scion/pkg/addr"
 	cppb "github.com/scionproto/scion/pkg/proto/control_plane"
-	"github.com/scionproto/scion/pkg/slayers/path/scion"
+	spath "github.com/scionproto/scion/pkg/slayers/path/scion"
 
+	"github.com/fancl20/cion/pkg/scion"
 	"github.com/fancl20/cion/pkg/trust"
 )
 
@@ -31,10 +32,10 @@ import (
 // signatures authenticate the path authoritatively anyway. Registrations and
 // lookups verify the peer's chain against the pinned TRC.
 type PeerClient struct {
-	conn   *SCIONConn
+	conn   *scion.Conn
 	qclt   *quic.Transport
 	engine *trust.Engine
-	pathTo func(dst addr.IA) *scion.Decoded
+	pathTo func(dst addr.IA) *spath.Decoded
 	// beaconHCLT pools connections for beacon sends; verifiedHCLT for the
 	// mutually verified RPCs. Both ride the same QUIC transport.
 	beaconHCLT   *http.Client
@@ -50,10 +51,10 @@ type PeerClientConfig struct {
 	// Engine provides the node's AS chain as the client certificate.
 	Engine *trust.Engine
 	// Conn is the SCION connection QUIC rides.
-	Conn *SCIONConn
+	Conn *scion.Conn
 	// PathTo resolves the data-plane path to a destination that is not a
 	// direct neighbor; nil, or a nil result, sends over a one-hop path.
-	PathTo func(dst addr.IA) *scion.Decoded
+	PathTo func(dst addr.IA) *spath.Decoded
 }
 
 // NewPeerClient creates the client for the SCION-native channel.
@@ -98,7 +99,7 @@ func NewPeerClient(cfg PeerClientConfig) *PeerClient {
 
 // Beacon propagates the extended PCB to the peer's beacon service (draft
 // Section 2.3.5.1).
-func (c *PeerClient) Beacon(ctx context.Context, peer *Addr, pcb *cppb.PathSegment) error {
+func (c *PeerClient) Beacon(ctx context.Context, peer *scion.Addr, pcb *cppb.PathSegment) error {
 	clt := c.client(peer, c.beaconHCLT, c.beaconClt)
 	_, err := clt.Beacon(ctx, connect.NewRequest(&cppb.BeaconRequest{Segment: pcb}))
 	return err
@@ -108,7 +109,7 @@ func (c *PeerClient) Beacon(ctx context.Context, peer *Addr, pcb *cppb.PathSegme
 // (Sections 3.1.3 and 3.3).
 func (c *PeerClient) RegisterSegments(
 	ctx context.Context,
-	peer *Addr,
+	peer *scion.Addr,
 	segments []*cppb.PathSegment,
 ) error {
 
@@ -125,7 +126,7 @@ func (c *PeerClient) RegisterSegments(
 // 5.2).
 func (c *PeerClient) Segments(
 	ctx context.Context,
-	peer *Addr,
+	peer *scion.Addr,
 	src, dst addr.IA,
 ) (*cppb.SegmentsResponse, error) {
 
@@ -148,7 +149,7 @@ func (c *PeerClient) Close() error {
 // client returns the ConnectRPC client for the peer over the given channel,
 // keyed by the peer's encoded authority so the HTTP/3 transport reuses the
 // connection.
-func (c *PeerClient) client(peer *Addr, hclt *http.Client, clients map[string]*Client) *Client {
+func (c *PeerClient) client(peer *scion.Addr, hclt *http.Client, clients map[string]*Client) *Client {
 	authority := peerAuthority(peer)
 	c.mtx.Lock()
 	defer c.mtx.Unlock()
@@ -162,14 +163,14 @@ func (c *PeerClient) client(peer *Addr, hclt *http.Client, clients map[string]*C
 
 // peerAuthority encodes the peer address as a URL authority: hexadecimal, so
 // it survives URL parsing unchanged and never collides with a real host.
-func peerAuthority(peer *Addr) string {
+func peerAuthority(peer *scion.Addr) string {
 	return hex.EncodeToString([]byte(peer.IA.String() + "," + peer.Addr.String()))
 }
 
 // peerFromAuthority decodes the URL authority back into a peer address. The
 // HTTP/3 transport appends a default port to authorities without one; the
 // separator is not a hexadecimal character, so it is cut unconditionally.
-func peerFromAuthority(authority string) (*Addr, error) {
+func peerFromAuthority(authority string) (*scion.Addr, error) {
 	if i := strings.IndexByte(authority, ':'); i >= 0 {
 		authority = authority[:i]
 	}
@@ -189,5 +190,5 @@ func peerFromAuthority(authority string) (*Addr, error) {
 	if err != nil {
 		return nil, fmt.Errorf("parsing peer underlay address: %w", err)
 	}
-	return &Addr{IA: ia, Addr: ap}, nil
+	return &scion.Addr{IA: ia, Addr: ap}, nil
 }

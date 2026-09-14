@@ -1,11 +1,11 @@
-package controlplane
+package scion
 
 import (
 	"context"
 
 	"github.com/scionproto/scion/pkg/addr"
 	"github.com/scionproto/scion/pkg/private/serrors"
-	"github.com/scionproto/scion/pkg/slayers/path/scion"
+	spath "github.com/scionproto/scion/pkg/slayers/path/scion"
 
 	"github.com/fancl20/cion/pkg/pathdb"
 	"github.com/fancl20/cion/pkg/segment"
@@ -13,21 +13,23 @@ import (
 
 // PathProvider composes up, core, and down segments into end-to-end SCION
 // paths — reversal, expiry filtering, and segment combination written once —
-// and is the only consumer seam of ADR-0004: the control transport and,
-// later, endhost exposure consume identical paths through it.
+// and is the only consumer seam of ADR-0004: the control transport and every
+// application consume identical paths through it.
 type PathProvider struct {
 	// IA is the local ISD-AS.
 	IA addr.IA
 	// DB holds the local up segments.
 	DB pathdb.DB
-	// Lookup resolves down segments, fetching them from the core's control
-	// service with expiry-aware caching.
-	Lookup *LookupService
+	// Lookup resolves down segments for a destination, fetched with
+	// expiry-aware caching — the narrowed piece of the control plane's
+	// lookup service, so that linking the library does not link the
+	// control plane.
+	Lookup func(ctx context.Context, dst addr.IA) []*pathdb.Segment
 	// Bootstrap yields the reversed data-plane path of the freshest
 	// unverified beacon originating at a core: the enrollment route of a
 	// node that has not pinned the TRC yet — the WebPKI-authenticated
 	// channel protects that exchange (proposal 0004).
-	Bootstrap func(core addr.IA) *scion.Decoded
+	Bootstrap func(core addr.IA) *spath.Decoded
 	// Cores enumerates the core ASes of an ISD named by the pinned TRC.
 	Cores func(isd addr.ISD) []addr.IA
 }
@@ -36,7 +38,7 @@ type PathProvider struct {
 // and the bootstrap beacon, never a fetch. It is the variant safe to call
 // from inside a dial — resolving a route must not spawn RPCs over the very
 // transport being dialed.
-func (p *PathProvider) LocalPath(dst addr.IA) (*scion.Decoded, error) {
+func (p *PathProvider) LocalPath(dst addr.IA) (*spath.Decoded, error) {
 	if dst.Equal(p.IA) {
 		return nil, serrors.New("destination is the local ISD-AS", "isd_as", dst)
 	}
@@ -61,12 +63,17 @@ func (p *PathProvider) LocalPath(dst addr.IA) (*scion.Decoded, error) {
 // bootstrap beacon; anywhere else, a down segment from a core the node can
 // reach — fetched with expiry-aware caching — composed after the reversed up
 // segment to that core.
-func (p *PathProvider) Path(ctx context.Context, dst addr.IA) (*scion.Decoded, error) {
+func (p *PathProvider) Path(ctx context.Context, dst addr.IA) (*spath.Decoded, error) {
 	if path, err := p.LocalPath(dst); err == nil {
 		return path, nil
 	}
-	downs := p.Lookup.Down(ctx, dst)
+	downs := p.Lookup(ctx, dst)
 	for _, down := range downs {
+		// The local node may itself be the core the down segment starts at;
+		// the segment alone is then the complete route.
+		if down.FirstIA().Equal(p.IA) {
+			return down.PCB.ForwardPath(), nil
+		}
 		up := p.freshestUp(down.FirstIA())
 		if up == nil {
 			continue

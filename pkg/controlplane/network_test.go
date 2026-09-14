@@ -11,11 +11,12 @@ import (
 
 	"github.com/scionproto/scion/pkg/addr"
 	"github.com/scionproto/scion/pkg/scrypto/cppki"
-	"github.com/scionproto/scion/pkg/slayers/path/scion"
+	spath "github.com/scionproto/scion/pkg/slayers/path/scion"
 
 	"github.com/fancl20/cion/pkg/dataplane"
 	"github.com/fancl20/cion/pkg/pathdb"
 	pathdbbbolt "github.com/fancl20/cion/pkg/pathdb/impl/bbolt"
+	"github.com/fancl20/cion/pkg/scion"
 	"github.com/fancl20/cion/pkg/trust"
 	"github.com/fancl20/cion/pkg/trust/impl/bbolt"
 )
@@ -34,6 +35,9 @@ const (
 // endpoint, and the beaconer.
 type netNode struct {
 	ia        addr.IA
+	internal  string
+	controlIP netip.Addr
+	links     map[uint16]addr.IA
 	stateDir  string
 	trustDB   trust.DB
 	pathDB    pathdb.DB
@@ -41,11 +45,28 @@ type netNode struct {
 	beaconer  *Beaconer
 	coreClt   *CoreClient
 	peerClt   *PeerClient
-	provider  *PathProvider
+	provider  *scion.PathProvider
 	lookup    *LookupService
 	discovery *Discovery
-	endpoint  netip.AddrPort
 	cancel    context.CancelFunc
+}
+
+// newNetConn returns a SCION connection of the node, bound to the control
+// address's host with the given port.
+func (n *netNode) newNetConn(t *testing.T, port uint16) *scion.Conn {
+	t.Helper()
+	conn, err := scion.NewConn(scion.ConnConfig{
+		IA:           n.ia,
+		Bind:         netip.AddrPortFrom(n.controlIP, port).String(),
+		InternalAddr: n.internal,
+		MACKey:       testMACKeyBytes,
+		Links:        n.links,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { conn.Close() }) //nolint:errcheck
+	return conn
 }
 
 // netLink is one external link of a node.
@@ -144,9 +165,9 @@ func startNetNode(
 		t.Fatal(err)
 	}
 
-	scionConn := func(port uint16) *SCIONConn {
+	scionConn := func(port uint16) *scion.Conn {
 		bind := netip.AddrPortFrom(controlAddr.Addr(), port).String()
-		conn, err := NewSCIONConn(SCIONConnConfig{
+		conn, err := scion.NewConn(scion.ConnConfig{
 			IA:           ia,
 			Bind:         bind,
 			InternalAddr: internal,
@@ -188,21 +209,21 @@ func startNetNode(
 		}
 	}
 
-	var pathProvider *PathProvider
-	coreRoute := func() *Addr {
+	var pathProvider *scion.PathProvider
+	coreRoute := func() *scion.Addr {
 		coreIA, coreEndpoint, ok := discovery.CoreEndpoint()
 		if !ok {
 			return nil
 		}
 		for _, n := range discovery.Neighbors() {
 			if n.IA.Equal(coreIA) {
-				return &Addr{IA: coreIA,
+				return &scion.Addr{IA: coreIA,
 					Addr: netip.AddrPortFrom(n.ControlAddr.Addr(), EndpointPort)}
 			}
 		}
 		if pathProvider != nil {
 			if path, err := pathProvider.LocalPath(coreIA); err == nil {
-				return &Addr{IA: coreIA, Addr: coreEndpoint, Path: path}
+				return &scion.Addr{IA: coreIA, Addr: coreEndpoint, Path: path}
 			}
 		}
 		return nil
@@ -227,7 +248,7 @@ func startNetNode(
 	peerClt := NewPeerClient(PeerClientConfig{
 		Engine: engine,
 		Conn:   scionConn(0),
-		PathTo: func(dst addr.IA) *scion.Decoded {
+		PathTo: func(dst addr.IA) *spath.Decoded {
 			if pathProvider == nil {
 				return nil
 			}
@@ -266,10 +287,10 @@ func startNetNode(
 	if err != nil {
 		t.Fatal(err)
 	}
-	pathProvider = &PathProvider{
+	pathProvider = &scion.PathProvider{
 		IA:        ia,
 		DB:        pathDB,
-		Lookup:    lookup,
+		Lookup:    lookup.Down,
 		Bootstrap: beaconer.BootstrapRoute,
 		Cores:     cores,
 	}
@@ -287,6 +308,9 @@ func startNetNode(
 		webPKIConf = conf
 	}
 	endpointConn := scionConn(EndpointPort)
+	// The HTTP/3 server serves until its socket closes; releasing it lets a
+	// re-run of the suite (go test -count) bind the fixed port again.
+	t.Cleanup(func() { endpointConn.Close() }) //nolint:errcheck
 	svc := &Services{
 		TrustService: &TrustService{DB: trustDB, Issuer: issuer},
 		SegmentService: &SegmentService{
@@ -308,7 +332,7 @@ func startNetNode(
 	}()
 
 	if core {
-		endpoint := endpointConn.LocalAddr().(*Addr).Addr
+		endpoint := endpointConn.LocalAddr().(*scion.Addr).Addr
 		discovery.SetCoreEndpoint(ia, endpoint)
 		go func() {
 			defer handlePanic()
@@ -333,6 +357,9 @@ func startNetNode(
 
 	return &netNode{
 		ia:        ia,
+		internal:  internal,
+		controlIP: controlAddr.Addr(),
+		links:     neighborLinks,
 		trustDB:   trustDB,
 		pathDB:    pathDB,
 		engine:    engine,

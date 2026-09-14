@@ -1,10 +1,11 @@
-package controlplane
+package scion
 
 import (
 	"net/netip"
 	"testing"
 
 	"github.com/scionproto/scion/pkg/addr"
+	"github.com/scionproto/scion/pkg/slayers"
 )
 
 // TestParseDatagramPacket checks the wire round trip of the datagram
@@ -12,7 +13,7 @@ import (
 func TestParseDatagramPacket(t *testing.T) {
 	local := netip.MustParseAddrPort("127.0.0.1:30044")
 	peer := netip.MustParseAddrPort("127.0.0.1:30111")
-	conn, err := NewSCIONConn(SCIONConnConfig{
+	conn, err := NewConn(ConnConfig{
 		IA:           addr.MustIAFrom(20, 0xff0000000001),
 		Bind:         local.String(),
 		InternalAddr: "127.0.0.1:30041",
@@ -25,7 +26,9 @@ func TestParseDatagramPacket(t *testing.T) {
 	defer conn.Close() //nolint:errcheck
 
 	peerAddr := &Addr{IA: addr.MustIAFrom(20, 0xff0000000002), Addr: peer}
-	raw, err := conn.datagramPacket(peerAddr, 1, []byte("quic payload"))
+	raw, err := conn.writePacket(peerAddr, slayers.L4UDP, func(scn *slayers.SCION) ([]byte, error) {
+		return serializeUDP(scn, local.Port(), peer.Port(), []byte("quic payload"))
+	})
 	if err != nil {
 		t.Fatal(err)
 	}

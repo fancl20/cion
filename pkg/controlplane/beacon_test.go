@@ -18,6 +18,7 @@ import (
 
 	"github.com/fancl20/cion/pkg/pathdb"
 	pathdbbbolt "github.com/fancl20/cion/pkg/pathdb/impl/bbolt"
+	"github.com/fancl20/cion/pkg/scion"
 	"github.com/fancl20/cion/pkg/segment"
 	"github.com/fancl20/cion/pkg/trust"
 	"github.com/fancl20/cion/pkg/trust/impl/bbolt"
@@ -39,16 +40,16 @@ type fakeSender struct {
 }
 
 type sentBeacon struct {
-	peer *Addr
+	peer *scion.Addr
 	pcb  *cppb.PathSegment
 }
 
 type sentRegistration struct {
-	peer     *Addr
+	peer     *scion.Addr
 	segments []*cppb.PathSegment
 }
 
-func (s *fakeSender) Beacon(ctx context.Context, peer *Addr, pcb *cppb.PathSegment) error {
+func (s *fakeSender) Beacon(ctx context.Context, peer *scion.Addr, pcb *cppb.PathSegment) error {
 	s.mtx.Lock()
 	defer s.mtx.Unlock()
 	s.beacons = append(s.beacons, sentBeacon{peer: peer, pcb: pcb})
@@ -56,7 +57,7 @@ func (s *fakeSender) Beacon(ctx context.Context, peer *Addr, pcb *cppb.PathSegme
 }
 
 func (s *fakeSender) RegisterSegments(
-	ctx context.Context, peer *Addr, segments []*cppb.PathSegment) error {
+	ctx context.Context, peer *scion.Addr, segments []*cppb.PathSegment) error {
 
 	s.mtx.Lock()
 	defer s.mtx.Unlock()
@@ -137,8 +138,8 @@ func newBeaconFixture(t *testing.T) *beaconFixture {
 	}
 	store := NewBeaconStore()
 	sender := &fakeSender{}
-	coreRoute := func() *Addr {
-		return &Addr{IA: coreIATest, Addr: netip.MustParseAddrPort("192.0.2.10:30044")}
+	coreRoute := func() *scion.Addr {
+		return &scion.Addr{IA: coreIATest, Addr: netip.MustParseAddrPort("192.0.2.10:30044")}
 	}
 	beaconer, err := NewBeaconer(BeaconerConfig{
 		IA:        nodeIATest,

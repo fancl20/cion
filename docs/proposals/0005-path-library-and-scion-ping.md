@@ -119,10 +119,14 @@ parsers over the slayers types the data plane already decodes
 application — proposal 0006's gateway included — repeats: a package
 consuming `pkg/scion` and the node's wiring.
 
-*   The responder serves echo replies on `PingPort` (30047, beside the
-    control plane's `EndpointPort` 30044 and the ports proposal 0006
-    introduces): one `Conn`, each request answered on its reversed arrival
-    path.
+*   The responder serves echo replies on the node's endhost port
+    (`dataplane.EndhostPort`, 30041): one `Conn` bound to the control
+    address's host, each request answered on its reversed arrival path.
+    The port is the data plane's, not an application constant:
+    `getDstPortSCMP` delivers echo requests to the endhost port of the
+    destination host — SCMP has no per-application port — and replies to
+    the port in the echo identifier. A fixed `PingPort` beside
+    `EndpointPort` would never receive a request.
 *   The pinger resolves the destination with `PathProvider.Path`, sends a
     count of requests at a fixed interval with sequence numbers, matches
     replies by identifier and sequence, and reports per-reply RTT, the
@@ -158,3 +162,41 @@ proposal 0004 left it.
     configuration error.
 
 ## Implementation history
+
+*   Library: `pkg/scion` holds the socket (`Conn`, from
+    `controlplane.SCIONConn`), the address (`Addr`), and the resolver
+    (`PathProvider`, its `Lookup` narrowed from the lookup service to the
+    down-segment function); the moved types' tests moved with them, the
+    control plane imports the package with its behavior otherwise
+    unchanged, and import aliases (`spath` for the vendored
+    `slayers/path/scion`) keep the two `scion` names apart where they meet.
+*   SCMP echo: request and reply constructors and parsers beside the UDP
+    datagram path on the same socket — `WriteEchoRequestTo` stamps the
+    socket's own port as the identifier, `ReadEchoFrom` returns the
+    message with the reversed arrival path — with the SCMP checksum
+    computed on send and, like the data plane, not verified on receipt.
+*   Application: `pkg/apps/ping` — a responder bound to the endhost port
+    (see above for why not a `PingPort`; the sample configurations' internal
+    links moved from 30041 to 30042 so the responder's bind does not
+    collide) and a pinger as a library entry (`ping.Run`) and the `cion
+    ping` subcommand, which rides the node's full assembly in place of
+    serving. Both were exercised against two real processes.
+*   Provider: one gap the first consumer surfaced — a down segment whose
+    origin core is the local node is itself the complete route (cores hold
+    no up segments to compose before it) — is resolved in `Path`, so
+    `cion ping` works from a core node.
+*   Lookup: an empty down-segment fetch is no longer cached for the TTL —
+    a fetch racing the destination's first registration otherwise left the
+    route poisoned for a minute.
+*   Composed paths: the end-to-end proof runs on a fork topology (core
+    between two leaves). On a line, the composed route to the middle node
+    revisits it mid-path, and the routers reject a packet whose destination
+    ISD-AS is local before the path's last hop — legal path syntax, but
+    not carriage the (upstream) forwarding check permits; revisiting
+    compositions are a path-selection concern for a later milestone.
+*   Tests: the moved socket and parse tests, echo wire round trip and
+    exchange over one hop, provider resolution and expiry with an injected
+    lookup, a crafted-segment expiry that re-resolves mid-run and recovers,
+    the fork-topology composed ping with per-reply hops and RTT, the loss
+    summary with the responder down, the unreachable destination, and the
+    subcommand's target parsing and missing-configuration errors.
