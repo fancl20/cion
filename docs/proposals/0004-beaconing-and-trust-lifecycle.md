@@ -129,7 +129,8 @@ beacon traffic itself and can be retired.
 
 ### The chain lifecycle
 
-`runEnrollment` in `cmd/cion/main.go` becomes a loop for the node's lifetime
+`runEnrollment` in the node's wiring (`internal/services`) becomes a loop
+for the node's lifetime
 instead of returning after the first success. Each pass:
 
 1.  Reads the newest chain for the node's IA from the DB and its remaining
@@ -308,7 +309,8 @@ endhost exposure consume identical paths through it. Concretely:
 
 ### Node wiring
 
-Startup order in `cmd/cion/main.go` extends proposal 0003's: trust DB and
+Startup order in the node's wiring (`internal/services`) extends proposal
+0003's: trust DB and
 keys, TRC genesis and self-enrollment (core) or the enrollment loop
 (non-core), the control endpoint on every node, the trust engine, the beacon
 store and path database, then the beaconing originator (core) or

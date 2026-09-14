@@ -223,6 +223,6 @@ today. The data plane and its forwarding `key` configuration are unchanged.
     (`pkg/controlplane/server.go`, `tls.go`), the trust material and chain
     renewal RPCs (`pkg/controlplane/trustservice.go`), the network-backed
     provider and enrollment (`pkg/trust/network.go`, `renewal.go`), and the
-    `cion` binary wiring (`cmd/cion/main.go`). Tests cover genesis, issuance,
+    `cion` binary wiring (`internal/services`). Tests cover genesis, issuance,
     the transport, the RPCs, and a two-node integration test with TLS
     verified against a test CA standing in for the WebPKI.

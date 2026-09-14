@@ -106,8 +106,9 @@ and — on the core — the directory server, the in-process router, the
 netstack egress, and the run loop. The application consumes the path
 library (`pkg/scion`, proposal 0005) for every sent datagram and the trust
 engine to authenticate directory peers by certificate chain; it holds its
-own sockets, storage, and loops. `cmd/cion/main.go` starts it after
-`setupControlPlane` when the node's configuration has a gateway section;
+own sockets, storage, and loops. The `cion run` command (`cmd/cion`) starts
+it through the node assembly (`internal/services`) after the control-plane
+setup when the node's configuration has a gateway section;
 the milestone adds no always-on component.
 
 `GatewayPort` (30045, beside `EndpointPort` in
@@ -289,7 +290,8 @@ the subnet, exits configured, one exit per key). A host's client
 configuration is the node's public key, one address, and the shared port;
 the key it sends with selects the exit.
 
-Startup in `cmd/cion/main.go` extends proposal 0004's: after the path
+Startup in the node assembly (`internal/services`) extends proposal
+0004's: after the path
 provider exists, the application loads or creates its key, binds the mesh
 socket on `GatewayPort`, starts the directory client and its publish loop
 (publication begins once enrollment has produced the node's chain),
