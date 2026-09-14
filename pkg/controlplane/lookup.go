@@ -12,6 +12,7 @@ import (
 	cppb "github.com/scionproto/scion/pkg/proto/control_plane"
 
 	"github.com/fancl20/cion/pkg/pathdb"
+	"github.com/fancl20/cion/pkg/scion"
 )
 
 // lookupCacheTTL caps how long fetched segments are served from the cache,
@@ -34,9 +35,9 @@ type LookupService struct {
 	// cores mean the TRC is not pinned.
 	Cores func(isd addr.ISD) []addr.IA
 	// Fetch requests segments from a core's control service.
-	Fetch func(ctx context.Context, peer *Addr, src, dst addr.IA) (*cppb.SegmentsResponse, error)
+	Fetch func(ctx context.Context, peer *scion.Addr, src, dst addr.IA) (*cppb.SegmentsResponse, error)
 	// CoreRoute resolves the core's endpoint to fetch through.
-	CoreRoute func() *Addr
+	CoreRoute func() *scion.Addr
 
 	mtx   sync.Mutex
 	cache map[[2]addr.IA]cachedSegments
@@ -224,6 +225,12 @@ func (s *LookupService) fetchCached(
 			expiry = seg.Expiration()
 		}
 		segs = append(segs, seg)
+	}
+	// An empty answer is not cached: a registration the fetch raced lands
+	// any moment, and the next request must see it. The first consumer of
+	// the seam — ping — resolved paths minutes late otherwise.
+	if len(segs) == 0 {
+		return nil
 	}
 	s.mtx.Lock()
 	s.cache[key] = cachedSegments{segments: segs, expiry: expiry}

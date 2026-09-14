@@ -11,10 +11,11 @@ import (
 	"connectrpc.com/connect"
 	"github.com/scionproto/scion/pkg/addr"
 	cppb "github.com/scionproto/scion/pkg/proto/control_plane"
-	"github.com/scionproto/scion/pkg/slayers/path/scion"
+	spath "github.com/scionproto/scion/pkg/slayers/path/scion"
 
 	"github.com/fancl20/cion/pkg/pathdb"
 	pathdbbbolt "github.com/fancl20/cion/pkg/pathdb/impl/bbolt"
+	"github.com/fancl20/cion/pkg/scion"
 	"github.com/fancl20/cion/pkg/segment"
 )
 
@@ -35,7 +36,7 @@ type recordingFetch struct {
 }
 
 func (f *recordingFetch) Fetch(
-	ctx context.Context, peer *Addr, src, dst addr.IA) (*cppb.SegmentsResponse, error) {
+	ctx context.Context, peer *scion.Addr, src, dst addr.IA) (*cppb.SegmentsResponse, error) {
 
 	f.mtx.Lock()
 	defer f.mtx.Unlock()
@@ -70,8 +71,8 @@ func newLookupFixture(t *testing.T) *lookupFixture {
 	lookup.DB = db
 	lookup.Cores = func(isd addr.ISD) []addr.IA { return []addr.IA{coreIATest} }
 	lookup.Fetch = fetch.Fetch
-	lookup.CoreRoute = func() *Addr {
-		return &Addr{IA: coreIATest, Addr: fakeCoreEndpoint}
+	lookup.CoreRoute = func() *scion.Addr {
+		return &scion.Addr{IA: coreIATest, Addr: fakeCoreEndpoint}
 	}
 	return &lookupFixture{db: db, lookup: lookup, fetch: fetch, now: now}
 }
@@ -227,10 +228,10 @@ func TestLookupCoreHandler(t *testing.T) {
 // segment with a down segment.
 func TestPathProviderCompose(t *testing.T) {
 	fx := newLookupFixture(t)
-	provider := &PathProvider{
+	provider := &scion.PathProvider{
 		IA:     nodeIATest,
 		DB:     fx.db,
-		Lookup: fx.lookup,
+		Lookup: fx.lookup.Down,
 		Cores:  func(isd addr.ISD) []addr.IA { return []addr.IA{coreIATest} },
 	}
 
@@ -286,11 +287,11 @@ func TestPathProviderBootstrap(t *testing.T) {
 	}, macFactory()); err != nil {
 		t.Fatal(err)
 	}
-	provider := &PathProvider{
+	provider := &scion.PathProvider{
 		IA:     nodeIATest,
 		DB:     db,
-		Lookup: fx.lookup,
-		Bootstrap: func(core addr.IA) *scion.Decoded {
+		Lookup: fx.lookup.Down,
+		Bootstrap: func(core addr.IA) *spath.Decoded {
 			if !core.Equal(coreIATest) {
 				return nil
 			}

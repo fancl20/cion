@@ -115,8 +115,8 @@ the milestone adds no always-on component.
 port every node's mesh transport listens on, so a peer's directory entry —
 ISD-AS, public key, subnet — is all a node needs to reach it.
 `DirectoryPort` (30046, beside `GatewayPort`) is where the core node's
-application serves the directory; proposal 0005's `PingPort` (30047)
-completes the row.
+application serves the directory; proposal 0005's ping needs no port of
+the row — SCMP echo rides the endhost port and the echo identifier.
 
 ### The mesh transport: a WireGuard bind over SCION
 

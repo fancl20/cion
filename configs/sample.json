@@ -2,7 +2,7 @@
   "ia": "20-ff00:0:1",
   "asType": "normal",
   "state": "/var/lib/cion",
-  "internal": "127.0.0.1:30041",
+  "internal": "127.0.0.1:30042",
   "control": "127.0.0.1:30043",
   "key": "000102030405060708090a0b0c0d0e0f",
   "coreDomain": "core.example.org",

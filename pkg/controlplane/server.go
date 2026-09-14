@@ -7,6 +7,8 @@ import (
 	"github.com/quic-go/quic-go"
 	"github.com/quic-go/quic-go/http3"
 	"github.com/scionproto/scion/pkg/proto/control_plane/v1/control_planeconnect"
+
+	"github.com/fancl20/cion/pkg/scion"
 )
 
 // ControlPlane covers all control plane RPCs.
@@ -56,7 +58,7 @@ var quicConfig = &quic.Config{InitialPacketSize: 1200}
 
 // ServeHTTP3 serves the handler with HTTP/3 (QUIC) on conn. The TLS
 // configuration must carry the certificate for the served domain.
-func ServeHTTP3(conn *SCIONConn, handler http.Handler, tlsConf *tls.Config) error {
+func ServeHTTP3(conn *scion.Conn, handler http.Handler, tlsConf *tls.Config) error {
 	server := &http3.Server{
 		Handler:    handler,
 		TLSConfig:  tlsConf,

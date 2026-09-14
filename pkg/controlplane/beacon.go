@@ -13,9 +13,10 @@ import (
 	"github.com/scionproto/scion/pkg/proto/control_plane"
 	"github.com/scionproto/scion/pkg/scrypto"
 	"github.com/scionproto/scion/pkg/slayers/path"
-	"github.com/scionproto/scion/pkg/slayers/path/scion"
+	spath "github.com/scionproto/scion/pkg/slayers/path/scion"
 
 	"github.com/fancl20/cion/pkg/pathdb"
+	"github.com/fancl20/cion/pkg/scion"
 	"github.com/fancl20/cion/pkg/segment"
 	"github.com/fancl20/cion/pkg/trust"
 )
@@ -48,10 +49,10 @@ var clockSkewAllowance = path.ExpTimeToDuration(0)
 // channel; PeerClient satisfies it.
 type SegmentSender interface {
 	// Beacon propagates the extended PCB to the peer's beacon service.
-	Beacon(ctx context.Context, peer *Addr, pcb *control_plane.PathSegment) error
+	Beacon(ctx context.Context, peer *scion.Addr, pcb *control_plane.PathSegment) error
 	// RegisterSegments registers down segments with the core's control
 	// service.
-	RegisterSegments(ctx context.Context, peer *Addr,
+	RegisterSegments(ctx context.Context, peer *scion.Addr,
 		segments []*control_plane.PathSegment) error
 }
 
@@ -72,7 +73,7 @@ type Beaconer struct {
 	links        map[uint16]addr.IA
 	neighbors    func() map[uint16]Neighbor
 	sender       SegmentSender
-	coreRoute    func() *Addr
+	coreRoute    func() *scion.Addr
 	core         bool
 	propagation  time.Duration
 	registration time.Duration
@@ -112,7 +113,7 @@ type BeaconerConfig struct {
 	Sender SegmentSender
 	// CoreRoute resolves the core's endpoint — the one-hop path when the
 	// core is a neighbor, else the provider's route.
-	CoreRoute func() *Addr
+	CoreRoute func() *scion.Addr
 	// Core marks the founding core, which originates beacons.
 	Core bool
 	// PropagationInterval and RegistrationInterval override the defaults;
@@ -254,7 +255,7 @@ func (b *Beaconer) HandleRegistration(
 // it ride it, all protected by the WebPKI-authenticated channel. It is
 // never stored, propagated, or registered, serves only its originating
 // core, and verified up segments take over the moment one exists.
-func (b *Beaconer) BootstrapRoute(dst addr.IA) *scion.Decoded {
+func (b *Beaconer) BootstrapRoute(dst addr.IA) *spath.Decoded {
 	b.bootstrapMtx.Lock()
 	defer b.bootstrapMtx.Unlock()
 	if b.bootstrap == nil || !b.bootstrap.Expiration().After(b.now()) {
@@ -555,7 +556,7 @@ func (b *Beaconer) sweepOnce(ctx context.Context) {
 // sendBeacon sends one beacon RPC, bounded so a wedged connection cannot
 // stall the loop sending it.
 func (b *Beaconer) sendBeacon(
-	ctx context.Context, peer *Addr, pb *control_plane.PathSegment) error {
+	ctx context.Context, peer *scion.Addr, pb *control_plane.PathSegment) error {
 
 	ctx, cancel := context.WithTimeout(ctx, b.sendTimeout)
 	defer cancel()
@@ -564,7 +565,7 @@ func (b *Beaconer) sendBeacon(
 
 // sendRegistration sends one registration RPC, bounded like sendBeacon.
 func (b *Beaconer) sendRegistration(
-	ctx context.Context, peer *Addr, segments []*control_plane.PathSegment) error {
+	ctx context.Context, peer *scion.Addr, segments []*control_plane.PathSegment) error {
 
 	ctx, cancel := context.WithTimeout(ctx, b.sendTimeout)
 	defer cancel()
@@ -577,13 +578,13 @@ func (b *Beaconer) neighborEndpoint(
 	neighbors map[uint16]Neighbor,
 	ifID uint16,
 	neighborIA addr.IA,
-) (*Addr, bool) {
+) (*scion.Addr, bool) {
 
 	n, ok := neighbors[ifID]
 	if !ok {
 		return nil, false
 	}
-	return &Addr{
+	return &scion.Addr{
 		IA:   neighborIA,
 		Addr: netip.AddrPortFrom(n.ControlAddr.Addr(), EndpointPort),
 	}, true

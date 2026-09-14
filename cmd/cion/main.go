@@ -17,15 +17,19 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"syscall"
+	"time"
 
 	"github.com/scionproto/scion/pkg/addr"
-	"github.com/scionproto/scion/pkg/slayers/path/scion"
+	spath "github.com/scionproto/scion/pkg/slayers/path/scion"
 
+	"github.com/fancl20/cion/pkg/apps/ping"
 	"github.com/fancl20/cion/pkg/controlplane"
 	"github.com/fancl20/cion/pkg/dataplane"
 	"github.com/fancl20/cion/pkg/pathdb"
 	pathdbbbolt "github.com/fancl20/cion/pkg/pathdb/impl/bbolt"
+	"github.com/fancl20/cion/pkg/scion"
 	"github.com/fancl20/cion/pkg/trust"
 	"github.com/fancl20/cion/pkg/trust/impl/bbolt"
 )
@@ -81,13 +85,13 @@ func main() {
 	configPath := flag.String("config", "", "path to the JSON configuration file")
 	flag.Parse()
 
-	if err := run(*configPath); err != nil {
+	if err := run(*configPath, flag.Args()); err != nil {
 		slog.Error("CION terminated", "err", err)
 		os.Exit(1)
 	}
 }
 
-func run(configPath string) error {
+func run(configPath string, args []string) error {
 	cfg, err := loadConfig(configPath)
 	if err != nil {
 		return err
@@ -183,14 +187,104 @@ func run(configPath string) error {
 		node.beaconer.Run(ctx)
 	}()
 
+	// The ping subcommand rides the assembled node — its packets cross the
+	// data plane and its paths come from the node's own beaconing — instead
+	// of serving forever.
+	if len(args) > 0 {
+		if args[0] != "ping" {
+			return fmt.Errorf("unknown subcommand %q", args[0])
+		}
+		go func() {
+			defer handleControlPanic()
+			_ = d.Serve(ctx)
+		}()
+		return runPing(ctx, node, args[1:])
+	}
+
 	slog.Info("Starting CION", "ia", ia, "asType", asType, "internal", cfg.Internal,
 		"control", cfg.Control, "interfaces", len(cfg.Interfaces))
 	return d.Serve(ctx)
 }
 
+// runPing runs the ping subcommand: a pinger on the node's own assembly,
+// printing one line per reply and a loss summary.
+func runPing(ctx context.Context, node *controlPlaneNode, args []string) error {
+	fs := flag.NewFlagSet("ping", flag.ContinueOnError)
+	count := fs.Int("count", 4, "number of requests")
+	interval := fs.Duration("interval", time.Second, "time between requests")
+	wait := fs.Duration("wait", 2*time.Second, "wait per reply")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 {
+		return fmt.Errorf("ping needs a destination: cion -config node.json ping 20-ff00:0:2,[host]")
+	}
+	dst, host, err := parsePingTarget(fs.Arg(0))
+	if err != nil {
+		return err
+	}
+	bind, err := controlBind(node.cfg.Control, 0)
+	if err != nil {
+		return err
+	}
+	conn, err := scion.NewConn(scion.ConnConfig{
+		IA:           node.ia,
+		Bind:         bind,
+		InternalAddr: node.cfg.Internal,
+		MACKey:       node.key,
+		Links:        node.links,
+	})
+	if err != nil {
+		return err
+	}
+	defer conn.Close() //nolint:errcheck
+
+	fmt.Printf("cion ping %s,%s\n", dst, host)
+	report, err := ping.Run(ctx, ping.Config{
+		Conn:     conn,
+		Provider: node.provider,
+		Dst:      dst,
+		DstHost:  host,
+		Count:    *count,
+		Interval: *interval,
+		Wait:     *wait,
+		Log:      func(f string, a ...any) { fmt.Printf(f+"\n", a...) },
+	})
+	if err != nil {
+		return err
+	}
+	if report.Loss() > 0 {
+		return fmt.Errorf("%d of %d requests lost", report.Loss(), report.Sent)
+	}
+	return nil
+}
+
+// parsePingTarget splits a "20-ff00:0:2,192.0.2.10" destination into the
+// ISD-AS and the underlay host the destination's responder is bound to.
+func parsePingTarget(s string) (dst addr.IA, host netip.Addr, err error) {
+	iaStr, hostStr, ok := strings.Cut(s, ",")
+	if !ok {
+		return dst, host, fmt.Errorf("destination %q must be isd-as,[host]", s)
+	}
+	dst, err = addr.ParseIA(iaStr)
+	if err != nil {
+		return dst, host, fmt.Errorf("parsing ISD-AS: %w", err)
+	}
+	host, err = netip.ParseAddr(hostStr)
+	if err != nil {
+		return dst, host, fmt.Errorf("parsing host address: %w", err)
+	}
+	return dst, host, nil
+}
+
 // controlPlaneNode holds the state a running node's control plane needs to
-// release at shutdown.
+// release at shutdown, and the pieces its applications consume.
 type controlPlaneNode struct {
+	cfg      *Config
+	ia       addr.IA
+	key      []byte
+	links    map[uint16]addr.IA
+	provider *scion.PathProvider
 	trustDB  trust.DB
 	pathDB   pathdb.DB
 	peerClt  *controlplane.PeerClient
@@ -235,12 +329,12 @@ func setupControlPlane(
 		return nil, fmt.Errorf("opening path DB: %w", err)
 	}
 
-	scionConn := func(port uint16) (*controlplane.SCIONConn, error) {
+	scionConn := func(port uint16) (*scion.Conn, error) {
 		bind, err := controlBind(cfg.Control, port)
 		if err != nil {
 			return nil, err
 		}
-		return controlplane.NewSCIONConn(controlplane.SCIONConnConfig{
+		return scion.NewConn(scion.ConnConfig{
 			IA:           ia,
 			Bind:         bind,
 			InternalAddr: cfg.Internal,
@@ -251,8 +345,8 @@ func setupControlPlane(
 
 	// The path provider resolves routes; its consumers below close the
 	// cycle through the beaconer, the lookup service, and this route.
-	var pathProvider *controlplane.PathProvider
-	coreRoute := func() *controlplane.Addr {
+	var pathProvider *scion.PathProvider
+	coreRoute := func() *scion.Addr {
 		coreIA, coreEndpoint, ok := discovery.CoreEndpoint()
 		if !ok {
 			return nil
@@ -260,7 +354,7 @@ func setupControlPlane(
 		// The one-hop path when the core is a neighbor...
 		for _, n := range discovery.Neighbors() {
 			if n.IA.Equal(coreIA) {
-				return &controlplane.Addr{
+				return &scion.Addr{
 					IA:   coreIA,
 					Addr: netip.AddrPortFrom(n.ControlAddr.Addr(), controlplane.EndpointPort),
 				}
@@ -272,7 +366,7 @@ func setupControlPlane(
 		// RPCs over the transport being dialed.
 		if pathProvider != nil {
 			if path, err := pathProvider.LocalPath(coreIA); err == nil {
-				return &controlplane.Addr{IA: coreIA, Addr: coreEndpoint, Path: path}
+				return &scion.Addr{IA: coreIA, Addr: coreEndpoint, Path: path}
 			}
 		}
 		return nil
@@ -357,7 +451,7 @@ func setupControlPlane(
 	peerClt := controlplane.NewPeerClient(controlplane.PeerClientConfig{
 		Engine: engine,
 		Conn:   peerConn,
-		PathTo: func(dst addr.IA) *scion.Decoded {
+		PathTo: func(dst addr.IA) *spath.Decoded {
 			path, err := pathProvider.LocalPath(dst)
 			if err != nil {
 				return nil
@@ -394,10 +488,10 @@ func setupControlPlane(
 		return nil, err
 	}
 
-	pathProvider = &controlplane.PathProvider{
+	pathProvider = &scion.PathProvider{
 		IA:        ia,
 		DB:        pathDB,
-		Lookup:    lookup,
+		Lookup:    lookup.Down,
 		Bootstrap: beaconer.BootstrapRoute,
 		Cores:     cores,
 	}
@@ -435,6 +529,22 @@ func setupControlPlane(
 		pathDB.Close()  //nolint:errcheck
 		return nil, err
 	}
+
+	// Every node answers SCMP echo requests on its endhost port — the
+	// network's health probe, served by the first application consuming the
+	// path library beside the control plane.
+	pingConn, err := scionConn(dataplane.EndhostPort)
+	if err != nil {
+		peerClt.Close() //nolint:errcheck
+		trustDB.Close() //nolint:errcheck
+		pathDB.Close()  //nolint:errcheck
+		return nil, fmt.Errorf("binding the ping responder (the control address's host must not share the internal link's port): %w", err)
+	}
+	responder := &ping.Responder{Conn: pingConn}
+	go func() {
+		defer handleControlPanic()
+		responder.Run(ctx)
+	}()
 	svc := &controlplane.Services{
 		TrustService: &controlplane.TrustService{
 			DB:      trustDB,
@@ -462,7 +572,7 @@ func setupControlPlane(
 	// The chain lifecycle keeps a valid chain on every node — the core
 	// included — by re-enrolling before expiry.
 	if asType == trust.ASTypeCore {
-		endpoint := endpointConn.LocalAddr().(*controlplane.Addr).Addr
+		endpoint := endpointConn.LocalAddr().(*scion.Addr).Addr
 		discovery.SetCoreEndpoint(ia, endpoint)
 		go func() {
 			defer handleControlPanic()
@@ -487,6 +597,11 @@ func setupControlPlane(
 
 	slog.Info("Serving control endpoint", "port", controlplane.EndpointPort)
 	return &controlPlaneNode{
+		cfg:      cfg,
+		ia:       ia,
+		key:      key,
+		links:    links,
+		provider: pathProvider,
 		trustDB:  trustDB,
 		pathDB:   pathDB,
 		peerClt:  peerClt,

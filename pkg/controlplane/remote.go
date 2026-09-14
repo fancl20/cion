@@ -20,6 +20,7 @@ import (
 	"github.com/scionproto/scion/pkg/scrypto/cppki"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
+	"github.com/fancl20/cion/pkg/scion"
 	"github.com/fancl20/cion/pkg/trust"
 )
 
@@ -29,13 +30,13 @@ import (
 // locator; the locator supplies the SCION route — a one-hop neighbor's
 // address from discovery, or the provider's multi-hop path.
 type CoreClient struct {
-	conn    *SCIONConn
+	conn    *scion.Conn
 	qclt    *quic.Transport
 	clt     *Client
-	locator func() *Addr
+	locator func() *scion.Addr
 
 	mtx  sync.Mutex
-	core *Addr
+	core *scion.Addr
 }
 
 // CoreClientConfig configures a CoreClient.
@@ -43,14 +44,14 @@ type CoreClientConfig struct {
 	// Domain is the core's DNS domain, verified as the TLS server name.
 	Domain string
 	// Conn is the SCION connection QUIC rides to the core.
-	Conn *SCIONConn
+	Conn *scion.Conn
 	// RootCAs anchors the TLS verification; nil means the system roots.
 	RootCAs *x509.CertPool
 	// Locator resolves the core's SCION address: its IA, underlay endpoint,
 	// and path — the one-hop path when the core is a neighbor, else the
 	// reversed freshest up segment (proposal 0004). It is consulted at dial
 	// time, so later dials pick up fresh paths. Nil falls back to SetCore.
-	Locator func() *Addr
+	Locator func() *scion.Addr
 }
 
 // NewCoreClient dials the core's control endpoint. The client fails on use,
@@ -93,19 +94,19 @@ func NewCoreClient(cfg CoreClientConfig) (*CoreClient, error) {
 func (c *CoreClient) SetCore(ia addr.IA, addr netip.AddrPort) {
 	c.mtx.Lock()
 	defer c.mtx.Unlock()
-	c.core = &Addr{IA: ia, Addr: addr}
+	c.core = &scion.Addr{IA: ia, Addr: addr}
 }
 
 // SetLocator sets the locator resolving the core's SCION address at dial
 // time; it overrides SetCore's address.
-func (c *CoreClient) SetLocator(locator func() *Addr) {
+func (c *CoreClient) SetLocator(locator func() *scion.Addr) {
 	c.locator = locator
 }
 
 // coreAddr resolves the core's current address: the locator when configured,
 // else the address set with SetCore. Nil means the locator is unknown.
 func (c *CoreClient) coreAddr() net.Addr {
-	var a *Addr
+	var a *scion.Addr
 	if c.locator != nil {
 		a = c.locator()
 	} else {
