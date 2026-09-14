@@ -126,15 +126,20 @@ host-facing port, the peer's key selecting its exit**, key material
 **forwarding in-process with netstack-serviced egress** — realized as
 follows:
 
-1.  **The path library is the provider seam, not a new abstraction.**
-    `controlplane.SCIONConn` already carries datagrams over provider-supplied
-    SCION paths and reverses arrival paths for replies; `controlplane.
-    PathProvider` already resolves them. The gateway — and any future
-    in-process application — consumes both directly. No path API daemon
-    exists; an application on a CION node is part of the node's process, and
-    linking the library is how it becomes path-aware.
-2.  **WireGuard runs on every node; tunnels connect nodes.** The CION binary
-    embeds wireguard-go. A node's mesh peers are the other nodes' gateways,
+1.  **The path library is the provider seam, not a new abstraction.** A
+    SCION socket already carries datagrams over provider-supplied SCION
+    paths and reverses arrival paths for replies; the path provider already
+    resolves them. The library is the two of them in a package of their
+    own, with the control plane as their first consumer — and the gateway,
+    or any future in-process application, links it directly. No path API
+    daemon exists; an application on a CION node is part of the node's
+    process, and linking the library is how it becomes path-aware.
+2.  **WireGuard runs on every node; tunnels connect nodes.** The gateway is
+    an application in the SCION network, embedded in the CION binary — and
+    behaves like one: it consumes the path library and the trust engine as
+    any future application would, and owns its key and directory state. The
+    binary embeds wireguard-go; a node's mesh peers are the other nodes'
+    gateways,
     reached over the SCION network through a transport (`conn.Bind`)
     implemented on the SCION socket: every outgoing datagram is carried by a
     SCION packet over a provider-resolved path, and everything WireGuard
@@ -180,17 +185,19 @@ follows:
     splitting exists.
 6.  **One WireGuard key pair per node, generated locally, published through
     the core.** The key pair is created on first start and persisted in the
-    state directory beside the AS keys; it never appears in the
-    configuration file. During enrollment — and re-enrollment — a node
-    publishes its public key, gateway port, and overlay subnet to the core
-    over the SCION-native channel, where the peer's verified certificate
-    chain identifies the publishing ISD-AS; a node cannot publish for
-    another. The core stores the directory beside the trust material and
-    serves it to every node, which refreshes it periodically and creates
-    tunnels for peers as they appear. The core never generates or holds a
-    private WireGuard key: issuing private keys would let it read all
-    node-to-node traffic silently, a trust regression the certificate
-    enrollment flow (CSRs from locally generated keys) deliberately avoids.
+    application's own state, apart from the AS keys; it never appears in
+    the configuration file. The gateway publishes its public key, gateway
+    port, and overlay subnet to the core over its own authenticated
+    channel — presenting the node's certificate chain, verified against
+    the TRC, so the publishing ISD-AS is identified and a node cannot
+    publish for another — on a cadence it owns, beginning once enrollment
+    has produced the chain. The core node's gateway application stores the
+    directory in its own store and serves it to every node, which refreshes
+    it periodically and creates tunnels for peers as they appear. The core
+    never generates or holds a private WireGuard key: issuing private keys
+    would let it read all node-to-node traffic silently, a trust regression
+    the certificate enrollment flow (CSRs from locally generated keys)
+    deliberately avoids.
 7.  **SCION remains a pure forwarding layer.** The node-to-node protection
     the mesh provides is an application choosing to protect itself, not a
     network service: WireGuard is the gateway's transport, and its
@@ -210,20 +217,15 @@ follows:
     and SCION header stacks fits a standard 1500-byte MTU, enforced by the
     router.
 
-Delivery is staged: the kernel-forwarding variant (proposal 0005) brings up
-the mesh, host termination, and the directory with the operating system as a
-temporary forwarding engine; the in-process router and the netstack egress
-replace it, touching neither hosts, nor the mesh, nor the directory.
-
 ### Positive consequences
 
 *   Any host with a standard WireGuard client can use CION and choose its
     path by choosing which of its provisioned keys it sends with; no SCION
     software is ever installed on a host, and one UDP port serves everyone.
 *   The single binary runs unprivileged — no TUN device, no
-    network-administration capability, nothing to provision and no degraded
-    mode for missing privileges — deployable anywhere an unprivileged
-    process runs, containers and shared hosts included.
+    network-administration capability, nothing to provision — deployable
+    anywhere an unprivileged process runs, containers and shared hosts
+    included.
 *   The node's new code is device lifecycle, the SCION transport, directory
     plumbing, an overlay destination table, and the exit's flow splice;
     WireGuard, gVisor's netstack, and the operating system's outbound
@@ -237,9 +239,10 @@ replace it, touching neither hosts, nor the mesh, nor the directory.
     protocol of our own.
 *   Peer discovery is the core's directory: a new node's tunnel reaches every
     node without any operator copying keys or subnets between machines.
-*   The gateway introduces no new trust anchor: keys are local state beside
-    the AS keys, publishing is authenticated by the TRC-anchored control
-    channel, and the directory rides the existing trust database pattern.
+*   The gateway introduces no new trust anchor: keys are the application's
+    own local state, publishing is authenticated by the node's TRC-anchored
+    certificate chain over the gateway's own channel, and the directory
+    rides the application's own store and channel.
 *   The data plane, the SCION transport, and the provider are reused
     unchanged.
 
@@ -271,7 +274,7 @@ replace it, touching neither hosts, nor the mesh, nor the directory.
 *   Flow state at the exit ties a flow to one exit: mid-flow exit switching
     or exit failure drops the flow.
 *   One path at a time per destination: diversity exists across exits
-    (ports), not within one exit's traffic.
+    (keys), not within one exit's traffic.
 
 ## Pros and cons of the options
 
