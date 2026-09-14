@@ -1,7 +1,7 @@
 # Serve Endhosts with a WireGuard Gateway
 
 *   Status: accepted
-*   Date: 2026-09-12
+*   Date: 2026-09-13
 
 [TOC]
 
@@ -22,8 +22,8 @@ ADR-0004 drew its scope boundary exactly here: endhost-facing path exposure
 was deferred to "a follow-up consuming the same provider," with the data plane
 needing no change. The provider now exists. This ADR decides how endhosts
 obtain paths, how plain hosts without any SCION knowledge reach the network,
-what carries their traffic between nodes, and how the resulting key material
-is distributed.
+what carries their traffic between nodes, what forwards it between the
+tunnels, and how the resulting key material is distributed.
 
 ## Decision drivers
 
@@ -33,13 +33,16 @@ is distributed.
 *   **Path Choice for Clients:** Choosing a path — through a different
     operator, a different region — must be an action the endhost can take;
     which choices exist to choose among is the operator's to provision.
-*   **Implementation Economy:** Where the operating system already forwards,
-    routes, and translates packets, the node must not reimplement it in
-    userspace. Custom code is reserved for what only CION has: SCION paths.
+*   **Implementation Economy:** Proven components are consumed, not
+    reimplemented: WireGuard for tunnels, gVisor's netstack for flow
+    termination. What the node writes is a destination table and a splice —
+    not a TCP/IP stack, not a packet NAT. Custom logic is reserved for what
+    only CION has: SCION paths.
 *   **Almost-Zero Config and Single Binary:** No new daemon, no per-host
     SCION setup, no secrets in the configuration file, no per-peer tunnel
     configuration copied between operators; the gateway lives in the CION
-    binary like everything else.
+    binary like everything else, and runs unprivileged — no TUN devices, no
+    network-administration capabilities.
 *   **SCION as a Pure Forwarding Layer:** SCION forwards packets; it does not
     protect them. Protection is an end-to-end concern of the application
     riding the network. The network layer assumes no protection role and
@@ -105,13 +108,23 @@ How WireGuard key material is distributed:
 *   **Static Configuration:** Every operator configures every peer's public
     key by hand.
 
+What forwards between the tunnels:
+
+*   **Kernel TUNs and Policy Routing:** Every device sits on a kernel TUN;
+    the node provisions addresses, per-exit routing tables and rules, IP
+    forwarding, and nftables masquerading.
+*   **In-Process Routing with Netstack Egress:** Devices sit on in-process
+    packet pipes; a destination table routes the overlay, and exits proxy
+    internet flows through gVisor's netstack.
+
 ## Decision outcome
 
 Chosen options: an **in-process path library**, an **embedded WireGuard
 gateway** built as a **node-to-node mesh over SCION** with **one shared
 host-facing port, the peer's key selecting its exit**, key material
-**generated locally and published through a core-served directory** —
-realized as follows:
+**generated locally and published through a core-served directory**, and
+**forwarding in-process with netstack-serviced egress** — realized as
+follows:
 
 1.  **The path library is the provider seam, not a new abstraction.**
     `controlplane.SCIONConn` already carries datagrams over provider-supplied
@@ -130,15 +143,20 @@ realized as follows:
     SCION socket on a fixed gateway port serves all of a node's mesh devices;
     an incoming datagram is delivered to whichever device holds the sender's
     public key as a peer, so the peer lookup demultiplexes the shared socket.
-3.  **The operating system forwards between tunnels.** Each device sits on a
-    kernel TUN. Routes for remote overlay subnets point at their tunnels, so
-    overlay traffic between nodes is kernel forwarding; an egress node
-    enables IP forwarding and masquerades overlay traffic to the public
-    internet, so exit traffic and its conntracked replies are kernel
-    forwarding too. The node provisions TUN devices, addresses, routes,
-    forwarding, and NAT rules itself, and logs the exact commands as
-    instructions where it lacks the privileges to run them. The gateway
-    implements no routing, address translation, or flow table of its own.
+3.  **The gateway forwards in userspace; the node holds no kernel state.**
+    Mesh and host devices sit on in-process packet pipes instead of kernel
+    TUNs, and an in-process router moves packets between them: each host
+    peer's /32 goes to its host device, each directory peer's subnet to its
+    mesh device — longest prefix first — and everything else to the exit
+    whose device decrypted the packet. Internet egress is flow-level
+    proxying through gVisor's netstack: the exit terminates TCP flows — the
+    host completes its handshake with the exit — and splices each to an
+    outbound connection from the node's own address; a UDP flow maps to one
+    socket with the addresses rewritten, the socket itself the reply
+    mapping; echo ICMP is relayed per identifier; other IP protocols are
+    dropped. Flow state is bounded and expired by idleness. A gateway node
+    needs nothing but unprivileged UDP sockets — no TUN device, no
+    network-administration capability, nothing provisioned.
 4.  **Hosts are standard WireGuard clients of their local node on one shared
     port, one device per exit.** All host-facing devices share a single
     public UDP port and the node's key pair; a datagram arriving on it is
@@ -152,14 +170,14 @@ realized as follows:
     address, the shared port — and chooses among its provisioned exits by
     choosing which of its keys it sends with; a host needing several exits
     at once runs several interfaces, one key each.
-5.  **Exit selection is policy routing.** Traffic decrypted by the
-    host-facing device of exit X enters the kernel on that device's TUN and
-    is routed by a per-exit routing table whose default route points at the
-    tunnel to exit X; remote overlay subnets, as longer prefixes, win over
-    the default and go direct. WireGuard's longest-prefix peer selection
-    carries the same rule inside each tunnel. Replies find their device by
-    the peer's address: each host address is configured on exactly one
-    exit's device and routed by its /32, so no subnet splitting exists.
+5.  **Exit selection is the router's default.** Traffic decrypted by the
+    host-facing device of exit X is routed by the in-process table, whose
+    default points at the tunnel to X; remote overlay subnets, as longer
+    prefixes, win over the default and go direct. WireGuard's
+    longest-prefix peer selection carries the same rule inside each tunnel.
+    Replies find their device by the peer's address: each host address is
+    configured under exactly one exit's device as its /32, so no subnet
+    splitting exists.
 6.  **One WireGuard key pair per node, generated locally, published through
     the core.** The key pair is created on first start and persisted in the
     state directory beside the AS keys; it never appears in the
@@ -182,24 +200,38 @@ realized as follows:
     Hosts that want protection beyond their access tunnel and the mesh have
     the same option every internet application has: end-to-end protection of
     their own.
-8.  **Scope stays minimal.** Only host-initiated flows exist (the NAT
-    returns replies; nothing is published to the internet); host membership
-    is the static per-node peer list, not control-plane distribution; one
-    path per destination at a time — the freshest, resolved from local state,
-    refreshed on expiry or error — with no policy engine, following
-    ADR-0004. Overlay addressing is IPv4; the tunnel MTU is a code constant
-    sized so an inner packet plus the WireGuard, UDP/IP, and SCION header
-    stacks fits a standard 1500-byte MTU.
+8.  **Scope stays minimal.** Only host-initiated flows exist (the exit's
+    flow proxying returns replies; nothing is published to the internet);
+    host membership is the static per-node peer list, not control-plane
+    distribution; one path per destination at a time — the freshest,
+    resolved from local state, refreshed on expiry or error — with no policy
+    engine, following ADR-0004. Overlay addressing is IPv4; the tunnel MTU
+    is a code constant sized so an inner packet plus the WireGuard, UDP/IP,
+    and SCION header stacks fits a standard 1500-byte MTU, enforced by the
+    router.
+
+Delivery is staged: the kernel-forwarding variant (proposal 0005) brings up
+the mesh, host termination, and the directory with the operating system as a
+temporary forwarding engine; the in-process router and the netstack egress
+replace it, touching neither hosts, nor the mesh, nor the directory.
 
 ### Positive consequences
 
 *   Any host with a standard WireGuard client can use CION and choose its
     path by choosing which of its provisioned keys it sends with; no SCION
     software is ever installed on a host, and one UDP port serves everyone.
-*   Nearly all forwarding, return-path, and NAT behavior is the operating
-    system's, proven at internet scale, instead of bespoke gateway logic; the
-    node's new code is device lifecycle, the SCION transport, directory
-    plumbing, and OS provisioning.
+*   The single binary runs unprivileged — no TUN device, no
+    network-administration capability, nothing to provision and no degraded
+    mode for missing privileges — deployable anywhere an unprivileged
+    process runs, containers and shared hosts included.
+*   The node's new code is device lifecycle, the SCION transport, directory
+    plumbing, an overlay destination table, and the exit's flow splice;
+    WireGuard, gVisor's netstack, and the operating system's outbound
+    sockets do the rest.
+*   Forwarding is entirely in-process, so tests exercise the production
+    router and proxy rather than a simulated kernel leg; and netstack's
+    endpoint mode leaves the node itself able to join the overlay later —
+    in-process applications with real sockets over CION paths.
 *   WireGuard supplies on the mesh leg exactly what SCION deliberately does
     not: authenticated, confidential tunnels between nodes, with no new
     protocol of our own.
@@ -213,9 +245,16 @@ realized as follows:
 
 ### Negative consequences
 
-*   Every node needs a privileged TUN device and `CAP_NET_ADMIN` — not just
-    egress nodes — and test environments must provide them or skip the tests
-    that need them.
+*   TCP through an exit is two spliced connections, not one: RTT, congestion
+    control, and retransmission are per leg, and the two halves need not
+    agree on MTU or options.
+*   Only TCP, UDP, and echo ICMP traverse an exit; other IP protocols are
+    dropped, and other ICMP is best-effort.
+*   The exit's flow bounds, idle expiry, and echo mapping are CION's code —
+    a new bug surface where a NAT appliance's was — and about 4 MB of
+    vendored gVisor joins the module.
+*   Overlay traffic leaves the operating system's tooling behind: no
+    `tcpdump` or `iptables` on gateway devices, counters and logs instead.
 *   The access node terminates its hosts' tunnels and can read their
     traffic; the mesh protects only the node-to-node leg. Both are inherent
     to the model; applications with stronger needs protect themselves
@@ -229,8 +268,8 @@ realized as follows:
     needs a new key provisioned on the node.
 *   Host membership is manual: every host public key is configured on its
     node by hand until a later milestone distributes it.
-*   NAT state ties flows to one exit: mid-flow exit switching or exit
-    failure drops the flow.
+*   Flow state at the exit ties a flow to one exit: mid-flow exit switching
+    or exit failure drops the flow.
 *   One path at a time per destination: diversity exists across exits
     (ports), not within one exit's traffic.
 
@@ -275,17 +314,16 @@ realized as follows:
 *   Good, because wireguard-go embeds as a library with a swappable
     transport, and its datagram orientation tolerates path rotation and
     reordering under an established flow.
-*   Bad, because the node must run and configure real devices and TUNs
-    instead of just sockets.
+*   Bad, because the node owns device lifecycle and a forwarding story, not
+    just sockets.
 
 ### Node-to-node mesh over SCION
 
-*   Good, because tunnels on TUN devices hand routing, return paths, and NAT
-    to the kernel: the largest part of a gateway's work disappears.
 *   Good, because peer authentication between nodes is WireGuard's, not a
     new mechanism beside the TRC-anchored control plane.
-*   Bad, because every node needs TUN privileges, and a device per peer and
-    per exit multiplies state.
+*   Good, because handshakes, retransmit, roaming, and replay filtering are
+    inherited from WireGuard rather than designed here.
+*   Bad, because a device per peer and per exit multiplies state.
 
 ### Host-to-exit end-to-end
 
@@ -300,10 +338,9 @@ realized as follows:
 
 *   Good, because it keeps origin nodes unprivileged and adds no
     node-to-node crypto to explain.
-*   Bad, because the node must itself route between the decrypted traffic
-    and the SCION transport — learned overlay routes, per-exit forwarders,
-    reply mapping — exactly the bespoke forwarding this ADR's economy driver
-    exists to avoid.
+*   Bad, because node-to-node datagrams would ride SCION bare — no peer
+    authentication, roaming, or replay filtering — and the node would owe
+    all of that machinery itself instead of inheriting WireGuard's.
 
 ### Peer key per exit on a shared port
 
@@ -322,7 +359,7 @@ realized as follows:
 *   Good, because a port is the one selector every WireGuard client already
     has, and any offered exit is usable with no per-host provisioning.
 *   Good, because it needs no protocol: the mapping lives in the node's
-    configuration and the kernel's per-exit routing tables.
+    configuration and the router's per-exit defaults.
 *   Bad, because the node opens and documents one port per exit, and reply
     routing needs the overlay subnet split into one source range per exit.
 
@@ -365,3 +402,30 @@ realized as follows:
 *   Bad, because every membership change copies keys and subnets between
     operators by hand, the manual ceremony ADR-0003 removed for certificates
     and CION exists to avoid.
+
+### Kernel TUNs and policy routing
+
+*   Good, because the operating system's forwarding and NAT are proven at
+    internet scale, and overlay traffic stays visible to the system's own
+    tools — `tcpdump`, `iptables` — on the gateway devices.
+*   Good, because the gateway itself implements no forwarding at all.
+*   Bad, because every node needs a TUN device and `CAP_NET_ADMIN`, and the
+    node must provision — or instruct an operator to provision — addresses,
+    routing tables, rules, forwarding, and NAT, with a degraded mode
+    wherever the privileges are missing.
+
+### In-process routing with netstack egress
+
+*   Good, because the node runs unprivileged and provisions nothing: the
+    almost-zero-config driver is complete even where no
+    network-administration privilege exists.
+*   Good, because the overlay router is a destination table rather than an
+    IP stack, and the internet leg terminates flows in a reusable userspace
+    stack rather than a bespoke packet NAT.
+*   Good, because the forwarding path is entirely in-process and therefore
+    entirely testable.
+*   Bad, because TCP through an exit is two spliced connections,
+    non-TCP/UDP protocols are dropped, and flow bounds, expiry, and ICMP
+    handling become the node's own code.
+*   Bad, because overlay traffic leaves the operating system's tooling
+    behind, and about 4 MB of vendored gVisor joins the module.
