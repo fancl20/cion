@@ -1,5 +1,6 @@
-// Package bbolt is the gateway directory's bbolt store, following the trust
-// DB's pattern: a small file, one bucket, values marshaled beside their keys.
+// Package bbolt is the application directory's bbolt store, following the
+// trust DB's pattern: a small file, one bucket, values marshaled beside
+// their keys.
 package bbolt
 
 import (

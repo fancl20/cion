@@ -2,9 +2,10 @@ package wireguard
 
 import "sync/atomic"
 
-// counters are the gateway's exposure of its overlay: the operating system's
-// tooling cannot see in-process forwarding, so the gateway counts and logs
-// instead (ADR-0005). Every counter is a monotonic total since start.
+// counters are the application's exposure of its overlay: the operating
+// system's tooling cannot see in-process forwarding, so the application
+// counts and logs instead (ADR-0005). Every counter is a monotonic total
+// since start.
 type counters struct {
 	// droppedPackets counts packets a full pipe or an oversized inner packet
 	// dropped.

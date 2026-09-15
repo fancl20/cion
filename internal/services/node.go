@@ -52,7 +52,7 @@ type node struct {
 	allowAS      map[addr.IA]bool
 	services     *controlplane.Services
 	responder    *ping.Responder
-	gateway      *wireguard.Gateway
+	wireguard    *wireguard.App
 }
 
 // identity is the node's decoded self: what every assembly phase needs
@@ -86,7 +86,7 @@ func setupNode(ctx context.Context, cfg *Config, opts DataplaneOptions) (n *node
 	if err = n.setupControlPlane(ctx); err != nil {
 		return n, err
 	}
-	if err = n.setupGateway(); err != nil {
+	if err = n.setupWireguard(); err != nil {
 		return n, err
 	}
 	return n, nil
@@ -97,8 +97,8 @@ func setupNode(ctx context.Context, cfg *Config, opts DataplaneOptions) (n *node
 // point setupNode can fail. The loops' own sockets (endpoint, responder,
 // clients) close with their owners when the process exits.
 func (n *node) Close() {
-	if n.gateway != nil {
-		n.gateway.Close()
+	if n.wireguard != nil {
+		n.wireguard.Close()
 	}
 	if n.peerClt != nil {
 		n.peerClt.Close() //nolint:errcheck
@@ -162,9 +162,9 @@ func (n *node) start(ctx context.Context) {
 		})
 	}
 	slog.Info("Serving control endpoint", "port", controlplane.EndpointPort)
-	if n.gateway != nil {
-		runBackground(ctx, "gateway", func(ctx context.Context) error {
-			return n.gateway.Run(ctx)
+	if n.wireguard != nil {
+		runBackground(ctx, "wireguard", func(ctx context.Context) error {
+			return n.wireguard.Run(ctx)
 		})
 	}
 }

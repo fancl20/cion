@@ -2,9 +2,9 @@
 // versions:
 // 	protoc-gen-go v1.36.11
 // 	protoc        (unknown)
-// source: proto/gateway/v1/directory.proto
+// source: proto/wireguard/v1/directory.proto
 
-package gatewayv1
+package wireguardv1
 
 import (
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
@@ -21,7 +21,7 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
-// Entry is one gateway's publication: everything another node needs to
+// Entry is one node's publication: everything another node needs to
 // establish a mesh tunnel to it.
 type Entry struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
@@ -38,7 +38,7 @@ type Entry struct {
 
 func (x *Entry) Reset() {
 	*x = Entry{}
-	mi := &file_proto_gateway_v1_directory_proto_msgTypes[0]
+	mi := &file_proto_wireguard_v1_directory_proto_msgTypes[0]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -50,7 +50,7 @@ func (x *Entry) String() string {
 func (*Entry) ProtoMessage() {}
 
 func (x *Entry) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_gateway_v1_directory_proto_msgTypes[0]
+	mi := &file_proto_wireguard_v1_directory_proto_msgTypes[0]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -63,7 +63,7 @@ func (x *Entry) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Entry.ProtoReflect.Descriptor instead.
 func (*Entry) Descriptor() ([]byte, []int) {
-	return file_proto_gateway_v1_directory_proto_rawDescGZIP(), []int{0}
+	return file_proto_wireguard_v1_directory_proto_rawDescGZIP(), []int{0}
 }
 
 func (x *Entry) GetIsdAs() uint64 {
@@ -98,7 +98,7 @@ type PublishRequest struct {
 
 func (x *PublishRequest) Reset() {
 	*x = PublishRequest{}
-	mi := &file_proto_gateway_v1_directory_proto_msgTypes[1]
+	mi := &file_proto_wireguard_v1_directory_proto_msgTypes[1]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -110,7 +110,7 @@ func (x *PublishRequest) String() string {
 func (*PublishRequest) ProtoMessage() {}
 
 func (x *PublishRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_gateway_v1_directory_proto_msgTypes[1]
+	mi := &file_proto_wireguard_v1_directory_proto_msgTypes[1]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -123,7 +123,7 @@ func (x *PublishRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PublishRequest.ProtoReflect.Descriptor instead.
 func (*PublishRequest) Descriptor() ([]byte, []int) {
-	return file_proto_gateway_v1_directory_proto_rawDescGZIP(), []int{1}
+	return file_proto_wireguard_v1_directory_proto_rawDescGZIP(), []int{1}
 }
 
 func (x *PublishRequest) GetEntry() *Entry {
@@ -141,7 +141,7 @@ type PublishResponse struct {
 
 func (x *PublishResponse) Reset() {
 	*x = PublishResponse{}
-	mi := &file_proto_gateway_v1_directory_proto_msgTypes[2]
+	mi := &file_proto_wireguard_v1_directory_proto_msgTypes[2]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -153,7 +153,7 @@ func (x *PublishResponse) String() string {
 func (*PublishResponse) ProtoMessage() {}
 
 func (x *PublishResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_gateway_v1_directory_proto_msgTypes[2]
+	mi := &file_proto_wireguard_v1_directory_proto_msgTypes[2]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -166,7 +166,7 @@ func (x *PublishResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PublishResponse.ProtoReflect.Descriptor instead.
 func (*PublishResponse) Descriptor() ([]byte, []int) {
-	return file_proto_gateway_v1_directory_proto_rawDescGZIP(), []int{2}
+	return file_proto_wireguard_v1_directory_proto_rawDescGZIP(), []int{2}
 }
 
 type ListRequest struct {
@@ -177,7 +177,7 @@ type ListRequest struct {
 
 func (x *ListRequest) Reset() {
 	*x = ListRequest{}
-	mi := &file_proto_gateway_v1_directory_proto_msgTypes[3]
+	mi := &file_proto_wireguard_v1_directory_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -189,7 +189,7 @@ func (x *ListRequest) String() string {
 func (*ListRequest) ProtoMessage() {}
 
 func (x *ListRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_gateway_v1_directory_proto_msgTypes[3]
+	mi := &file_proto_wireguard_v1_directory_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -202,12 +202,12 @@ func (x *ListRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListRequest.ProtoReflect.Descriptor instead.
 func (*ListRequest) Descriptor() ([]byte, []int) {
-	return file_proto_gateway_v1_directory_proto_rawDescGZIP(), []int{3}
+	return file_proto_wireguard_v1_directory_proto_rawDescGZIP(), []int{3}
 }
 
 type ListResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// entries holds one entry per publishing gateway.
+	// entries holds one entry per publishing node.
 	Entries       []*Entry `protobuf:"bytes,1,rep,name=entries,proto3" json:"entries,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -215,7 +215,7 @@ type ListResponse struct {
 
 func (x *ListResponse) Reset() {
 	*x = ListResponse{}
-	mi := &file_proto_gateway_v1_directory_proto_msgTypes[4]
+	mi := &file_proto_wireguard_v1_directory_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -227,7 +227,7 @@ func (x *ListResponse) String() string {
 func (*ListResponse) ProtoMessage() {}
 
 func (x *ListResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_gateway_v1_directory_proto_msgTypes[4]
+	mi := &file_proto_wireguard_v1_directory_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -240,7 +240,7 @@ func (x *ListResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListResponse.ProtoReflect.Descriptor instead.
 func (*ListResponse) Descriptor() ([]byte, []int) {
-	return file_proto_gateway_v1_directory_proto_rawDescGZIP(), []int{4}
+	return file_proto_wireguard_v1_directory_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *ListResponse) GetEntries() []*Entry {
@@ -250,54 +250,53 @@ func (x *ListResponse) GetEntries() []*Entry {
 	return nil
 }
 
-var File_proto_gateway_v1_directory_proto protoreflect.FileDescriptor
+var File_proto_wireguard_v1_directory_proto protoreflect.FileDescriptor
 
-const file_proto_gateway_v1_directory_proto_rawDesc = "" +
+const file_proto_wireguard_v1_directory_proto_rawDesc = "" +
 	"\n" +
-	" proto/gateway/v1/directory.proto\x12\n" +
-	"gateway.v1\"d\n" +
+	"\"proto/wireguard/v1/directory.proto\x12\fwireguard.v1\"d\n" +
 	"\x05Entry\x12\x15\n" +
 	"\x06isd_as\x18\x01 \x01(\x04R\x05isdAs\x12\x1d\n" +
 	"\n" +
 	"public_key\x18\x02 \x01(\fR\tpublicKey\x12%\n" +
-	"\x0eoverlay_subnet\x18\x03 \x01(\tR\roverlaySubnet\"9\n" +
-	"\x0ePublishRequest\x12'\n" +
-	"\x05entry\x18\x01 \x01(\v2\x11.gateway.v1.EntryR\x05entry\"\x11\n" +
+	"\x0eoverlay_subnet\x18\x03 \x01(\tR\roverlaySubnet\";\n" +
+	"\x0ePublishRequest\x12)\n" +
+	"\x05entry\x18\x01 \x01(\v2\x13.wireguard.v1.EntryR\x05entry\"\x11\n" +
 	"\x0fPublishResponse\"\r\n" +
-	"\vListRequest\";\n" +
-	"\fListResponse\x12+\n" +
-	"\aentries\x18\x01 \x03(\v2\x11.gateway.v1.EntryR\aentries2\x91\x01\n" +
-	"\x10DirectoryService\x12B\n" +
-	"\aPublish\x12\x1a.gateway.v1.PublishRequest\x1a\x1b.gateway.v1.PublishResponse\x129\n" +
-	"\x04List\x12\x17.gateway.v1.ListRequest\x1a\x18.gateway.v1.ListResponseB4Z2github.com/fancl20/cion/proto/gateway/v1;gatewayv1b\x06proto3"
+	"\vListRequest\"=\n" +
+	"\fListResponse\x12-\n" +
+	"\aentries\x18\x01 \x03(\v2\x13.wireguard.v1.EntryR\aentries2\x99\x01\n" +
+	"\x10DirectoryService\x12F\n" +
+	"\aPublish\x12\x1c.wireguard.v1.PublishRequest\x1a\x1d.wireguard.v1.PublishResponse\x12=\n" +
+	"\x04List\x12\x19.wireguard.v1.ListRequest\x1a\x1a.wireguard.v1.ListResponseB8Z6github.com/fancl20/cion/proto/wireguard/v1;wireguardv1b\x06proto3"
 
 var (
-	file_proto_gateway_v1_directory_proto_rawDescOnce sync.Once
-	file_proto_gateway_v1_directory_proto_rawDescData []byte
+	file_proto_wireguard_v1_directory_proto_rawDescOnce sync.Once
+	file_proto_wireguard_v1_directory_proto_rawDescData []byte
 )
 
-func file_proto_gateway_v1_directory_proto_rawDescGZIP() []byte {
-	file_proto_gateway_v1_directory_proto_rawDescOnce.Do(func() {
-		file_proto_gateway_v1_directory_proto_rawDescData = protoimpl.X.CompressGZIP(unsafe.Slice(unsafe.StringData(file_proto_gateway_v1_directory_proto_rawDesc), len(file_proto_gateway_v1_directory_proto_rawDesc)))
+func file_proto_wireguard_v1_directory_proto_rawDescGZIP() []byte {
+	file_proto_wireguard_v1_directory_proto_rawDescOnce.Do(func() {
+		file_proto_wireguard_v1_directory_proto_rawDescData = protoimpl.X.CompressGZIP(unsafe.Slice(unsafe.StringData(file_proto_wireguard_v1_directory_proto_rawDesc), len(file_proto_wireguard_v1_directory_proto_rawDesc)))
 	})
-	return file_proto_gateway_v1_directory_proto_rawDescData
+	return file_proto_wireguard_v1_directory_proto_rawDescData
 }
 
-var file_proto_gateway_v1_directory_proto_msgTypes = make([]protoimpl.MessageInfo, 5)
-var file_proto_gateway_v1_directory_proto_goTypes = []any{
-	(*Entry)(nil),           // 0: gateway.v1.Entry
-	(*PublishRequest)(nil),  // 1: gateway.v1.PublishRequest
-	(*PublishResponse)(nil), // 2: gateway.v1.PublishResponse
-	(*ListRequest)(nil),     // 3: gateway.v1.ListRequest
-	(*ListResponse)(nil),    // 4: gateway.v1.ListResponse
+var file_proto_wireguard_v1_directory_proto_msgTypes = make([]protoimpl.MessageInfo, 5)
+var file_proto_wireguard_v1_directory_proto_goTypes = []any{
+	(*Entry)(nil),           // 0: wireguard.v1.Entry
+	(*PublishRequest)(nil),  // 1: wireguard.v1.PublishRequest
+	(*PublishResponse)(nil), // 2: wireguard.v1.PublishResponse
+	(*ListRequest)(nil),     // 3: wireguard.v1.ListRequest
+	(*ListResponse)(nil),    // 4: wireguard.v1.ListResponse
 }
-var file_proto_gateway_v1_directory_proto_depIdxs = []int32{
-	0, // 0: gateway.v1.PublishRequest.entry:type_name -> gateway.v1.Entry
-	0, // 1: gateway.v1.ListResponse.entries:type_name -> gateway.v1.Entry
-	1, // 2: gateway.v1.DirectoryService.Publish:input_type -> gateway.v1.PublishRequest
-	3, // 3: gateway.v1.DirectoryService.List:input_type -> gateway.v1.ListRequest
-	2, // 4: gateway.v1.DirectoryService.Publish:output_type -> gateway.v1.PublishResponse
-	4, // 5: gateway.v1.DirectoryService.List:output_type -> gateway.v1.ListResponse
+var file_proto_wireguard_v1_directory_proto_depIdxs = []int32{
+	0, // 0: wireguard.v1.PublishRequest.entry:type_name -> wireguard.v1.Entry
+	0, // 1: wireguard.v1.ListResponse.entries:type_name -> wireguard.v1.Entry
+	1, // 2: wireguard.v1.DirectoryService.Publish:input_type -> wireguard.v1.PublishRequest
+	3, // 3: wireguard.v1.DirectoryService.List:input_type -> wireguard.v1.ListRequest
+	2, // 4: wireguard.v1.DirectoryService.Publish:output_type -> wireguard.v1.PublishResponse
+	4, // 5: wireguard.v1.DirectoryService.List:output_type -> wireguard.v1.ListResponse
 	4, // [4:6] is the sub-list for method output_type
 	2, // [2:4] is the sub-list for method input_type
 	2, // [2:2] is the sub-list for extension type_name
@@ -305,26 +304,26 @@ var file_proto_gateway_v1_directory_proto_depIdxs = []int32{
 	0, // [0:2] is the sub-list for field type_name
 }
 
-func init() { file_proto_gateway_v1_directory_proto_init() }
-func file_proto_gateway_v1_directory_proto_init() {
-	if File_proto_gateway_v1_directory_proto != nil {
+func init() { file_proto_wireguard_v1_directory_proto_init() }
+func file_proto_wireguard_v1_directory_proto_init() {
+	if File_proto_wireguard_v1_directory_proto != nil {
 		return
 	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
-			RawDescriptor: unsafe.Slice(unsafe.StringData(file_proto_gateway_v1_directory_proto_rawDesc), len(file_proto_gateway_v1_directory_proto_rawDesc)),
+			RawDescriptor: unsafe.Slice(unsafe.StringData(file_proto_wireguard_v1_directory_proto_rawDesc), len(file_proto_wireguard_v1_directory_proto_rawDesc)),
 			NumEnums:      0,
 			NumMessages:   5,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
-		GoTypes:           file_proto_gateway_v1_directory_proto_goTypes,
-		DependencyIndexes: file_proto_gateway_v1_directory_proto_depIdxs,
-		MessageInfos:      file_proto_gateway_v1_directory_proto_msgTypes,
+		GoTypes:           file_proto_wireguard_v1_directory_proto_goTypes,
+		DependencyIndexes: file_proto_wireguard_v1_directory_proto_depIdxs,
+		MessageInfos:      file_proto_wireguard_v1_directory_proto_msgTypes,
 	}.Build()
-	File_proto_gateway_v1_directory_proto = out.File
-	file_proto_gateway_v1_directory_proto_goTypes = nil
-	file_proto_gateway_v1_directory_proto_depIdxs = nil
+	File_proto_wireguard_v1_directory_proto = out.File
+	file_proto_wireguard_v1_directory_proto_goTypes = nil
+	file_proto_wireguard_v1_directory_proto_depIdxs = nil
 }

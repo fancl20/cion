@@ -1,5 +1,5 @@
-// Package dbtest holds the gateway directory store's contract tests, shared
-// by every implementation the way the trust DB's are.
+// Package dbtest holds the application directory store's contract tests,
+// shared by every implementation the way the trust DB's are.
 package dbtest
 
 import (

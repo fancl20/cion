@@ -205,7 +205,7 @@ func TestMeshSocketRefreshesFailedSend(t *testing.T) {
 }
 
 // TestMeshBindEndpointRoundTrip checks the IPC string form flows through
-// ParseEndpoint: the peer named by ISD-AS and the gateway service, the
+// ParseEndpoint: the peer named by ISD-AS and the wireguard service, the
 // malformed forms refused.
 func TestMeshBindEndpointRoundTrip(t *testing.T) {
 	socket, _ := testMeshSocket(t, &memDB{})
@@ -219,13 +219,14 @@ func TestMeshBindEndpointRoundTrip(t *testing.T) {
 	if !ok {
 		t.Fatalf("endpoint of type %T", ep)
 	}
-	if !peer.addr.IA.Equal(ia) || peer.addr.Service != SvcGateway {
-		t.Errorf("endpoint = %v, want %s,%s", peer.addr, ia, SvcGateway)
+	if !peer.addr.IA.Equal(ia) || peer.addr.Service != SvcWireguard {
+		t.Errorf("endpoint = %v, want %s,%s", peer.addr, ia, SvcWireguard)
 	}
 	for _, bad := range []string{
 		"no-comma",
-		"nope,gateway",           // malformed ISD-AS
+		"nope,wireguard",         // malformed ISD-AS
 		ia.String(),              // no service
+		ia.String() + ",gateway", // the retired service name
 		ia.String() + ",bogus",   // unknown service
 		ia.String() + ",1.2.3.4", // an underlay form names no service
 	} {
@@ -236,9 +237,9 @@ func TestMeshBindEndpointRoundTrip(t *testing.T) {
 	// The cookie MAC's endpoint digest carries the service value in place of
 	// the address, distinguishing peers the way the underlay form did.
 	digest := peer.DstToBytes()
-	svc := uint16(SvcGateway)
+	svc := uint16(SvcWireguard)
 	if len(digest) != 10 || digest[8] != byte(svc>>8) || digest[9] != byte(svc) {
-		t.Errorf("digest = %x, want the ISD-AS and the service value %04x", digest, SvcGateway)
+		t.Errorf("digest = %x, want the ISD-AS and the service value %04x", digest, SvcWireguard)
 	}
 	other, err := bind.ParseEndpoint(endpointString(addr.MustIAFrom(20, 0xff0000000052)))
 	if err != nil {

@@ -1,7 +1,7 @@
 // Package testnetwork is the integration tests' topology harness: the fully
 // wired nodes of pkg/controlplane/network_test.go's harness, extended per
-// proposal 0006 with the WireGuard gateway application, moved where the
-// gateway's own integration tests can assemble beside them — the harness
+// proposal 0006 with the WireGuard application, moved where the
+// application's own integration tests can assemble beside them — the harness
 // imports the control plane, so the control plane's package cannot host it.
 package testnetwork
 
@@ -29,7 +29,7 @@ import (
 
 	"github.com/fancl20/cion/pkg/apps/ping"
 	"github.com/fancl20/cion/pkg/apps/wireguard"
-	gatewaybbolt "github.com/fancl20/cion/pkg/apps/wireguard/impl/bbolt"
+	wireguardbbolt "github.com/fancl20/cion/pkg/apps/wireguard/impl/bbolt"
 	"github.com/fancl20/cion/pkg/controlplane"
 	"github.com/fancl20/cion/pkg/dataplane"
 	"github.com/fancl20/cion/pkg/pathdb"
@@ -45,11 +45,12 @@ const (
 	Propagation  = 100 * time.Millisecond
 	Registration = 200 * time.Millisecond
 	EnrollRetry  = 100 * time.Millisecond
-	// GatewayCadence paces the gateway's publication and directory refresh.
-	GatewayPublish = 200 * time.Millisecond
-	GatewayRefresh = 200 * time.Millisecond
-	GatewayRetry   = 100 * time.Millisecond
-	TestTimeout    = 20 * time.Second
+	// WireguardCadence paces the application's publication and directory
+	// refresh.
+	WireguardPublish = 200 * time.Millisecond
+	WireguardRefresh = 200 * time.Millisecond
+	WireguardRetry   = 100 * time.Millisecond
+	TestTimeout      = 20 * time.Second
 )
 
 // TestDomain is the DNS identity of the core endpoint in tests; its
@@ -61,7 +62,7 @@ var MACKey = []byte("0123456789abcdef")
 
 // Node is one fully-wired node of a test topology — the same components the
 // run command wires in internal/services: data plane, discovery, trust, the
-// control endpoint, the beaconer, and — when configured — the gateway
+// control endpoint, the beaconer, and — when configured — the WireGuard
 // application.
 type Node struct {
 	IA        addr.IA
@@ -78,7 +79,7 @@ type Node struct {
 	Provider  *scion.PathProvider
 	Lookup    *controlplane.LookupService
 	Discovery *controlplane.Discovery
-	Gateway   *wireguard.Gateway
+	Wireguard *wireguard.App
 	cancel    context.CancelFunc
 }
 
@@ -181,8 +182,9 @@ func NewWebPKI(t *testing.T) *WebPKI {
 	return &WebPKI{pool: pool, certFile: certFile, keyFile: keyFile}
 }
 
-// GatewayOptions configures a node's gateway application; nil runs none.
-type GatewayOptions struct {
+// WireguardOptions configures a node's WireGuard application; nil runs
+// none.
+type WireguardOptions struct {
 	// Subnet is the node's overlay subnet.
 	Subnet string
 	// Egress marks an internet exit.
@@ -210,8 +212,8 @@ type NodeConfig struct {
 	Core bool
 	// WPKI anchors the bootstrap channel's certificate.
 	WPKI *WebPKI
-	// Gateway starts the gateway application when set.
-	Gateway *GatewayOptions
+	// Wireguard starts the WireGuard application when set.
+	Wireguard *WireguardOptions
 }
 
 // StartNode brings up a node with the given configuration. The core serves
@@ -503,20 +505,20 @@ func StartNode(t *testing.T, cfg NodeConfig) *Node {
 		cancel:    cancel,
 	}
 
-	if cfg.Gateway != nil {
-		node.startGateway(t, ctx, *cfg.Gateway, stateDir, scionConn, coreRoute, controlAddr, provider)
+	if cfg.Wireguard != nil {
+		node.startWireguard(t, ctx, *cfg.Wireguard, stateDir, scionConn, coreRoute, controlAddr, provider)
 	}
 	return node
 }
 
-// startGateway starts the node's gateway application: the mesh transport,
-// the host devices behind their shared port, the router and egress, and the
-// directory — served by the core, published and fetched by everyone — per
-// the node assembly's own wiring.
-func (n *Node) startGateway(
+// startWireguard starts the node's WireGuard application: the mesh
+// transport, the host devices behind their shared port, the router and
+// egress, and the directory — served by the core, published and fetched by
+// everyone — per the node assembly's own wiring.
+func (n *Node) startWireguard(
 	t *testing.T,
 	ctx context.Context,
-	opts GatewayOptions,
+	opts WireguardOptions,
 	stateDir string,
 	scionConn func(uint16) *scion.Conn,
 	coreRoute func() *scion.Addr,
@@ -525,8 +527,8 @@ func (n *Node) startGateway(
 ) {
 
 	t.Helper()
-	gwState := filepath.Join(stateDir, "gateway")
-	gwCfg := wireguard.Config{
+	wgState := filepath.Join(stateDir, "wireguard")
+	wgCfg := wireguard.Config{
 		IA:         n.IA,
 		Subnet:     netip.MustParsePrefix(opts.Subnet),
 		ListenHost: controlAddr.Addr(),
@@ -534,7 +536,7 @@ func (n *Node) startGateway(
 		Egress:     opts.Egress,
 		Exits:      opts.Exits,
 		Peers:      opts.Peers,
-		StateDir:   gwState,
+		StateDir:   wgState,
 		Provider:   n.Provider,
 		Engine:     n.Engine,
 		NewConn: func() (*scion.Conn, error) {
@@ -546,25 +548,25 @@ func (n *Node) startGateway(
 		UnregisterSvc: func(svc addr.SVC, port uint16) error {
 			return provider.DelSvc(svc, addr.HostIP(controlAddr.Addr()), port)
 		},
-		PublishInterval: GatewayPublish,
-		RefreshInterval: GatewayRefresh,
-		PublishRetry:    GatewayRetry,
+		PublishInterval: WireguardPublish,
+		RefreshInterval: WireguardRefresh,
+		PublishRetry:    WireguardRetry,
 	}
 	if opts.ListenPort == 0 {
-		gwCfg.ListenPort = freeUDPPort(t)
+		wgCfg.ListenPort = freeUDPPort(t)
 	}
 	if n.CoreClt == nil {
 		// The core serves the directory from its own store.
-		if err := os.MkdirAll(gwState, 0o700); err != nil {
+		if err := os.MkdirAll(wgState, 0o700); err != nil {
 			t.Fatal(err)
 		}
-		store, err := gatewaybbolt.New(filepath.Join(gwState, "directory.db"), nil)
+		store, err := wireguardbbolt.New(filepath.Join(wgState, "directory.db"), nil)
 		if err != nil {
 			t.Fatal(err)
 		}
-		gwCfg.Store = store
+		wgCfg.Store = store
 	} else {
-		gwCfg.CoreRoute = func() *scion.Addr {
+		wgCfg.CoreRoute = func() *scion.Addr {
 			route := coreRoute()
 			if route == nil {
 				return nil
@@ -572,15 +574,15 @@ func (n *Node) startGateway(
 			return &scion.Addr{IA: route.IA, Service: wireguard.SvcDirectory, Path: route.Path}
 		}
 	}
-	gateway, err := wireguard.New(gwCfg)
+	app, err := wireguard.New(wgCfg)
 	if err != nil {
 		t.Fatal(err)
 	}
-	n.Gateway = gateway
+	n.Wireguard = app
 	go func() {
 		defer handlePanic()
-		if err := gateway.Run(ctx); err != nil {
-			t.Logf("gateway exited: %v", err)
+		if err := app.Run(ctx); err != nil {
+			t.Logf("wireguard exited: %v", err)
 		}
 	}()
 }

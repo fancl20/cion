@@ -29,7 +29,7 @@ const (
 	PublishRetry = 10 * time.Second
 )
 
-// Entry is one gateway's publication: everything another node needs to
+// Entry is one node's publication: everything another node needs to
 // establish a mesh tunnel to it. The ISD-AS comes from the authenticated
 // publisher's certificate chain, never from the claimed entry. A peer is its
 // ISD-AS, its key, and its subnet: the mesh transport is a SCION service
@@ -78,12 +78,12 @@ func (c storeDirectoryClient) List(ctx context.Context) ([]Entry, error) {
 // runPublish owns the application's publication cadence: it waits for
 // enrollment to produce the node's chain, publishes the node's entry, and
 // re-publishes on the constant. Failures retry, never stop, the loop.
-func (g *Gateway) runPublish(ctx context.Context) {
-	interval := g.cfg.PublishInterval
+func (a *App) runPublish(ctx context.Context) {
+	interval := a.cfg.PublishInterval
 	if interval == 0 {
 		interval = PublishInterval
 	}
-	retry := g.cfg.PublishRetry
+	retry := a.cfg.PublishRetry
 	if retry == 0 {
 		retry = PublishRetry
 	}
@@ -91,8 +91,8 @@ func (g *Gateway) runPublish(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
-		if err := g.publish(ctx); err != nil {
-			slog.Warn("Gateway publication", "err", err)
+		if err := a.publish(ctx); err != nil {
+			slog.Warn("WireGuard publication", "err", err)
 			if !sleepCtx(ctx, retry) {
 				return
 			}
@@ -106,23 +106,23 @@ func (g *Gateway) runPublish(ctx context.Context) {
 
 // publish sends the node's entry once the node's chain exists: an
 // un-enrolled node has no certificate to authenticate the channel with.
-func (g *Gateway) publish(ctx context.Context) error {
-	chain, err := g.cfg.Engine.Chain(ctx)
+func (a *App) publish(ctx context.Context) error {
+	chain, err := a.cfg.Engine.Chain(ctx)
 	if err != nil {
 		return err
 	}
 	if len(chain) == 0 {
 		return fmt.Errorf("no certificate chain yet; enrollment has not produced one")
 	}
-	return g.directory.Publish(ctx, g.selfEntry())
+	return a.directory.Publish(ctx, a.selfEntry())
 }
 
 // selfEntry is the node's own publication.
-func (g *Gateway) selfEntry() Entry {
+func (a *App) selfEntry() Entry {
 	return Entry{
-		IA:        g.cfg.IA,
-		PublicKey: g.key.PublicKey(),
-		Overlay:   g.cfg.Subnet,
+		IA:        a.cfg.IA,
+		PublicKey: a.key.PublicKey(),
+		Overlay:   a.cfg.Subnet,
 	}
 }
 
@@ -130,9 +130,9 @@ func (g *Gateway) selfEntry() Entry {
 // constant and diffs it against the mesh devices — new peers gain a device,
 // departed peers lose theirs. A fetch that fails logs and waits; a peer
 // without a reachable path queues a refresh and logs rather than erroring
-// the gateway.
-func (g *Gateway) runSync(ctx context.Context) {
-	interval := g.cfg.RefreshInterval
+// the application.
+func (a *App) runSync(ctx context.Context) {
+	interval := a.cfg.RefreshInterval
 	if interval == 0 {
 		interval = RefreshInterval
 	}
@@ -140,13 +140,13 @@ func (g *Gateway) runSync(ctx context.Context) {
 		if !sleepCtx(ctx, interval) {
 			return
 		}
-		entries, err := g.directory.List(ctx)
+		entries, err := a.directory.List(ctx)
 		if err != nil {
-			slog.Warn("Gateway directory fetch", "err", err)
+			slog.Warn("WireGuard directory fetch", "err", err)
 			continue
 		}
-		g.applyDirectory(entries)
-		g.warmMeshPaths(ctx)
+		a.applyDirectory(entries)
+		a.warmMeshPaths(ctx)
 	}
 }
 
@@ -154,24 +154,24 @@ func (g *Gateway) runSync(ctx context.Context) {
 // fetch belongs: sends only ever read the cache, but a leaf-to-leaf route
 // composes up and down segments and needs the lookup. A peer without a
 // reachable path queues the next refresh and logs rather than erroring the
-// gateway.
-func (g *Gateway) warmMeshPaths(ctx context.Context) {
-	for _, ia := range g.meshPeerIAs() {
-		path, err := g.cfg.Provider.Path(ctx, ia)
+// application.
+func (a *App) warmMeshPaths(ctx context.Context) {
+	for _, ia := range a.meshPeerIAs() {
+		path, err := a.cfg.Provider.Path(ctx, ia)
 		if err != nil {
-			slog.Warn("Gateway mesh route", "peer", ia, "err", err)
+			slog.Warn("WireGuard mesh route", "peer", ia, "err", err)
 			continue
 		}
-		g.mesh.warmPath(ia, path)
+		a.mesh.warmPath(ia, path)
 	}
 }
 
 // meshPeerIAs snapshots the mesh peers' ISD-ASes.
-func (g *Gateway) meshPeerIAs() []addr.IA {
-	g.mtx.Lock()
-	defer g.mtx.Unlock()
-	ias := make([]addr.IA, 0, len(g.meshPeers))
-	for ia := range g.meshPeers {
+func (a *App) meshPeerIAs() []addr.IA {
+	a.mtx.Lock()
+	defer a.mtx.Unlock()
+	ias := make([]addr.IA, 0, len(a.meshPeers))
+	for ia := range a.meshPeers {
 		ias = append(ias, ia)
 	}
 	return ias
@@ -188,6 +188,6 @@ func sleepCtx(ctx context.Context, d time.Duration) bool {
 	}
 }
 
-// Engine is the trust surface the gateway consumes: the chain that
+// Engine is the trust surface the application consumes: the chain that
 // authenticates the directory channel.
 type Engine = trust.Engine

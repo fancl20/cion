@@ -1,4 +1,4 @@
-// Package wireguard is CION's WireGuard gateway application (proposal 0006,
+// Package wireguard is CION's WireGuard application (proposal 0006,
 // ADR-0005): wireguard-go embedded in the CION binary, serving plain hosts.
 // Hosts are standard WireGuard clients of their local node behind one shared
 // UDP port — the public key they send with selects their exit — nodes tunnel
@@ -41,7 +41,7 @@ type datagram struct {
 }
 
 // meshSocket is the node's mesh transport: one SCION socket bound to an
-// ephemeral port and registered under the gateway service in its own AS,
+// ephemeral port and registered under the wireguard service in its own AS,
 // shared by every mesh device, fanning each received datagram out to all of
 // them — all devices share the node's key pair, so each can decrypt a
 // handshake, but only the device whose peer table holds the sender's public
@@ -287,7 +287,7 @@ func (b *meshBind) Send(bufs [][]byte, ep conn.Endpoint) error {
 }
 
 // ParseEndpoint builds a peer endpoint from its IPC string form,
-// "isd-as,service": the peer named by its ISD-AS and the gateway service,
+// "isd-as,service": the peer named by its ISD-AS and the wireguard service,
 // which the peer's own AS resolves to its registered socket.
 func (b *meshBind) ParseEndpoint(s string) (conn.Endpoint, error) {
 	parts := strings.Split(s, ",")
@@ -352,17 +352,17 @@ func (e *meshEndpoint) DstIP() netip.Addr { return e.addr.Addr.Addr() }
 func (e *meshEndpoint) SrcIP() netip.Addr { return netip.Addr{} }
 
 // endpointString encodes a mesh endpoint as the IPC form ParseEndpoint
-// reads: the peer's ISD-AS and the gateway service.
+// reads: the peer's ISD-AS and the wireguard service.
 func endpointString(ia addr.IA) string {
-	return ia.String() + "," + serviceName(SvcGateway)
+	return ia.String() + "," + serviceName(SvcWireguard)
 }
 
 // serviceName returns the service's name — the word the endpoint string
 // names a service by, the way the drafts' registry names theirs.
 func serviceName(svc addr.SVC) string {
 	switch svc {
-	case SvcGateway:
-		return "gateway"
+	case SvcWireguard:
+		return "wireguard"
 	case SvcDirectory:
 		return "directory"
 	default:
@@ -374,8 +374,8 @@ func serviceName(svc addr.SVC) string {
 // table does not hold is refused rather than guessed.
 func parseServiceName(name string) (addr.SVC, error) {
 	switch name {
-	case "gateway":
-		return SvcGateway, nil
+	case "wireguard":
+		return SvcWireguard, nil
 	case "directory":
 		return SvcDirectory, nil
 	default:

@@ -1,6 +1,7 @@
 package services
 
 import (
+	"bytes"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -47,14 +48,14 @@ type Config struct {
 	// AllowIAS optionally restricts enrollment to the listed ISD-ASes; the
 	// core rejects and logs requests from any other ISD-AS (core only).
 	AllowIAS []string `json:"allowIAS"`
-	// Gateway configures the WireGuard gateway application (proposal 0006);
-	// a node without the section runs no gateway.
-	Gateway *ConfigGateway `json:"gateway"`
+	// Wireguard configures the WireGuard application (proposal 0006); a
+	// node without the section runs none.
+	Wireguard *ConfigWireguard `json:"wireguard"`
 }
 
-// ConfigGateway is the gateway application's configuration section. See
+// ConfigWireguard is the WireGuard application's configuration section. See
 // proposal 0006.
-type ConfigGateway struct {
+type ConfigWireguard struct {
 	// Subnet is the node's overlay subnet, e.g. "10.64.1.0/24". Host
 	// addresses are assigned within it by the peer configuration.
 	Subnet string `json:"subnet"`
@@ -68,11 +69,12 @@ type ConfigGateway struct {
 	Exits []string `json:"exits"`
 	// Peers lists the host public keys — the operator's membership list —
 	// with an overlay address and an exit each.
-	Peers []ConfigGatewayPeer `json:"peers"`
+	Peers []ConfigWireguardPeer `json:"peers"`
 }
 
-// ConfigGatewayPeer is one host's entry in the gateway configuration.
-type ConfigGatewayPeer struct {
+// ConfigWireguardPeer is one host's entry in the application's
+// configuration.
+type ConfigWireguardPeer struct {
 	// PublicKey is the host's 32-byte WireGuard public key, hexadecimal.
 	PublicKey string `json:"publicKey"`
 	// Address is the host's overlay address inside the subnet.
@@ -103,7 +105,12 @@ func LoadConfig(path string) (*Config, error) {
 		return nil, fmt.Errorf("reading config: %w", err)
 	}
 	cfg := &Config{}
-	if err := json.Unmarshal(raw, cfg); err != nil {
+	// Unknown fields are refused rather than silently ignored, so a
+	// configuration still naming a retired section stops here instead of
+	// quietly running without it (proposal 0009).
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(cfg); err != nil {
 		return nil, fmt.Errorf("parsing config: %w", err)
 	}
 	if cfg.IA == "" || cfg.Internal == "" {

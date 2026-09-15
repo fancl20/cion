@@ -52,9 +52,9 @@ func ParsePublicKey(s string) (PublicKey, error) {
 	return key, nil
 }
 
-// LoadOrCreateKey returns the gateway's WireGuard private key, generating and
-// persisting a new one on first start, following pkg/trust/keys.go's pattern
-// into the application's own state directory.
+// LoadOrCreateKey returns the application's WireGuard private key, generating
+// and persisting a new one on first start, following pkg/trust/keys.go's
+// pattern into the application's own state directory.
 func LoadOrCreateKey(stateDir string) (PrivateKey, error) {
 	path := filepath.Join(stateDir, KeyFile)
 	if raw, err := os.ReadFile(path); err == nil {

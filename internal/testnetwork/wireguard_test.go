@@ -21,12 +21,13 @@ import (
 	"github.com/fancl20/cion/pkg/apps/wireguard"
 )
 
-// The gateway integration tests' topology: the core A — the internet exit —
-// and the leaf B, each running the gateway application; the hosts are
-// in-process WireGuard clients, plain internet clients of their local node.
+// The WireGuard application's integration tests' topology: the core A — the
+// internet exit — and the leaf B, each running the application; the hosts
+// are in-process WireGuard clients, plain internet clients of their local
+// node.
 var (
-	gatewayA = addr.MustIAFrom(20, 0xff0000000051)
-	gatewayB = addr.MustIAFrom(20, 0xff0000000052)
+	wireguardA = addr.MustIAFrom(20, 0xff0000000051)
+	wireguardB = addr.MustIAFrom(20, 0xff0000000052)
 )
 
 // newHostKey generates a host key pair in a throwaway directory.
@@ -108,9 +109,9 @@ func newNetstackHost(t *testing.T, nodeKey wireguard.PublicKey, hostKey wireguar
 	return &netstackHost{dev: dev, net: net}
 }
 
-// hasMeshPeer reports whether the gateway holds the peer's mesh device.
-func hasMeshPeer(g *wireguard.Gateway, peer addr.IA) bool {
-	for _, ia := range g.MeshPeers() {
+// hasMeshPeer reports whether the application holds the peer's mesh device.
+func hasMeshPeer(a *wireguard.App, peer addr.IA) bool {
+	for _, ia := range a.MeshPeers() {
 		if ia.Equal(peer) {
 			return true
 		}
@@ -120,13 +121,13 @@ func hasMeshPeer(g *wireguard.Gateway, peer addr.IA) bool {
 
 // nodeHostPort returns the node's shared host-facing underlay endpoint.
 func nodeHostPort(n *Node) netip.AddrPort {
-	return netip.AddrPortFrom(n.ControlIP, n.Gateway.HostPort())
+	return netip.AddrPortFrom(n.ControlIP, n.Wireguard.HostPort())
 }
 
-// startGatewayNodes brings up the two-node gateway topology: the core A —
-// the internet exit — and the leaf B whose hosts send through it. A's own
-// host is optional (a zero key runs A with none); B's hosts use A.
-func startGatewayNodes(
+// startWireguardNodes brings up the two-node WireGuard topology: the core
+// A — the internet exit — and the leaf B whose hosts send through it. A's
+// own host is optional (a zero key runs A with none); B's hosts use A.
+func startWireguardNodes(
 	t *testing.T,
 	ipA, ipB netip.Addr,
 	hostAPub wireguard.PublicKey, hostAAddr netip.Addr,
@@ -139,37 +140,37 @@ func startGatewayNodes(
 	var hostAPeers []wireguard.HostPeer
 	if hostAPub != (wireguard.PublicKey{}) {
 		hostAPeers = append(hostAPeers,
-			wireguard.HostPeer{PublicKey: hostAPub, Addr: hostAAddr, Exit: gatewayA})
+			wireguard.HostPeer{PublicKey: hostAPub, Addr: hostAAddr, Exit: wireguardA})
 	}
 	a := StartNode(t, NodeConfig{
-		IA: gatewayA, Host: ipA, Core: true, WPKI: wpki,
-		Links: []Link{{IfID: 1, Local: extA, Remote: extB, Neighbor: gatewayB}},
-		Gateway: &GatewayOptions{
+		IA: wireguardA, Host: ipA, Core: true, WPKI: wpki,
+		Links: []Link{{IfID: 1, Local: extA, Remote: extB, Neighbor: wireguardB}},
+		Wireguard: &WireguardOptions{
 			Subnet: "10.64.1.0/24",
 			Egress: true,
-			Exits:  []addr.IA{gatewayA},
+			Exits:  []addr.IA{wireguardA},
 			Peers:  hostAPeers,
 		},
 	})
 	b := StartNode(t, NodeConfig{
-		IA: gatewayB, Host: ipB, WPKI: wpki,
-		Links: []Link{{IfID: 1, Local: extB, Remote: extA, Neighbor: gatewayA}},
-		Gateway: &GatewayOptions{
+		IA: wireguardB, Host: ipB, WPKI: wpki,
+		Links: []Link{{IfID: 1, Local: extB, Remote: extA, Neighbor: wireguardA}},
+		Wireguard: &WireguardOptions{
 			Subnet: "10.64.2.0/24",
-			Exits:  []addr.IA{gatewayA},
-			Peers:  []wireguard.HostPeer{{PublicKey: hostBPub, Addr: hostBAddr, Exit: gatewayA}},
+			Exits:  []addr.IA{wireguardA},
+			Peers:  []wireguard.HostPeer{{PublicKey: hostBPub, Addr: hostBAddr, Exit: wireguardA}},
 		},
 	})
-	Poll(t, "A's mesh peer", func() bool { return hasMeshPeer(a.Gateway, gatewayB) })
-	Poll(t, "B's mesh peer", func() bool { return hasMeshPeer(b.Gateway, gatewayA) })
+	Poll(t, "A's mesh peer", func() bool { return hasMeshPeer(a.Wireguard, wireguardB) })
+	Poll(t, "B's mesh peer", func() bool { return hasMeshPeer(b.Wireguard, wireguardA) })
 	return a, b
 }
 
-// TestGatewayMeshExchange is proposal 0006's mesh proof: the nodes publish
-// and fetch the directory, mesh devices handshake over the SCION transport,
-// and an in-process host exchanges ICMP through node B's host device, the
-// mesh, and node A's delivery to its own in-process host.
-func TestGatewayMeshExchange(t *testing.T) {
+// TestWireguardMeshExchange is proposal 0006's mesh proof: the nodes
+// publish and fetch the directory, mesh devices handshake over the SCION
+// transport, and an in-process host exchanges ICMP through node B's host
+// device, the mesh, and node A's delivery to its own in-process host.
+func TestWireguardMeshExchange(t *testing.T) {
 	hostAKey, hostAPub := newHostKey(t)
 	hostBKey, hostBPub := newHostKey(t)
 	hostAAddr := netip.MustParseAddr("10.64.1.10")
@@ -177,12 +178,12 @@ func TestGatewayMeshExchange(t *testing.T) {
 
 	// Loopback addresses of this test's own; the egress test's nodes keep
 	// theirs.
-	a, b := startGatewayNodes(t, addrIP(0x21), addrIP(0x22),
+	a, b := startWireguardNodes(t, addrIP(0x21), addrIP(0x22),
 		hostAPub, hostAAddr, hostBPub, hostBAddr)
 
 	// Hosts: standard clients of their local nodes.
-	hostA := newRawHost(t, a.Gateway.PublicKey(), hostAKey, hostAAddr, nodeHostPort(a))
-	hostB := newRawHost(t, b.Gateway.PublicKey(), hostBKey, hostBAddr, nodeHostPort(b))
+	hostA := newRawHost(t, a.Wireguard.PublicKey(), hostAKey, hostAAddr, nodeHostPort(a))
+	hostB := newRawHost(t, b.Wireguard.PublicKey(), hostBKey, hostBAddr, nodeHostPort(b))
 
 	// Host A echoes host B across the mesh: through A's host device, the
 	// tunnel, and B's delivery to its own host.
@@ -246,11 +247,11 @@ func internetHost(t *testing.T) netip.Addr {
 	return ip
 }
 
-// TestGatewayEgressProxiesInternet is proposal 0006's egress proof: an exit
-// proxies a host's TCP flow to a local "internet" service and returns the
-// reply — the host's handshake completing at the exit, the flow spliced to
-// one outbound connection from the node's own address.
-func TestGatewayEgressProxiesInternet(t *testing.T) {
+// TestWireguardEgressProxiesInternet is proposal 0006's egress proof: an
+// exit proxies a host's TCP flow to a local "internet" service and returns
+// the reply — the host's handshake completing at the exit, the flow spliced
+// to one outbound connection from the node's own address.
+func TestWireguardEgressProxiesInternet(t *testing.T) {
 	// The "internet": an echo service on the host's real address.
 	listener, err := net.Listen("tcp", netip.AddrPortFrom(internetHost(t), 0).String())
 	if err != nil {
@@ -273,10 +274,10 @@ func TestGatewayEgressProxiesInternet(t *testing.T) {
 
 	hostBKey, hostBPub := newHostKey(t)
 	hostBAddr := netip.MustParseAddr("10.64.2.10")
-	_, b := startGatewayNodes(t, addrIP(0x23), addrIP(0x24),
+	_, b := startWireguardNodes(t, addrIP(0x23), addrIP(0x24),
 		wireguard.PublicKey{}, netip.Addr{}, hostBPub, hostBAddr)
 
-	host := newNetstackHost(t, b.Gateway.PublicKey(), hostBKey, hostBAddr, nodeHostPort(b))
+	host := newNetstackHost(t, b.Wireguard.PublicKey(), hostBKey, hostBAddr, nodeHostPort(b))
 	conn, err := host.net.DialTCPAddrPort(internet)
 	if err != nil {
 		t.Fatalf("the host's TCP flow through the exit failed: %v", err)

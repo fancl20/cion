@@ -18,7 +18,7 @@ import (
 	"github.com/scionproto/scion/pkg/addr"
 	"github.com/scionproto/scion/pkg/scrypto/cppki"
 
-	gatewayv1 "github.com/fancl20/cion/proto/gateway/v1"
+	wireguardv1 "github.com/fancl20/cion/proto/wireguard/v1"
 )
 
 // fakeStore is an in-memory directory store.
@@ -67,7 +67,7 @@ func TestDirectoryPublishRecordsAuthenticatedIA(t *testing.T) {
 		Overlay:   netip.MustParsePrefix("10.64.1.0/24"),
 	}
 	if _, err := svc.Publish(requestWithIA(t, publisher),
-		connect.NewRequest(&gatewayv1.PublishRequest{Entry: entry.pb()})); err != nil {
+		connect.NewRequest(&wireguardv1.PublishRequest{Entry: entry.pb()})); err != nil {
 		t.Fatalf("publishing: %v", err)
 	}
 	entries, err := store.List(context.Background())
@@ -84,7 +84,7 @@ func TestDirectoryPublishRecordsAuthenticatedIA(t *testing.T) {
 
 	// A publish without an authenticated ISD-AS never records.
 	_, err = svc.Publish(context.Background(),
-		connect.NewRequest(&gatewayv1.PublishRequest{Entry: entry.pb()}))
+		connect.NewRequest(&wireguardv1.PublishRequest{Entry: entry.pb()}))
 	if err == nil {
 		t.Error("publishing without an authenticated ISD-AS succeeded")
 	}
@@ -104,11 +104,11 @@ func TestDirectoryListServesEntries(t *testing.T) {
 		Overlay:   netip.MustParsePrefix("10.64.7.0/24"),
 	}
 	if _, err := svc.Publish(requestWithIA(t, ia),
-		connect.NewRequest(&gatewayv1.PublishRequest{Entry: entry.pb()})); err != nil {
+		connect.NewRequest(&wireguardv1.PublishRequest{Entry: entry.pb()})); err != nil {
 		t.Fatal(err)
 	}
 	resp, err := svc.List(context.Background(),
-		connect.NewRequest(&gatewayv1.ListRequest{}))
+		connect.NewRequest(&wireguardv1.ListRequest{}))
 	if err != nil {
 		t.Fatal(err)
 	}
