@@ -1,9 +1,8 @@
 package services
 
 import (
-	"bytes"
 	"encoding/hex"
-	"encoding/json"
+	"encoding/json/v2"
 	"fmt"
 	"net/netip"
 	"os"
@@ -108,9 +107,7 @@ func LoadConfig(path string) (*Config, error) {
 	// Unknown fields are refused rather than silently ignored, so a
 	// configuration still naming a retired section stops here instead of
 	// quietly running without it (proposal 0009).
-	dec := json.NewDecoder(bytes.NewReader(raw))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(cfg); err != nil {
+	if err := json.Unmarshal(raw, cfg, json.RejectUnknownMembers(true)); err != nil {
 		return nil, fmt.Errorf("parsing config: %w", err)
 	}
 	if cfg.IA == "" || cfg.Internal == "" {

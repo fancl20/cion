@@ -1,6 +1,6 @@
 module github.com/fancl20/cion
 
-go 1.26.4
+go 1.27.0
 
 require (
 	connectrpc.com/connect v1.19.1

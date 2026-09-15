@@ -3,7 +3,7 @@ package trust
 import (
 	"context"
 	"crypto/x509"
-	"encoding/json"
+	"encoding/json/v2"
 	"fmt"
 
 	"github.com/scionproto/scion/pkg/addr"
