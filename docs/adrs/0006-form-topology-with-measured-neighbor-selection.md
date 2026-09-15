@@ -48,6 +48,9 @@ is gone.
 *   **Measurement over Description:** The network already discovers paths and
     measures nothing but them; topology should follow the same principle —
     links earned by evidence, not declared.
+*   **One Loop over Many:** Liveness and latency are the same probe stream —
+    health detection should fall out of the measurements selection already
+    makes, not arrive as a second protocol beside them.
 *   **Trust Continuity:** No new trust anchors. The WebPKI bootstrap channel,
     TRC-anchored chains, and authenticated control channels stay exactly as
     they are.
@@ -112,12 +115,31 @@ How a link change reaches the data plane:
 *   **Generational Replacement:** The serving data plane is gracefully
     retired and replaced by one built with the new link set.
 
+How link health is detected and acted on:
+
+*   **Admission-Time Probing Only:** Selection's comparator gates promotion
+    and demotion; nothing observes an established link at runtime.
+*   **Probe-Driven Runtime Link State:** The same measurements drive a
+    reversible up/down flag beside the damped membership changes.
+*   **BFD per the Drafts:** The SCION data-plane draft's router-to-router
+    liveness protocol, with its own sessions and the SCMP notification path.
+
+What carries the measurement of an established link:
+
+*   **The Greeting Stream:** Timestamps ride the greetings the node already
+    sends on each link every interval.
+*   **A Dedicated Probe Protocol:** A new periodic probe beside the
+    greetings.
+*   **SCMP Echo Everywhere:** Echo requests over paths for baseline and
+    health alike.
+
 ## Decision outcome
 
 Chosen options: **measured selection with a redundancy floor**, **one
 bootstrap neighbor argument**, a **core-served directory**, **generated local
 state**, the **WebPKI domain argument**, a **self-picked, enrollment-gated
-ISD-AS**, and **generational replacement** of the data plane on link changes —
+ISD-AS**, **generational replacement** of the data plane on link changes, and
+**probe-driven runtime link state** carried by **the greeting stream** —
 realized as follows:
 
 1.  **The link set is the node's own decision, continuously revised.** An
@@ -166,36 +188,82 @@ realized as follows:
     any reachable candidate will do. It caps its link count to bound beaconing
     fan-out, and it changes links only on sustained evidence — every link
     change re-shapes segments network-wide, so stability is traded against
-    optimality deliberately.
-7.  **Interfaces are runtime state over generational data planes.** Interface
+    optimality deliberately. The comparator never stops at admission: every
+    evaluation window measures every peer — neighbor, candidate, and demoted
+    neighbor alike — so a peer whose direct round trip durably beats its
+    composed-path baseline is proposed again no matter how often it has been
+    demoted before, and the floor and the cap bound the set at every instant.
+7.  **One measurement substrate feeds selection and health.** An established
+    link is measured by its own greeting stream: the greeting already crosses
+    every link each interval, and it gains the sender's timestamp — probe
+    arrival is liveness, round trip is latency, and the stream discovery
+    already sends becomes the probe, without a second protocol. Candidates
+    are measured by the rendezvous echo the selection loop already sends,
+    and the composed-path baseline by SCMP echo over the freshest resolved
+    path — the ping application's machinery as an internal service, not a
+    command. Liveness, latency, and benefit are one stream read three ways;
+    no node runs a protocol whose only purpose is health.
+8.  **Up and down is probe-driven runtime state within a generation.** A
+    link whose probe stream goes silent past a bounded window is marked
+    down: the data plane stops forwarding to it — signaling sources with
+    the SCMP interface-down error its egress validation already knows how
+    to originate — beaconing pauses on the interface as it already does
+    for a greeting timeout, and the link leaves the redundancy floor's
+    count, so sustained down state meets selection exactly as the loop
+    already treats a timed-out neighbor: infinitely slow. The probe stream
+    itself never stops on a down link — that is how recovery is seen — and
+    probes answering again mark the link up: no generation change, no new
+    interface ID, no re-acquaintance, the reversible half of link dynamics
+    deliberately faster than the damped membership changes selection makes.
+    Both edges are hysteresed, so a lossy link settles rather than flaps,
+    and a sender that receives an interface-down signal sets aside paths
+    crossing that interface for a short window — its own probes remain the
+    authority, the received signal a prompt to re-probe, because SCMP is
+    unauthenticated; this is the drafts' own posture, which makes their
+    notifications optional and rate-limited and tells endpoints to detect
+    failures by their own means.
+9.  **Interfaces are runtime state over generational data planes.** Interface
     IDs are allocated at establishment, unique among live links, and not
     reused while unexpired segments elsewhere may still reference them.
     Removal is graceful: the node withdraws beaconing from the link and
     expiration retires the segments — no revocation exists or is added
-    (ADR-0004). The forwarding substrate itself is never mutated: a data
-    plane is built with an immutable link set and serves until retired, and a
+    (ADR-0004). The forwarding substrate's configuration is never mutated
+    while serving: a data plane is built with an immutable link set and
+    serves until retired, and a
     topology change gracefully retires the serving instance and brings up
     its replacement with the new link set. Each link's underlay address is
     part of the link's state and is bound identically by every generation,
     so peers observe a brief pause rather than a re-acquaintance, and the
     control plane — trust, beaconing, connections — survives the replacement
     untouched. The data plane is asked for nothing new beyond the graceful
-    shutdown.
-8.  **Consent is unchanged.** Appearing in paths still requires signing one's
+    shutdown and the up/down flag of the preceding point, which feeds the
+    egress check the substrate already performs — state it reads, not a
+    reconfiguration of it.
+10. **Consent is unchanged.** Appearing in paths still requires signing one's
     own AS entries; accepting links and propagating beacons remain the
     operator's choices, and direct links reduce dependence on others' transit.
     The selection heuristic itself depends on multi-hop paths existing — on
     some transit consent in the network — which is the same posture
     ADR-0004 took.
-9.  **Scope boundaries.** Nodes behind address translation join but cannot be
+11. **Scope boundaries.** Nodes behind address translation join but cannot be
     joined; their redundancy floor is met from publicly reachable candidates,
     which the reachability class identifies. NAT traversal is out of scope.
     The comparison metric is latency to the candidate; richer benefit models
-    are deferred with the policy work ADR-0004 already deferred. Two run
+    are deferred with the policy work ADR-0004 already deferred. Up and down
+    brings constants of its own — the silence window, the hysteresis
+    margins, the sender's interface-cache duration — code constants like the
+    intervals beside them. Two run
     arguments remain — "almost" zero config stays almost.
 
 ### Positive consequences
 
+*   Health, signaling, and selection are one loop: the probes a node runs to
+    justify its links are what tell it they died, and the SCMP
+    interface-down machinery the data plane already carries becomes live
+    without a new protocol.
+*   Down is fast and reversible — a flag and a signal, not a forwarding
+    restart — while membership stays damped, so a flapping link costs a
+    state flip and its notification, never a generational burst.
 *   Joining is node-local: one address, one domain, no coordination with any
     other operator, and a topology change replaces a data plane generation,
     not the node.
@@ -220,6 +288,13 @@ realized as follows:
 
 ### Negative consequences
 
+*   The greeting gains a measurement role — discovery's one message changes
+    shape, and the greeting interval sets the granularity of both liveness
+    and latency.
+*   A mutable bit enters the serving path's edge, with a silence window and
+    hysteresis margins as new constants, and a sender that trusted received
+    interface-down signals could be steered by any on-path speaker — hence
+    the own-probe-authority rule.
 *   Every topology change restarts the forwarding substrate: a bounded loss
     burst while the serving data plane retires and its replacement binds —
     borne by all traffic, not only the change that caused it — per-link
@@ -411,3 +486,64 @@ realized as follows:
     all traffic bears a brief loss burst for a single topology decision.
 *   Bad, because link addresses must stay stable across generations for peers
     not to re-acquaint, and per-generation counters are lost unless carried.
+
+### Admission-time probing only
+
+*   Good, because selection stays the only machinery — probe, promote,
+    demote — with no runtime state and no new constants.
+*   Bad, because a link that dies after establishment stays a member until
+    demotion's sustained evidence accumulates, and the floor counts a
+    corpse: the invariant is dishonest exactly when it matters.
+*   Bad, because health and selection drift apart — the failure the node
+    most needs to see is the one no measurement is watching, and the data
+    plane's up/down check stays the stub it is today.
+
+### Probe-driven runtime link state
+
+*   Good, because one substrate serves both: probe arrival is liveness,
+    probe round trip is latency, and the comparator consumes both —
+    selection and health are the same loop at two timescales, the
+    reversible one fast and the structural one damped.
+*   Good, because a down link can tell sources with the SCMP
+    interface-down error the data plane already knows how to originate —
+    draft-aligned failure signaling without a second detection protocol.
+*   Bad, because a mutable bit sits beside the immutable substrate, with a
+    silence window and hysteresis margins as new tuning constants.
+*   Bad, because received signals are unauthenticated: own probes must stay
+    authoritative and interface-down from others only a prompt to re-probe,
+    or any on-path speaker could steer sources.
+
+### BFD per the drafts
+
+*   Good, because it is the standardized answer, tuned by the SCION
+    data-plane draft exactly for fast bidirectional liveness between
+    routers.
+*   Bad, because BFD knows liveness only — selection still needs the
+    latency comparison, so the node runs two probe systems and reconciles
+    their outputs.
+*   Bad, because one process per AS makes router-to-router sessions
+    redundant with the greeting stream already crossing the same link every
+    interval.
+
+### The greeting stream as carrier
+
+*   Good, because the packets already exist, already cross each link every
+    interval, and are already paired to the link's identity — a timestamp
+    is the only change.
+*   Bad, because discovery's message becomes load-bearing for measurement,
+    and probe cadence is pinned to the greeting interval.
+
+### A dedicated probe protocol
+
+*   Good, because cadence, payload, and evolution are free of discovery's
+    concerns.
+*   Bad, because it is a second periodic stream per link saying what the
+    first already says, with its own socket, constants, and failure modes.
+
+### SCMP echo everywhere
+
+*   Good, because it reuses the ping machinery end to end — the
+    composed-path baseline measurement does exactly this.
+*   Bad, because echo needs a path and candidates have none: the
+    direct-side measurement cannot ride the very baseline it is compared
+    against.
