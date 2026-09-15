@@ -1,0 +1,280 @@
+package wireguard
+
+import (
+	"context"
+	"crypto/x509"
+	"net"
+	"net/netip"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/scionproto/scion/pkg/addr"
+	"github.com/scionproto/scion/pkg/scrypto/cppki"
+
+	"github.com/fancl20/cion/pkg/scion"
+	"github.com/fancl20/cion/pkg/trust"
+)
+
+// recordingDirectory records publications and serves a directory it holds.
+type recordingDirectory struct {
+	published chan Entry
+	entries   []Entry
+}
+
+func (d *recordingDirectory) Publish(ctx context.Context, entry Entry) error {
+	select {
+	case d.published <- entry:
+	default:
+	}
+	return nil
+}
+
+func (d *recordingDirectory) List(context.Context) ([]Entry, error) {
+	return d.entries, nil
+}
+
+// flippableTrustDB serves no chains until it serves one; the publish loop
+// reads it while the test flips it.
+type flippableTrustDB struct {
+	mtx   sync.Mutex
+	chain [][]*x509.Certificate
+}
+
+func (d *flippableTrustDB) Chains(context.Context, trust.ChainQuery) ([][]*x509.Certificate, error) {
+	d.mtx.Lock()
+	defer d.mtx.Unlock()
+	return d.chain, nil
+}
+
+// enroll produces the node's chain.
+func (d *flippableTrustDB) enroll(chain []*x509.Certificate) {
+	d.mtx.Lock()
+	defer d.mtx.Unlock()
+	d.chain = [][]*x509.Certificate{chain}
+}
+func (d *flippableTrustDB) InsertChain(context.Context, []*x509.Certificate) (bool, error) {
+	return false, nil
+}
+func (d *flippableTrustDB) SignedTRC(context.Context, cppki.TRCID) (cppki.SignedTRC, error) {
+	return cppki.SignedTRC{}, nil
+}
+func (d *flippableTrustDB) InsertTRC(context.Context, cppki.SignedTRC) (bool, error) {
+	return false, nil
+}
+func (d *flippableTrustDB) Close() error { return nil }
+
+// newTestGateway assembles a gateway around throwaway sockets: a SCION conn
+// submitting to a sink, the shared host port on an ephemeral one, and the
+// core's store-side directory.
+func newTestGateway(
+	t *testing.T, ia addr.IA, exits []addr.IA, peers []HostPeer, db *flippableTrustDB,
+) (*Gateway, *recordingDirectory) {
+	t.Helper()
+	internal, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { internal.Close() }) //nolint:errcheck
+	// Reserve an ephemeral host port, then release it for the gateway to
+	// bind — the port only needs to be free at construction.
+	hostPort, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	listenPort := uint16(hostPort.LocalAddr().(*net.UDPAddr).Port)
+	hostPort.Close()
+	provider := &scion.PathProvider{IA: ia, DB: &memDB{}}
+	directory := &recordingDirectory{published: make(chan Entry, 16)}
+	g, err := New(Config{
+		IA:         ia,
+		Subnet:     netip.MustParsePrefix("10.64.1.0/24"),
+		ListenHost: netip.MustParseAddr("127.0.0.1"),
+		ListenPort: listenPort,
+		Exits:      exits,
+		Peers:      peers,
+		StateDir:   t.TempDir(),
+		Provider:   provider,
+		Engine:     trust.NewEngine(ia, nil, &trust.NetworkProvider{DB: db}),
+		Store:      directory,
+		NewConn: func(port uint16) (*scion.Conn, error) {
+			return scion.NewConn(scion.ConnConfig{
+				IA:           ia,
+				Bind:         "127.0.0.1:0",
+				InternalAddr: internal.LocalAddr().String(),
+				MACKey:       testMACKey,
+				Links:        map[uint16]addr.IA{1: addr.MustIAFrom(20, 2)},
+			})
+		},
+		PublishInterval: time.Hour,
+		PublishRetry:    20 * time.Millisecond,
+		RefreshInterval: time.Hour,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(g.Close)
+	return g, directory
+}
+
+// TestGatewayPublishesOnceEnrolled checks the publication cadence: the loop
+// retries while enrollment has produced no chain, and publishes once one
+// exists.
+func TestGatewayPublishesOnceEnrolled(t *testing.T) {
+	ia := addr.MustIAFrom(20, 0xff0000000211)
+	db := &flippableTrustDB{}
+	g, directory := newTestGateway(t, ia, nil, nil, db)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go g.runPublish(ctx)
+
+	select {
+	case <-directory.published:
+		t.Fatal("published without a certificate chain")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	// Enrollment produces the node's chain; the retrying loop publishes.
+	db.enroll([]*x509.Certificate{iaSubjectCert(t, ia)})
+	select {
+	case entry := <-directory.published:
+		if !entry.IA.Equal(ia) {
+			t.Errorf("published entry for %s, want %s", entry.IA, ia)
+		}
+		if entry.Overlay.String() != "10.64.1.0/24" {
+			t.Errorf("published subnet %s, want 10.64.1.0/24", entry.Overlay)
+		}
+		if entry.PublicKey == (PublicKey{}) {
+			t.Error("published no public key")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("publication never happened after enrollment")
+	}
+}
+
+// TestGatewayAppliesDirectoryDiff checks the mesh device lifecycle: new peers
+// gain a device, departed peers lose theirs and their router entries.
+func TestGatewayAppliesDirectoryDiff(t *testing.T) {
+	ia := addr.MustIAFrom(20, 0xff0000000221)
+	peer1 := addr.MustIAFrom(20, 0xff0000000231)
+	peer2 := addr.MustIAFrom(20, 0xff0000000232)
+	g, _ := newTestGateway(t, ia, nil, nil, &flippableTrustDB{})
+
+	entry := func(peer addr.IA, subnet string) Entry {
+		return Entry{
+			IA:          peer,
+			PublicKey:   mustPubKey(byte(peer.AS())),
+			GatewayPort: 30045,
+			Underlay:    netip.MustParseAddr("127.0.0.1"),
+			Overlay:     netip.MustParsePrefix(subnet),
+		}
+	}
+	e1 := entry(peer1, "10.64.11.0/24")
+	e2 := entry(peer2, "10.64.12.0/24")
+
+	g.applyDirectory([]Entry{e1})
+	if len(g.meshPeers) != 1 || g.meshPeers[peer1] == nil {
+		t.Fatalf("peers after the first directory = %v, want %s", g.meshPeers, peer1)
+	}
+	g.applyDirectory([]Entry{e1, e2})
+	if len(g.meshPeers) != 2 {
+		t.Fatalf("peers after the second directory = %d, want 2", len(g.meshPeers))
+	}
+	g.applyDirectory([]Entry{e2})
+	if len(g.meshPeers) != 1 || g.meshPeers[peer2] == nil {
+		t.Fatalf("departed peer kept its device: %v", g.meshPeers)
+	}
+
+	// The router table follows: the surviving peer's subnet routes to its
+	// device, and the departed peer's entries are gone. (Packet delivery
+	// itself the router tests cover; a live device's reader would consume
+	// anything routed here before a test could observe it.)
+	if len(g.router.nets) != 1 {
+		t.Fatalf("router holds %d mesh routes, want 1", len(g.router.nets))
+	}
+	if got := g.router.nets[0].prefix; got.String() != e2.Overlay.String() {
+		t.Errorf("mesh route = %s, want the survivor's %s", got, e2.Overlay)
+	}
+	if g.router.nets[0].dst != g.meshPeers[peer2].pipe {
+		t.Error("the mesh route does not point at the survivor's device")
+	}
+}
+
+// TestGatewayValidatesConfig checks the configuration the node assembly
+// feeds: peer addresses inside the subnet, exits configured, one exit per
+// key.
+func TestGatewayValidatesConfig(t *testing.T) {
+	ia := addr.MustIAFrom(20, 0xff0000000241)
+	exit := addr.MustIAFrom(20, 0xff0000000242)
+	other := addr.MustIAFrom(20, 0xff0000000243)
+	internal, _ := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	t.Cleanup(func() { internal.Close() }) //nolint:errcheck
+	base := Config{
+		IA:         ia,
+		Subnet:     netip.MustParsePrefix("10.64.1.0/24"),
+		ListenHost: netip.MustParseAddr("127.0.0.1"),
+		ListenPort: 51820,
+		Exits:      []addr.IA{exit},
+		Peers: []HostPeer{{
+			PublicKey: mustPubKey(1),
+			Addr:      netip.MustParseAddr("10.64.1.10"),
+			Exit:      exit,
+		}},
+		StateDir: t.TempDir(),
+		Provider: &scion.PathProvider{IA: ia},
+		Engine:   trust.NewEngine(ia, nil, nil),
+		Store:    &fakeStore{},
+		NewConn: func(uint16) (*scion.Conn, error) {
+			return scion.NewConn(scion.ConnConfig{
+				IA:           ia,
+				Bind:         "127.0.0.1:0",
+				InternalAddr: internal.LocalAddr().String(),
+				MACKey:       testMACKey,
+				Links:        map[uint16]addr.IA{1: addr.MustIAFrom(20, 2)},
+			})
+		},
+	}
+
+	if _, err := New(base); err != nil {
+		t.Fatalf("a valid configuration was rejected: %v", err)
+	}
+
+	outside := base
+	outside.Peers = []HostPeer{{
+		PublicKey: mustPubKey(2),
+		Addr:      netip.MustParseAddr("10.65.9.9"),
+		Exit:      exit,
+	}}
+	if _, err := New(outside); err == nil {
+		t.Error("a peer outside the subnet was accepted")
+	}
+
+	unconfigured := base
+	unconfigured.Peers = []HostPeer{{
+		PublicKey: mustPubKey(3),
+		Addr:      netip.MustParseAddr("10.64.1.11"),
+		Exit:      other,
+	}}
+	if _, err := New(unconfigured); err == nil {
+		t.Error("a peer with an unconfigured exit was accepted")
+	}
+
+	duplicate := base
+	duplicate.Peers = append(duplicate.Peers, HostPeer{
+		PublicKey: mustPubKey(1),
+		Addr:      netip.MustParseAddr("10.64.1.12"),
+		Exit:      exit,
+	})
+	if _, err := New(duplicate); err == nil {
+		t.Error("the same host key under two peers was accepted")
+	}
+
+	noDirectory := base
+	noDirectory.Store = nil
+	if _, err := New(noDirectory); err == nil {
+		t.Error("a gateway with neither store nor core route was accepted")
+	}
+}
+
+func (d *recordingDirectory) Close() error { return nil }

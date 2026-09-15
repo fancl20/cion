@@ -335,3 +335,54 @@ flow state; no operating-system provisioning exists to undo.
     device and its router entries.
 
 ## Implementation history
+
+*   Application: `pkg/apps/wireguard` — keys, the packet pipes
+    (`tun.Device` implementations whose two halves are channels), the mesh
+    transport (a `conn.Bind` on the path library's socket), the
+    host-facing binds, the in-process router, the netstack egress, the
+    directory client and service, and the gateway that composes them —
+    with the directory store in `impl/bbolt` under shared contract tests
+    (`impl/dbtest`), beside the trust DB's pattern. wireguard-go
+    (v0.0-20260522) and gVisor's netstack (v0.0-20250503, wireguard-go's
+    own pin) joined the module, vendored like the rest; the echo relay
+    rides `x/net/icmp`.
+*   Directory API: `proto/gateway/v1` — the module's first own protobuf,
+    a two-method ConnectRPC service whose generated code is checked in
+    beside its `.proto` (the `buf.gen.yaml` records the generation). One
+    entry field the proposal's list did not name turned out to be
+    required: the gateway's underlay host address. The destination AS's
+    router delivers a SCION packet to the underlay `host:port` its header
+    names, so without the underlay address a peer is unreachable; entries
+    carry it beside the port, and the summary's "(ISD-AS, public key,
+    gateway port, overlay subnet)" list gains the underlay address.
+*   Bind demultiplexing: closing a shared-socket bind wakes its receive
+    function — wireguard-go waits for the receive routines to retire on
+    device close, so a bind that only deregisters deadlocks the teardown.
+*   Mesh routes: the SCION transport seeds its path cache from the
+    reversed arrival path an endpoint carries (a core replying to a leaf
+    below it has no up segment of its own to resolve), and the sync loop
+    warms each peer's route through the full `Path` — where a fetch
+    belongs — because leaf-to-leaf routes compose up and down segments
+    and sends read the cache only.
+*   Egress: netstack's exit runs promiscuous and spoofing with external
+    loopback traffic allowed (an exit terminates whatever destination a
+    host addressed), over a default route (the forwarders' endpoints bind
+    against it), and a TCP forwarder request's identity must be read
+    before `Complete` retires it. Outbound netstack packets are taken
+    from the header views (`BufferSince`), not the payload buffer.
+*   Tests: the shared-port demultiplexing with real wireguard-go clients
+    (a key under one exit completes only on that exit's device; a key no
+    device holds is dropped), the mesh transport's path caching and
+    refresh on expiry and error, the router's lookups and MTU drop, the
+    egress's TCP splice and UDP mapping against a host-side netstack, the
+    echo relay's rewriting with a fake ICMP socket, dropped protocols,
+    flow idle expiry, the directory handlers' authenticated recording, the
+    publish loop's retry until the chain exists, the directory diff's
+    device lifecycle, and configuration validation — beside the topology
+    harness, moved from `pkg/controlplane/network_test.go` to
+    `internal/testnetwork` (the harness imports the control plane, so the
+    gateway's integration tests — which import the harness — cannot live
+    in the control plane's package), where the mesh exchange and internet
+    egress proofs run on the two-node topology with in-process hosts. The
+    egress proof's internet stand-in serves on a real local address: the
+    hosts' userspace stacks reject loopback sources as martian packets.

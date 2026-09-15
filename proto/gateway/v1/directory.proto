@@ -1,0 +1,45 @@
+syntax = "proto3";
+
+package gateway.v1;
+
+option go_package = "github.com/fancl20/cion/proto/gateway/v1;gatewayv1";
+
+// Entry is one gateway's publication: everything another node needs to
+// establish a mesh tunnel to it.
+message Entry {
+  // isd_as is the publisher's ISD-AS. The directory records the ISD-AS the
+  // authenticated publisher's certificate names, never the claimed one.
+  uint64 isd_as = 1;
+  // public_key is the node's 32-byte WireGuard public key.
+  bytes public_key = 2;
+  // gateway_port is the underlay UDP port the mesh transport listens on.
+  uint32 gateway_port = 3;
+  // underlay is the host address the gateway binds, e.g. "192.0.2.1".
+  string underlay = 4;
+  // overlay_subnet is the node's overlay subnet, e.g. "10.64.1.0/24".
+  string overlay_subnet = 5;
+}
+
+message PublishRequest {
+  // entry is the publisher's claimed entry; the ISD-AS comes from the
+  // authenticated certificate chain, the rest from the entry.
+  Entry entry = 1;
+}
+
+message PublishResponse {}
+
+message ListRequest {}
+
+message ListResponse {
+  // entries holds one entry per publishing gateway.
+  repeated Entry entries = 1;
+}
+
+// DirectoryService distributes gateway entries. Any authenticated node may
+// publish its own entry; every node may list the directory.
+service DirectoryService {
+  // Publish records the caller's gateway entry.
+  rpc Publish(PublishRequest) returns (PublishResponse);
+  // List returns every published entry.
+  rpc List(ListRequest) returns (ListResponse);
+}

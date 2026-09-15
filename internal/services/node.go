@@ -10,6 +10,7 @@ import (
 	"github.com/scionproto/scion/pkg/addr"
 
 	"github.com/fancl20/cion/pkg/apps/ping"
+	"github.com/fancl20/cion/pkg/apps/wireguard"
 	"github.com/fancl20/cion/pkg/controlplane"
 	"github.com/fancl20/cion/pkg/dataplane"
 	"github.com/fancl20/cion/pkg/pathdb"
@@ -51,6 +52,7 @@ type node struct {
 	allowAS      map[addr.IA]bool
 	services     *controlplane.Services
 	responder    *ping.Responder
+	gateway      *wireguard.Gateway
 }
 
 // identity is the node's decoded self: what every assembly phase needs
@@ -84,6 +86,9 @@ func setupNode(ctx context.Context, cfg *Config, opts DataplaneOptions) (n *node
 	if err = n.setupControlPlane(ctx); err != nil {
 		return n, err
 	}
+	if err = n.setupGateway(); err != nil {
+		return n, err
+	}
 	return n, nil
 }
 
@@ -92,6 +97,9 @@ func setupNode(ctx context.Context, cfg *Config, opts DataplaneOptions) (n *node
 // point setupNode can fail. The loops' own sockets (endpoint, responder,
 // clients) close with their owners when the process exits.
 func (n *node) Close() {
+	if n.gateway != nil {
+		n.gateway.Close()
+	}
 	if n.peerClt != nil {
 		n.peerClt.Close() //nolint:errcheck
 	}
@@ -154,6 +162,11 @@ func (n *node) start(ctx context.Context) {
 		})
 	}
 	slog.Info("Serving control endpoint", "port", controlplane.EndpointPort)
+	if n.gateway != nil {
+		runBackground(ctx, "gateway", func(ctx context.Context) error {
+			return n.gateway.Run(ctx)
+		})
+	}
 }
 
 // selfEnroll issues the core's own certificate chain locally, through the

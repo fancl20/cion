@@ -1,4 +1,4 @@
-package controlplane
+package testnetwork
 
 import (
 	"context"
@@ -11,21 +11,10 @@ import (
 	"github.com/scionproto/scion/pkg/scrypto"
 
 	"github.com/fancl20/cion/pkg/apps/ping"
-	"github.com/fancl20/cion/pkg/dataplane"
 	"github.com/fancl20/cion/pkg/pathdb"
 	"github.com/fancl20/cion/pkg/scion"
 	"github.com/fancl20/cion/pkg/segment"
 )
-
-// startPingResponder serves echo replies on the node's endhost port, as the
-// daemon does beside the control endpoint.
-func startPingResponder(t *testing.T, n *netNode) {
-	t.Helper()
-	responder := &ping.Responder{Conn: n.newNetConn(t, dataplane.EndhostPort)}
-	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
-	go responder.Run(ctx)
-}
 
 // TestPingForkTopology is the end-to-end proof of the path library's first
 // application: a responder on one node and a pinger on another of a fork
@@ -34,42 +23,42 @@ func startPingResponder(t *testing.T, n *netNode) {
 // path — the first multi-segment carriage by the data plane — and the core's
 // requests ride the down segment alone.
 func TestPingForkTopology(t *testing.T) {
-	wpki := newTestWebPKI(t)
+	wpki := NewWebPKI(t)
 	// Loopback addresses of this test's own; earlier tests' endpoints keep
 	// theirs.
-	ipA := netip.MustParseAddr("127.0.0.8")
-	ipB := netip.MustParseAddr("127.0.0.9")
-	ipC := netip.MustParseAddr("127.0.0.10")
-	extA1, extB := freeUDPAddrOn(t, ipA), freeUDPAddrOn(t, ipB)
-	extA2, extC := freeUDPAddrOn(t, ipA), freeUDPAddrOn(t, ipC)
+	ipA := addrIP(8)
+	ipB := addrIP(9)
+	ipC := addrIP(10)
+	extA1, extB := FreeUDPAddrOn(t, ipA), FreeUDPAddrOn(t, ipB)
+	extA2, extC := FreeUDPAddrOn(t, ipA), FreeUDPAddrOn(t, ipC)
 
-	a := startNetNode(t, coreIATest, ipA, "", []netLink{
-		{ifID: 1, local: extA1, remote: extB, neighbor: nodeIATest},
-		{ifID: 2, local: extA2, remote: extC, neighbor: iaLineC},
-	}, true, wpki)
-	b := startNetNode(t, nodeIATest, ipB, "", []netLink{
-		{ifID: 1, local: extB, remote: extA1, neighbor: coreIATest},
-	}, false, wpki)
-	c := startNetNode(t, iaLineC, ipC, "", []netLink{
-		{ifID: 1, local: extC, remote: extA2, neighbor: coreIATest},
-	}, false, wpki)
+	a := StartNode(t, NodeConfig{IA: coreIA, Host: ipA, Links: []Link{
+		{IfID: 1, Local: extA1, Remote: extB, Neighbor: nodeIA},
+		{IfID: 2, Local: extA2, Remote: extC, Neighbor: lineCIA},
+	}, Core: true, WPKI: wpki})
+	b := StartNode(t, NodeConfig{IA: nodeIA, Host: ipB, Links: []Link{
+		{IfID: 1, Local: extB, Remote: extA1, Neighbor: coreIA},
+	}, WPKI: wpki})
+	c := StartNode(t, NodeConfig{IA: lineCIA, Host: ipC, Links: []Link{
+		{IfID: 1, Local: extC, Remote: extA2, Neighbor: coreIA},
+	}, WPKI: wpki})
 	ctx := context.Background()
 
-	startPingResponder(t, a)
-	startPingResponder(t, b)
-	startPingResponder(t, c)
+	StartPingResponder(t, a)
+	StartPingResponder(t, b)
+	StartPingResponder(t, c)
 
 	// Beacons propagate, C enrolls, and the provider resolves the composed
 	// path C→A→B from C.
-	poll(t, "path from C to B", func() bool {
-		_, err := c.provider.Path(ctx, nodeIATest)
+	Poll(t, "path from C to B", func() bool {
+		_, err := c.Provider.Path(ctx, nodeIA)
 		return err == nil
 	})
 	report, err := ping.Run(ctx, ping.Config{
-		Conn:     c.newNetConn(t, 0),
-		Provider: c.provider,
-		Dst:      nodeIATest,
-		DstHost:  b.controlIP,
+		Conn:     c.NewConn(t, 0),
+		Provider: c.Provider,
+		Dst:      nodeIA,
+		DstHost:  b.ControlIP,
 		Count:    3,
 		Interval: 100 * time.Millisecond,
 		Wait:     2 * time.Second,
@@ -92,17 +81,18 @@ func TestPingForkTopology(t *testing.T) {
 				reply.Seq, reply.Hops)
 		}
 		if reply.Segments != 2 {
-			t.Errorf("seq %d arrival path = %d segments, want 2", reply.Seq, reply.Segments)
+			t.Errorf("seq %d arrival path = %d segments, want 2",
+				reply.Seq, reply.Segments)
 		}
 	}
 
 	// The core pings down its other leaf: its own down segment is the
 	// complete route.
 	report, err = ping.Run(ctx, ping.Config{
-		Conn:     a.newNetConn(t, 0),
-		Provider: a.provider,
-		Dst:      iaLineC,
-		DstHost:  c.controlIP,
+		Conn:     a.NewConn(t, 0),
+		Provider: a.Provider,
+		Dst:      lineCIA,
+		DstHost:  c.ControlIP,
 		Count:    3,
 		Interval: 100 * time.Millisecond,
 		Wait:     2 * time.Second,
@@ -129,16 +119,16 @@ func TestPingForkTopology(t *testing.T) {
 func TestPingReresolvesExpiredPath(t *testing.T) {
 	iaP := addr.MustIAFrom(20, 0xff0000000021)
 	iaR := addr.MustIAFrom(20, 0xff0000000022)
-	ipP, ipR := netip.MustParseAddr("127.0.0.11"), netip.MustParseAddr("127.0.0.12")
-	extP, extR := freeUDPAddrOn(t, ipP), freeUDPAddrOn(t, ipR)
+	ipP, ipR := addrIP(0x11), addrIP(0x12)
+	extP, extR := FreeUDPAddrOn(t, ipP), FreeUDPAddrOn(t, ipR)
 
-	p := startNetNode(t, iaP, ipP, "", []netLink{
-		{ifID: 1, local: extP, remote: extR, neighbor: iaR},
-	}, false, newTestWebPKI(t))
-	r := startNetNode(t, iaR, ipR, "", []netLink{
-		{ifID: 1, local: extR, remote: extP, neighbor: iaP},
-	}, false, newTestWebPKI(t))
-	startPingResponder(t, r)
+	p := StartNode(t, NodeConfig{IA: iaP, Host: ipP, Links: []Link{
+		{IfID: 1, Local: extP, Remote: extR, Neighbor: iaR},
+	}, WPKI: NewWebPKI(t)})
+	r := StartNode(t, NodeConfig{IA: iaR, Host: ipR, Links: []Link{
+		{IfID: 1, Local: extR, Remote: extP, Neighbor: iaP},
+	}, WPKI: NewWebPKI(t)})
+	StartPingResponder(t, r)
 
 	// The pinger resolves through a provider of crafted up segments: the
 	// first resolution sees a stale segment — expired twenty-five hours
@@ -150,10 +140,10 @@ func TestPingReresolvesExpiredPath(t *testing.T) {
 	}
 	provider := &scion.PathProvider{IA: iaP, DB: db}
 	report, err := ping.Run(context.Background(), ping.Config{
-		Conn:     p.newNetConn(t, 0),
+		Conn:     p.NewConn(t, 0),
 		Provider: provider,
 		Dst:      iaR,
-		DstHost:  r.controlIP,
+		DstHost:  r.ControlIP,
 		Count:    3,
 		Interval: 100 * time.Millisecond,
 		Wait:     2 * time.Second,
@@ -165,7 +155,7 @@ func TestPingReresolvesExpiredPath(t *testing.T) {
 		t.Errorf("re-resolutions = %d, want 1 (the expired initial path)", report.Reresolves)
 	}
 	if report.Received != 3 || report.Loss() != 0 {
-		t.Fatalf("received %d of %d replies, want 3 of 3 over the fresh path",
+		t.Fatalf("received %d of %d replies over the fresh path",
 			report.Received, report.Sent)
 	}
 	for _, reply := range report.Replies {
@@ -186,14 +176,14 @@ func upSegment(t *testing.T, now time.Time, core, leaf addr.IA) *pathdb.Segment 
 		t.Fatal(err)
 	}
 	macFactory := func() hash.Hash {
-		mac, _ := scrypto.InitMac(testMACKeyBytes)
+		mac, _ := scrypto.InitMac(MACKey)
 		return mac
 	}
-	if _, err := pcb.AppendRouteHop(core, segment.EntryOptions{EgressIfID: testIfID},
+	if _, err := pcb.AppendRouteHop(core, segment.EntryOptions{EgressIfID: 1},
 		macFactory); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := pcb.AppendRouteHop(leaf, segment.EntryOptions{IngressIfID: testIfID},
+	if _, err := pcb.AppendRouteHop(leaf, segment.EntryOptions{IngressIfID: 1},
 		macFactory); err != nil {
 		t.Fatal(err)
 	}
@@ -233,22 +223,22 @@ func (d *flipPathDB) Close() error                                          { re
 func TestPingUnreachable(t *testing.T) {
 	iaP := addr.MustIAFrom(20, 0xff0000000031)
 	iaR := addr.MustIAFrom(20, 0xff0000000032)
-	ipP, ipR := netip.MustParseAddr("127.0.0.13"), netip.MustParseAddr("127.0.0.14")
-	extP, extR := freeUDPAddrOn(t, ipP), freeUDPAddrOn(t, ipR)
+	ipP, ipR := addrIP(0x13), addrIP(0x14)
+	extP, extR := FreeUDPAddrOn(t, ipP), FreeUDPAddrOn(t, ipR)
 
-	p := startNetNode(t, iaP, ipP, "", []netLink{
-		{ifID: 1, local: extP, remote: extR, neighbor: iaR},
-	}, false, newTestWebPKI(t))
-	startNetNode(t, iaR, ipR, "", []netLink{
-		{ifID: 1, local: extR, remote: extP, neighbor: iaP},
-	}, false, newTestWebPKI(t))
+	p := StartNode(t, NodeConfig{IA: iaP, Host: ipP, Links: []Link{
+		{IfID: 1, Local: extP, Remote: extR, Neighbor: iaR},
+	}, WPKI: NewWebPKI(t)})
+	StartNode(t, NodeConfig{IA: iaR, Host: ipR, Links: []Link{
+		{IfID: 1, Local: extR, Remote: extP, Neighbor: iaP},
+	}, WPKI: NewWebPKI(t)})
 
 	stranger := addr.MustIAFrom(20, 0xff0000000077)
 	done := make(chan error, 1)
 	go func() {
 		_, err := ping.Run(context.Background(), ping.Config{
-			Conn:     p.newNetConn(t, 0),
-			Provider: p.provider,
+			Conn:     p.NewConn(t, 0),
+			Provider: p.Provider,
 			Dst:      stranger,
 			DstHost:  netip.MustParseAddr("127.0.0.99"),
 			Count:    1,
@@ -262,7 +252,7 @@ func TestPingUnreachable(t *testing.T) {
 		if err == nil {
 			t.Error("pinging an unreachable ISD-AS succeeded, want error")
 		}
-	case <-time.After(netTestTimeout):
+	case <-time.After(TestTimeout):
 		t.Fatal("pinging an unreachable ISD-AS hangs")
 	}
 }
@@ -273,26 +263,26 @@ func TestPingUnreachable(t *testing.T) {
 func TestPingLossSummary(t *testing.T) {
 	iaP := addr.MustIAFrom(20, 0xff0000000041)
 	iaR := addr.MustIAFrom(20, 0xff0000000042)
-	ipP, ipR := netip.MustParseAddr("127.0.0.15"), netip.MustParseAddr("127.0.0.16")
-	extP, extR := freeUDPAddrOn(t, ipP), freeUDPAddrOn(t, ipR)
+	ipP, ipR := addrIP(0x15), addrIP(0x16)
+	extP, extR := FreeUDPAddrOn(t, ipP), FreeUDPAddrOn(t, ipR)
 
 	// The provider resolves over a crafted up segment, so the requests are
 	// delivered; no responder answers them.
-	p := startNetNode(t, iaP, ipP, "", []netLink{
-		{ifID: 1, local: extP, remote: extR, neighbor: iaR},
-	}, false, newTestWebPKI(t))
-	r := startNetNode(t, iaR, ipR, "", []netLink{
-		{ifID: 1, local: extR, remote: extP, neighbor: iaP},
-	}, false, newTestWebPKI(t))
+	p := StartNode(t, NodeConfig{IA: iaP, Host: ipP, Links: []Link{
+		{IfID: 1, Local: extP, Remote: extR, Neighbor: iaR},
+	}, WPKI: NewWebPKI(t)})
+	r := StartNode(t, NodeConfig{IA: iaR, Host: ipR, Links: []Link{
+		{IfID: 1, Local: extR, Remote: extP, Neighbor: iaP},
+	}, WPKI: NewWebPKI(t)})
 	provider := &scion.PathProvider{
 		IA: iaP,
 		DB: &staticPathDB{seg: upSegment(t, time.Now(), iaR, iaP)},
 	}
 	report, err := ping.Run(context.Background(), ping.Config{
-		Conn:     p.newNetConn(t, 0),
+		Conn:     p.NewConn(t, 0),
 		Provider: provider,
 		Dst:      iaR,
-		DstHost:  r.controlIP,
+		DstHost:  r.ControlIP,
 		Count:    2,
 		Interval: 100 * time.Millisecond,
 		Wait:     200 * time.Millisecond,

@@ -47,6 +47,38 @@ type Config struct {
 	// AllowIAS optionally restricts enrollment to the listed ISD-ASes; the
 	// core rejects and logs requests from any other ISD-AS (core only).
 	AllowIAS []string `json:"allowIAS"`
+	// Gateway configures the WireGuard gateway application (proposal 0006);
+	// a node without the section runs no gateway.
+	Gateway *ConfigGateway `json:"gateway"`
+}
+
+// ConfigGateway is the gateway application's configuration section. See
+// proposal 0006.
+type ConfigGateway struct {
+	// Subnet is the node's overlay subnet, e.g. "10.64.1.0/24". Host
+	// addresses are assigned within it by the peer configuration.
+	Subnet string `json:"subnet"`
+	// ListenPort is the shared host-facing UDP port every host dials.
+	ListenPort uint16 `json:"listenPort"`
+	// Egress marks an internet exit: the node runs the netstack egress only
+	// when set.
+	Egress bool `json:"egress"`
+	// Exits lists the offered exit ISD-ASes, e.g. ["20-ff00:0:3"]; one host
+	// device serves each.
+	Exits []string `json:"exits"`
+	// Peers lists the host public keys — the operator's membership list —
+	// with an overlay address and an exit each.
+	Peers []ConfigGatewayPeer `json:"peers"`
+}
+
+// ConfigGatewayPeer is one host's entry in the gateway configuration.
+type ConfigGatewayPeer struct {
+	// PublicKey is the host's 32-byte WireGuard public key, hexadecimal.
+	PublicKey string `json:"publicKey"`
+	// Address is the host's overlay address inside the subnet.
+	Address string `json:"address"`
+	// Exit is the exit ISD-AS the host sends through.
+	Exit string `json:"exit"`
 }
 
 type ConfigInterface struct {
