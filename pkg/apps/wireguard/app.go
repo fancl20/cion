@@ -18,7 +18,7 @@ import (
 
 	"github.com/fancl20/cion/pkg/controlplane"
 	"github.com/fancl20/cion/pkg/scion"
-	gatewayv1connect "github.com/fancl20/cion/proto/gateway/v1/gatewayv1connect"
+	wireguardv1connect "github.com/fancl20/cion/proto/wireguard/v1/wireguardv1connect"
 )
 
 // OverlayMTU is the overlay's maximum inner packet: an inner packet of 1280
@@ -32,14 +32,14 @@ const OverlayMTU = 1280
 // names the low values — DS 0x0001, CS 0x0002, the wildcard 0x0010 — and the
 // SVC type's top bit is the multicast flag, so CION's own services take a
 // private slice above both, 0x7ff1 through 0x7fff. The drafts define no
-// gateway service: the values are CION's to allocate, the convention
-// proto/gateway/v1 is.
+// WireGuard service: the values are CION's to allocate, the convention
+// proto/wireguard/v1 is.
 const (
-	// SvcGateway is the mesh transport service. Every node's gateway
+	// SvcWireguard is the mesh transport service. Every node's application
 	// registers its mesh socket under this value in its own AS.
-	SvcGateway addr.SVC = 0x7ff1
-	// SvcDirectory is the core's directory service. The core node's gateway
-	// registers its directory socket under this value.
+	SvcWireguard addr.SVC = 0x7ff1
+	// SvcDirectory is the core's directory service. The core node's
+	// application registers its directory socket under this value.
 	SvcDirectory addr.SVC = 0x7ff2
 )
 
@@ -48,13 +48,13 @@ const (
 // rather than discovered at first use.
 const PersistentKeepalive = 25 * time.Second
 
-// CountersInterval is how often the gateway logs its counters — the overlay's
-// substitute for the operating system's tooling, which cannot see in-process
-// forwarding.
+// CountersInterval is how often the application logs its counters — the
+// overlay's substitute for the operating system's tooling, which cannot see
+// in-process forwarding.
 const CountersInterval = time.Minute
 
 // HostPeer is one configured host: its public key — the operator's list, the
-// gateway's membership — its overlay address, and its exit.
+// application's membership — its overlay address, and its exit.
 type HostPeer struct {
 	// PublicKey is the host's WireGuard public key.
 	PublicKey PublicKey
@@ -65,7 +65,7 @@ type HostPeer struct {
 	Exit addr.IA
 }
 
-// Config configures the gateway application.
+// Config configures the application.
 type Config struct {
 	// IA is the node's ISD-AS.
 	IA addr.IA
@@ -119,12 +119,12 @@ type Config struct {
 	PublishRetry    time.Duration
 }
 
-// Gateway is the WireGuard gateway application (proposal 0006): the mesh
-// transport and directory, the host-facing devices behind their shared port,
-// the in-process router between the tunnels, and — on an exit — the netstack
-// egress. A gateway node holds unprivileged UDP sockets and its own state,
-// and nothing else.
-type Gateway struct {
+// App is the WireGuard application (proposal 0006): the mesh transport and
+// directory, the host-facing devices behind their shared port, the in-process
+// router between the tunnels, and — on an exit — the netstack egress. The
+// node running it holds unprivileged UDP sockets and its own state, and
+// nothing else.
+type App struct {
 	cfg Config
 	key PrivateKey
 	cnt *counters
@@ -172,15 +172,15 @@ type hostDevice struct {
 	pipe *pipe
 }
 
-// New assembles the gateway: it loads or creates the node's WireGuard key
+// New assembles the application: it loads or creates the node's WireGuard key
 // pair, binds the mesh socket on an ephemeral port and registers it under
-// the gateway service in its own AS, binds the shared host-facing port,
+// the wireguard service in its own AS, binds the shared host-facing port,
 // creates one host device per offered exit with the configured peers, builds
 // the router and — when the node is an exit — the netstack egress, and wires
 // the directory surfaces: the core's store it serves over its own registered
 // service socket, the route every other node publishes and fetches through.
 // Run serves it.
-func New(cfg Config) (*Gateway, error) {
+func New(cfg Config) (*App, error) {
 	if cfg.IA.IsZero() {
 		return nil, fmt.Errorf("no ISD-AS configured")
 	}
@@ -207,7 +207,7 @@ func New(cfg Config) (*Gateway, error) {
 	}
 	key, err := LoadOrCreateKey(cfg.StateDir)
 	if err != nil {
-		return nil, fmt.Errorf("loading the gateway key: %w", err)
+		return nil, fmt.Errorf("loading the application key: %w", err)
 	}
 	cnt := &counters{}
 	meshConn, err := cfg.NewConn()
@@ -220,7 +220,7 @@ func New(cfg Config) (*Gateway, error) {
 		meshConn.Close() //nolint:errcheck
 		return nil, fmt.Errorf("binding the host port: %w", err)
 	}
-	g := &Gateway{
+	a := &App{
 		cfg:         cfg,
 		key:         key,
 		cnt:         cnt,
@@ -231,14 +231,14 @@ func New(cfg Config) (*Gateway, error) {
 		hostDevices: make(map[addr.IA]*hostDevice),
 		logger:      device.NewLogger(device.LogLevelError, "cion-wireguard"),
 	}
-	if err := g.register(SvcGateway, meshConn.LocalPort()); err != nil {
-		g.release()
+	if err := a.register(SvcWireguard, meshConn.LocalPort()); err != nil {
+		a.release()
 		return nil, fmt.Errorf("registering the mesh socket: %w", err)
 	}
 	if cfg.Egress {
 		overlayAddr, err := firstAddr(cfg.Subnet)
 		if err != nil {
-			g.release()
+			a.release()
 			return nil, err
 		}
 		e, err := newEgress(egressConfig{
@@ -248,80 +248,80 @@ func New(cfg Config) (*Gateway, error) {
 			Cnt:           cnt,
 		})
 		if err != nil {
-			g.release()
+			a.release()
 			return nil, err
 		}
-		g.egress = e
-		g.router.setEgress(e.Inbound)
-		e.setRouter(g.router.routeFromEgress)
+		a.egress = e
+		a.router.setEgress(e.Inbound)
+		e.setRouter(a.router.routeFromEgress)
 	}
 	if cfg.Store != nil {
-		g.directory = storeDirectoryClient{store: cfg.Store}
+		a.directory = storeDirectoryClient{store: cfg.Store}
 		// The core serves the directory on a socket of its own, registered
 		// under the directory service the way the mesh socket is under the
-		// gateway service.
+		// wireguard service.
 		dirServe, err := cfg.NewConn()
 		if err != nil {
-			g.release()
+			a.release()
 			return nil, fmt.Errorf("binding the directory socket: %w", err)
 		}
-		g.dirServe = dirServe
-		if err := g.register(SvcDirectory, dirServe.LocalPort()); err != nil {
-			g.release()
+		a.dirServe = dirServe
+		if err := a.register(SvcDirectory, dirServe.LocalPort()); err != nil {
+			a.release()
 			return nil, fmt.Errorf("registering the directory socket: %w", err)
 		}
 	} else {
 		dirConn, err := cfg.NewConn()
 		if err != nil {
-			g.release()
+			a.release()
 			return nil, fmt.Errorf("binding the directory socket: %w", err)
 		}
-		g.dirConn = newRPCDirectoryClient(dirConn, cfg.CoreRoute, cfg.Engine, cfg.Provider)
-		g.directory = g.dirConn
+		a.dirConn = newRPCDirectoryClient(dirConn, cfg.CoreRoute, cfg.Engine, cfg.Provider)
+		a.directory = a.dirConn
 	}
-	if err := g.startHostDevices(); err != nil {
-		g.release()
+	if err := a.startHostDevices(); err != nil {
+		a.release()
 		return nil, err
 	}
-	return g, nil
+	return a, nil
 }
 
 // register registers a socket's port as a SCION service in this AS and
 // records the registration for Close to undo.
-func (g *Gateway) register(svc addr.SVC, port uint16) error {
-	if err := g.cfg.RegisterSvc(svc, port); err != nil {
+func (a *App) register(svc addr.SVC, port uint16) error {
+	if err := a.cfg.RegisterSvc(svc, port); err != nil {
 		return err
 	}
-	g.regs = append(g.regs, svcReg{svc: svc, port: port})
+	a.regs = append(a.regs, svcReg{svc: svc, port: port})
 	return nil
 }
 
 // deregisterAll undoes the recorded registrations, most recent first.
-func (g *Gateway) deregisterAll() {
-	for i := len(g.regs) - 1; i >= 0; i-- {
-		reg := g.regs[i]
-		if err := g.cfg.UnregisterSvc(reg.svc, reg.port); err != nil {
-			slog.Warn("Gateway service deregistration", "service", reg.svc, "err", err)
+func (a *App) deregisterAll() {
+	for i := len(a.regs) - 1; i >= 0; i-- {
+		reg := a.regs[i]
+		if err := a.cfg.UnregisterSvc(reg.svc, reg.port); err != nil {
+			slog.Warn("WireGuard service deregistration", "service", reg.svc, "err", err)
 		}
 	}
-	g.regs = nil
+	a.regs = nil
 }
 
 // release closes what New opened on a failed construction. The store stays
 // the caller's: it opened it, and a construction that never returned owns
 // nothing of it.
-func (g *Gateway) release() {
-	g.deregisterAll()
-	g.mesh.Close()
-	g.host.Close()
-	if g.egress != nil {
-		g.egress.link.Close()
+func (a *App) release() {
+	a.deregisterAll()
+	a.mesh.Close()
+	a.host.Close()
+	if a.egress != nil {
+		a.egress.link.Close()
 	}
-	if g.dirConn != nil {
-		g.dirConn.Close() //nolint:errcheck
+	if a.dirConn != nil {
+		a.dirConn.Close() //nolint:errcheck
 	}
-	if g.dirServe != nil {
-		g.dirServe.Close() //nolint:errcheck
+	if a.dirServe != nil {
+		a.dirServe.Close() //nolint:errcheck
 	}
 }
 
@@ -361,21 +361,21 @@ func firstAddr(prefix netip.Prefix) (netip.Addr, error) {
 // shared port's dispatcher, with the host peers configured under exactly one
 // exit's device — so the peer lookup demultiplexes the shared socket and
 // reply traffic routes by the peer's address to its exit's device.
-func (g *Gateway) startHostDevices() error {
-	peersByExit := make(map[addr.IA][]HostPeer, len(g.cfg.Exits))
-	for _, p := range g.cfg.Peers {
+func (a *App) startHostDevices() error {
+	peersByExit := make(map[addr.IA][]HostPeer, len(a.cfg.Exits))
+	for _, p := range a.cfg.Peers {
 		peersByExit[p.Exit] = append(peersByExit[p.Exit], p)
 	}
-	for _, exit := range g.cfg.Exits {
-		dev, pipe, err := g.newHostDevice(exit, peersByExit[exit])
+	for _, exit := range a.cfg.Exits {
+		dev, pipe, err := a.newHostDevice(exit, peersByExit[exit])
 		if err != nil {
-			for _, hd := range g.hostDevices {
+			for _, hd := range a.hostDevices {
 				hd.dev.Close()
 				hd.pipe.Close() //nolint:errcheck
 			}
 			return err
 		}
-		g.hostDevices[exit] = &hostDevice{exit: exit, dev: dev, pipe: pipe}
+		a.hostDevices[exit] = &hostDevice{exit: exit, dev: dev, pipe: pipe}
 	}
 	return nil
 }
@@ -384,12 +384,12 @@ func (g *Gateway) startHostDevices() error {
 // every host device shares it, so any can decrypt a handshake while only the
 // one holding the sender's public key completes it — and the hosts
 // configured under this exit as /32 peers.
-func (g *Gateway) newHostDevice(exit addr.IA, peers []HostPeer) (*device.Device, *pipe, error) {
-	pipe := newPipe("host-"+exit.String(), OverlayMTU, g.cnt)
-	dev := device.NewDevice(pipe, newHostBind(g.host), g.logger)
+func (a *App) newHostDevice(exit addr.IA, peers []HostPeer) (*device.Device, *pipe, error) {
+	pipe := newPipe("host-"+exit.String(), OverlayMTU, a.cnt)
+	dev := device.NewDevice(pipe, newHostBind(a.host), a.logger)
 	var ipc strings.Builder
-	ipc.WriteString("private_key=" + hex.EncodeToString(g.key[:]) + "\n")
-	ipc.WriteString("listen_port=" + strconv.Itoa(int(g.host.LocalPort())) + "\n")
+	ipc.WriteString("private_key=" + hex.EncodeToString(a.key[:]) + "\n")
+	ipc.WriteString("listen_port=" + strconv.Itoa(int(a.host.LocalPort())) + "\n")
 	ipc.WriteString("replace_peers=true\n")
 	for _, p := range peers {
 		ipc.WriteString("public_key=" + p.PublicKey.String() + "\n")
@@ -413,17 +413,17 @@ func (g *Gateway) newHostDevice(exit addr.IA, peers []HostPeer) (*device.Device,
 // 0.0.0.0/0 added when the peer is one of this node's configured exits, so
 // the device's default-routed traffic finds a peer for any destination while
 // WireGuard's longest-prefix peer selection keeps subnet traffic direct.
-func (g *Gateway) newMeshDevice(entry Entry) (*meshPeer, error) {
-	bind := newMeshBind(g.mesh)
-	pipe := newPipe("mesh-"+entry.IA.String(), OverlayMTU, g.cnt)
-	dev := device.NewDevice(pipe, bind, g.logger)
+func (a *App) newMeshDevice(entry Entry) (*meshPeer, error) {
+	bind := newMeshBind(a.mesh)
+	pipe := newPipe("mesh-"+entry.IA.String(), OverlayMTU, a.cnt)
+	dev := device.NewDevice(pipe, bind, a.logger)
 	var ipc strings.Builder
-	ipc.WriteString("private_key=" + hex.EncodeToString(g.key[:]) + "\n")
+	ipc.WriteString("private_key=" + hex.EncodeToString(a.key[:]) + "\n")
 	ipc.WriteString("replace_peers=true\n")
 	ipc.WriteString("public_key=" + entry.PublicKey.String() + "\n")
 	ipc.WriteString("endpoint=" + endpointString(entry.IA) + "\n")
 	ipc.WriteString("allowed_ip=" + entry.Overlay.String() + "\n")
-	if containsExit(g.cfg.Exits, entry.IA) {
+	if containsExit(a.cfg.Exits, entry.IA) {
 		ipc.WriteString("allowed_ip=0.0.0.0/0\n")
 	}
 	ipc.WriteString("persistent_keepalive_interval=" +
@@ -444,52 +444,52 @@ func (g *Gateway) newMeshDevice(entry Entry) (*meshPeer, error) {
 // applyDirectory diffs a fetched directory against the mesh devices: new
 // peers gain a device; departed peers lose theirs and their router entries.
 // The node's own entry is not a peer.
-func (g *Gateway) applyDirectory(entries []Entry) {
-	g.mtx.Lock()
-	defer g.mtx.Unlock()
+func (a *App) applyDirectory(entries []Entry) {
+	a.mtx.Lock()
+	defer a.mtx.Unlock()
 	live := make(map[addr.IA]bool, len(entries))
 	for _, entry := range entries {
-		if entry.IA.Equal(g.cfg.IA) {
+		if entry.IA.Equal(a.cfg.IA) {
 			continue
 		}
 		live[entry.IA] = true
-		if _, ok := g.meshPeers[entry.IA]; ok {
+		if _, ok := a.meshPeers[entry.IA]; ok {
 			continue
 		}
-		peer, err := g.newMeshDevice(entry)
+		peer, err := a.newMeshDevice(entry)
 		if err != nil {
 			// A directory entry that fails to raise a device queues a
-			// refresh and logs rather than erroring the gateway.
-			slog.Warn("Gateway mesh device", "peer", entry.IA, "err", err)
+			// refresh and logs rather than erroring the application.
+			slog.Warn("WireGuard mesh device", "peer", entry.IA, "err", err)
 			continue
 		}
-		g.meshPeers[entry.IA] = peer
-		go peer.pipe.drain(g.router.routeFrom(peer.pipe))
-		slog.Info("Gateway mesh tunnel up", "peer", entry.IA, "subnet", entry.Overlay)
+		a.meshPeers[entry.IA] = peer
+		go peer.pipe.drain(a.router.routeFrom(peer.pipe))
+		slog.Info("WireGuard mesh tunnel up", "peer", entry.IA, "subnet", entry.Overlay)
 	}
-	for ia, peer := range g.meshPeers {
+	for ia, peer := range a.meshPeers {
 		if live[ia] {
 			continue
 		}
 		peer.dev.Close()
 		peer.pipe.Close() //nolint:errcheck
-		delete(g.meshPeers, ia)
-		slog.Info("Gateway mesh tunnel down", "peer", ia)
+		delete(a.meshPeers, ia)
+		slog.Info("WireGuard mesh tunnel down", "peer", ia)
 	}
-	g.rebuildLocked()
+	a.rebuildLocked()
 }
 
-// rebuildLocked recomposes the router table from the devices; the gateway
-// mutex serializes rebuilds with the device set.
-func (g *Gateway) rebuildLocked() {
-	nets := make([]route, 0, len(g.meshPeers))
-	for _, peer := range g.meshPeers {
+// rebuildLocked recomposes the router table from the devices; the
+// application's mutex serializes rebuilds with the device set.
+func (a *App) rebuildLocked() {
+	nets := make([]route, 0, len(a.meshPeers))
+	for _, peer := range a.meshPeers {
 		nets = append(nets, route{prefix: peer.entry.Overlay, dst: peer.pipe})
 	}
-	hosts := make([]hostRoute, 0, len(g.cfg.Peers))
-	exits := make(map[*pipe]*pipe, len(g.hostDevices))
-	for exit, hd := range g.hostDevices {
-		for _, p := range g.cfg.Peers {
+	hosts := make([]hostRoute, 0, len(a.cfg.Peers))
+	exits := make(map[*pipe]*pipe, len(a.hostDevices))
+	for exit, hd := range a.hostDevices {
+		for _, p := range a.cfg.Peers {
 			if p.Exit.Equal(exit) {
 				hosts = append(hosts, hostRoute{addr: p.Addr, pipe: hd.pipe})
 			}
@@ -497,7 +497,7 @@ func (g *Gateway) rebuildLocked() {
 		// Exit selection is the router's default: traffic decrypted by this
 		// exit's host device flows to the exit's mesh device — the local
 		// exit enters the egress, whose sink the router already holds.
-		if mesh := g.meshPeers[exit]; mesh != nil {
+		if mesh := a.meshPeers[exit]; mesh != nil {
 			exits[hd.pipe] = mesh.pipe
 		} else {
 			// The exit has no tunnel yet; default traffic drops until it
@@ -505,50 +505,50 @@ func (g *Gateway) rebuildLocked() {
 			exits[hd.pipe] = nil
 		}
 	}
-	g.router.rebuild(hosts, nets, exits)
+	a.router.rebuild(hosts, nets, exits)
 }
 
 // PublicKey returns the node's WireGuard public key — the public key a
 // host's client configuration peers with.
-func (g *Gateway) PublicKey() PublicKey {
-	return g.key.PublicKey()
+func (a *App) PublicKey() PublicKey {
+	return a.key.PublicKey()
 }
 
 // HostPort returns the shared host-facing UDP port — the one port every
 // host dials.
-func (g *Gateway) HostPort() uint16 {
-	return g.cfg.ListenPort
+func (a *App) HostPort() uint16 {
+	return a.cfg.ListenPort
 }
 
 // MeshPeers snapshots the ISD-ASes the directory has produced mesh devices
 // for.
-func (g *Gateway) MeshPeers() []addr.IA {
-	return g.meshPeerIAs()
+func (a *App) MeshPeers() []addr.IA {
+	return a.meshPeerIAs()
 }
 
-// Run serves the gateway until the context is canceled: the sockets' read
+// Run serves the application until the context is canceled: the sockets' read
 // loops, the devices' pipes through the router, the egress, the directory —
 // served by the core, published and fetched by everyone — and the counters
 // log.
-func (g *Gateway) Run(ctx context.Context) error {
-	defer g.Close()
-	go g.mesh.run()
-	go g.host.run()
-	for _, hd := range g.hostDevices {
-		go hd.pipe.drain(g.router.routeFrom(hd.pipe))
+func (a *App) Run(ctx context.Context) error {
+	defer a.Close()
+	go a.mesh.run()
+	go a.host.run()
+	for _, hd := range a.hostDevices {
+		go hd.pipe.drain(a.router.routeFrom(hd.pipe))
 	}
-	if g.egress != nil {
-		go g.egress.run(ctx)
+	if a.egress != nil {
+		go a.egress.run(ctx)
 	}
-	if g.cfg.Store != nil {
-		g.serveDirectory(ctx)
+	if a.cfg.Store != nil {
+		a.serveDirectory(ctx)
 	}
-	go g.runPublish(ctx)
-	go g.runSync(ctx)
-	slog.Info("Serving WireGuard gateway",
-		"ia", g.cfg.IA, "subnet", g.cfg.Subnet,
-		"listenPort", g.cfg.ListenPort, "egress", g.cfg.Egress,
-		"publicKey", g.PublicKey())
+	go a.runPublish(ctx)
+	go a.runSync(ctx)
+	slog.Info("Serving the WireGuard application",
+		"ia", a.cfg.IA, "subnet", a.cfg.Subnet,
+		"listenPort", a.cfg.ListenPort, "egress", a.cfg.Egress,
+		"publicKey", a.PublicKey())
 	logTick := time.NewTicker(CountersInterval)
 	defer logTick.Stop()
 	for {
@@ -556,7 +556,7 @@ func (g *Gateway) Run(ctx context.Context) error {
 		case <-ctx.Done():
 			return nil
 		case <-logTick.C:
-			slog.Info("Gateway counters", g.cnt.snapshot()...)
+			slog.Info("WireGuard counters", a.cnt.snapshot()...)
 		}
 	}
 }
@@ -565,61 +565,61 @@ func (g *Gateway) Run(ctx context.Context) error {
 // registered under the directory service, over the application's
 // authenticated channel: the control endpoint's TLS machinery, every
 // publisher identified by its verified chain.
-func (g *Gateway) serveDirectory(ctx context.Context) {
-	conn := g.dirServe
+func (a *App) serveDirectory(ctx context.Context) {
+	conn := a.dirServe
 	go func() {
 		defer conn.Close() //nolint:errcheck
-		if err := controlplane.ServeHTTP3(conn, g.DirectoryHandler(),
+		if err := controlplane.ServeHTTP3(conn, a.DirectoryHandler(),
 			controlplane.EndpointTLS(controlplane.EndpointTLSConfig{
-				Engine: g.cfg.Engine,
+				Engine: a.cfg.Engine,
 			})); err != nil && ctx.Err() == nil {
-			slog.Error("Gateway directory service exited", "err", err)
+			slog.Error("WireGuard directory service exited", "err", err)
 		}
 	}()
-	slog.Info("Serving gateway directory", "service", serviceName(SvcDirectory))
+	slog.Info("Serving the WireGuard directory", "service", serviceName(SvcDirectory))
 }
 
 // DirectoryHandler is the core's directory HTTP handler: the ConnectRPC
 // service behind the middleware that peers each request's verified chain
 // into its context.
-func (g *Gateway) DirectoryHandler() http.Handler {
-	path, handler := gatewayv1connect.NewDirectoryServiceHandler(
-		&DirectoryService{Store: g.cfg.Store, Cnt: g.cnt})
+func (a *App) DirectoryHandler() http.Handler {
+	path, handler := wireguardv1connect.NewDirectoryServiceHandler(
+		&DirectoryService{Store: a.cfg.Store, Cnt: a.cnt})
 	mux := http.NewServeMux()
 	mux.Handle(path, Authenticate(handler))
 	return mux
 }
 
-// Close releases the gateway: the devices close, the sockets retire with
+// Close releases the application: the devices close, the sockets retire with
 // their service registrations, the flow state expires, and the store closes;
 // no operating-system provisioning exists to undo.
-func (g *Gateway) Close() {
-	g.mtx.Lock()
-	defer g.mtx.Unlock()
-	for _, peer := range g.meshPeers {
+func (a *App) Close() {
+	a.mtx.Lock()
+	defer a.mtx.Unlock()
+	for _, peer := range a.meshPeers {
 		peer.dev.Close()
 		peer.pipe.Close() //nolint:errcheck
 	}
-	g.meshPeers = nil
-	for _, hd := range g.hostDevices {
+	a.meshPeers = nil
+	for _, hd := range a.hostDevices {
 		hd.dev.Close()
 		hd.pipe.Close() //nolint:errcheck
 	}
-	g.hostDevices = nil
-	g.deregisterAll()
-	g.mesh.Close()
-	g.host.Close()
-	if g.egress != nil {
-		g.egress.link.Close()
+	a.hostDevices = nil
+	a.deregisterAll()
+	a.mesh.Close()
+	a.host.Close()
+	if a.egress != nil {
+		a.egress.link.Close()
 	}
-	if g.dirConn != nil {
-		g.dirConn.Close() //nolint:errcheck
+	if a.dirConn != nil {
+		a.dirConn.Close() //nolint:errcheck
 	}
-	if g.dirServe != nil {
-		g.dirServe.Close() //nolint:errcheck
+	if a.dirServe != nil {
+		a.dirServe.Close() //nolint:errcheck
 	}
-	if g.cfg.Store != nil {
-		g.cfg.Store.Close() //nolint:errcheck
+	if a.cfg.Store != nil {
+		a.cfg.Store.Close() //nolint:errcheck
 	}
 }
 

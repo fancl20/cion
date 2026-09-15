@@ -1,10 +1,10 @@
 syntax = "proto3";
 
-package gateway.v1;
+package wireguard.v1;
 
-option go_package = "github.com/fancl20/cion/proto/gateway/v1;gatewayv1";
+option go_package = "github.com/fancl20/cion/proto/wireguard/v1;wireguardv1";
 
-// Entry is one gateway's publication: everything another node needs to
+// Entry is one node's publication: everything another node needs to
 // establish a mesh tunnel to it.
 message Entry {
   // isd_as is the publisher's ISD-AS. The directory records the ISD-AS the
@@ -27,14 +27,14 @@ message PublishResponse {}
 message ListRequest {}
 
 message ListResponse {
-  // entries holds one entry per publishing gateway.
+  // entries holds one entry per publishing node.
   repeated Entry entries = 1;
 }
 
-// DirectoryService distributes gateway entries. Any authenticated node may
+// DirectoryService distributes node entries. Any authenticated node may
 // publish its own entry; every node may list the directory.
 service DirectoryService {
-  // Publish records the caller's gateway entry.
+  // Publish records the caller's entry.
   rpc Publish(PublishRequest) returns (PublishResponse);
   // List returns every published entry.
   rpc List(ListRequest) returns (ListResponse);

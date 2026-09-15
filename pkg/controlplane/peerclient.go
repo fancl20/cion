@@ -79,7 +79,8 @@ func NewPeerClient(cfg PeerClientConfig) *PeerClient {
 // (QUIC) riding the connection's SCION paths, presenting the node's chain as
 // the client certificate and — with verifyServer set — verifying the peer's
 // chain against the pinned TRC. The control endpoint's client machinery as a
-// library, the form the gateway's directory client consumes (proposal 0006).
+// library, the form the WireGuard application's directory client consumes
+// (proposal 0006).
 // Closing qclt releases the connections the client dials.
 func NewSCIONClient(
 	cfg PeerClientConfig,

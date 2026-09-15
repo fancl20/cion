@@ -160,3 +160,34 @@ alias `gatewaybbolt` take `Wireguard`/`wireguard` forms.
     tests.
 
 ## Implementation history
+
+*   Service value and names: `SvcGateway` became `SvcWireguard` at the same
+    `0x7ff1`, the name table reads "wireguard", and the mesh endpoint
+    string is "isd-as,wireguard" — `ParseEndpoint` refuses "gateway" as a
+    retired name beside the unknown ones. `SvcDirectory` and the
+    registration callbacks kept their names.
+*   Protobuf: `proto/gateway/v1` moved to `proto/wireguard/v1` with
+    package `wireguard.v1` and Go packages `wireguardv1`/`wireguardv1connect`,
+    regenerated with the pinned plugins; the ConnectRPC procedure paths and
+    the message full names moved with the package, and `buf.gen.yaml`'s
+    comment follows.
+*   Node assembly and configuration: `internal/services/gateway.go` became
+    `wireguard.go` with `setupWireguard`/`parseWireguardConfig`, the node's
+    `wireguard` field of type `*wireguard.App`, the background service
+    named "wireguard", and the application's state directory
+    `<state>/wireguard`. The section became `wireguard:` with
+    `ConfigWireguard`/`ConfigWireguardPeer`, and `LoadConfig` now refuses
+    unknown fields — a stale `gateway:` section stops the node at
+    configuration, the rename's one operator-visible edge.
+*   Application type and vocabulary: `wireguard.Gateway` became
+    `wireguard.App` in `app.go`; the log strings ("Serving the WireGuard
+    application", "WireGuard mesh tunnel up") and the doc comments follow;
+    the harness's identifiers — `WireguardOptions`, `NodeConfig.Wireguard`,
+    `startWireguard`, the `WireguardPublish`/`WireguardRefresh`/
+    `WireguardRetry` cadence, the proofs' `TestWireguard*` names, the test
+    helpers, and the `wireguardbbolt` import alias — took `Wireguard`
+    forms.
+*   Tests: the endpoint string's round trip over "isd-as,wireguard" with
+    "gateway" among the refused names; the `wireguard:` section's decoding
+    beside the refusal of a stale `gateway:` one; the unit and integration
+    suites re-ran unchanged in behavior under the renamed identifiers.

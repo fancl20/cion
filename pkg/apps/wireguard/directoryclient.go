@@ -13,8 +13,8 @@ import (
 
 	"github.com/fancl20/cion/pkg/controlplane"
 	"github.com/fancl20/cion/pkg/scion"
-	gatewayv1 "github.com/fancl20/cion/proto/gateway/v1"
-	gatewayv1connect "github.com/fancl20/cion/proto/gateway/v1/gatewayv1connect"
+	wireguardv1 "github.com/fancl20/cion/proto/wireguard/v1"
+	wireguardv1connect "github.com/fancl20/cion/proto/wireguard/v1/wireguardv1connect"
 )
 
 // rpcDirectoryClient publishes and fetches over the application's own mTLS
@@ -33,7 +33,7 @@ type rpcDirectoryClient struct {
 	mtx sync.Mutex
 	// clt serves the current core endpoint; the authority it is keyed by
 	// replaces it when the core's route moves.
-	clt       gatewayv1connect.DirectoryServiceClient
+	clt       wireguardv1connect.DirectoryServiceClient
 	authority string
 }
 
@@ -59,7 +59,7 @@ func (c *rpcDirectoryClient) Close() error { return c.qclt.Close() }
 
 // client returns the ConnectRPC client for the core's directory endpoint,
 // building it — or rebuilding it when the core's route moved — on demand.
-func (c *rpcDirectoryClient) client() (gatewayv1connect.DirectoryServiceClient, error) {
+func (c *rpcDirectoryClient) client() (wireguardv1connect.DirectoryServiceClient, error) {
 	core := c.coreRoute()
 	if core == nil {
 		return nil, errors.New("no route to the core's directory yet")
@@ -81,7 +81,7 @@ func (c *rpcDirectoryClient) client() (gatewayv1connect.DirectoryServiceClient, 
 			return path
 		},
 	}, c.qclt, true)
-	c.clt = gatewayv1connect.NewDirectoryServiceClient(hclt, "https://"+authority)
+	c.clt = wireguardv1connect.NewDirectoryServiceClient(hclt, "https://"+authority)
 	c.authority = authority
 	return c.clt, nil
 }
@@ -92,7 +92,7 @@ func (c *rpcDirectoryClient) Publish(ctx context.Context, entry Entry) error {
 	if err != nil {
 		return err
 	}
-	_, err = clt.Publish(ctx, connect.NewRequest(&gatewayv1.PublishRequest{
+	_, err = clt.Publish(ctx, connect.NewRequest(&wireguardv1.PublishRequest{
 		Entry: entry.pb(),
 	}))
 	return err
@@ -104,7 +104,7 @@ func (c *rpcDirectoryClient) List(ctx context.Context) ([]Entry, error) {
 	if err != nil {
 		return nil, err
 	}
-	resp, err := clt.List(ctx, connect.NewRequest(&gatewayv1.ListRequest{}))
+	resp, err := clt.List(ctx, connect.NewRequest(&wireguardv1.ListRequest{}))
 	if err != nil {
 		return nil, err
 	}

@@ -13,15 +13,15 @@ import (
 	"github.com/scionproto/scion/pkg/addr"
 	"github.com/scionproto/scion/pkg/scrypto/cppki"
 
-	gatewayv1 "github.com/fancl20/cion/proto/gateway/v1"
+	wireguardv1 "github.com/fancl20/cion/proto/wireguard/v1"
 )
 
-// DirectoryService is the core node's gateway application's own service:
-// Publish records the publisher's gateway entry on the application's
-// authenticated channel, List serves the directory to every node. The
-// channel is the SCION-native mTLS: the publisher identified by its verified
-// certificate chain, so a node can only publish its own entry — the claimed
-// entry's ISD-AS is ignored in favor of the authenticated one.
+// DirectoryService is the core node's application's own service: Publish
+// records the publisher's entry on the application's authenticated channel,
+// List serves the directory to every node. The channel is the SCION-native
+// mTLS: the publisher identified by its verified certificate chain, so a
+// node can only publish its own entry — the claimed entry's ISD-AS is
+// ignored in favor of the authenticated one.
 type DirectoryService struct {
 	// Store persists the directory.
 	Store DirectoryStore
@@ -70,8 +70,8 @@ func publisherIA(chain []*x509.Certificate) (addr.IA, error) {
 // authenticated one all the same.
 func (s *DirectoryService) Publish(
 	ctx context.Context,
-	req *connect.Request[gatewayv1.PublishRequest],
-) (*connect.Response[gatewayv1.PublishResponse], error) {
+	req *connect.Request[wireguardv1.PublishRequest],
+) (*connect.Response[wireguardv1.PublishResponse], error) {
 
 	publisher := AuthenticatedIA(ctx)
 	if publisher.IsZero() {
@@ -98,21 +98,21 @@ func (s *DirectoryService) Publish(
 	if s.Cnt != nil {
 		s.Cnt.published.Add(1)
 	}
-	return connect.NewResponse(&gatewayv1.PublishResponse{}), nil
+	return connect.NewResponse(&wireguardv1.PublishResponse{}), nil
 }
 
 // List returns every published entry.
 func (s *DirectoryService) List(
 	ctx context.Context,
-	req *connect.Request[gatewayv1.ListRequest],
-) (*connect.Response[gatewayv1.ListResponse], error) {
+	req *connect.Request[wireguardv1.ListRequest],
+) (*connect.Response[wireguardv1.ListResponse], error) {
 
 	entries, err := s.Store.List(ctx)
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInternal,
 			fmt.Errorf("reading the directory: %w", err))
 	}
-	resp := &gatewayv1.ListResponse{}
+	resp := &wireguardv1.ListResponse{}
 	for _, e := range entries {
 		resp.Entries = append(resp.Entries, e.pb())
 	}
@@ -120,7 +120,7 @@ func (s *DirectoryService) List(
 }
 
 // entryFromPB decodes a wire entry.
-func entryFromPB(pb *gatewayv1.Entry) (Entry, error) {
+func entryFromPB(pb *wireguardv1.Entry) (Entry, error) {
 	var key PublicKey
 	if len(pb.PublicKey) != len(key) {
 		return Entry{}, fmt.Errorf("public key must be %d bytes", len(key))
@@ -138,8 +138,8 @@ func entryFromPB(pb *gatewayv1.Entry) (Entry, error) {
 }
 
 // pb encodes the entry for the wire.
-func (e Entry) pb() *gatewayv1.Entry {
-	return &gatewayv1.Entry{
+func (e Entry) pb() *wireguardv1.Entry {
+	return &wireguardv1.Entry{
 		IsdAs:         uint64(e.IA),
 		PublicKey:     e.PublicKey[:],
 		OverlaySubnet: e.Overlay.String(),
