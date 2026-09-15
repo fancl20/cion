@@ -1,4 +1,4 @@
-FROM debian:testing-slim
+FROM debian:unstable-slim
 
 RUN groupadd --gid 1000 coder && \
     useradd --uid 1000 --gid 1000 -m coder
