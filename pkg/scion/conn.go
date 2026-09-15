@@ -1,10 +1,10 @@
 // Package scion is the node's SCION library, the application seam of
 // ADR-0005: the socket (Conn) that carries datagrams over SCION paths and
 // reverses arrival paths for replies, the address (Addr) naming a peer by
-// ISD-AS and underlay address, and the path resolver (PathProvider) that
-// composes discovered segments into end-to-end paths. Applications on a CION
-// node link this package — and nothing else of the control plane — to become
-// path-aware.
+// ISD-AS and underlay address or service, and the path resolver
+// (PathProvider) that composes discovered segments into end-to-end paths.
+// Applications on a CION node link this package — and nothing else of the
+// control plane — to become path-aware.
 package scion
 
 import (
@@ -42,6 +42,13 @@ type Addr struct {
 	IA addr.IA
 	// Addr is the peer's underlay address.
 	Addr netip.AddrPort
+	// Service is the peer's SCION service destination. When non-zero, the
+	// peer is named by ISD-AS and service instead of underlay address: the
+	// destination is serialized as a service host, and the receiving AS's
+	// router delivers to the registered backend — to no port the sender
+	// names. Zero on every address a receive path derives, whose sources are
+	// ordinary IPs.
+	Service addr.SVC
 	// IfID is the local egress interface toward the peer; zero means it is
 	// resolved from the link table on write.
 	IfID uint16
@@ -55,6 +62,9 @@ type Addr struct {
 func (a *Addr) Network() string { return "scion" }
 
 func (a *Addr) String() string {
+	if a.Service != 0 {
+		return fmt.Sprintf("%s,svc:%04x", a.IA, uint16(a.Service))
+	}
 	return fmt.Sprintf("%s,%s", a.IA, a.Addr)
 }
 
@@ -192,14 +202,21 @@ func (c *Conn) ReadFrom(b []byte) (int, net.Addr, error) {
 // so the routers' in-flight segment-ID updates never accumulate. A one-hop
 // peer address has its path created fresh for every packet instead: the
 // egress interface is taken from the address if the peer set one (replies),
-// and resolved from the link table otherwise (client traffic).
+// and resolved from the link table otherwise (client traffic). A peer
+// address carrying a service names the destination by it: the receiving AS's
+// internal link delivers to the registered backend, so no destination port
+// is consulted and the wire carries zero.
 func (c *Conn) WriteTo(b []byte, addr net.Addr) (int, error) {
 	peer, ok := addr.(*Addr)
 	if !ok || peer == nil {
 		return 0, fmt.Errorf("unexpected address type %T", addr)
 	}
+	dstPort := peer.Addr.Port()
+	if peer.Service != 0 {
+		dstPort = 0
+	}
 	raw, err := c.writePacket(peer, slayers.L4UDP, func(scn *slayers.SCION) ([]byte, error) {
-		return serializeUDP(scn, c.local.Port(), peer.Addr.Port(), b)
+		return serializeUDP(scn, c.local.Port(), dstPort, b)
 	})
 	if err != nil {
 		return 0, err
@@ -292,7 +309,11 @@ func (c *Conn) scionHeader(peer *Addr, ifID uint16, nextHdr slayers.L4ProtocolTy
 	if err := scn.SetSrcAddr(addr.HostIP(c.local.Addr())); err != nil {
 		return nil, err
 	}
-	if err := scn.SetDstAddr(addr.HostIP(peer.Addr.Addr())); err != nil {
+	dstHost := addr.HostIP(peer.Addr.Addr())
+	if peer.Service != 0 {
+		dstHost = addr.HostSVC(peer.Service)
+	}
+	if err := scn.SetDstAddr(dstHost); err != nil {
 		return nil, err
 	}
 	return scn, nil

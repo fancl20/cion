@@ -175,3 +175,36 @@ directory socket beside it; nothing serves before `Run`.
     is refused at configuration.
 
 ## Implementation history
+
+*   Path library: `Addr.Service` beside the underlay address, the zero
+    value meaning underlay so every receive-derived address is unchanged;
+    `WriteTo` serializes the service destination with `SetDstAddr` and a
+    zero inner UDP destination port. The string form of a service
+    destination is `isd-as,svc:xxxx` — the numeric value, since the
+    library knows no names — and the SCION-native channel's URL authority
+    (`PeerAuthority`) rides it, so the directory client dials the core by
+    authority the way it always has.
+*   Application: the constants live in `pkg/apps/wireguard` as `SvcGateway`
+    and `SvcDirectory`, with the name table the IPC endpoint string reads
+    (`"isd-as,gateway"`) — `ParseEndpoint` refuses a name the table does
+    not hold, underlay forms included. The mesh devices' IPC drops
+    `listen_port` outright: the shared socket owns an ephemeral port no
+    device names. `Config.RegisterSvc` gained a sibling `UnregisterSvc`
+    for `Close`'s deregistration — one callback cannot express both
+    directions over the provider's `AddSvc`/`DelSvc`.
+*   Directory: the wire entry's retired fields left `proto/gateway/v1`
+    outright — `overlay_subnet` renumbered to 3, nothing reserved, since no
+    deployment ever carried proposal 0006's numbering — while the store's
+    JSON decode keeps ignoring the retired keys a proposal-0006 state
+    directory may hold, a re-publish replacing an old-shape entry wholesale.
+    The node assembly's `registerSvc` derives the registration's host from
+    the control address, the host its `scionConn` binds, so the router's
+    resolution meets the socket the application bound.
+*   Tests: the service header's wire form and the two-node delivery with
+    its reply beside the unanswered send to an unregistered service; the
+    authority round trip over both forms and the publish-side dial that
+    fails rather than hangs when no backend answers; the endpoint string's
+    round trip with its malformed forms and the cookie digest carrying the
+    service value; the store's leniency toward proposal 0006's shape; and
+    the registration lifecycle around `New`/`Close`. The integration proofs
+    re-ran unchanged on the service addresses.

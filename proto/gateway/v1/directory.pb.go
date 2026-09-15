@@ -30,12 +30,8 @@ type Entry struct {
 	IsdAs uint64 `protobuf:"varint,1,opt,name=isd_as,json=isdAs,proto3" json:"isd_as,omitempty"`
 	// public_key is the node's 32-byte WireGuard public key.
 	PublicKey []byte `protobuf:"bytes,2,opt,name=public_key,json=publicKey,proto3" json:"public_key,omitempty"`
-	// gateway_port is the underlay UDP port the mesh transport listens on.
-	GatewayPort uint32 `protobuf:"varint,3,opt,name=gateway_port,json=gatewayPort,proto3" json:"gateway_port,omitempty"`
-	// underlay is the host address the gateway binds, e.g. "192.0.2.1".
-	Underlay string `protobuf:"bytes,4,opt,name=underlay,proto3" json:"underlay,omitempty"`
 	// overlay_subnet is the node's overlay subnet, e.g. "10.64.1.0/24".
-	OverlaySubnet string `protobuf:"bytes,5,opt,name=overlay_subnet,json=overlaySubnet,proto3" json:"overlay_subnet,omitempty"`
+	OverlaySubnet string `protobuf:"bytes,3,opt,name=overlay_subnet,json=overlaySubnet,proto3" json:"overlay_subnet,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -82,20 +78,6 @@ func (x *Entry) GetPublicKey() []byte {
 		return x.PublicKey
 	}
 	return nil
-}
-
-func (x *Entry) GetGatewayPort() uint32 {
-	if x != nil {
-		return x.GatewayPort
-	}
-	return 0
-}
-
-func (x *Entry) GetUnderlay() string {
-	if x != nil {
-		return x.Underlay
-	}
-	return ""
 }
 
 func (x *Entry) GetOverlaySubnet() string {
@@ -273,14 +255,12 @@ var File_proto_gateway_v1_directory_proto protoreflect.FileDescriptor
 const file_proto_gateway_v1_directory_proto_rawDesc = "" +
 	"\n" +
 	" proto/gateway/v1/directory.proto\x12\n" +
-	"gateway.v1\"\xa3\x01\n" +
+	"gateway.v1\"d\n" +
 	"\x05Entry\x12\x15\n" +
 	"\x06isd_as\x18\x01 \x01(\x04R\x05isdAs\x12\x1d\n" +
 	"\n" +
-	"public_key\x18\x02 \x01(\fR\tpublicKey\x12!\n" +
-	"\fgateway_port\x18\x03 \x01(\rR\vgatewayPort\x12\x1a\n" +
-	"\bunderlay\x18\x04 \x01(\tR\bunderlay\x12%\n" +
-	"\x0eoverlay_subnet\x18\x05 \x01(\tR\roverlaySubnet\"9\n" +
+	"public_key\x18\x02 \x01(\fR\tpublicKey\x12%\n" +
+	"\x0eoverlay_subnet\x18\x03 \x01(\tR\roverlaySubnet\"9\n" +
 	"\x0ePublishRequest\x12'\n" +
 	"\x05entry\x18\x01 \x01(\v2\x11.gateway.v1.EntryR\x05entry\"\x11\n" +
 	"\x0fPublishResponse\"\r\n" +

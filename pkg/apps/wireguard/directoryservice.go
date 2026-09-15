@@ -126,20 +126,14 @@ func entryFromPB(pb *gatewayv1.Entry) (Entry, error) {
 		return Entry{}, fmt.Errorf("public key must be %d bytes", len(key))
 	}
 	copy(key[:], pb.PublicKey)
-	underlay, err := netip.ParseAddr(pb.Underlay)
-	if err != nil {
-		return Entry{}, fmt.Errorf("parsing underlay: %w", err)
-	}
 	overlay, err := netip.ParsePrefix(pb.OverlaySubnet)
 	if err != nil {
 		return Entry{}, fmt.Errorf("parsing overlay subnet: %w", err)
 	}
 	return Entry{
-		IA:          addr.IA(pb.IsdAs),
-		PublicKey:   key,
-		GatewayPort: uint16(pb.GatewayPort),
-		Underlay:    underlay,
-		Overlay:     overlay,
+		IA:        addr.IA(pb.IsdAs),
+		PublicKey: key,
+		Overlay:   overlay,
 	}, nil
 }
 
@@ -148,8 +142,6 @@ func (e Entry) pb() *gatewayv1.Entry {
 	return &gatewayv1.Entry{
 		IsdAs:         uint64(e.IA),
 		PublicKey:     e.PublicKey[:],
-		GatewayPort:   uint32(e.GatewayPort),
-		Underlay:      e.Underlay.String(),
 		OverlaySubnet: e.Overlay.String(),
 	}
 }

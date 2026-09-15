@@ -28,6 +28,21 @@ import (
 // no kernel TUN exists to do it.
 const OverlayMTU = 1280
 
+// CION's private SCION service values (proposal 0007). The drafts' registry
+// names the low values — DS 0x0001, CS 0x0002, the wildcard 0x0010 — and the
+// SVC type's top bit is the multicast flag, so CION's own services take a
+// private slice above both, 0x7ff1 through 0x7fff. The drafts define no
+// gateway service: the values are CION's to allocate, the convention
+// proto/gateway/v1 is.
+const (
+	// SvcGateway is the mesh transport service. Every node's gateway
+	// registers its mesh socket under this value in its own AS.
+	SvcGateway addr.SVC = 0x7ff1
+	// SvcDirectory is the core's directory service. The core node's gateway
+	// registers its directory socket under this value.
+	SvcDirectory addr.SVC = 0x7ff2
+)
+
 // PersistentKeepalive is the mesh peers' keepalive interval, a code constant
 // set so sessions and paths stay warm enough that path rotation is exercised
 // rather than discovered at first use.
@@ -81,11 +96,22 @@ type Config struct {
 	// publishes and fetches through locally; nil on every other node, which
 	// reaches the core's over CoreRoute instead.
 	Store DirectoryStore
-	// CoreRoute resolves the core's directory endpoint on non-core nodes.
+	// CoreRoute resolves the core's directory endpoint — its ISD-AS named by
+	// the directory service — on non-core nodes.
 	CoreRoute func() *scion.Addr
-	// NewConn binds the SCION connection a port of this node serves the
-	// mesh transport and — on the core — the directory on.
-	NewConn func(port uint16) (*scion.Conn, error)
+	// NewConn binds a SCION connection of this node on an ephemeral port:
+	// the socket the mesh transport serves on, the one the core's directory
+	// serves on beside it, and the one every other node's client publishes
+	// and fetches through.
+	NewConn func() (*scion.Conn, error)
+	// RegisterSvc registers one of the application's sockets as a SCION
+	// service in this AS — the same registration discovery makes for the CS
+	// service over the data plane's provider — so the router delivers
+	// service-addressed packets to the socket's port. Close deregisters
+	// through UnregisterSvc.
+	RegisterSvc func(svc addr.SVC, port uint16) error
+	// UnregisterSvc deregisters a socket RegisterSvc registered.
+	UnregisterSvc func(svc addr.SVC, port uint16) error
 
 	// Cadence overrides for tests; zero means the package constant.
 	PublishInterval time.Duration
@@ -99,10 +125,9 @@ type Config struct {
 // egress. A gateway node holds unprivileged UDP sockets and its own state,
 // and nothing else.
 type Gateway struct {
-	cfg      Config
-	key      PrivateKey
-	underlay netip.Addr
-	cnt      *counters
+	cfg Config
+	key PrivateKey
+	cnt *counters
 
 	mesh   *meshSocket
 	host   *hostSocket
@@ -112,6 +137,10 @@ type Gateway struct {
 	directory directoryClient
 	dirConn   *rpcDirectoryClient
 	dirServe  *scion.Conn
+
+	// regs holds the service registrations the sockets made in their own AS,
+	// for Close to undo.
+	regs []svcReg
 
 	// logger is wireguard-go's device logger.
 	logger *device.Logger
@@ -130,6 +159,12 @@ type meshPeer struct {
 	pipe  *pipe
 }
 
+// svcReg is one socket's registration as a SCION service in its own AS.
+type svcReg struct {
+	svc  addr.SVC
+	port uint16
+}
+
 // hostDevice is one exit's host-facing device.
 type hostDevice struct {
 	exit addr.IA
@@ -138,11 +173,13 @@ type hostDevice struct {
 }
 
 // New assembles the gateway: it loads or creates the node's WireGuard key
-// pair, binds the mesh socket on the gateway port and the shared host-facing
-// port, creates one host device per offered exit with the configured peers,
-// builds the router and — when the node is an exit — the netstack egress,
-// and wires the directory surfaces: the core's store it serves, the route
-// every other node publishes and fetches through. Run serves it.
+// pair, binds the mesh socket on an ephemeral port and registers it under
+// the gateway service in its own AS, binds the shared host-facing port,
+// creates one host device per offered exit with the configured peers, builds
+// the router and — when the node is an exit — the netstack egress, and wires
+// the directory surfaces: the core's store it serves over its own registered
+// service socket, the route every other node publishes and fetches through.
+// Run serves it.
 func New(cfg Config) (*Gateway, error) {
 	if cfg.IA.IsZero() {
 		return nil, fmt.Errorf("no ISD-AS configured")
@@ -155,6 +192,9 @@ func New(cfg Config) (*Gateway, error) {
 	}
 	if cfg.NewConn == nil {
 		return nil, fmt.Errorf("no SCION connection builder configured")
+	}
+	if cfg.RegisterSvc == nil || cfg.UnregisterSvc == nil {
+		return nil, fmt.Errorf("no service registration configured")
 	}
 	if cfg.Engine == nil || cfg.Provider == nil {
 		return nil, fmt.Errorf("no trust engine or path provider configured")
@@ -170,7 +210,7 @@ func New(cfg Config) (*Gateway, error) {
 		return nil, fmt.Errorf("loading the gateway key: %w", err)
 	}
 	cnt := &counters{}
-	meshConn, err := cfg.NewConn(controlplane.GatewayPort)
+	meshConn, err := cfg.NewConn()
 	if err != nil {
 		return nil, fmt.Errorf("binding the mesh socket: %w", err)
 	}
@@ -183,7 +223,6 @@ func New(cfg Config) (*Gateway, error) {
 	g := &Gateway{
 		cfg:         cfg,
 		key:         key,
-		underlay:    meshConn.LocalAddr().(*scion.Addr).Addr.Addr(),
 		cnt:         cnt,
 		mesh:        newMeshSocket(meshConn, cfg.Provider, cnt),
 		host:        newHostSocket(hostConn, cnt),
@@ -191,6 +230,10 @@ func New(cfg Config) (*Gateway, error) {
 		meshPeers:   make(map[addr.IA]*meshPeer),
 		hostDevices: make(map[addr.IA]*hostDevice),
 		logger:      device.NewLogger(device.LogLevelError, "cion-wireguard"),
+	}
+	if err := g.register(SvcGateway, meshConn.LocalPort()); err != nil {
+		g.release()
+		return nil, fmt.Errorf("registering the mesh socket: %w", err)
 	}
 	if cfg.Egress {
 		overlayAddr, err := firstAddr(cfg.Subnet)
@@ -214,8 +257,21 @@ func New(cfg Config) (*Gateway, error) {
 	}
 	if cfg.Store != nil {
 		g.directory = storeDirectoryClient{store: cfg.Store}
+		// The core serves the directory on a socket of its own, registered
+		// under the directory service the way the mesh socket is under the
+		// gateway service.
+		dirServe, err := cfg.NewConn()
+		if err != nil {
+			g.release()
+			return nil, fmt.Errorf("binding the directory socket: %w", err)
+		}
+		g.dirServe = dirServe
+		if err := g.register(SvcDirectory, dirServe.LocalPort()); err != nil {
+			g.release()
+			return nil, fmt.Errorf("registering the directory socket: %w", err)
+		}
 	} else {
-		dirConn, err := cfg.NewConn(controlplane.DirectoryPort)
+		dirConn, err := cfg.NewConn()
 		if err != nil {
 			g.release()
 			return nil, fmt.Errorf("binding the directory socket: %w", err)
@@ -230,10 +286,32 @@ func New(cfg Config) (*Gateway, error) {
 	return g, nil
 }
 
+// register registers a socket's port as a SCION service in this AS and
+// records the registration for Close to undo.
+func (g *Gateway) register(svc addr.SVC, port uint16) error {
+	if err := g.cfg.RegisterSvc(svc, port); err != nil {
+		return err
+	}
+	g.regs = append(g.regs, svcReg{svc: svc, port: port})
+	return nil
+}
+
+// deregisterAll undoes the recorded registrations, most recent first.
+func (g *Gateway) deregisterAll() {
+	for i := len(g.regs) - 1; i >= 0; i-- {
+		reg := g.regs[i]
+		if err := g.cfg.UnregisterSvc(reg.svc, reg.port); err != nil {
+			slog.Warn("Gateway service deregistration", "service", reg.svc, "err", err)
+		}
+	}
+	g.regs = nil
+}
+
 // release closes what New opened on a failed construction. The store stays
 // the caller's: it opened it, and a construction that never returned owns
 // nothing of it.
 func (g *Gateway) release() {
+	g.deregisterAll()
 	g.mesh.Close()
 	g.host.Close()
 	if g.egress != nil {
@@ -241,6 +319,9 @@ func (g *Gateway) release() {
 	}
 	if g.dirConn != nil {
 		g.dirConn.Close() //nolint:errcheck
+	}
+	if g.dirServe != nil {
+		g.dirServe.Close() //nolint:errcheck
 	}
 }
 
@@ -338,11 +419,9 @@ func (g *Gateway) newMeshDevice(entry Entry) (*meshPeer, error) {
 	dev := device.NewDevice(pipe, bind, g.logger)
 	var ipc strings.Builder
 	ipc.WriteString("private_key=" + hex.EncodeToString(g.key[:]) + "\n")
-	ipc.WriteString("listen_port=" + strconv.Itoa(int(controlplane.GatewayPort)) + "\n")
 	ipc.WriteString("replace_peers=true\n")
 	ipc.WriteString("public_key=" + entry.PublicKey.String() + "\n")
-	ipc.WriteString("endpoint=" +
-		endpointString(entry.IA, netip.AddrPortFrom(entry.Underlay, entry.GatewayPort)) + "\n")
+	ipc.WriteString("endpoint=" + endpointString(entry.IA) + "\n")
 	ipc.WriteString("allowed_ip=" + entry.Overlay.String() + "\n")
 	if containsExit(g.cfg.Exits, entry.IA) {
 		ipc.WriteString("allowed_ip=0.0.0.0/0\n")
@@ -482,16 +561,12 @@ func (g *Gateway) Run(ctx context.Context) error {
 	}
 }
 
-// serveDirectory serves the core's directory on its own port over the
-// application's authenticated channel: the control endpoint's TLS machinery,
-// every publisher identified by its verified chain.
+// serveDirectory serves the core's directory on the socket New bound and
+// registered under the directory service, over the application's
+// authenticated channel: the control endpoint's TLS machinery, every
+// publisher identified by its verified chain.
 func (g *Gateway) serveDirectory(ctx context.Context) {
-	conn, err := g.cfg.NewConn(controlplane.DirectoryPort)
-	if err != nil {
-		slog.Error("Gateway directory socket", "err", err)
-		return
-	}
-	g.dirServe = conn
+	conn := g.dirServe
 	go func() {
 		defer conn.Close() //nolint:errcheck
 		if err := controlplane.ServeHTTP3(conn, g.DirectoryHandler(),
@@ -501,7 +576,7 @@ func (g *Gateway) serveDirectory(ctx context.Context) {
 			slog.Error("Gateway directory service exited", "err", err)
 		}
 	}()
-	slog.Info("Serving gateway directory", "port", controlplane.DirectoryPort)
+	slog.Info("Serving gateway directory", "service", serviceName(SvcDirectory))
 }
 
 // DirectoryHandler is the core's directory HTTP handler: the ConnectRPC
@@ -515,9 +590,9 @@ func (g *Gateway) DirectoryHandler() http.Handler {
 	return mux
 }
 
-// Close releases the gateway: the devices close, the sockets retire, the
-// flow state expires, and the store closes; no operating-system provisioning
-// exists to undo.
+// Close releases the gateway: the devices close, the sockets retire with
+// their service registrations, the flow state expires, and the store closes;
+// no operating-system provisioning exists to undo.
 func (g *Gateway) Close() {
 	g.mtx.Lock()
 	defer g.mtx.Unlock()
@@ -531,6 +606,7 @@ func (g *Gateway) Close() {
 		hd.pipe.Close() //nolint:errcheck
 	}
 	g.hostDevices = nil
+	g.deregisterAll()
 	g.mesh.Close()
 	g.host.Close()
 	if g.egress != nil {

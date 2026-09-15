@@ -64,6 +64,38 @@ func (d *flippableTrustDB) InsertTRC(context.Context, cppki.SignedTRC) (bool, er
 }
 func (d *flippableTrustDB) Close() error { return nil }
 
+// recordingRegs records the service registrations the gateway makes.
+type recordingRegs struct {
+	mtx  sync.Mutex
+	live map[addr.SVC]uint16
+}
+
+func (r *recordingRegs) register(svc addr.SVC, port uint16) error {
+	r.mtx.Lock()
+	defer r.mtx.Unlock()
+	if r.live == nil {
+		r.live = make(map[addr.SVC]uint16)
+	}
+	r.live[svc] = port
+	return nil
+}
+
+func (r *recordingRegs) unregister(svc addr.SVC, port uint16) error {
+	r.mtx.Lock()
+	defer r.mtx.Unlock()
+	if r.live[svc] == port {
+		delete(r.live, svc)
+	}
+	return nil
+}
+
+func (r *recordingRegs) registered(svc addr.SVC) (uint16, bool) {
+	r.mtx.Lock()
+	defer r.mtx.Unlock()
+	port, ok := r.live[svc]
+	return port, ok
+}
+
 // newTestGateway assembles a gateway around throwaway sockets: a SCION conn
 // submitting to a sink, the shared host port on an ephemeral one, and the
 // core's store-side directory.
@@ -86,6 +118,7 @@ func newTestGateway(
 	hostPort.Close()
 	provider := &scion.PathProvider{IA: ia, DB: &memDB{}}
 	directory := &recordingDirectory{published: make(chan Entry, 16)}
+	regs := &recordingRegs{}
 	g, err := New(Config{
 		IA:         ia,
 		Subnet:     netip.MustParsePrefix("10.64.1.0/24"),
@@ -97,7 +130,7 @@ func newTestGateway(
 		Provider:   provider,
 		Engine:     trust.NewEngine(ia, nil, &trust.NetworkProvider{DB: db}),
 		Store:      directory,
-		NewConn: func(port uint16) (*scion.Conn, error) {
+		NewConn: func() (*scion.Conn, error) {
 			return scion.NewConn(scion.ConnConfig{
 				IA:           ia,
 				Bind:         "127.0.0.1:0",
@@ -106,6 +139,8 @@ func newTestGateway(
 				Links:        map[uint16]addr.IA{1: addr.MustIAFrom(20, 2)},
 			})
 		},
+		RegisterSvc:     regs.register,
+		UnregisterSvc:   regs.unregister,
 		PublishInterval: time.Hour,
 		PublishRetry:    20 * time.Millisecond,
 		RefreshInterval: time.Hour,
@@ -113,7 +148,22 @@ func newTestGateway(
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The deregistration check registers before Close so it runs after it.
+	t.Cleanup(func() {
+		if port, ok := regs.registered(SvcGateway); ok {
+			t.Errorf("the mesh service registration for port %d outlived Close", port)
+		}
+		if port, ok := regs.registered(SvcDirectory); ok {
+			t.Errorf("the directory service registration for port %d outlived Close", port)
+		}
+	})
 	t.Cleanup(g.Close)
+	if _, ok := regs.registered(SvcGateway); !ok {
+		t.Error("the mesh socket was not registered under the gateway service")
+	}
+	if _, ok := regs.registered(SvcDirectory); !ok {
+		t.Error("the core's directory socket was not registered under the directory service")
+	}
 	return g, directory
 }
 
@@ -163,11 +213,9 @@ func TestGatewayAppliesDirectoryDiff(t *testing.T) {
 
 	entry := func(peer addr.IA, subnet string) Entry {
 		return Entry{
-			IA:          peer,
-			PublicKey:   mustPubKey(byte(peer.AS())),
-			GatewayPort: 30045,
-			Underlay:    netip.MustParseAddr("127.0.0.1"),
-			Overlay:     netip.MustParsePrefix(subnet),
+			IA:        peer,
+			PublicKey: mustPubKey(byte(peer.AS())),
+			Overlay:   netip.MustParsePrefix(subnet),
 		}
 	}
 	e1 := entry(peer1, "10.64.11.0/24")
@@ -225,7 +273,7 @@ func TestGatewayValidatesConfig(t *testing.T) {
 		Provider: &scion.PathProvider{IA: ia},
 		Engine:   trust.NewEngine(ia, nil, nil),
 		Store:    &fakeStore{},
-		NewConn: func(uint16) (*scion.Conn, error) {
+		NewConn: func() (*scion.Conn, error) {
 			return scion.NewConn(scion.ConnConfig{
 				IA:           ia,
 				Bind:         "127.0.0.1:0",
@@ -234,6 +282,8 @@ func TestGatewayValidatesConfig(t *testing.T) {
 				Links:        map[uint16]addr.IA{1: addr.MustIAFrom(20, 2)},
 			})
 		},
+		RegisterSvc:   func(addr.SVC, uint16) error { return nil },
+		UnregisterSvc: func(addr.SVC, uint16) error { return nil },
 	}
 
 	if _, err := New(base); err != nil {
@@ -274,6 +324,12 @@ func TestGatewayValidatesConfig(t *testing.T) {
 	noDirectory.Store = nil
 	if _, err := New(noDirectory); err == nil {
 		t.Error("a gateway with neither store nor core route was accepted")
+	}
+
+	noRegistration := base
+	noRegistration.RegisterSvc = nil
+	if _, err := New(noRegistration); err == nil {
+		t.Error("a gateway with no service registration was accepted")
 	}
 }
 

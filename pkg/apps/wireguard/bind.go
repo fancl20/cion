@@ -40,7 +40,8 @@ type datagram struct {
 	src  conn.Endpoint
 }
 
-// meshSocket is the node's mesh transport: one SCION socket on GatewayPort
+// meshSocket is the node's mesh transport: one SCION socket bound to an
+// ephemeral port and registered under the gateway service in its own AS,
 // shared by every mesh device, fanning each received datagram out to all of
 // them — all devices share the node's key pair, so each can decrypt a
 // handshake, but only the device whose peer table holds the sender's public
@@ -255,7 +256,7 @@ func newMeshBind(socket *meshSocket) *meshBind {
 }
 
 // Open registers with the shared socket. The requested port is ignored — the
-// socket owns GatewayPort — and echoed back as the actual one.
+// socket owns the service registration — and echoed back as the actual one.
 func (b *meshBind) Open(port uint16) ([]conn.ReceiveFunc, uint16, error) {
 	b.once = sync.Once{}
 	b.closed = make(chan struct{})
@@ -286,7 +287,8 @@ func (b *meshBind) Send(bufs [][]byte, ep conn.Endpoint) error {
 }
 
 // ParseEndpoint builds a peer endpoint from its IPC string form,
-// "isd-as,underlay".
+// "isd-as,service": the peer named by its ISD-AS and the gateway service,
+// which the peer's own AS resolves to its registered socket.
 func (b *meshBind) ParseEndpoint(s string) (conn.Endpoint, error) {
 	parts := strings.Split(s, ",")
 	if len(parts) != 2 {
@@ -296,11 +298,11 @@ func (b *meshBind) ParseEndpoint(s string) (conn.Endpoint, error) {
 	if err != nil {
 		return nil, fmt.Errorf("parsing mesh endpoint ISD-AS: %w", err)
 	}
-	underlay, err := netip.ParseAddrPort(parts[1])
+	svc, err := parseServiceName(parts[1])
 	if err != nil {
-		return nil, fmt.Errorf("parsing mesh endpoint underlay: %w", err)
+		return nil, fmt.Errorf("parsing mesh endpoint service: %w", err)
 	}
-	return &meshEndpoint{addr: scion.Addr{IA: ia, Addr: underlay}}, nil
+	return &meshEndpoint{addr: scion.Addr{IA: ia, Service: svc}}, nil
 }
 
 func (b *meshBind) BatchSize() int { return bindBatchSize }
@@ -321,7 +323,8 @@ func (b *meshBind) receive(packets [][]byte, sizes []int, eps []conn.Endpoint) (
 }
 
 // meshEndpoint is a mesh peer as wireguard-go sees it: the SCION address the
-// transport dials, carrying whatever path the peer's latest arrival reversed.
+// transport dials — a service destination until the peer's first arrival
+// roams it to the arrival's underlay address and reversed path.
 type meshEndpoint struct {
 	addr scion.Addr
 }
@@ -332,17 +335,50 @@ func (e *meshEndpoint) SrcToString() string {
 }
 func (e *meshEndpoint) DstToString() string { return e.addr.String() }
 func (e *meshEndpoint) DstToBytes() []byte {
-	raw := make([]byte, 0, 8+len(e.addr.Addr.Addr().AsSlice()))
+	raw := make([]byte, 0, 10)
 	ia := uint64(e.addr.IA)
 	raw = append(raw,
 		byte(ia>>56), byte(ia>>48), byte(ia>>40), byte(ia>>32),
 		byte(ia>>24), byte(ia>>16), byte(ia>>8), byte(ia))
+	// The cookie MAC's digest of the destination: the service value in place
+	// of the address on a service endpoint.
+	if e.addr.Service != 0 {
+		svc := uint16(e.addr.Service)
+		return append(raw, byte(svc>>8), byte(svc))
+	}
 	return append(raw, e.addr.Addr.Addr().AsSlice()...)
 }
 func (e *meshEndpoint) DstIP() netip.Addr { return e.addr.Addr.Addr() }
 func (e *meshEndpoint) SrcIP() netip.Addr { return netip.Addr{} }
 
-// endpointString encodes a mesh endpoint as the IPC form ParseEndpoint reads.
-func endpointString(ia addr.IA, underlay netip.AddrPort) string {
-	return ia.String() + "," + underlay.String()
+// endpointString encodes a mesh endpoint as the IPC form ParseEndpoint
+// reads: the peer's ISD-AS and the gateway service.
+func endpointString(ia addr.IA) string {
+	return ia.String() + "," + serviceName(SvcGateway)
+}
+
+// serviceName returns the service's name — the word the endpoint string
+// names a service by, the way the drafts' registry names theirs.
+func serviceName(svc addr.SVC) string {
+	switch svc {
+	case SvcGateway:
+		return "gateway"
+	case SvcDirectory:
+		return "directory"
+	default:
+		return svc.String()
+	}
+}
+
+// parseServiceName decodes a service name serviceName encodes; a name the
+// table does not hold is refused rather than guessed.
+func parseServiceName(name string) (addr.SVC, error) {
+	switch name {
+	case "gateway":
+		return SvcGateway, nil
+	case "directory":
+		return SvcDirectory, nil
+	default:
+		return 0, fmt.Errorf("unknown service %q", name)
+	}
 }

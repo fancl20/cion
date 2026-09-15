@@ -23,18 +23,14 @@ func TestDirectoryStore(t *testing.T, open func(t *testing.T) wireguard.Director
 
 	entries := []wireguard.Entry{
 		{
-			IA:          mustIA(t, "20-ff00:0:1"),
-			PublicKey:   mustKey(t, 0x01),
-			GatewayPort: 30045,
-			Underlay:    mustAddr(t, "192.0.2.1"),
-			Overlay:     mustPrefix(t, "10.64.1.0/24"),
+			IA:        mustIA(t, "20-ff00:0:1"),
+			PublicKey: mustKey(t, 0x01),
+			Overlay:   mustPrefix(t, "10.64.1.0/24"),
 		},
 		{
-			IA:          mustIA(t, "20-ff00:0:2"),
-			PublicKey:   mustKey(t, 0x02),
-			GatewayPort: 30045,
-			Underlay:    mustAddr(t, "192.0.2.2"),
-			Overlay:     mustPrefix(t, "10.64.2.0/24"),
+			IA:        mustIA(t, "20-ff00:0:2"),
+			PublicKey: mustKey(t, 0x02),
+			Overlay:   mustPrefix(t, "10.64.2.0/24"),
 		},
 	}
 	for _, e := range entries {
@@ -86,15 +82,6 @@ func mustKey(t *testing.T, fill byte) wireguard.PublicKey {
 		key[i] = fill
 	}
 	return key
-}
-
-func mustAddr(t *testing.T, s string) netip.Addr {
-	t.Helper()
-	ip, err := netip.ParseAddr(s)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return ip
 }
 
 func mustPrefix(t *testing.T, s string) netip.Prefix {

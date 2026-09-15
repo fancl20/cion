@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/netip"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -177,9 +178,10 @@ func (c *PeerClient) client(peer *scion.Addr, hclt *http.Client, clients map[str
 
 // PeerAuthority encodes the peer address as a URL authority: hexadecimal, so
 // it survives URL parsing unchanged and never collides with a real host. The
-// form every SCION-native client names its peer's endpoint by.
+// form every SCION-native client names its peer's endpoint by — an underlay
+// or a service destination.
 func PeerAuthority(peer *scion.Addr) string {
-	return hex.EncodeToString([]byte(peer.IA.String() + "," + peer.Addr.String()))
+	return hex.EncodeToString([]byte(peer.String()))
 }
 
 // peerFromAuthority decodes the URL authority back into a peer address. The
@@ -200,6 +202,13 @@ func peerFromAuthority(authority string) (*scion.Addr, error) {
 	ia, err := addr.ParseIA(parts[0])
 	if err != nil {
 		return nil, fmt.Errorf("parsing peer ISD-AS: %w", err)
+	}
+	if value, ok := strings.CutPrefix(parts[1], "svc:"); ok {
+		svc, err := strconv.ParseUint(value, 16, 16)
+		if err != nil {
+			return nil, fmt.Errorf("parsing peer service: %w", err)
+		}
+		return &scion.Addr{IA: ia, Service: addr.SVC(svc)}, nil
 	}
 	ap, err := netip.ParseAddrPort(parts[1])
 	if err != nil {

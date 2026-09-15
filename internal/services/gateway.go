@@ -9,7 +9,6 @@ import (
 
 	"github.com/fancl20/cion/pkg/apps/wireguard"
 	gatewaybbolt "github.com/fancl20/cion/pkg/apps/wireguard/impl/bbolt"
-	"github.com/fancl20/cion/pkg/controlplane"
 	"github.com/fancl20/cion/pkg/dataplane"
 	"github.com/fancl20/cion/pkg/scion"
 	"github.com/fancl20/cion/pkg/trust"
@@ -18,10 +17,12 @@ import (
 // setupGateway assembles the WireGuard gateway application (proposal 0006)
 // when the node's configuration has a gateway section, after the control
 // plane whose path provider and trust engine it consumes: the key loads or
-// creates in the application's own state, the mesh socket binds the gateway
-// port, host devices serve the configured exits behind the shared port, and
-// the router and — when egress is set — the netstack egress come with them.
-// The core node additionally serves the directory from its own store.
+// creates in the application's own state, the mesh socket binds an ephemeral
+// port registered as the gateway service in this AS, host devices serve the
+// configured exits behind the shared port, and the router and — when egress
+// is set — the netstack egress come with them. The core node additionally
+// serves the directory from its own store, over its own registered service
+// socket.
 func (n *node) setupGateway() error {
 	if n.cfg.Gateway == nil {
 		return nil
@@ -86,17 +87,19 @@ func (n *node) parseGatewayConfig() (wireguard.Config, error) {
 		peers = append(peers, wireguard.HostPeer{PublicKey: key, Addr: address, Exit: exit})
 	}
 	cfg := wireguard.Config{
-		IA:         n.ident.ia,
-		Subnet:     subnet,
-		ListenHost: listenHost.Addr(),
-		ListenPort: gw.ListenPort,
-		Egress:     gw.Egress,
-		Exits:      exits,
-		Peers:      peers,
-		StateDir:   filepath.Join(n.cfg.State, "gateway"),
-		Provider:   n.provider,
-		Engine:     n.engine,
-		NewConn:    n.scionConn,
+		IA:            n.ident.ia,
+		Subnet:        subnet,
+		ListenHost:    listenHost.Addr(),
+		ListenPort:    gw.ListenPort,
+		Egress:        gw.Egress,
+		Exits:         exits,
+		Peers:         peers,
+		StateDir:      filepath.Join(n.cfg.State, "gateway"),
+		Provider:      n.provider,
+		Engine:        n.engine,
+		NewConn:       func() (*scion.Conn, error) { return n.scionConn(0) },
+		RegisterSvc:   n.registerSvc,
+		UnregisterSvc: n.unregisterSvc,
 	}
 	if n.ident.asType == trust.ASTypeCore {
 		// The core serves the directory from its own store, following the
@@ -112,8 +115,41 @@ func (n *node) parseGatewayConfig() (wireguard.Config, error) {
 	return cfg, nil
 }
 
-// directoryRoute resolves the core's directory endpoint: the route the
-// enrollment core client rides, ending at the directory port.
+// registerSvc registers one of the gateway application's sockets as a SCION
+// service in this AS — the same registration discovery makes for the CS
+// service over the data plane's provider — so the router delivers
+// service-addressed packets to the socket's port on the control host the
+// application's connections bind.
+func (n *node) registerSvc(svc addr.SVC, port uint16) error {
+	host, err := parseControlHost(n.cfg.Control)
+	if err != nil {
+		return err
+	}
+	return n.udp.AddSvc(svc, host, port)
+}
+
+// unregisterSvc deregisters a socket registerSvc registered.
+func (n *node) unregisterSvc(svc addr.SVC, port uint16) error {
+	host, err := parseControlHost(n.cfg.Control)
+	if err != nil {
+		return err
+	}
+	return n.udp.DelSvc(svc, host, port)
+}
+
+// parseControlHost returns the control address's host as a SCION host.
+func parseControlHost(control string) (addr.Host, error) {
+	ap, err := dataplane.ResolveAddrPort(control)
+	if err != nil {
+		return addr.Host{}, fmt.Errorf("parsing control address: %w", err)
+	}
+	return addr.HostIP(ap.Addr()), nil
+}
+
+// directoryRoute resolves the core's directory endpoint: the core's ISD-AS
+// addressed by the directory service, over the route the enrollment core
+// client rides — a neighbor core one hop, anything else the reversed
+// freshest up segment.
 func (n *node) directoryRoute() *scion.Addr {
 	if n.coreClt == nil {
 		return nil
@@ -122,6 +158,5 @@ func (n *node) directoryRoute() *scion.Addr {
 	if route == nil {
 		return nil
 	}
-	route.Addr = netip.AddrPortFrom(route.Addr.Addr(), controlplane.DirectoryPort)
-	return route
+	return &scion.Addr{IA: route.IA, Service: wireguard.SvcDirectory, Path: route.Path}
 }
