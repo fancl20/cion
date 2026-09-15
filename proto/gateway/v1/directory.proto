@@ -12,12 +12,8 @@ message Entry {
   uint64 isd_as = 1;
   // public_key is the node's 32-byte WireGuard public key.
   bytes public_key = 2;
-  // gateway_port is the underlay UDP port the mesh transport listens on.
-  uint32 gateway_port = 3;
-  // underlay is the host address the gateway binds, e.g. "192.0.2.1".
-  string underlay = 4;
   // overlay_subnet is the node's overlay subnet, e.g. "10.64.1.0/24".
-  string overlay_subnet = 5;
+  string overlay_subnet = 3;
 }
 
 message PublishRequest {

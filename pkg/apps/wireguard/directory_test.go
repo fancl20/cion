@@ -62,11 +62,9 @@ func TestDirectoryPublishRecordsAuthenticatedIA(t *testing.T) {
 	claimed := addr.MustIAFrom(20, 0xff0000000222)
 
 	entry := Entry{
-		IA:          claimed,
-		PublicKey:   PublicKey{},
-		GatewayPort: 30045,
-		Underlay:    netip.MustParseAddr("192.0.2.1"),
-		Overlay:     netip.MustParsePrefix("10.64.1.0/24"),
+		IA:        claimed,
+		PublicKey: PublicKey{},
+		Overlay:   netip.MustParsePrefix("10.64.1.0/24"),
 	}
 	if _, err := svc.Publish(requestWithIA(t, publisher),
 		connect.NewRequest(&gatewayv1.PublishRequest{Entry: entry.pb()})); err != nil {
@@ -101,11 +99,9 @@ func TestDirectoryListServesEntries(t *testing.T) {
 	svc := &DirectoryService{Store: store, Cnt: &counters{}}
 	ia := addr.MustIAFrom(20, 0xff0000000131)
 	entry := Entry{
-		IA:          ia,
-		PublicKey:   mustPubKey(0xab),
-		GatewayPort: 30045,
-		Underlay:    netip.MustParseAddr("192.0.2.7"),
-		Overlay:     netip.MustParsePrefix("10.64.7.0/24"),
+		IA:        ia,
+		PublicKey: mustPubKey(0xab),
+		Overlay:   netip.MustParsePrefix("10.64.7.0/24"),
 	}
 	if _, err := svc.Publish(requestWithIA(t, ia),
 		connect.NewRequest(&gatewayv1.PublishRequest{Entry: entry.pb()})); err != nil {

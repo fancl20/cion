@@ -26,6 +26,7 @@ type testNode struct {
 	neighbor  addr.IA
 	internal  string
 	controlIP netip.Addr
+	provider  *dataplane.UDPProvider
 	cancel    context.CancelFunc
 }
 
@@ -80,6 +81,7 @@ func startTestNode(t *testing.T, ia, neighbor addr.IA, extLocal, extRemote strin
 		neighbor:  neighbor,
 		internal:  internal,
 		controlIP: controlAddr.Addr(),
+		provider:  provider,
 		cancel:    cancel,
 	}
 }
@@ -195,5 +197,105 @@ func TestConnWriteWithoutLink(t *testing.T) {
 	}
 	if _, err := connA.WriteTo([]byte("hello"), stranger); err == nil {
 		t.Error("writing to neighbor without link succeeded, want error")
+	}
+}
+
+// TestConnServiceDestination checks a service destination end to end: the
+// sender names the peer by ISD-AS and service value — no port — and the
+// receiving AS's internal link delivers to the registered backend's port,
+// with the reply riding the ordinary source address back.
+func TestConnServiceDestination(t *testing.T) {
+	iaA := addr.MustIAFrom(20, 0xff0000000011)
+	iaB := addr.MustIAFrom(20, 0xff0000000012)
+	extA, extB := freeUDPAddr(t), freeUDPAddr(t)
+	a := startTestNode(t, iaA, iaB, extA, extB)
+	b := startTestNode(t, iaB, iaA, extB, extA)
+
+	connA := a.newConn(t, 0)
+	connB := b.newConn(t, 0)
+	svc := addr.SVC(0x7ff1)
+	if err := b.provider.AddSvc(svc, addr.HostIP(b.controlIP), connB.LocalPort()); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := connA.WriteTo([]byte("hello"), &Addr{IA: iaB, Service: svc}); err != nil {
+		t.Fatal(err)
+	}
+	buf := make([]byte, 128)
+	if err := connB.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	n, from, err := connB.ReadFrom(buf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(buf[:n]) != "hello" {
+		t.Fatalf("datagram = %q, want %q", buf[:n], "hello")
+	}
+	// The service destination says nothing of the sender: the reply rides
+	// the source the packet carried, an ordinary underlay address.
+	fromB, ok := from.(*Addr)
+	if !ok {
+		t.Fatalf("peer address type %T", from)
+	}
+	if !fromB.IA.Equal(iaA) || fromB.Service != 0 {
+		t.Errorf("peer address = %v, want the underlay source in %s", fromB, iaA)
+	}
+
+	if _, err := connB.WriteTo([]byte("welcome"), from); err != nil {
+		t.Fatal(err)
+	}
+	if err := connA.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	n, _, err = connA.ReadFrom(buf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(buf[:n]) != "welcome" {
+		t.Fatalf("reply = %q, want %q", buf[:n], "welcome")
+	}
+}
+
+// TestConnServiceWithoutBackend checks the unanswered send: a service with
+// no registered backend fails the receiving router's resolution — the SCMP
+// answer is not a send error, and nothing arrives anywhere.
+func TestConnServiceWithoutBackend(t *testing.T) {
+	iaA := addr.MustIAFrom(20, 0xff0000000021)
+	iaB := addr.MustIAFrom(20, 0xff0000000022)
+	extA, extB := freeUDPAddr(t), freeUDPAddr(t)
+	a := startTestNode(t, iaA, iaB, extA, extB)
+	b := startTestNode(t, iaB, iaA, extB, extA)
+
+	// B registers a backend for one service; the sender addresses another.
+	connB := b.newConn(t, 0)
+	if err := b.provider.AddSvc(addr.SVC(0x7ff1), addr.HostIP(b.controlIP), connB.LocalPort()); err != nil {
+		t.Fatal(err)
+	}
+	connA := a.newConn(t, 0)
+	unregistered := &Addr{IA: iaB, Service: addr.SVC(0x7ff2)}
+	if _, err := connA.WriteTo([]byte("into the void"), unregistered); err != nil {
+		t.Fatalf("the unanswered send reported an error: %v", err)
+	}
+	if err := connB.SetReadDeadline(time.Now().Add(300 * time.Millisecond)); err != nil {
+		t.Fatal(err)
+	}
+	buf := make([]byte, 128)
+	if _, _, err := connB.ReadFrom(buf); err == nil {
+		t.Error("a datagram addressed to a service with no backend was delivered")
+	}
+}
+
+// TestAddrString checks the address's string form: an underlay destination
+// as ISD-AS and address, a service destination as ISD-AS and service value.
+func TestAddrString(t *testing.T) {
+	ia := addr.MustIAFrom(20, 0xff0000000031)
+	underlay := &Addr{IA: ia, Addr: netip.MustParseAddrPort("192.0.2.7:30045")}
+	if want := ia.String() + ",192.0.2.7:30045"; underlay.String() != want {
+		t.Errorf("underlay string = %q, want %q", underlay.String(), want)
+	}
+	service := &Addr{IA: ia, Service: addr.SVC(0x7ff1)}
+	if want := ia.String() + ",svc:7ff1"; service.String() != want {
+		t.Errorf("service string = %q, want %q", service.String(), want)
 	}
 }

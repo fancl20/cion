@@ -205,13 +205,13 @@ func TestMeshSocketRefreshesFailedSend(t *testing.T) {
 }
 
 // TestMeshBindEndpointRoundTrip checks the IPC string form flows through
-// ParseEndpoint.
+// ParseEndpoint: the peer named by ISD-AS and the gateway service, the
+// malformed forms refused.
 func TestMeshBindEndpointRoundTrip(t *testing.T) {
 	socket, _ := testMeshSocket(t, &memDB{})
 	bind := newMeshBind(socket)
 	ia := addr.MustIAFrom(20, 0xff0000000051)
-	underlay := netip.MustParseAddrPort("192.0.2.7:30045")
-	ep, err := bind.ParseEndpoint(endpointString(ia, underlay))
+	ep, err := bind.ParseEndpoint(endpointString(ia))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -219,14 +219,32 @@ func TestMeshBindEndpointRoundTrip(t *testing.T) {
 	if !ok {
 		t.Fatalf("endpoint of type %T", ep)
 	}
-	if !peer.addr.IA.Equal(ia) || peer.addr.Addr != underlay {
-		t.Errorf("endpoint = %v, want %s,%s", peer.addr, ia, underlay)
+	if !peer.addr.IA.Equal(ia) || peer.addr.Service != SvcGateway {
+		t.Errorf("endpoint = %v, want %s,%s", peer.addr, ia, SvcGateway)
 	}
-	if _, err := bind.ParseEndpoint("no-comma"); err == nil {
-		t.Error("parsing a malformed endpoint succeeded")
+	for _, bad := range []string{
+		"no-comma",
+		"nope,gateway",           // malformed ISD-AS
+		ia.String(),              // no service
+		ia.String() + ",bogus",   // unknown service
+		ia.String() + ",1.2.3.4", // an underlay form names no service
+	} {
+		if _, err := bind.ParseEndpoint(bad); err == nil {
+			t.Errorf("parsing endpoint %q succeeded", bad)
+		}
 	}
-	// The cookie MAC's endpoint digest distinguishes peers.
-	if bytes.Equal(peer.DstToBytes(), make([]byte, len(peer.DstToBytes()))) {
-		t.Error("the endpoint digest is empty")
+	// The cookie MAC's endpoint digest carries the service value in place of
+	// the address, distinguishing peers the way the underlay form did.
+	digest := peer.DstToBytes()
+	svc := uint16(SvcGateway)
+	if len(digest) != 10 || digest[8] != byte(svc>>8) || digest[9] != byte(svc) {
+		t.Errorf("digest = %x, want the ISD-AS and the service value %04x", digest, SvcGateway)
+	}
+	other, err := bind.ParseEndpoint(endpointString(addr.MustIAFrom(20, 0xff0000000052)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Equal(peer.DstToBytes(), other.DstToBytes()) {
+		t.Error("two peers share an endpoint digest")
 	}
 }

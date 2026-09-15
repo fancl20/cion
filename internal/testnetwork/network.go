@@ -504,7 +504,7 @@ func StartNode(t *testing.T, cfg NodeConfig) *Node {
 	}
 
 	if cfg.Gateway != nil {
-		node.startGateway(t, ctx, *cfg.Gateway, stateDir, scionConn, coreRoute, controlAddr)
+		node.startGateway(t, ctx, *cfg.Gateway, stateDir, scionConn, coreRoute, controlAddr, provider)
 	}
 	return node
 }
@@ -521,6 +521,7 @@ func (n *Node) startGateway(
 	scionConn func(uint16) *scion.Conn,
 	coreRoute func() *scion.Addr,
 	controlAddr netip.AddrPort,
+	provider *dataplane.UDPProvider,
 ) {
 
 	t.Helper()
@@ -536,8 +537,14 @@ func (n *Node) startGateway(
 		StateDir:   gwState,
 		Provider:   n.Provider,
 		Engine:     n.Engine,
-		NewConn: func(port uint16) (*scion.Conn, error) {
-			return scionConn(port), nil
+		NewConn: func() (*scion.Conn, error) {
+			return scionConn(0), nil
+		},
+		RegisterSvc: func(svc addr.SVC, port uint16) error {
+			return provider.AddSvc(svc, addr.HostIP(controlAddr.Addr()), port)
+		},
+		UnregisterSvc: func(svc addr.SVC, port uint16) error {
+			return provider.DelSvc(svc, addr.HostIP(controlAddr.Addr()), port)
 		},
 		PublishInterval: GatewayPublish,
 		RefreshInterval: GatewayRefresh,
@@ -562,8 +569,7 @@ func (n *Node) startGateway(
 			if route == nil {
 				return nil
 			}
-			route.Addr = netip.AddrPortFrom(route.Addr.Addr(), controlplane.DirectoryPort)
-			return route
+			return &scion.Addr{IA: route.IA, Service: wireguard.SvcDirectory, Path: route.Path}
 		}
 	}
 	gateway, err := wireguard.New(gwCfg)

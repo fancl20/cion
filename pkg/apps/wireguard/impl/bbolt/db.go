@@ -39,10 +39,8 @@ func New(path string, opts *bbolt.Options) (wireguard.DirectoryStore, error) {
 }
 
 type wireEntry struct {
-	PublicKey   string `json:"publicKey"`
-	GatewayPort uint16 `json:"gatewayPort"`
-	Underlay    string `json:"underlay"`
-	Overlay     string `json:"overlay"`
+	PublicKey string `json:"publicKey"`
+	Overlay   string `json:"overlay"`
 }
 
 // Publish records the entry, keyed by its ISD-AS: a publisher's later entry
@@ -53,10 +51,8 @@ func (b *directoryDB) Publish(ctx context.Context, entry wireguard.Entry) error 
 	}
 	return b.db.Update(func(tx *bbolt.Tx) error {
 		raw, err := json.Marshal(wireEntry{
-			PublicKey:   entry.PublicKey.String(),
-			GatewayPort: entry.GatewayPort,
-			Underlay:    entry.Underlay.String(),
-			Overlay:     entry.Overlay.String(),
+			PublicKey: entry.PublicKey.String(),
+			Overlay:   entry.Overlay.String(),
 		})
 		if err != nil {
 			return err
@@ -65,7 +61,9 @@ func (b *directoryDB) Publish(ctx context.Context, entry wireguard.Entry) error 
 	})
 }
 
-// List returns every published entry.
+// List returns every published entry. Stored entries shaped by proposal 0006
+// carry their retired port and underlay fields beside these; the JSON decode
+// ignores what the struct no longer names.
 func (b *directoryDB) List(ctx context.Context) ([]wireguard.Entry, error) {
 	var entries []wireguard.Entry
 	err := b.db.View(func(tx *bbolt.Tx) error {
@@ -83,20 +81,14 @@ func (b *directoryDB) List(ctx context.Context) ([]wireguard.Entry, error) {
 			if err != nil {
 				return fmt.Errorf("decoding the entry for %s: %w", k, err)
 			}
-			underlay, err := parseAddr(wire.Underlay)
-			if err != nil {
-				return fmt.Errorf("decoding the entry for %s: %w", k, err)
-			}
 			overlay, err := parsePrefix(wire.Overlay)
 			if err != nil {
 				return fmt.Errorf("decoding the entry for %s: %w", k, err)
 			}
 			entries = append(entries, wireguard.Entry{
-				IA:          ia,
-				PublicKey:   key,
-				GatewayPort: wire.GatewayPort,
-				Underlay:    underlay,
-				Overlay:     overlay,
+				IA:        ia,
+				PublicKey: key,
+				Overlay:   overlay,
 			})
 		}
 		return nil
@@ -115,14 +107,6 @@ func parseIA(s string) (addr.IA, error) {
 		return addr.IA(0), fmt.Errorf("parsing the ISD-AS %q: %w", s, err)
 	}
 	return ia, nil
-}
-
-func parseAddr(s string) (netip.Addr, error) {
-	ip, err := netip.ParseAddr(s)
-	if err != nil {
-		return netip.Addr{}, fmt.Errorf("parsing the underlay %q: %w", s, err)
-	}
-	return ip, nil
 }
 
 func parsePrefix(s string) (netip.Prefix, error) {

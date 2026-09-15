@@ -9,7 +9,6 @@ import (
 
 	"github.com/scionproto/scion/pkg/addr"
 
-	"github.com/fancl20/cion/pkg/controlplane"
 	"github.com/fancl20/cion/pkg/trust"
 )
 
@@ -32,16 +31,14 @@ const (
 
 // Entry is one gateway's publication: everything another node needs to
 // establish a mesh tunnel to it. The ISD-AS comes from the authenticated
-// publisher's certificate chain, never from the claimed entry.
+// publisher's certificate chain, never from the claimed entry. A peer is its
+// ISD-AS, its key, and its subnet: the mesh transport is a SCION service
+// (proposal 0007), so no reachability data rides the entry.
 type Entry struct {
 	// IA is the publisher's ISD-AS.
 	IA addr.IA
 	// PublicKey is the node's WireGuard public key.
 	PublicKey PublicKey
-	// GatewayPort is the underlay UDP port the mesh transport listens on.
-	GatewayPort uint16
-	// Underlay is the host address the gateway binds.
-	Underlay netip.Addr
 	// Overlay is the node's overlay subnet.
 	Overlay netip.Prefix
 }
@@ -123,11 +120,9 @@ func (g *Gateway) publish(ctx context.Context) error {
 // selfEntry is the node's own publication.
 func (g *Gateway) selfEntry() Entry {
 	return Entry{
-		IA:          g.cfg.IA,
-		PublicKey:   g.key.PublicKey(),
-		GatewayPort: controlplane.GatewayPort,
-		Underlay:    g.underlay,
-		Overlay:     g.cfg.Subnet,
+		IA:        g.cfg.IA,
+		PublicKey: g.key.PublicKey(),
+		Overlay:   g.cfg.Subnet,
 	}
 }
 
