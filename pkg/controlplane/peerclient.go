@@ -67,34 +67,48 @@ func NewPeerClient(cfg PeerClientConfig) *PeerClient {
 		beaconClt:   make(map[string]*Client),
 		verifiedClt: make(map[string]*Client),
 	}
+	// Beacons ride the client-authenticated channel; registrations and
+	// lookups the mutually verified one. Both ride the same QUIC transport.
+	c.beaconHCLT = NewSCIONClient(cfg, c.qclt, false)
+	c.verifiedHCLT = NewSCIONClient(cfg, c.qclt, true)
+	return c
+}
+
+// NewSCIONClient returns an HTTP client over the SCION-native channel: HTTP/3
+// (QUIC) riding the connection's SCION paths, presenting the node's chain as
+// the client certificate and — with verifyServer set — verifying the peer's
+// chain against the pinned TRC. The control endpoint's client machinery as a
+// library, the form the gateway's directory client consumes (proposal 0006).
+// Closing qclt releases the connections the client dials.
+func NewSCIONClient(
+	cfg PeerClientConfig,
+	qclt *quic.Transport,
+	verifyServer bool,
+) *http.Client {
+
 	// QUIC datagrams are capped so a datagram wrapped in a SCION header
 	// still fits a standard 1500-byte MTU; idle connections die soon enough
 	// that re-dials pick up fresh paths.
 	quicConf := &quic.Config{InitialPacketSize: 1200}
-	transport := func(verifyServer bool) *http3.Transport {
-		return &http3.Transport{
-			QUICConfig: quicConf,
-			TLSClientConfig: &tls.Config{
-				MinVersion:         tls.VersionTLS13,
-				InsecureSkipVerify: true, // per-dial verification against the TRC
-			},
-			Dial: func(ctx context.Context, authority string, tlsCfg *tls.Config,
-				quicCfg *quic.Config) (*quic.Conn, error) {
+	return &http.Client{Transport: &http3.Transport{
+		QUICConfig: quicConf,
+		TLSClientConfig: &tls.Config{
+			MinVersion:         tls.VersionTLS13,
+			InsecureSkipVerify: true, // per-dial verification against the TRC
+		},
+		Dial: func(ctx context.Context, authority string, tlsCfg *tls.Config,
+			quicCfg *quic.Config) (*quic.Conn, error) {
 
-				peer, err := peerFromAuthority(authority)
-				if err != nil {
-					return nil, err
-				}
-				if c.pathTo != nil {
-					peer.Path = c.pathTo(peer.IA)
-				}
-				return c.qclt.Dial(ctx, peer, nativeClientTLS(peer.IA, c.engine, verifyServer), quicCfg)
-			},
-		}
-	}
-	c.beaconHCLT = &http.Client{Transport: transport(false)}
-	c.verifiedHCLT = &http.Client{Transport: transport(true)}
-	return c
+			peer, err := peerFromAuthority(authority)
+			if err != nil {
+				return nil, err
+			}
+			if cfg.PathTo != nil {
+				peer.Path = cfg.PathTo(peer.IA)
+			}
+			return qclt.Dial(ctx, peer, nativeClientTLS(peer.IA, cfg.Engine, verifyServer), quicCfg)
+		},
+	}}
 }
 
 // Beacon propagates the extended PCB to the peer's beacon service (draft
@@ -150,7 +164,7 @@ func (c *PeerClient) Close() error {
 // keyed by the peer's encoded authority so the HTTP/3 transport reuses the
 // connection.
 func (c *PeerClient) client(peer *scion.Addr, hclt *http.Client, clients map[string]*Client) *Client {
-	authority := peerAuthority(peer)
+	authority := PeerAuthority(peer)
 	c.mtx.Lock()
 	defer c.mtx.Unlock()
 	clt, ok := clients[authority]
@@ -161,9 +175,10 @@ func (c *PeerClient) client(peer *scion.Addr, hclt *http.Client, clients map[str
 	return clt
 }
 
-// peerAuthority encodes the peer address as a URL authority: hexadecimal, so
-// it survives URL parsing unchanged and never collides with a real host.
-func peerAuthority(peer *scion.Addr) string {
+// PeerAuthority encodes the peer address as a URL authority: hexadecimal, so
+// it survives URL parsing unchanged and never collides with a real host. The
+// form every SCION-native client names its peer's endpoint by.
+func PeerAuthority(peer *scion.Addr) string {
 	return hex.EncodeToString([]byte(peer.IA.String() + "," + peer.Addr.String()))
 }
 

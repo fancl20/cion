@@ -10,3 +10,12 @@ package controlplane
 // fixed so that a node can reach a neighbor's endpoint knowing only the
 // underlay address advertised in the discovery greeting.
 const EndpointPort = 30044
+
+// GatewayPort is the SCION UDP port every gateway's mesh transport listens
+// on (proposal 0006), so a peer's directory entry — ISD-AS, public key,
+// underlay, subnet — is all a node needs to reach it.
+const GatewayPort = 30045
+
+// DirectoryPort is the SCION UDP port the core node's gateway application
+// serves the peer directory on (proposal 0006).
+const DirectoryPort = 30046

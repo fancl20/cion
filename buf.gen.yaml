@@ -1,0 +1,13 @@
+# Generates the gateway directory API's protobuf and ConnectRPC code (the
+# connect plugin emits its gatewayv1connect package beside the messages, the
+# pattern the vendored SCION control-plane protos follow). Requires
+# protoc-gen-go v1.36.11 and protoc-gen-connect-go on PATH, matching the
+# module's protobuf and connect versions.
+version: v2
+plugins:
+  - local: protoc-gen-go
+    out: .
+    opt: paths=source_relative
+  - local: protoc-gen-connect-go
+    out: .
+    opt: paths=source_relative
