@@ -10,7 +10,7 @@ import (
 
 	"github.com/fancl20/cion/internal/services"
 	"github.com/fancl20/cion/pkg/apps/ping"
-	"github.com/fancl20/cion/pkg/controlplane"
+	"github.com/fancl20/cion/pkg/apps/topology"
 	"github.com/fancl20/cion/pkg/links"
 	"github.com/fancl20/cion/pkg/trust"
 )
@@ -25,6 +25,7 @@ var fastPacing = services.NodePacing{
 	CandidateWindow: 5 * time.Second,
 	Directory:       100 * time.Millisecond,
 	RendezvousRate:  10 * time.Millisecond,
+	LinkSetPoll:     100 * time.Millisecond,
 }
 
 // assemblyNode is a node booted through the run command's own assembly.
@@ -39,7 +40,7 @@ type assemblyNode struct {
 // rendezvousOf returns the node's advertised rendezvous address: the
 // control address's host on the fixed rendezvous port.
 func (n *assemblyNode) rendezvousOf() string {
-	return netip.AddrPortFrom(n.host, controlplane.RendezvousPort).String()
+	return netip.AddrPortFrom(n.host, topology.RendezvousPort).String()
 }
 
 // bootAssembly boots a full node assembly — the run command's own wiring —

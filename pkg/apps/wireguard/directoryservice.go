@@ -10,7 +10,7 @@ import (
 	"connectrpc.com/connect"
 	"github.com/scionproto/scion/pkg/addr"
 
-	"github.com/fancl20/cion/pkg/controlplane"
+	"github.com/fancl20/cion/pkg/peeria"
 	wireguardv1 "github.com/fancl20/cion/proto/wireguard/v1"
 )
 
@@ -29,10 +29,11 @@ type DirectoryService struct {
 
 // AuthenticatedIA returns the ISD-AS of the peer whose certificate chain the
 // channel verified, and Authenticate peers it into the request context — the
-// control plane's middleware, consumed here for the publisher's identity.
+// peer-identity middleware of the SCION-native channel, consumed here for
+// the publisher's identity.
 var (
-	AuthenticatedIA = controlplane.AuthenticatedIA
-	Authenticate    = controlplane.Authenticate
+	AuthenticatedIA = peeria.AuthenticatedIA
+	Authenticate    = peeria.Authenticate
 )
 
 // Publish records the caller's entry. The entry's ISD-AS is the

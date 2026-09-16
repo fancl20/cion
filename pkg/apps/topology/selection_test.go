@@ -1,4 +1,4 @@
-package controlplane
+package topology
 
 import (
 	"context"
@@ -8,6 +8,7 @@ import (
 
 	"github.com/scionproto/scion/pkg/addr"
 
+	"github.com/fancl20/cion/pkg/controlplane"
 	"github.com/fancl20/cion/pkg/links"
 	"github.com/fancl20/cion/pkg/links/impl/memory"
 )
@@ -20,7 +21,7 @@ type selFixture struct {
 	store       *memory.DB
 	directory   []DirectoryEntry
 	samples     map[addr.IA]measurement
-	fresh       map[uint16]Neighbor
+	fresh       map[uint16]controlplane.Neighbor
 	silent      map[addr.IA]bool // neighbors whose greetings timed out
 	established []addr.IA        // the promoted candidates, in order
 	retired     []addr.IA        // the demoted neighbors, in order
@@ -50,7 +51,7 @@ func newSelFixture(t *testing.T, neighbors ...addr.IA) *selFixture {
 	f := &selFixture{
 		store:   memory.New(),
 		samples: make(map[addr.IA]measurement),
-		fresh:   make(map[uint16]Neighbor),
+		fresh:   make(map[uint16]controlplane.Neighbor),
 		silent:  make(map[addr.IA]bool),
 	}
 	for _, ia := range neighbors {
@@ -93,7 +94,7 @@ func newSelFixture(t *testing.T, neighbors ...addr.IA) *selFixture {
 		},
 	}
 	f.sel.cfg.Directory = func() []DirectoryEntry { return f.directory }
-	f.sel.cfg.Neighbors = func() map[uint16]Neighbor { return f.fresh }
+	f.sel.cfg.Neighbors = func() map[uint16]controlplane.Neighbor { return f.fresh }
 	// Every established neighbor is greeting-fresh unless a test says
 	// otherwise.
 	f.sel.cfg.Evidence = func(*links.Link) bool { return false }
@@ -108,10 +109,10 @@ func (f *selFixture) refresh() {
 	if err != nil {
 		return
 	}
-	f.fresh = make(map[uint16]Neighbor)
+	f.fresh = make(map[uint16]controlplane.Neighbor)
 	for _, l := range entries {
 		if l.State == links.StateEstablished && !f.silent[l.NeighborIA] {
-			f.fresh[l.IfID] = Neighbor{IA: l.NeighborIA, IfID: l.RemoteIfID}
+			f.fresh[l.IfID] = controlplane.Neighbor{IA: l.NeighborIA, IfID: l.RemoteIfID}
 		}
 	}
 }

@@ -1,4 +1,4 @@
-package controlplane
+package topology
 
 import (
 	"context"
@@ -9,6 +9,7 @@ import (
 	"connectrpc.com/connect"
 	"github.com/scionproto/scion/pkg/addr"
 
+	"github.com/fancl20/cion/pkg/peeria"
 	nodev1 "github.com/fancl20/cion/proto/node/v1"
 )
 
@@ -19,7 +20,7 @@ func directoryPublish(
 	ctx context.Context, svc *DirectoryService, publisher addr.IA, entry *nodev1.Entry,
 ) error {
 
-	sctx := context.WithValue(ctx, AuthenticatedIAContextKey(), publisher)
+	sctx := context.WithValue(ctx, peeria.AuthenticatedIAContextKey(), publisher)
 	_, err := svc.Publish(sctx, connect.NewRequest(&nodev1.PublishRequest{Entry: entry}))
 	return err
 }

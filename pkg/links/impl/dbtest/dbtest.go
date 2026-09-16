@@ -32,6 +32,7 @@ func Run(t *testing.T, db TestableDB) {
 		"update":              testUpdate,
 		"lookups":             testLookups,
 		"allocate skips live": testAllocateSkipsLive,
+		"preset interface id": testPresetIfID,
 		"persist across open": testPersist,
 	}
 	for name, test := range tests {
@@ -193,6 +194,37 @@ func testAllocateSkipsLive(t *testing.T, db TestableDB) {
 		if ids[i] <= ids[i-1] {
 			t.Fatalf("interface IDs = %v, want monotonically increasing", ids)
 		}
+	}
+}
+
+// testPresetIfID checks the entry-carried interface ID: an insert carrying
+// one takes it, a later insert claiming the same ID is refused, and the one
+// a retired entry still holds back is refused too — the file provider's
+// vouched entries are the carrier.
+func testPresetIfID(t *testing.T, db TestableDB) {
+	ctx := context.Background()
+	l := link(iaA, links.StateEstablished)
+	l.IfID = 42
+	if err := db.Insert(ctx, l); err != nil {
+		t.Fatal(err)
+	}
+	if l.IfID != 42 {
+		t.Fatalf("interface ID = %d, want the preset 42", l.IfID)
+	}
+	clash := link(iaB, links.StateEstablished)
+	clash.IfID = 42
+	if err := db.Insert(ctx, clash); err == nil {
+		t.Error("an insert claiming a live interface ID was accepted")
+	}
+	l.State = links.StateRetired
+	l.Retired = time.Now()
+	if err := db.Update(ctx, l); err != nil {
+		t.Fatal(err)
+	}
+	held := link(iaC, links.StateEstablished)
+	held.IfID = 42
+	if err := db.Insert(ctx, held); err == nil {
+		t.Error("an insert claiming a held-back interface ID was accepted")
 	}
 }
 

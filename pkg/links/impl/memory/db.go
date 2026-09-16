@@ -31,27 +31,35 @@ func New() *DB {
 // Now sets the table's clock.
 func (d *DB) Now(now func() time.Time) { d.now = now }
 
-// Insert stores a new entry, allocating its interface ID.
+// Insert stores a new entry: an entry carrying no interface ID is allocated
+// one, and one carrying an ID takes it, refused when the ID is held.
 func (d *DB) Insert(ctx context.Context, l *links.Link) error {
 	d.mtx.Lock()
 	defer d.mtx.Unlock()
 	now := d.now()
-	for {
-		id := d.nextIfID
-		d.nextIfID++
-		if d.nextIfID == 0 {
-			d.nextIfID = 1
-		}
-		held := false
+	held := func(id uint16) bool {
 		for _, e := range d.entries {
 			if e.IfID == id && (e.Live() || now.Sub(e.Retired) < links.IfIDHoldback) {
-				held = true
-				break
+				return true
 			}
 		}
-		if !held {
-			l.IfID = id
-			break
+		return false
+	}
+	if l.IfID != 0 {
+		if held(l.IfID) {
+			return fmt.Errorf("interface ID %d is held", l.IfID)
+		}
+	} else {
+		for {
+			id := d.nextIfID
+			d.nextIfID++
+			if d.nextIfID == 0 {
+				d.nextIfID = 1
+			}
+			if !held(id) {
+				l.IfID = id
+				break
+			}
 		}
 	}
 	l.Created = now

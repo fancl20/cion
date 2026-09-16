@@ -28,7 +28,6 @@ import (
 	"github.com/scionproto/scion/pkg/addr"
 	spath "github.com/scionproto/scion/pkg/slayers/path/scion"
 
-	"github.com/fancl20/cion/pkg/apps/ping"
 	"github.com/fancl20/cion/pkg/apps/wireguard"
 	wireguardbbolt "github.com/fancl20/cion/pkg/apps/wireguard/impl/bbolt"
 	"github.com/fancl20/cion/pkg/controlplane"
@@ -687,14 +686,28 @@ func selfEnroll(
 	return err
 }
 
-// StartPingResponder serves echo replies on the node's endhost port, as the
-// daemon does beside the control endpoint.
+// StartPingResponder serves echo replies on the node's endhost port, the
+// loop the daemon's own core runs beside the control endpoint (ADR 0007) —
+// the harness wires it by hand, its nodes not being the daemon's assembly.
 func StartPingResponder(t *testing.T, n *Node) {
 	t.Helper()
-	responder := &ping.Responder{Conn: n.NewConn(t, dataplane.EndhostPort)}
-	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
-	go responder.Run(ctx)
+	conn := n.NewConn(t, dataplane.EndhostPort)
+	t.Cleanup(func() { conn.Close() }) //nolint:errcheck
+	go func() {
+		for {
+			echo, from, err := conn.ReadEchoFrom()
+			if err != nil {
+				return
+			}
+			if echo.Reply {
+				continue
+			}
+			if err := conn.WriteEchoReplyTo(from, echo.Identifier, echo.Seq,
+				echo.Payload); err != nil {
+				return
+			}
+		}
+	}()
 }
 
 // handlePanic absorbs a background loop's panic, the way the node assembly's

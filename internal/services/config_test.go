@@ -40,6 +40,11 @@ func TestNodeConfigValidate(t *testing.T) {
 		"bad neighbor":       func(c *NodeConfig) { c.Core = false; c.Neighbors = []string{"nope"} },
 		"bad allow-ia":       func(c *NodeConfig) { c.AllowIA = []string{"nope"} },
 		"missing internal":   func(c *NodeConfig) { c.Internal = "" },
+		"link-set plus neighbor": func(c *NodeConfig) {
+			c.Core = false
+			c.LinkSet = "/tmp/link-set.json"
+			c.Neighbors = []string{"192.0.2.7:30045"}
+		},
 	}
 	for name, mutate := range bad {
 		t.Run(name, func(t *testing.T) {

@@ -94,9 +94,11 @@ func (l *Link) Serving() bool {
 // DB is the database of neighbor table entries. Lookup methods report
 // absence as a nil entry with a nil error.
 type DB interface {
-	// Insert stores a new entry, allocating its interface ID monotonically
-	// from a persisted counter and stamping Created and Updated. The entry's
-	// IfID is set to the allocated one.
+	// Insert stores a new entry, stamping Created and Updated. An entry
+	// carrying no interface ID is allocated one monotonically from a
+	// persisted counter — the entry's IfID is set to it — and one carrying
+	// an ID takes it, refused when the ID is held: live, or retired within
+	// the holdback. The file provider's vouched entries are the carrier.
 	Insert(ctx context.Context, l *Link) error
 	// Update replaces the stored entry with the same interface ID, stamping
 	// Updated.

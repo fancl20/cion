@@ -295,3 +295,48 @@ it no longer holds.
     held back.
 
 ## Implementation history
+
+*   Core: `rendezvous.go`, `linkservice.go`, `directory.go`, and
+    `selection.go` moved verbatim with their suites and constants into
+    `pkg/apps/topology`, taking `MaxNeighbors`, `RendezvousPort`, and the
+    Link and Directory client stubs with them — `Client` keeps the drafts'
+    five, and `pkg/controlplane` no longer names a `proto/node/v1` type;
+    `peeria.go` extracted into `pkg/peeria`, imported by the endpoint, the
+    topology services, and the WireGuard directory, its middleware test
+    moving with it; `PeerClient`'s Link RPC moved with the selection loop,
+    replaced by `VerifiedClient`, the mutually verified channel's HTTP
+    client the topology application's link requester rides.
+*   Seam: `Provider` in `pkg/apps/topology` — `CompleteIdentity` before the
+    phases (the assembly persists what returns, the founding core's draw at
+    once under either provider), `Wire` delivering the phases' products,
+    `Seed` landing the vouched links before the first data plane generation
+    builds (the measured provider's first-start neighbor check moving into
+    it), `Mounts` behind the peer middleware, `Run` under the node's
+    supervision with each loop's panic absorbed, and `Close`.
+    `Services.Link` and `Services.Directory` became
+    `Services.Mounts []Mount` of pattern/handler pairs, empty mounting
+    none; the assembly's `assembleLinks` renamed `assembleDiscovery`, the
+    rendezvous acceptor and node directory leaving it with the selection
+    and join-dial loops and the seeding; `--link-set` loads the file
+    provider and refuses `--neighbor`.
+*   File provider: a JSON link-set parsed with `json.RejectUnknownMembers`,
+    reconciled on start and on the constant modification-time poll — named
+    entries established with pinned addresses and an optional interface ID
+    (the store's `Insert` learning to honor a carried ID, refused when
+    held), absent entries retired with the interface ID held back, an
+    unchanged file writing nothing, a changed file notifying exactly one
+    generation swap; identity completed offline from the first entry's ISD.
+*   Responder: `ping.Responder` moved into the node assembly as the
+    unexported `responder` loop — same socket, same behavior — leaving
+    `pkg/apps/ping` the pinger alone; the test harness wires its own copy
+    beside its hand-assembled nodes.
+*   Tests: the moved suites pass unmodified at `pkg/apps/topology` and
+    `pkg/peeria`; the store's contract suite gained the preset
+    interface-ID case; the seam's units cover measured completion by echo,
+    file completion from the first entry, the core's final draw, the
+    mounts under either provider, and the file provider's parsing,
+    reconciliation, holdback, and silent-peer cases; the three-node
+    rendezvous proof passes unmodified, and the static-lab proof joins it —
+    three nodes paired by link-set files only, beaconing, forwarding, and
+    answering echo end to end through the responder's new home, with an
+    entry's removal surviving as a generation swap.

@@ -1,8 +1,9 @@
 // Package services assembles the CION node's services — the data plane
-// generations, the control plane, and the resident applications — from the
-// node's run arguments and the state directory, where the first start
-// generates the identity (ADR-0006). Run serves them as the daemon; BootApp
-// boots them for an application sending over the node's own assembly.
+// generations, the control plane, the topology provider the run arguments
+// load (ADR 0007), and the resident applications — from the node's run
+// arguments and the state directory, where the first start generates the
+// identity (ADR-0006). Run serves them as the daemon; BootApp boots them
+// for an application sending over the node's own assembly.
 package services
 
 import (
@@ -76,7 +77,7 @@ func (a *App) Conn(port uint16) (*scion.Conn, error) {
 // Provider returns the node's path provider: the resolver the application
 // composes routes through.
 func (a *App) Provider() *scion.PathProvider {
-	return a.node.provider
+	return a.node.pathProvider
 }
 
 // Links returns the node's neighbor table — the one source of truth the

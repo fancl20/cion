@@ -1,4 +1,4 @@
-package controlplane
+package topology
 
 import (
 	"context"
@@ -13,6 +13,7 @@ import (
 	"github.com/scionproto/scion/pkg/addr"
 	spath "github.com/scionproto/scion/pkg/slayers/path/scion"
 
+	"github.com/fancl20/cion/pkg/controlplane"
 	"github.com/fancl20/cion/pkg/dataplane"
 	"github.com/fancl20/cion/pkg/links"
 	"github.com/fancl20/cion/pkg/scion"
@@ -72,7 +73,7 @@ type SelectionConfig struct {
 	Directory func() []DirectoryEntry
 	// Neighbors returns the greeting-fresh neighbors by interface ID; a
 	// neighbor absent from it has timed out and counts as infinitely slow.
-	Neighbors func() map[uint16]Neighbor
+	Neighbors func() map[uint16]controlplane.Neighbor
 	// Provider resolves the freshest path to a candidate — the baseline.
 	Provider *scion.PathProvider
 	// Conn carries the SCMP echo probes; its port is the reply address.
@@ -519,7 +520,7 @@ func (s *selection) worstNeighbor(
 }
 
 // freshNeighbors returns the greeting-fresh neighbors by interface ID.
-func (s *selection) freshNeighbors() map[uint16]Neighbor {
+func (s *selection) freshNeighbors() map[uint16]controlplane.Neighbor {
 	if s.cfg.Neighbors == nil {
 		return nil
 	}
@@ -558,7 +559,7 @@ func (s *selection) establishLink(ctx context.Context, e DirectoryEntry, why str
 	if path, err := s.cfg.Provider.Path(probeCtx, e.IA); err == nil {
 		peer := &scion.Addr{
 			IA:   e.IA,
-			Addr: netip.AddrPortFrom(e.ControlAddr.Addr(), EndpointPort),
+			Addr: netip.AddrPortFrom(e.ControlAddr.Addr(), controlplane.EndpointPort),
 			Path: path,
 		}
 		rpcCtx, rpcCancel := context.WithTimeout(ctx, EstablishTimeout)

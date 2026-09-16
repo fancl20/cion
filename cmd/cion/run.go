@@ -26,6 +26,9 @@ func addNodeFlags(flags *pflag.FlagSet, opts *services.NodeConfig) {
 		"the core's TLS key file, the offline fallback to ACME (core only)")
 	flags.StringSliceVar(&opts.Neighbors, "neighbor", nil,
 		"an existing node's rendezvous underlay address; repeatable")
+	flags.StringVar(&opts.LinkSet, "link-set", "",
+		"path to a JSON link-set file naming the static topology (refuses --neighbor): "+
+			"neighbor ISD-ASes with each link's two underlay addresses")
 	flags.StringVar(&opts.State, "state", services.DefaultState,
 		"the state directory, where the first start generates the identity")
 	flags.StringVar(&opts.Internal, "internal", services.DefaultInternal,
@@ -47,9 +50,10 @@ type runOptions struct {
 	queueSize  int
 }
 
-// newRunCommand builds `cion run`: the daemon of proposals 0003-0008 — data
-// plane, control plane, and the resident applications in one process — from
-// the run arguments and the state directory.
+// newRunCommand builds `cion run`: the daemon of proposals 0003-0011 — data
+// plane, control plane, the loaded topology provider, and the resident
+// applications in one process — from the run arguments and the state
+// directory.
 func newRunCommand() *cobra.Command {
 	opts := &services.NodeConfig{}
 	tuning := &runOptions{}
@@ -57,9 +61,11 @@ func newRunCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "run",
 		Short: "Run the CION daemon",
-		Long: "Run the CION daemon: data plane, control plane, and enabled applications in one " +
-			"process (proposals 0003-0008). Identity and links come from the state directory; " +
-			"a non-core's first start needs a bootstrap --neighbor and the core's --domain.",
+		Long: "Run the CION daemon: data plane, control plane, the loaded topology provider, " +
+			"and enabled applications in one process (proposals 0003-0011). Identity and links " +
+			"come from the state directory; a non-core's first start needs a bootstrap " +
+			"--neighbor — or a --link-set file under the static provider — and the core's " +
+			"--domain.",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			// A zero processor count or batch size would panic deep inside

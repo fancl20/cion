@@ -6,13 +6,9 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
-	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
-	"github.com/fancl20/cion/pkg/controlplane"
 	"math/big"
-	"net/http"
-	"net/http/httptest"
 	"net/netip"
 	"testing"
 
@@ -20,6 +16,7 @@ import (
 	"github.com/scionproto/scion/pkg/addr"
 	"github.com/scionproto/scion/pkg/scrypto/cppki"
 
+	"github.com/fancl20/cion/pkg/peeria"
 	wireguardv1 "github.com/fancl20/cion/proto/wireguard/v1"
 )
 
@@ -51,7 +48,7 @@ func (s *fakeStore) Close() error                          { return nil }
 func requestWithIA(t *testing.T, ia addr.IA) context.Context {
 	t.Helper()
 	return context.WithValue(context.Background(),
-		controlplane.AuthenticatedIAContextKey(), ia)
+		peeria.AuthenticatedIAContextKey(), ia)
 }
 
 // TestDirectoryPublishRecordsAuthenticatedIA checks the handlers record the
@@ -133,25 +130,6 @@ func mustPubKey(b byte) PublicKey {
 		key[i] = b
 	}
 	return key
-}
-
-// TestAuthenticateMiddleware checks the middleware peers the verified
-// chain's ISD-AS into the request context for the handlers to read.
-func TestAuthenticateMiddleware(t *testing.T) {
-	ia := addr.MustIAFrom(20, 0xff0000000141)
-	var seen addr.IA
-	h := Authenticate(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		seen = AuthenticatedIA(r.Context())
-	}))
-	r := httptest.NewRequest("POST", "/", nil)
-	// A certificate whose subject names the ISD-AS the way SCION chains do.
-	r.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{
-		iaSubjectCert(t, ia),
-	}}
-	h.ServeHTTP(httptest.NewRecorder(), r)
-	if !seen.Equal(ia) {
-		t.Errorf("authenticated ISD-AS = %s, want %s", seen, ia)
-	}
 }
 
 // iaSubjectCert builds a certificate whose subject names the ISD-AS the way

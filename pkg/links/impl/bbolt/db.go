@@ -130,19 +130,30 @@ func New(path string, opts *bbolt.Options) (links.DB, error) {
 	return &bboltDB{db: db, now: time.Now}, nil
 }
 
-// Insert stores a new entry, allocating its interface ID monotonically from
-// the persisted counter: IDs of live entries and of entries retired within
-// the holdback are skipped.
+// Insert stores a new entry: an entry carrying no interface ID is allocated
+// one monotonically from the persisted counter — IDs of live entries and of
+// entries retired within the holdback are skipped — and one carrying an ID
+// takes it, refused when the ID is held.
 func (b *bboltDB) Insert(ctx context.Context, l *links.Link) error {
 	return b.db.Update(func(tx *bbolt.Tx) error {
 		linksB := tx.Bucket([]byte(linksBucket))
 		metaB := tx.Bucket([]byte(metaBucket))
-		id, next, err := allocateIfID(linksB, metaB, b.now())
+		held, err := heldIfIDs(linksB, b.now())
 		if err != nil {
 			return err
 		}
-		if err := metaB.Put([]byte(nextIfIDKey), beUint16(next)); err != nil {
-			return err
+		id := l.IfID
+		if id == 0 {
+			var next uint16
+			id, next, err = allocateIfID(linksB, metaB, held)
+			if err != nil {
+				return err
+			}
+			if err := metaB.Put([]byte(nextIfIDKey), beUint16(next)); err != nil {
+				return err
+			}
+		} else if held[id] {
+			return fmt.Errorf("interface ID %d is held", id)
 		}
 		now := b.now()
 		l.IfID = id
@@ -230,24 +241,29 @@ func (b *bboltDB) Close() error {
 	return b.db.Close()
 }
 
-// allocateIfID picks the next free interface ID and the counter value to
-// persist: the counter advances monotonically, skipping the IDs of live
-// entries and of entries retired within the holdback. Entries whose holdback
-// passed are purged — no segment can name them any longer.
-func allocateIfID(linksB, metaB *bbolt.Bucket, now time.Time) (id, next uint16, err error) {
+// heldIfIDs returns the IDs no new entry may take — those of live entries
+// and of entries retired within the holdback — purging the entries whose
+// holdback passed, no segment being able to name them any longer.
+func heldIfIDs(linksB *bbolt.Bucket, now time.Time) (map[uint16]bool, error) {
 	held := make(map[uint16]bool)
 	c := linksB.Cursor()
 	for k, v := c.First(); k != nil; k, v = c.Next() {
 		l, err := unmarshalStored(v, beUint16Decode(k))
 		if err != nil {
-			return 0, 0, err
+			return nil, err
 		}
 		if l.Live() || now.Sub(l.Retired) < links.IfIDHoldback {
 			held[l.IfID] = true
 		} else if err := linksB.Delete(k); err != nil {
-			return 0, 0, err
+			return nil, err
 		}
 	}
+	return held, nil
+}
+
+// allocateIfID picks the next free interface ID and the counter value to
+// persist: the counter advances monotonically, skipping the held IDs.
+func allocateIfID(linksB, metaB *bbolt.Bucket, held map[uint16]bool) (id, next uint16, err error) {
 	next = 1
 	if raw := metaB.Get([]byte(nextIfIDKey)); raw != nil {
 		next = beUint16Decode(raw)

@@ -1,4 +1,4 @@
-package controlplane
+package topology
 
 import (
 	"context"
@@ -11,6 +11,7 @@ import (
 
 	"github.com/fancl20/cion/pkg/links"
 	"github.com/fancl20/cion/pkg/links/impl/memory"
+	"github.com/fancl20/cion/pkg/peeria"
 	nodev1 "github.com/fancl20/cion/proto/node/v1"
 )
 
@@ -43,7 +44,7 @@ func linkRequest(
 	ctx context.Context, svc *LinkService, peer addr.IA, local string, ifID uint32,
 ) (*nodev1.LinkReply, error) {
 
-	sctx := context.WithValue(ctx, AuthenticatedIAContextKey(), peer)
+	sctx := context.WithValue(ctx, peeria.AuthenticatedIAContextKey(), peer)
 	resp, err := svc.Request(sctx, connect.NewRequest(&nodev1.LinkRequest{
 		LocalAddr: local,
 		IfId:      ifID,

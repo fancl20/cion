@@ -99,7 +99,7 @@ func (n *node) parseWireguardConfig(wg *ConfigWireguard) (wireguard.Config, erro
 		Exits:         exits,
 		Peers:         peers,
 		StateDir:      filepath.Join(n.cfg.State, "wireguard"),
-		Provider:      n.provider,
+		Provider:      n.pathProvider,
 		Engine:        n.engine,
 		NewConn:       func() (*scion.Conn, error) { return n.scionConn(0) },
 		RegisterSvc:   n.registerSvc,
