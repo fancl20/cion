@@ -10,6 +10,8 @@ import (
 	"github.com/scionproto/scion/pkg/addr"
 
 	"github.com/fancl20/cion/pkg/dataplane"
+	"github.com/fancl20/cion/pkg/links"
+	"github.com/fancl20/cion/pkg/links/impl/memory"
 )
 
 const (
@@ -18,10 +20,27 @@ const (
 )
 
 // startNode brings up one CION node: data plane with an internal and an
-// external link, plus a registered discovery service.
+// external link, plus a registered discovery service. The link store seeds
+// the established link the data plane carries and discovery validates
+// against.
 func startNode(t *testing.T, ia addr.IA, internal, extLocal, extRemote, control string) *Discovery {
 	t.Helper()
 	key := []byte("0123456789abcdef")
+
+	neighbor := addr.MustIAFrom(1, 0xff0000000001)
+	if ia == neighbor {
+		neighbor = addr.MustIAFrom(1, 0xff0000000002)
+	}
+	store := memory.New()
+	entry := &links.Link{
+		NeighborIA: neighbor,
+		Local:      netip.MustParseAddrPort(extLocal),
+		Remote:     netip.MustParseAddrPort(extRemote),
+		State:      links.StateEstablished,
+	}
+	if err := store.Insert(context.Background(), entry); err != nil {
+		t.Fatal(err)
+	}
 
 	metrics, err := dataplane.NewMetrics()
 	if err != nil {
@@ -32,12 +51,8 @@ func startNode(t *testing.T, ia addr.IA, internal, extLocal, extRemote, control 
 	if err != nil {
 		t.Fatal(err)
 	}
-	neighbor := addr.MustIAFrom(1, 0xff0000000001)
-	if ia == neighbor {
-		neighbor = addr.MustIAFrom(1, 0xff0000000002)
-	}
-	el, err := provider.NewExternalLink(64, nil, extLocal, extRemote, ifID,
-		metrics.NewInterfaceMetrics(ifID, ia, neighbor))
+	el, err := provider.NewExternalLink(64, nil, extLocal, extRemote, entry.IfID,
+		metrics.NewInterfaceMetrics(entry.IfID, ia, neighbor))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -57,7 +72,7 @@ func startNode(t *testing.T, ia addr.IA, internal, extLocal, extRemote, control 
 		ControlAddr:  control,
 		MACKey:       key,
 		InternalAddr: internal,
-		Links:        map[uint16]addr.IA{ifID: neighbor},
+		Store:        store,
 		Interval:     discoveryGap,
 	})
 	if err != nil {
@@ -84,7 +99,9 @@ func waitNeighbor(t *testing.T, d *Discovery) Neighbor {
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		if ns := d.Neighbors(); len(ns) == 1 {
-			return ns[ifID]
+			for _, n := range ns {
+				return n
+			}
 		}
 		time.Sleep(2 * discoveryGap)
 	}
@@ -151,18 +168,28 @@ func TestDiscoveryTwoNodes(t *testing.T) {
 }
 
 // TestDiscoveryRejectsMismatchedIA checks the neighbor cross-check of the
-// link-bootstrap model: a greeting advertising an ISD-AS that does not match
-// the configured neighbor of the receiving interface is dropped.
+// link-table model: a greeting advertising an ISD-AS that does not match the
+// entry of the receiving interface is dropped.
 func TestDiscoveryRejectsMismatchedIA(t *testing.T) {
 	iaA := addr.MustIAFrom(1, 0xff0000000001)
 	iaB := addr.MustIAFrom(1, 0xff0000000002)
 
+	store := memory.New()
+	entry := &links.Link{
+		NeighborIA: iaB,
+		Local:      netip.MustParseAddrPort("127.0.0.1:40001"),
+		Remote:     netip.MustParseAddrPort("127.0.0.1:40002"),
+		State:      links.StateEstablished,
+	}
+	if err := store.Insert(context.Background(), entry); err != nil {
+		t.Fatal(err)
+	}
 	d, err := NewDiscovery(DiscoveryConfig{
 		IA:           iaA,
 		ControlAddr:  freeUDPAddr(t),
 		MACKey:       []byte("0123456789abcdef"),
 		InternalAddr: freeUDPAddr(t),
-		Links:        map[uint16]addr.IA{ifID: iaB},
+		Store:        store,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -172,9 +199,9 @@ func TestDiscoveryRejectsMismatchedIA(t *testing.T) {
 	}
 
 	foreign := addr.MustIAFrom(1, 0xff0000000f0f)
-	d.record(ifID, Greeting{
+	d.record(entry.IfID, Greeting{
 		IA:          foreign,
-		IfID:        ifID,
+		IfID:        entry.IfID,
 		ControlAddr: netip.MustParseAddrPort("127.0.0.1:30043"),
 	})
 	if ns := d.Neighbors(); len(ns) != 0 {
@@ -182,13 +209,73 @@ func TestDiscoveryRejectsMismatchedIA(t *testing.T) {
 	}
 
 	// The legitimate neighbor is accepted on the same interface.
-	d.record(ifID, Greeting{
+	d.record(entry.IfID, Greeting{
 		IA:          iaB,
-		IfID:        ifID,
+		IfID:        entry.IfID,
 		ControlAddr: netip.MustParseAddrPort("127.0.0.1:30044"),
 	})
-	if ns := d.Neighbors(); len(ns) != 1 || !ns[ifID].IA.Equal(iaB) {
+	if ns := d.Neighbors(); len(ns) != 1 || !ns[entry.IfID].IA.Equal(iaB) {
 		t.Errorf("neighbors after legitimate greeting = %v, want %v", ns, iaB)
+	}
+}
+
+// TestDiscoveryAdoptsNeighbor checks the entry a joiner's rendezvous created
+// without a named neighbor: the first greeting's ISD-AS is adopted into it,
+// and a later greeting of another ISD-AS is refused.
+func TestDiscoveryAdoptsNeighbor(t *testing.T) {
+	iaA := addr.MustIAFrom(1, 0xff0000000001)
+	iaB := addr.MustIAFrom(1, 0xff0000000002)
+
+	store := memory.New()
+	entry := &links.Link{
+		Local:  netip.MustParseAddrPort("127.0.0.1:40001"),
+		Remote: netip.MustParseAddrPort("127.0.0.1:40002"),
+		State:  links.StateCandidate,
+	}
+	if err := store.Insert(context.Background(), entry); err != nil {
+		t.Fatal(err)
+	}
+	d, err := NewDiscovery(DiscoveryConfig{
+		IA:           iaA,
+		ControlAddr:  freeUDPAddr(t),
+		MACKey:       []byte("0123456789abcdef"),
+		InternalAddr: freeUDPAddr(t),
+		Store:        store,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := d.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	d.record(entry.IfID, Greeting{
+		IA:          iaB,
+		IfID:        entry.IfID + 1,
+		ControlAddr: netip.MustParseAddrPort("127.0.0.1:30044"),
+	})
+	if ns := d.Neighbors(); len(ns) != 1 || !ns[entry.IfID].IA.Equal(iaB) {
+		t.Fatalf("neighbors after the first greeting = %v, want %v", ns, iaB)
+	}
+	// The adoption and the remote interface ID landed in the entry.
+	entries, err := store.All(context.Background())
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("entries = %v (%v), want the one", entries, err)
+	}
+	if !entries[0].NeighborIA.Equal(iaB) || entries[0].RemoteIfID != entry.IfID+1 {
+		t.Errorf("entry after adoption = %+v, want %s with the remote ID", entries[0], iaB)
+	}
+
+	// A greeting of another ISD-AS on the same interface is refused now that
+	// the entry names its neighbor.
+	foreign := addr.MustIAFrom(1, 0xff0000000f0f)
+	d.record(entry.IfID, Greeting{
+		IA:          foreign,
+		IfID:        entry.IfID,
+		ControlAddr: netip.MustParseAddrPort("127.0.0.1:30045"),
+	})
+	if ns := d.Neighbors(); len(ns) != 1 || !ns[entry.IfID].IA.Equal(iaB) {
+		t.Errorf("neighbors after a foreign greeting = %v, want the adopted %v", ns, iaB)
 	}
 }
 

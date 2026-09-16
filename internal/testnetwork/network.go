@@ -1,8 +1,9 @@
 // Package testnetwork is the integration tests' topology harness: the fully
 // wired nodes of pkg/controlplane/network_test.go's harness, extended per
-// proposal 0006 with the WireGuard application, moved where the
-// application's own integration tests can assemble beside them — the harness
-// imports the control plane, so the control plane's package cannot host it.
+// proposal 0006 with the WireGuard application and per proposal 0008 with
+// the link store, moved where the applications' own integration tests can
+// assemble beside them — the harness imports the control plane, so the
+// control plane's package cannot host it.
 package testnetwork
 
 import (
@@ -32,6 +33,8 @@ import (
 	wireguardbbolt "github.com/fancl20/cion/pkg/apps/wireguard/impl/bbolt"
 	"github.com/fancl20/cion/pkg/controlplane"
 	"github.com/fancl20/cion/pkg/dataplane"
+	"github.com/fancl20/cion/pkg/links"
+	linkbbolt "github.com/fancl20/cion/pkg/links/impl/bbolt"
 	"github.com/fancl20/cion/pkg/pathdb"
 	pathdbbbolt "github.com/fancl20/cion/pkg/pathdb/impl/bbolt"
 	"github.com/fancl20/cion/pkg/scion"
@@ -57,23 +60,22 @@ const (
 // certificate is signed by a test CA that stands in for the WebPKI.
 const TestDomain = "cion-core.test"
 
-// MACKey is the forwarding key the harness's data planes verify against.
-var MACKey = []byte("0123456789abcdef")
-
 // Node is one fully-wired node of a test topology — the same components the
-// run command wires in internal/services: data plane, discovery, trust, the
-// control endpoint, the beaconer, and — when configured — the WireGuard
-// application.
+// run command wires in internal/services: data plane, the link store,
+// discovery, trust, the control endpoint, the beaconer, and — when
+// configured — the WireGuard application.
 type Node struct {
 	IA        addr.IA
 	Internal  string
 	ControlIP netip.Addr
-	Links     map[uint16]addr.IA
+	Links     func() map[uint16]addr.IA
+	Store     links.DB
+	MACKey    []byte
 	TrustDB   trust.DB
 	PathDB    pathdb.DB
 	Engine    *trust.Engine
 	Beaconer  *controlplane.Beaconer
-	Store     *controlplane.BeaconStore
+	StoreBcn  *controlplane.BeaconStore
 	CoreClt   *controlplane.CoreClient
 	PeerClt   *controlplane.PeerClient
 	Provider  *scion.PathProvider
@@ -91,7 +93,7 @@ func (n *Node) NewConn(t *testing.T, port uint16) *scion.Conn {
 		IA:           n.IA,
 		Bind:         netip.AddrPortFrom(n.ControlIP, port).String(),
 		InternalAddr: n.Internal,
-		MACKey:       MACKey,
+		MACKey:       n.MACKey,
 		Links:        n.Links,
 	})
 	if err != nil {
@@ -101,9 +103,9 @@ func (n *Node) NewConn(t *testing.T, port uint16) *scion.Conn {
 	return conn
 }
 
-// Link is one external link of a node.
+// Link is one seeded external link of a node: both endpoints' addresses
+// recorded in each side's store, the shape a restart serves.
 type Link struct {
-	IfID     uint16
 	Local    string
 	Remote   string
 	Neighbor addr.IA
@@ -206,7 +208,8 @@ type NodeConfig struct {
 	Host netip.Addr
 	// StateDir persists the node's state; "" uses a fresh temporary one.
 	StateDir string
-	// Links are the node's external links.
+	// Links are the node's seeded external links, recorded in its store as
+	// established — the shape a restart serves.
 	Links []Link
 	// Core marks the founding core node.
 	Core bool
@@ -221,7 +224,7 @@ type NodeConfig struct {
 // channel; non-core nodes enroll against it.
 func StartNode(t *testing.T, cfg NodeConfig) *Node {
 	t.Helper()
-	ia, host, links, core, wpki := cfg.IA, cfg.Host, cfg.Links, cfg.Core, cfg.WPKI
+	ia, host, linksCfg, core, wpki := cfg.IA, cfg.Host, cfg.Links, cfg.Core, cfg.WPKI
 	stateDir := cfg.StateDir
 
 	metrics, err := dataplane.NewMetrics()
@@ -236,24 +239,77 @@ func StartNode(t *testing.T, cfg NodeConfig) *Node {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if stateDir == "" {
+		stateDir = t.TempDir()
+	}
+	trustDB, err := trustbbolt.New(filepath.Join(stateDir, "trust.db"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pathDB, err := pathdbbbolt.New(filepath.Join(stateDir, "path.db"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	linkStore, err := linkbbolt.New(filepath.Join(stateDir, "links.db"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	macKey, err := trust.LoadOrCreateForwardingKey(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	asKey, err := trust.LoadOrCreateASKey(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, l := range linksCfg {
+		local, err := netip.ParseAddrPort(l.Local)
+		if err != nil {
+			t.Fatal(err)
+		}
+		remote, err := netip.ParseAddrPort(l.Remote)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Idempotent by remote address: a restarted node re-serves the
+		// persisted entry rather than duplicating it.
+		if existing, err := linkStore.ByRemote(context.Background(), remote); err != nil {
+			t.Fatal(err)
+		} else if existing != nil {
+			continue
+		}
+		if err := linkStore.Insert(context.Background(), &links.Link{
+			NeighborIA: l.Neighbor,
+			Local:      local,
+			Remote:     remote,
+			State:      links.StateEstablished,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	entries, err := linkStore.All(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	serving := links.Serving(entries)
+
+	dLinks := []dataplane.Link{}
 	il, err := provider.NewInternalLink(internal, 64,
 		metrics.NewInterfaceMetrics(0, ia, 0))
 	if err != nil {
 		t.Fatal(err)
 	}
-	dLinks := []dataplane.Link{il}
-	neighborLinks := make(map[uint16]addr.IA, len(links))
-	for _, l := range links {
-		el, err := provider.NewExternalLink(64, nil, l.Local, l.Remote, l.IfID,
-			metrics.NewInterfaceMetrics(l.IfID, ia, 0))
+	dLinks = append(dLinks, il)
+	for _, l := range serving {
+		el, err := provider.NewExternalLink(64, nil, l.Local.String(), l.Remote.String(),
+			l.IfID, metrics.NewInterfaceMetrics(l.IfID, ia, 0))
 		if err != nil {
 			t.Fatal(err)
 		}
 		dLinks = append(dLinks, el)
-		neighborLinks[l.IfID] = l.Neighbor
 	}
 	local := addr.HostIP(controlAddr.Addr())
-	d, err := dataplane.NewDataPlane(ia, local, MACKey, provider, dLinks)
+	d, err := dataplane.NewDataPlane(ia, local, macKey, provider, dLinks)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -261,9 +317,9 @@ func StartNode(t *testing.T, cfg NodeConfig) *Node {
 	discovery, err := controlplane.NewDiscovery(controlplane.DiscoveryConfig{
 		IA:           ia,
 		ControlAddr:  control,
-		MACKey:       MACKey,
+		MACKey:       macKey,
 		InternalAddr: internal,
-		Links:        neighborLinks,
+		Store:        linkStore,
 		Interval:     DiscoveryGap,
 	})
 	if err != nil {
@@ -279,24 +335,15 @@ func StartNode(t *testing.T, cfg NodeConfig) *Node {
 		provider.Stop()
 		discovery.Close() //nolint:errcheck
 	})
+	// The link store's file lock releases with the node's cancellation, so
+	// a restarted node — the same state directory — opens it instead of
+	// blocking on it.
+	go func() {
+		<-ctx.Done()
+		linkStore.Close() //nolint:errcheck
+	}()
 	go func() { _ = d.Serve(ctx) }()
 	go discovery.Run(ctx)
-
-	if stateDir == "" {
-		stateDir = t.TempDir()
-	}
-	trustDB, err := trustbbolt.New(filepath.Join(stateDir, "trust.db"), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	pathDB, err := pathdbbbolt.New(filepath.Join(stateDir, "path.db"), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	asKey, err := trust.LoadOrCreateASKey(stateDir)
-	if err != nil {
-		t.Fatal(err)
-	}
 
 	scionConn := func(port uint16) *scion.Conn {
 		bind := netip.AddrPortFrom(controlAddr.Addr(), port).String()
@@ -304,8 +351,8 @@ func StartNode(t *testing.T, cfg NodeConfig) *Node {
 			IA:           ia,
 			Bind:         bind,
 			InternalAddr: internal,
-			MACKey:       MACKey,
-			Links:        neighborLinks,
+			MACKey:       macKey,
+			Links:        linkTableOf(linkStore),
 		})
 		if err != nil {
 			t.Fatal(err)
@@ -405,10 +452,10 @@ func StartNode(t *testing.T, cfg NodeConfig) *Node {
 	beaconer, err := controlplane.NewBeaconer(controlplane.BeaconerConfig{
 		IA:                   ia,
 		Engine:               engine,
-		MACKey:               MACKey,
+		MACKey:               macKey,
 		Store:                store,
 		DB:                   pathDB,
-		Links:                neighborLinks,
+		Links:                linkTableOf(linkStore),
 		Neighbors:            discovery.Neighbors,
 		Sender:               peerClt,
 		CoreRoute:            coreRoute,
@@ -491,12 +538,14 @@ func StartNode(t *testing.T, cfg NodeConfig) *Node {
 		IA:        ia,
 		Internal:  internal,
 		ControlIP: controlAddr.Addr(),
-		Links:     neighborLinks,
+		Links:     linkTableOf(linkStore),
+		Store:     linkStore,
+		MACKey:    macKey,
 		TrustDB:   trustDB,
 		PathDB:    pathDB,
 		Engine:    engine,
 		Beaconer:  beaconer,
-		Store:     store,
+		StoreBcn:  store,
 		CoreClt:   coreClt,
 		PeerClt:   peerClt,
 		Provider:  pathProvider,
@@ -509,6 +558,18 @@ func StartNode(t *testing.T, cfg NodeConfig) *Node {
 		node.startWireguard(t, ctx, *cfg.Wireguard, stateDir, scionConn, coreRoute, controlAddr, provider)
 	}
 	return node
+}
+
+// linkTableOf snapshots a link store into the interface-ID-to-neighbor map
+// the data plane consumers read.
+func linkTableOf(store links.DB) func() map[uint16]addr.IA {
+	return func() map[uint16]addr.IA {
+		entries, err := store.All(context.Background())
+		if err != nil {
+			return nil
+		}
+		return links.Links(entries)
+	}
 }
 
 // startWireguard starts the node's WireGuard application: the mesh

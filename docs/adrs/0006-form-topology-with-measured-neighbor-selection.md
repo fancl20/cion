@@ -1,6 +1,6 @@
 # Form the Topology with Measured Neighbor Selection
 
-*   Status: proposed
+*   Status: accepted
 *   Date: 2026-09-14
 
 [TOC]

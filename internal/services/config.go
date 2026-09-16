@@ -1,59 +1,111 @@
 package services
 
 import (
-	"encoding/hex"
+	"crypto/x509"
 	"encoding/json/v2"
 	"fmt"
 	"net/netip"
 	"os"
+	"time"
 
 	"github.com/scionproto/scion/pkg/addr"
 
 	"github.com/fancl20/cion/pkg/dataplane"
-	"github.com/fancl20/cion/pkg/trust"
 )
 
-// Config is the configuration of a CION node. See configs/sample.json.
-type Config struct {
-	// IA is the ISD-AS identifier of this node, e.g. "20-ff00:0:1". The ISD
-	// should come from the private range 16-63.
-	IA string `json:"ia"`
-	// ASType is the tiered role of the node: core, authoritative, or normal.
-	ASType string `json:"asType"`
-	// State is the directory for the node's state: key material and the
-	// trust database.
-	State string `json:"state"`
-	// Internal is the UDP address the router listens on for traffic from
-	// hosts in the local AS, e.g. "127.0.0.1:30041".
-	Internal string `json:"internal"`
-	// Control is the UDP address the control service listens on and
-	// advertises to neighbors, e.g. "127.0.0.1:30043".
-	Control string `json:"control"`
-	// Key is the hex-encoded secret key used for hop field MAC computation.
-	Key string `json:"key"`
-	// Interfaces are the external links to neighboring ASes.
-	Interfaces []ConfigInterface `json:"interfaces"`
-	// Domain is the DNS domain this core serves its control endpoint for
-	// (core only). It is a TLS identity, never resolved.
-	Domain string `json:"domain"`
-	// CertFile and KeyFile are the TLS certificate for the control endpoint
-	// (core only, optional). Without them the certificate is managed via
-	// ACME, which needs publicly reachable TCP ports 80 and 443.
-	CertFile string `json:"certFile"`
-	KeyFile  string `json:"keyFile"`
-	// CoreDomain is the DNS domain of the core this node enrolls with
-	// (non-core only).
-	CoreDomain string `json:"coreDomain"`
-	// AllowIAS optionally restricts enrollment to the listed ISD-ASes; the
-	// core rejects and logs requests from any other ISD-AS (core only).
-	AllowIAS []string `json:"allowIAS"`
-	// Wireguard configures the WireGuard application (proposal 0006); a
-	// node without the section runs none.
-	Wireguard *ConfigWireguard `json:"wireguard"`
+// Default run arguments: a restart needs none of them (ADR-0006).
+const (
+	// DefaultState is the state directory's default.
+	DefaultState = "/var/lib/cion"
+	// DefaultInternal is the internal address's default.
+	DefaultInternal = "127.0.0.1:30042"
+	// DefaultControl is the control address's default.
+	DefaultControl = "127.0.0.1:30043"
+)
+
+// NodeConfig is the node's run arguments — everything the retiring
+// configuration file carried, as arguments with defaults: identity, links,
+// and the forwarding key come from the state directory, where the first
+// start generates them (ADR-0006).
+type NodeConfig struct {
+	// Core marks the founding core: TRC genesis, issuer, self-enrollment. It
+	// takes no neighbor.
+	Core bool
+	// Domain is the core's domain — the core's own when Core is set (with
+	// AcmeEmail optional and the certificate files as the offline fallback),
+	// the network's core domain otherwise: the WebPKI identity of the
+	// enrollment and TRC fetch.
+	Domain    string
+	AcmeEmail string
+	CertFile  string
+	KeyFile   string
+	// Neighbors are existing nodes' rendezvous underlay addresses; the first
+	// start of a non-core requires at least one, later starts seed
+	// additional entries, idempotent by remote address.
+	Neighbors []string
+	// State is the state directory; Internal and Control are the bind
+	// addresses.
+	State    string
+	Internal string
+	Control  string
+	// AllowIA optionally restricts enrollment on the core and link admission
+	// everywhere; open when unset.
+	AllowIA []string
+	// BehindNAT publishes the node's reachability class as private: joinable
+	// by no one, candidate for no one's floor.
+	BehindNAT bool
+	// WireguardConfig points at the WireGuard application's own file (host
+	// membership, subnets, exits); empty runs none.
+	WireguardConfig string
+	// RootCAs anchors the WebPKI verification of the core's domain
+	// certificate; nil uses the system roots. The integration tests inject
+	// their CA with it.
+	RootCAs *x509.CertPool
+
+	// Pacing shortens the loops' periods; zero values keep the production
+	// constants. The daemon never sets it — the integration tests do.
+	Pacing NodePacing
 }
 
-// ConfigWireguard is the WireGuard application's configuration section. See
-// proposal 0006.
+// NodePacing carries the test pacing of the node's loops.
+type NodePacing struct {
+	Discovery       time.Duration // greeting interval
+	Propagation     time.Duration // beacon origination and propagation
+	Registration    time.Duration // segment registration
+	Enrollment      time.Duration // enrollment retry
+	Selection       time.Duration // selection evaluation window
+	CandidateWindow time.Duration // unproven candidate lifetime
+	Directory       time.Duration // directory publish and fetch
+	RendezvousRate  time.Duration // admission rate caps
+}
+
+// Validate applies the role-aware argument checks: the domain is always
+// required; the core takes no neighbor.
+func (c NodeConfig) Validate() error {
+	if c.Domain == "" {
+		return fmt.Errorf("--domain is required: the core's own on --core, the network's core domain otherwise")
+	}
+	if c.Core && len(c.Neighbors) > 0 {
+		return fmt.Errorf("the founding core takes no --neighbor: nodes join it")
+	}
+	if c.State == "" || c.Internal == "" || c.Control == "" {
+		return fmt.Errorf("--state, --internal, and --control are required")
+	}
+	for _, s := range c.Neighbors {
+		if _, err := netip.ParseAddrPort(s); err != nil {
+			return fmt.Errorf("parsing --neighbor %q: %w", s, err)
+		}
+	}
+	for _, s := range c.AllowIA {
+		if _, err := addr.ParseIA(s); err != nil {
+			return fmt.Errorf("parsing --allow-ia %q: %w", s, err)
+		}
+	}
+	return nil
+}
+
+// ConfigWireguard is the WireGuard application's configuration file. See
+// proposal 0006; the section moved out of the retiring node file (ADR-0006).
 type ConfigWireguard struct {
 	// Subnet is the node's overlay subnet, e.g. "10.64.1.0/24". Host
 	// addresses are assigned within it by the peer configuration.
@@ -71,8 +123,7 @@ type ConfigWireguard struct {
 	Peers []ConfigWireguardPeer `json:"peers"`
 }
 
-// ConfigWireguardPeer is one host's entry in the application's
-// configuration.
+// ConfigWireguardPeer is one host's entry in the application's configuration.
 type ConfigWireguardPeer struct {
 	// PublicKey is the host's 32-byte WireGuard public key, hexadecimal.
 	PublicKey string `json:"publicKey"`
@@ -82,79 +133,27 @@ type ConfigWireguardPeer struct {
 	Exit string `json:"exit"`
 }
 
-type ConfigInterface struct {
-	// ID is the SCION interface ID of this link.
-	ID uint16 `json:"id"`
-	// Local is the UDP address to send and receive on, e.g. "192.0.2.1:50000".
-	Local string `json:"local"`
-	// Remote is the UDP address of the neighbor router, e.g. "192.0.2.2:50000".
-	Remote string `json:"remote"`
-	// NeighborIA is the ISD-AS of the neighbor, e.g. "20-ff00:0:2".
-	NeighborIA string `json:"neighborIA"`
-}
-
-// LoadConfig reads and validates the node configuration from the JSON file
-// at the given path.
-func LoadConfig(path string) (*Config, error) {
+// LoadWireguardConfig reads the WireGuard application's configuration from
+// the JSON file at the given path; an empty path runs no application.
+// Unknown fields are refused rather than silently ignored, so a file still
+// naming a retired field stops here.
+func LoadWireguardConfig(path string) (*ConfigWireguard, error) {
 	if path == "" {
-		return nil, fmt.Errorf("missing --config flag")
+		return nil, nil
 	}
 	raw, err := os.ReadFile(path)
 	if err != nil {
-		return nil, fmt.Errorf("reading config: %w", err)
+		return nil, fmt.Errorf("reading the wireguard configuration: %w", err)
 	}
-	cfg := &Config{}
-	// Unknown fields are refused rather than silently ignored, so a
-	// configuration still naming a retired section stops here instead of
-	// quietly running without it (proposal 0009).
+	cfg := &ConfigWireguard{}
 	if err := json.Unmarshal(raw, cfg, json.RejectUnknownMembers(true)); err != nil {
-		return nil, fmt.Errorf("parsing config: %w", err)
-	}
-	if cfg.IA == "" || cfg.Internal == "" {
-		return nil, fmt.Errorf("config must set ia and internal")
-	}
-	if cfg.ASType == "" || cfg.State == "" {
-		return nil, fmt.Errorf("config must set asType and state")
+		return nil, fmt.Errorf("parsing the wireguard configuration: %w", err)
 	}
 	return cfg, nil
 }
 
-// parseIdentity returns the node's decoded self: what every assembly phase
-// needs from the configuration.
-func parseIdentity(cfg *Config) (identity, error) {
-	ia, err := addr.ParseIA(cfg.IA)
-	if err != nil {
-		return identity{}, fmt.Errorf("parsing IA: %w", err)
-	}
-	asType, err := trust.ParseASType(cfg.ASType)
-	if err != nil {
-		return identity{}, err
-	}
-	key, err := decodeKey(cfg.Key)
-	if err != nil {
-		return identity{}, err
-	}
-	localHost, err := parseInternalHost(cfg.Internal)
-	if err != nil {
-		return identity{}, err
-	}
-	return identity{ia: ia, asType: asType, key: key, localHost: localHost}, nil
-}
-
-// decodeKey decodes the hex-encoded forwarding key.
-func decodeKey(hexKey string) ([]byte, error) {
-	key, err := hex.DecodeString(hexKey)
-	if err != nil {
-		return nil, fmt.Errorf("decoding key: %w", err)
-	}
-	if len(key) == 0 {
-		return nil, fmt.Errorf("key must not be empty")
-	}
-	return key, nil
-}
-
-// parseAllowIAS parses the enrollment allowlist into a set.
-func parseAllowIAS(ias []string) (map[addr.IA]bool, error) {
+// parseAllowIA parses the admission allowlist into a set.
+func parseAllowIA(ias []string) (map[addr.IA]bool, error) {
 	if len(ias) == 0 {
 		return nil, nil
 	}
@@ -177,6 +176,15 @@ func controlBind(control string, port uint16) (string, error) {
 		return "", fmt.Errorf("parsing control address: %w", err)
 	}
 	return netip.AddrPortFrom(ap.Addr(), port).String(), nil
+}
+
+// parseControlHost returns the control address's host.
+func parseControlHost(control string) (netip.Addr, error) {
+	ap, err := dataplane.ResolveAddrPort(control)
+	if err != nil {
+		return netip.Addr{}, fmt.Errorf("parsing control address: %w", err)
+	}
+	return ap.Addr(), nil
 }
 
 // parseInternalHost returns the local host address derived from the internal

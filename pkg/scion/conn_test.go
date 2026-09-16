@@ -95,7 +95,7 @@ func (n *testNode) newConn(t *testing.T, port uint16) *Conn {
 		Bind:         netip.AddrPortFrom(n.controlIP, port).String(),
 		InternalAddr: n.internal,
 		MACKey:       testMACKeyBytes,
-		Links:        map[uint16]addr.IA{testIfID: n.neighbor},
+		Links:        func() map[uint16]addr.IA { return map[uint16]addr.IA{testIfID: n.neighbor} },
 	})
 	if err != nil {
 		t.Fatal(err)

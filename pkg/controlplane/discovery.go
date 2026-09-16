@@ -22,6 +22,7 @@ import (
 	"github.com/scionproto/scion/pkg/slayers/path/onehop"
 
 	"github.com/fancl20/cion/pkg/dataplane"
+	"github.com/fancl20/cion/pkg/links"
 )
 
 // DiscoveryPort is the SCION UDP port used by the discovery greeting. The
@@ -167,8 +168,8 @@ type Discovery struct {
 	localIA     addr.IA
 	controlAddr netip.AddrPort
 	macFactory  func() hash.Hash
-	internal    *net.UDPAddr       // The router's internal underlay address.
-	links       map[uint16]addr.IA // Interface ID to neighbor IA.
+	internal    *net.UDPAddr // The router's internal underlay address.
+	store       links.DB     // The neighbor table, read live.
 	conn        *net.UDPConn
 
 	mtx       sync.Mutex
@@ -181,11 +182,13 @@ type Discovery struct {
 	timeout  time.Duration
 }
 
-// coreState is the core control endpoint learned from a greeting.
+// coreState is the core control endpoint: the core's own announcement,
+// which never decays, or one learned from a greeting, which does.
 type coreState struct {
 	ia       addr.IA
 	addr     netip.AddrPort
 	lastSeen time.Time
+	own      bool
 }
 
 // DiscoveryConfig configures a Discovery instance.
@@ -200,8 +203,9 @@ type DiscoveryConfig struct {
 	MACKey []byte
 	// InternalAddr is the router's internal underlay address.
 	InternalAddr string
-	// Links maps each external interface ID to the IA of the neighbor.
-	Links map[uint16]addr.IA
+	// Store is the neighbor table, read live: greetings are validated
+	// against the current snapshot, and a node may start with zero links.
+	Store links.DB
 	// Interval between greetings; defaults to 1s if zero.
 	Interval time.Duration
 }
@@ -215,8 +219,8 @@ func NewDiscovery(cfg DiscoveryConfig) (*Discovery, error) {
 	if err != nil {
 		return nil, fmt.Errorf("parsing internal address: %w", err)
 	}
-	if len(cfg.Links) == 0 {
-		return nil, fmt.Errorf("no links configured")
+	if cfg.Store == nil {
+		return nil, fmt.Errorf("no link store configured")
 	}
 	if _, err := scrypto.InitMac(cfg.MACKey); err != nil {
 		return nil, fmt.Errorf("initializing MAC: %w", err)
@@ -239,9 +243,9 @@ func NewDiscovery(cfg DiscoveryConfig) (*Discovery, error) {
 		controlAddr: controlAddr,
 		macFactory:  macFactory,
 		internal:    internal,
-		links:       cfg.Links,
+		store:       cfg.Store,
 		conn:        conn,
-		neighbors:   make(map[uint16]Neighbor, len(cfg.Links)),
+		neighbors:   make(map[uint16]Neighbor),
 		interval:    interval,
 		timeout:     3 * interval,
 	}, nil
@@ -286,7 +290,7 @@ func (d *Discovery) send(ctx context.Context) {
 func (d *Discovery) sendOnce() {
 	coreIA, coreAddr := d.greetingCore()
 	g := Greeting{IA: d.localIA, ControlAddr: d.controlAddr, CoreIA: coreIA, CoreAddr: coreAddr}
-	for ifID, neighborIA := range d.links {
+	for ifID, neighborIA := range d.linkTable() {
 		g.IfID = ifID
 		raw, err := d.greetingPacket(g, neighborIA, ifID)
 		if err != nil {
@@ -297,6 +301,23 @@ func (d *Discovery) sendOnce() {
 			slog.Error("Sending greeting", "interface", ifID, "err", err)
 		}
 	}
+}
+
+// linkTable snapshots the serving links' interface IDs and neighbors — the
+// table the data plane generation carries.
+func (d *Discovery) linkTable() map[uint16]addr.IA {
+	entries, err := d.store.All(context.Background())
+	if err != nil {
+		slog.Error("Reading the link store", "err", err)
+		return nil
+	}
+	table := make(map[uint16]addr.IA, len(entries))
+	for _, l := range entries {
+		if l.Serving() && !l.NeighborIA.IsZero() {
+			table[l.IfID] = l.NeighborIA
+		}
+	}
+	return table
 }
 
 func (d *Discovery) receive(ctx context.Context) {
@@ -323,11 +344,32 @@ func (d *Discovery) receive(ctx context.Context) {
 func (d *Discovery) record(ifID uint16, g Greeting) {
 	d.mtx.Lock()
 	defer d.mtx.Unlock()
-	neighborIA, ok := d.links[ifID]
-	if !ok || neighborIA != g.IA {
-		slog.Error("Greeting from unexpected neighbor",
-			"interface", ifID, "expected", neighborIA, "got", g.IA)
+	entry := d.entry(ifID)
+	if entry == nil {
+		slog.Error("Greeting on unknown interface", "interface", ifID, "got", g.IA)
 		return
+	}
+	if entry.NeighborIA.IsZero() {
+		// A link whose neighbor was not named yet — a joiner's first contact
+		// — adopts the greeting's ISD-AS, and the remote interface ID with
+		// it.
+		entry.NeighborIA = g.IA
+		entry.RemoteIfID = g.IfID
+		if err := d.store.Update(context.Background(), entry); err != nil {
+			slog.Error("Adopting the neighbor of a link", "interface", ifID, "err", err)
+			return
+		}
+	} else if !entry.NeighborIA.Equal(g.IA) {
+		slog.Error("Greeting from unexpected neighbor",
+			"interface", ifID, "expected", entry.NeighborIA, "got", g.IA)
+		return
+	} else if entry.RemoteIfID != g.IfID {
+		entry.RemoteIfID = g.IfID
+		if err := d.store.Update(context.Background(), entry); err != nil {
+			slog.Error("Recording the neighbor's interface ID",
+				"interface", ifID, "err", err)
+			return
+		}
 	}
 	now := time.Now()
 	d.neighbors[ifID] = Neighbor{
@@ -338,10 +380,31 @@ func (d *Discovery) record(ifID uint16, g Greeting) {
 	}
 	// Relay the freshest core endpoint: every node includes the one it
 	// reaches in its greetings, so nodes without a direct link to the core
-	// learn where their enrollment fetch and registrations are aimed.
+	// learn where their enrollment fetch and registrations are aimed. A
+	// greeting relaying the node's own endpoint refreshes it without
+	// downgrading it to a learned one that could decay.
 	if !g.CoreIA.IsZero() {
-		d.core = coreState{ia: g.CoreIA, addr: g.CoreAddr, lastSeen: now}
+		if d.core.own && g.CoreIA.Equal(d.core.ia) {
+			d.core.lastSeen = now
+		} else {
+			d.core = coreState{ia: g.CoreIA, addr: g.CoreAddr, lastSeen: now}
+		}
 	}
+}
+
+// entry returns the link store's entry of an interface.
+func (d *Discovery) entry(ifID uint16) *links.Link {
+	entries, err := d.store.All(context.Background())
+	if err != nil {
+		slog.Error("Reading the link store", "err", err)
+		return nil
+	}
+	for _, l := range entries {
+		if l.IfID == ifID && l.Live() {
+			return l
+		}
+	}
+	return nil
 }
 
 // Neighbors returns the currently reachable neighbors, by interface ID.
@@ -360,21 +423,21 @@ func (d *Discovery) Neighbors() map[uint16]Neighbor {
 	return out
 }
 
-// SetCoreEndpoint names the core this node serves or reaches, announced in
-// every greeting. The founding core sets its own endpoint; every other node
-// relays what it learned.
+// SetCoreEndpoint names the core this node serves, announced in every
+// greeting without decaying: a core that starts before its neighbors still
+// announces itself once they arrive.
 func (d *Discovery) SetCoreEndpoint(ia addr.IA, addr netip.AddrPort) {
 	d.mtx.Lock()
 	defer d.mtx.Unlock()
-	d.core = coreState{ia: ia, addr: addr, lastSeen: time.Now()}
+	d.core = coreState{ia: ia, addr: addr, lastSeen: time.Now(), own: true}
 }
 
 // CoreEndpoint returns the core control endpoint learned from greetings,
-// fresh within the greeting timeout.
+// fresh within the greeting timeout; the core's own never goes stale.
 func (d *Discovery) CoreEndpoint() (addr.IA, netip.AddrPort, bool) {
 	d.mtx.Lock()
 	defer d.mtx.Unlock()
-	if d.core.ia.IsZero() || time.Since(d.core.lastSeen) > d.timeout {
+	if d.core.ia.IsZero() || (!d.core.own && time.Since(d.core.lastSeen) > d.timeout) {
 		return 0, netip.AddrPort{}, false
 	}
 	return d.core.ia, d.core.addr, true
@@ -384,7 +447,7 @@ func (d *Discovery) CoreEndpoint() (addr.IA, netip.AddrPort, bool) {
 func (d *Discovery) greetingCore() (addr.IA, netip.AddrPort) {
 	d.mtx.Lock()
 	defer d.mtx.Unlock()
-	if d.core.ia.IsZero() || time.Since(d.core.lastSeen) > d.timeout {
+	if d.core.ia.IsZero() || (!d.core.own && time.Since(d.core.lastSeen) > d.timeout) {
 		return 0, netip.AddrPort{}
 	}
 	return d.core.ia, d.core.addr

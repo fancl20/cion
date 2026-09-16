@@ -1,6 +1,7 @@
 package controlplane
 
 import (
+	"bytes"
 	"context"
 	"crypto/x509"
 	"errors"
@@ -73,6 +74,43 @@ func (s *TrustService) TRC(
 		return nil, connect.NewError(connect.CodeInternal, err)
 	}
 	return connect.NewResponse(&cppb.TRCResponse{Trc: raw}), nil
+}
+
+// checkNameTaken rejects a renewal for an ISD-AS that already holds an
+// unexpired chain under a different subject key: the name is taken (ADR-0006's
+// enrollment gate). A same-key renewal — the chain's own holder — passes.
+func (s *TrustService) checkNameTaken(
+	ctx context.Context,
+	ia addr.IA,
+	csr *x509.CertificateRequest,
+	now time.Time,
+) error {
+
+	chains, err := s.DB.Chains(ctx, trust.ChainQuery{
+		IA:       ia,
+		Validity: cppki.Validity{NotBefore: now, NotAfter: now},
+	})
+	if err != nil {
+		return connect.NewError(connect.CodeInternal,
+			serrors.Wrap("querying the ISD-AS's chains", err))
+	}
+	if len(chains) == 0 {
+		return nil
+	}
+	skid, err := cppki.SubjectKeyID(csr.PublicKey)
+	if err != nil {
+		return connect.NewError(connect.CodeInvalidArgument,
+			serrors.Wrap("computing the CSR subject key", err))
+	}
+	for _, chain := range chains {
+		if bytes.Equal(chain[0].SubjectKeyId, skid) {
+			return nil // the current holder renewing its own chain
+		}
+	}
+	slog.Warn("Rejecting chain renewal of a taken ISD-AS",
+		"isd_as", ia, "holder", chains[0][0].SubjectKeyId)
+	return connect.NewError(connect.CodeAlreadyExists,
+		serrors.New("ISD-AS already holds a chain under another key", "isd_as", ia))
 }
 
 // Chains serves the certificate chains matching the request.
@@ -157,6 +195,16 @@ func (s *TrustService) ChainRenewal(
 		slog.Warn("Rejecting chain renewal of unlisted ISD-AS", "isd_as", ia)
 		return nil, connect.NewError(connect.CodePermissionDenied,
 			serrors.New("ISD-AS is not allowlisted", "isd_as", ia))
+	}
+	// The enrollment gate of self-picked ISD-ASes (ADR-0006): a name that
+	// already holds an unexpired chain under a different subject key is
+	// taken. Renewals by the same key pass untouched.
+	now := time.Now()
+	if s.Now != nil {
+		now = s.Now()
+	}
+	if err := s.checkNameTaken(ctx, ia, csr, now); err != nil {
+		return nil, err
 	}
 	// The wrapper must be signed by the same key the CSR certifies; the
 	// CSR's self-signature alone is checked by the issuer.

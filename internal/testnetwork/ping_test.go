@@ -33,14 +33,14 @@ func TestPingForkTopology(t *testing.T) {
 	extA2, extC := FreeUDPAddrOn(t, ipA), FreeUDPAddrOn(t, ipC)
 
 	a := StartNode(t, NodeConfig{IA: coreIA, Host: ipA, Links: []Link{
-		{IfID: 1, Local: extA1, Remote: extB, Neighbor: nodeIA},
-		{IfID: 2, Local: extA2, Remote: extC, Neighbor: lineCIA},
+		{Local: extA1, Remote: extB, Neighbor: nodeIA},
+		{Local: extA2, Remote: extC, Neighbor: lineCIA},
 	}, Core: true, WPKI: wpki})
 	b := StartNode(t, NodeConfig{IA: nodeIA, Host: ipB, Links: []Link{
-		{IfID: 1, Local: extB, Remote: extA1, Neighbor: coreIA},
+		{Local: extB, Remote: extA1, Neighbor: coreIA},
 	}, WPKI: wpki})
 	c := StartNode(t, NodeConfig{IA: lineCIA, Host: ipC, Links: []Link{
-		{IfID: 1, Local: extC, Remote: extA2, Neighbor: coreIA},
+		{Local: extC, Remote: extA2, Neighbor: coreIA},
 	}, WPKI: wpki})
 	ctx := context.Background()
 
@@ -123,10 +123,10 @@ func TestPingReresolvesExpiredPath(t *testing.T) {
 	extP, extR := FreeUDPAddrOn(t, ipP), FreeUDPAddrOn(t, ipR)
 
 	p := StartNode(t, NodeConfig{IA: iaP, Host: ipP, Links: []Link{
-		{IfID: 1, Local: extP, Remote: extR, Neighbor: iaR},
+		{Local: extP, Remote: extR, Neighbor: iaR},
 	}, WPKI: NewWebPKI(t)})
 	r := StartNode(t, NodeConfig{IA: iaR, Host: ipR, Links: []Link{
-		{IfID: 1, Local: extR, Remote: extP, Neighbor: iaP},
+		{Local: extR, Remote: extP, Neighbor: iaP},
 	}, WPKI: NewWebPKI(t)})
 	StartPingResponder(t, r)
 
@@ -135,8 +135,8 @@ func TestPingReresolvesExpiredPath(t *testing.T) {
 	// after its beacon — and every later one a fresh segment routing over
 	// the real link.
 	db := &flipPathDB{
-		stale: upSegment(t, time.Now().Add(-25*time.Hour), iaR, iaP),
-		fresh: upSegment(t, time.Now(), iaR, iaP),
+		stale: upSegment(t, r.MACKey, p.MACKey, time.Now().Add(-25*time.Hour), iaR, iaP),
+		fresh: upSegment(t, r.MACKey, p.MACKey, time.Now(), iaR, iaP),
 	}
 	provider := &scion.PathProvider{IA: iaP, DB: db}
 	report, err := ping.Run(context.Background(), ping.Config{
@@ -167,24 +167,29 @@ func TestPingReresolvesExpiredPath(t *testing.T) {
 }
 
 // upSegment builds the unsigned route form of a two-AS up segment from core
-// to leaf over the test link, MACed with the forwarding key the data planes
-// verify.
-func upSegment(t *testing.T, now time.Time, core, leaf addr.IA) *pathdb.Segment {
+// to leaf over the test link, each hop MACed with its own AS's forwarding
+// key the way beaconing does.
+func upSegment(
+	t *testing.T, coreKey, leafKey []byte, now time.Time, core, leaf addr.IA,
+) *pathdb.Segment {
+
 	t.Helper()
 	pcb, err := segment.PCBWithID(now, 0x333)
 	if err != nil {
 		t.Fatal(err)
 	}
-	macFactory := func() hash.Hash {
-		mac, _ := scrypto.InitMac(MACKey)
-		return mac
+	macFactory := func(key []byte) func() hash.Hash {
+		return func() hash.Hash {
+			mac, _ := scrypto.InitMac(key)
+			return mac
+		}
 	}
 	if _, err := pcb.AppendRouteHop(core, segment.EntryOptions{EgressIfID: 1},
-		macFactory); err != nil {
+		macFactory(coreKey)); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := pcb.AppendRouteHop(leaf, segment.EntryOptions{IngressIfID: 1},
-		macFactory); err != nil {
+		macFactory(leafKey)); err != nil {
 		t.Fatal(err)
 	}
 	return &pathdb.Segment{Type: pathdb.SegmentTypeUp, PCB: pcb}
@@ -227,10 +232,10 @@ func TestPingUnreachable(t *testing.T) {
 	extP, extR := FreeUDPAddrOn(t, ipP), FreeUDPAddrOn(t, ipR)
 
 	p := StartNode(t, NodeConfig{IA: iaP, Host: ipP, Links: []Link{
-		{IfID: 1, Local: extP, Remote: extR, Neighbor: iaR},
+		{Local: extP, Remote: extR, Neighbor: iaR},
 	}, WPKI: NewWebPKI(t)})
 	StartNode(t, NodeConfig{IA: iaR, Host: ipR, Links: []Link{
-		{IfID: 1, Local: extR, Remote: extP, Neighbor: iaP},
+		{Local: extR, Remote: extP, Neighbor: iaP},
 	}, WPKI: NewWebPKI(t)})
 
 	stranger := addr.MustIAFrom(20, 0xff0000000077)
@@ -269,14 +274,14 @@ func TestPingLossSummary(t *testing.T) {
 	// The provider resolves over a crafted up segment, so the requests are
 	// delivered; no responder answers them.
 	p := StartNode(t, NodeConfig{IA: iaP, Host: ipP, Links: []Link{
-		{IfID: 1, Local: extP, Remote: extR, Neighbor: iaR},
+		{Local: extP, Remote: extR, Neighbor: iaR},
 	}, WPKI: NewWebPKI(t)})
 	r := StartNode(t, NodeConfig{IA: iaR, Host: ipR, Links: []Link{
-		{IfID: 1, Local: extR, Remote: extP, Neighbor: iaP},
+		{Local: extR, Remote: extP, Neighbor: iaP},
 	}, WPKI: NewWebPKI(t)})
 	provider := &scion.PathProvider{
 		IA: iaP,
-		DB: &staticPathDB{seg: upSegment(t, time.Now(), iaR, iaP)},
+		DB: &staticPathDB{seg: upSegment(t, r.MACKey, p.MACKey, time.Now(), iaR, iaP)},
 	}
 	report, err := ping.Run(context.Background(), ping.Config{
 		Conn:     p.NewConn(t, 0),

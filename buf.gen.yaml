@@ -1,6 +1,7 @@
-# Generates the WireGuard application's directory API protobuf and ConnectRPC
-# code (the connect plugin emits its wireguardv1connect package beside the
-# messages, the pattern the vendored SCION control-plane protos follow).
+# Generates CION's own protobuf and ConnectRPC code — the WireGuard
+# application's directory API and the node services of proposal 0008 — with
+# the connect plugin emitting each connect package beside the messages, the
+# pattern the vendored SCION control-plane protos follow.
 # Requires
 # protoc-gen-go v1.36.11 and protoc-gen-connect-go on PATH, matching the
 # module's protobuf and connect versions.

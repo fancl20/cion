@@ -97,11 +97,20 @@ func (p *PathProvider) freshestUp(core addr.IA) *pathdb.Segment {
 	return freshest(segs)
 }
 
-// freshest picks the segment with the latest creation timestamp.
+// freshest picks the segment with the latest creation timestamp; equally
+// fresh segments resolve to the one with the fewest entries — a tie names
+// the same origination period, and the shorter route through it serves
+// better than an arbitrary one.
 func freshest(segs []*pathdb.Segment) *pathdb.Segment {
 	var best *pathdb.Segment
 	for _, seg := range segs {
-		if best == nil || seg.PCB.Timestamp().After(best.PCB.Timestamp()) {
+		switch {
+		case best == nil:
+			best = seg
+		case seg.PCB.Timestamp().After(best.PCB.Timestamp()):
+			best = seg
+		case seg.PCB.Timestamp().Equal(best.PCB.Timestamp()) &&
+			len(seg.PCB.Entries) < len(best.PCB.Entries):
 			best = seg
 		}
 	}

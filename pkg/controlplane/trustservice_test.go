@@ -222,4 +222,44 @@ func TestTrustServiceChainRenewal(t *testing.T) {
 			t.Errorf("unsigned-CSR error code = %v, want InvalidArgument", connect.CodeOf(err))
 		}
 	})
+
+	// The enrollment gate of self-picked ISD-ASes (proposal 0008): a name
+	// that already holds an unexpired chain under a different subject key is
+	// taken; the holder's own renewal passes untouched.
+	t.Run("taken name", func(t *testing.T) {
+		f := newTrustFixture(t)
+		svc := &TrustService{DB: f.db, Issuer: f.issuer}
+
+		csr, key := newCSR(t, nodeIATest)
+		req, err := trust.BuildRenewalRequest(csr, key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := svc.ChainRenewal(context.Background(), connect.NewRequest(
+			&cppb.ChainRenewalRequest{CmsSignedRequest: req})); err != nil {
+			t.Fatal(err)
+		}
+
+		// Another key claiming the same ISD-AS is rejected.
+		strangerCSR, strangerKey := newCSR(t, nodeIATest)
+		strangerReq, err := trust.BuildRenewalRequest(strangerCSR, strangerKey)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = svc.ChainRenewal(context.Background(), connect.NewRequest(
+			&cppb.ChainRenewalRequest{CmsSignedRequest: strangerReq}))
+		if connect.CodeOf(err) != connect.CodeAlreadyExists {
+			t.Errorf("taken-name error code = %v, want AlreadyExists", connect.CodeOf(err))
+		}
+
+		// The holder renews under its own key.
+		renewal, err := trust.BuildRenewalRequest(csr, key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := svc.ChainRenewal(context.Background(), connect.NewRequest(
+			&cppb.ChainRenewalRequest{CmsSignedRequest: renewal})); err != nil {
+			t.Errorf("the holder's own renewal was rejected: %v", err)
+		}
+	})
 }

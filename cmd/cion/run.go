@@ -4,9 +4,41 @@ import (
 	"fmt"
 
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 
 	"github.com/fancl20/cion/internal/services"
 )
+
+// addNodeFlags registers the node's run arguments on a command that assembles
+// one — the arguments the retiring configuration file carried, with defaults
+// so a restart needs none of them (ADR-0006).
+func addNodeFlags(flags *pflag.FlagSet, opts *services.NodeConfig) {
+	flags.BoolVar(&opts.Core, "core", false,
+		"mark the founding core: TRC genesis, issuer, self-enrollment (takes no --neighbor)")
+	flags.StringVar(&opts.Domain, "domain", "",
+		"the core's domain: the core's own with --core, the network's core domain otherwise "+
+			"(required)")
+	flags.StringVar(&opts.AcmeEmail, "acme-email", "",
+		"the ACME account email for the core's certificate (core only, optional)")
+	flags.StringVar(&opts.CertFile, "cert-file", "",
+		"the core's TLS certificate file, the offline fallback to ACME (core only)")
+	flags.StringVar(&opts.KeyFile, "key-file", "",
+		"the core's TLS key file, the offline fallback to ACME (core only)")
+	flags.StringSliceVar(&opts.Neighbors, "neighbor", nil,
+		"an existing node's rendezvous underlay address; repeatable")
+	flags.StringVar(&opts.State, "state", services.DefaultState,
+		"the state directory, where the first start generates the identity")
+	flags.StringVar(&opts.Internal, "internal", services.DefaultInternal,
+		"the UDP address the router listens on for hosts in the local AS")
+	flags.StringVar(&opts.Control, "control", services.DefaultControl,
+		"the UDP address the control service listens on and advertises")
+	flags.StringSliceVar(&opts.AllowIA, "allow-ia", nil,
+		"restrict enrollment and link admission to the listed ISD-ASes; open when unset")
+	flags.BoolVar(&opts.BehindNAT, "behind-nat", false,
+		"publish the node's reachability class as private: joinable by no one")
+	flags.StringVar(&opts.WireguardConfig, "wireguard-config", "",
+		"path to the WireGuard application's own JSON configuration file")
+}
 
 // runOptions carries the run command's data-plane tuning flags.
 type runOptions struct {
@@ -15,49 +47,48 @@ type runOptions struct {
 	queueSize  int
 }
 
-// newRunCommand builds `cion run`: the daemon of proposals 0003-0005 —
-// data plane, control plane, and the resident applications in one process —
-// with the data-plane tuning flags.
+// newRunCommand builds `cion run`: the daemon of proposals 0003-0008 — data
+// plane, control plane, and the resident applications in one process — from
+// the run arguments and the state directory.
 func newRunCommand() *cobra.Command {
-	opts := &runOptions{}
+	opts := &services.NodeConfig{}
+	tuning := &runOptions{}
 	defaults := services.DefaultDataplaneOptions()
 	cmd := &cobra.Command{
 		Use:   "run",
 		Short: "Run the CION daemon",
 		Long: "Run the CION daemon: data plane, control plane, and enabled applications in one " +
-			"process (proposals 0003-0005).",
+			"process (proposals 0003-0008). Identity and links come from the state directory; " +
+			"a non-core's first start needs a bootstrap --neighbor and the core's --domain.",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cfg, err := services.LoadConfig(configPath)
-			if err != nil {
-				return err
-			}
 			// A zero processor count or batch size would panic deep inside
 			// Serve, which divides by them; fail at the flag instead.
 			for _, check := range []struct {
 				name  string
 				value int
 			}{
-				{"processors", opts.processors},
-				{"batch-size", opts.batchSize},
-				{"queue-size", opts.queueSize},
+				{"processors", tuning.processors},
+				{"batch-size", tuning.batchSize},
+				{"queue-size", tuning.queueSize},
 			} {
 				if check.value < 1 {
 					return fmt.Errorf("--%s must be at least 1", check.name)
 				}
 			}
-			return services.Run(cmd.Context(), cfg, services.DataplaneOptions{
-				Processors: opts.processors,
-				BatchSize:  opts.batchSize,
-				QueueSize:  opts.queueSize,
+			return services.Run(cmd.Context(), *opts, services.DataplaneOptions{
+				Processors: tuning.processors,
+				BatchSize:  tuning.batchSize,
+				QueueSize:  tuning.queueSize,
 			})
 		},
 	}
-	cmd.Flags().IntVar(&opts.processors, "processors", defaults.Processors,
+	addNodeFlags(cmd.Flags(), opts)
+	cmd.Flags().IntVar(&tuning.processors, "processors", defaults.Processors,
 		"number of fast-path packet processors")
-	cmd.Flags().IntVar(&opts.batchSize, "batch-size", defaults.BatchSize,
+	cmd.Flags().IntVar(&tuning.batchSize, "batch-size", defaults.BatchSize,
 		"receive batch size per underlay socket")
-	cmd.Flags().IntVar(&opts.queueSize, "queue-size", defaults.QueueSize,
+	cmd.Flags().IntVar(&tuning.queueSize, "queue-size", defaults.QueueSize,
 		"queue depth of the internal and external links")
 	return cmd
 }

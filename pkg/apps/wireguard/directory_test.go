@@ -2,12 +2,14 @@ package wireguard
 
 import (
 	"context"
+
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"github.com/fancl20/cion/pkg/controlplane"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
@@ -48,7 +50,8 @@ func (s *fakeStore) Close() error                          { return nil }
 // publisher the middleware would have peered in.
 func requestWithIA(t *testing.T, ia addr.IA) context.Context {
 	t.Helper()
-	return context.WithValue(context.Background(), authenticatedIAKey{}, ia)
+	return context.WithValue(context.Background(),
+		controlplane.AuthenticatedIAContextKey(), ia)
 }
 
 // TestDirectoryPublishRecordsAuthenticatedIA checks the handlers record the

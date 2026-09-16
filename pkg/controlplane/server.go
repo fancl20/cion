@@ -9,6 +9,7 @@ import (
 	"github.com/scionproto/scion/pkg/proto/control_plane/v1/control_planeconnect"
 
 	"github.com/fancl20/cion/pkg/scion"
+	nodev1connect "github.com/fancl20/cion/proto/node/v1/nodev1connect"
 )
 
 // ControlPlane covers all control plane RPCs.
@@ -22,10 +23,16 @@ type ControlPlane interface {
 
 // Services composes the trust and segment services into one ControlPlane;
 // the segment service's methods take precedence over the trust service's
-// unimplemented embeds.
+// unimplemented embeds. Link and Directory are CION's own services of
+// proposal 0008 — served on the same endpoint behind the peer-authenticating
+// middleware when set, absent when the node runs none.
 type Services struct {
 	*TrustService
 	*SegmentService
+	// Link establishes links in-band.
+	Link *LinkService
+	// Directory serves the node directory, on the core.
+	Directory *DirectoryService
 }
 
 var _ ControlPlane = (*Services)(nil)
@@ -44,6 +51,17 @@ func NewServer(svc ControlPlane) *Server {
 	mux.Handle(control_planeconnect.NewSegmentRegistrationServiceHandler(svc))
 	mux.Handle(control_planeconnect.NewSegmentLookupServiceHandler(svc))
 	mux.Handle(control_planeconnect.NewChainRenewalServiceHandler(svc))
+
+	if s, ok := svc.(*Services); ok {
+		if s.Link != nil {
+			path, handler := nodev1connect.NewLinkServiceHandler(s.Link)
+			mux.Handle(path, Authenticate(handler))
+		}
+		if s.Directory != nil {
+			path, handler := nodev1connect.NewDirectoryServiceHandler(s.Directory)
+			mux.Handle(path, Authenticate(handler))
+		}
+	}
 
 	return &Server{
 		Handler: mux,

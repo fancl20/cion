@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"math"
 	"runtime/debug"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -63,6 +64,9 @@ type DataPlane struct {
 	macFactory    func() hash.Hash
 	underlays     []UnderlayProvider
 	running       atomic.Bool
+	// processors tracks the fast- and slow-path processor goroutines, so
+	// Serve's graceful shutdown can wait for their exit.
+	processors sync.WaitGroup
 
 	RunConfig RunConfig
 
@@ -146,20 +150,32 @@ func (d *DataPlane) Serve(ctx context.Context) error {
 		u.Start(ctx, d.packetPool, procQs)
 	}
 	for i := 0; i < d.RunConfig.NumProcessors; i++ {
+		d.processors.Add(1)
 		go func(i int) {
 			defer handlePanic()
+			defer d.processors.Done()
 			d.runProcessor(ctx, i, procQs[i], slowQs[i%d.RunConfig.NumSlowPathProcessors])
 		}(i)
 	}
 	for i := 0; i < d.RunConfig.NumSlowPathProcessors; i++ {
+		d.processors.Add(1)
 		go func(i int) {
 			defer handlePanic()
+			defer d.processors.Done()
 			d.runSlowPathProcessor(ctx, i, slowQs[i])
 		}(i)
 	}
 
-	defer d.setStopping()
 	<-ctx.Done()
+	// Graceful shutdown (ADR-0006): the underlay stops ingesting and its
+	// links flush and close, the processors drain their queues and exit, and
+	// Serve returns with the underlay addresses released — the replacement
+	// generation binds them next.
+	for _, u := range d.underlays {
+		u.Stop()
+	}
+	d.setStopping()
+	d.processors.Wait()
 	return nil
 }
 
@@ -238,9 +254,15 @@ func (d *DataPlane) runProcessor(ctx context.Context, id int, q <-chan *Packet, 
 	slog.Debug("Initialize processor", "id", id)
 	processor := newPacketProcessor(d)
 	for d.isRunning() {
-		p, ok := <-q
-		if !ok {
-			continue
+		var p *Packet
+		select {
+		case <-ctx.Done():
+			return
+		case got, ok := <-q:
+			if !ok {
+				continue
+			}
+			p = got
 		}
 		disp := processor.processPkt(p)
 
@@ -290,9 +312,15 @@ func (d *DataPlane) runSlowPathProcessor(ctx context.Context, id int, q <-chan *
 	slog.Debug("Initialize slow-path processor", "id", id)
 	processor := newSlowPathProcessor(d)
 	for d.isRunning() {
-		p, ok := <-q
-		if !ok {
-			continue
+		var p *Packet
+		select {
+		case <-ctx.Done():
+			return
+		case got, ok := <-q:
+			if !ok {
+				continue
+			}
+			p = got
 		}
 		err := processor.processPacket(p)
 		if err != nil {

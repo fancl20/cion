@@ -300,9 +300,13 @@ func (u *udpConnection) start(ctx context.Context, batchSize int, pool PacketPoo
 
 // stop puts the connection in the stopped state. In that state, the connection
 // no longer delivers incoming packets and ignores packets present on its input
-// channel. The connection is fully stopped when this method returns.
+// channel. The connection is fully stopped when this method returns. Stopping
+// a stopped connection is a no-op — both Serve's graceful shutdown and the
+// provider's owner may stop it.
 func (u *udpConnection) stop() {
-	u.stopped.Store(true)
+	if !u.stopped.CompareAndSwap(false, true) {
+		return
+	}
 	wasRunning := u.running.Swap(false)
 
 	// The socket is released even if the connection never started, so that a
@@ -657,6 +661,9 @@ func (l *internalLink) runProcessor() {
 func (l *internalLink) stop() {
 	l.lifeMtx.Lock()
 	defer l.lifeMtx.Unlock()
+	if l.stopped { // Already stopped; stopping twice is a no-op.
+		return
+	}
 	l.stopped = true
 	if l.procStop == nil { // Not started.
 		return
