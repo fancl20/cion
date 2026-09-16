@@ -1,6 +1,7 @@
 # Form the Topology with Measured Neighbor Selection
 
-*   Status: accepted
+*   Status: superseded by
+    [ADR-0008](/docs/adrs/0008-form-topology-with-measured-neighbor-selection.md)
 *   Date: 2026-09-14
 
 [TOC]
