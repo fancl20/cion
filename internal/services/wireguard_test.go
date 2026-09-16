@@ -8,48 +8,55 @@ import (
 	"github.com/fancl20/cion/pkg/trust"
 )
 
-// parseWireguardOf builds a bare node around the configuration's identity
-// and parses its wireguard section.
-func parseWireguardOf(t *testing.T, cfg *Config) (wireguard.Config, error) {
+// parseWireguardOf builds a bare node around the generated identity of a
+// fresh state directory and parses the wireguard configuration.
+func parseWireguardOf(
+	t *testing.T, cfg NodeConfig, wg *ConfigWireguard,
+) (wireguard.Config, error) {
+
 	t.Helper()
-	ident, err := parseIdentity(cfg)
+	ident, _, err := loadIdentity(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
 	n := &node{cfg: cfg, ident: ident,
 		provider: &scion.PathProvider{}, engine: trust.NewEngine(ident.ia, nil, nil)}
-	return n.parseWireguardConfig()
+	return n.parseWireguardConfig(wg)
 }
 
-// wireguardNodeConfig builds a minimal valid node configuration with the
-// wireguard section.
-func wireguardNodeConfig(t *testing.T, stateDir string) *Config {
-	t.Helper()
-	return &Config{
-		IA:       "20-ff00:0:1",
-		ASType:   "normal",
-		State:    stateDir,
-		Internal: "127.0.0.1:30042",
-		Control:  "127.0.0.1:30043",
-		Key:      "000102030405060708090a0b0c0d0e0f",
-		Wireguard: &ConfigWireguard{
-			Subnet:     "10.64.1.0/24",
-			ListenPort: 51820,
-			Exits:      []string{"20-ff00:0:3"},
-			Peers: []ConfigWireguardPeer{{
-				PublicKey: "0101010101010101010101010101010101010101010101010101010101010101",
-				Address:   "10.64.1.10",
-				Exit:      "20-ff00:0:3",
-			}},
-		},
+// wireguardSection builds the application's configuration section.
+func wireguardSection() *ConfigWireguard {
+	return &ConfigWireguard{
+		Subnet:     "10.64.1.0/24",
+		ListenPort: 51820,
+		Exits:      []string{"20-ff00:0:3"},
+		Peers: []ConfigWireguardPeer{{
+			PublicKey: "0101010101010101010101010101010101010101010101010101010101010101",
+			Address:   "10.64.1.10",
+			Exit:      "20-ff00:0:3",
+		}},
 	}
 }
 
-// TestParseWireguardConfig checks the wireguard section's decoding: the
-// fields carry into the application's configuration.
+// wireguardNodeConfig builds a minimal valid run-argument set with the
+// wireguard section.
+func wireguardNodeConfig(t *testing.T, stateDir string) NodeConfig {
+	t.Helper()
+	return NodeConfig{
+		Core:     true,
+		Domain:   "core.example.org",
+		State:    stateDir,
+		Internal: "127.0.0.1:30042",
+		Control:  "127.0.0.1:30043",
+	}
+}
+
+// TestParseWireguardConfig checks the wireguard file's decoding: the fields
+// carry into the application's configuration. The node is a core, so it
+// takes the directory store and no core route.
 func TestParseWireguardConfig(t *testing.T) {
 	cfg := wireguardNodeConfig(t, t.TempDir())
-	parsed, err := parseWireguardOf(t, cfg)
+	parsed, err := parseWireguardOf(t, cfg, wireguardSection())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -62,34 +69,34 @@ func TestParseWireguardConfig(t *testing.T) {
 	if len(parsed.Exits) != 1 || len(parsed.Peers) != 1 {
 		t.Errorf("exits = %v peers = %v", parsed.Exits, parsed.Peers)
 	}
-	if parsed.CoreRoute == nil {
-		t.Error("a non-core node got no core route")
+	if parsed.CoreRoute != nil {
+		t.Error("a core node got a core route")
 	}
-	if parsed.Store != nil {
-		t.Error("a non-core node got a directory store")
+	if parsed.Store == nil {
+		t.Error("a core node got no directory store")
 	}
 }
 
-// TestParseWireguardConfigRejects checks the section's validation: malformed
+// TestParseWireguardConfigRejects checks the file's validation: malformed
 // subnets, ports, keys, and peers the node refuses.
 func TestParseWireguardConfigRejects(t *testing.T) {
-	valid := func(t *testing.T) *Config { return wireguardNodeConfig(t, t.TempDir()) }
+	valid := func(t *testing.T) NodeConfig { return wireguardNodeConfig(t, t.TempDir()) }
 
-	bad := map[string]func(*Config){
-		"malformed subnet":    func(c *Config) { c.Wireguard.Subnet = "10.64.1.0" },
-		"missing listen port": func(c *Config) { c.Wireguard.ListenPort = 0 },
-		"IPv6 subnet":         func(c *Config) { c.Wireguard.Subnet = "2001:db8::/64" },
-		"malformed exit":      func(c *Config) { c.Wireguard.Exits = []string{"nope"} },
-		"short key":           func(c *Config) { c.Wireguard.Peers[0].PublicKey = "0102" },
-		"malformed address":   func(c *Config) { c.Wireguard.Peers[0].Address = "10.64" },
-		"malformed exit ia":   func(c *Config) { c.Wireguard.Peers[0].Exit = "nope" },
+	bad := map[string]func(*ConfigWireguard){
+		"malformed subnet":    func(wg *ConfigWireguard) { wg.Subnet = "10.64.1.0" },
+		"missing listen port": func(wg *ConfigWireguard) { wg.ListenPort = 0 },
+		"IPv6 subnet":         func(wg *ConfigWireguard) { wg.Subnet = "2001:db8::/64" },
+		"malformed exit":      func(wg *ConfigWireguard) { wg.Exits = []string{"nope"} },
+		"short key":           func(wg *ConfigWireguard) { wg.Peers[0].PublicKey = "0102" },
+		"malformed address":   func(wg *ConfigWireguard) { wg.Peers[0].Address = "10.64" },
+		"malformed exit ia":   func(wg *ConfigWireguard) { wg.Peers[0].Exit = "nope" },
 	}
 	for name, mutate := range bad {
 		t.Run(name, func(t *testing.T) {
-			cfg := valid(t)
-			mutate(cfg)
-			if _, err := parseWireguardOf(t, cfg); err == nil {
-				t.Error("the malformed wireguard section was accepted")
+			wg := wireguardSection()
+			mutate(wg)
+			if _, err := parseWireguardOf(t, valid(t), wg); err == nil {
+				t.Error("the malformed wireguard configuration was accepted")
 			}
 		})
 	}

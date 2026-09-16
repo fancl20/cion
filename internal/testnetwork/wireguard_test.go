@@ -144,7 +144,7 @@ func startWireguardNodes(
 	}
 	a := StartNode(t, NodeConfig{
 		IA: wireguardA, Host: ipA, Core: true, WPKI: wpki,
-		Links: []Link{{IfID: 1, Local: extA, Remote: extB, Neighbor: wireguardB}},
+		Links: []Link{{Local: extA, Remote: extB, Neighbor: wireguardB}},
 		Wireguard: &WireguardOptions{
 			Subnet: "10.64.1.0/24",
 			Egress: true,
@@ -154,7 +154,7 @@ func startWireguardNodes(
 	})
 	b := StartNode(t, NodeConfig{
 		IA: wireguardB, Host: ipB, WPKI: wpki,
-		Links: []Link{{IfID: 1, Local: extB, Remote: extA, Neighbor: wireguardA}},
+		Links: []Link{{Local: extB, Remote: extA, Neighbor: wireguardA}},
 		Wireguard: &WireguardOptions{
 			Subnet: "10.64.2.0/24",
 			Exits:  []addr.IA{wireguardA},

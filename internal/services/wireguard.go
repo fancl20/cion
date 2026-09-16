@@ -3,6 +3,7 @@ package services
 import (
 	"fmt"
 	"net/netip"
+	"os"
 	"path/filepath"
 
 	"github.com/scionproto/scion/pkg/addr"
@@ -15,7 +16,7 @@ import (
 )
 
 // setupWireguard assembles the WireGuard application (proposal 0006) when
-// the node's configuration has a wireguard section, after the control plane
+// the node's arguments name its configuration file, after the control plane
 // whose path provider and trust engine it consumes: the key loads or creates
 // in the application's own state, the mesh socket binds an ephemeral port
 // registered as the wireguard service in this AS, host devices serve the
@@ -24,10 +25,14 @@ import (
 // serves the directory from its own store, over its own registered service
 // socket.
 func (n *node) setupWireguard() error {
-	if n.cfg.Wireguard == nil {
+	wg, err := LoadWireguardConfig(n.cfg.WireguardConfig)
+	if err != nil {
+		return err
+	}
+	if wg == nil {
 		return nil
 	}
-	cfg, err := n.parseWireguardConfig()
+	cfg, err := n.parseWireguardConfig(wg)
 	if err != nil {
 		return err
 	}
@@ -43,12 +48,10 @@ func (n *node) setupWireguard() error {
 	return nil
 }
 
-// parseWireguardConfig validates the wireguard section into the
-// application's configuration: peer addresses inside the subnet, exits
-// configured, one exit per key — and the core route or store the directory
-// flows through.
-func (n *node) parseWireguardConfig() (wireguard.Config, error) {
-	wg := n.cfg.Wireguard
+// parseWireguardConfig validates the application's configuration into its
+// own form: peer addresses inside the subnet, exits configured, one exit
+// per key — and the core route or store the directory flows through.
+func (n *node) parseWireguardConfig(wg *ConfigWireguard) (wireguard.Config, error) {
 	subnet, err := netip.ParsePrefix(wg.Subnet)
 	if err != nil {
 		return wireguard.Config{}, fmt.Errorf("parsing the wireguard subnet: %w", err)
@@ -105,8 +108,11 @@ func (n *node) parseWireguardConfig() (wireguard.Config, error) {
 	if n.ident.asType == trust.ASTypeCore {
 		// The core serves the directory from its own store, following the
 		// trust DB's bbolt pattern.
+		if err := os.MkdirAll(cfg.StateDir, 0o700); err != nil {
+			return wireguard.Config{}, fmt.Errorf("creating the application's state: %w", err)
+		}
 		store, err := wireguardbbolt.New(
-			filepath.Join(n.cfg.State, "wireguard", "directory.db"), nil)
+			filepath.Join(cfg.StateDir, "directory.db"), nil)
 		if err != nil {
 			return wireguard.Config{}, fmt.Errorf("opening the directory store: %w", err)
 		}
@@ -115,37 +121,6 @@ func (n *node) parseWireguardConfig() (wireguard.Config, error) {
 		cfg.CoreRoute = n.directoryRoute
 	}
 	return cfg, nil
-}
-
-// registerSvc registers one of the application's sockets as a SCION service
-// in this AS — the same registration discovery makes for the CS service over
-// the data plane's provider — so the router delivers service-addressed
-// packets to the socket's port on the control host the application's
-// connections bind.
-func (n *node) registerSvc(svc addr.SVC, port uint16) error {
-	host, err := parseControlHost(n.cfg.Control)
-	if err != nil {
-		return err
-	}
-	return n.udp.AddSvc(svc, host, port)
-}
-
-// unregisterSvc deregisters a socket registerSvc registered.
-func (n *node) unregisterSvc(svc addr.SVC, port uint16) error {
-	host, err := parseControlHost(n.cfg.Control)
-	if err != nil {
-		return err
-	}
-	return n.udp.DelSvc(svc, host, port)
-}
-
-// parseControlHost returns the control address's host as a SCION host.
-func parseControlHost(control string) (addr.Host, error) {
-	ap, err := dataplane.ResolveAddrPort(control)
-	if err != nil {
-		return addr.Host{}, fmt.Errorf("parsing control address: %w", err)
-	}
-	return addr.HostIP(ap.Addr()), nil
 }
 
 // directoryRoute resolves the core's directory endpoint: the core's ISD-AS

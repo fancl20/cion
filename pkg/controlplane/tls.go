@@ -20,6 +20,9 @@ type TLSCertConfig struct {
 	// Domain is the DNS domain of the certificate. It is a TLS identity,
 	// never resolved: the SCION link is the locator.
 	Domain string
+	// Email is the ACME account email; empty lets the ACME server ask for
+	// one interactively or proceed without.
+	Email string
 	// CertFile and KeyFile point at the certificate and key in PEM format;
 	// when set, they take precedence over ACME. This is the fallback for
 	// offline deployments.
@@ -74,6 +77,7 @@ func manageACME(ctx context.Context, cfg TLSCertConfig) (*tls.Config, error) {
 		cache.Stop()
 		return nil, fmt.Errorf("certmagic did not configure an ACME issuer")
 	}
+	issuer.Email = cfg.Email
 
 	// The challenges must be answerable before certificate issuance starts.
 	if err := serveHTTP01(ctx, issuer); err != nil {

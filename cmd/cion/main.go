@@ -13,10 +13,6 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// configPath is the node configuration file given with the persistent
-// --config flag; every command that assembles a node requires it.
-var configPath string
-
 // newRootCommand builds the cion command tree: the run daemon and the ping
 // application. The root itself has no run function, so a bare invocation
 // prints the usage instead of starting a node by accident.
@@ -31,8 +27,6 @@ func newRootCommand() *cobra.Command {
 		SilenceErrors: true,
 	}
 	root.CompletionOptions.DisableDefaultCmd = true
-	root.PersistentFlags().StringVar(&configPath, "config", "",
-		"path to the JSON configuration file (required)")
 	root.AddCommand(newRunCommand(), newPingCommand())
 	return root
 }

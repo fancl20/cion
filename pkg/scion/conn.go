@@ -85,9 +85,10 @@ type Conn struct {
 	// mac MACs the hop fields of outgoing one-hop paths, with the same key
 	// the data plane verifies.
 	mac hash.Hash
-	// links maps the neighbor IA of each external link to its interface ID,
-	// to resolve the egress interface of fresh one-hop paths.
-	links map[addr.IA]uint16
+	// links snapshots the external links, interface ID to neighbor IA, to
+	// resolve the egress interface of fresh one-hop paths. Read live, so a
+	// topology change reaches the conn without rebuilding it.
+	links func() map[uint16]addr.IA
 
 	conn *net.UDPConn
 
@@ -106,8 +107,9 @@ type ConnConfig struct {
 	InternalAddr string
 	// MACKey is the data-plane forwarding key, used to MAC one-hop paths.
 	MACKey []byte
-	// Links maps each external interface ID to the IA of the neighbor.
-	Links map[uint16]addr.IA
+	// Links snapshots the external links, interface ID to neighbor IA; the
+	// conn resolves one-hop egress through it live.
+	Links func() map[uint16]addr.IA
 }
 
 // NewConn binds the endpoint's underlay address. Packets it sends are
@@ -121,9 +123,6 @@ func NewConn(cfg ConnConfig) (*Conn, error) {
 	internal, err := net.ResolveUDPAddr("udp", cfg.InternalAddr)
 	if err != nil {
 		return nil, fmt.Errorf("parsing internal address: %w", err)
-	}
-	if len(cfg.Links) == 0 {
-		return nil, fmt.Errorf("no links configured")
 	}
 	if _, err := scrypto.InitMac(cfg.MACKey); err != nil {
 		return nil, fmt.Errorf("initializing MAC: %w", err)
@@ -144,16 +143,12 @@ func NewConn(cfg ConnConfig) (*Conn, error) {
 		return nil, fmt.Errorf("invalid bound address %v", bound)
 	}
 	local = netip.AddrPortFrom(boundIP.Unmap(), uint16(bound.Port))
-	links := make(map[addr.IA]uint16, len(cfg.Links))
-	for ifID, neighborIA := range cfg.Links {
-		links[neighborIA] = ifID
-	}
 	return &Conn{
 		localIA:  cfg.IA,
 		local:    local,
 		internal: internal,
 		mac:      macFactory(),
-		links:    links,
+		links:    cfg.Links,
 		conn:     conn,
 	}, nil
 }
@@ -270,12 +265,17 @@ func (c *Conn) SetWriteDeadline(t time.Time) error {
 	return c.conn.SetWriteDeadline(t)
 }
 
+// resolveLink reads the link table's snapshot for the neighbor's egress
+// interface. A nil source — a conn with no link table — resolves nothing.
 func (c *Conn) resolveLink(neighborIA addr.IA) (uint16, error) {
-	ifID, ok := c.links[neighborIA]
-	if !ok {
-		return 0, fmt.Errorf("no link to neighbor %s", neighborIA)
+	if c.links != nil {
+		for ifID, neighbor := range c.links() {
+			if neighbor.Equal(neighborIA) {
+				return ifID, nil
+			}
+		}
 	}
-	return ifID, nil
+	return 0, fmt.Errorf("no link to neighbor %s", neighborIA)
 }
 
 // scionHeader returns the SCION layer addressing the peer, over the peer's

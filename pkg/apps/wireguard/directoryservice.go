@@ -2,17 +2,15 @@ package wireguard
 
 import (
 	"context"
-	"crypto/x509"
 	"errors"
 	"fmt"
 	"log/slog"
-	"net/http"
 	"net/netip"
 
 	"connectrpc.com/connect"
 	"github.com/scionproto/scion/pkg/addr"
-	"github.com/scionproto/scion/pkg/scrypto/cppki"
 
+	"github.com/fancl20/cion/pkg/controlplane"
 	wireguardv1 "github.com/fancl20/cion/proto/wireguard/v1"
 )
 
@@ -29,41 +27,13 @@ type DirectoryService struct {
 	Cnt *counters
 }
 
-// authenticatedIAKey is the context key carrying the verified publisher.
-type authenticatedIAKey struct{}
-
 // AuthenticatedIA returns the ISD-AS of the peer whose certificate chain the
-// channel verified, or the zero ISD-AS when the request carries none —
-// requests without one never reach the handlers.
-func AuthenticatedIA(ctx context.Context) addr.IA {
-	ia, ok := ctx.Value(authenticatedIAKey{}).(addr.IA)
-	if !ok {
-		return addr.IA(0)
-	}
-	return ia
-}
-
-// Authenticate peers the verified chain's ISD-AS into the request context.
-// The middleware shape serves every service the application serves on the
-// channel: the handler reads what the transport authenticated.
-func Authenticate(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.TLS != nil && len(r.TLS.PeerCertificates) > 0 {
-			if ia, err := publisherIA(r.TLS.PeerCertificates); err == nil {
-				r = r.WithContext(context.WithValue(r.Context(), authenticatedIAKey{}, ia))
-			}
-		}
-		next.ServeHTTP(w, r)
-	})
-}
-
-// publisherIA extracts the ISD-AS a verified chain's leaf names.
-func publisherIA(chain []*x509.Certificate) (addr.IA, error) {
-	if len(chain) == 0 {
-		return addr.IA(0), errors.New("no peer certificate")
-	}
-	return cppki.ExtractIA(chain[0].Subject)
-}
+// channel verified, and Authenticate peers it into the request context — the
+// control plane's middleware, consumed here for the publisher's identity.
+var (
+	AuthenticatedIA = controlplane.AuthenticatedIA
+	Authenticate    = controlplane.Authenticate
+)
 
 // Publish records the caller's entry. The entry's ISD-AS is the
 // authenticated one; a claim of another ISD-AS is recorded under the

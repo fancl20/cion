@@ -26,21 +26,21 @@ func TestLineTopology(t *testing.T) {
 	extB2, extC := FreeUDPAddrOn(t, ipB), FreeUDPAddrOn(t, ipC)
 
 	a := StartNode(t, NodeConfig{IA: coreIA, Host: ipA, Links: []Link{
-		{IfID: 1, Local: extA, Remote: extB1, Neighbor: nodeIA},
+		{Local: extA, Remote: extB1, Neighbor: nodeIA},
 	}, Core: true, WPKI: wpki})
 	b := StartNode(t, NodeConfig{IA: nodeIA, Host: ipB, Links: []Link{
-		{IfID: 1, Local: extB1, Remote: extA, Neighbor: coreIA},
-		{IfID: 2, Local: extB2, Remote: extC, Neighbor: lineCIA},
+		{Local: extB1, Remote: extA, Neighbor: coreIA},
+		{Local: extB2, Remote: extC, Neighbor: lineCIA},
 	}, WPKI: wpki})
 	c := StartNode(t, NodeConfig{IA: lineCIA, Host: ipC, Links: []Link{
-		{IfID: 1, Local: extC, Remote: extB2, Neighbor: nodeIA},
+		{Local: extC, Remote: extB2, Neighbor: nodeIA},
 	}, WPKI: wpki})
 	ctx := context.Background()
 
 	// Beacons propagate A→B→C with signatures verified at each hop: the
 	// beacon store only ever holds verified PCBs.
-	Poll(t, "beacons at C", func() bool { return c.Store.Len() > 0 })
-	Poll(t, "beacons at B", func() bool { return b.Store.Len() > 0 })
+	Poll(t, "beacons at C", func() bool { return c.StoreBcn.Len() > 0 })
+	Poll(t, "beacons at B", func() bool { return b.StoreBcn.Len() > 0 })
 
 	// C enrolls through the reversed beacon over B: no direct A–C link
 	// exists, so the enrollment fetch rides the bootstrap route.
@@ -116,10 +116,10 @@ func TestRestartedNodeServesUpSegments(t *testing.T) {
 	extA, extB1 := FreeUDPAddrOn(t, ipA), FreeUDPAddrOn(t, ipB1)
 
 	StartNode(t, NodeConfig{IA: coreIA, Host: ipA, Links: []Link{
-		{IfID: 1, Local: extA, Remote: extB1, Neighbor: nodeIA},
+		{Local: extA, Remote: extB1, Neighbor: nodeIA},
 	}, Core: true, WPKI: wpki})
 	b := StartNode(t, NodeConfig{IA: nodeIA, Host: ipB1, StateDir: dir, Links: []Link{
-		{IfID: 1, Local: extB1, Remote: extA, Neighbor: coreIA},
+		{Local: extB1, Remote: extA, Neighbor: coreIA},
 	}, WPKI: wpki})
 	ctx := context.Background()
 
@@ -141,9 +141,15 @@ func TestRestartedNodeServesUpSegments(t *testing.T) {
 	if err := b.TrustDB.Close(); err != nil {
 		t.Fatal(err)
 	}
+	// The link store's lock released with the cancellation; wait for it so
+	// the restarted node opens a settled database.
+	Poll(t, "the link store to release", func() bool {
+		_, err := b.Store.All(context.Background())
+		return err != nil
+	})
 	extB2 := FreeUDPAddrOn(t, ipB2)
 	b2 := StartNode(t, NodeConfig{IA: nodeIA, Host: ipB2, StateDir: dir, Links: []Link{
-		{IfID: 1, Local: extB2, Remote: extA, Neighbor: coreIA},
+		{Local: extB2, Remote: extA, Neighbor: coreIA},
 	}, WPKI: wpki})
 	segs, err := b2.PathDB.Get(ctx, pathdb.Query{Type: pathdb.SegmentTypeUp})
 	if err != nil {

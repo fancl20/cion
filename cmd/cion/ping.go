@@ -22,34 +22,35 @@ type pingOptions struct {
 }
 
 // newPingCommand builds `cion ping`: the SCION echo application of proposal
-// 0005, printing one line per reply and a loss summary.
+// 0005, printing one line per reply and a loss summary. It assembles the
+// node from the state directory and the same run arguments as `cion run`,
+// not from a file.
 func newPingCommand() *cobra.Command {
-	opts := &pingOptions{}
+	opts := &services.NodeConfig{}
+	pingOpts := &pingOptions{}
 	cmd := &cobra.Command{
 		Use:   "ping isd-as,[host]",
 		Short: "Ping a destination ISD-AS over the node's own data and control plane",
 		Long: "Ping a destination ISD-AS over the node's own assembled data and control plane " +
-			"(proposal 0005): boots the full node in place of serving, prints one line per " +
-			"reply plus a loss summary, and exits.",
+			"(proposal 0005): boots the full node in place of serving from the state directory " +
+			"and the same run arguments as 'cion run', prints one line per reply plus a loss " +
+			"summary, and exits.",
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cfg, err := services.LoadConfig(configPath)
-			if err != nil {
-				return err
-			}
-			return runPing(cmd.Context(), cfg, args[0], opts)
+			return runPing(cmd.Context(), *opts, args[0], pingOpts)
 		},
 	}
-	cmd.Flags().IntVar(&opts.count, "count", 4, "number of requests")
-	cmd.Flags().DurationVar(&opts.interval, "interval", time.Second, "time between requests")
-	cmd.Flags().DurationVar(&opts.wait, "wait", 2*time.Second, "wait per reply")
+	addNodeFlags(cmd.Flags(), opts)
+	cmd.Flags().IntVar(&pingOpts.count, "count", 4, "number of requests")
+	cmd.Flags().DurationVar(&pingOpts.interval, "interval", time.Second, "time between requests")
+	cmd.Flags().DurationVar(&pingOpts.wait, "wait", 2*time.Second, "wait per reply")
 	return cmd
 }
 
 // runPing boots the full node in place of serving (proposal 0005): the
 // pinger's packets cross the data plane and its paths come from the node's
 // own beaconing, so the node serves underneath the run.
-func runPing(ctx context.Context, cfg *services.Config, target string, opts *pingOptions) error {
+func runPing(ctx context.Context, cfg services.NodeConfig, target string, opts *pingOptions) error {
 	dst, host, err := parsePingTarget(target)
 	if err != nil {
 		return err

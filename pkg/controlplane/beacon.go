@@ -70,7 +70,7 @@ type Beaconer struct {
 	macFactory   func() hash.Hash
 	store        *BeaconStore
 	db           pathdb.DB
-	links        map[uint16]addr.IA
+	links        func() map[uint16]addr.IA
 	neighbors    func() map[uint16]Neighbor
 	sender       SegmentSender
 	coreRoute    func() *scion.Addr
@@ -103,8 +103,10 @@ type BeaconerConfig struct {
 	Store *BeaconStore
 	// DB is the persistent path database for registered segments.
 	DB pathdb.DB
-	// Links maps each external interface ID to the IA of the neighbor.
-	Links map[uint16]addr.IA
+	// Links snapshots the external links, interface ID to neighbor IA; the
+	// beaconer reads it fresh each pass, so a node may start with zero
+	// links.
+	Links func() map[uint16]addr.IA
 	// Neighbors returns the currently discovered neighbors; nil disables
 	// sending beacons (reception still works).
 	Neighbors func() map[uint16]Neighbor
@@ -167,6 +169,14 @@ func NewBeaconer(cfg BeaconerConfig) (*Beaconer, error) {
 		sendTimeout:  sendTimeout,
 		now:          now,
 	}, nil
+}
+
+// linkTable snapshots the links; a nil source serves none.
+func (b *Beaconer) linkTable() map[uint16]addr.IA {
+	if b.links == nil {
+		return nil
+	}
+	return b.links()
 }
 
 // Run executes the beaconing loops until the context is canceled: origination
@@ -301,7 +311,7 @@ func (b *Beaconer) checkBeacon(pcb *segment.PCB, ingress uint16) error {
 	if pcb.ContainsIA(b.ia) {
 		return serrors.New("beacon already contains this ISD-AS", "isd_as", b.ia)
 	}
-	neighbor, ok := b.links[ingress]
+	neighbor, ok := b.linkTable()[ingress]
 	if !ok {
 		return serrors.New("beacon arrived on unknown interface", "interface", ingress)
 	}
@@ -400,7 +410,7 @@ func (b *Beaconer) coreASes() map[addr.IA]bool {
 // signed AS entry, delivered to the neighbor's beacon service.
 func (b *Beaconer) originateOnce(ctx context.Context) {
 	neighbors := b.neighbors()
-	for ifID, neighborIA := range b.links {
+	for ifID, neighborIA := range b.linkTable() {
 		pcb, err := segment.NewPCB(b.now())
 		if err != nil {
 			slog.Error("Creating beacon", "err", err)
@@ -432,7 +442,7 @@ func (b *Beaconer) propagateOnce(ctx context.Context) {
 	neighbors := b.neighbors()
 	cores := b.coreASes()
 	for _, cand := range b.store.BestSet(BestSetSize) {
-		for egress, neighborIA := range b.links {
+		for egress, neighborIA := range b.linkTable() {
 			if egress == cand.Ingress {
 				continue
 			}
@@ -513,7 +523,7 @@ func (b *Beaconer) registerOnce(ctx context.Context) {
 func (b *Beaconer) registerCoreOnce(ctx context.Context) {
 	cores := b.coreASes()
 	for _, cand := range b.store.BestSet(BestSetSize) {
-		if !cores[b.links[cand.Ingress]] {
+		if !cores[b.linkTable()[cand.Ingress]] {
 			continue
 		}
 		terminated, err := b.terminate(cand)

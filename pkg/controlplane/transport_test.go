@@ -11,6 +11,8 @@ import (
 	"github.com/scionproto/scion/pkg/addr"
 
 	"github.com/fancl20/cion/pkg/dataplane"
+	"github.com/fancl20/cion/pkg/links"
+	"github.com/fancl20/cion/pkg/links/impl/memory"
 	"github.com/fancl20/cion/pkg/scion"
 )
 
@@ -26,9 +28,11 @@ var testMACKeyBytes = []byte(testMACKey)
 type testNode struct {
 	ia        addr.IA
 	neighbor  addr.IA
+	ifID      uint16
 	internal  string
 	controlIP netip.Addr
 	provider  *dataplane.UDPProvider
+	store     *memory.DB
 	discovery *Discovery
 	cancel    context.CancelFunc
 }
@@ -45,6 +49,17 @@ func startTestNode(t *testing.T, ia, neighbor addr.IA, extLocal, extRemote strin
 		t.Fatal(err)
 	}
 
+	store := memory.New()
+	entry := &links.Link{
+		NeighborIA: neighbor,
+		Local:      netip.MustParseAddrPort(extLocal),
+		Remote:     netip.MustParseAddrPort(extRemote),
+		State:      links.StateEstablished,
+	}
+	if err := store.Insert(context.Background(), entry); err != nil {
+		t.Fatal(err)
+	}
+
 	metrics, err := dataplane.NewMetrics()
 	if err != nil {
 		t.Fatal(err)
@@ -55,8 +70,8 @@ func startTestNode(t *testing.T, ia, neighbor addr.IA, extLocal, extRemote strin
 	if err != nil {
 		t.Fatal(err)
 	}
-	el, err := provider.NewExternalLink(64, nil, extLocal, extRemote, testIfID,
-		metrics.NewInterfaceMetrics(testIfID, ia, 0))
+	el, err := provider.NewExternalLink(64, nil, extLocal, extRemote, entry.IfID,
+		metrics.NewInterfaceMetrics(entry.IfID, ia, 0))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -76,7 +91,7 @@ func startTestNode(t *testing.T, ia, neighbor addr.IA, extLocal, extRemote strin
 		ControlAddr:  control,
 		MACKey:       testMACKeyBytes,
 		InternalAddr: internal,
-		Links:        map[uint16]addr.IA{testIfID: neighbor},
+		Store:        store,
 		Interval:     discoveryGap,
 	})
 	if err != nil {
@@ -98,9 +113,11 @@ func startTestNode(t *testing.T, ia, neighbor addr.IA, extLocal, extRemote strin
 	return &testNode{
 		ia:        ia,
 		neighbor:  neighbor,
+		ifID:      entry.IfID,
 		internal:  internal,
 		controlIP: controlAddr.Addr(),
 		provider:  provider,
+		store:     store,
 		discovery: discovery,
 		cancel:    cancel,
 	}
@@ -115,13 +132,22 @@ func (n *testNode) newConn(t *testing.T, port uint16) *scion.Conn {
 		Bind:         netip.AddrPortFrom(n.controlIP, port).String(),
 		InternalAddr: n.internal,
 		MACKey:       testMACKeyBytes,
-		Links:        map[uint16]addr.IA{testIfID: n.neighbor},
+		Links:        n.linkTable,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { conn.Close() }) //nolint:errcheck
 	return conn
+}
+
+// linkTable snapshots the node's link table for its connections.
+func (n *testNode) linkTable() map[uint16]addr.IA {
+	entries, err := n.store.All(context.Background())
+	if err != nil {
+		return nil
+	}
+	return links.Links(entries)
 }
 
 // TestPeerAuthorityRoundTrip checks the authority encoding both destination

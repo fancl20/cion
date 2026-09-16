@@ -103,7 +103,7 @@ func testMeshSocket(t *testing.T, db pathdb.DB) (*meshSocket, *countingDB) {
 		Bind:         "127.0.0.1:0",
 		InternalAddr: internal.LocalAddr().String(),
 		MACKey:       testMACKey,
-		Links:        map[uint16]addr.IA{1: addr.MustIAFrom(20, 2)},
+		Links:        func() map[uint16]addr.IA { return map[uint16]addr.IA{1: addr.MustIAFrom(20, 2)} },
 	})
 	if err != nil {
 		t.Fatal(err)

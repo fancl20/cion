@@ -302,3 +302,106 @@ Establishing a promoted candidate is the in-band request; the joiner's
     candidate — good window, bad window, good — is never promoted.
 
 ## Implementation history
+
+*   Link store: `pkg/links` follows the path DB pattern — the `Link` entry,
+    a bbolt implementation with a monotonic interface-ID counter persisted
+    beside the entries, shared contract tests in `impl/dbtest`, and an
+    in-memory implementation (`impl/memory`) for tests and embeddings.
+    Interface IDs are held back by `IfIDHoldback` (the longest hop-field
+    lifetime plus an hour), and lookups report absence as a nil entry.
+    Consumers read the store live: discovery validates greetings against it
+    (adopting an unnamed entry's neighbor from its first greeting and
+    recording the remote interface ID), the beaconer resolves its targets
+    from its snapshot, and the path library's `Conn` resolves one-hop
+    egress through a link-table source instead of the map it copied — all
+    three permitting a zero-link start.
+*   Identity: the ISD-AS is a draw from the private ranges
+    (`trust.GenerateIA`) that persists only when final — the core's at
+    once, a joiner's once its bootstrap answers, so a failed first start
+    leaves nothing half-named behind. The forwarding key
+    (`trust.LoadOrCreateForwardingKey`) MACs only the node's own hop
+    fields, as the ADR notes, and is never coordinated. One gap the
+    proposal left open: a self-picked ISD cannot match the core's by
+    chance, so the rendezvous reply carries the acceptor's ISD-AS and the
+    joiner's identity completes with the network's ISD — its drawn AS kept
+    — before the node assembles. A first start whose bootstrap neighbor
+    never answers fails cleanly and retries draw a fresh identity.
+*   Rendezvous: the acceptor (`pkg/controlplane/rendezvous.go`) admits by
+    return-routability — the nonce echo — bounded by rate caps keyed by the
+    claimed ISD-AS or, for unnamed claims, the claimed address (a node's
+    dials share one key however many ephemeral sockets they use), by the
+    allowlist, and by caps the returning neighbor never meets: named
+    entries — the ones that carry beacons — against the link cap, unnamed
+    ones against their own. A claim only ever mints or retargets a
+    candidate; an established entry answers with its recorded side
+    untouched, since the claim names nothing the acceptor can check. A
+    bootstrap joiner claims the zero ISD-AS and the acceptor's candidate
+    entry adopts the joiner's final name from its first greeting, so the
+    identity completion costs no second exchange. The selection loop's
+    probes claim the zero ISD-AS too and deduplicate by the control address
+    they claim — a probe mints no entry a candidate sweep could mistake for
+    a peer.
+*   Services: `proto/node/v1` carries the `LinkService` and
+    `DirectoryService` (generated with buf, mounted behind a peer-
+    authenticating middleware whose `AuthenticatedIA` the WireGuard
+    directory now shares). The directory store is in-memory on the core
+    with a TTL; the core publishes into and fetches from its own store,
+    everyone else rides the verified channel. `ChainRenewal` gained the
+    collision check: an unexpired chain under another subject key rejects
+    the CSR with `AlreadyExists`, the holder's own renewal passing.
+*   Selection: `RunSelection` probes every peer the directory names by
+    rendezvous echo against SCMP echo over the freshest resolved path —
+    medians of constant-sized runs — and decides on the constants (floor
+    two, cap eight, ratios 0.8 and 1.25, two and three windows). Below the
+    floor it promotes any reachable candidate outright, at the cap a
+    sustained winner displaces the neighbor with the slowest direct sample
+    — no sample counts as infinitely slow — and the floor holds at every
+    instant: however many neighbors go bad in one window, the window
+    retires only down to it. Streaks reset when evidence lands, so a
+    demoted peer re-earns promotion from scratch. Establishment is the
+    in-band request when a path resolves — both sides record established
+    entries — else the rendezvous exchange a joiner uses; the candidate
+    sweep settles both, its evidence a chain of the peer the node knows
+    (one it issued on the core, or one a verified beacon's signatures
+    resolved through), which retires an unproven peer after the window.
+    The acceptor-side entries of never-proven joiners under non-core
+    neighbors retire by that window; selection re-establishes those links
+    in-band once paths form, the self-healing the ADR's convergence trades
+    on.
+*   Generational data planes: `Serve`'s graceful shutdown stops ingest,
+    drains the processors — which now watch their context — closes the
+    links' sockets, and returns with the addresses released; the provider's
+    stop is idempotent, as both `Serve` and the supervisor may stop it. The
+    supervisor (`internal/services/dataplane.go`) retires the serving
+    generation before building its replacement, retrying the rebind on a
+    bounded schedule while the operating system releases the ports, and
+    re-registers every service backend on each new provider. The control
+    endpoint's socket releases with the node's cancellation, so an
+    in-process restart rebinds the fixed port. The greeting's core
+    announcement no longer decays on the core itself — its own endpoint is
+    permanent, a core that starts before its neighbors still announces
+    itself once they arrive.
+*   Arguments: `cion run` and `cion ping` share the node flags — `--core`,
+    `--domain` (always required), `--neighbor` (required on a non-core's
+    first start, idempotent by remote address later), `--state`,
+    `--internal`, `--control`, `--allow-ia`, `--behind-nat`,
+    `--acme-email` with `--cert-file`/`--key-file` as the offline
+    fallback, and `--wireguard-config` (the proposal's `--gateway-config`,
+    under proposal 0009's rename) pointing at the application's own file,
+    the retiring section's JSON shape unchanged. `BootApp` and the tests
+    assemble from `NodeConfig`; `configs/` retired with the `Config` type.
+*   Tests: the store's contract suite with the interface-ID holdback; the
+    snapshot readers' zero-link starts and greeting adoption; the
+    acceptor's nonce echo, rate cap, allowlist, link cap, and the silent
+    dial that allocates nothing; the link service's admission and
+    refresh-without-reallocation; the directory handlers' authenticated
+    recording and TTL expiry; the enrollment gate's taken-name rejection
+    and holder renewal; the selection loop's decisions with injected
+    measurements — floor and ratio promotion, displacement, demotion above
+    and never below the floor, greeting timeout, the flapping candidate,
+    and the quiet window. The integration proof runs the run command's own
+    assembly: a three-node line joined by rendezvous, enrolled, published,
+    and fetched; C promotes A below the floor and survives both the
+    generation swap mid-traffic and B's death through A; a bare restart
+    serves from the persisted link store; and a bootstrap without an answer
+    fails cleanly and joins on retry.

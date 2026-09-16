@@ -129,7 +129,9 @@ func newBeaconFixture(t *testing.T) *beaconFixture {
 	}
 
 	// B's two links: interface 1 to the core A, interface 2 to C.
-	links := map[uint16]addr.IA{1: coreIATest, 2: iaLineC}
+	links := func() map[uint16]addr.IA {
+		return map[uint16]addr.IA{1: coreIATest, 2: iaLineC}
+	}
 	neighbors := func() map[uint16]Neighbor {
 		return map[uint16]Neighbor{
 			1: {IA: coreIATest, ControlAddr: netip.MustParseAddrPort("192.0.2.10:30043")},
@@ -304,7 +306,7 @@ func TestHandleBeaconWithoutTRC(t *testing.T) {
 		MACKey: []byte(testMACKey),
 		Store:  f.store,
 		DB:     f.pathDB,
-		Links:  map[uint16]addr.IA{1: coreIATest},
+		Links:  func() map[uint16]addr.IA { return map[uint16]addr.IA{1: coreIATest} },
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -452,7 +454,7 @@ func TestHandleRegistration(t *testing.T) {
 		MACKey: []byte(testMACKey),
 		Store:  NewBeaconStore(),
 		DB:     f.pathDB,
-		Links:  map[uint16]addr.IA{1: nodeIATest},
+		Links:  func() map[uint16]addr.IA { return map[uint16]addr.IA{1: nodeIATest} },
 		Core:   true,
 	})
 	if err != nil {
