@@ -5,16 +5,14 @@ import (
 	"crypto"
 	"crypto/tls"
 	"crypto/x509"
-	"fmt"
 	"log/slog"
-	"net/netip"
 	"sync"
 	"time"
 
 	"github.com/scionproto/scion/pkg/addr"
 	"github.com/scionproto/scion/pkg/scrypto/cppki"
 
-	"github.com/fancl20/cion/pkg/apps/ping"
+	"github.com/fancl20/cion/pkg/apps/topology"
 	"github.com/fancl20/cion/pkg/apps/wireguard"
 	"github.com/fancl20/cion/pkg/controlplane"
 	"github.com/fancl20/cion/pkg/dataplane"
@@ -25,19 +23,25 @@ import (
 )
 
 // node is the fully wired CION node: data plane generations, discovery, the
-// control plane, the link machinery of ADR-0006, and the resident
-// applications, per proposals 0003-0008. setupNode assembles it phase by
-// phase; start launches its loops; Close releases it.
+// control plane, the resident applications, and — loaded through the
+// provider seam — the topology machinery of ADR-0006 (ADR-0007), per
+// proposals 0003-0008. setupNode assembles it phase by phase; start
+// launches its loops; Close releases it.
 type node struct {
 	cfg   NodeConfig
 	ident identity
 	opts  DataplaneOptions
 
+	// topology is the loaded provider: the measured machinery by default,
+	// the file provider when --link-set names a link-set (ADR-0007). It
+	// completes a first start's identity, seeds the store, mounts its
+	// services on the endpoint, and runs its loops under start.
+	topology topology.Provider
+
 	// Link state: the neighbor table as the one source of truth, and the
 	// change signal every mutation lands as a generation swap.
-	linkStore    links.DB
-	linkChanges  chan struct{}
-	bootstrapped *bootstrapped
+	linkStore   links.DB
+	linkChanges chan struct{}
 
 	// Data plane generations, run by superviseDataplanes.
 	metrics *dataplane.Metrics
@@ -56,27 +60,25 @@ type node struct {
 	tableSnapshot map[uint16]addr.IA
 
 	// Control plane, assembled by setupControlPlane's phases.
-	trustDB     trust.DB
-	pathDB      pathdb.DB
-	asKey       crypto.Signer
-	issuer      *trust.Issuer            // core only
-	coreClt     *controlplane.CoreClient // non-core only
-	engine      *trust.Engine
-	peerClt     *controlplane.PeerClient
-	lookup      *controlplane.LookupService
-	beaconer    *controlplane.Beaconer
-	beaconStore *controlplane.BeaconStore
-	provider    *scion.PathProvider
-	discovery   *controlplane.Discovery
-	rendezvous  *controlplane.Rendezvous
-	directory   *controlplane.NodeDirectory
+	trustDB      trust.DB
+	pathDB       pathdb.DB
+	asKey        crypto.Signer
+	issuer       *trust.Issuer            // core only
+	coreClt      *controlplane.CoreClient // non-core only
+	engine       *trust.Engine
+	peerClt      *controlplane.PeerClient
+	lookup       *controlplane.LookupService
+	beaconer     *controlplane.Beaconer
+	beaconStore  *controlplane.BeaconStore
+	pathProvider *scion.PathProvider
+	discovery    *controlplane.Discovery
 
 	// Assembled sockets and services, started by start.
 	endpointConn *scion.Conn
 	webPKI       *tls.Config
 	allowAS      map[addr.IA]bool
 	services     *controlplane.Services
-	responder    *ping.Responder
+	responder    *responder
 	wireguard    *wireguard.App
 }
 
@@ -93,7 +95,7 @@ type identity struct {
 // generating it on first start: the ISD-AS drawn randomly from the private
 // ranges, the forwarding key beside the AS keys. The ISD-AS is the node's
 // name for its lifetime, logged loudly at creation. A first start's ISD is
-// a provisional draw a joiner's bootstrap completes with the network's.
+// a provisional draw the loaded provider completes with the network's.
 func loadIdentity(cfg NodeConfig) (identity, bool, error) {
 	ia, err := trust.LoadIA(cfg.State)
 	if err != nil {
@@ -102,7 +104,7 @@ func loadIdentity(cfg NodeConfig) (identity, bool, error) {
 	created := ia.IsZero()
 	if created {
 		// A first start's draw, provisional until persisted: the core's at
-		// once, a joiner's once its bootstrap completes the network's ISD.
+		// once, a joiner's once its provider completes the network's ISD.
 		ia, err = trust.GenerateIA()
 		if err != nil {
 			return identity{}, false, err
@@ -125,75 +127,49 @@ func loadIdentity(cfg NodeConfig) (identity, bool, error) {
 	return identity{ia: ia, asType: asType, key: key, localHost: localHost}, created, nil
 }
 
-// bootstrapped is what a first-start joiner's rendezvous taught it: the
-// network's ISD, the neighbor's ISD-AS, and the link's addresses — the seed
-// lands complete.
-type bootstrapped struct {
-	target netip.AddrPort
-	reply  controlplane.RendezvousReply
-	local  netip.AddrPort
-}
-
-// bootstrapIdentity completes a first-start joiner's identity: the ISD of
-// its draw is provisional, replaced by the network's — the answering
-// neighbor's — so the enrollment's chains verify against the ISD's TRC. The
-// joiner claims the zero ISD-AS in its dial; the neighbor's entry adopts
-// the final one from the joiner's first greeting.
-func (n *node) bootstrapIdentity(ctx context.Context, created bool) error {
-	if !created {
-		return nil
+// selectProvider loads the topology provider the run arguments name
+// (ADR-0007): the measured one by default — loading it is what makes a node
+// zero-conf — the file one when --link-set names a link-set. The provider
+// completes a first start's identity before the phases assemble, Wire
+// delivers the phases' products to it, and Seed, Mounts, and Run follow.
+func (n *node) selectProvider() error {
+	allowAS, err := parseAllowIA(n.cfg.AllowIA)
+	if err != nil {
+		return err
 	}
-	if n.cfg.Core {
-		// The founding core's draw is its network's name already.
-		return trust.PersistIA(n.cfg.State, n.ident.ia)
-	}
-	if len(n.cfg.Neighbors) == 0 {
-		// Unreachable: a non-core's first start carries a neighbor.
-		return fmt.Errorf("a non-core's first start needs at least one --neighbor")
-	}
+	n.allowAS = allowAS
 	host, err := parseControlHost(n.cfg.Control)
 	if err != nil {
 		return err
 	}
-	local, err := controlplane.AllocateLinkAddr(host)
-	if err != nil {
-		return err
+	if n.cfg.LinkSet != "" {
+		n.topology = topology.NewFile(topology.FileConfig{
+			Core:          n.cfg.Core,
+			Path:          n.cfg.LinkSet,
+			Notify:        n.notifyLinkChange,
+			WatchInterval: n.cfg.Pacing.LinkSetPoll,
+		})
+		return nil
 	}
-	var answer *controlplane.RendezvousReply
-	var targetOf netip.AddrPort
-	for _, s := range n.cfg.Neighbors {
-		target, err := netip.ParseAddrPort(s)
-		if err != nil {
-			return fmt.Errorf("parsing --neighbor %q: %w", s, err)
-		}
-		reply, _, err := controlplane.RendezvousEcho(ctx, host, target,
-			addr.IA(0), local)
-		if err != nil {
-			slog.Warn("The bootstrap neighbor's rendezvous did not answer",
-				"rendezvous", target, "err", err)
-			continue
-		}
-		answer = &reply
-		targetOf = target
-		break
-	}
-	if answer == nil {
-		return fmt.Errorf("no bootstrap neighbor answered its rendezvous; " +
-			"retry once one does")
-	}
-	if answer.IA.ISD() != n.ident.ia.ISD() {
-		if ia, err := addr.IAFrom(answer.IA.ISD(), n.ident.ia.AS()); err != nil {
-			return err
-		} else {
-			slog.Info("Completed the identity with the network's ISD",
-				"isd_as", ia, "provisional", n.ident.ia)
-			n.ident.ia = ia
-		}
-	}
-	if err := trust.PersistIA(n.cfg.State, n.ident.ia); err != nil {
-		return err
-	}
-	n.bootstrapped = &bootstrapped{target: targetOf, reply: *answer, local: local}
+	n.topology = topology.NewZeroconf(topology.ZeroconfConfig{
+		Core:        n.cfg.Core,
+		Neighbors:   n.cfg.Neighbors,
+		BehindNAT:   n.cfg.BehindNAT,
+		ControlHost: host,
+		AllowAS:     allowAS,
+		NewConn: func() (*scion.Conn, error) {
+			return n.scionConn(0)
+		},
+		Evidence:  n.linkEvidence,
+		CoreRoute: n.coreRoute,
+		Notify:    n.notifyLinkChange,
+		Pacing: topology.Pacing{
+			RendezvousRate:  n.cfg.Pacing.RendezvousRate,
+			Directory:       n.cfg.Pacing.Directory,
+			Selection:       n.cfg.Pacing.Selection,
+			CandidateWindow: n.cfg.Pacing.CandidateWindow,
+		},
+	})
 	return nil
 }
 
@@ -222,8 +198,23 @@ func setupNode(ctx context.Context, cfg NodeConfig, opts DataplaneOptions) (n *n
 			n.Close()
 		}
 	}()
-	if err = n.bootstrapIdentity(ctx, created); err != nil {
+	if err = n.selectProvider(); err != nil {
 		return n, err
+	}
+	if created {
+		// The one moment before the phases: the provider completes the
+		// provisional ISD draw — the measured provider's from a bootstrap
+		// neighbor's reply, the file provider's from the link-set's first
+		// entry — and the founding core's draw is final already; either
+		// way the completed identity persists before anything assembles.
+		ia, cerr := n.topology.CompleteIdentity(ctx, n.ident.ia)
+		if cerr != nil {
+			return n, cerr
+		}
+		n.ident.ia = ia
+		if err = trust.PersistIA(n.cfg.State, ia); err != nil {
+			return n, err
+		}
 	}
 	if err = n.setupMetrics(); err != nil {
 		return n, err
@@ -231,7 +222,7 @@ func setupNode(ctx context.Context, cfg NodeConfig, opts DataplaneOptions) (n *n
 	if err = n.setupControlPlane(ctx); err != nil {
 		return n, err
 	}
-	if err = n.seedNeighbors(ctx); err != nil {
+	if err = n.topology.Seed(ctx); err != nil {
 		return n, err
 	}
 	if err = n.setupWireguard(); err != nil {
@@ -255,11 +246,8 @@ func (n *node) Close() {
 	if gen != nil {
 		gen.stop()
 	}
-	if n.directory != nil {
-		n.directory.Close() //nolint:errcheck
-	}
-	if n.rendezvous != nil {
-		n.rendezvous.Close() //nolint:errcheck
+	if n.topology != nil {
+		n.topology.Close() //nolint:errcheck
 	}
 	if n.peerClt != nil {
 		n.peerClt.Close() //nolint:errcheck
@@ -279,9 +267,10 @@ func (n *node) Close() {
 }
 
 // start launches the node's background loops: discovery, beaconing, the
-// control endpoint, the SCMP echo responder, the chain lifecycle loop the
-// node's role prescribes, and proposal 0008's — the rendezvous acceptor, the
-// joiner's dials, the node directory, and the selection loop. Nothing serves
+// control endpoint, the SCMP echo responder, the loaded topology provider's
+// — the rendezvous acceptor, the joiner's dials, the node directory, and
+// the selection loop under the measured provider — the chain lifecycle loop
+// the node's role prescribes, and the resident applications. Nothing serves
 // before start, so assembly and serving stay separate lifecycles; the data
 // plane generations are served by superviseDataplanes, the daemon's own
 // body.
@@ -313,20 +302,8 @@ func (n *node) start(ctx context.Context) {
 		n.responder.Run(ctx)
 		return nil
 	})
-	runBackground(ctx, "rendezvous", func(ctx context.Context) error {
-		n.rendezvous.Run(ctx)
-		return nil
-	})
-	runBackground(ctx, "join dials", func(ctx context.Context) error {
-		n.runJoinDials(ctx)
-		return nil
-	})
-	runBackground(ctx, "node directory", func(ctx context.Context) error {
-		n.directory.Run(ctx)
-		return nil
-	})
-	runBackground(ctx, "selection", func(ctx context.Context) error {
-		controlplane.RunSelection(ctx, n.selectionConfig())
+	runBackground(ctx, "topology provider", func(ctx context.Context) error {
+		n.topology.Run(ctx)
 		return nil
 	})
 	if n.ident.asType == trust.ASTypeCore {
@@ -357,34 +334,6 @@ func (n *node) start(ctx context.Context) {
 		runBackground(ctx, "wireguard", func(ctx context.Context) error {
 			return n.wireguard.Run(ctx)
 		})
-	}
-}
-
-// selectionConfig builds the topology loop's configuration from the node's
-// own pieces: the link store its decisions land in, the directory its
-// candidates come from, the provider and conn its probes ride, and the
-// neighbor liveness its demotions read.
-func (n *node) selectionConfig() controlplane.SelectionConfig {
-	probeConn, err := n.scionConn(0)
-	if err != nil {
-		slog.Error("Binding the selection probe socket", "err", err)
-	}
-	control, _ := parseControlHost(n.cfg.Control)
-	controlAddr := netip.AddrPortFrom(control, controlplane.DiscoveryPort)
-	return controlplane.SelectionConfig{
-		IA:          n.ident.ia,
-		Store:       n.linkStore,
-		Directory:   n.directory.Entries,
-		Neighbors:   n.discovery.Neighbors,
-		Provider:    n.provider,
-		Conn:        probeConn,
-		ControlAddr: controlAddr,
-		LinkHost:    control,
-		Link:        n.peerClt,
-		Evidence:    n.linkEvidence,
-		Changed:     n.notifyLinkChange,
-		Interval:    n.cfg.Pacing.Selection,
-		Window:      n.cfg.Pacing.CandidateWindow,
 	}
 }
 

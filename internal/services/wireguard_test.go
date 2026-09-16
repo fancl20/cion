@@ -20,7 +20,7 @@ func parseWireguardOf(
 		t.Fatal(err)
 	}
 	n := &node{cfg: cfg, ident: ident,
-		provider: &scion.PathProvider{}, engine: trust.NewEngine(ident.ia, nil, nil)}
+		pathProvider: &scion.PathProvider{}, engine: trust.NewEngine(ident.ia, nil, nil)}
 	return n.parseWireguardConfig(wg)
 }
 

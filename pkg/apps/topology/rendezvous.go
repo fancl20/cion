@@ -1,4 +1,4 @@
-package controlplane
+package topology
 
 import (
 	"context"
@@ -119,6 +119,43 @@ func ParseRendezvousReply(b []byte) (RendezvousReply, error) {
 	}
 	reply.LinkAddr = linkAddr
 	return reply, nil
+}
+
+// binReader is the rendezvous wire's cursor: every read consumes from the
+// front and records truncation, so one error check serves a whole parse.
+type binReader struct {
+	b   []byte
+	err error
+}
+
+func (r *binReader) uint16() uint16 {
+	if len(r.b) < 2 {
+		r.err = errors.New("truncated")
+		return 0
+	}
+	v := binary.BigEndian.Uint16(r.b)
+	r.b = r.b[2:]
+	return v
+}
+
+func (r *binReader) uint64() uint64 {
+	if len(r.b) < 8 {
+		r.err = errors.New("truncated")
+		return 0
+	}
+	v := binary.BigEndian.Uint64(r.b)
+	r.b = r.b[8:]
+	return v
+}
+
+func (r *binReader) bytes(n int) []byte {
+	if n < 0 || len(r.b) < n {
+		r.err = errors.New("truncated")
+		return nil
+	}
+	v := r.b[:n]
+	r.b = r.b[n:]
+	return v
 }
 
 // read consumes len(dst) bytes into dst.

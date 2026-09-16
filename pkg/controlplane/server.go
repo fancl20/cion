@@ -8,8 +8,8 @@ import (
 	"github.com/quic-go/quic-go/http3"
 	"github.com/scionproto/scion/pkg/proto/control_plane/v1/control_planeconnect"
 
+	"github.com/fancl20/cion/pkg/peeria"
 	"github.com/fancl20/cion/pkg/scion"
-	nodev1connect "github.com/fancl20/cion/proto/node/v1/nodev1connect"
 )
 
 // ControlPlane covers all control plane RPCs.
@@ -21,18 +21,27 @@ type ControlPlane interface {
 	control_planeconnect.ChainRenewalServiceHandler
 }
 
+// Mount is one handler a loaded application serves on the control endpoint
+// (ADR 0007): the pattern the HTTP mux mounts the handler at, the handler
+// itself behind the peer-identity middleware. The core learns no type of the
+// application that built it.
+type Mount struct {
+	// Pattern is the mux pattern the handler mounts at.
+	Pattern string
+	// Handler serves the pattern.
+	Handler http.Handler
+}
+
 // Services composes the trust and segment services into one ControlPlane;
 // the segment service's methods take precedence over the trust service's
-// unimplemented embeds. Link and Directory are CION's own services of
-// proposal 0008 — served on the same endpoint behind the peer-authenticating
-// middleware when set, absent when the node runs none.
+// unimplemented embeds. Mounts are the handlers a loaded application — the
+// topology provider foremost — serves behind the peer-authenticating
+// middleware, mounted beside the drafts' services; empty when none loads.
 type Services struct {
 	*TrustService
 	*SegmentService
-	// Link establishes links in-band.
-	Link *LinkService
-	// Directory serves the node directory, on the core.
-	Directory *DirectoryService
+	// Mounts are the application mounts the endpoint serves.
+	Mounts []Mount
 }
 
 var _ ControlPlane = (*Services)(nil)
@@ -53,13 +62,8 @@ func NewServer(svc ControlPlane) *Server {
 	mux.Handle(control_planeconnect.NewChainRenewalServiceHandler(svc))
 
 	if s, ok := svc.(*Services); ok {
-		if s.Link != nil {
-			path, handler := nodev1connect.NewLinkServiceHandler(s.Link)
-			mux.Handle(path, Authenticate(handler))
-		}
-		if s.Directory != nil {
-			path, handler := nodev1connect.NewDirectoryServiceHandler(s.Directory)
-			mux.Handle(path, Authenticate(handler))
+		for _, m := range s.Mounts {
+			mux.Handle(m.Pattern, peeria.Authenticate(m.Handler))
 		}
 	}
 

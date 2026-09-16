@@ -20,7 +20,6 @@ import (
 
 	"github.com/fancl20/cion/pkg/scion"
 	"github.com/fancl20/cion/pkg/trust"
-	nodev1 "github.com/fancl20/cion/proto/node/v1"
 )
 
 // PeerClient is the SCION-native channel's RPC client: ConnectRPC over HTTP/3
@@ -158,26 +157,13 @@ func (c *PeerClient) Segments(
 	return resp.Msg, nil
 }
 
-// Link asks the peer to admit a link over the mutually verified channel,
-// offering the requester's link address and interface ID (proposal 0008);
-// the peer's chain identifies it, so the request is authenticated without a
-// claim.
-func (c *PeerClient) Link(
-	ctx context.Context,
-	peer *scion.Addr,
-	local netip.AddrPort,
-	ifID uint16,
-) (*nodev1.LinkReply, error) {
-
-	clt := c.client(peer, c.verifiedHCLT, c.verifiedClt)
-	resp, err := clt.Request(ctx, connect.NewRequest(&nodev1.LinkRequest{
-		LocalAddr: local.String(),
-		IfId:      uint32(ifID),
-	}))
-	if err != nil {
-		return nil, err
-	}
-	return resp.Msg, nil
+// VerifiedClient returns the HTTP client of the mutually verified channel —
+// the one registrations and lookups ride, peers authenticated by their
+// chains against the pinned TRC — for an application's own services beside
+// the drafts': the client machinery consumed as a library, sharing this
+// client's transport and connection pool.
+func (c *PeerClient) VerifiedClient() *http.Client {
+	return c.verifiedHCLT
 }
 
 // Close releases the underlying QUIC transport.

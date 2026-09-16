@@ -1,4 +1,4 @@
-package controlplane
+package topology
 
 import (
 	"context"
@@ -13,6 +13,7 @@ import (
 	"github.com/scionproto/scion/pkg/addr"
 
 	"github.com/fancl20/cion/pkg/links"
+	"github.com/fancl20/cion/pkg/peeria"
 	nodev1 "github.com/fancl20/cion/proto/node/v1"
 	nodev1connect "github.com/fancl20/cion/proto/node/v1/nodev1connect"
 )
@@ -25,7 +26,8 @@ const LinkMinInterval = time.Second
 // composed paths already reach asks over the control endpoint's authenticated
 // channel, the peer's chain identifying it. The acceptor applies its
 // admission policy, allocates its own interface ID and link address, records
-// the entry as established, and replies with them.
+// the entry as established, and replies with them. Served by the measured
+// provider, mounted behind the peer middleware.
 type LinkService struct {
 	// Store is the neighbor table.
 	Store links.DB
@@ -75,7 +77,7 @@ func (s *LinkService) Request(
 		return nil, connect.NewError(connect.CodeInvalidArgument,
 			errors.New("no link request"))
 	}
-	peer := AuthenticatedIA(ctx)
+	peer := peeria.AuthenticatedIA(ctx)
 	if peer.IsZero() {
 		return nil, connect.NewError(connect.CodePermissionDenied,
 			errors.New("no authenticated ISD-AS; the channel verified no chain"))

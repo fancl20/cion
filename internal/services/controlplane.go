@@ -6,13 +6,12 @@ import (
 	"log/slog"
 	"net/netip"
 	"path/filepath"
-	"time"
 
 	"github.com/scionproto/scion/pkg/addr"
 	spath "github.com/scionproto/scion/pkg/slayers/path/scion"
 
+	"github.com/fancl20/cion/pkg/apps/topology"
 	"github.com/fancl20/cion/pkg/controlplane"
-	"github.com/fancl20/cion/pkg/links"
 	linkbbolt "github.com/fancl20/cion/pkg/links/impl/bbolt"
 	pathdbbbolt "github.com/fancl20/cion/pkg/pathdb/impl/bbolt"
 	"github.com/fancl20/cion/pkg/scion"
@@ -20,26 +19,16 @@ import (
 	"github.com/fancl20/cion/pkg/trust/impl/bbolt"
 )
 
-// joinDialInterval paces the joiner's rendezvous dials: entries whose
-// rendezvous has not answered yet are re-dialed until it does or the
-// candidate window retires them.
-const joinDialInterval = 5 * time.Second
-
 // setupControlPlane brings up the node's control plane, in phases: the state
 // databases and keys — the link store of proposal 0008 among them — the
 // trust role (the founding core's issuer or every other node's core client),
-// the messenger (trust engine and peer client), beaconing (lookup, beaconer,
-// and the path provider closing their cycle), the link machinery (discovery,
-// the rendezvous acceptor, the link service, the node directory), the
-// control endpoint's socket, and the echo responder. Each phase assigns what
-// it opens to the node as it goes, so setupNode's single deferred unwinding
-// releases a partial node.
+// the messenger (trust engine and peer client), discovery, beaconing (the
+// lookup, beaconer, and path provider closing their cycle), the wiring of
+// the loaded topology provider over what the phases built, the control
+// endpoint's socket and the provider's mounted services, and the echo
+// responder. Each phase assigns what it opens to the node as it goes, so
+// setupNode's single deferred unwinding releases a partial node.
 func (n *node) setupControlPlane(ctx context.Context) error {
-	allowAS, err := parseAllowIA(n.cfg.AllowIA)
-	if err != nil {
-		return err
-	}
-	n.allowAS = allowAS
 	if err := n.openState(ctx); err != nil {
 		return err
 	}
@@ -49,12 +38,13 @@ func (n *node) setupControlPlane(ctx context.Context) error {
 	if err := n.buildMessenger(); err != nil {
 		return err
 	}
-	if err := n.assembleLinks(); err != nil {
+	if err := n.assembleDiscovery(); err != nil {
 		return err
 	}
 	if err := n.buildBeaconing(); err != nil {
 		return err
 	}
+	n.wireTopology()
 	if err := n.assembleEndpoint(ctx); err != nil {
 		return err
 	}
@@ -63,7 +53,9 @@ func (n *node) setupControlPlane(ctx context.Context) error {
 
 // openState opens the trust, path, and link databases and the AS key under
 // the state directory. A node may start with zero links: the store is empty
-// until a neighbor joins or the selection loop promotes one.
+// until a neighbor joins, the selection loop promotes one, or the loaded
+// provider seeds it — the first-start neighbor requirement being the
+// provider's to satisfy, by a --neighbor or a non-empty link-set.
 func (n *node) openState(ctx context.Context) error {
 	trustDB, err := bbolt.New(filepath.Join(n.cfg.State, "trust.db"), nil)
 	if err != nil {
@@ -85,123 +77,7 @@ func (n *node) openState(ctx context.Context) error {
 		return fmt.Errorf("opening link DB: %w", err)
 	}
 	n.linkStore = linkStore
-
-	// A non-core's first start carries at least one neighbor; later starts
-	// read the persisted table.
-	entries, err := linkStore.All(ctx)
-	if err != nil {
-		return fmt.Errorf("reading link DB: %w", err)
-	}
-	if !n.cfg.Core && len(n.cfg.Neighbors) == 0 && len(entries) == 0 {
-		return fmt.Errorf("a non-core's first start needs at least one --neighbor")
-	}
 	return nil
-}
-
-// seedNeighbors seeds the store with an entry per --neighbor, aimed at the
-// given rendezvous address and idempotent by it: the joiner's dial loop
-// retargets the entry when the reply arrives.
-func (n *node) seedNeighbors(ctx context.Context) error {
-	if len(n.cfg.Neighbors) == 0 {
-		return nil
-	}
-	host, err := parseControlHost(n.cfg.Control)
-	if err != nil {
-		return err
-	}
-	for _, s := range n.cfg.Neighbors {
-		rendezvous, err := netip.ParseAddrPort(s)
-		if err != nil {
-			return fmt.Errorf("parsing --neighbor %q: %w", s, err)
-		}
-		existing, err := n.linkStore.ByRemote(ctx, rendezvous)
-		if err != nil {
-			return err
-		}
-		if existing != nil {
-			continue
-		}
-		if b := n.bootstrapped; b != nil && b.target == rendezvous {
-			// The bootstrap's dial already taught both sides: the seed lands
-			// retargeted, the data plane's first generation serving it.
-			if err := n.linkStore.Insert(ctx, &links.Link{
-				NeighborIA: b.reply.IA,
-				Local:      b.local,
-				Remote:     b.reply.LinkAddr,
-				RemoteIfID: b.reply.IfID,
-				Rendezvous: rendezvous,
-				State:      links.StateCandidate,
-			}); err != nil {
-				return err
-			}
-			n.notifyLinkChange()
-			slog.Info("Seeded the bootstrapped neighbor", "neighbor", b.reply.IA,
-				"rendezvous", rendezvous)
-			continue
-		}
-		local, err := controlplane.AllocateLinkAddr(host)
-		if err != nil {
-			return err
-		}
-		if err := n.linkStore.Insert(ctx, &links.Link{
-			Local:      local,
-			Rendezvous: rendezvous,
-			State:      links.StateCandidate,
-		}); err != nil {
-			return err
-		}
-		n.notifyLinkChange()
-		slog.Info("Seeded a bootstrap neighbor", "rendezvous", rendezvous)
-	}
-	return nil
-}
-
-// runJoinDials dials the rendezvous of every entry still aimed at one: the
-// reply retargets the entry to the acceptor's link address, and the first
-// generation serves it.
-func (n *node) runJoinDials(ctx context.Context) {
-	host, err := parseControlHost(n.cfg.Control)
-	if err != nil {
-		slog.Error("Parsing the control address", "err", err)
-		return
-	}
-	for {
-		n.dialJoins(ctx, host)
-		select {
-		case <-ctx.Done():
-			return
-		case <-time.After(joinDialInterval):
-		}
-	}
-}
-
-// dialJoins runs one pass of the joiner's dials.
-func (n *node) dialJoins(ctx context.Context, host netip.Addr) {
-	entries, err := n.linkStore.All(ctx)
-	if err != nil {
-		slog.Error("Reading the link store", "err", err)
-		return
-	}
-	for _, l := range entries {
-		if !l.Live() || !l.Rendezvous.IsValid() || l.Remote.IsValid() {
-			continue
-		}
-		reply, _, err := controlplane.RendezvousEcho(ctx, host,
-			l.Rendezvous, n.ident.ia, l.Local)
-		if err != nil {
-			slog.Debug("Rendezvous dial", "rendezvous", l.Rendezvous, "err", err)
-			continue
-		}
-		l.Remote = reply.LinkAddr
-		l.RemoteIfID = reply.IfID
-		if err := n.linkStore.Update(ctx, l); err != nil {
-			slog.Error("Retargeting a seeded neighbor", "err", err)
-			continue
-		}
-		n.notifyLinkChange()
-		slog.Info("Joined a neighbor by rendezvous",
-			"local", l.Local, "remote", l.Remote, "interface", l.IfID)
-	}
 }
 
 // setupTrustRole establishes the node's trust role: the founding core
@@ -268,7 +144,7 @@ func (n *node) buildMessenger() error {
 		Engine: n.engine,
 		Conn:   peerConn,
 		PathTo: func(dst addr.IA) *spath.Decoded {
-			path, err := n.provider.LocalPath(dst)
+			path, err := n.pathProvider.LocalPath(dst)
 			if err != nil {
 				return nil
 			}
@@ -324,7 +200,7 @@ func (n *node) buildBeaconing() error {
 	}
 	n.beaconer = beaconer
 
-	n.provider = &scion.PathProvider{
+	n.pathProvider = &scion.PathProvider{
 		IA:        n.ident.ia,
 		DB:        n.pathDB,
 		Lookup:    lookup.Down,
@@ -334,14 +210,29 @@ func (n *node) buildBeaconing() error {
 	return nil
 }
 
-// assembleLinks builds discovery over the store and the rendezvous acceptor
-// every node serves — proposal 0008's link machinery the beaconer and the
-// endpoint build on.
-func (n *node) assembleLinks() error {
-	control, err := parseControlHost(n.cfg.Control)
-	if err != nil {
-		return err
-	}
+// wireTopology delivers the phases' products to the loaded provider: the
+// completed identity, the store its decisions land in, the peer client its
+// in-band requests ride, the path provider its comparator baselines with,
+// the trust engine its directory channel authenticates with, and the
+// greeting-fresh neighbor map. The last step before the provider mounts and
+// runs, and the one direction the dependency ever crosses: the application
+// imports the core and the shared libraries, never the reverse.
+func (n *node) wireTopology() {
+	n.topology.Wire(topology.Pieces{
+		IA:        n.ident.ia,
+		Store:     n.linkStore,
+		Peer:      n.peerClt,
+		Provider:  n.pathProvider,
+		Engine:    n.engine,
+		Neighbors: n.discovery.Neighbors,
+	})
+}
+
+// assembleDiscovery builds discovery over the store: the greeting stream,
+// the neighbor map, and the core-endpoint relay — CION's own but owed by
+// every node however its topology is decided (ADR-0007), the beaconer and
+// the endpoint build on it.
+func (n *node) assembleDiscovery() error {
 	discovery, err := controlplane.NewDiscovery(controlplane.DiscoveryConfig{
 		IA:           n.ident.ia,
 		ControlAddr:  n.cfg.Control,
@@ -354,30 +245,14 @@ func (n *node) assembleLinks() error {
 		return err
 	}
 	n.discovery = discovery
-
-	rendezvous, err := controlplane.NewRendezvous(controlplane.RendezvousConfig{
-		Bind:        netip.AddrPortFrom(control, controlplane.RendezvousPort).String(),
-		IA:          n.ident.ia,
-		MinInterval: n.cfg.Pacing.RendezvousRate,
-		Store:       n.linkStore,
-		AllowAS:     n.allowAS,
-		MaxLinks:    controlplane.MaxNeighbors,
-		LinkHost:    control,
-		Changed:     n.notifyLinkChange,
-	})
-	if err != nil {
-		return err
-	}
-	n.rendezvous = rendezvous
 	return nil
 }
 
 // assembleEndpoint binds the control endpoint's socket and, on the core,
-// its WebPKI certificate, the enrollment allowlist, and the node directory
-// service. Every node serves its ConnectRPC services over HTTP/3 on the
-// endpoint port — the drafts' beside proposal 0008's LinkService — and the
-// core's endpoint additionally serves the bootstrap channel for clients
-// offering its domain as the TLS server name.
+// its WebPKI certificate. Every node serves its ConnectRPC services over
+// HTTP/3 on the endpoint port — the drafts' beside the loaded provider's
+// mounts — and the core's endpoint additionally serves the bootstrap
+// channel for clients offering its domain as the TLS server name.
 func (n *node) assembleEndpoint(ctx context.Context) error {
 	if n.ident.asType == trust.ASTypeCore {
 		webPKI, err := controlplane.ManageTLSCert(ctx, controlplane.TLSCertConfig{
@@ -398,7 +273,7 @@ func (n *node) assembleEndpoint(ctx context.Context) error {
 	}
 	n.endpointConn = endpointConn
 
-	control, err := parseControlHost(n.cfg.Control)
+	mounts, err := n.topology.Mounts()
 	if err != nil {
 		return err
 	}
@@ -412,51 +287,8 @@ func (n *node) assembleEndpoint(ctx context.Context) error {
 			Beaconer: n.beaconer,
 			Lookup:   n.lookup,
 		},
-		Link: &controlplane.LinkService{
-			Store:       n.linkStore,
-			AllowAS:     n.allowAS,
-			MaxLinks:    controlplane.MaxNeighbors,
-			LinkHost:    control,
-			MinInterval: n.cfg.Pacing.RendezvousRate,
-			Changed:     n.notifyLinkChange,
-		},
+		Mounts: mounts,
 	}
-	var directory *controlplane.DirectoryService
-	if n.ident.asType == trust.ASTypeCore {
-		directory = &controlplane.DirectoryService{Store: controlplane.NewDirectoryStore()}
-		n.services.Directory = directory
-	}
-
-	// The node directory: the core publishes into and fetches from the store
-	// it serves; every other node rides its verified channel to the core's
-	// endpoint.
-	directoryCfg := controlplane.NodeDirectoryConfig{
-		Entry: controlplane.DirectoryEntry{
-			IA:             n.ident.ia,
-			ControlAddr:    netip.AddrPortFrom(control, controlplane.DiscoveryPort),
-			RendezvousAddr: netip.AddrPortFrom(control, controlplane.RendezvousPort),
-			Private:        n.cfg.BehindNAT,
-		},
-		Engine:          n.engine,
-		Provider:        n.provider,
-		PublishInterval: n.cfg.Pacing.Directory,
-		FetchInterval:   n.cfg.Pacing.Directory,
-	}
-	if directory != nil {
-		directoryCfg.Store = directory.Store
-	} else {
-		conn, err := n.scionConn(0)
-		if err != nil {
-			return err
-		}
-		directoryCfg.Conn = conn
-		directoryCfg.CoreRoute = n.coreRoute
-	}
-	nodeDirectory, err := controlplane.NewNodeDirectory(directoryCfg)
-	if err != nil {
-		return err
-	}
-	n.directory = nodeDirectory
 
 	if n.ident.asType == trust.ASTypeCore {
 		n.discovery.SetCoreEndpoint(n.ident.ia,
@@ -505,8 +337,8 @@ func (n *node) coreRoute() *scion.Addr {
 	}
 	// ...else the reversed up segment from the path provider, when
 	// beaconing has already filled it.
-	if n.provider != nil {
-		if path, err := n.provider.LocalPath(coreIA); err == nil {
+	if n.pathProvider != nil {
+		if path, err := n.pathProvider.LocalPath(coreIA); err == nil {
 			return &scion.Addr{IA: coreIA, Addr: coreEndpoint, Path: path}
 		}
 	}

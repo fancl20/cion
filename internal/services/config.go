@@ -41,8 +41,15 @@ type NodeConfig struct {
 	KeyFile   string
 	// Neighbors are existing nodes' rendezvous underlay addresses; the first
 	// start of a non-core requires at least one, later starts seed
-	// additional entries, idempotent by remote address.
+	// additional entries, idempotent by remote address. They select the
+	// measured topology provider, which loads by default.
 	Neighbors []string
+	// LinkSet points at the file provider's link-set (ADR 0007): neighbor
+	// ISD-ASes with the links' two underlay addresses, reconciled into the
+	// store as the operator's vouch. It refuses to combine with --neighbor,
+	// and it never carries identity, keys, or bind addresses — those stay
+	// run arguments and state.
+	LinkSet string
 	// State is the state directory; Internal and Control are the bind
 	// addresses.
 	State    string
@@ -77,6 +84,7 @@ type NodePacing struct {
 	CandidateWindow time.Duration // unproven candidate lifetime
 	Directory       time.Duration // directory publish and fetch
 	RendezvousRate  time.Duration // admission rate caps
+	LinkSetPoll     time.Duration // the file provider's link-set poll
 }
 
 // Validate applies the role-aware argument checks: the domain is always
@@ -87,6 +95,10 @@ func (c NodeConfig) Validate() error {
 	}
 	if c.Core && len(c.Neighbors) > 0 {
 		return fmt.Errorf("the founding core takes no --neighbor: nodes join it")
+	}
+	if c.LinkSet != "" && len(c.Neighbors) > 0 {
+		return fmt.Errorf("--link-set refuses --neighbor: " +
+			"one topology provider per process, the static and the measured")
 	}
 	if c.State == "" || c.Internal == "" || c.Control == "" {
 		return fmt.Errorf("--state, --internal, and --control are required")

@@ -1,4 +1,4 @@
-package controlplane
+package topology
 
 import (
 	"context"
@@ -14,6 +14,8 @@ import (
 	"github.com/scionproto/scion/pkg/addr"
 	spath "github.com/scionproto/scion/pkg/slayers/path/scion"
 
+	"github.com/fancl20/cion/pkg/controlplane"
+	"github.com/fancl20/cion/pkg/peeria"
 	"github.com/fancl20/cion/pkg/scion"
 	"github.com/fancl20/cion/pkg/trust"
 	nodev1 "github.com/fancl20/cion/proto/node/v1"
@@ -111,7 +113,7 @@ func (s *DirectoryService) Publish(
 	req *connect.Request[nodev1.PublishRequest],
 ) (*connect.Response[nodev1.PublishResponse], error) {
 
-	publisher := AuthenticatedIA(ctx)
+	publisher := peeria.AuthenticatedIA(ctx)
 	if publisher.IsZero() {
 		return nil, connect.NewError(connect.CodePermissionDenied,
 			errors.New("no authenticated ISD-AS; the channel verified no chain"))
@@ -229,13 +231,13 @@ func (c *rpcDirectoryClient) client() (nodev1connect.DirectoryServiceClient, err
 	if core == nil {
 		return nil, errors.New("no route to the core's endpoint yet")
 	}
-	authority := PeerAuthority(core)
+	authority := controlplane.PeerAuthority(core)
 	c.mtx.Lock()
 	defer c.mtx.Unlock()
 	if c.clt != nil && c.authority == authority {
 		return c.clt, nil
 	}
-	hclt := NewSCIONClient(PeerClientConfig{
+	hclt := controlplane.NewSCIONClient(controlplane.PeerClientConfig{
 		Engine: c.engine,
 		Conn:   c.conn,
 		PathTo: func(dst addr.IA) *spath.Decoded {
@@ -287,7 +289,8 @@ func (c *rpcDirectoryClient) List(ctx context.Context) ([]DirectoryEntry, error)
 // NodeDirectory is the node's view of the directory: the publish loop that
 // records the node's own entry once enrollment has produced its chain, the
 // fetch loop that refreshes the local copy, and the snapshot the selection
-// loop draws its candidates from.
+// loop draws its candidates from. The measured provider runs it on every
+// node; the core serves the store it publishes into.
 type NodeDirectory struct {
 	cfg NodeDirectoryConfig
 

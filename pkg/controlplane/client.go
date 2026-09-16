@@ -5,19 +5,17 @@ import (
 
 	"connectrpc.com/connect"
 	"github.com/scionproto/scion/pkg/proto/control_plane/v1/control_planeconnect"
-
-	nodev1connect "github.com/fancl20/cion/proto/node/v1/nodev1connect"
 )
 
-// Client implements the Interface by making RPC calls to a remote server.
+// Client implements the Interface by making RPC calls to a remote server:
+// the drafts' services alone, the Link and Directory clients the topology
+// application owns living beside their services (ADR 0007).
 type Client struct {
 	control_planeconnect.SegmentCreationServiceClient
 	control_planeconnect.TrustMaterialServiceClient
 	control_planeconnect.SegmentRegistrationServiceClient
 	control_planeconnect.SegmentLookupServiceClient
 	control_planeconnect.ChainRenewalServiceClient
-	nodev1connect.LinkServiceClient
-	nodev1connect.DirectoryServiceClient
 }
 
 // NewClient creates a new control plane client.
@@ -29,7 +27,5 @@ func NewClient(clt connect.HTTPClient, baseURL string, opts ...connect.ClientOpt
 		SegmentRegistrationServiceClient: control_planeconnect.NewSegmentRegistrationServiceClient(clt, baseURL, opts...),
 		SegmentLookupServiceClient:       control_planeconnect.NewSegmentLookupServiceClient(clt, baseURL, opts...),
 		ChainRenewalServiceClient:        control_planeconnect.NewChainRenewalServiceClient(clt, baseURL, opts...),
-		LinkServiceClient:                nodev1connect.NewLinkServiceClient(clt, baseURL, opts...),
-		DirectoryServiceClient:           nodev1connect.NewDirectoryServiceClient(clt, baseURL, opts...),
 	}
 }
