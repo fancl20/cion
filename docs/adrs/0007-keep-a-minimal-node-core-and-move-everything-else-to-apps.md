@@ -1,6 +1,7 @@
 # Keep a Minimal Node Core and Move Everything Else to Apps
 
-*   Status: proposed
+*   Status: superseded by
+    [ADR-0009](/docs/adrs/0009-keep-a-minimal-node-core-and-move-everything-else-to-apps.md)
 *   Date: 2026-09-16
 
 [TOC]
