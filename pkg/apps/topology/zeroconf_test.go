@@ -121,6 +121,9 @@ func TestZeroconfMounts(t *testing.T) {
 			CoreRoute:   func() *scion.Addr { return nil },
 		})
 		z.Wire(Pieces{Store: memory.New()})
+		// Mounts binds the rendezvous port; releasing it lets a rerun of the
+		// test in the same process bind it again.
+		t.Cleanup(func() { z.Close() }) //nolint:errcheck
 		mounts, err := z.Mounts()
 		if err != nil {
 			t.Fatal(err)

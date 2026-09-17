@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/netip"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"connectrpc.com/connect"
@@ -84,42 +85,44 @@ func TestDirectoryPublishRecordsAuthenticatedIA(t *testing.T) {
 }
 
 // TestDirectoryExpiry checks the TTL: entries expire without refresh, the
-// list serving only the fresh ones.
+// list serving only the fresh ones. The TTL's passage is a fake-time sleep
+// in the bubble.
 func TestDirectoryExpiry(t *testing.T) {
-	now := time.Now()
-	svc := &DirectoryService{Store: NewDirectoryStore(), Now: func() time.Time { return now }}
-	if err := directoryPublish(context.Background(), svc, directoryIA,
-		directoryEntryPB("192.0.2.7:30043", "192.0.2.7:30045", false)); err != nil {
-		t.Fatal(err)
-	}
-	other := addr.MustIAFrom(20, 0xfd0000000042)
-	if err := directoryPublish(context.Background(), svc, other,
-		directoryEntryPB("192.0.2.8:30043", "192.0.2.8:30045", false)); err != nil {
-		t.Fatal(err)
-	}
+	synctest.Test(t, func(t *testing.T) {
+		svc := &DirectoryService{Store: NewDirectoryStore()}
+		if err := directoryPublish(context.Background(), svc, directoryIA,
+			directoryEntryPB("192.0.2.7:30043", "192.0.2.7:30045", false)); err != nil {
+			t.Fatal(err)
+		}
+		other := addr.MustIAFrom(20, 0xfd0000000042)
+		if err := directoryPublish(context.Background(), svc, other,
+			directoryEntryPB("192.0.2.8:30043", "192.0.2.8:30045", false)); err != nil {
+			t.Fatal(err)
+		}
 
-	// A refresh of the first publisher only.
-	now = now.Add(NodeDirectoryTTL / 2)
-	if err := directoryPublish(context.Background(), svc, directoryIA,
-		directoryEntryPB("192.0.2.7:30043", "192.0.2.7:30045", false)); err != nil {
-		t.Fatal(err)
-	}
-	now = now.Add(NodeDirectoryTTL)
-	entries, err := directoryList(context.Background(), svc)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(entries) != 1 || !entries[0].IA.Equal(directoryIA) {
-		t.Fatalf("entries after the TTL = %v, want the refreshed one only", entries)
-	}
+		// A refresh of the first publisher only.
+		time.Sleep(NodeDirectoryTTL / 2)
+		if err := directoryPublish(context.Background(), svc, directoryIA,
+			directoryEntryPB("192.0.2.7:30043", "192.0.2.7:30045", false)); err != nil {
+			t.Fatal(err)
+		}
+		time.Sleep(NodeDirectoryTTL)
+		entries, err := directoryList(context.Background(), svc)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(entries) != 1 || !entries[0].IA.Equal(directoryIA) {
+			t.Fatalf("entries after the TTL = %v, want the refreshed one only", entries)
+		}
 
-	// Beyond every refresh, the directory empties.
-	now = now.Add(2 * NodeDirectoryTTL)
-	entries, err = directoryList(context.Background(), svc)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(entries) != 0 {
-		t.Errorf("entries beyond every TTL = %v, want none", entries)
-	}
+		// Beyond every refresh, the directory empties.
+		time.Sleep(2 * NodeDirectoryTTL)
+		entries, err = directoryList(context.Background(), svc)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(entries) != 0 {
+			t.Errorf("entries beyond every TTL = %v, want none", entries)
+		}
+	})
 }

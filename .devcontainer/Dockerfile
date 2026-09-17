@@ -11,6 +11,8 @@ RUN apt-get install -y \
     build-essential pkg-config \
     python3 golang
 
+RUN curl -sSfL https://golangci-lint.run/install.sh | sh -s -- -b /usr/bin/
+
 # Clean up
 RUN rm -rf /tmp/* /var/tmp/* /var/lib/apt/lists/*
 

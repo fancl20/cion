@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/netip"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/scionproto/scion/pkg/addr"
@@ -385,49 +386,53 @@ func TestSelectionCapDisplacement(t *testing.T) {
 
 // TestSelectionSweepCandidateWindow checks the candidate sweep: an unproven
 // candidate retires once the window passes, a proven one is established.
+// The sweep reads the clock, so the test runs in a bubble: the window's
+// passage is a fake-time sleep — instant, and never a real-time race.
 func TestSelectionSweepCandidateWindow(t *testing.T) {
-	f := newSelFixture(t)
-	f.sel.cfg.Window = 10 * time.Millisecond
-	unproven := &links.Link{
-		Local:  netip.MustParseAddrPort("127.0.0.1:40001"),
-		Remote: netip.MustParseAddrPort("127.0.0.1:40002"),
-		State:  links.StateCandidate,
-	}
-	if err := f.store.Insert(context.Background(), unproven); err != nil {
-		t.Fatal(err)
-	}
-	proven := &links.Link{
-		NeighborIA: selPeer,
-		Local:      netip.MustParseAddrPort("127.0.0.1:40003"),
-		Remote:     netip.MustParseAddrPort("127.0.0.1:40004"),
-		State:      links.StateCandidate,
-	}
-	if err := f.store.Insert(context.Background(), proven); err != nil {
-		t.Fatal(err)
-	}
-	f.sel.cfg.Evidence = func(l *links.Link) bool { return l.IfID == proven.IfID }
+	synctest.Test(t, func(t *testing.T) {
+		f := newSelFixture(t)
+		f.sel.cfg.Window = 10 * time.Millisecond
+		unproven := &links.Link{
+			Local:  netip.MustParseAddrPort("127.0.0.1:40001"),
+			Remote: netip.MustParseAddrPort("127.0.0.1:40002"),
+			State:  links.StateCandidate,
+		}
+		if err := f.store.Insert(context.Background(), unproven); err != nil {
+			t.Fatal(err)
+		}
+		proven := &links.Link{
+			NeighborIA: selPeer,
+			Local:      netip.MustParseAddrPort("127.0.0.1:40003"),
+			Remote:     netip.MustParseAddrPort("127.0.0.1:40004"),
+			State:      links.StateCandidate,
+		}
+		if err := f.store.Insert(context.Background(), proven); err != nil {
+			t.Fatal(err)
+		}
+		f.sel.cfg.Evidence = func(l *links.Link) bool { return l.IfID == proven.IfID }
 
-	time.Sleep(20 * time.Millisecond)
-	f.pass(t)
-	if f.state(t, selPeer) != links.StateEstablished {
-		t.Error("the proven candidate was not established")
-	}
-	entries, err := f.store.All(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	found := false
-	for _, l := range entries {
-		if l.IfID == unproven.IfID {
-			found = true
-			if l.State != links.StateRetired {
-				t.Error("the unproven candidate outlived the window")
+		time.Sleep(20 * time.Millisecond)
+		f.pass(t)
+		if f.state(t, selPeer) != links.StateEstablished {
+			t.Error("the proven candidate was not established")
+		}
+		entries, err := f.store.All(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		found := false
+		for _, l := range entries {
+			if l.IfID == unproven.IfID {
+				found = true
+				if l.State != links.StateRetired {
+					t.Error("the unproven candidate outlived the window")
+				}
 			}
 		}
-	}
-	if !found {
-		t.Error("the unproven candidate vanished instead of retiring")
-	}
+		if !found {
+			t.Error("the unproven candidate vanished instead of retiring")
+		}
+	})
 }
 
 // TestSelectionNoAction checks the comparator's quiet case: neutral
@@ -457,47 +462,50 @@ func TestSelectionNoAction(t *testing.T) {
 // candidate's peer that keeps greeting is alive and trying, exactly the
 // joiner whose enrollment is still in flight, and retires when it goes
 // silent. The streams answer different questions: liveness is BFD's alone,
-// and this grace is the greeting stream's own business.
+// and this grace is the greeting stream's own business. The test runs in a
+// bubble: outliving the window is a fake-time sleep, instant and exact.
 func TestSelectionSweepGrace(t *testing.T) {
-	f := newSelFixture(t)
-	f.sel.cfg.Window = 50 * time.Millisecond
-	insertCandidate := func(name addr.IA) *links.Link {
-		l := &links.Link{
-			NeighborIA: name,
-			Local:      netip.MustParseAddrPort("127.0.0.1:40001"),
-			Remote:     netip.MustParseAddrPort("127.0.0.1:40002"),
-			State:      links.StateCandidate,
+	synctest.Test(t, func(t *testing.T) {
+		f := newSelFixture(t)
+		f.sel.cfg.Window = 50 * time.Millisecond
+		insertCandidate := func(name addr.IA) *links.Link {
+			l := &links.Link{
+				NeighborIA: name,
+				Local:      netip.MustParseAddrPort("127.0.0.1:40001"),
+				Remote:     netip.MustParseAddrPort("127.0.0.1:40002"),
+				State:      links.StateCandidate,
+			}
+			if err := f.store.Insert(context.Background(), l); err != nil {
+				t.Fatal(err)
+			}
+			return l
 		}
-		if err := f.store.Insert(context.Background(), l); err != nil {
-			t.Fatal(err)
+		greeted := insertCandidate(selA)
+		silent := insertCandidate(selB)
+		time.Sleep(60 * time.Millisecond) // both candidates outlive the window
+
+		f.candidateGreetings[greeted.IfID] = controlplane.Neighbor{
+			IA:       selA,
+			LastSeen: time.Now(),
 		}
-		return l
-	}
-	greeted := insertCandidate(selA)
-	silent := insertCandidate(selB)
-	time.Sleep(60 * time.Millisecond) // both candidates outlive the window
+		f.pass(t)
+		if f.state(t, selA) != links.StateCandidate {
+			t.Error("the greeted candidate's grace did not hold")
+		}
+		if f.state(t, selB) != links.StateRetired {
+			t.Error("the silent candidate outlived the window")
+		}
 
-	f.candidateGreetings[greeted.IfID] = controlplane.Neighbor{
-		IA:       selA,
-		LastSeen: time.Now(),
-	}
-	f.pass(t)
-	if f.state(t, selA) != links.StateCandidate {
-		t.Error("the greeted candidate's grace did not hold")
-	}
-	if f.state(t, selB) != links.StateRetired {
-		t.Error("the silent candidate outlived the window")
-	}
-
-	// The grace reads arrivals, not identity: once the greetings stop, the
-	// entry retires on the next sweep.
-	f.candidateGreetings[greeted.IfID] = controlplane.Neighbor{
-		IA:       selA,
-		LastSeen: time.Now().Add(-f.sel.cfg.Window - time.Second),
-	}
-	f.pass(t)
-	if f.state(t, selA) != links.StateRetired {
-		t.Error("the candidate kept its grace after going silent")
-	}
-	_ = silent
+		// The grace reads arrivals, not identity: once the greetings stop, the
+		// entry retires on the next sweep.
+		f.candidateGreetings[greeted.IfID] = controlplane.Neighbor{
+			IA:       selA,
+			LastSeen: time.Now().Add(-f.sel.cfg.Window - time.Second),
+		}
+		f.pass(t)
+		if f.state(t, selA) != links.StateRetired {
+			t.Error("the candidate kept its grace after going silent")
+		}
+		_ = silent
+	})
 }

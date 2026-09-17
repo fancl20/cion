@@ -79,7 +79,6 @@ type Beaconer struct {
 	propagation  time.Duration
 	registration time.Duration
 	sendTimeout  time.Duration
-	now          func() time.Time
 
 	// bootstrap keeps the freshest unverified beacon and the interface it
 	// arrived on: a fresh node receives beacons before it has pinned the TRC
@@ -128,8 +127,6 @@ type BeaconerConfig struct {
 	// zero keeps them.
 	PropagationInterval  time.Duration
 	RegistrationInterval time.Duration
-	// Now is the clock; nil uses time.Now.
-	Now func() time.Time
 	// SendTimeout bounds each RPC; zero uses the default.
 	SendTimeout time.Duration
 }
@@ -151,10 +148,6 @@ func NewBeaconer(cfg BeaconerConfig) (*Beaconer, error) {
 	if registration == 0 {
 		registration = RegistrationInterval
 	}
-	now := cfg.Now
-	if now == nil {
-		now = time.Now
-	}
 	sendTimeout := cfg.SendTimeout
 	if sendTimeout == 0 {
 		sendTimeout = SendTimeout
@@ -174,7 +167,6 @@ func NewBeaconer(cfg BeaconerConfig) (*Beaconer, error) {
 		propagation:  propagation,
 		registration: registration,
 		sendTimeout:  sendTimeout,
-		now:          now,
 	}, nil
 }
 
@@ -285,7 +277,7 @@ func (b *Beaconer) HandleRegistration(
 func (b *Beaconer) BootstrapRoute(dst addr.IA) *spath.Decoded {
 	b.bootstrapMtx.Lock()
 	defer b.bootstrapMtx.Unlock()
-	if b.bootstrap == nil || !b.bootstrap.Expiration().After(b.now()) {
+	if b.bootstrap == nil || !b.bootstrap.Expiration().After(time.Now()) {
 		return nil
 	}
 	if !b.bootstrap.FirstIA().Equal(dst) {
@@ -339,7 +331,7 @@ func (b *Beaconer) checkBeacon(pcb *segment.PCB, ingress uint16) error {
 	if err := checkContinuity(pcb); err != nil {
 		return err
 	}
-	return checkTimeWindow(pcb, b.now())
+	return checkTimeWindow(pcb, time.Now())
 }
 
 // checkRegistered applies the receiving core's checks to a registered down
@@ -357,7 +349,7 @@ func (b *Beaconer) checkRegistered(pcb *segment.PCB) error {
 	if err := checkContinuity(pcb); err != nil {
 		return err
 	}
-	return checkTimeWindow(pcb, b.now())
+	return checkTimeWindow(pcb, time.Now())
 }
 
 // checkContinuity checks that consecutive AS entries chain (Section 2.3.1,
@@ -431,7 +423,7 @@ func (b *Beaconer) originateOnce(ctx context.Context) {
 		if !b.linkUp(ifID) {
 			continue // a down interface originates nothing
 		}
-		pcb, err := segment.NewPCB(b.now())
+		pcb, err := segment.NewPCB(time.Now())
 		if err != nil {
 			slog.Error("Creating beacon", "err", err)
 			continue
@@ -581,7 +573,7 @@ func (b *Beaconer) terminate(cand Candidate) (*segment.PCB, error) {
 }
 
 func (b *Beaconer) sweepOnce(ctx context.Context) {
-	if _, err := b.db.DeleteExpired(ctx, b.now()); err != nil {
+	if _, err := b.db.DeleteExpired(ctx, time.Now()); err != nil {
 		slog.Error("Sweeping expired segments", "err", err)
 	}
 }

@@ -3,6 +3,7 @@ package controlplane
 import (
 	"net/netip"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/gopacket/gopacket"
@@ -31,27 +32,20 @@ func (w *fakeWriter) WriteRaw(b []byte) error {
 	return nil
 }
 
-// bfdClock is the session's injectable clock: tests advance it through the
-// silence windows and arrival instants the verdict derives from.
-type bfdClock struct{ now time.Time }
-
-func (c *bfdClock) Now() time.Time { return c.now }
-
-// newTestSession starts a session on the fake writer with an injected
-// clock, at the production timers' cadence.
-func newTestSession(t *testing.T) (*BFDSession, *fakeWriter, *bfdClock) {
+// newTestSession starts a session on the fake writer, at the production
+// timers' cadence.
+func newTestSession(t *testing.T) (*BFDSession, *fakeWriter) {
 	t.Helper()
-	clk := &bfdClock{now: time.Now()}
 	w := &fakeWriter{}
 	mac, err := initMac([]byte("0123456789abcdef"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	s := newBFDSession(bfdIA, mac, BFDTransmissionInterval, BFDDetectMultiplier,
-		clk.Now, 7, bfdPeer,
+		7, bfdPeer,
 		netip.MustParseAddr("127.0.0.1"), netip.MustParseAddr("127.0.0.2"))
 	s.SetRawWriter(w)
-	return s, w, clk
+	return s, w
 }
 
 // peerMessage builds the peer's control message as the data plane hands it
@@ -113,7 +107,7 @@ func decodeControl(
 // 203 over a one-hop path on the link's interface — carrying the session's
 // state and timers.
 func TestBFDControlPacketFrame(t *testing.T) {
-	s, w, _ := newTestSession(t)
+	s, w := newTestSession(t)
 	s.tick()
 
 	scn, bfd := decodeControl(t, lastPacket(t, w))
@@ -158,7 +152,7 @@ func TestBFDControlPacketFrame(t *testing.T) {
 // from every arrival. Each step's state is read from the packet the next
 // interval transmits.
 func TestBFDSessionStateMachine(t *testing.T) {
-	s, w, _ := newTestSession(t)
+	s, w := newTestSession(t)
 	peerDisc := uint32(0x2a2a2a2a)
 
 	receiveAndTick := func(state layers.BFDState) *layers.BFD {
@@ -195,7 +189,7 @@ func TestBFDSessionStateMachine(t *testing.T) {
 // message naming another session's discriminator is not ours and changes
 // nothing.
 func TestBFDSessionRejectsForeignDiscriminator(t *testing.T) {
-	s, _, _ := newTestSession(t)
+	s, _ := newTestSession(t)
 	s.ReceiveMessage(peerMessage(layers.BFDStateUp, 1, s.myDisc+1))
 	if s.localStateOf() != layers.BFDStateDown {
 		t.Error("a foreign discriminator advanced the session")
@@ -214,73 +208,79 @@ func TestBFDSessionRejectsForeignDiscriminator(t *testing.T) {
 // TestBFDVerdictDownAtSilence checks the verdict: up until the detect
 // multiplier expires without an arrival, down the moment it does — and
 // transmitting throughout, including while down, with the expiry named in
-// the diagnostic.
+// the diagnostic. The silence is a fake-time sleep in the bubble, instant
+// and exactly at the window's edge.
 func TestBFDVerdictDownAtSilence(t *testing.T) {
-	s, w, clk := newTestSession(t)
-	if !s.IsUp() {
-		t.Fatal("a fresh session's verdict is down; a node restarts with every link up")
-	}
-	s.tick()
-	if !s.IsUp() {
-		t.Fatal("the verdict went down before the silence window passed")
-	}
+	synctest.Test(t, func(t *testing.T) {
+		s, w := newTestSession(t)
+		if !s.IsUp() {
+			t.Fatal("a fresh session's verdict is down; a node restarts with every link up")
+		}
+		s.tick()
+		if !s.IsUp() {
+			t.Fatal("the verdict went down before the silence window passed")
+		}
 
-	clk.now = clk.now.Add(time.Duration(BFDDetectMultiplier) * BFDTransmissionInterval)
-	before := len(w.packets)
-	s.tick()
-	if s.IsUp() {
-		t.Fatal("the verdict stayed up past the detect multiplier's silence")
-	}
-	if len(w.packets) != before+1 {
-		t.Fatal("the session stopped transmitting while down; recovery is seen by the stream")
-	}
-	_, bfd := decodeControl(t, lastPacket(t, w))
-	if bfd.State != layers.BFDStateDown ||
-		bfd.Diagnostic != layers.BFDDiagnosticTimeExpired {
-		t.Fatalf("state/diagnostic = %v/%v, want Down/Control Detection Time Expired",
-			bfd.State, bfd.Diagnostic)
-	}
+		time.Sleep(time.Duration(BFDDetectMultiplier) * BFDTransmissionInterval)
+		before := len(w.packets)
+		s.tick()
+		if s.IsUp() {
+			t.Fatal("the verdict stayed up past the detect multiplier's silence")
+		}
+		if len(w.packets) != before+1 {
+			t.Fatal("the session stopped transmitting while down; recovery is seen by the stream")
+		}
+		_, bfd := decodeControl(t, lastPacket(t, w))
+		if bfd.State != layers.BFDStateDown ||
+			bfd.Diagnostic != layers.BFDDiagnosticTimeExpired {
+			t.Fatalf("state/diagnostic = %v/%v, want Down/Control Detection Time Expired",
+				bfd.State, bfd.Diagnostic)
+		}
 
-	// The next answered arrival is the up edge, whatever the negotiated
-	// state: the peer's packet arriving is the link carrying traffic.
-	s.ReceiveMessage(peerMessage(layers.BFDStateDown, 1, 0))
-	if !s.IsUp() {
-		t.Fatal("the verdict stayed down after an arrival")
-	}
+		// The next answered arrival is the up edge, whatever the negotiated
+		// state: the peer's packet arriving is the link carrying traffic.
+		s.ReceiveMessage(peerMessage(layers.BFDStateDown, 1, 0))
+		if !s.IsUp() {
+			t.Fatal("the verdict stayed down after an arrival")
+		}
+	})
 }
 
 // TestBFDVerdictSettles checks the hysteresis by construction: an
 // alternating arrive-and-silence stream — never three intervals of silence,
 // never a quiet verdict flip — settles with the link up and crosses neither
-// edge twice in a window.
+// edge twice in a window. The stream's intervals are fake-time sleeps in
+// the bubble.
 func TestBFDVerdictSettles(t *testing.T) {
-	s, _, clk := newTestSession(t)
-	flips := 0
-	last := s.IsUp()
-	for i := range 12 {
-		// Arrive, then two intervals of quiet: the silence never reaches
-		// the detect multiplier, so the verdict never goes down.
-		s.ReceiveMessage(peerMessage(layers.BFDStateUp, 1, 0))
-		clk.now = clk.now.Add(2 * BFDTransmissionInterval)
-		s.tick()
-		clk.now = clk.now.Add(BFDTransmissionInterval)
-		if got := s.IsUp(); got != last {
-			flips++
-			last = got
+	synctest.Test(t, func(t *testing.T) {
+		s, _ := newTestSession(t)
+		flips := 0
+		last := s.IsUp()
+		for i := range 12 {
+			// Arrive, then two intervals of quiet: the silence never reaches
+			// the detect multiplier, so the verdict never goes down.
+			s.ReceiveMessage(peerMessage(layers.BFDStateUp, 1, 0))
+			time.Sleep(2 * BFDTransmissionInterval)
+			s.tick()
+			time.Sleep(BFDTransmissionInterval)
+			if got := s.IsUp(); got != last {
+				flips++
+				last = got
+			}
+			if i == 0 && !s.IsUp() {
+				t.Fatal("the verdict dropped on sub-window silence")
+			}
 		}
-		if i == 0 && !s.IsUp() {
-			t.Fatal("the verdict dropped on sub-window silence")
+		if flips != 0 {
+			t.Fatalf("the verdict crossed an edge %d times on an arrive-and-silence stream", flips)
 		}
-	}
-	if flips != 0 {
-		t.Fatalf("the verdict crossed an edge %d times on an arrive-and-silence stream", flips)
-	}
+	})
 }
 
 // TestBFDStop checks the departed link: a stopped session records no
 // arrival and transmits nothing.
 func TestBFDStop(t *testing.T) {
-	s, w, _ := newTestSession(t)
+	s, w := newTestSession(t)
 	s.stop()
 	s.tick()
 	s.ReceiveMessage(peerMessage(layers.BFDStateUp, 1, 0))
@@ -303,7 +303,7 @@ func (s *BFDSession) localStateOf() layers.BFDState {
 // serialization the other way: the bytes the session builds decode as the
 // data plane decodes them, field for field.
 func TestBFDControlPacketRoundTripThroughWire(t *testing.T) {
-	s, w, _ := newTestSession(t)
+	s, w := newTestSession(t)
 	s.ReceiveMessage(peerMessage(layers.BFDStateInit, 0x11223344, 0))
 	s.tick()
 

@@ -22,8 +22,10 @@ const (
 // startNode brings up one CION node: data plane with an internal and an
 // external link, plus a registered discovery service. The link store seeds
 // the established link the data plane carries and discovery validates
-// against.
-func startNode(t *testing.T, ia addr.IA, internal, extLocal, extRemote, control string) *Discovery {
+// against. The changed hook, when set, is the discovery's arrival signal.
+func startNode(
+	t *testing.T, ia addr.IA, internal, extLocal, extRemote, control string, changed func(),
+) *Discovery {
 	t.Helper()
 	key := []byte("0123456789abcdef")
 
@@ -74,6 +76,7 @@ func startNode(t *testing.T, ia addr.IA, internal, extLocal, extRemote, control 
 		InternalAddr: internal,
 		Store:        store,
 		Interval:     discoveryGap,
+		Changed:      changed,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -93,19 +96,36 @@ func startNode(t *testing.T, ia addr.IA, internal, extLocal, extRemote, control 
 	return discovery
 }
 
-// waitNeighbor polls until the neighbor is learned or the timeout expires.
-func waitNeighbor(t *testing.T, d *Discovery) Neighbor {
-	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		if ns := d.Neighbors(); len(ns) == 1 {
-			for _, n := range ns {
-				return n
-			}
+// signalArrival returns the discovery change hook that signals one pending
+// arrival, dropping the rest — the first greeting tells the waiter all it
+// needs, and a dropped signal never blocks the receiver.
+func signalArrival(learned chan<- struct{}) func() {
+	return func() {
+		select {
+		case learned <- struct{}{}:
+		default:
 		}
-		time.Sleep(2 * discoveryGap)
 	}
-	t.Fatal("neighbor not discovered in time")
+}
+
+// waitNeighbor blocks until the node records a greeting — the arrival
+// channel's signal, delivered after the table learned from it — and returns
+// the neighbor it learned. No polling: the event is the readiness.
+func waitNeighbor(t *testing.T, learned <-chan struct{}, d *Discovery) Neighbor {
+	t.Helper()
+	select {
+	case <-learned:
+	case <-time.After(5 * time.Second):
+		t.Fatal("no greeting recorded in time")
+		return Neighbor{}
+	}
+	ns := d.Neighbors()
+	if len(ns) != 1 {
+		t.Fatalf("neighbors = %v, want the one learned", ns)
+	}
+	for _, n := range ns {
+		return n
+	}
 	return Neighbor{}
 }
 
@@ -140,10 +160,11 @@ func TestDiscoveryTwoNodes(t *testing.T) {
 	extA, extB := freeUDPAddr(t), freeUDPAddr(t)
 	ctrlA, ctrlB := freeUDPAddr(t), freeUDPAddr(t)
 
-	a := startNode(t, iaA, intA, extA, extB, ctrlA)
-	b := startNode(t, iaB, intB, extB, extA, ctrlB)
+	learnedA, learnedB := make(chan struct{}, 1), make(chan struct{}, 1)
+	a := startNode(t, iaA, intA, extA, extB, ctrlA, signalArrival(learnedA))
+	b := startNode(t, iaB, intB, extB, extA, ctrlB, signalArrival(learnedB))
 
-	nb := waitNeighbor(t, a)
+	nb := waitNeighbor(t, learnedA, a)
 	if nb.IA != iaB {
 		t.Fatalf("learned IA = %v, want %v", nb.IA, iaB)
 	}
@@ -158,7 +179,7 @@ func TestDiscoveryTwoNodes(t *testing.T) {
 		t.Fatalf("learned control address = %v, want %v", nb.ControlAddr, want)
 	}
 
-	na := waitNeighbor(t, b)
+	na := waitNeighbor(t, learnedB, b)
 	if na.IA != iaA {
 		t.Fatalf("learned IA = %v, want %v", na.IA, iaA)
 	}

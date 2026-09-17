@@ -7,7 +7,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"testing"
-	"time"
 
 	"github.com/scionproto/scion/pkg/addr"
 
@@ -198,8 +197,9 @@ func TestFileReconcileChanges(t *testing.T) {
 	}
 	updated := f.entry(t, fileIA).Updated
 
-	// An unchanged file writes nothing.
-	time.Sleep(10 * time.Millisecond)
+	// An unchanged file writes nothing — the comparison is the entry's own
+	// addresses against the file's, never a clock, so an immediate pass
+	// decides on equality alone.
 	if err := f.reconcile(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -284,7 +284,9 @@ func TestFileSilentPeerKeepsEntry(t *testing.T) {
 	if err := f.Seed(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	time.Sleep(20 * time.Millisecond)
+	// However long the silence, the vouch stands: the provider keeps no
+	// clock of its own, so the pass right after the seed is the same one
+	// any later pass would be.
 	if err := f.reconcile(context.Background()); err != nil {
 		t.Fatal(err)
 	}

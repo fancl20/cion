@@ -49,16 +49,6 @@ type EnrollmentConfig struct {
 	InspectInterval time.Duration
 	// Timeout bounds one enrollment attempt; zero uses the default.
 	Timeout time.Duration
-	// Now is the clock for validity decisions; nil uses time.Now. Tests
-	// advance it past a chain's validity to exercise re-enrollment.
-	Now func() time.Time
-}
-
-func (cfg EnrollmentConfig) now() time.Time {
-	if cfg.Now != nil {
-		return cfg.Now()
-	}
-	return time.Now()
 }
 
 func (cfg EnrollmentConfig) interval(v, def time.Duration) time.Duration {
@@ -158,7 +148,7 @@ func (cfg EnrollmentConfig) corePass(ctx context.Context) time.Duration {
 // newestChain returns the node's newest chain and its remaining validity; a
 // nil chain means none is valid.
 func newestChain(ctx context.Context, cfg EnrollmentConfig) ([]*x509.Certificate, time.Duration) {
-	chain, err := trust.NewestChain(ctx, cfg.DB, cfg.IA, cfg.now())
+	chain, err := trust.NewestChain(ctx, cfg.DB, cfg.IA, time.Now())
 	if err != nil {
 		slog.Error("Reading newest chain", "isd_as", cfg.IA, "err", err)
 		return nil, 0
@@ -166,7 +156,7 @@ func newestChain(ctx context.Context, cfg EnrollmentConfig) ([]*x509.Certificate
 	if chain == nil {
 		return nil, 0
 	}
-	return chain, chain[0].NotAfter.Sub(cfg.now())
+	return chain, chain[0].NotAfter.Sub(time.Now())
 }
 
 // selfIssue self-issues the core's chain through its issuer and stores it.
@@ -190,7 +180,7 @@ func selfIssue(ctx context.Context, cfg EnrollmentConfig) error {
 // logTRCValidity logs the pinned TRC's validity once it approaches expiry;
 // log only, since a new base TRC means redeploying (ADR-0003).
 func logTRCValidity(ctx context.Context, cfg EnrollmentConfig) {
-	now := cfg.now()
+	now := time.Now()
 	trc, err := cfg.DB.SignedTRC(ctx, cppki.TRCID{ISD: cfg.IA.ISD(), Base: 1, Serial: 1})
 	if err != nil || trc.IsZero() {
 		return

@@ -53,7 +53,6 @@ type BFDSession struct {
 	interval    time.Duration
 	detectMult  uint8
 	macFactory  func() hash.Hash
-	now         func() time.Time
 	transmitted atomic.Uint64
 
 	// writer is the link's own socket, attached at construction and
@@ -87,7 +86,6 @@ func newBFDSession(
 	macFactory func() hash.Hash,
 	interval time.Duration,
 	detectMult uint8,
-	now func() time.Time,
 	ifID uint16,
 	neighbor addr.IA,
 	localHost, remoteHost netip.Addr,
@@ -97,23 +95,19 @@ func newBFDSession(
 	if _, err := rand.Read(disc); err != nil {
 		panic("Error while generating BFD discriminator")
 	}
-	if now == nil {
-		now = time.Now
-	}
 	s := &BFDSession{
 		ifID:       ifID,
 		myDisc:     binary.BigEndian.Uint32(disc) | 1,
 		interval:   interval,
 		detectMult: detectMult,
 		macFactory: macFactory,
-		now:        now,
 		localState: layers.BFDStateDown,
 		localIA:    localIA,
 		neighborIA: neighbor,
 		localHost:  localHost,
 		remoteHost: remoteHost,
 	}
-	s.lastRX = s.now()
+	s.lastRX = time.Now()
 	s.up.Store(true)
 	return s
 }
@@ -179,7 +173,7 @@ func (s *BFDSession) ReceiveMessage(msg *layers.BFD) {
 	}
 	s.remoteState = msg.State
 	s.advance(msg.State)
-	s.lastRX = s.now()
+	s.lastRX = time.Now()
 	if !s.up.Swap(true) {
 		slog.Info("Link up", "interface", s.ifID, "neighbor", s.neighborIA)
 	}
@@ -224,7 +218,7 @@ func (s *BFDSession) tick() {
 	if s.stopped {
 		return
 	}
-	now := s.now()
+	now := time.Now()
 	if now.Sub(s.lastRX) >= time.Duration(s.detectMult)*s.interval {
 		if s.localState != layers.BFDStateDown ||
 			s.diagnostic != layers.BFDDiagnosticTimeExpired {

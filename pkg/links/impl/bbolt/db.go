@@ -106,8 +106,6 @@ func unmarshalStored(raw []byte, key uint16) (*links.Link, error) {
 
 type bboltDB struct {
 	db *bbolt.DB
-	// now is the clock; tests advance it past the interface ID holdback.
-	now func() time.Time
 }
 
 // New opens the link database at path, creating it if needed.
@@ -127,7 +125,7 @@ func New(path string, opts *bbolt.Options) (links.DB, error) {
 		db.Close() //nolint:errcheck
 		return nil, err
 	}
-	return &bboltDB{db: db, now: time.Now}, nil
+	return &bboltDB{db: db}, nil
 }
 
 // Insert stores a new entry: an entry carrying no interface ID is allocated
@@ -138,7 +136,7 @@ func (b *bboltDB) Insert(ctx context.Context, l *links.Link) error {
 	return b.db.Update(func(tx *bbolt.Tx) error {
 		linksB := tx.Bucket([]byte(linksBucket))
 		metaB := tx.Bucket([]byte(metaBucket))
-		held, err := heldIfIDs(linksB, b.now())
+		held, err := heldIfIDs(linksB, time.Now())
 		if err != nil {
 			return err
 		}
@@ -155,7 +153,7 @@ func (b *bboltDB) Insert(ctx context.Context, l *links.Link) error {
 		} else if held[id] {
 			return fmt.Errorf("interface ID %d is held", id)
 		}
-		now := b.now()
+		now := time.Now()
 		l.IfID = id
 		l.Created = now
 		l.Updated = now
@@ -176,7 +174,7 @@ func (b *bboltDB) Update(ctx context.Context, l *links.Link) error {
 		if linksB.Get(key) == nil {
 			return fmt.Errorf("no stored link with interface ID %d", l.IfID)
 		}
-		l.Updated = b.now()
+		l.Updated = time.Now()
 		value, err := marshalStored(l)
 		if err != nil {
 			return err

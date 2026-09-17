@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/netip"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"connectrpc.com/connect"
@@ -67,42 +68,46 @@ func linkEntry(t *testing.T, svc *LinkService, peer addr.IA) *links.Link {
 
 // TestLinkServiceAdmits checks the in-band establishment: the authenticated
 // peer's link is recorded as established with both sides' addresses, the
-// reply carrying the acceptor's.
+// reply carrying the acceptor's. The rate cap reads the clock, so the test
+// runs in a bubble: the pause past the interval is a fake-time sleep,
+// instant and never a real-time race.
 func TestLinkServiceAdmits(t *testing.T) {
-	// The rate cap is loose here: the re-request below is a refresh, not a
-	// burst.
-	svc := newLinkService(t, func(s *LinkService) { s.MinInterval = time.Millisecond })
-	reply, err := linkRequest(context.Background(), svc, linkIA, "127.0.0.1:4242", 9)
-	if err != nil {
-		t.Fatal(err)
-	}
-	entry := linkEntry(t, svc, linkIA)
-	if entry.State != links.StateEstablished {
-		t.Errorf("state = %v, want established", entry.State)
-	}
-	if entry.Remote != netip.MustParseAddrPort("127.0.0.1:4242") || entry.RemoteIfID != 9 {
-		t.Errorf("requester side = %v/%d, want the request's", entry.Remote, entry.RemoteIfID)
-	}
-	if got := netip.MustParseAddrPort(reply.LocalAddr); got != entry.Local {
-		t.Errorf("reply address = %v, want the entry's %v", got, entry.Local)
-	}
-	if reply.IfId != uint32(entry.IfID) {
-		t.Errorf("reply interface ID = %d, want the entry's %d", reply.IfId, entry.IfID)
-	}
+	synctest.Test(t, func(t *testing.T) {
+		// The rate cap is loose here: the re-request below is a refresh, not a
+		// burst.
+		svc := newLinkService(t, func(s *LinkService) { s.MinInterval = time.Millisecond })
+		reply, err := linkRequest(context.Background(), svc, linkIA, "127.0.0.1:4242", 9)
+		if err != nil {
+			t.Fatal(err)
+		}
+		entry := linkEntry(t, svc, linkIA)
+		if entry.State != links.StateEstablished {
+			t.Errorf("state = %v, want established", entry.State)
+		}
+		if entry.Remote != netip.MustParseAddrPort("127.0.0.1:4242") || entry.RemoteIfID != 9 {
+			t.Errorf("requester side = %v/%d, want the request's", entry.Remote, entry.RemoteIfID)
+		}
+		if got := netip.MustParseAddrPort(reply.LocalAddr); got != entry.Local {
+			t.Errorf("reply address = %v, want the entry's %v", got, entry.Local)
+		}
+		if reply.IfId != uint32(entry.IfID) {
+			t.Errorf("reply interface ID = %d, want the entry's %d", reply.IfId, entry.IfID)
+		}
 
-	// A re-request refreshes the requester's addresses without a new
-	// interface ID.
-	time.Sleep(2 * time.Millisecond)
-	reply2, err := linkRequest(context.Background(), svc, linkIA, "127.0.0.1:4243", 10)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if reply2.IfId != reply.IfId {
-		t.Error("a re-establishment allocated a second interface ID")
-	}
-	if entry := linkEntry(t, svc, linkIA); entry.RemoteIfID != 10 {
-		t.Errorf("the re-request did not refresh the remote interface ID: %v", entry)
-	}
+		// A re-request refreshes the requester's addresses without a new
+		// interface ID.
+		time.Sleep(2 * time.Millisecond)
+		reply2, err := linkRequest(context.Background(), svc, linkIA, "127.0.0.1:4243", 10)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if reply2.IfId != reply.IfId {
+			t.Error("a re-establishment allocated a second interface ID")
+		}
+		if entry := linkEntry(t, svc, linkIA); entry.RemoteIfID != 10 {
+			t.Errorf("the re-request did not refresh the remote interface ID: %v", entry)
+		}
+	})
 }
 
 // TestLinkServiceRefusals checks the admission policy: a channel that
