@@ -249,3 +249,65 @@ func TestMeshBindEndpointRoundTrip(t *testing.T) {
 		t.Error("two peers share an endpoint digest")
 	}
 }
+
+// TestMeshSocketDropsPathOnSignal checks the signal's prompting: the
+// interface-down cache's quoted destination names the peer whose cached
+// path just failed; the bind drops exactly that path, and the next send
+// re-resolves through the filtered composition.
+func TestMeshSocketDropsPathOnSignal(t *testing.T) {
+	core, leaf := addr.MustIAFrom(20, 0xff0000000061), addr.MustIAFrom(20, 0xff0000000062)
+	fresh := upSegmentAt(t, time.Now(), core, leaf)
+	db := &memDB{segs: []*pathdb.Segment{fresh}}
+	socket, counting := testMeshSocket(t, db)
+
+	peer := &meshEndpoint{addr: scion.Addr{
+		IA:   core,
+		Addr: netip.MustParseAddrPort("127.0.0.1:30045"),
+	}}
+	if err := socket.send(peer, [][]byte{[]byte("datagram")}); err != nil {
+		t.Fatal(err)
+	}
+	queries := counting.queries
+	socket.mtx.Lock()
+	cached := socket.paths[core]
+	socket.mtx.Unlock()
+	if cached == nil {
+		t.Fatal("the send cached no path")
+	}
+
+	// The signal's quote names the destination; the bind drops its path.
+	socket.dropPathOf(scion.InterfaceDownSignal{
+		IA: leaf, IfID: 1, Dst: core,
+	})
+	socket.mtx.Lock()
+	_, kept := socket.paths[core]
+	socket.mtx.Unlock()
+	if kept {
+		t.Fatal("the quoted destination's path survived the signal")
+	}
+	if err := socket.send(peer, [][]byte{[]byte("datagram")}); err != nil {
+		t.Fatal(err)
+	}
+	if counting.queries != queries+1 {
+		t.Errorf("path queries = %d after the drop and resend, want %d (the re-resolution)",
+			counting.queries, queries+1)
+	}
+
+	// A signal naming another destination drops exactly that one.
+	if err := socket.send(peer, [][]byte{[]byte("datagram")}); err != nil {
+		t.Fatal(err)
+	}
+	before := socket.cnt.sentDatagrams.Load()
+	socket.dropPathOf(scion.InterfaceDownSignal{
+		IA: leaf, IfID: 1, Dst: addr.MustIAFrom(20, 0xff0000000099),
+	})
+	socket.mtx.Lock()
+	_, kept = socket.paths[core]
+	socket.mtx.Unlock()
+	if !kept {
+		t.Error("a signal naming another destination dropped this peer's path")
+	}
+	if socket.cnt.sentDatagrams.Load() != before {
+		t.Error("a signal counted a send")
+	}
+}

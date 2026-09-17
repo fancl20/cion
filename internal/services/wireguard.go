@@ -104,6 +104,7 @@ func (n *node) parseWireguardConfig(wg *ConfigWireguard) (wireguard.Config, erro
 		NewConn:       func() (*scion.Conn, error) { return n.scionConn(0) },
 		RegisterSvc:   n.registerSvc,
 		UnregisterSvc: n.unregisterSvc,
+		InterfaceDown: n.ifDown,
 	}
 	if n.ident.asType == trust.ASTypeCore {
 		// The core serves the directory from its own store, following the

@@ -191,8 +191,16 @@ func (u *UDPProvider) newConnectedLink(
 		egressQ:    queue,
 		metrics:    metrics,
 		bfdSession: bfd,
+		raw:        c,
 		seed:       makeHashSeed(),
 		ifID:       ifID,
+	}
+	if bfd != nil {
+		// The link hands the session its writer for prebuilt packets: a send
+		// beneath the egress queue and the validation above it. Every
+		// generation re-attaches its own writer this way, the session's state
+		// and timers untouched across the swap.
+		bfd.SetRawWriter(el)
 	}
 	uc := &udpConnection{
 		conn:         c,
@@ -503,8 +511,11 @@ type connectedLink struct {
 	metrics    *InterfaceMetrics
 	pool       PacketPool
 	bfdSession Session
-	seed       uint32
-	ifID       uint16
+	// raw is the link's own socket: the writer a BFD session sends its
+	// prebuilt control packets through, beneath the egress queue.
+	raw  *udpBatchConn
+	seed uint32
+	ifID uint16
 }
 
 func (l *connectedLink) start(
@@ -538,7 +549,18 @@ func (l *connectedLink) BFDSession() Session {
 }
 
 func (l *connectedLink) IsUp() bool {
-	return true // BFD is not supported yet.
+	if l.bfdSession == nil {
+		return true
+	}
+	return l.bfdSession.IsUp()
+}
+
+// WriteRaw sends a prebuilt packet on the link's own socket, beneath the
+// forwarding queue — the BFD session's send path, which must keep
+// transmitting while the link is down.
+func (l *connectedLink) WriteRaw(b []byte) error {
+	_, err := l.raw.Write(b)
+	return err
 }
 
 // Resolve should not be useful on an external link so we don't implement it.
@@ -911,6 +933,12 @@ func (c *udpBatchConn) ReadBatch(msgs []ipv4.Message) (int, error) {
 		return c.pc4.ReadBatch(msgs, syscall.MSG_WAITFORONE)
 	}
 	return c.pc6.ReadBatch(msgs, syscall.MSG_WAITFORONE)
+}
+
+// Write sends one packet on the connected socket — the BFD session's send
+// path, safe to call beside the forwarder's batched writes.
+func (c *udpBatchConn) Write(b []byte) (int, error) {
+	return c.conn.Write(b)
 }
 
 func (c *udpBatchConn) WriteBatch(msgs []ipv4.Message) (int, error) {

@@ -72,6 +72,7 @@ type Beaconer struct {
 	db           pathdb.DB
 	links        func() map[uint16]addr.IA
 	neighbors    func() map[uint16]Neighbor
+	verdicts     func() map[uint16]bool
 	sender       SegmentSender
 	coreRoute    func() *scion.Addr
 	core         bool
@@ -107,9 +108,14 @@ type BeaconerConfig struct {
 	// beaconer reads it fresh each pass, so a node may start with zero
 	// links.
 	Links func() map[uint16]addr.IA
-	// Neighbors returns the currently discovered neighbors; nil disables
-	// sending beacons (reception still works).
+	// Neighbors returns the discovered neighbors — identity, however stale
+	// their greetings; the endpoint addresses beacons are addressed with
+	// come from it. Nil disables sending beacons (reception still works).
 	Neighbors func() map[uint16]Neighbor
+	// Verdicts returns the health monitor's link verdicts by interface ID;
+	// a down interface originates and propagates nothing, resuming with the
+	// verdict's up edge. Nil treats every link as up.
+	Verdicts func() map[uint16]bool
 	// Sender sends beacon and registration RPCs over the SCION-native
 	// channel.
 	Sender SegmentSender
@@ -161,6 +167,7 @@ func NewBeaconer(cfg BeaconerConfig) (*Beaconer, error) {
 		db:           cfg.DB,
 		links:        cfg.Links,
 		neighbors:    cfg.Neighbors,
+		verdicts:     cfg.Verdicts,
 		sender:       cfg.Sender,
 		coreRoute:    cfg.CoreRoute,
 		core:         cfg.Core,
@@ -169,6 +176,16 @@ func NewBeaconer(cfg BeaconerConfig) (*Beaconer, error) {
 		sendTimeout:  sendTimeout,
 		now:          now,
 	}, nil
+}
+
+// linkUp reports the interface's verdict; a beaconer without the monitor's
+// verdicts treats every link as up.
+func (b *Beaconer) linkUp(ifID uint16) bool {
+	if b.verdicts == nil {
+		return true
+	}
+	up, ok := b.verdicts()[ifID]
+	return !ok || up
 }
 
 // linkTable snapshots the links; a nil source serves none.
@@ -411,6 +428,9 @@ func (b *Beaconer) coreASes() map[addr.IA]bool {
 func (b *Beaconer) originateOnce(ctx context.Context) {
 	neighbors := b.neighbors()
 	for ifID, neighborIA := range b.linkTable() {
+		if !b.linkUp(ifID) {
+			continue // a down interface originates nothing
+		}
 		pcb, err := segment.NewPCB(b.now())
 		if err != nil {
 			slog.Error("Creating beacon", "err", err)
@@ -448,6 +468,9 @@ func (b *Beaconer) propagateOnce(ctx context.Context) {
 			}
 			if cores[neighborIA] {
 				continue
+			}
+			if !b.linkUp(egress) {
+				continue // a down interface propagates nothing
 			}
 			peer, ok := b.neighborEndpoint(neighbors, egress, neighborIA)
 			if !ok {

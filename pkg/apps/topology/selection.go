@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/scionproto/scion/pkg/addr"
-	spath "github.com/scionproto/scion/pkg/slayers/path/scion"
 
 	"github.com/fancl20/cion/pkg/controlplane"
 	"github.com/fancl20/cion/pkg/dataplane"
@@ -71,9 +70,16 @@ type SelectionConfig struct {
 	Store links.DB
 	// Directory snapshots the node directory's entries.
 	Directory func() []DirectoryEntry
-	// Neighbors returns the greeting-fresh neighbors by interface ID; a
-	// neighbor absent from it has timed out and counts as infinitely slow.
+	// Neighbors returns the neighbors learned from greetings by interface
+	// ID, with their LastSeen — identity, however stale the arrivals. The
+	// one recency derivation the loop makes of it is the candidate sweep's
+	// grace, which reads LastSeen directly.
 	Neighbors func() map[uint16]controlplane.Neighbor
+	// Verdicts returns the health monitor's link verdicts by interface ID:
+	// an established neighbor whose verdict is down counts as infinitely
+	// slow for the window whatever its last sample said, and the redundancy
+	// floor counts up links only. Nil treats every link as up.
+	Verdicts func() map[uint16]bool
 	// Provider resolves the freshest path to a candidate — the baseline.
 	Provider *scion.PathProvider
 	// Conn carries the SCMP echo probes; its port is the reply address.
@@ -137,7 +143,7 @@ type selection struct {
 	streaks map[addr.IA]*peerStreak
 	// probeFn and establishFn override the measurement and the
 	// establishment in tests; nil uses the real ones.
-	probeFn     func(context.Context, DirectoryEntry) measurement
+	probeFn     func(context.Context, DirectoryEntry, *links.Link) measurement
 	establishFn func(context.Context, DirectoryEntry, string) bool
 }
 
@@ -148,8 +154,14 @@ type peerStreak struct {
 
 // measurement is one peer's probe sample.
 type measurement struct {
-	direct time.Duration // rendezvous echo median; zero when unreachable
-	path   time.Duration // SCMP echo median; zero when no path answered
+	// direct is the direct side's median: the SCMP echo over the one-hop
+	// path for an established neighbor, the rendezvous echo for a
+	// candidate — one instrument over two carriers, each reaching where
+	// the other cannot. Zero when unreachable.
+	direct time.Duration
+	// path is the baseline: the SCMP echo median over the freshest
+	// resolved path; zero when no path answered.
+	path time.Duration
 }
 
 func (s *selection) now() time.Time {
@@ -175,19 +187,21 @@ func (s *selection) pass(ctx context.Context) {
 	directory := s.directory()
 
 	// Probe every peer the directory names — neighbor and candidate alike
-	// (ADR-0006: the comparator never stops at admission).
+	// (ADR-0006: the comparator never stops at admission) — each by its own
+	// carrier: the neighbor's direct side over the one-hop path, the
+	// candidate's by rendezvous echo.
 	samples := make(map[addr.IA]measurement)
 	candidates := make([]DirectoryEntry, 0, len(directory))
 	for _, e := range directory {
 		if e.IA.Equal(s.cfg.IA) || e.Private {
 			continue
 		}
-		if _, ok := neighbors[e.IA]; ok {
-			samples[e.IA] = s.measure(ctx, e)
+		if l, ok := neighbors[e.IA]; ok {
+			samples[e.IA] = s.measure(ctx, e, l)
 			continue
 		}
 		candidates = append(candidates, e)
-		samples[e.IA] = s.measure(ctx, e)
+		samples[e.IA] = s.measure(ctx, e, nil)
 	}
 	// Damp the promotions: a candidate is promoted on sustained evidence
 	// only, a flapping one never.
@@ -209,7 +223,9 @@ func (s *selection) pass(ctx context.Context) {
 // peers that produced no verified beacon or enrollment within the window
 // retire — unless their greetings still arrive, for a peer that keeps
 // greeting is alive and trying, exactly the joiner whose enrollment is
-// still in flight; it retires when it goes silent.
+// still in flight; it retires when it goes silent. The grace reads LastSeen
+// directly — a candidate has no serving link and no session, and the
+// greeting stream is the one evidence of trying it offers.
 func (s *selection) sweep(ctx context.Context, entries []*links.Link) bool {
 	window := s.cfg.Window
 	if window == 0 {
@@ -217,7 +233,11 @@ func (s *selection) sweep(ctx context.Context, entries []*links.Link) bool {
 	}
 	changed := false
 	now := s.now()
-	fresh := s.freshNeighbors()
+	neighbors := s.freshNeighbors()
+	greeted := func(l *links.Link) bool {
+		n, ok := neighbors[l.IfID]
+		return ok && now.Sub(n.LastSeen) < window
+	}
 	for _, l := range entries {
 		if l.State != links.StateCandidate {
 			continue
@@ -233,7 +253,7 @@ func (s *selection) sweep(ctx context.Context, entries []*links.Link) bool {
 				"neighbor", l.NeighborIA, "interface", l.IfID)
 			changed = true
 		} else if now.Sub(l.Created) > window {
-			if _, greeted := fresh[l.IfID]; greeted {
+			if greeted(l) {
 				continue
 			}
 			s.retire(ctx, l, "candidate window elapsed without a proven peer")
@@ -254,15 +274,28 @@ func (s *selection) neighbors(entries []*links.Link) map[addr.IA]*links.Link {
 	return out
 }
 
-// liveNeighbors counts the established entries.
+// liveNeighbors counts the established entries whose verdict is up — the
+// redundancy floor counts up links only, so established-but-down entries
+// satisfy no floor and a node whose every neighbor went down promotes from
+// the directory rather than resting on verdicts.
 func (s *selection) liveNeighbors(entries []*links.Link) int {
 	n := 0
 	for _, l := range entries {
-		if l.State == links.StateEstablished {
+		if l.State == links.StateEstablished && s.linkUp(l.IfID) {
 			n++
 		}
 	}
 	return n
+}
+
+// linkUp reports the interface's verdict; a loop without the monitor's
+// verdicts treats every link as up.
+func (s *selection) linkUp(ifID uint16) bool {
+	if s.cfg.Verdicts == nil {
+		return true
+	}
+	up, ok := s.cfg.Verdicts()[ifID]
+	return !ok || up
 }
 
 // directory snapshots the node directory; nil Directory serves none.
@@ -273,13 +306,15 @@ func (s *selection) directory() []DirectoryEntry {
 	return s.cfg.Directory()
 }
 
-// measure runs the window's probe of one peer, through the test seam when
-// set.
-func (s *selection) measure(ctx context.Context, e DirectoryEntry) measurement {
+// measure runs the window's probe of one peer — a nil neighbor entry means
+// a candidate — through the test seam when set.
+func (s *selection) measure(
+	ctx context.Context, e DirectoryEntry, l *links.Link,
+) measurement {
 	if s.probeFn != nil {
-		return s.probeFn(ctx, e)
+		return s.probeFn(ctx, e, l)
 	}
-	return s.probe(ctx, e)
+	return s.probe(ctx, e, l)
 }
 
 // establish lands a promotion, through the test seam when set.
@@ -290,34 +325,46 @@ func (s *selection) establish(ctx context.Context, e DirectoryEntry, why string)
 	return s.establishLink(ctx, e, why)
 }
 
-// probe measures one peer: a run of rendezvous echoes against a run of SCMP
-// echoes over the freshest resolved path. The echo claims the zero ISD-AS —
-// a probe mints no entry a candidate sweep could mistake for a peer, and no
-// identity the acceptor would admit against an allowlist — deduplicated by
-// the control address it claims.
-func (s *selection) probe(ctx context.Context, e DirectoryEntry) measurement {
+// probe measures one peer by the directory's own distinction: an
+// established neighbor's direct side by SCMP echo over the one-hop path —
+// the conn resolving the egress interface from the link table as every
+// one-hop write does, the responder in the peer's core answering on the
+// reversed arrival path — and a candidate's (a demoted neighbor included)
+// by the rendezvous echo that reaches where no path and no interface exist.
+// The baseline is the same SCMP echo instrument over the freshest resolved
+// path: one destination, two routes, the same median-of-runs discipline.
+// The echo claims the zero ISD-AS — a probe mints no entry a candidate
+// sweep could mistake for a peer, and no identity the acceptor would admit
+// against an allowlist — deduplicated by the control address it claims.
+func (s *selection) probe(ctx context.Context, e DirectoryEntry, l *links.Link) measurement {
 	var m measurement
-	if _, rtt, err := RendezvousEcho(ctx, s.cfg.ControlAddr.Addr(),
+	if l != nil {
+		m.direct = s.echoRTT(&scion.Addr{
+			IA:   e.IA,
+			Addr: netip.AddrPortFrom(e.ControlAddr.Addr(), dataplane.EndhostPort),
+		})
+	} else if _, rtt, err := RendezvousEcho(ctx, s.cfg.ControlAddr.Addr(),
 		e.RendezvousAddr, addr.IA(0), s.cfg.ControlAddr); err == nil {
 		m.direct = rtt
 	}
 	probeCtx, cancel := context.WithTimeout(ctx, ProbeWait*ProbeRuns+time.Second)
 	defer cancel()
 	if path, err := s.cfg.Provider.Path(probeCtx, e.IA); err == nil {
-		m.path = s.pathRTT(e, path)
+		m.path = s.echoRTT(&scion.Addr{
+			IA:   e.IA,
+			Addr: netip.AddrPortFrom(e.ControlAddr.Addr(), dataplane.EndhostPort),
+			Path: path,
+		})
 	}
 	return m
 }
 
-// pathRTT takes the median SCMP echo round trip over the path.
-func (s *selection) pathRTT(e DirectoryEntry, path *spath.Decoded) time.Duration {
+// echoRTT takes the median SCMP echo round trip to the destination — over
+// the one-hop path the conn resolves for a neighbor, over the supplied path
+// for the baseline. Zero without a probe conn.
+func (s *selection) echoRTT(dst *scion.Addr) time.Duration {
 	if s.cfg.Conn == nil {
 		return 0
-	}
-	dst := &scion.Addr{
-		IA:   e.IA,
-		Addr: netip.AddrPortFrom(e.ControlAddr.Addr(), dataplane.EndhostPort),
-		Path: path,
 	}
 	var rtts []time.Duration
 	for seq := uint16(0); seq < ProbeRuns; seq++ {
@@ -343,10 +390,11 @@ func (s *selection) pathRTT(e DirectoryEntry, path *spath.Decoded) time.Duration
 	return median(rtts)
 }
 
-// promote applies the promotion rules: below the floor any reachable
-// candidate is promoted outright; above it a candidate must beat its path
-// baseline by the promotion ratio across consecutive windows; at the cap it
-// must also beat the worst neighbor by the same ratio to displace it.
+// promote applies the promotion rules: below the floor — counting up links
+// only — any reachable candidate is promoted outright; above it a candidate
+// must beat its path baseline by the promotion ratio across consecutive
+// windows; at the cap it must also beat the worst neighbor by the same
+// ratio to displace it.
 func (s *selection) promote(
 	ctx context.Context,
 	neighbors map[addr.IA]*links.Link,
@@ -358,7 +406,12 @@ func (s *selection) promote(
 	if cap == 0 {
 		cap = MaxNeighbors
 	}
-	live := len(neighbors)
+	live := 0
+	for _, l := range neighbors {
+		if s.linkUp(l.IfID) {
+			live++
+		}
+	}
 	// Rank the candidates: reachable first, fastest first.
 	var reachable []DirectoryEntry
 	for _, e := range candidates {
@@ -422,9 +475,12 @@ func (s *selection) promote(
 	return promoted
 }
 
-// demote applies the demotion rules: a neighbor whose direct link durably
-// loses to its path baseline — or whose greetings have timed out, counting as
-// infinitely slow — retires, never below the floor.
+// demote applies the demotion rules: a neighbor whose verdict is down —
+// infinitely slow whatever its last sample said — or whose direct link
+// durably loses to its path baseline retires, never below the floor. The
+// floor here counts established entries — a bad link is still a link, held
+// for its reversible verdict to recover — while the promotion floor counts
+// up links only; the two readings are each honored for their own question.
 func (s *selection) demote(
 	ctx context.Context,
 	entries []*links.Link,
@@ -446,7 +502,6 @@ func (s *selection) demote(
 		}
 		return false
 	}
-	fresh := s.freshNeighbors()
 	demoted := false
 	for _, l := range entries {
 		if l.State != links.StateEstablished {
@@ -459,8 +514,8 @@ func (s *selection) demote(
 		}
 		m := samples[l.NeighborIA]
 		bad := false
-		if _, greeted := fresh[l.IfID]; !greeted {
-			bad = true // greetings timed out: infinitely slow
+		if !s.linkUp(l.IfID) {
+			bad = true // the verdict is down: infinitely slow
 		} else if m.direct > 0 && m.path > 0 && m.direct > ratioOf(m.path, DemotionRatio) {
 			bad = true
 		}
@@ -498,13 +553,17 @@ func (s *selection) streak(ia addr.IA) *peerStreak {
 }
 
 // worstNeighbor returns the neighbor with the slowest direct sample — no
-// sample counts as infinitely slow.
+// sample counts as infinitely slow, and a down neighbor more so: the
+// verdict outranks however recent its last sample was.
 func (s *selection) worstNeighbor(
 	neighbors map[addr.IA]*links.Link,
 	samples map[addr.IA]measurement,
 ) *links.Link {
 
 	slow := func(l *links.Link) time.Duration {
+		if !s.linkUp(l.IfID) {
+			return time.Duration(math.MaxInt64)
+		}
 		if d := samples[l.NeighborIA].direct; d > 0 {
 			return d
 		}
@@ -519,7 +578,8 @@ func (s *selection) worstNeighbor(
 	return worst
 }
 
-// freshNeighbors returns the greeting-fresh neighbors by interface ID.
+// freshNeighbors returns the neighbors learned from greetings by interface
+// ID, with their LastSeen — identity for whoever asks.
 func (s *selection) freshNeighbors() map[uint16]controlplane.Neighbor {
 	if s.cfg.Neighbors == nil {
 		return nil
@@ -544,9 +604,11 @@ func (s *selection) retire(ctx context.Context, l *links.Link, why string) bool 
 }
 
 // establish lands a promoted candidate: in-band over the composed path when
-// one resolves — the authenticated request — else the rendezvous exchange a
-// joiner with no paths uses, whose entries the candidate sweep settles on the
-// peer's evidence.
+// one resolves and answers — the authenticated request — else the rendezvous
+// exchange a joiner with no paths uses, whose entries the candidate sweep
+// settles on the peer's evidence. A path that resolves but carries nothing —
+// the composed route crossing the very link that went down — fails the
+// in-band request, and the rendezvous establishment takes over.
 func (s *selection) establishLink(ctx context.Context, e DirectoryEntry, why string) bool {
 	entry, err := s.ownEntry(ctx, e)
 	if err != nil {
@@ -566,28 +628,29 @@ func (s *selection) establishLink(ctx context.Context, e DirectoryEntry, why str
 		defer rpcCancel()
 		reply, err := s.cfg.Link.Link(rpcCtx, peer, entry.Local, entry.IfID)
 		if err != nil {
+			// The path resolved but did not answer; the rendezvous exchange
+			// below is the establishment that reaches the peer regardless.
 			slog.Warn("The in-band link request failed", "neighbor", e.IA, "err", err)
-			return false
-		}
-		remote, err := netip.ParseAddrPort(reply.LocalAddr)
-		if err != nil {
+		} else if remote, err := netip.ParseAddrPort(reply.LocalAddr); err != nil {
 			slog.Error("The link reply carries a malformed address", "err", err)
 			return false
+		} else {
+			entry.Remote = remote
+			entry.RemoteIfID = uint16(reply.IfId)
+			entry.State = links.StateEstablished
+			if err := s.cfg.Store.Update(ctx, entry); err != nil {
+				slog.Error("Establishing a link", "neighbor", e.IA, "err", err)
+				return false
+			}
+			s.streak(e.IA).promote = 0
+			slog.Info("Link established", "neighbor", e.IA, "why", why,
+				"interface", entry.IfID, "local", entry.Local, "remote", entry.Remote)
+			return true
 		}
-		entry.Remote = remote
-		entry.RemoteIfID = uint16(reply.IfId)
-		entry.State = links.StateEstablished
-		if err := s.cfg.Store.Update(ctx, entry); err != nil {
-			slog.Error("Establishing a link", "neighbor", e.IA, "err", err)
-			return false
-		}
-		s.streak(e.IA).promote = 0
-		slog.Info("Link established", "neighbor", e.IA, "why", why,
-			"interface", entry.IfID, "local", entry.Local, "remote", entry.Remote)
-		return true
 	}
-	// No composed path: the rendezvous exchange is the establishment, the
-	// entries starting as candidates the peer's evidence settles.
+	// No composed path, or one that did not answer: the rendezvous exchange
+	// is the establishment, the entries starting as candidates the peer's
+	// evidence settles.
 	reply, _, err := RendezvousEcho(ctx, s.cfg.LinkHost, e.RendezvousAddr,
 		s.cfg.IA, entry.Local)
 	if err != nil {

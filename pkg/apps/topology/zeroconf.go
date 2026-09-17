@@ -360,6 +360,7 @@ func (z *Zeroconf) selectionConfig() SelectionConfig {
 		Store:       z.pcs.Store,
 		Directory:   z.directory.Entries,
 		Neighbors:   z.pcs.Neighbors,
+		Verdicts:    z.pcs.Verdicts,
 		Provider:    z.pcs.Provider,
 		Conn:        z.probeConn,
 		ControlAddr: netip.AddrPortFrom(z.cfg.ControlHost, controlplane.DiscoveryPort),

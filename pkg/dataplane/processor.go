@@ -4,6 +4,8 @@ import (
 	"crypto/subtle"
 	"fmt"
 	"hash"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gopacket/gopacket"
@@ -23,7 +25,42 @@ const (
 	// e2eAuthHdrLen is the length in bytes of added information when a SCMP packet
 	// needs to be authenticated: 16B (e2e.option.Len()) + 16B (CMAC_tag.Len()).
 	e2eAuthHdrLen = 32
+
+	// notifyCapPerSecond bounds the SCMP interface-down notifications the
+	// slow path emits per interface per second — the rate limiting the data
+	// plane draft's Section 6.2 asks of the notifications it permits. The
+	// packet itself is dropped either way; over-cap ones merely take no
+	// notification with them.
+	notifyCapPerSecond = 10
 )
+
+// scmpNotifyLimiter rate-caps the SCMP notifications emitted per interface:
+// a fixed one-second window and a count packed into one atomic word, so the
+// egress-down check stays lock-free on the fast path it guards.
+type scmpNotifyLimiter struct {
+	windows sync.Map // ifID uint16 -> *atomic.Uint64 (second<<20 | count)
+}
+
+// allow reports whether one more notification on the interface fits the cap.
+func (l *scmpNotifyLimiter) allow(ifID uint16, now time.Time) bool {
+	vAny, ok := l.windows.Load(ifID)
+	if !ok {
+		vAny, _ = l.windows.LoadOrStore(ifID, new(atomic.Uint64))
+	}
+	v := vAny.(*atomic.Uint64)
+	sec := now.Unix()
+	for {
+		old := v.Load()
+		second, count := int64(old>>20), int32(old&(1<<20-1))
+		if second != sec {
+			count = 0
+		}
+		count++
+		if v.CompareAndSwap(old, uint64(sec)<<20|uint64(count)) {
+			return count <= notifyCapPerSecond
+		}
+	}
+}
 
 func newPacketProcessor(d *DataPlane) *scionPacketProcessor {
 	p := &scionPacketProcessor{
@@ -524,6 +561,11 @@ func (p *scionPacketProcessor) validateEgressUp() disposition {
 	egressID := p.pkt.egress
 	egressLink := p.d.interfaces[egressID]
 	if !egressLink.IsUp() {
+		if !p.d.scmpCap.allow(egressID, time.Now()) {
+			// Over the per-interface cap: the notification is dropped with
+			// the packet (Section 6.2's rate limiting).
+			return errorDiscard("error", errSCMPNotifyCapExceeded)
+		}
 		if egressLink.Scope() != External {
 			p.pkt.slowPathRequest = slowPathRequest{
 				spType: slowPathType(slayers.SCMPTypeInternalConnectivityDown),

@@ -112,6 +112,12 @@ type Config struct {
 	RegisterSvc func(svc addr.SVC, port uint16) error
 	// UnregisterSvc deregisters a socket RegisterSvc registered.
 	UnregisterSvc func(svc addr.SVC, port uint16) error
+	// InterfaceDown is the node's shared negative cache of SCMP
+	// interface-down signals; the mesh transport drops the cached path of
+	// the destination a signal's quote names, so its next send re-resolves
+	// through the filtered composition. Nil leaves the failure-and-refresh
+	// behavior alone.
+	InterfaceDown *scion.InterfaceDownCache
 
 	// Cadence overrides for tests; zero means the package constant.
 	PublishInterval time.Duration
@@ -230,6 +236,12 @@ func New(cfg Config) (*App, error) {
 		meshPeers:   make(map[addr.IA]*meshPeer),
 		hostDevices: make(map[addr.IA]*hostDevice),
 		logger:      device.NewLogger(device.LogLevelError, "cion-wireguard"),
+	}
+	if cfg.InterfaceDown != nil {
+		// The signal drops the quoted destination's cached path — the bind's
+		// existing failure-and-refresh behavior, prompted by the signal
+		// instead of a lost datagram.
+		cfg.InterfaceDown.OnSignal(a.mesh.dropPathOf)
 	}
 	if err := a.register(SvcWireguard, meshConn.LocalPort()); err != nil {
 		a.release()

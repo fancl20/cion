@@ -41,6 +41,9 @@ func (n *node) setupControlPlane(ctx context.Context) error {
 	if err := n.assembleDiscovery(); err != nil {
 		return err
 	}
+	if err := n.assembleMonitor(); err != nil {
+		return err
+	}
 	if err := n.buildBeaconing(); err != nil {
 		return err
 	}
@@ -189,6 +192,7 @@ func (n *node) buildBeaconing() error {
 		DB:                   n.pathDB,
 		Links:                n.linkTable,
 		Neighbors:            n.discovery.Neighbors,
+		Verdicts:             n.monitor.Verdicts,
 		Sender:               n.peerClt,
 		CoreRoute:            n.coreRoute,
 		Core:                 n.ident.asType == trust.ASTypeCore,
@@ -201,11 +205,12 @@ func (n *node) buildBeaconing() error {
 	n.beaconer = beaconer
 
 	n.pathProvider = &scion.PathProvider{
-		IA:        n.ident.ia,
-		DB:        n.pathDB,
-		Lookup:    lookup.Down,
-		Bootstrap: beaconer.BootstrapRoute,
-		Cores:     cores,
+		IA:            n.ident.ia,
+		DB:            n.pathDB,
+		Lookup:        lookup.Down,
+		Bootstrap:     beaconer.BootstrapRoute,
+		Cores:         cores,
+		InterfaceDown: n.ifDown,
 	}
 	return nil
 }
@@ -213,10 +218,11 @@ func (n *node) buildBeaconing() error {
 // wireTopology delivers the phases' products to the loaded provider: the
 // completed identity, the store its decisions land in, the peer client its
 // in-band requests ride, the path provider its comparator baselines with,
-// the trust engine its directory channel authenticates with, and the
-// greeting-fresh neighbor map. The last step before the provider mounts and
-// runs, and the one direction the dependency ever crosses: the application
-// imports the core and the shared libraries, never the reverse.
+// the trust engine its directory channel authenticates with, the neighbor
+// map — identity, however stale the greetings — and the monitor's verdicts.
+// The last step before the provider mounts and runs, and the one direction
+// the dependency ever crosses: the application imports the core and the
+// shared libraries, never the reverse.
 func (n *node) wireTopology() {
 	n.topology.Wire(topology.Pieces{
 		IA:        n.ident.ia,
@@ -225,6 +231,7 @@ func (n *node) wireTopology() {
 		Provider:  n.pathProvider,
 		Engine:    n.engine,
 		Neighbors: n.discovery.Neighbors,
+		Verdicts:  n.monitor.Verdicts,
 	})
 }
 
@@ -245,6 +252,30 @@ func (n *node) assembleDiscovery() error {
 		return err
 	}
 	n.discovery = discovery
+	return nil
+}
+
+// assembleMonitor builds the health monitor over the link store (ADR-0008's
+// ninth point, ADR-0009's core enumeration): a BFD session per serving link
+// whatever the loaded provider is doing — a neighbor's detection of the node
+// depends on the node answering its BFD, which makes answering a service of
+// the node itself. It is assembled before the first data plane generation,
+// so every generation finds a session per serving link, and the file
+// provider's nodes get them too: the monitor reads the store, not the
+// provider. The interface-down cache is assembled with it — the conns the
+// phases bind record the signals the data plane's egress-down branch sends.
+func (n *node) assembleMonitor() error {
+	monitor, err := controlplane.NewHealthMonitor(controlplane.HealthMonitorConfig{
+		IA:       n.ident.ia,
+		MACKey:   n.ident.key,
+		Store:    n.linkStore,
+		Interval: n.cfg.Pacing.BFD,
+	})
+	if err != nil {
+		return err
+	}
+	n.monitor = monitor
+	n.ifDown = scion.NewInterfaceDownCache()
 	return nil
 }
 
@@ -298,35 +329,38 @@ func (n *node) assembleEndpoint(ctx context.Context) error {
 }
 
 // scionConn returns a SCION connection bound to the control address's host
-// with the given port, sending through the node's internal link.
+// with the given port, sending through the node's internal link. Every conn
+// shares the node's interface-down cache: each receive path recognizes the
+// signal the data plane's egress-down branch sends back.
 func (n *node) scionConn(port uint16) (*scion.Conn, error) {
 	bind, err := controlBind(n.cfg.Control, port)
 	if err != nil {
 		return nil, err
 	}
 	return scion.NewConn(scion.ConnConfig{
-		IA:           n.ident.ia,
-		Bind:         bind,
-		InternalAddr: n.cfg.Internal,
-		MACKey:       n.ident.key,
-		Links:        n.linkTable,
+		IA:            n.ident.ia,
+		Bind:          bind,
+		InternalAddr:  n.cfg.Internal,
+		MACKey:        n.ident.key,
+		Links:         n.linkTable,
+		InterfaceDown: n.ifDown,
 	})
 }
 
 // coreRoute returns the route to the core this node enrolls with. The
-// one-hop path when the core is a neighbor, else the reversed freshest up
-// segment, which exists from beaconing alone, or the bootstrap route before
-// the TRC is pinned. Local state only: resolving a route inside a dial must
-// not spawn RPCs over the transport being dialed.
+// one-hop path when the core is a neighbor whose verdict is up, else the
+// reversed freshest up segment, which exists from beaconing alone, or the
+// bootstrap route before the TRC is pinned. Local state only: resolving a
+// route inside a dial must not spawn RPCs over the transport being dialed.
 func (n *node) coreRoute() *scion.Addr {
 	coreIA, coreEndpoint, ok := n.discovery.CoreEndpoint()
 	if !ok {
 		return nil
 	}
-	// The one-hop path when the core is a neighbor; a link whose greeting
-	// went stale falls through to the composed route.
+	// The one-hop path when the core is a neighbor and its verdict holds;
+	// a link the monitor marked down falls through to the composed route.
 	for ifID, neighborIA := range n.linkTable() {
-		if neighborIA.Equal(coreIA) {
+		if neighborIA.Equal(coreIA) && n.monitor.Up(ifID) {
 			if remote, ok := n.remoteOf(ifID); ok {
 				return &scion.Addr{
 					IA:   coreIA,
