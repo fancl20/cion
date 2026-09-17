@@ -28,8 +28,6 @@ type Issuer struct {
 
 	mtx    sync.Mutex
 	caCert *x509.Certificate
-
-	now func() time.Time
 }
 
 // NewIssuer returns an issuer anchored in the given TRC. The allowlist is
@@ -39,7 +37,7 @@ func NewIssuer(ia addr.IA, keys CoreKeys, trc cppki.SignedTRC) (*Issuer, error) 
 	if err != nil {
 		return nil, err
 	}
-	i := &Issuer{IA: ia, RootKey: keys.Root, CAKey: keys.CA, TRC: trc, now: time.Now}
+	i := &Issuer{IA: ia, RootKey: keys.Root, CAKey: keys.CA, TRC: trc}
 	caCert, err := createCACert(ia, keys.CA, rootCert, keys.Root, i.signingTime())
 	if err != nil {
 		return nil, err
@@ -52,7 +50,7 @@ func NewIssuer(ia addr.IA, keys CoreKeys, trc cppki.SignedTRC) (*Issuer, error) 
 // tolerate clock skew between nodes and truncated to whole seconds so
 // certificates and their containers line up exactly.
 func (i *Issuer) signingTime() time.Time {
-	return i.now().UTC().Add(signingBackdate).Truncate(time.Second)
+	return time.Now().UTC().Add(signingBackdate).Truncate(time.Second)
 }
 
 // IssueChain creates a certificate chain for the subject of the CSR. The CSR
@@ -91,7 +89,7 @@ func (i *Issuer) IssueChain(csr *x509.CertificateRequest) ([]*x509.Certificate, 
 	// valid from the (possibly backdated) signing time.
 	if err := cppki.VerifyChain(chain, cppki.VerifyOptions{
 		TRC:         []*cppki.TRC{&i.TRC.TRC},
-		CurrentTime: i.now(),
+		CurrentTime: time.Now(),
 	}); err != nil {
 		return nil, serrors.Wrap("generated chain does not verify against TRC", err)
 	}
@@ -107,7 +105,7 @@ func (i *Issuer) IssueChain(csr *x509.CertificateRequest) ([]*x509.Certificate, 
 func (i *Issuer) ensureCACert() (*x509.Certificate, error) {
 	i.mtx.Lock()
 	defer i.mtx.Unlock()
-	minExpiration := i.now().Add(ASValidity)
+	minExpiration := time.Now().Add(ASValidity)
 	if i.caCert != nil && i.caCert.NotAfter.After(minExpiration) {
 		return i.caCert, nil
 	}

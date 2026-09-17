@@ -180,6 +180,8 @@ type Discovery struct {
 
 	interval time.Duration
 	timeout  time.Duration
+	// changed is called after each recorded greeting, off the lock.
+	changed func()
 }
 
 // coreState is the core control endpoint: the core's own announcement,
@@ -208,6 +210,10 @@ type DiscoveryConfig struct {
 	Store links.DB
 	// Interval between greetings; defaults to 1s if zero.
 	Interval time.Duration
+	// Changed is called after each recorded greeting — the arrival the
+	// neighbor table learned from. It runs outside the instance's lock, free
+	// to read Neighbors; nil keeps nothing.
+	Changed func()
 }
 
 func NewDiscovery(cfg DiscoveryConfig) (*Discovery, error) {
@@ -248,6 +254,7 @@ func NewDiscovery(cfg DiscoveryConfig) (*Discovery, error) {
 		neighbors:   make(map[uint16]Neighbor),
 		interval:    interval,
 		timeout:     3 * interval,
+		changed:     cfg.Changed,
 	}, nil
 }
 
@@ -342,12 +349,24 @@ func (d *Discovery) receive(ctx context.Context) {
 }
 
 func (d *Discovery) record(ifID uint16, g Greeting) {
+	if !d.learn(ifID, g) {
+		return
+	}
+	// The hook runs off the lock, free to read the table it just changed.
+	if d.changed != nil {
+		d.changed()
+	}
+}
+
+// learn validates and records one greeting arrival under the lock,
+// reporting whether the neighbor table learned from it.
+func (d *Discovery) learn(ifID uint16, g Greeting) bool {
 	d.mtx.Lock()
 	defer d.mtx.Unlock()
 	entry := d.entry(ifID)
 	if entry == nil {
 		slog.Error("Greeting on unknown interface", "interface", ifID, "got", g.IA)
-		return
+		return false
 	}
 	if entry.NeighborIA.IsZero() {
 		// A link whose neighbor was not named yet — a joiner's first contact
@@ -357,18 +376,18 @@ func (d *Discovery) record(ifID uint16, g Greeting) {
 		entry.RemoteIfID = g.IfID
 		if err := d.store.Update(context.Background(), entry); err != nil {
 			slog.Error("Adopting the neighbor of a link", "interface", ifID, "err", err)
-			return
+			return false
 		}
 	} else if !entry.NeighborIA.Equal(g.IA) {
 		slog.Error("Greeting from unexpected neighbor",
 			"interface", ifID, "expected", entry.NeighborIA, "got", g.IA)
-		return
+		return false
 	} else if entry.RemoteIfID != g.IfID {
 		entry.RemoteIfID = g.IfID
 		if err := d.store.Update(context.Background(), entry); err != nil {
 			slog.Error("Recording the neighbor's interface ID",
 				"interface", ifID, "err", err)
-			return
+			return false
 		}
 	}
 	now := time.Now()
@@ -390,6 +409,7 @@ func (d *Discovery) record(ifID uint16, g Greeting) {
 			d.core = coreState{ia: g.CoreIA, addr: g.CoreAddr, lastSeen: now}
 		}
 	}
+	return true
 }
 
 // entry returns the link store's entry of an interface.

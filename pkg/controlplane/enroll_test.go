@@ -138,7 +138,7 @@ func enrollNode(
 	key crypto.Signer,
 ) error {
 
-	core := waitNeighbor(t, n.discovery)
+	core := waitNeighbor(t, n.learned, n.discovery)
 	client, err := NewCoreClient(CoreClientConfig{
 		Domain:  domain,
 		Conn:    n.newConn(t, 0),

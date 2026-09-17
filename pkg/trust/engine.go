@@ -40,11 +40,13 @@ type Engine struct {
 
 // NewEngine returns an engine for the node's IA, AS key, and provider.
 func NewEngine(ia addr.IA, key crypto.Signer, provider Provider) *Engine {
+	// No janitor: expiry is checked on every read, and a cache without a
+	// background goroutine keeps the engine whole inside a fake-time bubble.
 	return &Engine{
 		IA:       ia,
 		Key:      key,
 		Provider: provider,
-		cache:    cache.New(defaultCacheExpiration, 2*defaultCacheExpiration),
+		cache:    cache.New(defaultCacheExpiration, 0),
 	}
 }
 

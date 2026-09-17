@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"connectrpc.com/connect"
@@ -151,34 +152,32 @@ func TestLookupSourceHandler(t *testing.T) {
 
 // TestLookupCacheUntilExpiry checks the expiry-aware caching: a second
 // request inside the TTL is served from the cache; once it passes, the core
-// is asked again.
+// is asked again. The TTL's passage is a fake-time sleep in the bubble.
 func TestLookupCacheUntilExpiry(t *testing.T) {
-	fx := newLookupFixture(t)
-	base := time.Now()
-	clock := base
-	fx.lookup.Now = func() time.Time { return clock }
-
-	ctx := context.Background()
-	for i := 0; i < 2; i++ {
-		if segs := fx.lookup.Down(ctx, iaLineC); len(segs) != 1 {
-			t.Fatalf("down segments = %d, want 1", len(segs))
+	synctest.Test(t, func(t *testing.T) {
+		fx := newLookupFixture(t)
+		ctx := context.Background()
+		for i := 0; i < 2; i++ {
+			if segs := fx.lookup.Down(ctx, iaLineC); len(segs) != 1 {
+				t.Fatalf("down segments = %d, want 1", len(segs))
+			}
 		}
-	}
-	fx.fetch.mtx.Lock()
-	if got := len(fx.fetch.requests); got != 1 {
-		t.Errorf("fetches inside TTL = %d, want 1", got)
-	}
-	fx.fetch.mtx.Unlock()
+		fx.fetch.mtx.Lock()
+		if got := len(fx.fetch.requests); got != 1 {
+			t.Errorf("fetches inside TTL = %d, want 1", got)
+		}
+		fx.fetch.mtx.Unlock()
 
-	clock = base.Add(2 * lookupCacheTTL)
-	if segs := fx.lookup.Down(ctx, iaLineC); len(segs) != 1 {
-		t.Fatalf("down segments after TTL = %d, want 1", len(segs))
-	}
-	fx.fetch.mtx.Lock()
-	if got := len(fx.fetch.requests); got != 2 {
-		t.Errorf("fetches after TTL = %d, want 2", got)
-	}
-	fx.fetch.mtx.Unlock()
+		time.Sleep(2 * lookupCacheTTL)
+		if segs := fx.lookup.Down(ctx, iaLineC); len(segs) != 1 {
+			t.Fatalf("down segments after TTL = %d, want 1", len(segs))
+		}
+		fx.fetch.mtx.Lock()
+		if got := len(fx.fetch.requests); got != 2 {
+			t.Errorf("fetches after TTL = %d, want 2", got)
+		}
+		fx.fetch.mtx.Unlock()
+	})
 }
 
 // TestLookupCoreHandler checks the core's handler (Section 4.2.3): the

@@ -20,23 +20,19 @@ type DB struct {
 	mtx      sync.Mutex
 	entries  []*links.Link
 	nextIfID uint16
-	now      func() time.Time
 }
 
 // New returns an empty table.
 func New() *DB {
-	return &DB{nextIfID: 1, now: time.Now}
+	return &DB{nextIfID: 1}
 }
-
-// Now sets the table's clock.
-func (d *DB) Now(now func() time.Time) { d.now = now }
 
 // Insert stores a new entry: an entry carrying no interface ID is allocated
 // one, and one carrying an ID takes it, refused when the ID is held.
 func (d *DB) Insert(ctx context.Context, l *links.Link) error {
 	d.mtx.Lock()
 	defer d.mtx.Unlock()
-	now := d.now()
+	now := time.Now()
 	held := func(id uint16) bool {
 		for _, e := range d.entries {
 			if e.IfID == id && (e.Live() || now.Sub(e.Retired) < links.IfIDHoldback) {
@@ -76,7 +72,7 @@ func (d *DB) Update(ctx context.Context, l *links.Link) error {
 	for i, e := range d.entries {
 		if e.IfID == l.IfID {
 			copied := *l
-			copied.Updated = d.now()
+			copied.Updated = time.Now()
 			d.entries[i] = &copied
 			return nil
 		}

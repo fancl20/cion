@@ -43,7 +43,6 @@ type InterfaceDownSignal struct {
 // skipped path for ten seconds.
 type InterfaceDownCache struct {
 	ttl time.Duration
-	now func() time.Time
 
 	mtx sync.Mutex
 	// signaled holds the entries' expiry by ISD-AS and interface.
@@ -62,7 +61,6 @@ type ifDownKey struct {
 func NewInterfaceDownCache() *InterfaceDownCache {
 	return &InterfaceDownCache{
 		ttl:      IfDownCacheTTL,
-		now:      time.Now,
 		signaled: make(map[ifDownKey]time.Time),
 	}
 }
@@ -81,7 +79,7 @@ func (c *InterfaceDownCache) OnSignal(fn func(InterfaceDownSignal)) {
 // receiver.
 func (c *InterfaceDownCache) Record(sig InterfaceDownSignal) {
 	c.mtx.Lock()
-	now := c.now()
+	now := time.Now()
 	c.signaled[ifDownKey{ia: sig.IA, ifID: sig.IfID}] = now.Add(c.ttl)
 	fn := c.onSignal
 	c.mtx.Unlock()
@@ -102,7 +100,7 @@ func (c *InterfaceDownCache) Holds(ia addr.IA, ifID uint16) bool {
 	if !ok {
 		return false
 	}
-	if c.now().After(expiry) {
+	if time.Now().After(expiry) {
 		delete(c.signaled, ifDownKey{ia: ia, ifID: ifID})
 		return false
 	}
@@ -122,7 +120,7 @@ func (c *InterfaceDownCache) HoldsAny() bool {
 	}
 	c.mtx.Lock()
 	defer c.mtx.Unlock()
-	now := c.now()
+	now := time.Now()
 	live := false
 	for k, expiry := range c.signaled {
 		if now.After(expiry) {

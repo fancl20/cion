@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"crypto/x509"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/scionproto/scion/pkg/addr"
@@ -111,46 +112,46 @@ func TestIssueChainRejectsUnsignedCSR(t *testing.T) {
 // it no longer covers a full AS certificate validity, and that both the old
 // and the new CA anchor in the TRC root.
 func TestIssuerReissuesCACert(t *testing.T) {
-	f := newGenesisFixture(t)
-	issuer, err := NewIssuer(coreIA, f.keys, f.trc)
-	if err != nil {
-		t.Fatal(err)
-	}
-	first, err := issuer.CACert()
-	if err != nil {
-		t.Fatal(err)
-	}
-	// Move time forward beyond the CA certificate's remaining usefulness
-	// for a three-day AS certificate.
-	issuer.now = func() time.Time {
-		return time.Now().Add(CAValidity - ASValidity + time.Hour)
-	}
-	second, err := issuer.CACert()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if second.Equal(first) {
-		t.Fatal("CA certificate was not reissued")
-	}
-	if !second.NotAfter.After(issuer.now().Add(ASValidity)) {
-		t.Errorf("reissued CA expires %v, too early for a full AS validity",
-			second.NotAfter)
-	}
-	// Chains issued under the fresh CA still verify against the TRC.
-	key := newTestASKey(t)
-	csr, err := CreateCSR(nodeIA, key)
-	if err != nil {
-		t.Fatal(err)
-	}
-	chain, err := issuer.IssueChain(csr)
-	if err != nil {
-		t.Fatal(err)
-	}
-	opts := cppki.VerifyOptions{
-		TRC:         []*cppki.TRC{&f.trc.TRC},
-		CurrentTime: issuer.now().Add(time.Minute),
-	}
-	if err := cppki.VerifyChain(chain, opts); err != nil {
-		t.Fatalf("chain under reissued CA does not verify: %v", err)
-	}
+	synctest.Test(t, func(t *testing.T) {
+		f := newGenesisFixture(t)
+		issuer, err := NewIssuer(coreIA, f.keys, f.trc)
+		if err != nil {
+			t.Fatal(err)
+		}
+		first, err := issuer.CACert()
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Move time forward beyond the CA certificate's remaining usefulness
+		// for a three-day AS certificate — a fake-time sleep in the bubble.
+		time.Sleep(CAValidity - ASValidity + time.Hour)
+		second, err := issuer.CACert()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if second.Equal(first) {
+			t.Fatal("CA certificate was not reissued")
+		}
+		if !second.NotAfter.After(time.Now().Add(ASValidity)) {
+			t.Errorf("reissued CA expires %v, too early for a full AS validity",
+				second.NotAfter)
+		}
+		// Chains issued under the fresh CA still verify against the TRC.
+		key := newTestASKey(t)
+		csr, err := CreateCSR(nodeIA, key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		chain, err := issuer.IssueChain(csr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		opts := cppki.VerifyOptions{
+			TRC:         []*cppki.TRC{&f.trc.TRC},
+			CurrentTime: time.Now().Add(time.Minute),
+		}
+		if err := cppki.VerifyChain(chain, opts); err != nil {
+			t.Fatalf("chain under reissued CA does not verify: %v", err)
+		}
+	})
 }

@@ -99,8 +99,6 @@ func (s *DirectoryStore) List(now time.Time) []DirectoryEntry {
 type DirectoryService struct {
 	// Store holds the directory.
 	Store *DirectoryStore
-	// Now is the clock; nil uses time.Now.
-	Now func() time.Time
 }
 
 var _ nodev1connect.DirectoryServiceHandler = (*DirectoryService)(nil)
@@ -131,7 +129,7 @@ func (s *DirectoryService) Publish(
 			"authenticated", publisher, "claimed", entry.IA)
 	}
 	entry.IA = publisher
-	entry.Published = s.now()
+	entry.Published = time.Now()
 	s.Store.Publish(entry)
 	return connect.NewResponse(&nodev1.PublishResponse{}), nil
 }
@@ -142,19 +140,12 @@ func (s *DirectoryService) List(
 	req *connect.Request[nodev1.ListRequest],
 ) (*connect.Response[nodev1.ListResponse], error) {
 
-	entries := s.Store.List(s.now())
+	entries := s.Store.List(time.Now())
 	resp := &nodev1.ListResponse{}
 	for _, e := range entries {
 		resp.Entries = append(resp.Entries, e.pb())
 	}
 	return connect.NewResponse(resp), nil
-}
-
-func (s *DirectoryService) now() time.Time {
-	if s.Now != nil {
-		return s.Now()
-	}
-	return time.Now()
 }
 
 func entryFromPB(pb *nodev1.Entry) (DirectoryEntry, error) {
@@ -195,17 +186,16 @@ type directoryClient interface {
 // core publishes and fetches beside the directory it serves.
 type storeDirectoryClient struct {
 	store *DirectoryStore
-	now   func() time.Time
 }
 
 func (c storeDirectoryClient) Publish(_ context.Context, entry DirectoryEntry) error {
-	entry.Published = c.now()
+	entry.Published = time.Now()
 	c.store.Publish(entry)
 	return nil
 }
 
 func (c storeDirectoryClient) List(_ context.Context) ([]DirectoryEntry, error) {
-	return c.store.List(c.now()), nil
+	return c.store.List(time.Now()), nil
 }
 
 // rpcDirectoryClient publishes and fetches over the SCION-native verified
@@ -324,38 +314,38 @@ type NodeDirectoryConfig struct {
 	PublishInterval time.Duration
 	FetchInterval   time.Duration
 	PublishRetry    time.Duration
-	// Now is the clock; nil uses time.Now.
-	Now func() time.Time
 }
 
 // NewNodeDirectory builds the node's directory view. The core keeps its own
 // store as the client.
 func NewNodeDirectory(cfg NodeDirectoryConfig) (*NodeDirectory, error) {
-	now := cfg.Now
-	if now == nil {
-		now = time.Now
-	}
 	d := &NodeDirectory{cfg: cfg}
 	if cfg.CoreRoute == nil {
 		if cfg.Store == nil {
 			return nil, errors.New("the core's directory needs its store")
 		}
-		d.client = storeDirectoryClient{store: cfg.Store, now: now}
+		d.client = storeDirectoryClient{store: cfg.Store}
 		return d, nil
 	}
-	d.client = &rpcDirectoryClient{
+	rpc := &rpcDirectoryClient{
 		conn:      cfg.Conn,
 		engine:    cfg.Engine,
 		provider:  cfg.Provider,
 		coreRoute: cfg.CoreRoute,
-		qclt:      &quic.Transport{Conn: cfg.Conn},
 	}
+	// The transport exists only over a conn: a provider whose conn is
+	// absent mounts its services without one, and Close has nothing to
+	// release — quic-go's Close over a nil conn would panic.
+	if cfg.Conn != nil {
+		rpc.qclt = &quic.Transport{Conn: cfg.Conn}
+	}
+	d.client = rpc
 	return d, nil
 }
 
 // Close releases the publish and fetch transport.
 func (d *NodeDirectory) Close() error {
-	if rpc, ok := d.client.(*rpcDirectoryClient); ok {
+	if rpc, ok := d.client.(*rpcDirectoryClient); ok && rpc.qclt != nil {
 		return rpc.qclt.Close()
 	}
 	return nil

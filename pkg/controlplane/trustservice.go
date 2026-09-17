@@ -36,9 +36,6 @@ type TrustService struct {
 	// AllowAS optionally restricts enrollment to the listed ISD-ASes; nil
 	// means open enrollment.
 	AllowAS map[addr.IA]bool
-
-	// Now is the clock used for chain lookups; tests replace it.
-	Now func() time.Time
 }
 
 var _ ControlPlane = (*TrustService)(nil)
@@ -121,9 +118,6 @@ func (s *TrustService) Chains(
 
 	r := req.Msg
 	now := time.Now()
-	if s.Now != nil {
-		now = s.Now()
-	}
 	// The request may pin a validity window; unset bounds default to "valid
 	// now" on that side.
 	query := trust.ChainQuery{
@@ -200,9 +194,6 @@ func (s *TrustService) ChainRenewal(
 	// already holds an unexpired chain under a different subject key is
 	// taken. Renewals by the same key pass untouched.
 	now := time.Now()
-	if s.Now != nil {
-		now = s.Now()
-	}
 	if err := s.checkNameTaken(ctx, ia, csr, now); err != nil {
 		return nil, err
 	}

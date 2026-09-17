@@ -41,8 +41,6 @@ type LookupService struct {
 
 	mtx   sync.Mutex
 	cache map[[2]addr.IA]cachedSegments
-	// Now is the clock; nil uses time.Now.
-	Now func() time.Time
 }
 
 // cachedSegments holds fetched segments until the earliest of their
@@ -191,7 +189,7 @@ func (s *LookupService) fetchCached(
 	t pathdb.SegmentType,
 ) []*pathdb.Segment {
 
-	now := s.now()
+	now := time.Now()
 	key := [2]addr.IA{core, dst}
 	s.mtx.Lock()
 	if cached, ok := s.cache[key]; ok && now.Before(cached.expiry) {
@@ -267,11 +265,4 @@ func (s *LookupService) isCore(ia addr.IA) bool {
 		}
 	}
 	return false
-}
-
-func (s *LookupService) now() time.Time {
-	if s.Now != nil {
-		return s.Now()
-	}
-	return time.Now()
 }

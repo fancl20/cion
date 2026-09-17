@@ -34,6 +34,7 @@ type testNode struct {
 	provider  *dataplane.UDPProvider
 	store     *memory.DB
 	discovery *Discovery
+	learned   chan struct{} // signaled on the first recorded greeting
 	cancel    context.CancelFunc
 }
 
@@ -86,6 +87,7 @@ func startTestNode(t *testing.T, ia, neighbor addr.IA, extLocal, extRemote strin
 		NumSlowPathProcessors: 1,
 		BatchSize:             64,
 	}
+	learned := make(chan struct{}, 1)
 	discovery, err := NewDiscovery(DiscoveryConfig{
 		IA:           ia,
 		ControlAddr:  control,
@@ -93,6 +95,7 @@ func startTestNode(t *testing.T, ia, neighbor addr.IA, extLocal, extRemote strin
 		InternalAddr: internal,
 		Store:        store,
 		Interval:     discoveryGap,
+		Changed:      signalArrival(learned),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -119,6 +122,7 @@ func startTestNode(t *testing.T, ia, neighbor addr.IA, extLocal, extRemote strin
 		provider:  provider,
 		store:     store,
 		discovery: discovery,
+		learned:   learned,
 		cancel:    cancel,
 	}
 }

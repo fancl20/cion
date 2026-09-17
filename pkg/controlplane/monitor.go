@@ -27,7 +27,6 @@ import (
 type HealthMonitor struct {
 	ia         addr.IA
 	store      links.DB
-	now        func() time.Time
 	tick       time.Duration
 	detectMult uint8
 	macFactory func() hash.Hash
@@ -52,8 +51,6 @@ type HealthMonitorConfig struct {
 	// DetectMultiplier is the count of intervals without an arrival that
 	// marks a link down; zero uses BFDDetectMultiplier.
 	DetectMultiplier uint8
-	// Now is the clock; nil uses time.Now.
-	Now func() time.Time
 }
 
 func (cfg HealthMonitorConfig) interval() time.Duration {
@@ -81,14 +78,9 @@ func NewHealthMonitor(cfg HealthMonitorConfig) (*HealthMonitor, error) {
 	if err != nil {
 		return nil, fmt.Errorf("initializing MAC: %w", err)
 	}
-	now := cfg.Now
-	if now == nil {
-		now = time.Now
-	}
 	return &HealthMonitor{
 		ia:         cfg.IA,
 		store:      cfg.Store,
-		now:        now,
 		tick:       cfg.interval(),
 		detectMult: cfg.detectMultiplier(),
 		macFactory: macFactory,
@@ -111,7 +103,7 @@ func (m *HealthMonitor) session(l *links.Link) *BFDSession {
 		s.update(l.NeighborIA, l.Local.Addr(), l.Remote.Addr())
 		return s
 	}
-	s := newBFDSession(m.ia, m.macFactory, m.tick, m.detectMult, m.now,
+	s := newBFDSession(m.ia, m.macFactory, m.tick, m.detectMult,
 		l.IfID, l.NeighborIA, l.Local.Addr(), l.Remote.Addr())
 	m.sessions[l.IfID] = s
 	return s

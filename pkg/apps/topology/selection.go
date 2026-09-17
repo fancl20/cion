@@ -97,8 +97,6 @@ type SelectionConfig struct {
 	Changed func()
 	// MaxLinks caps the neighbor count; zero uses MaxNeighbors.
 	MaxLinks int
-	// Now is the clock; nil uses time.Now.
-	Now func() time.Time
 	// Interval and Window override the evaluation window and the candidate
 	// window; zero keeps them. Tests pace the loop with them.
 	Interval time.Duration
@@ -164,13 +162,6 @@ type measurement struct {
 	path time.Duration
 }
 
-func (s *selection) now() time.Time {
-	if s.cfg.Now != nil {
-		return s.cfg.Now()
-	}
-	return time.Now()
-}
-
 // pass runs one evaluation window.
 func (s *selection) pass(ctx context.Context) {
 	if s.streaks == nil {
@@ -232,7 +223,7 @@ func (s *selection) sweep(ctx context.Context, entries []*links.Link) bool {
 		window = CandidateWindow
 	}
 	changed := false
-	now := s.now()
+	now := time.Now()
 	neighbors := s.freshNeighbors()
 	greeted := func(l *links.Link) bool {
 		n, ok := neighbors[l.IfID]
@@ -591,7 +582,7 @@ func (s *selection) freshNeighbors() map[uint16]controlplane.Neighbor {
 // back until no unexpired segment can reference it.
 func (s *selection) retire(ctx context.Context, l *links.Link, why string) bool {
 	l.State = links.StateRetired
-	l.Retired = s.now()
+	l.Retired = time.Now()
 	if err := s.cfg.Store.Update(ctx, l); err != nil {
 		slog.Error("Retiring a link", "neighbor", l.NeighborIA, "err", err)
 		return false

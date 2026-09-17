@@ -17,12 +17,15 @@ Avoid introducing third-party assertion libraries. If tests need to compare
 complex structures, prefer using `https://github.com/google/go-cmp` over
 `reflect`.
 
+`time.Sleep(...)` is unreliable. Use `testing/synctest` or other deterministic
+methods to wait system ready.
+
 ## Commit change
 
 ### Before commit
 
 Review changes to ensure they conform to all style requirements. For code
-changes, run tests first.
+changes, run tests with `go test -race -count=2` first, then `golangci-lint`.
 
 Pause and wait for human review before committing changes to the codebase.
 It's acceptable to amend a local commit if a later commit is a refinement of
