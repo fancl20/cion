@@ -78,7 +78,7 @@ func newLifecycleFixture(t *testing.T, f *trustFixture) *lifecycleFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { db.Close() }) //nolint:errcheck
+	t.Cleanup(func() { _ = db.Close() })
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		t.Fatal(err)

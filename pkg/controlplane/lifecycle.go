@@ -156,7 +156,7 @@ func newestChain(ctx context.Context, cfg EnrollmentConfig) ([]*x509.Certificate
 	if chain == nil {
 		return nil, 0
 	}
-	return chain, chain[0].NotAfter.Sub(time.Now())
+	return chain, time.Until(chain[0].NotAfter)
 }
 
 // selfIssue self-issues the core's chain through its issuer and stores it.

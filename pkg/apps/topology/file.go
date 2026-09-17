@@ -222,7 +222,7 @@ func (f *File) Run(ctx context.Context) {
 			slog.Error("Watching the link-set", "err", err)
 			continue
 		}
-		if info.ModTime() == f.modTime && info.Size() == f.size {
+		if info.ModTime().Equal(f.modTime) && info.Size() == f.size {
 			continue
 		}
 		if err := f.load(); err != nil {

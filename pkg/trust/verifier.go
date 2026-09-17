@@ -143,7 +143,7 @@ func (v *Verifier) cacheAdd(key string, value any, d time.Duration) {
 	if v.Cache == nil {
 		return
 	}
-	v.Cache.Add(key, value, d) //nolint:errcheck // XXX(matzf): could use Set, subtle difference
+	_ = v.Cache.Add(key, value, d) // XXX(matzf): could use Set, subtle difference
 }
 
 func (v *Verifier) cacheExpiration(chains [][]*x509.Certificate) time.Duration {

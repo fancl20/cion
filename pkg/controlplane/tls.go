@@ -110,11 +110,11 @@ func serveHTTP01(ctx context.Context, issuer *certmagic.ACMEIssuer) error {
 	}
 	srv := &http.Server{Handler: issuer.HTTPChallengeHandler(http.NotFoundHandler())}
 	go func() {
-		defer ln.Close() //nolint:errcheck
+		defer func() { _ = ln.Close() }()
 		<-ctx.Done()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		srv.Shutdown(shutdownCtx) //nolint:errcheck
+		_ = srv.Shutdown(shutdownCtx)
 	}()
 	go func() {
 		if err := srv.Serve(ln); !errors.Is(err, http.ErrServerClosed) {
@@ -134,7 +134,7 @@ func serveTLSALPN01(ctx context.Context, conf *tls.Config) error {
 		return fmt.Errorf("binding TLS-ALPN-01 challenge port: %w", err)
 	}
 	go func() {
-		defer ln.Close() //nolint:errcheck
+		defer func() { _ = ln.Close() }()
 		for {
 			conn, err := ln.Accept()
 			if err != nil {
@@ -144,13 +144,13 @@ func serveTLSALPN01(ctx context.Context, conf *tls.Config) error {
 				return
 			}
 			go func() {
-				defer conn.Close() //nolint:errcheck
+				defer func() { _ = conn.Close() }()
 				hctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 				defer cancel()
 				if c, ok := conn.(*tls.Conn); ok {
 					// The handshake itself answers the challenge; the
 					// connection carries no application protocol.
-					c.HandshakeContext(hctx) //nolint:errcheck
+					_ = c.HandshakeContext(hctx)
 				}
 			}()
 		}

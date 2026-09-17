@@ -33,7 +33,7 @@ func New(path string, opts *bbolt.Options) (wireguard.DirectoryStore, error) {
 		_, err := tx.CreateBucketIfNotExists(entriesBucket)
 		return err
 	}); err != nil {
-		db.Close() //nolint:errcheck
+		_ = db.Close()
 		return nil, err
 	}
 	return &directoryDB{db: db}, nil

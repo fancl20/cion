@@ -19,7 +19,7 @@ import (
 func TestDirectoryStore(t *testing.T, open func(t *testing.T) wireguard.DirectoryStore) {
 	ctx := context.Background()
 	store := open(t)
-	t.Cleanup(func() { store.Close() }) //nolint:errcheck
+	t.Cleanup(func() { _ = store.Close() })
 
 	entries := []wireguard.Entry{
 		{

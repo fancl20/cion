@@ -39,7 +39,7 @@ func newTrustFixture(t *testing.T) *trustFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { db.Close() }) //nolint:errcheck
+	t.Cleanup(func() { _ = db.Close() })
 	keys, err := trust.LoadOrCreateCoreKeys(dir)
 	if err != nil {
 		t.Fatal(err)

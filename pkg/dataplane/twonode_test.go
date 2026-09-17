@@ -24,7 +24,7 @@ func freeUDPAddr(t *testing.T) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer c.Close()
+	defer func() { _ = c.Close() }()
 	return c.LocalAddr().String()
 }
 
@@ -182,7 +182,7 @@ func TestTwoNodeSCMPEcho(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer appB.Close()
+	defer func() { _ = appB.Close() }()
 
 	// The client in AS A binds an ephemeral port and uses it as echo
 	// identifier so that the reply can be delivered.
@@ -190,7 +190,7 @@ func TestTwoNodeSCMPEcho(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer appA.Close()
+	defer func() { _ = appA.Close() }()
 	ident := uint16(appA.LocalAddr().(*net.UDPAddr).Port)
 
 	// Request: A -> B via the direct link.
@@ -201,7 +201,7 @@ func TestTwoNodeSCMPEcho(t *testing.T) {
 	}
 
 	got := make([]byte, bufSize)
-	appB.SetReadDeadline(time.Now().Add(testTimeout)) //nolint:errcheck
+	_ = appB.SetReadDeadline(time.Now().Add(testTimeout))
 	n, err := appB.Read(got)
 	if err != nil {
 		t.Fatal(err)
@@ -222,7 +222,7 @@ func TestTwoNodeSCMPEcho(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	appA.SetReadDeadline(time.Now().Add(testTimeout)) //nolint:errcheck
+	_ = appA.SetReadDeadline(time.Now().Add(testTimeout))
 	n, err = appA.Read(got)
 	if err != nil {
 		t.Fatal(err)

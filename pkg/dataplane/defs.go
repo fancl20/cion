@@ -49,7 +49,7 @@ func TypeFromString(s string) (Type, error) {
 	case strings.ToLower(UDPIPv46Name):
 		return UDPIPv46, nil
 	default:
-		return Invalid, fmt.Errorf("Unknown underlay type: type: %s", s)
+		return Invalid, fmt.Errorf("unknown underlay type: %s", s)
 	}
 }
 

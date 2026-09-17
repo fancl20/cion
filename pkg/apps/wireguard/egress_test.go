@@ -98,7 +98,7 @@ func newTestEgress(t *testing.T, idle time.Duration) (*egress, *fakeICMP) {
 	t.Cleanup(func() {
 		cancel()
 		e.link.Close()
-		socket.Close() //nolint:errcheck
+		_ = socket.Close()
 	})
 	go e.run(ctx)
 	return e, socket
@@ -115,7 +115,7 @@ func TestEgressSplicesTCP(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer listener.Close()
+	defer func() { _ = listener.Close() }()
 	go func() {
 		for {
 			conn, err := listener.Accept()
@@ -123,8 +123,8 @@ func TestEgressSplicesTCP(t *testing.T) {
 				return
 			}
 			go func() {
-				defer conn.Close()
-				io.Copy(conn, conn) //nolint:errcheck
+				defer func() { _ = conn.Close() }()
+				_, _ = io.Copy(conn, conn)
 			}()
 		}
 	}()
@@ -139,7 +139,7 @@ func TestEgressSplicesTCP(t *testing.T) {
 	if err != nil {
 		t.Fatalf("the host's handshake did not complete at the exit: %v", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	msg := []byte("through the exit")
 	if _, err := conn.Write(msg); err != nil {
@@ -170,7 +170,7 @@ func TestEgressMapsUDP(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer osConn.Close()
+	defer func() { _ = osConn.Close() }()
 	go func() {
 		buf := make([]byte, 2048)
 		for {
@@ -178,7 +178,7 @@ func TestEgressMapsUDP(t *testing.T) {
 			if err != nil {
 				return
 			}
-			osConn.WriteToUDP(buf[:n], from) //nolint:errcheck
+			_, _ = osConn.WriteToUDP(buf[:n], from)
 		}
 	}()
 	internet := osConn.LocalAddr().(*net.UDPAddr).AddrPort()
@@ -191,7 +191,7 @@ func TestEgressMapsUDP(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer udpConn.Close()
+	defer func() { _ = udpConn.Close() }()
 
 	msg := []byte("udp through the exit")
 	if _, err := udpConn.Write(msg); err != nil {
@@ -360,7 +360,7 @@ func TestEgressExpiresIdleFlows(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer osConn.Close()
+	defer func() { _ = osConn.Close() }()
 	internet := osConn.LocalAddr().(*net.UDPAddr).AddrPort()
 
 	host := newHostStack(t, netip.MustParseAddr("10.64.1.10"), e)
@@ -371,7 +371,7 @@ func TestEgressExpiresIdleFlows(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer udpConn.Close()
+	defer func() { _ = udpConn.Close() }()
 	if _, err := udpConn.Write([]byte("kick")); err != nil {
 		t.Fatal(err)
 	}

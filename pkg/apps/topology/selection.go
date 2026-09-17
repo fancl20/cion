@@ -265,20 +265,6 @@ func (s *selection) neighbors(entries []*links.Link) map[addr.IA]*links.Link {
 	return out
 }
 
-// liveNeighbors counts the established entries whose verdict is up — the
-// redundancy floor counts up links only, so established-but-down entries
-// satisfy no floor and a node whose every neighbor went down promotes from
-// the directory rather than resting on verdicts.
-func (s *selection) liveNeighbors(entries []*links.Link) int {
-	n := 0
-	for _, l := range entries {
-		if l.State == links.StateEstablished && s.linkUp(l.IfID) {
-			n++
-		}
-	}
-	return n
-}
-
 // linkUp reports the interface's verdict; a loop without the monitor's
 // verdicts treats every link as up.
 func (s *selection) linkUp(ifID uint16) bool {

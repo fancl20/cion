@@ -235,7 +235,7 @@ func pingLossy(ctx context.Context, t *testing.T, n *assemblyNode, dst addr.IA, 
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer conn.Close() //nolint:errcheck
+	defer func() { _ = conn.Close() }()
 	_, _ = ping.Run(ctx, ping.Config{
 		Conn:     conn,
 		Provider: n.app.Provider(),

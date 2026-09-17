@@ -64,7 +64,7 @@ func runPing(ctx context.Context, cfg services.NodeConfig, target string, opts *
 	if err != nil {
 		return err
 	}
-	defer conn.Close() //nolint:errcheck
+	defer func() { _ = conn.Close() }()
 
 	fmt.Printf("cion ping %s,%s\n", dst, host)
 	report, err := ping.Run(ctx, ping.Config{

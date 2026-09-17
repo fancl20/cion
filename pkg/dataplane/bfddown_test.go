@@ -74,7 +74,7 @@ func TestEgressDownAnswersInterfaceDown(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer app.Close()
+	defer func() { _ = app.Close() }()
 	ident := uint16(app.LocalAddr().(*net.UDPAddr).Port)
 
 	request := scmpPacket(t, a.ia, bia, directPath(t, key, 0x111),
@@ -84,7 +84,7 @@ func TestEgressDownAnswersInterfaceDown(t *testing.T) {
 	}
 
 	buf := make([]byte, bufSize)
-	app.SetReadDeadline(time.Now().Add(testTimeout)) //nolint:errcheck
+	_ = app.SetReadDeadline(time.Now().Add(testTimeout))
 	n, err := app.Read(buf)
 	if err != nil {
 		t.Fatalf("no answer from the down egress: %v", err)
@@ -134,7 +134,7 @@ func TestEgressDownNotificationCap(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer app.Close()
+	defer func() { _ = app.Close() }()
 	ident := uint16(app.LocalAddr().(*net.UDPAddr).Port)
 
 	// Start the burst early in a wall-clock second, so it cannot straddle
@@ -155,7 +155,7 @@ func TestEgressDownNotificationCap(t *testing.T) {
 	buf := make([]byte, bufSize)
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		app.SetReadDeadline(time.Now().Add(100 * time.Millisecond)) //nolint:errcheck
+		_ = app.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
 		n, err := app.Read(buf)
 		if err != nil {
 			if notifications > 0 {

@@ -38,7 +38,7 @@ type responder struct {
 func (r *responder) Run(ctx context.Context) {
 	go func() {
 		<-ctx.Done()
-		r.conn.Close() //nolint:errcheck
+		_ = r.conn.Close()
 	}()
 	for {
 		echo, from, err := r.conn.ReadEchoFrom()

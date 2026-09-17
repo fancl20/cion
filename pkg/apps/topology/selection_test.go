@@ -31,7 +31,6 @@ type selFixture struct {
 	// keyed by the candidate's interface ID.
 	candidateGreetings map[uint16]controlplane.Neighbor
 	established        []addr.IA // the promoted candidates, in order
-	retired            []addr.IA // the demoted neighbors, in order
 	changed            int
 	sel                *selection
 }

@@ -223,7 +223,7 @@ func New(cfg Config) (*App, error) {
 	hostConn, err := net.ListenUDP("udp",
 		&net.UDPAddr{IP: cfg.ListenHost.AsSlice(), Port: int(cfg.ListenPort)})
 	if err != nil {
-		meshConn.Close() //nolint:errcheck
+		_ = meshConn.Close()
 		return nil, fmt.Errorf("binding the host port: %w", err)
 	}
 	a := &App{
@@ -330,10 +330,10 @@ func (a *App) release() {
 		a.egress.link.Close()
 	}
 	if a.dirConn != nil {
-		a.dirConn.Close() //nolint:errcheck
+		_ = a.dirConn.Close()
 	}
 	if a.dirServe != nil {
-		a.dirServe.Close() //nolint:errcheck
+		_ = a.dirServe.Close()
 	}
 }
 
@@ -383,7 +383,7 @@ func (a *App) startHostDevices() error {
 		if err != nil {
 			for _, hd := range a.hostDevices {
 				hd.dev.Close()
-				hd.pipe.Close() //nolint:errcheck
+				_ = hd.pipe.Close()
 			}
 			return err
 		}
@@ -409,12 +409,12 @@ func (a *App) newHostDevice(exit addr.IA, peers []HostPeer) (*device.Device, *pi
 	}
 	if err := dev.IpcSet(ipc.String()); err != nil {
 		dev.Close()
-		pipe.Close() //nolint:errcheck
+		_ = pipe.Close()
 		return nil, nil, fmt.Errorf("configuring the host device for %s: %w", exit, err)
 	}
 	if err := dev.Up(); err != nil {
 		dev.Close()
-		pipe.Close() //nolint:errcheck
+		_ = pipe.Close()
 		return nil, nil, fmt.Errorf("raising the host device for %s: %w", exit, err)
 	}
 	return dev, pipe, nil
@@ -442,12 +442,12 @@ func (a *App) newMeshDevice(entry Entry) (*meshPeer, error) {
 		strconv.Itoa(int(PersistentKeepalive.Seconds())) + "\n")
 	if err := dev.IpcSet(ipc.String()); err != nil {
 		dev.Close()
-		pipe.Close() //nolint:errcheck
+		_ = pipe.Close()
 		return nil, fmt.Errorf("configuring the mesh device for %s: %w", entry.IA, err)
 	}
 	if err := dev.Up(); err != nil {
 		dev.Close()
-		pipe.Close() //nolint:errcheck
+		_ = pipe.Close()
 		return nil, fmt.Errorf("raising the mesh device for %s: %w", entry.IA, err)
 	}
 	return &meshPeer{entry: entry, dev: dev, pipe: pipe}, nil
@@ -484,7 +484,7 @@ func (a *App) applyDirectory(entries []Entry) {
 			continue
 		}
 		peer.dev.Close()
-		peer.pipe.Close() //nolint:errcheck
+		_ = peer.pipe.Close()
 		delete(a.meshPeers, ia)
 		slog.Info("WireGuard mesh tunnel down", "peer", ia)
 	}
@@ -580,7 +580,7 @@ func (a *App) Run(ctx context.Context) error {
 func (a *App) serveDirectory(ctx context.Context) {
 	conn := a.dirServe
 	go func() {
-		defer conn.Close() //nolint:errcheck
+		defer func() { _ = conn.Close() }()
 		if err := controlplane.ServeHTTP3(conn, a.DirectoryHandler(),
 			controlplane.EndpointTLS(controlplane.EndpointTLSConfig{
 				Engine: a.cfg.Engine,
@@ -610,12 +610,12 @@ func (a *App) Close() {
 	defer a.mtx.Unlock()
 	for _, peer := range a.meshPeers {
 		peer.dev.Close()
-		peer.pipe.Close() //nolint:errcheck
+		_ = peer.pipe.Close()
 	}
 	a.meshPeers = nil
 	for _, hd := range a.hostDevices {
 		hd.dev.Close()
-		hd.pipe.Close() //nolint:errcheck
+		_ = hd.pipe.Close()
 	}
 	a.hostDevices = nil
 	a.deregisterAll()
@@ -625,13 +625,13 @@ func (a *App) Close() {
 		a.egress.link.Close()
 	}
 	if a.dirConn != nil {
-		a.dirConn.Close() //nolint:errcheck
+		_ = a.dirConn.Close()
 	}
 	if a.dirServe != nil {
-		a.dirServe.Close() //nolint:errcheck
+		_ = a.dirServe.Close()
 	}
 	if a.cfg.Store != nil {
-		a.cfg.Store.Close() //nolint:errcheck
+		_ = a.cfg.Store.Close()
 	}
 }
 

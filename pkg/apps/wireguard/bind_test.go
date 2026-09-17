@@ -22,9 +22,8 @@ var testMACKey = []byte("0123456789abcdef")
 
 // countingDB counts the queries a provider makes, beside what it serves.
 type countingDB struct {
-	inner      pathdb.DB
-	queries    int
-	lastAccess time.Time
+	inner   pathdb.DB
+	queries int
 }
 
 func (d *countingDB) Insert(ctx context.Context, s *pathdb.Segment) (bool, error) {
@@ -95,7 +94,7 @@ func testMeshSocket(t *testing.T, db pathdb.DB) (*meshSocket, *countingDB) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { internal.Close() }) //nolint:errcheck
+	t.Cleanup(func() { _ = internal.Close() })
 	counting := &countingDB{inner: db}
 	provider := &scion.PathProvider{IA: addr.MustIAFrom(20, 1), DB: counting}
 	conn, err := scion.NewConn(scion.ConnConfig{
@@ -108,7 +107,7 @@ func testMeshSocket(t *testing.T, db pathdb.DB) (*meshSocket, *countingDB) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { conn.Close() }) //nolint:errcheck
+	t.Cleanup(func() { _ = conn.Close() })
 	cnt := &counters{}
 	return newMeshSocket(conn, provider, cnt), counting
 }
@@ -189,7 +188,7 @@ func TestMeshSocketRefreshesFailedSend(t *testing.T) {
 	}
 	// A closed socket fails every send; the failure refreshes the path once
 	// and reports.
-	socket.conn.Close() //nolint:errcheck
+	_ = socket.conn.Close()
 	if err := socket.send(peer, [][]byte{[]byte("datagram")}); err == nil {
 		t.Fatal("sending over a closed socket succeeded")
 	}

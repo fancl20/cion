@@ -147,7 +147,7 @@ func enrollNode(
 	if err != nil {
 		return err
 	}
-	defer client.Close() //nolint:errcheck
+	defer func() { _ = client.Close() }()
 	client.SetCore(core.IA,
 		netip.AddrPortFrom(core.ControlAddr.Addr(), EndpointPort))
 	_, enrollErr := trust.Enroll(ctx, db, client, n.ia, key)
@@ -173,7 +173,7 @@ func TestEnrollmentTwoNodes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer nodeDB.Close() //nolint:errcheck
+	defer func() { _ = nodeDB.Close() }()
 	asKey, err := trust.LoadOrCreateASKey(nodeDir)
 	if err != nil {
 		t.Fatal(err)
@@ -242,7 +242,7 @@ func TestEnrollmentWrongDomain(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer nodeDB.Close() //nolint:errcheck
+	defer func() { _ = nodeDB.Close() }()
 	asKey, err := trust.LoadOrCreateASKey(nodeDir)
 	if err != nil {
 		t.Fatal(err)

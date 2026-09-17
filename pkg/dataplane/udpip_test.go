@@ -77,7 +77,7 @@ func TestExternalLinkSendReceive(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer remote.Close()
+	defer func() { _ = remote.Close() }()
 	remoteAddr := remote.LocalAddr().String()
 
 	provider := NewUDPProvider(64, 0, 0)
@@ -107,7 +107,7 @@ func TestExternalLinkSendReceive(t *testing.T) {
 		t.Fatal("send queue full")
 	}
 
-	remote.SetReadDeadline(time.Now().Add(testTimeout)) //nolint:errcheck
+	_ = remote.SetReadDeadline(time.Now().Add(testTimeout))
 	got := make([]byte, bufSize)
 	n, err := remote.Read(got)
 	if err != nil {
@@ -162,7 +162,7 @@ func TestInternalLinkSendReceive(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer host.Close()
+	defer func() { _ = host.Close() }()
 
 	in := scionLikeDatagram([]byte("hello from host"))
 	if _, err := host.Write(in); err != nil {
@@ -183,7 +183,7 @@ func TestInternalLinkSendReceive(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer dst.Close()
+	defer func() { _ = dst.Close() }()
 
 	out := scionLikeDatagram([]byte("hello to host"))
 	pkt := pool.Get()
@@ -197,7 +197,7 @@ func TestInternalLinkSendReceive(t *testing.T) {
 		t.Fatal("send queue full")
 	}
 
-	dst.SetReadDeadline(time.Now().Add(testTimeout)) //nolint:errcheck
+	_ = dst.SetReadDeadline(time.Now().Add(testTimeout))
 	got := make([]byte, bufSize)
 	n, err := dst.Read(got)
 	if err != nil {

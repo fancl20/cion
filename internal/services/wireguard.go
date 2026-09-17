@@ -40,7 +40,7 @@ func (n *node) setupWireguard() error {
 	if err != nil {
 		// The store is the node's until construction returns it.
 		if cfg.Store != nil {
-			cfg.Store.Close() //nolint:errcheck
+			_ = cfg.Store.Close()
 		}
 		return fmt.Errorf("assembling the application: %w", err)
 	}

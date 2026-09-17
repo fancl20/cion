@@ -25,7 +25,7 @@ type testableDB struct {
 func (d *testableDB) Prepare(t *testing.T, ctx context.Context) {
 	d.t = t
 	if d.DB != nil {
-		d.DB.Close() //nolint:errcheck
+		_ = d.Close()
 		if err := os.Remove(d.path); err != nil && !errors.Is(err, os.ErrNotExist) {
 			t.Fatal(err)
 		}
@@ -38,7 +38,7 @@ func (d *testableDB) Prepare(t *testing.T, ctx context.Context) {
 }
 
 func (d *testableDB) Reopen(t *testing.T, ctx context.Context) {
-	if err := d.DB.Close(); err != nil {
+	if err := d.Close(); err != nil {
 		t.Fatal(err)
 	}
 	db, err := New(d.path, nil)
@@ -62,7 +62,7 @@ func TestAllocateHoldsRetired(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close() //nolint:errcheck
+	defer func() { _ = db.Close() }()
 	ctx := context.Background()
 
 	live := &links.Link{NeighborIA: ia(1), State: links.StateEstablished}

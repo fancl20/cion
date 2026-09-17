@@ -319,7 +319,7 @@ func (u *udpConnection) stop() {
 
 	// The socket is released even if the connection never started, so that a
 	// provider that is abandoned before Serve still frees its addresses.
-	u.conn.Close() // Also unblocks the receiver.
+	_ = u.conn.Close() // Also unblocks the receiver.
 
 	if wasRunning {
 		// The queue itself stays open: producers (the data plane processors
@@ -914,10 +914,10 @@ func newUDPConn(
 	}
 	if receiveBufferSize != 0 {
 		// Not all platforms support this; best effort only.
-		c.SetReadBuffer(receiveBufferSize) //nolint:errcheck
+		_ = c.SetReadBuffer(receiveBufferSize)
 	}
 	if sendBufferSize != 0 {
-		c.SetWriteBuffer(sendBufferSize) //nolint:errcheck
+		_ = c.SetWriteBuffer(sendBufferSize)
 	}
 	uc := &udpBatchConn{conn: c}
 	if c.LocalAddr().(*net.UDPAddr).IP.To4() != nil {

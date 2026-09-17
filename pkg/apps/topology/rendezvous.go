@@ -254,7 +254,7 @@ func (r *Rendezvous) Close() error {
 func (r *Rendezvous) Run(ctx context.Context) {
 	go func() {
 		<-ctx.Done()
-		r.conn.Close() //nolint:errcheck
+		_ = r.conn.Close()
 	}()
 	buf := make([]byte, 128)
 	for {
@@ -412,7 +412,7 @@ func RendezvousEcho(
 	if err != nil {
 		return RendezvousReply{}, 0, fmt.Errorf("binding the rendezvous client: %w", err)
 	}
-	defer conn.Close() //nolint:errcheck
+	defer func() { _ = conn.Close() }()
 	var req RendezvousRequest
 	if _, err := rand.Read(req.Nonce[:]); err != nil {
 		return RendezvousReply{}, 0, err

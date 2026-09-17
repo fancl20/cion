@@ -99,7 +99,7 @@ func (n *Node) NewConn(t *testing.T, port uint16) *scion.Conn {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { conn.Close() }) //nolint:errcheck
+	t.Cleanup(func() { _ = conn.Close() })
 	return conn
 }
 
@@ -344,14 +344,14 @@ func StartNode(t *testing.T, cfg NodeConfig) *Node {
 	t.Cleanup(func() {
 		cancel()
 		provider.Stop()
-		discovery.Close() //nolint:errcheck
+		_ = discovery.Close()
 	})
 	// The link store's file lock releases with the node's cancellation, so
 	// a restarted node — the same state directory — opens it instead of
 	// blocking on it.
 	go func() {
 		<-ctx.Done()
-		linkStore.Close() //nolint:errcheck
+		_ = linkStore.Close()
 	}()
 	go func() { _ = d.Serve(ctx) }()
 	go discovery.Run(ctx)
@@ -508,7 +508,7 @@ func StartNode(t *testing.T, cfg NodeConfig) *Node {
 	endpointConn := scionConn(controlplane.EndpointPort)
 	// The HTTP/3 server serves until its socket closes; releasing it lets a
 	// re-run of the suite (go test -count) bind the fixed port again.
-	t.Cleanup(func() { endpointConn.Close() }) //nolint:errcheck
+	t.Cleanup(func() { _ = endpointConn.Close() })
 	svc := &controlplane.Services{
 		TrustService: &controlplane.TrustService{DB: trustDB, Issuer: issuer},
 		SegmentService: &controlplane.SegmentService{
@@ -675,7 +675,7 @@ func freeUDPPort(t *testing.T) uint16 {
 		t.Fatal(err)
 	}
 	port := uint16(c.LocalAddr().(*net.UDPAddr).Port)
-	c.Close()
+	_ = c.Close()
 	return port
 }
 
@@ -686,7 +686,7 @@ func FreeUDPAddrOn(t *testing.T, ip netip.Addr) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer c.Close()
+	defer func() { _ = c.Close() }()
 	return c.LocalAddr().String()
 }
 
@@ -712,7 +712,7 @@ func selfEnroll(
 func StartPingResponder(t *testing.T, n *Node) {
 	t.Helper()
 	conn := n.NewConn(t, dataplane.EndhostPort)
-	t.Cleanup(func() { conn.Close() }) //nolint:errcheck
+	t.Cleanup(func() { _ = conn.Close() })
 	go func() {
 		for {
 			echo, from, err := conn.ReadEchoFrom()

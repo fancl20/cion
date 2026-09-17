@@ -123,7 +123,7 @@ func TestZeroconfMounts(t *testing.T) {
 		z.Wire(Pieces{Store: memory.New()})
 		// Mounts binds the rendezvous port; releasing it lets a rerun of the
 		// test in the same process bind it again.
-		t.Cleanup(func() { z.Close() }) //nolint:errcheck
+		t.Cleanup(func() { _ = z.Close() })
 		mounts, err := z.Mounts()
 		if err != nil {
 			t.Fatal(err)

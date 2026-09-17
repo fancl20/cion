@@ -91,7 +91,7 @@ func Run(t *testing.T, db TestableDB, cfg Config) {
 			defer cancelF()
 			db.Prepare(t, ctx)
 			test(t, db, cfg)
-			db.Close()
+			_ = db.Close()
 		})
 	}
 }

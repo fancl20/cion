@@ -173,15 +173,3 @@ func freshest(a, b *pathdb.Segment) *pathdb.Segment {
 		return a
 	}
 }
-
-func (p *PathProvider) isCore(ia addr.IA) bool {
-	if p.Cores == nil {
-		return false
-	}
-	for _, core := range p.Cores(ia.ISD()) {
-		if core.Equal(ia) {
-			return true
-		}
-	}
-	return false
-}

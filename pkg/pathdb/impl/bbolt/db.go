@@ -60,7 +60,7 @@ func New(path string, opts *bbolt.Options) (pathdb.DB, error) {
 		_, err := tx.CreateBucketIfNotExists([]byte(bucketName))
 		return err
 	}); err != nil {
-		db.Close() //nolint:errcheck
+		_ = db.Close()
 		return nil, err
 	}
 	return &bboltDB{db: db}, nil

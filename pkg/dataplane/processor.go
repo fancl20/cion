@@ -441,11 +441,6 @@ func (p *scionPacketProcessor) updateNonConsDirIngressSegID() disposition {
 	return pForward
 }
 
-func (p *scionPacketProcessor) currentInfoPointer() uint16 {
-	return uint16(slayers.CmnHdrLen + p.scionLayer.AddrHdrLen() +
-		scion.MetaLen + path.InfoLen*int(p.path.PathMeta.CurrINF))
-}
-
 func (p *scionPacketProcessor) currentHopPointer() uint16 {
 	return uint16(slayers.CmnHdrLen + p.scionLayer.AddrHdrLen() +
 		scion.MetaLen + path.InfoLen*p.path.NumINF + path.HopLen*int(p.path.PathMeta.CurrHF))
@@ -872,7 +867,7 @@ func (p *slowPathPacketProcessor) processPacket(pkt *Packet) error {
 		}
 	default:
 		// unsupported path type
-		return fmt.Errorf("Path type not supported for slow-path: type: %s", pathType)
+		return fmt.Errorf("path type not supported for slow-path: %s", pathType)
 	}
 
 	s := pkt.slowPathRequest

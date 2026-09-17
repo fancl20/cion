@@ -43,7 +43,7 @@ func Run(t *testing.T, db TestableDB) {
 			// The close is deferred so a failing test's runtime.Goexit still
 			// releases the database — a leaked handle would block the next
 			// subtest's open on the file lock.
-			defer db.Close() //nolint:errcheck
+			defer func() { _ = db.Close() }()
 			test(t, db)
 		})
 	}

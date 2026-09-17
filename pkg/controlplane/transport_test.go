@@ -108,7 +108,7 @@ func startTestNode(t *testing.T, ia, neighbor addr.IA, extLocal, extRemote strin
 	t.Cleanup(func() {
 		cancel()
 		provider.Stop()
-		discovery.Close() //nolint:errcheck
+		_ = discovery.Close()
 	})
 	go func() { _ = d.Serve(ctx) }()
 	go discovery.Run(ctx)
@@ -141,7 +141,7 @@ func (n *testNode) newConn(t *testing.T, port uint16) *scion.Conn {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { conn.Close() }) //nolint:errcheck
+	t.Cleanup(func() { _ = conn.Close() })
 	return conn
 }
 
@@ -185,7 +185,7 @@ func TestSCIONClientServiceWithoutBackend(t *testing.T) {
 
 	conn := a.newConn(t, 0)
 	qclt := &quic.Transport{Conn: conn}
-	t.Cleanup(func() { qclt.Close() }) //nolint:errcheck
+	t.Cleanup(func() { _ = qclt.Close() })
 	// The dial's TLS is never exercised: no backend answers the handshake.
 	hclt := NewSCIONClient(PeerClientConfig{Conn: conn}, qclt, false)
 	unregistered := &scion.Addr{IA: iaB, Service: addr.SVC(0x7ff2)}
@@ -198,7 +198,7 @@ func TestSCIONClientServiceWithoutBackend(t *testing.T) {
 	}
 	resp, err := hclt.Do(req)
 	if err == nil {
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		t.Fatal("a dial to a service with no backend succeeded")
 	}
 }
