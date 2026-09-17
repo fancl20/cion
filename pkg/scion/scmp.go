@@ -84,7 +84,8 @@ func serializeEcho(
 
 // ReadEchoFrom reads the next SCMP echo message, returning it with the
 // sender's address, whose path is the reversed arrival path. Packets that
-// are not SCMP echo are dropped silently, as ReadFrom drops non-UDP ones.
+// are not SCMP echo are dropped silently, as ReadFrom drops non-UDP ones —
+// unless they are the interface-down signal the cache recognizes.
 func (c *Conn) ReadEchoFrom() (Echo, *Addr, error) {
 	buf := make([]byte, dataplane.BufferSize)
 	for {
@@ -94,6 +95,7 @@ func (c *Conn) ReadEchoFrom() (Echo, *Addr, error) {
 		}
 		echo, from, err := parseEchoPacket(buf[:n])
 		if err != nil {
+			c.recordInterfaceDown(buf[:n])
 			continue
 		}
 		return echo, from, nil

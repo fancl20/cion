@@ -343,3 +343,56 @@ the verdicts joining it — and imports the core, never the reverse.
     its own.
 
 ## Implementation history
+
+*   Core: `pkg/controlplane/bfd.go` holds the session — the async subset
+    of RFC 5880 through gopacket's BFD layer, SCION-framed (NextHdr 203)
+    over a fresh one-hop path per transmission — and `monitor.go` the
+    health monitor: sessions keyed by interface ID, `Session` asked by
+    each generation so a swap re-attaches the writer through the same
+    session, `Up`/`Verdicts` the consumers read, and one loop that
+    reconciles against the store and ticks every session's interval.
+    The `dataplane.Session` interface gained `IsUp` and `SetRawWriter`;
+    `NewExternalLink` attaches the link's raw writer (a plain write on
+    the connected socket), and `connectedLink.IsUp` reads the session
+    the link carries.
+*   The egress-down branch runs: `validateEgressUp` consults the
+    per-interface cap (`notifyCapPerSecond`, a lock-free one-second
+    window per interface) before taking the slow path, so a burst of
+    packets into a down link earns at most the cap's type-5
+    notifications per second; over-cap ones drop with the packet.
+    `pkg/scion/ifdown.go` holds the signal type, the ten-second cache
+    with its subscriber hook, and the recognition parse; the conn's two
+    receive paths record what they recognize, and `PathProvider`
+    (gaining the cache) prefers composed paths that cross no signaled
+    interface — up and down segments checked where their entries carry
+    the ISD-ASes and interface IDs — keeping a crossing path as the
+    last resort. The WireGuard bind drops the quoted destination's
+    cached path through the cache's subscriber.
+*   Consumers: `Discovery.Neighbors` returns the full map with
+    `LastSeen` (the greeting timeout stays on the core-endpoint relay
+    alone); the beaconer's `Verdicts` field pauses origination and
+    propagation on down interfaces; the core route's one-hop shortcut
+    requires the verdict; the selection loop's `Verdicts` field feeds
+    the demotions and the promotion floor (up links only), the sweep's
+    grace reads `LastSeen` against the candidate window, and the probe
+    split landed as `echoRTT` — the neighbor's direct side one-hop, the
+    candidate's by rendezvous echo, the baseline over the resolved
+    path. `establishLink` now falls through to the rendezvous
+    establishment when the in-band request fails, so a promotion is not
+    hostage to a path that resolves but carries nothing. The monitor
+    and the shared cache are assembled beside discovery (`BootApp` and
+    `cion ping` identically), passed to every conn and the provider,
+    and exposed on `App` for the tests.
+*   Tests: the session's frame, state machine, verdict hysteresis, and
+    stop; the monitor's reconcile, retarget, and swap survival; the
+    slow path's type 5 and its cap (`pkg/dataplane/bfddown_test.go`);
+    the cache's retention, recognition, and composition avoidance; the
+    bind's drop; the selection's verdict-down demotion, the two floors,
+    and the sweep grace; the beaconer's pause; and the two integration
+    episodes — the assembly harness's three-node line with promotion
+    and recovery, the static lab's file-paired variant
+    (`internal/testnetwork/bfd_test.go`). One pre-existing race in
+    `TestJoinByRendezvous` surfaced under the new traffic: it killed B
+    before C's direct up segments from A's beacons had landed, and the
+    test now polls for that precondition — the race itself, in the
+    beaconer's serialized sends, predates this proposal and stands.

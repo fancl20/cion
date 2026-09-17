@@ -407,17 +407,16 @@ func (d *Discovery) entry(ifID uint16) *links.Link {
 	return nil
 }
 
-// Neighbors returns the currently reachable neighbors, by interface ID.
-// Neighbors whose last greeting is older than three intervals are omitted.
+// Neighbors returns the neighbors learned from greetings, by interface ID,
+// with their LastSeen — identity for whoever asks. The entries stand
+// however stale their arrivals: liveness is the health monitor's verdict
+// (ADR-0008), and the one recency derivation left — the selection sweep's
+// grace for a candidate still proving itself — reads LastSeen directly.
 func (d *Discovery) Neighbors() map[uint16]Neighbor {
 	d.mtx.Lock()
 	defer d.mtx.Unlock()
 	out := make(map[uint16]Neighbor, len(d.neighbors))
-	now := time.Now()
 	for ifID, n := range d.neighbors {
-		if now.Sub(n.LastSeen) > d.timeout {
-			continue
-		}
 		out[ifID] = n
 	}
 	return out

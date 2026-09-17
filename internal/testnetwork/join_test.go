@@ -12,6 +12,7 @@ import (
 	"github.com/fancl20/cion/pkg/apps/ping"
 	"github.com/fancl20/cion/pkg/apps/topology"
 	"github.com/fancl20/cion/pkg/links"
+	"github.com/fancl20/cion/pkg/pathdb"
 	"github.com/fancl20/cion/pkg/trust"
 )
 
@@ -26,6 +27,7 @@ var fastPacing = services.NodePacing{
 	Directory:       100 * time.Millisecond,
 	RendezvousRate:  10 * time.Millisecond,
 	LinkSetPoll:     100 * time.Millisecond,
+	BFD:             200 * time.Millisecond,
 }
 
 // assemblyNode is a node booted through the run command's own assembly.
@@ -194,6 +196,26 @@ func TestJoinByRendezvous(t *testing.T) {
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
+
+	// The precondition of the episode below: A's beacons over the direct
+	// link have reached C and terminated into a direct up segment — the
+	// route that takes over when B dies. Without it, the takeover races
+	// the beaconing convergence.
+	Poll(t, "C's direct up segment from A", func() bool {
+		segs, err := c.app.PathDB().Get(ctx, pathdb.Query{
+			Type:  pathdb.SegmentTypeUp,
+			SrcIA: a.app.IA(),
+		})
+		if err != nil {
+			return false
+		}
+		for _, s := range segs {
+			if len(s.PCB.Entries) == 2 {
+				return true
+			}
+		}
+		return false
+	})
 
 	// Killing B leaves C connected through A.
 	b.cancel()

@@ -61,8 +61,8 @@ const TestDomain = "cion-core.test"
 
 // Node is one fully-wired node of a test topology — the same components the
 // run command wires in internal/services: data plane, the link store,
-// discovery, trust, the control endpoint, the beaconer, and — when
-// configured — the WireGuard application.
+// discovery, the BFD health monitor, trust, the control endpoint, the
+// beaconer, and — when configured — the WireGuard application.
 type Node struct {
 	IA        addr.IA
 	Internal  string
@@ -70,6 +70,7 @@ type Node struct {
 	Links     func() map[uint16]addr.IA
 	Store     links.DB
 	MACKey    []byte
+	Monitor   *controlplane.HealthMonitor
 	TrustDB   trust.DB
 	PathDB    pathdb.DB
 	Engine    *trust.Engine
@@ -292,6 +293,17 @@ func StartNode(t *testing.T, cfg NodeConfig) *Node {
 	}
 	serving := links.Serving(entries)
 
+	// The BFD health monitor the daemon's own assembly builds: a session per
+	// serving link, the store its source either way (ADR-0008).
+	monitor, err := controlplane.NewHealthMonitor(controlplane.HealthMonitorConfig{
+		IA:     ia,
+		MACKey: macKey,
+		Store:  linkStore,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
 	dLinks := []dataplane.Link{}
 	il, err := provider.NewInternalLink(internal, 64,
 		metrics.NewInterfaceMetrics(0, ia, 0))
@@ -300,8 +312,8 @@ func StartNode(t *testing.T, cfg NodeConfig) *Node {
 	}
 	dLinks = append(dLinks, il)
 	for _, l := range serving {
-		el, err := provider.NewExternalLink(64, nil, l.Local.String(), l.Remote.String(),
-			l.IfID, metrics.NewInterfaceMetrics(l.IfID, ia, 0))
+		el, err := provider.NewExternalLink(64, monitor.Session(l), l.Local.String(),
+			l.Remote.String(), l.IfID, metrics.NewInterfaceMetrics(l.IfID, ia, 0))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -343,6 +355,10 @@ func StartNode(t *testing.T, cfg NodeConfig) *Node {
 	}()
 	go func() { _ = d.Serve(ctx) }()
 	go discovery.Run(ctx)
+	go func() {
+		defer handlePanic()
+		monitor.Run(ctx)
+	}()
 
 	scionConn := func(port uint16) *scion.Conn {
 		bind := netip.AddrPortFrom(controlAddr.Addr(), port).String()
@@ -394,8 +410,10 @@ func StartNode(t *testing.T, cfg NodeConfig) *Node {
 		if !ok {
 			return nil
 		}
-		for _, n := range discovery.Neighbors() {
-			if n.IA.Equal(coreIA) {
+		// The one-hop shortcut when the core is a neighbor and the monitor's
+		// verdict holds; a down link falls through to the composed route.
+		for ifID, n := range discovery.Neighbors() {
+			if n.IA.Equal(coreIA) && monitor.Up(ifID) {
 				return &scion.Addr{IA: coreIA,
 					Addr: netip.AddrPortFrom(n.ControlAddr.Addr(), controlplane.EndpointPort)}
 			}
@@ -456,6 +474,7 @@ func StartNode(t *testing.T, cfg NodeConfig) *Node {
 		DB:                   pathDB,
 		Links:                linkTableOf(linkStore),
 		Neighbors:            discovery.Neighbors,
+		Verdicts:             monitor.Verdicts,
 		Sender:               peerClt,
 		CoreRoute:            coreRoute,
 		Core:                 core,
@@ -540,6 +559,7 @@ func StartNode(t *testing.T, cfg NodeConfig) *Node {
 		Links:     linkTableOf(linkStore),
 		Store:     linkStore,
 		MACKey:    macKey,
+		Monitor:   monitor,
 		TrustDB:   trustDB,
 		PathDB:    pathDB,
 		Engine:    engine,

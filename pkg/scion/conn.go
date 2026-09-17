@@ -89,6 +89,9 @@ type Conn struct {
 	// resolve the egress interface of fresh one-hop paths. Read live, so a
 	// topology change reaches the conn without rebuilding it.
 	links func() map[uint16]addr.IA
+	// ifDown is the node's shared negative cache of interface-down signals;
+	// nil drops them as before.
+	ifDown *InterfaceDownCache
 
 	conn *net.UDPConn
 
@@ -110,6 +113,10 @@ type ConnConfig struct {
 	// Links snapshots the external links, interface ID to neighbor IA; the
 	// conn resolves one-hop egress through it live.
 	Links func() map[uint16]addr.IA
+	// InterfaceDown is the node's shared negative cache of SCMP
+	// interface-down signals; the conn's receive paths recognize the signal
+	// and record it. Nil drops them.
+	InterfaceDown *InterfaceDownCache
 }
 
 // NewConn binds the endpoint's underlay address. Packets it sends are
@@ -149,8 +156,25 @@ func NewConn(cfg ConnConfig) (*Conn, error) {
 		internal: internal,
 		mac:      macFactory(),
 		links:    cfg.Links,
+		ifDown:   cfg.InterfaceDown,
 		conn:     conn,
 	}, nil
+}
+
+// recordInterfaceDown recognizes an interface-down signal in a received
+// packet — the drafts' error the library's receive paths once dropped
+// silently — and enters it in the shared cache. Reports whether one was
+// recognized.
+func (c *Conn) recordInterfaceDown(raw []byte) bool {
+	if c.ifDown == nil {
+		return false
+	}
+	sig, ok := parseInterfaceDownPacket(raw)
+	if !ok {
+		return false
+	}
+	c.ifDown.Record(sig)
+	return true
 }
 
 // LocalPort returns the bound underlay port. An SCMP echo request sent by
@@ -172,8 +196,9 @@ func (c *Conn) Close() error {
 }
 
 // ReadFrom reads the next datagram, returning it with the peer's address.
-// Packets that are not SCION/UDP over a one-hop path are dropped silently;
-// greetings share the CS service address and are none of our business.
+// Packets that are not SCION/UDP over a one-hop path are dropped silently —
+// unless they are the interface-down signal the cache recognizes; greetings
+// share the CS service address and are none of our business.
 func (c *Conn) ReadFrom(b []byte) (int, net.Addr, error) {
 	buf := make([]byte, dataplane.BufferSize)
 	for {
@@ -183,6 +208,7 @@ func (c *Conn) ReadFrom(b []byte) (int, net.Addr, error) {
 		}
 		payload, from, err := parseDatagramPacket(buf[:n])
 		if err != nil {
+			c.recordInterfaceDown(buf[:n])
 			continue
 		}
 		if len(payload) > len(b) {

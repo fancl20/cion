@@ -225,6 +225,25 @@ func (s *meshSocket) warmPath(ia addr.IA, path *spath.Decoded) {
 	s.expiry[ia] = scion.PathExpiry(path)
 }
 
+// dropPathOf releases the cached path of the destination an interface-down
+// signal's quote names — the signal's cached path just failed — so the next
+// send re-resolves through the filtered composition; the existing
+// failure-and-refresh behavior, prompted by the signal instead of a lost
+// datagram. The bind cannot recover an ISD-AS from a decoded path and does
+// not try.
+func (s *meshSocket) dropPathOf(sig scion.InterfaceDownSignal) {
+	if sig.Dst.IsZero() {
+		return
+	}
+	s.mtx.Lock()
+	defer s.mtx.Unlock()
+	if _, ok := s.paths[sig.Dst]; ok {
+		s.cnt.pathRefreshes.Add(1)
+		delete(s.paths, sig.Dst)
+		delete(s.expiry, sig.Dst)
+	}
+}
+
 // cachedPath returns the cached path for the peer when it exists and its hops
 // do not lapse inside the refresh margin.
 func (s *meshSocket) cachedPath(ia addr.IA) *spath.Decoded {

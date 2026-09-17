@@ -85,6 +85,7 @@ type NodePacing struct {
 	Directory       time.Duration // directory publish and fetch
 	RendezvousRate  time.Duration // admission rate caps
 	LinkSetPoll     time.Duration // the file provider's link-set poll
+	BFD             time.Duration // BFD transmission interval
 }
 
 // Validate applies the role-aware argument checks: the domain is always

@@ -16,8 +16,26 @@ const (
 	External                  // to/from routers in another AS
 )
 
+// RawWriter sends a prebuilt packet on a link's own underlay socket —
+// beneath the forwarding queues and the egress validation above them — so a
+// BFD session's stream survives its own down verdict by construction: a
+// probe gated by the verdict could never overturn it.
+type RawWriter interface {
+	WriteRaw(b []byte) error
+}
+
+// Session is the BFD session of a link: every control packet the link
+// receives is handed to it, its verdict is the flag the egress check reads,
+// and the link attaches its raw writer at construction — the one send path
+// that stays open while the link is down, which is how recovery is seen.
 type Session interface {
+	// ReceiveMessage hands one received BFD control message to the session.
 	ReceiveMessage(msg *layers.BFD)
+	// IsUp returns the session's verdict: up until the detect multiplier
+	// expires without an arrival, up again on the next answered one.
+	IsUp() bool
+	// SetRawWriter attaches the link's writer for prebuilt packets.
+	SetRawWriter(w RawWriter)
 }
 
 // Link embodies the router's idea of a point to point connection. A link associates the underlay

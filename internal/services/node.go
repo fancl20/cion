@@ -72,6 +72,11 @@ type node struct {
 	beaconStore  *controlplane.BeaconStore
 	pathProvider *scion.PathProvider
 	discovery    *controlplane.Discovery
+	// monitor owns the BFD sessions and their verdicts; ifDown is the
+	// node's shared negative cache of interface-down signals its conns
+	// record and its path composition consults.
+	monitor *controlplane.HealthMonitor
+	ifDown  *scion.InterfaceDownCache
 
 	// Assembled sockets and services, started by start.
 	endpointConn *scion.Conn
@@ -266,17 +271,21 @@ func (n *node) Close() {
 	}
 }
 
-// start launches the node's background loops: discovery, beaconing, the
-// control endpoint, the SCMP echo responder, the loaded topology provider's
-// — the rendezvous acceptor, the joiner's dials, the node directory, and
-// the selection loop under the measured provider — the chain lifecycle loop
-// the node's role prescribes, and the resident applications. Nothing serves
-// before start, so assembly and serving stay separate lifecycles; the data
-// plane generations are served by superviseDataplanes, the daemon's own
-// body.
+// start launches the node's background loops: discovery, the BFD health
+// monitor, beaconing, the control endpoint, the SCMP echo responder, the
+// loaded topology provider's — the rendezvous acceptor, the joiner's dials,
+// the node directory, and the selection loop under the measured provider —
+// the chain lifecycle loop the node's role prescribes, and the resident
+// applications. Nothing serves before start, so assembly and serving stay
+// separate lifecycles; the data plane generations are served by
+// superviseDataplanes, the daemon's own body.
 func (n *node) start(ctx context.Context) {
 	runBackground(ctx, "discovery", func(ctx context.Context) error {
 		n.discovery.Run(ctx)
+		return nil
+	})
+	runBackground(ctx, "health monitor", func(ctx context.Context) error {
+		n.monitor.Run(ctx)
 		return nil
 	})
 	runBackground(ctx, "beaconer", func(ctx context.Context) error {

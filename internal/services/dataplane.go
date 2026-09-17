@@ -100,8 +100,13 @@ func (n *node) startGeneration(ctx context.Context) (*generation, error) {
 	}
 	dlinks = append(dlinks, internalLink)
 	for _, l := range entries {
+		// Each serving link carries its BFD session — the monitor's, keyed
+		// by interface ID and surviving the swap — and the verdict through
+		// it: the link attaches its own raw writer, so the session's stream
+		// keeps leaving on the rebound address (ADR-0008).
+		session := n.monitor.Session(l)
 		link, err := provider.NewExternalLink(
-			n.opts.QueueSize, nil, l.Local.String(), l.Remote.String(), l.IfID,
+			n.opts.QueueSize, session, l.Local.String(), l.Remote.String(), l.IfID,
 			n.metrics.NewInterfaceMetrics(l.IfID, n.ident.ia, 0),
 		)
 		if err != nil {

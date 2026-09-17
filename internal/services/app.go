@@ -12,6 +12,7 @@ import (
 
 	"github.com/scionproto/scion/pkg/addr"
 
+	"github.com/fancl20/cion/pkg/controlplane"
 	"github.com/fancl20/cion/pkg/links"
 	"github.com/fancl20/cion/pkg/pathdb"
 	"github.com/fancl20/cion/pkg/scion"
@@ -83,6 +84,14 @@ func (a *App) Provider() *scion.PathProvider {
 // Links returns the node's neighbor table — the one source of truth the
 // control plane reads and every data plane generation is built from.
 func (a *App) Links() links.DB { return a.node.linkStore }
+
+// Monitor returns the node's BFD health monitor — the sessions and their
+// verdicts, one per serving link.
+func (a *App) Monitor() *controlplane.HealthMonitor { return a.node.monitor }
+
+// InterfaceDown returns the node's shared negative cache of SCMP
+// interface-down signals.
+func (a *App) InterfaceDown() *scion.InterfaceDownCache { return a.node.ifDown }
 
 // TrustDB returns the node's trust database.
 func (a *App) TrustDB() trust.DB { return a.node.trustDB }

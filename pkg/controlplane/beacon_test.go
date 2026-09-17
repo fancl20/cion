@@ -491,3 +491,64 @@ func TestHandleRegistration(t *testing.T) {
 		t.Error("registration of a foreign-origin segment accepted")
 	}
 }
+
+// TestBeaconerPausesOnDownInterface checks the verdict's read: a down
+// interface originates and propagates nothing — the endpoint is identity
+// the map serves however stale, and the monitor's verdict is the pause.
+func TestBeaconerPausesOnDownInterface(t *testing.T) {
+	f := newBeaconFixture(t)
+	ctx := context.Background()
+
+	// Interface 2 — toward C — is verdict-down.
+	f.beaconer.verdicts = func() map[uint16]bool {
+		return map[uint16]bool{1: true, 2: false}
+	}
+
+	pcb := lineBeacon(t, f, time.Now())
+	if err := f.beaconer.HandleBeacon(ctx, pcb, 1); err != nil {
+		t.Fatal(err)
+	}
+	f.beaconer.propagateOnce(ctx)
+	f.sender.mtx.Lock()
+	sent := len(f.sender.beacons)
+	f.sender.mtx.Unlock()
+	if sent != 0 {
+		t.Fatalf("propagated %d beacons over a down interface, want 0", sent)
+	}
+
+	// The core's origination pauses the same way.
+	core, err := NewBeaconer(BeaconerConfig{
+		IA:        coreIATest,
+		Engine:    f.engines[coreIATest],
+		MACKey:    []byte(testMACKey),
+		Store:     NewBeaconStore(),
+		DB:        f.pathDB,
+		Links:     func() map[uint16]addr.IA { return map[uint16]addr.IA{1: nodeIATest} },
+		Neighbors: func() map[uint16]Neighbor { return map[uint16]Neighbor{} },
+		Verdicts:  func() map[uint16]bool { return map[uint16]bool{1: false} },
+		Sender:    f.sender,
+		CoreRoute: func() *scion.Addr { return nil },
+		Core:      true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	core.originateOnce(ctx)
+	f.sender.mtx.Lock()
+	sent = len(f.sender.beacons)
+	f.sender.mtx.Unlock()
+	if sent != 0 {
+		t.Fatalf("originated %d beacons on a down interface, want 0", sent)
+	}
+
+	// The verdict's up edge resumes: a missing verdict — no session —
+	// treats the link as up, as a node restarts with every link up.
+	f.beaconer.verdicts = func() map[uint16]bool { return map[uint16]bool{} }
+	f.beaconer.propagateOnce(ctx)
+	f.sender.mtx.Lock()
+	sent = len(f.sender.beacons)
+	f.sender.mtx.Unlock()
+	if sent != 1 {
+		t.Fatalf("propagated %d beacons after the up edge, want 1", sent)
+	}
+}

@@ -74,8 +74,15 @@ type Pieces struct {
 	// Engine provides the node's chain as the directory client's
 	// certificate.
 	Engine *trust.Engine
-	// Neighbors returns the greeting-fresh neighbors by interface ID.
+	// Neighbors returns the neighbors learned from greetings by interface
+	// ID, with their LastSeen — identity, however stale the arrivals; the
+	// selection sweep's grace reads LastSeen directly.
 	Neighbors func() map[uint16]controlplane.Neighbor
+	// Verdicts returns the health monitor's link verdicts by interface ID:
+	// the selection loop's floor and demotions read them — established-but-
+	// down entries satisfy no floor and a down neighbor counts as
+	// infinitely slow.
+	Verdicts func() map[uint16]bool
 }
 
 // runLoop runs one of the provider's long-lived loops in its own goroutine:

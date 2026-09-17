@@ -45,6 +45,7 @@ var (
 	errIngressInterfaceInvalid       = errors.New("ingress interface invalid")
 	errMacVerificationFailed         = errors.New("MAC verification failed")
 	errBadPacketSize                 = errors.New("bad packet size")
+	errSCMPNotifyCapExceeded         = errors.New("scmp notification rate cap exceeded")
 
 	// zeroBuffer will be used to reset the Authenticator option in the
 	// scionPacketProcessor.OptAuth
@@ -64,6 +65,9 @@ type DataPlane struct {
 	macFactory    func() hash.Hash
 	underlays     []UnderlayProvider
 	running       atomic.Bool
+	// scmpCap rate-limits the SCMP notifications a down egress earns —
+	// the drafts' Section 6.2 — per interface per second.
+	scmpCap scmpNotifyLimiter
 	// processors tracks the fast- and slow-path processor goroutines, so
 	// Serve's graceful shutdown can wait for their exit.
 	processors sync.WaitGroup

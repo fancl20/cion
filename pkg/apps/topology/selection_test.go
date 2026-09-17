@@ -14,19 +14,25 @@ import (
 )
 
 // selFixture is the selection loop's test harness: a memory link store, a
-// directory snapshot, greeting liveness, and injected measurements. The
-// establishment is recorded rather than performed; the promotion and
-// demotion rules are what the tests assert.
+// directory snapshot, greeting arrivals with their LastSeen, the monitor's
+// verdicts, and injected measurements. The establishment is recorded rather
+// than performed; the promotion and demotion rules are what the tests
+// assert.
 type selFixture struct {
-	store       *memory.DB
-	directory   []DirectoryEntry
-	samples     map[addr.IA]measurement
-	fresh       map[uint16]controlplane.Neighbor
-	silent      map[addr.IA]bool // neighbors whose greetings timed out
-	established []addr.IA        // the promoted candidates, in order
-	retired     []addr.IA        // the demoted neighbors, in order
-	changed     int
-	sel         *selection
+	store     *memory.DB
+	directory []DirectoryEntry
+	samples   map[addr.IA]measurement
+	fresh     map[uint16]controlplane.Neighbor
+	verdicts  map[uint16]bool
+	silent    map[addr.IA]bool // neighbors whose greetings stopped
+	down      map[addr.IA]bool // neighbors whose verdict is down
+	// candidateGreetings holds the greeting arrivals of candidates' peers,
+	// keyed by the candidate's interface ID.
+	candidateGreetings map[uint16]controlplane.Neighbor
+	established        []addr.IA // the promoted candidates, in order
+	retired            []addr.IA // the demoted neighbors, in order
+	changed            int
+	sel                *selection
 }
 
 var (
@@ -49,10 +55,13 @@ func entryOf(ia addr.IA) DirectoryEntry {
 func newSelFixture(t *testing.T, neighbors ...addr.IA) *selFixture {
 	t.Helper()
 	f := &selFixture{
-		store:   memory.New(),
-		samples: make(map[addr.IA]measurement),
-		fresh:   make(map[uint16]controlplane.Neighbor),
-		silent:  make(map[addr.IA]bool),
+		store:              memory.New(),
+		samples:            make(map[addr.IA]measurement),
+		fresh:              make(map[uint16]controlplane.Neighbor),
+		verdicts:           make(map[uint16]bool),
+		silent:             make(map[addr.IA]bool),
+		down:               make(map[addr.IA]bool),
+		candidateGreetings: make(map[uint16]controlplane.Neighbor),
 	}
 	for _, ia := range neighbors {
 		if err := f.store.Insert(context.Background(), &links.Link{
@@ -76,7 +85,7 @@ func newSelFixture(t *testing.T, neighbors ...addr.IA) *selFixture {
 			Window:  time.Hour, // the candidate sweep never retires in these
 		},
 		streaks: make(map[addr.IA]*peerStreak),
-		probeFn: func(_ context.Context, e DirectoryEntry) measurement {
+		probeFn: func(_ context.Context, e DirectoryEntry, _ *links.Link) measurement {
 			return f.samples[e.IA]
 		},
 		establishFn: func(_ context.Context, e DirectoryEntry, _ string) bool {
@@ -95,25 +104,39 @@ func newSelFixture(t *testing.T, neighbors ...addr.IA) *selFixture {
 	}
 	f.sel.cfg.Directory = func() []DirectoryEntry { return f.directory }
 	f.sel.cfg.Neighbors = func() map[uint16]controlplane.Neighbor { return f.fresh }
-	// Every established neighbor is greeting-fresh unless a test says
-	// otherwise.
+	f.sel.cfg.Verdicts = func() map[uint16]bool { return f.verdicts }
+	// Every established neighbor greets and holds its verdict up unless a
+	// test says otherwise.
 	f.sel.cfg.Evidence = func(*links.Link) bool { return false }
 	f.refresh()
 	return f
 }
 
-// refresh rebuilds the greeting-fresh map from the established entries,
-// minus the silent ones.
+// refresh rebuilds the greeting and verdict maps from the established
+// entries, minus the silent and the down ones.
 func (f *selFixture) refresh() {
 	entries, err := f.store.All(context.Background())
 	if err != nil {
 		return
 	}
+	now := time.Now()
 	f.fresh = make(map[uint16]controlplane.Neighbor)
+	f.verdicts = make(map[uint16]bool)
 	for _, l := range entries {
-		if l.State == links.StateEstablished && !f.silent[l.NeighborIA] {
-			f.fresh[l.IfID] = controlplane.Neighbor{IA: l.NeighborIA, IfID: l.RemoteIfID}
+		if l.State != links.StateEstablished {
+			continue
 		}
+		if !f.silent[l.NeighborIA] {
+			n := controlplane.Neighbor{IA: l.NeighborIA, IfID: l.RemoteIfID, LastSeen: now}
+			f.fresh[l.IfID] = n
+		}
+		f.verdicts[l.IfID] = !f.down[l.NeighborIA]
+	}
+	// A candidate's peer that keeps greeting — a peer still trying, with no
+	// serving link and no session to its name — arrives through the same
+	// map, its LastSeen the grace's only evidence.
+	for ifID, n := range f.candidateGreetings {
+		f.fresh[ifID] = n
 	}
 }
 
@@ -251,24 +274,69 @@ func TestSelectionDemotion(t *testing.T) {
 	}
 }
 
-// TestSelectionGreetingTimeout checks the liveness rule: a neighbor whose
-// greetings have timed out counts as infinitely slow and retires on the
-// third window — and the floor holds even when every neighbor goes silent
-// in the same window.
-func TestSelectionGreetingTimeout(t *testing.T) {
+// TestSelectionVerdictDownDemotion checks the liveness rule: a neighbor
+// whose verdict is down counts as infinitely slow — however recent its last
+// sample — and retires on the third window, never below the floor.
+func TestSelectionVerdictDownDemotion(t *testing.T) {
 	f := newSelFixture(t, selPeer, selA, selB)
-	f.silent[selPeer] = true
-	f.silent[selA] = true
-	f.silent[selB] = true // every greeting timed out
+	// B is verdict-down with the freshest of samples; the verdict outranks
+	// the sample.
+	f.down[selB] = true
 
 	f.pass(t)
 	f.pass(t)
-	if f.state(t, selPeer) != links.StateEstablished {
-		t.Fatal("a silent neighbor was demoted before three windows")
+	if f.state(t, selB) != links.StateEstablished {
+		t.Fatal("a down neighbor was demoted before three windows")
 	}
 	f.pass(t)
-	// Three silent neighbors above the floor of two retire down to it, no
-	// further — the floor holds at every instant.
+	if f.state(t, selB) != links.StateRetired {
+		t.Fatal("a durably down neighbor was not demoted")
+	}
+	for _, ia := range []addr.IA{selPeer, selA} {
+		if f.state(t, ia) != links.StateEstablished {
+			t.Errorf("demotion took the up neighbor %s", ia)
+		}
+	}
+}
+
+// TestSelectionFloorCountsDownLinks checks the two floors' arithmetic: the
+// promotion floor counts up links only — a node whose every neighbor went
+// down promotes from the directory rather than resting on verdicts — while
+// the demotion floor counts established entries, so a peer whose BFD never
+// arrives but whose greetings do keeps its link established with the floor
+// counting it.
+func TestSelectionFloorCountsDownLinks(t *testing.T) {
+	// At the established floor, a verdict-down neighbor is kept: its
+	// verdict is reversible, and a bad link is still a link.
+	f := newSelFixture(t, selPeer, selA)
+	f.down[selPeer] = true
+	for range 5 {
+		f.pass(t)
+	}
+	for _, ia := range []addr.IA{selPeer, selA} {
+		if f.state(t, ia) != links.StateEstablished {
+			t.Fatalf("the down neighbor %s was demoted at the floor", ia)
+		}
+	}
+
+	// The same node's promotion floor counts up links only: below it, a
+	// reachable candidate is promoted outright.
+	f.candidate(selB, 30*time.Millisecond, 10*time.Millisecond)
+	f.pass(t)
+	if len(f.established) != 1 || !f.established[0].Equal(selB) {
+		t.Fatalf("promoted %v, want the reachable candidate below the up-link floor",
+			f.established)
+	}
+
+	// Above the floor, every neighbor going down retires them down to it —
+	// the floor holds at every instant.
+	f = newSelFixture(t, selPeer, selA, selB)
+	f.down[selPeer] = true
+	f.down[selA] = true
+	f.down[selB] = true
+	for range DemoteWindows {
+		f.pass(t)
+	}
 	retired := 0
 	for _, ia := range []addr.IA{selPeer, selA, selB} {
 		if f.state(t, ia) == links.StateRetired {
@@ -276,18 +344,7 @@ func TestSelectionGreetingTimeout(t *testing.T) {
 		}
 	}
 	if retired != 1 {
-		t.Fatalf("retired %d of three silent neighbors, want the one the floor allows", retired)
-	}
-	f.pass(t)
-	retired = 0
-	for _, ia := range []addr.IA{selPeer, selA, selB} {
-		if f.state(t, ia) == links.StateRetired {
-			retired++
-		}
-	}
-	if retired != 1 {
-		t.Errorf("retired %d of three silent neighbors after another window, want the floor to hold",
-			retired)
+		t.Fatalf("retired %d of three down neighbors, want the one the floor allows", retired)
 	}
 }
 
@@ -393,4 +450,54 @@ func TestSelectionNoAction(t *testing.T) {
 	if f.changed != 0 {
 		t.Errorf("change notifications = %d, want 0", f.changed)
 	}
+}
+
+// TestSelectionSweepGrace checks the candidacy grace: the sweep's one
+// recency derivation reads greeting arrivals' LastSeen directly — a
+// candidate's peer that keeps greeting is alive and trying, exactly the
+// joiner whose enrollment is still in flight, and retires when it goes
+// silent. The streams answer different questions: liveness is BFD's alone,
+// and this grace is the greeting stream's own business.
+func TestSelectionSweepGrace(t *testing.T) {
+	f := newSelFixture(t)
+	f.sel.cfg.Window = 50 * time.Millisecond
+	insertCandidate := func(name addr.IA) *links.Link {
+		l := &links.Link{
+			NeighborIA: name,
+			Local:      netip.MustParseAddrPort("127.0.0.1:40001"),
+			Remote:     netip.MustParseAddrPort("127.0.0.1:40002"),
+			State:      links.StateCandidate,
+		}
+		if err := f.store.Insert(context.Background(), l); err != nil {
+			t.Fatal(err)
+		}
+		return l
+	}
+	greeted := insertCandidate(selA)
+	silent := insertCandidate(selB)
+	time.Sleep(60 * time.Millisecond) // both candidates outlive the window
+
+	f.candidateGreetings[greeted.IfID] = controlplane.Neighbor{
+		IA:       selA,
+		LastSeen: time.Now(),
+	}
+	f.pass(t)
+	if f.state(t, selA) != links.StateCandidate {
+		t.Error("the greeted candidate's grace did not hold")
+	}
+	if f.state(t, selB) != links.StateRetired {
+		t.Error("the silent candidate outlived the window")
+	}
+
+	// The grace reads arrivals, not identity: once the greetings stop, the
+	// entry retires on the next sweep.
+	f.candidateGreetings[greeted.IfID] = controlplane.Neighbor{
+		IA:       selA,
+		LastSeen: time.Now().Add(-f.sel.cfg.Window - time.Second),
+	}
+	f.pass(t)
+	if f.state(t, selA) != links.StateRetired {
+		t.Error("the candidate kept its grace after going silent")
+	}
+	_ = silent
 }
