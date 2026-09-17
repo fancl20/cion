@@ -32,14 +32,6 @@ type options struct {
 	server        net.Addr
 }
 
-func applyOptions(opts []Option) options {
-	var o options
-	for _, option := range opts {
-		option(&o)
-	}
-	return o
-}
-
 // Option is a function that sets an option.
 type Option func(o *options)
 

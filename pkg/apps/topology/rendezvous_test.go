@@ -48,7 +48,7 @@ func newRendezvousFixture(t *testing.T, mutate func(*RendezvousConfig)) *rendezv
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(func() {
 		cancel()
-		r.Close() //nolint:errcheck
+		_ = r.Close()
 	})
 	go r.Run(ctx)
 	return &rendezvousFixture{store: store, addr: ap, Rendezvous: r}
@@ -134,7 +134,7 @@ func TestRendezvousRateCap(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer conn.Close() //nolint:errcheck
+	defer func() { _ = conn.Close() }()
 
 	replies := 0
 	buf := make([]byte, 128)

@@ -331,13 +331,13 @@ type udpFlow struct {
 }
 
 func (f *tcpFlow) close() {
-	f.in.Close()  //nolint:errcheck
-	f.out.Close() //nolint:errcheck
+	_ = f.in.Close()
+	_ = f.out.Close()
 }
 
 func (f *udpFlow) close() {
-	f.in.Close()  //nolint:errcheck
-	f.out.Close() //nolint:errcheck
+	_ = f.in.Close()
+	_ = f.out.Close()
 }
 
 // pump relays both directions of a UDP flow until a leg fails.
@@ -389,8 +389,8 @@ func spliceConns(a, b net.Conn, last *atomic.Int64) {
 			if n > 0 {
 				last.Store(time.Now().UnixNano())
 				if _, werr := dst.Write(buf[:n]); werr != nil {
-					dst.Close() //nolint:errcheck
-					src.Close() //nolint:errcheck
+					_ = dst.Close()
+					_ = src.Close()
 					return
 				}
 			}
@@ -398,9 +398,9 @@ func spliceConns(a, b net.Conn, last *atomic.Int64) {
 				// A finished direction half-closes the leg so the peer
 				// sees the end of stream instead of a hang.
 				if hc, ok := dst.(interface{ CloseWrite() error }); ok {
-					hc.CloseWrite() //nolint:errcheck
+					_ = hc.CloseWrite()
 				} else {
-					dst.Close() //nolint:errcheck
+					_ = dst.Close()
 				}
 				return
 			}
@@ -410,8 +410,8 @@ func spliceConns(a, b net.Conn, last *atomic.Int64) {
 	go copyOne(a, b)
 	go copyOne(b, a)
 	wg.Wait()
-	a.Close() //nolint:errcheck
-	b.Close() //nolint:errcheck
+	_ = a.Close()
+	_ = b.Close()
 }
 
 // addressToNetip converts a netstack address.

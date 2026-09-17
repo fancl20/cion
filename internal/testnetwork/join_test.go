@@ -32,11 +32,10 @@ var fastPacing = services.NodePacing{
 
 // assemblyNode is a node booted through the run command's own assembly.
 type assemblyNode struct {
-	app       *services.App
-	cancel    context.CancelFunc
-	stateDir  string
-	host      netip.Addr
-	pingCount int
+	app      *services.App
+	cancel   context.CancelFunc
+	stateDir string
+	host     netip.Addr
 }
 
 // rendezvousOf returns the node's advertised rendezvous address: the
@@ -87,7 +86,7 @@ func pingFrom(ctx context.Context, n *assemblyNode, dst addr.IA, host netip.Addr
 	if err != nil {
 		return false
 	}
-	defer conn.Close() //nolint:errcheck
+	defer func() { _ = conn.Close() }()
 	report, err := ping.Run(ctx, ping.Config{
 		Conn:     conn,
 		Provider: n.app.Provider(),

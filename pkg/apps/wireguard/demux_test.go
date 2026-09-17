@@ -53,7 +53,7 @@ func newHostClient(
 	}
 	t.Cleanup(func() {
 		dev.Close()
-		pipe.Close() //nolint:errcheck
+		_ = pipe.Close()
 	})
 	return dev, pipe
 }
@@ -75,7 +75,7 @@ func TestSharedHostPortDemultiplexes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { udpConn.Close() }) //nolint:errcheck
+	t.Cleanup(func() { _ = udpConn.Close() })
 	socket := newHostSocket(udpConn, cnt)
 	go socket.run()
 	nodeAddr := udpConn.LocalAddr().(*net.UDPAddr).AddrPort()
@@ -99,7 +99,7 @@ func TestSharedHostPortDemultiplexes(t *testing.T) {
 		}
 		t.Cleanup(func() {
 			dev.Close()
-			pipe.Close() //nolint:errcheck
+			_ = pipe.Close()
 		})
 		return pipe
 	}

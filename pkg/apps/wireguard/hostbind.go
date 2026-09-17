@@ -69,7 +69,7 @@ func (s *hostSocket) deliver(data []byte, src conn.Endpoint) {
 
 // Close stops the read loop by closing the socket.
 func (s *hostSocket) Close() {
-	s.conn.Close() //nolint:errcheck
+	_ = s.conn.Close()
 }
 
 // finish marks the socket retired exactly once.

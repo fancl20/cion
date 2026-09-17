@@ -257,7 +257,7 @@ func TestWireguardEgressProxiesInternet(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { listener.Close() })
+	t.Cleanup(func() { _ = listener.Close() })
 	go func() {
 		for {
 			conn, err := listener.Accept()
@@ -265,8 +265,8 @@ func TestWireguardEgressProxiesInternet(t *testing.T) {
 				return
 			}
 			go func() {
-				defer conn.Close()
-				io.Copy(conn, conn) //nolint:errcheck
+				defer func() { _ = conn.Close() }()
+				_, _ = io.Copy(conn, conn)
 			}()
 		}
 	}()
@@ -282,7 +282,7 @@ func TestWireguardEgressProxiesInternet(t *testing.T) {
 	if err != nil {
 		t.Fatalf("the host's TCP flow through the exit failed: %v", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	msg := []byte("through the exit")
 	if _, err := conn.Write(msg); err != nil {
 		t.Fatal(err)

@@ -207,7 +207,7 @@ func (r *echoRelay) len() int {
 }
 
 func (r *echoRelay) close() {
-	r.socket.Close() //nolint:errcheck
+	_ = r.socket.Close()
 }
 
 // echoReplyPacket builds the IPv4 packet returning an echoed reply to its

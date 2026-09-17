@@ -252,22 +252,22 @@ func (n *node) Close() {
 		gen.stop()
 	}
 	if n.topology != nil {
-		n.topology.Close() //nolint:errcheck
+		_ = n.topology.Close()
 	}
 	if n.peerClt != nil {
-		n.peerClt.Close() //nolint:errcheck
+		_ = n.peerClt.Close()
 	}
 	if n.discovery != nil {
-		n.discovery.Close() //nolint:errcheck
+		_ = n.discovery.Close()
 	}
 	if n.linkStore != nil {
-		n.linkStore.Close() //nolint:errcheck
+		_ = n.linkStore.Close()
 	}
 	if n.pathDB != nil {
-		n.pathDB.Close() //nolint:errcheck
+		_ = n.pathDB.Close()
 	}
 	if n.trustDB != nil {
-		n.trustDB.Close() //nolint:errcheck
+		_ = n.trustDB.Close()
 	}
 }
 
@@ -297,7 +297,7 @@ func (n *node) start(ctx context.Context) {
 		// restart rebinds the fixed endpoint port.
 		go func() {
 			<-ctx.Done()
-			n.endpointConn.Close() //nolint:errcheck
+			_ = n.endpointConn.Close()
 		}()
 		return controlplane.ServeHTTP3(n.endpointConn,
 			controlplane.NewServer(n.services).Handler,

@@ -58,7 +58,7 @@ func newLookupFixture(t *testing.T) *lookupFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { db.Close() }) //nolint:errcheck
+	t.Cleanup(func() { _ = db.Close() })
 	now := time.Now()
 	up := terminatedSegment(t, coreIATest, nodeIATest, 1, now)
 	if _, err := db.Insert(context.Background(), up); err != nil {
@@ -273,7 +273,7 @@ func TestPathProviderBootstrap(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { db.Close() }) //nolint:errcheck
+	t.Cleanup(func() { _ = db.Close() })
 	f := newBeaconFixture(t)
 	// The beaconer's bootstrap route: the [A] beacon plus the node's own
 	// unsigned hop, reversed.

@@ -25,7 +25,7 @@ func TestEchoWireRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer conn.Close() //nolint:errcheck
+	defer func() { _ = conn.Close() }()
 
 	peerAddr := &Addr{
 		IA:   addr.MustIAFrom(20, 0xff0000000002),

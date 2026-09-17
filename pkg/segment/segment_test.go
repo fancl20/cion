@@ -52,7 +52,7 @@ func newSegFixture(t *testing.T, ias ...addr.IA) *segFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { db.Close() }) //nolint:errcheck
+	t.Cleanup(func() { _ = db.Close() })
 	coreKeys, err := trust.LoadOrCreateCoreKeys(dir)
 	if err != nil {
 		t.Fatal(err)

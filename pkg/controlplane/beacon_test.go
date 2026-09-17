@@ -88,12 +88,12 @@ func newBeaconFixture(t *testing.T) *beaconFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { db.Close() }) //nolint:errcheck
+	t.Cleanup(func() { _ = db.Close() })
 	pathDB, err := pathdbbbolt.New(filepath.Join(dir, "path.db"), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { pathDB.Close() }) //nolint:errcheck
+	t.Cleanup(func() { _ = pathDB.Close() })
 
 	keys, err := trust.LoadOrCreateCoreKeys(dir)
 	if err != nil {
@@ -294,7 +294,7 @@ func TestHandleBeaconWithoutTRC(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer freshDB.Close() //nolint:errcheck
+	defer func() { _ = freshDB.Close() }()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		t.Fatal(err)

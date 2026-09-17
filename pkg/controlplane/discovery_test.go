@@ -89,7 +89,7 @@ func startNode(
 	t.Cleanup(func() {
 		cancel()
 		provider.Stop()
-		discovery.Close() //nolint:errcheck
+		_ = discovery.Close()
 	})
 	go func() { _ = d.Serve(ctx) }()
 	go discovery.Run(ctx)
@@ -145,7 +145,7 @@ func freeUDPAddrOn(t *testing.T, ip netip.Addr) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer c.Close()
+	defer func() { _ = c.Close() }()
 	return c.LocalAddr().String()
 }
 

@@ -122,7 +122,7 @@ func New(path string, opts *bbolt.Options) (links.DB, error) {
 		}
 		return nil
 	}); err != nil {
-		db.Close() //nolint:errcheck
+		_ = db.Close()
 		return nil, err
 	}
 	return &bboltDB{db: db}, nil

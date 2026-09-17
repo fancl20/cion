@@ -31,7 +31,7 @@ func newMTLSFixture(t *testing.T) *mtlsFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { db.Close() }) //nolint:errcheck
+	t.Cleanup(func() { _ = db.Close() })
 	keys, err := trust.LoadOrCreateCoreKeys(dir)
 	if err != nil {
 		t.Fatal(err)
@@ -96,7 +96,7 @@ func TestNativeTLSVerifiesAgainstTRC(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close() //nolint:errcheck
+	defer func() { _ = db.Close() }()
 	keys, err := trust.LoadOrCreateCoreKeys(dir)
 	if err != nil {
 		t.Fatal(err)
@@ -147,7 +147,7 @@ func TestNativeTLSWithoutTRC(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close() //nolint:errcheck
+	defer func() { _ = db.Close() }()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		t.Fatal(err)

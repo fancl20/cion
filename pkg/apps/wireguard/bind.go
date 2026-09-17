@@ -113,7 +113,7 @@ func (s *meshSocket) deliver(data []byte, src conn.Endpoint) {
 // Close stops the read loop by closing the socket; the loop's failure path
 // finishes the socket and wakes every bind.
 func (s *meshSocket) Close() {
-	s.conn.Close() //nolint:errcheck
+	_ = s.conn.Close()
 }
 
 // finish marks the socket retired exactly once.

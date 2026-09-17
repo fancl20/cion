@@ -20,7 +20,7 @@ func TestConnZeroLinkStart(t *testing.T) {
 	if err != nil {
 		t.Fatalf("a zero-link conn failed to build: %v", err)
 	}
-	defer conn.Close() //nolint:errcheck
+	defer func() { _ = conn.Close() }()
 
 	neighbor := addr.MustIAFrom(20, 0xfd0000000002)
 	if _, err := conn.resolveLink(neighbor); err == nil {

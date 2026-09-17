@@ -100,7 +100,7 @@ func (n *testNode) newConn(t *testing.T, port uint16) *Conn {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { conn.Close() }) //nolint:errcheck
+	t.Cleanup(func() { _ = conn.Close() })
 	return conn
 }
 
@@ -113,7 +113,7 @@ func freeUDPAddr(t *testing.T) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer c.Close() //nolint:errcheck
+	defer func() { _ = c.Close() }()
 	return c.LocalAddr().String()
 }
 

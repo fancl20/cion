@@ -24,7 +24,7 @@ func TestParseDatagramPacket(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer conn.Close() //nolint:errcheck
+	defer func() { _ = conn.Close() }()
 
 	peerAddr := &Addr{IA: addr.MustIAFrom(20, 0xff0000000002), Addr: peer}
 	raw, err := conn.writePacket(peerAddr, slayers.L4UDP, func(scn *slayers.SCION) ([]byte, error) {
@@ -69,7 +69,7 @@ func TestWritePacketServiceHeader(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer conn.Close() //nolint:errcheck
+	defer func() { _ = conn.Close() }()
 
 	svc := addr.SVC(0x7ff1)
 	peerAddr := &Addr{IA: addr.MustIAFrom(20, 0xff0000000002), Service: svc}

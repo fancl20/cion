@@ -41,7 +41,7 @@ func Run(t *testing.T, db TestableDB) {
 			defer cancel()
 			db.Prepare(t, ctx)
 			test(t, db)
-			db.Close() //nolint:errcheck
+			_ = db.Close()
 		})
 	}
 }

@@ -107,7 +107,7 @@ func newTestWireguard(
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { internal.Close() }) //nolint:errcheck
+	t.Cleanup(func() { _ = internal.Close() })
 	// Reserve an ephemeral host port, then release it for the application
 	// to bind — the port only needs to be free at construction.
 	hostPort, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
@@ -115,7 +115,7 @@ func newTestWireguard(
 		t.Fatal(err)
 	}
 	listenPort := uint16(hostPort.LocalAddr().(*net.UDPAddr).Port)
-	hostPort.Close()
+	_ = hostPort.Close()
 	provider := &scion.PathProvider{IA: ia, DB: &memDB{}}
 	directory := &recordingDirectory{published: make(chan Entry, 16)}
 	regs := &recordingRegs{}
@@ -257,7 +257,7 @@ func TestWireguardValidatesConfig(t *testing.T) {
 	exit := addr.MustIAFrom(20, 0xff0000000242)
 	other := addr.MustIAFrom(20, 0xff0000000243)
 	internal, _ := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
-	t.Cleanup(func() { internal.Close() }) //nolint:errcheck
+	t.Cleanup(func() { _ = internal.Close() })
 	base := Config{
 		IA:         ia,
 		Subnet:     netip.MustParsePrefix("10.64.1.0/24"),
