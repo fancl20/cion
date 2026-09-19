@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"connectrpc.com/connect"
 	"github.com/quic-go/quic-go"
@@ -89,9 +90,19 @@ func NewSCIONClient(
 ) *http.Client {
 
 	// QUIC datagrams are capped so a datagram wrapped in a SCION header
-	// still fits a standard 1500-byte MTU; idle connections die soon enough
-	// that re-dials pick up fresh paths.
-	quicConf := &quic.Config{InitialPacketSize: 1200}
+	// still fits a standard 1500-byte MTU. Idle connections die soon enough
+	// that re-dials pick up fresh paths: the pool holds a connection by its
+	// peer alone, and one whose route went dark is detectable only by its
+	// silence — keep-alives sustain the healthy ones while an idle timeout
+	// an order below QUIC's half-minute default retires a dark one, the next
+	// request dialing the route the provider resolves now. (A request that
+	// times out on a dark connection leaves it pooled: only the connection's
+	// own silence closes it.)
+	quicConf := &quic.Config{
+		InitialPacketSize: 1200,
+		MaxIdleTimeout:    5 * time.Second,
+		KeepAlivePeriod:   2 * time.Second,
+	}
 	return &http.Client{Transport: &http3.Transport{
 		QUICConfig: quicConf,
 		TLSClientConfig: &tls.Config{

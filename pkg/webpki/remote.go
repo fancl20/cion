@@ -18,6 +18,7 @@ import (
 	"net/netip"
 	"strings"
 	"sync"
+	"time"
 
 	"connectrpc.com/connect"
 	"github.com/quic-go/quic-go"
@@ -100,8 +101,15 @@ func NewCoreClient(cfg CoreClientConfig) (*CoreClient, error) {
 	c.qclt = &quic.Transport{Conn: cfg.Conn}
 
 	// QUIC datagrams are capped so a datagram wrapped in a SCION header
-	// still fits a standard 1500-byte MTU.
-	quicConf := &quic.Config{InitialPacketSize: 1200}
+	// still fits a standard 1500-byte MTU, and idle connections die soon
+	// enough that re-dials pick up fresh paths: keep-alives sustain the
+	// healthy ones while the idle timeout retires one whose route went dark,
+	// the next dial taking the locator's current route.
+	quicConf := &quic.Config{
+		InitialPacketSize: 1200,
+		MaxIdleTimeout:    5 * time.Second,
+		KeepAlivePeriod:   2 * time.Second,
+	}
 	tlsConf := &tls.Config{
 		ServerName: cfg.Domain,
 		RootCAs:    cfg.RootCAs,
