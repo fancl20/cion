@@ -111,21 +111,13 @@ func TestLinkServiceAdmits(t *testing.T) {
 }
 
 // TestLinkServiceRefusals checks the admission policy: a channel that
-// verified no chain serves no identity, an unlisted ISD-AS is refused, and
-// so is a request past the link cap — while a returning neighbor never is.
+// verified no chain serves no identity, and so does a request past the link
+// cap refuse — while a returning neighbor never is.
 func TestLinkServiceRefusals(t *testing.T) {
 	// No authenticated peer.
 	svc := newLinkService(t, nil)
 	if _, err := linkRequest(context.Background(), svc, addr.IA(0), "127.0.0.1:4242", 1); err == nil {
 		t.Error("a request without an authenticated ISD-AS was admitted")
-	}
-
-	// Unlisted ISD-AS.
-	svc = newLinkService(t, func(s *LinkService) {
-		s.AllowAS = map[addr.IA]bool{linkIA2: true}
-	})
-	if _, err := linkRequest(context.Background(), svc, linkIA, "127.0.0.1:4242", 1); err == nil {
-		t.Error("a request from an unlisted ISD-AS was admitted")
 	}
 
 	// The link cap.

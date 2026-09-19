@@ -40,9 +40,6 @@ type ZeroconfConfig struct {
 	// ControlHost is the control address's host: the rendezvous port, the
 	// directory's advertised addresses, and the probe claims sit on it.
 	ControlHost netip.Addr
-	// AllowAS optionally restricts link admission to the listed ISD-ASes;
-	// nil means open admission.
-	AllowAS map[addr.IA]bool
 	// NewConn binds a SCION connection on an ephemeral port: the socket the
 	// directory's publish and fetch ride on non-core nodes and the selection
 	// probe's socket.
@@ -248,7 +245,6 @@ func (z *Zeroconf) assemble() error {
 		IA:          z.pcs.IA,
 		MinInterval: z.cfg.Pacing.RendezvousRate,
 		Store:       z.pcs.Store,
-		AllowAS:     z.cfg.AllowAS,
 		MaxLinks:    MaxNeighbors,
 		LinkHost:    z.cfg.ControlHost,
 		Changed:     z.cfg.Notify,
@@ -259,7 +255,6 @@ func (z *Zeroconf) assemble() error {
 	z.rendezvous = rendezvous
 	z.links = &LinkService{
 		Store:       z.pcs.Store,
-		AllowAS:     z.cfg.AllowAS,
 		MaxLinks:    MaxNeighbors,
 		LinkHost:    z.cfg.ControlHost,
 		MinInterval: z.cfg.Pacing.RendezvousRate,

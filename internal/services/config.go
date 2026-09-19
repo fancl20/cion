@@ -11,6 +11,7 @@ import (
 	"github.com/scionproto/scion/pkg/addr"
 
 	"github.com/fancl20/cion/pkg/dataplane"
+	"github.com/fancl20/cion/pkg/enrollauth"
 )
 
 // Default run arguments: a restart needs none of them (ADR-0008).
@@ -56,10 +57,16 @@ type NodeConfig struct {
 	State    string
 	Internal string
 	Control  string
-	// AllowIA optionally restricts the loaded provider's link admission;
-	// open when unset. Enrollment admission is the provider's alone
-	// (ADR-0009): no chain is issued over a link the acceptor refused.
-	AllowIA []string
+	// EnrollAuth selects the enrollment authorizer that gates first
+	// issuance (ADR-0010), "method=spec": "cidrs" with a comma-separated
+	// prefix list, "telegram" with <chat>:<token>. Empty is open enrollment
+	// — the zero-conf default — and the argument refuses to load without
+	// --core, the only node that issues chains.
+	EnrollAuth string
+	// TelegramAPI overrides the Telegram Bot API's base URL for the
+	// telegram method of EnrollAuth; empty uses the public one. The
+	// integration tests point it at their local double.
+	TelegramAPI string
 	// BehindNAT publishes the node's reachability class as private: joinable
 	// by no one, candidate for no one's floor.
 	BehindNAT bool
@@ -110,9 +117,16 @@ func (c NodeConfig) Validate() error {
 			return fmt.Errorf("parsing --neighbor %q: %w", s, err)
 		}
 	}
-	for _, s := range c.AllowIA {
-		if _, err := addr.ParseIA(s); err != nil {
-			return fmt.Errorf("parsing --allow-ia %q: %w", s, err)
+	if c.EnrollAuth != "" {
+		// A silently inert gate is the misleading configuration the
+		// role-aware checks exist to refuse: only the core issues chains,
+		// so only the core's gate means anything.
+		if !c.Core {
+			return fmt.Errorf("--enroll-auth requires --core: " +
+				"the core is the only node that issues chains")
+		}
+		if _, _, err := enrollauth.Load(c.EnrollAuth, enrollauth.LoadOptions{}); err != nil {
+			return fmt.Errorf("parsing --enroll-auth: %w", err)
 		}
 	}
 	return nil
@@ -164,22 +178,6 @@ func LoadWireguardConfig(path string) (*ConfigWireguard, error) {
 		return nil, fmt.Errorf("parsing the wireguard configuration: %w", err)
 	}
 	return cfg, nil
-}
-
-// parseAllowIA parses the admission allowlist into a set.
-func parseAllowIA(ias []string) (map[addr.IA]bool, error) {
-	if len(ias) == 0 {
-		return nil, nil
-	}
-	allow := make(map[addr.IA]bool, len(ias))
-	for _, s := range ias {
-		ia, err := addr.ParseIA(s)
-		if err != nil {
-			return nil, fmt.Errorf("parsing allowlisted ISD-AS %q: %w", s, err)
-		}
-		allow[ia] = true
-	}
-	return allow, nil
 }
 
 // controlBind returns the "host:port" address for the control endpoint: the

@@ -302,4 +302,67 @@ and ADR-0010 is marked accepted, its implementing proposal landed.
 
 ## Implementation history
 
-*   (To be recorded as the change lands.)
+*   The seam: `enrollauth.go` in `pkg/controlplane` — `EnrollmentFacts`,
+    the claimed ISD-AS, the CSR's subject key, and the SCION source
+    address `remoteUnderlay` reads from the request context's
+    `http3.RemoteAddrContextKey` beside `arrivalInterface`'s pattern,
+    zero `netip.AddrPort` when the context carries none;
+    `EnrollmentVerdict`, deny the zero value; and the one-method
+    `EnrollmentAuthorizer`. In `trustservice.go`, `checkNameTaken`
+    reports what it already computed — the same-key renewal passing —
+    and `authorizeFirstIssuance` asks the authorizer exactly at first
+    issuance, after the name-taken check and the wrapper's possession
+    proof: allow issues, deny answers `PermissionDenied`, pending
+    `Unavailable`, both logged with the facts beside them. The
+    same-key-renewal and taken-name rules of the trust suite grew the
+    authorizer's own episodes, the facts included.
+*   The CIDR authorizer: `cidr.go` in the new `pkg/enrollauth` — the
+    comma-separated spec parsed once at startup and masked, a source
+    address in a listed prefix allowing, a miss or a missing address
+    denying, and nothing logged beyond the trust service's own line.
+*   The Telegram authorizer: `telegram.go` — the Bot API over `net/http`
+    and JSON alone, `sendMessage`, `getUpdates`, and
+    `answerCallbackQuery` behind one generic envelope call; one prompt
+    per identity — the claimed ISD-AS and the subject key's fingerprint
+    keyed together, the buttons' callback data one action byte, the IA,
+    and the fingerprint hex-encoded inside the sixty-four-byte cap —
+    pending on the standing decision's window, allow for its remainder
+    after an approve, deny after a deny, and a re-prompt on the first
+    ask past it; a ten-minute window, a ten-second send timeout that
+    turns a slow API into a prompt-failure denial, a long-poll loop
+    under the caller's supervision, only the configured chat's answers
+    counting, and an unanswered callback for an unknown identity
+    acknowledged with exactly that. The suite runs it against a local
+    Bot API double: the first ask prompts and pends, retries do not
+    re-prompt, approve and deny decide, another chat's press is ignored
+    before the deciding one, a failed send denies, the window's expiry
+    re-prompts a denied identity, and a fresh instance knows no
+    decision.
+*   The selector: `Load` in `enrollauth.go` — `method=spec` parsed once,
+    `cidrs` and `telegram` the two methods, the chat split on the first
+    colon so the token's own survives, the run function present exactly
+    for the method with loops of its own. `Validate` refuses the
+    argument without `--core`, the unknown method, the empty prefix
+    list, and the unparsable chat; `setupEnrollAuth` loads the selection
+    into the trust service and `start` launches its run under
+    `runBackground`, core only; `NodeConfig.TelegramAPI` lets the
+    integration tests point the authorizer at their double.
+*   The retirement: `--allow-ia`, `NodeConfig.AllowIA`, and
+    `parseAllowIA` from the assembly; the `AllowAS` fields and checks of
+    `RendezvousConfig` and `LinkService`, and the zeroconf provider's
+    pass-throughs; the allowlist episodes of the rendezvous and
+    link-service suites; and the static lab's enrollment-past-allowlist
+    episode, replaced by the authorizer's own.
+*   Integration: the join lab with a CIDR authorizer admitting the
+    joiner's range — enrollment by prefix, the candidate established on
+    its evidence; the same lab with the Telegram double — the joiner
+    pends through retries without a second prompt, the operator's
+    approve lands on the retry cadence, and a core restart mid-join is
+    answered by a fresh prompt while the enrolled node runs on
+    unprompted; the negatives — a joiner outside the prefix list mints a
+    graced candidate that no evidence ever establishes, no chain ever
+    names on either side, and the window retires once it goes silent;
+    and the static lab under a CIDR authorizer — the file provider's
+    vouch admits the link, the authorizer bounds the enrollment, and no
+    allowlist exists anywhere.
+*   Record: ADR-0010 marked accepted, its implementing proposal landed.

@@ -1,6 +1,6 @@
 # Gate Enrollment with a Pluggable Authorizer
 
-*   Status: proposed
+*   Status: accepted
 *   Date: 2026-09-17
 
 [TOC]

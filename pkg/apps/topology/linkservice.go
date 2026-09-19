@@ -31,9 +31,6 @@ const LinkMinInterval = time.Second
 type LinkService struct {
 	// Store is the neighbor table.
 	Store links.DB
-	// AllowAS optionally restricts admission to the listed ISD-ASes; nil
-	// means open admission.
-	AllowAS map[addr.IA]bool
 	// MaxLinks caps the live link count.
 	MaxLinks int
 	// LinkHost is the host link addresses are allocated on.
@@ -81,11 +78,6 @@ func (s *LinkService) Request(
 	if peer.IsZero() {
 		return nil, connect.NewError(connect.CodePermissionDenied,
 			errors.New("no authenticated ISD-AS; the channel verified no chain"))
-	}
-	if s.AllowAS != nil && !s.AllowAS[peer] {
-		slog.Warn("Refusing a link request of an unlisted ISD-AS", "peer", peer)
-		return nil, connect.NewError(connect.CodePermissionDenied,
-			fmt.Errorf("ISD-AS %s is not allowlisted", peer))
 	}
 	if !s.rateLimiter().admit(peer) {
 		return nil, connect.NewError(connect.CodeResourceExhausted,

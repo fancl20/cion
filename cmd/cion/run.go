@@ -36,9 +36,10 @@ func addNodeFlags(flags *pflag.FlagSet, opts *services.NodeConfig) {
 	flags.StringVar(&opts.Control, "control", services.DefaultControl,
 		"the UDP address of the control service; its host carries the control, "+
 			"rendezvous, and directory sockets")
-	flags.StringSliceVar(&opts.AllowIA, "allow-ia", nil,
-		"restrict the loaded provider's link admission to the listed ISD-ASes; "+
-			"open when unset")
+	flags.StringVar(&opts.EnrollAuth, "enroll-auth", "",
+		"gate first issuance with a policy (core only): "+
+			"cidrs=<comma-separated prefix list> admits by source address, "+
+			"telegram=<chat>:<token> prompts the chat per joiner; open when unset")
 	flags.BoolVar(&opts.BehindNAT, "behind-nat", false,
 		"publish the node's reachability class as private: joinable by no one")
 	flags.StringVar(&opts.WireguardConfig, "wireguard-config", "",

@@ -210,24 +210,6 @@ func TestRendezvousRateCap(t *testing.T) {
 	}
 }
 
-// TestRendezvousAllowlist checks the admission policy: a request from an
-// unlisted ISD-AS is refused, one from a listed ISD-AS admitted.
-func TestRendezvousAllowlist(t *testing.T) {
-	f := newRendezvousFixture(t, func(cfg *RendezvousConfig) {
-		cfg.AllowAS = map[addr.IA]bool{rendezvousIA: true}
-	})
-	claim := netip.MustParseAddrPort("127.0.0.1:4242")
-
-	if _, _, err := RendezvousEcho(context.Background(),
-		netip.MustParseAddr("127.0.0.1"), f.addr, strangerIA, claim); err == nil {
-		t.Error("a request from an unlisted ISD-AS was admitted")
-	}
-	if _, _, err := RendezvousEcho(context.Background(),
-		netip.MustParseAddr("127.0.0.1"), f.addr, rendezvousIA, claim); err != nil {
-		t.Fatalf("a request from a listed ISD-AS was refused: %v", err)
-	}
-}
-
 // TestRendezvousLinkCap checks the link-count cap: with the store at it, a
 // new peer is refused while a peer already in the table re-answers.
 func TestRendezvousLinkCap(t *testing.T) {
