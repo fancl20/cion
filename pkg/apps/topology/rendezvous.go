@@ -18,7 +18,7 @@ import (
 )
 
 // RendezvousPort is the UDP port every node's rendezvous acceptor listens on
-// for first contact, beside the discovery port on the control address's host.
+// for first contact, beside the endpoint on the control address's host.
 const RendezvousPort = 30045
 
 const rendezvousVersion = 1
@@ -26,7 +26,7 @@ const rendezvousVersion = 1
 // Rendezvous cadence and limits. The exchange is underlay-level and carries
 // no cryptography, because the joiner has nothing to show yet: the nonce echo
 // is the return-routability check, and the rate cap and the link-count cap
-// bound admission (ADR-0006).
+// bound admission (ADR-0008).
 const (
 	// RendezvousAttempts bounds one dial's request runs and
 	// RendezvousAttemptWait each reply wait.
@@ -185,7 +185,10 @@ func AllocateLinkAddr(host netip.Addr) (netip.AddrPort, error) {
 // Rendezvous is the acceptor every node runs on its advertised rendezvous
 // address: one unconnected UDP socket answering first-contact requests. The
 // entries it creates start as candidates — a peer that produces no verified
-// beacon or enrollment within the candidate window retires (ADR-0006).
+// beacon or enrollment within the candidate window retires (ADR-0008).
+// Identity adoption is the exchange's own act: the acceptor names its entry
+// from the request's ISD-AS and the joiner names its own from the reply, so
+// every establishment names both sides before the link serves.
 type Rendezvous struct {
 	conn *net.UDPConn
 	cfg  RendezvousConfig
@@ -280,7 +283,7 @@ func (r *Rendezvous) Run(ctx context.Context) {
 // reply to send to the source. The echo is the return-routability check: the
 // reply only ever reaches the socket the request came from. The exchange
 // carries no cryptography — the claim names no identity the acceptor can
-// check — so a claim only ever mints or retargets a candidate: an
+// check — so a claim only ever mints, names, or retargets a candidate: an
 // established entry answers with its recorded side untouched.
 func (r *Rendezvous) handle(raw []byte, src *net.UDPAddr) ([]byte, error) {
 	req, err := ParseRendezvousRequest(raw)
@@ -306,15 +309,38 @@ func (r *Rendezvous) handle(raw []byte, src *net.UDPAddr) ([]byte, error) {
 	r.mtx.Lock()
 	defer r.mtx.Unlock()
 	var entry *links.Link
-	if !req.IA.IsZero() {
-		entry, err = r.cfg.Store.ByNeighbor(context.Background(), req.IA)
-	} else {
+	if req.IA.IsZero() {
 		// An unnamed claim — a probe, or a bootstrap joiner whose identity
 		// is not final — deduplicates by the address it claims.
 		entry, err = r.cfg.Store.ByRemote(context.Background(), req.LinkAddr)
-	}
-	if err != nil {
-		return nil, err
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		entry, err = r.cfg.Store.ByNeighbor(context.Background(), req.IA)
+		if err != nil {
+			return nil, err
+		}
+		if entry == nil {
+			// A named claim the table holds only by the address claimed —
+			// the bootstrap joiner's second dial, its identity completed —
+			// names that entry instead of minting a second one: adoption is
+			// the request's own act.
+			byRemote, err := r.cfg.Store.ByRemote(context.Background(), req.LinkAddr)
+			if err != nil {
+				return nil, err
+			}
+			if byRemote != nil && byRemote.NeighborIA.IsZero() {
+				byRemote.NeighborIA = req.IA
+				if err := r.cfg.Store.Update(context.Background(), byRemote); err != nil {
+					return nil, err
+				}
+				r.changed()
+				slog.Info("Rendezvous named a candidate", "neighbor", req.IA,
+					"remote", byRemote.Remote, "interface", byRemote.IfID)
+				entry = byRemote
+			}
+		}
 	}
 	if entry == nil {
 		if live := r.namedLinks(); live >= r.cfg.MaxLinks {
@@ -338,8 +364,7 @@ func (r *Rendezvous) handle(raw []byte, src *net.UDPAddr) ([]byte, error) {
 			"local", entry.Local, "remote", entry.Remote, "interface", entry.IfID)
 	} else if entry.State == links.StateCandidate && entry.Remote != req.LinkAddr {
 		// The claim retargets an unnamed or unproven entry only; an
-		// established link keeps the address its peer's request or greeting
-		// recorded.
+		// established link keeps the address its peer's request recorded.
 		entry.Remote = req.LinkAddr
 		if err := r.cfg.Store.Update(context.Background(), entry); err != nil {
 			return nil, err

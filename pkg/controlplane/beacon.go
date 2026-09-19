@@ -4,7 +4,6 @@ import (
 	"context"
 	"hash"
 	"log/slog"
-	"net/netip"
 	"sync"
 	"time"
 
@@ -71,7 +70,6 @@ type Beaconer struct {
 	store        *BeaconStore
 	db           pathdb.DB
 	links        func() map[uint16]addr.IA
-	neighbors    func() map[uint16]Neighbor
 	verdicts     func() map[uint16]bool
 	sender       SegmentSender
 	coreRoute    func() *scion.Addr
@@ -105,12 +103,9 @@ type BeaconerConfig struct {
 	DB pathdb.DB
 	// Links snapshots the external links, interface ID to neighbor IA; the
 	// beaconer reads it fresh each pass, so a node may start with zero
-	// links.
+	// links. It is the store's snapshot alone: the neighbor's identity and
+	// the destination its beacons are addressed with both come from it.
 	Links func() map[uint16]addr.IA
-	// Neighbors returns the discovered neighbors — identity, however stale
-	// their greetings; the endpoint addresses beacons are addressed with
-	// come from it. Nil disables sending beacons (reception still works).
-	Neighbors func() map[uint16]Neighbor
 	// Verdicts returns the health monitor's link verdicts by interface ID;
 	// a down interface originates and propagates nothing, resuming with the
 	// verdict's up edge. Nil treats every link as up.
@@ -159,7 +154,6 @@ func NewBeaconer(cfg BeaconerConfig) (*Beaconer, error) {
 		store:        cfg.Store,
 		db:           cfg.DB,
 		links:        cfg.Links,
-		neighbors:    cfg.Neighbors,
 		verdicts:     cfg.Verdicts,
 		sender:       cfg.Sender,
 		coreRoute:    cfg.CoreRoute,
@@ -304,6 +298,18 @@ func (b *Beaconer) recordBootstrap(ingress uint16, pcb *segment.PCB) {
 	}
 }
 
+// BootstrapCore returns the ISD-AS of the core the freshest unverified beacon
+// originated — the destination a node that has not pinned the TRC aims its
+// core route at, beacons originating only at cores.
+func (b *Beaconer) BootstrapCore() addr.IA {
+	b.bootstrapMtx.Lock()
+	defer b.bootstrapMtx.Unlock()
+	if b.bootstrap == nil {
+		return 0
+	}
+	return b.bootstrap.FirstIA()
+}
+
 // checkBeacon applies the structural reception checks of Section 2.3.1: PCB
 // validity in time, loop prevention, the identity-to-link binding of the
 // arrival interface (the check ADR-0003 deferred to the first signed
@@ -416,10 +422,15 @@ func (b *Beaconer) coreASes() map[addr.IA]bool {
 
 // originateOnce originates a fresh PCB on each of the core's links (draft
 // Sections 2.3.4 and 2.3.5.1): new segment information and the core's own
-// signed AS entry, delivered to the neighbor's beacon service.
+// signed AS entry, delivered to the neighbor's beacon service — the
+// neighbor's control service as a service destination on the one-hop path,
+// the drafts' own control-traffic pattern, the neighbor's ISD-AS read from
+// the store's snapshot.
 func (b *Beaconer) originateOnce(ctx context.Context) {
-	neighbors := b.neighbors()
 	for ifID, neighborIA := range b.linkTable() {
+		if neighborIA.IsZero() {
+			continue // a link whose neighbor establishment has not named
+		}
 		if !b.linkUp(ifID) {
 			continue // a down interface originates nothing
 		}
@@ -435,10 +446,7 @@ func (b *Beaconer) originateOnce(ctx context.Context) {
 			slog.Error("Signing origin beacon", "interface", ifID, "err", err)
 			continue
 		}
-		peer, ok := b.neighborEndpoint(neighbors, ifID, neighborIA)
-		if !ok {
-			continue
-		}
+		peer := &scion.Addr{IA: neighborIA, Service: addr.SvcCS}
 		if err := b.sendBeacon(ctx, peer, pcb.PB); err != nil {
 			slog.Warn("Propagating origin beacon", "interface", ifID, "err", err)
 		}
@@ -449,24 +457,23 @@ func (b *Beaconer) originateOnce(ctx context.Context) {
 // this AS's signed entry, and propagates each on every external interface
 // except the one the beacon arrived on and except interfaces whose neighbor
 // the TRC names as a core — beacons never travel toward a core (Section
-// 2.3.5).
+// 2.3.5). The propagation targets are the neighbors' control services as
+// service destinations on the one-hop paths.
 func (b *Beaconer) propagateOnce(ctx context.Context) {
-	neighbors := b.neighbors()
 	cores := b.coreASes()
 	for _, cand := range b.store.BestSet(BestSetSize) {
 		for egress, neighborIA := range b.linkTable() {
 			if egress == cand.Ingress {
 				continue
 			}
+			if neighborIA.IsZero() {
+				continue // a link whose neighbor establishment has not named
+			}
 			if cores[neighborIA] {
 				continue
 			}
 			if !b.linkUp(egress) {
 				continue // a down interface propagates nothing
-			}
-			peer, ok := b.neighborEndpoint(neighbors, egress, neighborIA)
-			if !ok {
-				continue
 			}
 			extended, err := cand.PCB.Clone()
 			if err != nil {
@@ -481,6 +488,7 @@ func (b *Beaconer) propagateOnce(ctx context.Context) {
 				slog.Error("Extending beacon", "interface", egress, "err", err)
 				continue
 			}
+			peer := &scion.Addr{IA: neighborIA, Service: addr.SvcCS}
 			if err := b.sendBeacon(ctx, peer, extended.PB); err != nil {
 				slog.Warn("Propagating beacon", "interface", egress, "err", err)
 			}
@@ -595,22 +603,4 @@ func (b *Beaconer) sendRegistration(
 	ctx, cancel := context.WithTimeout(ctx, b.sendTimeout)
 	defer cancel()
 	return b.sender.RegisterSegments(ctx, peer, segments)
-}
-
-// neighborEndpoint resolves a neighbor's control endpoint address: the
-// discovery greeting's control address with the endpoint port.
-func (b *Beaconer) neighborEndpoint(
-	neighbors map[uint16]Neighbor,
-	ifID uint16,
-	neighborIA addr.IA,
-) (*scion.Addr, bool) {
-
-	n, ok := neighbors[ifID]
-	if !ok {
-		return nil, false
-	}
-	return &scion.Addr{
-		IA:   neighborIA,
-		Addr: netip.AddrPortFrom(n.ControlAddr.Addr(), EndpointPort),
-	}, true
 }

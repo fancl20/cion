@@ -1,8 +1,8 @@
 // Package services assembles the CION node's services — the data plane
 // generations, the control plane, the topology provider the run arguments
-// load (ADR 0007), and the resident applications — from the node's run
+// load (ADR 0009), and the resident applications — from the node's run
 // arguments and the state directory, where the first start generates the
-// identity (ADR-0006). Run serves them as the daemon; BootApp boots them
+// identity (ADR-0008). Run serves them as the daemon; BootApp boots them
 // for an application sending over the node's own assembly.
 package services
 

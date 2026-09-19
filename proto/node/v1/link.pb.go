@@ -22,7 +22,7 @@ const (
 )
 
 // LinkRequest asks the peer to admit a direct link between the two nodes,
-// riding the control endpoint's authenticated channel (ADR-0006): the
+// riding the control endpoint's authenticated channel (ADR-0008): the
 // requester is named by its verified certificate chain, never by a claim.
 type LinkRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`

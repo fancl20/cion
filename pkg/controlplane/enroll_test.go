@@ -11,7 +11,6 @@ import (
 	"encoding/pem"
 	"errors"
 	"math/big"
-	"net/netip"
 	"os"
 	"path/filepath"
 	"testing"
@@ -20,8 +19,10 @@ import (
 	"github.com/scionproto/scion/pkg/addr"
 	"github.com/scionproto/scion/pkg/scrypto/cppki"
 
+	"github.com/fancl20/cion/pkg/scion"
 	"github.com/fancl20/cion/pkg/trust"
 	"github.com/fancl20/cion/pkg/trust/impl/bbolt"
+	"github.com/fancl20/cion/pkg/webpki"
 )
 
 // testDomain is the DNS identity of the core endpoint in tests; its
@@ -107,7 +108,7 @@ func serveCore(t *testing.T, n *testNode, wpki *webPKI) *trustFixture {
 	t.Helper()
 	f := newTrustFixture(t)
 
-	tlsConf, err := ManageTLSCert(context.Background(), TLSCertConfig{
+	tlsConf, err := webpki.ManageTLSCert(context.Background(), webpki.TLSCertConfig{
 		Domain:   testDomain,
 		CertFile: wpki.certFile,
 		KeyFile:  wpki.keyFile,
@@ -126,8 +127,10 @@ func serveCore(t *testing.T, n *testNode, wpki *webPKI) *trustFixture {
 	return f
 }
 
-// enrollNode runs the enrollment a deployed non-core node performs: wait for
-// the core's greeting, aim the client at its endpoint, enroll.
+// enrollNode runs the enrollment a deployed non-core node performs: resolve
+// the core's control service through the drafts' exchange — the request the
+// endpoint answers beside its own protocol — aim the client at the answered
+// address, enroll.
 func enrollNode(
 	ctx context.Context,
 	t *testing.T,
@@ -138,8 +141,7 @@ func enrollNode(
 	key crypto.Signer,
 ) error {
 
-	core := waitNeighbor(t, n.learned, n.discovery)
-	client, err := NewCoreClient(CoreClientConfig{
+	client, err := webpki.NewCoreClient(webpki.CoreClientConfig{
 		Domain:  domain,
 		Conn:    n.newConn(t, 0),
 		RootCAs: rootCAs,
@@ -148,16 +150,21 @@ func enrollNode(
 		return err
 	}
 	defer func() { _ = client.Close() }()
-	client.SetCore(core.IA,
-		netip.AddrPortFrom(core.ControlAddr.Addr(), EndpointPort))
+	resolved, err := ResolveService(ctx, n.newConn(t, 0),
+		&scion.Addr{IA: n.neighbor, Service: addr.SvcCS})
+	if err != nil {
+		return err
+	}
+	client.SetCore(n.neighbor, resolved)
 	_, enrollErr := trust.Enroll(ctx, db, client, n.ia, key)
 	return enrollErr
 }
 
 // TestEnrollmentTwoNodes is the integration test of the trust bootstrap: a
-// core and a normal node discover each other, the normal node fetches the
-// TRC and enrolls over the one-hop SCION channel with TLS verified against
-// the core's domain, and both trust DBs converge.
+// core and a normal node, the normal node resolving the core's control
+// service through the drafts' exchange, fetching the TRC and enrolling over
+// the one-hop SCION channel with TLS verified against the core's domain, and
+// both trust DBs converging.
 func TestEnrollmentTwoNodes(t *testing.T) {
 	iaCore := addr.MustIAFrom(20, 0xff0000000001)
 	iaNode := addr.MustIAFrom(20, 0xff0000000002)

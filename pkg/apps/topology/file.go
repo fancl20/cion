@@ -35,15 +35,15 @@ type FileConfig struct {
 	WatchInterval time.Duration
 }
 
-// File is the static topology provider (ADR 0007): a link-set file the
+// File is the static topology provider (ADR 0009): a link-set file the
 // operator vouches for, reconciled into the store the way the old
 // configured interfaces worked — an entry named in the file established
 // with its pinned addresses, an entry absent from it retired, every change
 // a data plane generation swap the node already performs. It runs none of
 // the measured machinery: no rendezvous acceptor, no node directory, no
-// selection loop; greetings still flow over the pinned sockets — discovery
-// is core — so liveness, neighbor adoption, and beaconing treat a static
-// link exactly as a measured one.
+// selection loop; the entries arrive named and established — the operator's
+// vouch — so liveness and beaconing treat a static link exactly as a
+// measured one, the drafts' exchanges alone crossing the wire.
 type File struct {
 	cfg FileConfig
 	pcs Pieces

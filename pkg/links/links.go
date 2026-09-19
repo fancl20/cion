@@ -1,6 +1,6 @@
 // Package links stores the neighbor table: one entry per neighbor, holding
 // the addresses, interface IDs, and state of the link. The store is the one
-// source of truth ADR-0006 names — the control plane reads snapshots of it,
+// source of truth ADR-0008 names — the control plane reads snapshots of it,
 // and every data plane generation is built from its non-retired entries. It
 // follows the path DB pattern: a pure interface, a bbolt implementation, and
 // shared contract tests in impl/dbtest.
@@ -54,16 +54,17 @@ func (s State) String() string {
 var IfIDHoldback = path.ExpTimeToDuration(math.MaxUint8) + time.Hour
 
 // Link is one neighbor table entry. The neighbor ISD-AS is learned from the
-// peer's request or adopted from its first validated greeting; the local link
-// address is allocated once at establishment and rebound identically by every
-// data plane generation, which is what makes a swap invisible to the peer.
+// peer's side of the establishment — its request, its reply, its certificate;
+// the local link address is allocated once at establishment and rebound
+// identically by every data plane generation, which is what makes a swap
+// invisible to the peer.
 type Link struct {
 	// NeighborIA is the neighbor's ISD-AS; zero until learned.
 	NeighborIA addr.IA
 	// IfID is the local interface ID, allocated by the store on Insert.
 	IfID uint16
 	// RemoteIfID is the neighbor's interface ID of the link, learned from
-	// greetings.
+	// its side of the establishment.
 	RemoteIfID uint16
 	// Local is the local link underlay address.
 	Local netip.AddrPort
@@ -115,9 +116,9 @@ type DB interface {
 }
 
 // Links maps each live entry's interface ID to its neighbor ISD-AS — the
-// snapshot every consumer of the link set reads: discovery's greeting
-// validation, the beaconer's neighbor checks and propagation targets, and the
-// path library's one-hop egress resolution.
+// snapshot every consumer of the link set reads: the beaconer's neighbor
+// checks and propagation targets, the path library's one-hop egress
+// resolution, and the core route's one-hop shortcut.
 func Links(entries []*Link) map[uint16]addr.IA {
 	out := make(map[uint16]addr.IA, len(entries))
 	for _, l := range entries {

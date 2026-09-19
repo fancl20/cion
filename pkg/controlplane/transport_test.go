@@ -2,6 +2,7 @@ package controlplane
 
 import (
 	"context"
+	"net"
 	"net/http"
 	"net/netip"
 	"testing"
@@ -23,8 +24,29 @@ const (
 
 var testMACKeyBytes = []byte(testMACKey)
 
+// freeUDPAddr returns a loopback UDP address with a port picked by the
+// kernel, so that concurrent test runs do not collide on fixed ports.
+func freeUDPAddr(t *testing.T) string {
+	t.Helper()
+	return freeUDPAddrOn(t, netip.MustParseAddr("127.0.0.1"))
+}
+
+// freeUDPAddrOn returns an unused port on the given local address; distinct
+// loopback addresses let several nodes share one test host even with fixed
+// ports.
+func freeUDPAddrOn(t *testing.T, ip netip.Addr) string {
+	t.Helper()
+	c, err := net.ListenUDP("udp4", net.UDPAddrFromAddrPort(netip.AddrPortFrom(ip, 0)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = c.Close() }()
+	return c.LocalAddr().String()
+}
+
 // testNode is one CION node: data plane with an internal and an external
-// link, plus a registered discovery service.
+// link, plus the CS service registered on the control endpoint's socket —
+// the drafts' service routing the endpoint's own traffic rides.
 type testNode struct {
 	ia        addr.IA
 	neighbor  addr.IA
@@ -33,8 +55,6 @@ type testNode struct {
 	controlIP netip.Addr
 	provider  *dataplane.UDPProvider
 	store     *memory.DB
-	discovery *Discovery
-	learned   chan struct{} // signaled on the first recorded greeting
 	cancel    context.CancelFunc
 }
 
@@ -87,20 +107,9 @@ func startTestNode(t *testing.T, ia, neighbor addr.IA, extLocal, extRemote strin
 		NumSlowPathProcessors: 1,
 		BatchSize:             64,
 	}
-	learned := make(chan struct{}, 1)
-	discovery, err := NewDiscovery(DiscoveryConfig{
-		IA:           ia,
-		ControlAddr:  control,
-		MACKey:       testMACKeyBytes,
-		InternalAddr: internal,
-		Store:        store,
-		Interval:     discoveryGap,
-		Changed:      signalArrival(learned),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := discovery.Register(provider); err != nil {
+	// The control service maps to the endpoint's socket, the address a
+	// served endpoint (serveCore) binds.
+	if err := provider.AddSvc(addr.SvcCS, addr.HostIP(controlAddr.Addr()), EndpointPort); err != nil {
 		t.Fatal(err)
 	}
 
@@ -108,10 +117,8 @@ func startTestNode(t *testing.T, ia, neighbor addr.IA, extLocal, extRemote strin
 	t.Cleanup(func() {
 		cancel()
 		provider.Stop()
-		_ = discovery.Close()
 	})
 	go func() { _ = d.Serve(ctx) }()
-	go discovery.Run(ctx)
 
 	return &testNode{
 		ia:        ia,
@@ -121,8 +128,6 @@ func startTestNode(t *testing.T, ia, neighbor addr.IA, extLocal, extRemote strin
 		controlIP: controlAddr.Addr(),
 		provider:  provider,
 		store:     store,
-		discovery: discovery,
-		learned:   learned,
 		cancel:    cancel,
 	}
 }

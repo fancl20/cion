@@ -23,6 +23,10 @@ import (
 // TrustService implements the trust material and chain renewal RPCs of the
 // control endpoint. The segment service RPCs it embeds unimplemented come
 // from SegmentService, which takes precedence in the Services composition.
+// Admission is the provider's alone (ADR-0009): enrollment is reachable only
+// over paths, paths exist only over established links, and the loaded
+// provider admits every link — the acceptor's policy is where the decision
+// lives, and this service's own check is the name-taken one.
 type TrustService struct {
 	control_planeconnect.UnimplementedSegmentCreationServiceHandler
 	control_planeconnect.UnimplementedSegmentRegistrationServiceHandler
@@ -33,9 +37,6 @@ type TrustService struct {
 	// Issuer signs certificate chains. It is nil on nodes that do not issue
 	// chains — everything but the founding core, in this milestone.
 	Issuer *trust.Issuer
-	// AllowAS optionally restricts enrollment to the listed ISD-ASes; nil
-	// means open enrollment.
-	AllowAS map[addr.IA]bool
 }
 
 var _ ControlPlane = (*TrustService)(nil)
@@ -74,7 +75,7 @@ func (s *TrustService) TRC(
 }
 
 // checkNameTaken rejects a renewal for an ISD-AS that already holds an
-// unexpired chain under a different subject key: the name is taken (ADR-0006's
+// unexpired chain under a different subject key: the name is taken (ADR-0008's
 // enrollment gate). A same-key renewal — the chain's own holder — passes.
 func (s *TrustService) checkNameTaken(
 	ctx context.Context,
@@ -185,12 +186,7 @@ func (s *TrustService) ChainRenewal(
 		return nil, connect.NewError(connect.CodeInvalidArgument,
 			serrors.Wrap("extracting ISD-AS from CSR", err))
 	}
-	if s.AllowAS != nil && !s.AllowAS[ia] {
-		slog.Warn("Rejecting chain renewal of unlisted ISD-AS", "isd_as", ia)
-		return nil, connect.NewError(connect.CodePermissionDenied,
-			serrors.New("ISD-AS is not allowlisted", "isd_as", ia))
-	}
-	// The enrollment gate of self-picked ISD-ASes (ADR-0006): a name that
+	// The enrollment gate of self-picked ISD-ASes (ADR-0008): a name that
 	// already holds an unexpired chain under a different subject key is
 	// taken. Renewals by the same key pass untouched.
 	now := time.Now()

@@ -1,5 +1,5 @@
 // Package peeria is the peer-identity middleware of the SCION-native
-// channel (ADR 0007): the piece both sides of the node's boundary speak —
+// channel (ADR 0009): the piece both sides of the node's boundary speak —
 // the core's endpoint, the topology application's services, and the
 // WireGuard directory all authenticate their peers with it. A shared
 // library: no loops of its own, no policy, only the verified chain's

@@ -6,7 +6,6 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"hash"
-	"net/netip"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -132,16 +131,10 @@ func newBeaconFixture(t *testing.T) *beaconFixture {
 	links := func() map[uint16]addr.IA {
 		return map[uint16]addr.IA{1: coreIATest, 2: iaLineC}
 	}
-	neighbors := func() map[uint16]Neighbor {
-		return map[uint16]Neighbor{
-			1: {IA: coreIATest, ControlAddr: netip.MustParseAddrPort("192.0.2.10:30043")},
-			2: {IA: iaLineC, ControlAddr: netip.MustParseAddrPort("192.0.2.20:30043")},
-		}
-	}
 	store := NewBeaconStore()
 	sender := &fakeSender{}
 	coreRoute := func() *scion.Addr {
-		return &scion.Addr{IA: coreIATest, Addr: netip.MustParseAddrPort("192.0.2.10:30044")}
+		return &scion.Addr{IA: coreIATest, Service: addr.SvcCS}
 	}
 	beaconer, err := NewBeaconer(BeaconerConfig{
 		IA:        nodeIATest,
@@ -150,7 +143,6 @@ func newBeaconFixture(t *testing.T) *beaconFixture {
 		Store:     store,
 		DB:        pathDB,
 		Links:     links,
-		Neighbors: neighbors,
 		Sender:    sender,
 		CoreRoute: coreRoute,
 	})
@@ -361,8 +353,9 @@ func TestPropagateOnce(t *testing.T) {
 	if !sent.peer.IA.Equal(iaLineC) {
 		t.Errorf("beacon sent to %v, want %v", sent.peer.IA, iaLineC)
 	}
-	if sent.peer.Addr.Port() != EndpointPort {
-		t.Errorf("beacon sent to port %d, want %d", sent.peer.Addr.Port(), EndpointPort)
+	if sent.peer.Service != addr.SvcCS {
+		t.Errorf("beacon sent to service %#x, want the CS service %#x",
+			uint16(sent.peer.Service), uint16(addr.SvcCS))
 	}
 	parsed, err := segment.ParsePCB(sent.pcb)
 	if err != nil {
@@ -524,7 +517,6 @@ func TestBeaconerPausesOnDownInterface(t *testing.T) {
 		Store:     NewBeaconStore(),
 		DB:        f.pathDB,
 		Links:     func() map[uint16]addr.IA { return map[uint16]addr.IA{1: nodeIATest} },
-		Neighbors: func() map[uint16]Neighbor { return map[uint16]Neighbor{} },
 		Verdicts:  func() map[uint16]bool { return map[uint16]bool{1: false} },
 		Sender:    f.sender,
 		CoreRoute: func() *scion.Addr { return nil },

@@ -61,7 +61,8 @@ func TestStaticLabByLinkSet(t *testing.T) {
 		writeStaticSet(t, path)
 		return path
 	}
-	bootStatic := func(t *testing.T, ip netip.Addr, core bool, linkSet string) *staticNode {
+	bootStatic := func(t *testing.T, ip netip.Addr, core bool, linkSet string,
+		mutate func(*services.NodeConfig)) *staticNode {
 		t.Helper()
 		n := &staticNode{linkSet: linkSet}
 		n.assemblyNode = bootAssembly(t, func(cfg *services.NodeConfig) {
@@ -76,6 +77,9 @@ func TestStaticLabByLinkSet(t *testing.T) {
 			} else {
 				cfg.RootCAs = wpki.pool
 			}
+			if mutate != nil {
+				mutate(cfg)
+			}
 		})
 		return n
 	}
@@ -84,13 +88,13 @@ func TestStaticLabByLinkSet(t *testing.T) {
 	// the ISD the other files' entries complete with. B's file names the
 	// core — final already — before B's first start; C's names B, final
 	// once B's first start completed from A's entry.
-	a := bootStatic(t, ipA, true, newLinkSet(t))
+	a := bootStatic(t, ipA, true, newLinkSet(t), nil)
 	bFile := newLinkSet(t)
 	writeStaticSet(t, bFile, staticLink{IA: a.app.IA().String(), Local: abB, Remote: abA})
-	b := bootStatic(t, ipB, false, bFile)
+	b := bootStatic(t, ipB, false, bFile, nil)
 	cFile := newLinkSet(t)
 	writeStaticSet(t, cFile, staticLink{IA: b.app.IA().String(), Local: bcC, Remote: bcB})
-	c := bootStatic(t, ipC, false, cFile)
+	c := bootStatic(t, ipC, false, cFile, nil)
 
 	// The identity completed from the files: one ISD, each AS its own draw.
 	for _, n := range []*staticNode{b, c} {
@@ -146,5 +150,65 @@ func TestStaticLabByLinkSet(t *testing.T) {
 	})
 	Poll(t, "A and B still answer each other", func() bool {
 		return pingFrom(ctx, a.assemblyNode, b.app.IA(), b.host)
+	})
+}
+
+// TestStaticEnrollmentPastAllowlist checks the admission boundary
+// (ADR-0009): enrollment admission is the provider's alone. The core's
+// --allow-ia lists a foreign ISD-AS — the file provider's operator vouch
+// admits the link regardless, no acceptor reads the list — and the
+// enrollment over the vouched link stands: the trust service keeps no gate
+// of its own, the name-taken check excepted.
+func TestStaticEnrollmentPastAllowlist(t *testing.T) {
+	wpki := NewWebPKI(t)
+	ipA, ipB := addrIP(0x55), addrIP(0x56)
+	abA, abB := FreeUDPAddrOn(t, ipA), FreeUDPAddrOn(t, ipB)
+
+	linkSetOf := func(t *testing.T) string {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), "link-set.json")
+		writeStaticSet(t, path)
+		return path
+	}
+	boot := func(t *testing.T, ip netip.Addr, core bool, linkSet string,
+		mutate func(*services.NodeConfig)) *staticNode {
+		t.Helper()
+		n := &staticNode{linkSet: linkSet}
+		n.assemblyNode = bootAssembly(t, func(cfg *services.NodeConfig) {
+			cfg.Core = core
+			cfg.LinkSet = linkSet
+			cfg.State = t.TempDir()
+			cfg.Internal = FreeUDPAddrOn(t, ip)
+			cfg.Control = FreeUDPAddrOn(t, ip)
+			if core {
+				cfg.CertFile = wpki.certFile
+				cfg.KeyFile = wpki.keyFile
+			} else {
+				cfg.RootCAs = wpki.pool
+			}
+			if mutate != nil {
+				mutate(cfg)
+			}
+		})
+		return n
+	}
+	a := boot(t, ipA, true, linkSetOf(t), func(cfg *services.NodeConfig) {
+		cfg.AllowIA = []string{"20-ff00:0:99"} // no node of this network
+	})
+	bFile := linkSetOf(t)
+	writeStaticSet(t, bFile, staticLink{IA: a.app.IA().String(), Local: abB, Remote: abA})
+	b := boot(t, ipB, false, bFile, nil)
+	ifID := uint16(1)
+	writeStaticSet(t, a.linkSet,
+		staticLink{IA: b.app.IA().String(), Local: abA, Remote: abB, Interface: &ifID})
+
+	ctx := context.Background()
+	Poll(t, "the link stands", func() bool {
+		e := entryOf(b.assemblyNode, a.app.IA())
+		return e != nil && e.State == links.StateEstablished
+	})
+	// B enrolls over the vouched link: no ISD-AS the trust service refuses.
+	Poll(t, "B enrolled past the allowlist", func() bool {
+		return pingFrom(ctx, b.assemblyNode, a.app.IA(), a.host)
 	})
 }

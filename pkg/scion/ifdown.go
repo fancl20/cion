@@ -158,7 +158,9 @@ func parseInterfaceDownPacket(raw []byte) (InterfaceDownSignal, bool) {
 		var scn slayers.SCION
 		if err := scn.DecodeFromBytes(quote, gopacket.NilDecodeFeedback); err == nil {
 			sig.Dst = scn.DstIA
-			if dst, err := scn.DstAddr(); err == nil {
+			// A service-destined quote — control traffic rides the service
+			// addresses — names no host to drop by.
+			if dst, err := scn.DstAddr(); err == nil && dst.Type() == addr.HostTypeIP {
 				sig.DstHost = dst.IP()
 			}
 		}

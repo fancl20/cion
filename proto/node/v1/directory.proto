@@ -17,7 +17,7 @@ message Entry {
   // rendezvous acceptor listens on for first contact.
   string rendezvous_addr = 3;
   // private marks a node behind address translation: joinable by no one,
-  // candidate for no one's redundancy floor (ADR-0006's reachability class).
+  // candidate for no one's redundancy floor (ADR-0008's reachability class).
   bool private = 4;
 }
 

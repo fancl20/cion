@@ -1,6 +1,6 @@
 # Keep a Minimal Node Core and Move Everything Else to Apps
 
-*   Status: proposed
+*   Status: accepted
 *   Supersedes:
     [ADR-0007](/docs/adrs/0007-keep-a-minimal-node-core-and-move-everything-else-to-apps.md)
 *   Date: 2026-09-16
@@ -117,15 +117,18 @@ speak. Realized as follows:
         supplies, addressed to the core's control service;
     *   the beaconing loops of ADR-0004.
 
-    `pkg/controlplane` holds exactly this enumeration.
+    The core's packages — `pkg/dataplane`, `pkg/links` with its
+    supervisor, `pkg/controlplane`, and the monitor's BFD beside them —
+    hold exactly this enumeration.
 2.  **Shared libraries serve core and apps alike, run no loops of their
     own, and hold no policy.** These are `pkg/scion` — the connection,
     address, and path provider of ADR-0005's application seam;
     `pkg/links` — the neighbor table as the single source of topology
     truth, holding the identity facts whichever provider learns:
-    neighbor ISD-AS, interface IDs, link and rendezvous addresses; the
-    peer-identity middleware of the SCION-native channel; and the trust
-    and path databases. The moment one of these grows a policy decision
+    neighbor ISD-AS, interface IDs, link and rendezvous addresses — and
+    the trust and path databases; `pkg/peeria` — the peer-identity
+    middleware of the SCION-native channel, the piece both sides of the
+    node's boundary speak. The moment one of these grows a policy decision
     or a lifetime loop, it has become an app and must move.
 3.  **The topology machinery of ADR-0008 is an application — the
     measured provider — loaded by default.** The rendezvous acceptor,

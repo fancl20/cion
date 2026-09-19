@@ -9,30 +9,27 @@ import (
 
 	"github.com/scionproto/scion/pkg/addr"
 
-	"github.com/fancl20/cion/pkg/controlplane"
 	"github.com/fancl20/cion/pkg/links"
 	"github.com/fancl20/cion/pkg/links/impl/memory"
 )
 
 // selFixture is the selection loop's test harness: a memory link store, a
-// directory snapshot, greeting arrivals with their LastSeen, the monitor's
-// verdicts, and injected measurements. The establishment is recorded rather
-// than performed; the promotion and demotion rules are what the tests
-// assert.
+// directory snapshot, the monitor's verdicts, injected measurements, and
+// injected candidate-grace probes. The establishment is recorded rather than
+// performed; the promotion and demotion rules are what the tests assert.
 type selFixture struct {
 	store     *memory.DB
 	directory []DirectoryEntry
 	samples   map[addr.IA]measurement
-	fresh     map[uint16]controlplane.Neighbor
 	verdicts  map[uint16]bool
-	silent    map[addr.IA]bool // neighbors whose greetings stopped
+	silent    map[addr.IA]bool // neighbors whose probes went unanswered
 	down      map[addr.IA]bool // neighbors whose verdict is down
-	// candidateGreetings holds the greeting arrivals of candidates' peers,
-	// keyed by the candidate's interface ID.
-	candidateGreetings map[uint16]controlplane.Neighbor
-	established        []addr.IA // the promoted candidates, in order
-	changed            int
-	sel                *selection
+	// alive holds the candidates whose rendezvous socket answers the
+	// sweep's probe, keyed by neighbor ISD-AS.
+	alive       map[addr.IA]bool
+	established []addr.IA // the promoted candidates, in order
+	changed     int
+	sel         *selection
 }
 
 var (
@@ -55,13 +52,12 @@ func entryOf(ia addr.IA) DirectoryEntry {
 func newSelFixture(t *testing.T, neighbors ...addr.IA) *selFixture {
 	t.Helper()
 	f := &selFixture{
-		store:              memory.New(),
-		samples:            make(map[addr.IA]measurement),
-		fresh:              make(map[uint16]controlplane.Neighbor),
-		verdicts:           make(map[uint16]bool),
-		silent:             make(map[addr.IA]bool),
-		down:               make(map[addr.IA]bool),
-		candidateGreetings: make(map[uint16]controlplane.Neighbor),
+		store:    memory.New(),
+		samples:  make(map[addr.IA]measurement),
+		verdicts: make(map[uint16]bool),
+		silent:   make(map[addr.IA]bool),
+		down:     make(map[addr.IA]bool),
+		alive:    make(map[addr.IA]bool),
 	}
 	for _, ia := range neighbors {
 		if err := f.store.Insert(context.Background(), &links.Link{
@@ -103,40 +99,28 @@ func newSelFixture(t *testing.T, neighbors ...addr.IA) *selFixture {
 		},
 	}
 	f.sel.cfg.Directory = func() []DirectoryEntry { return f.directory }
-	f.sel.cfg.Neighbors = func() map[uint16]controlplane.Neighbor { return f.fresh }
 	f.sel.cfg.Verdicts = func() map[uint16]bool { return f.verdicts }
-	// Every established neighbor greets and holds its verdict up unless a
-	// test says otherwise.
+	// Every established neighbor holds its verdict up unless a test says
+	// otherwise.
 	f.sel.cfg.Evidence = func(*links.Link) bool { return false }
+	f.sel.aliveFn = func(l *links.Link) bool { return f.alive[l.NeighborIA] }
 	f.refresh()
 	return f
 }
 
-// refresh rebuilds the greeting and verdict maps from the established
-// entries, minus the silent and the down ones.
+// refresh rebuilds the verdict map from the established entries, minus the
+// down ones.
 func (f *selFixture) refresh() {
 	entries, err := f.store.All(context.Background())
 	if err != nil {
 		return
 	}
-	now := time.Now()
-	f.fresh = make(map[uint16]controlplane.Neighbor)
 	f.verdicts = make(map[uint16]bool)
 	for _, l := range entries {
 		if l.State != links.StateEstablished {
 			continue
 		}
-		if !f.silent[l.NeighborIA] {
-			n := controlplane.Neighbor{IA: l.NeighborIA, IfID: l.RemoteIfID, LastSeen: now}
-			f.fresh[l.IfID] = n
-		}
 		f.verdicts[l.IfID] = !f.down[l.NeighborIA]
-	}
-	// A candidate's peer that keeps greeting — a peer still trying, with no
-	// serving link and no session to its name — arrives through the same
-	// map, its LastSeen the grace's only evidence.
-	for ifID, n := range f.candidateGreetings {
-		f.fresh[ifID] = n
 	}
 }
 
@@ -303,8 +287,7 @@ func TestSelectionVerdictDownDemotion(t *testing.T) {
 // promotion floor counts up links only — a node whose every neighbor went
 // down promotes from the directory rather than resting on verdicts — while
 // the demotion floor counts established entries, so a peer whose BFD never
-// arrives but whose greetings do keeps its link established with the floor
-// counting it.
+// arrives keeps its link established with the floor counting it.
 func TestSelectionFloorCountsDownLinks(t *testing.T) {
 	// At the established floor, a verdict-down neighbor is kept: its
 	// verdict is reversible, and a bad link is still a link.
@@ -456,13 +439,13 @@ func TestSelectionNoAction(t *testing.T) {
 	}
 }
 
-// TestSelectionSweepGrace checks the candidacy grace: the sweep's one
-// recency derivation reads greeting arrivals' LastSeen directly — a
-// candidate's peer that keeps greeting is alive and trying, exactly the
-// joiner whose enrollment is still in flight, and retires when it goes
-// silent. The streams answer different questions: liveness is BFD's alone,
-// and this grace is the greeting stream's own business. The test runs in a
-// bubble: outliving the window is a fake-time sleep, instant and exact.
+// TestSelectionSweepGrace checks the candidacy grace: the sweep's own probe
+// is its only recency evidence — a named candidate whose rendezvous socket
+// answers the window's probe is alive and trying, exactly the joiner whose
+// enrollment is still in flight, and retires when it goes silent. The grace
+// is spent on named candidates alone: the unnamed entries the probes
+// themselves mint on their targets retire with the window. The test runs in
+// a bubble: outliving the window is a fake-time sleep, instant and exact.
 func TestSelectionSweepGrace(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		f := newSelFixture(t)
@@ -479,32 +462,43 @@ func TestSelectionSweepGrace(t *testing.T) {
 			}
 			return l
 		}
-		greeted := insertCandidate(selA)
-		silent := insertCandidate(selB)
-		time.Sleep(60 * time.Millisecond) // both candidates outlive the window
-
-		f.candidateGreetings[greeted.IfID] = controlplane.Neighbor{
-			IA:       selA,
-			LastSeen: time.Now(),
+		answering := insertCandidate(selA)
+		_ = insertCandidate(selB)
+		unnamed := &links.Link{
+			Local:  netip.MustParseAddrPort("127.0.0.1:40003"),
+			Remote: netip.MustParseAddrPort("127.0.0.1:40004"),
+			State:  links.StateCandidate,
 		}
+		if err := f.store.Insert(context.Background(), unnamed); err != nil {
+			t.Fatal(err)
+		}
+		time.Sleep(60 * time.Millisecond) // the candidates outlive the window
+
+		f.alive[selA] = true // the window's probe answers
 		f.pass(t)
 		if f.state(t, selA) != links.StateCandidate {
-			t.Error("the greeted candidate's grace did not hold")
+			t.Error("the answering candidate's grace did not hold")
 		}
 		if f.state(t, selB) != links.StateRetired {
 			t.Error("the silent candidate outlived the window")
 		}
-
-		// The grace reads arrivals, not identity: once the greetings stop, the
-		// entry retires on the next sweep.
-		f.candidateGreetings[greeted.IfID] = controlplane.Neighbor{
-			IA:       selA,
-			LastSeen: time.Now().Add(-f.sel.cfg.Window - time.Second),
+		entries, err := f.store.All(context.Background())
+		if err != nil {
+			t.Fatal(err)
 		}
+		for _, l := range entries {
+			if l.IfID == unnamed.IfID && l.State != links.StateRetired {
+				t.Error("the unnamed candidate outlived the window")
+			}
+		}
+
+		// The grace reads probe outcomes, not identity: once the probe goes
+		// unanswered, the entry retires on the next sweep.
+		f.alive[selA] = false
 		f.pass(t)
 		if f.state(t, selA) != links.StateRetired {
 			t.Error("the candidate kept its grace after going silent")
 		}
-		_ = silent
+		_ = answering
 	})
 }

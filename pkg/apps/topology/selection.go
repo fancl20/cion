@@ -19,7 +19,7 @@ import (
 	nodev1 "github.com/fancl20/cion/proto/node/v1"
 )
 
-// The selection loop's constants (ADR-0006: no operator tuning). A node keeps
+// The selection loop's constants (ADR-0008: no operator tuning). A node keeps
 // at least NeighborFloor neighbors no single failure can partition it from,
 // caps the count to bound beaconing fan-out, promotes a candidate whose
 // direct link is meaningfully faster than its composed paths, demotes a
@@ -70,11 +70,6 @@ type SelectionConfig struct {
 	Store links.DB
 	// Directory snapshots the node directory's entries.
 	Directory func() []DirectoryEntry
-	// Neighbors returns the neighbors learned from greetings by interface
-	// ID, with their LastSeen — identity, however stale the arrivals. The
-	// one recency derivation the loop makes of it is the candidate sweep's
-	// grace, which reads LastSeen directly.
-	Neighbors func() map[uint16]controlplane.Neighbor
 	// Verdicts returns the health monitor's link verdicts by interface ID:
 	// an established neighbor whose verdict is down counts as infinitely
 	// slow for the window whatever its last sample said, and the redundancy
@@ -139,9 +134,11 @@ type selection struct {
 	cfg SelectionConfig
 	// streaks damp the decisions: consecutive windows of the same evidence.
 	streaks map[addr.IA]*peerStreak
-	// probeFn and establishFn override the measurement and the
-	// establishment in tests; nil uses the real ones.
+	// probeFn, aliveFn, and establishFn override the measurement, the
+	// candidate-grace probe, and the establishment in tests; nil uses the
+	// real ones.
 	probeFn     func(context.Context, DirectoryEntry, *links.Link) measurement
+	aliveFn     func(*links.Link) bool
 	establishFn func(context.Context, DirectoryEntry, string) bool
 }
 
@@ -178,7 +175,7 @@ func (s *selection) pass(ctx context.Context) {
 	directory := s.directory()
 
 	// Probe every peer the directory names — neighbor and candidate alike
-	// (ADR-0006: the comparator never stops at admission) — each by its own
+	// (ADR-0008: the comparator never stops at admission) — each by its own
 	// carrier: the neighbor's direct side over the one-hop path, the
 	// candidate's by rendezvous echo.
 	samples := make(map[addr.IA]measurement)
@@ -212,11 +209,14 @@ func (s *selection) pass(ctx context.Context) {
 
 // sweep settles the candidate entries: proven peers are established, and
 // peers that produced no verified beacon or enrollment within the window
-// retire — unless their greetings still arrive, for a peer that keeps
-// greeting is alive and trying, exactly the joiner whose enrollment is
-// still in flight; it retires when it goes silent. The grace reads LastSeen
-// directly — a candidate has no serving link and no session, and the
-// greeting stream is the one evidence of trying it offers.
+// retire — unless this window's probe of the candidate answers, for a peer
+// that answers its rendezvous socket is alive and trying, exactly the joiner
+// whose enrollment is still in flight; it retires when it goes silent. Push
+// became pull: the same UDP round trip to the same rendezvous socket the
+// window's measurement already rides is now the grace's only evidence, and
+// it is spent on named candidates alone — the unnamed entries the probes
+// themselves mint on their targets retire with the window, or the cap they
+// bound would fill with them.
 func (s *selection) sweep(ctx context.Context, entries []*links.Link) bool {
 	window := s.cfg.Window
 	if window == 0 {
@@ -224,11 +224,6 @@ func (s *selection) sweep(ctx context.Context, entries []*links.Link) bool {
 	}
 	changed := false
 	now := time.Now()
-	neighbors := s.freshNeighbors()
-	greeted := func(l *links.Link) bool {
-		n, ok := neighbors[l.IfID]
-		return ok && now.Sub(n.LastSeen) < window
-	}
 	for _, l := range entries {
 		if l.State != links.StateCandidate {
 			continue
@@ -244,7 +239,7 @@ func (s *selection) sweep(ctx context.Context, entries []*links.Link) bool {
 				"neighbor", l.NeighborIA, "interface", l.IfID)
 			changed = true
 		} else if now.Sub(l.Created) > window {
-			if greeted(l) {
+			if s.candidateAlive(ctx, l) {
 				continue
 			}
 			s.retire(ctx, l, "candidate window elapsed without a proven peer")
@@ -252,6 +247,31 @@ func (s *selection) sweep(ctx context.Context, entries []*links.Link) bool {
 		}
 	}
 	return changed
+}
+
+// candidateAlive runs one rendezvous echo against the candidate's own
+// rendezvous socket — the address its entry records, or the fixed
+// rendezvous port on the host of its recorded remote address, the two
+// sharing the control host — through the test seam when set. An answer is a
+// peer alive and trying; the echo claims the zero ISD-AS like every probe,
+// minting no entry a sweep could mistake for a peer.
+func (s *selection) candidateAlive(ctx context.Context, l *links.Link) bool {
+	if l.NeighborIA.IsZero() {
+		return false
+	}
+	if s.aliveFn != nil {
+		return s.aliveFn(l)
+	}
+	target := l.Rendezvous
+	if !target.IsValid() && l.Remote.Addr().IsValid() {
+		target = netip.AddrPortFrom(l.Remote.Addr(), RendezvousPort)
+	}
+	if !target.IsValid() {
+		return false
+	}
+	_, _, err := RendezvousEcho(ctx, s.cfg.ControlAddr.Addr(), target,
+		addr.IA(0), s.cfg.ControlAddr)
+	return err == nil
 }
 
 // neighbors maps the established entries by their neighbor ISD-AS.
@@ -553,15 +573,6 @@ func (s *selection) worstNeighbor(
 		}
 	}
 	return worst
-}
-
-// freshNeighbors returns the neighbors learned from greetings by interface
-// ID, with their LastSeen — identity for whoever asks.
-func (s *selection) freshNeighbors() map[uint16]controlplane.Neighbor {
-	if s.cfg.Neighbors == nil {
-		return nil
-	}
-	return s.cfg.Neighbors()
 }
 
 // retire withdraws a link: its entry goes to retired, the interface ID held

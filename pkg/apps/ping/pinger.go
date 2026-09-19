@@ -3,7 +3,7 @@
 // library (pkg/scion) beside the control plane. A pinger resolves the
 // freshest path to a destination, sends a count of requests, and reports
 // per-reply RTT, the reply's path hops, and a loss summary; the responder
-// that answers them is the node's own, part of the core (ADR 0007), so the
+// that answers them is the node's own, part of the core (ADR 0009), so the
 // pinger is the application's whole surface.
 package ping
 

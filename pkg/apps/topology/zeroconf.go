@@ -73,7 +73,7 @@ type Pacing struct {
 
 // Zeroconf is the measured provider: the rendezvous acceptor, the joiner's
 // dials, the node directory, the in-band link service, and the selection
-// loop of ADR-0006 and proposal 0008, moved unchanged from the node
+// loop of ADR-0008 and proposal 0008, moved unchanged from the node
 // assembly and the core. Loading it is what makes a node zero-conf, and it
 // loads by default; nothing about its behavior differs from what the node
 // itself ran but its import path.
@@ -113,10 +113,11 @@ type bootstrapped struct {
 
 // CompleteIdentity completes a first-start joiner's identity: the ISD of its
 // draw is provisional, replaced by the network's — the answering neighbor's
-// — so the enrollment's chains verify against the ISD's TRC. The joiner
-// claims the zero ISD-AS in its dial; the neighbor's entry adopts the final
-// one from the joiner's first greeting. The founding core's draw is its
-// network's name already.
+// — so the enrollment's chains verify against the ISD's TRC. The first dial
+// claims the zero ISD-AS — the identity is not final yet — and the second,
+// with the completed one, names the acceptor's entry with it: identity
+// adoption is the exchange's own act, both sides named before the link
+// serves. The founding core's draw is its network's name already.
 func (z *Zeroconf) CompleteIdentity(ctx context.Context, ia addr.IA) (addr.IA, error) {
 	if z.cfg.Core {
 		return ia, nil
@@ -149,6 +150,14 @@ func (z *Zeroconf) CompleteIdentity(ctx context.Context, ia addr.IA) (addr.IA, e
 					"isd_as", completed, "provisional", ia)
 				ia = completed
 			}
+		}
+		// The named dial again, so the acceptor's entry carries the identity
+		// the first claimed zero: a link whose entry names no neighbor
+		// serves no beacons, and the exchange is the one place left to name
+		// it. The reply re-answers the same entry's addresses.
+		reply, _, err = RendezvousEcho(ctx, z.cfg.ControlHost, target, ia, local)
+		if err != nil {
+			return ia, fmt.Errorf("naming the bootstrap neighbor's entry: %w", err)
 		}
 		z.bootstrap = &bootstrapped{target: target, reply: reply, local: local}
 		return ia, nil
@@ -259,7 +268,7 @@ func (z *Zeroconf) assemble() error {
 	directoryCfg := NodeDirectoryConfig{
 		Entry: DirectoryEntry{
 			IA:             z.pcs.IA,
-			ControlAddr:    netip.AddrPortFrom(z.cfg.ControlHost, controlplane.DiscoveryPort),
+			ControlAddr:    netip.AddrPortFrom(z.cfg.ControlHost, controlplane.EndpointPort),
 			RendezvousAddr: netip.AddrPortFrom(z.cfg.ControlHost, RendezvousPort),
 			Private:        z.cfg.BehindNAT,
 		},
@@ -353,17 +362,16 @@ func (z *Zeroconf) Close() error {
 // selectionConfig builds the topology loop's configuration from the
 // provider's own pieces: the link store its decisions land in, the directory
 // its candidates come from, the provider and conn its probes ride, and the
-// neighbor liveness its demotions read.
+// monitor's verdicts its demotions read.
 func (z *Zeroconf) selectionConfig() SelectionConfig {
 	return SelectionConfig{
 		IA:          z.pcs.IA,
 		Store:       z.pcs.Store,
 		Directory:   z.directory.Entries,
-		Neighbors:   z.pcs.Neighbors,
 		Verdicts:    z.pcs.Verdicts,
 		Provider:    z.pcs.Provider,
 		Conn:        z.probeConn,
-		ControlAddr: netip.AddrPortFrom(z.cfg.ControlHost, controlplane.DiscoveryPort),
+		ControlAddr: netip.AddrPortFrom(z.cfg.ControlHost, controlplane.EndpointPort),
 		LinkHost:    z.cfg.ControlHost,
 		Link:        &linkClient{peer: z.pcs.Peer},
 		Evidence:    z.cfg.Evidence,
@@ -393,7 +401,9 @@ func (z *Zeroconf) runJoinDials(ctx context.Context) {
 	}
 }
 
-// dialJoins runs one pass of the joiner's dials.
+// dialJoins runs one pass of the joiner's dials. The reply names the
+// joiner's own entry — the acceptor's ISD-AS — beside retargeting it, so
+// both sides of the establishment are named before the link serves.
 func (z *Zeroconf) dialJoins(ctx context.Context) {
 	entries, err := z.pcs.Store.All(ctx)
 	if err != nil {
@@ -410,6 +420,7 @@ func (z *Zeroconf) dialJoins(ctx context.Context) {
 			slog.Debug("Rendezvous dial", "rendezvous", l.Rendezvous, "err", err)
 			continue
 		}
+		l.NeighborIA = reply.IA
 		l.Remote = reply.LinkAddr
 		l.RemoteIfID = reply.IfID
 		if err := z.pcs.Store.Update(ctx, l); err != nil {
@@ -418,7 +429,8 @@ func (z *Zeroconf) dialJoins(ctx context.Context) {
 		}
 		z.notify()
 		slog.Info("Joined a neighbor by rendezvous",
-			"local", l.Local, "remote", l.Remote, "interface", l.IfID)
+			"neighbor", l.NeighborIA, "local", l.Local, "remote", l.Remote,
+			"interface", l.IfID)
 	}
 }
 

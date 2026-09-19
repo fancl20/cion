@@ -39,11 +39,11 @@ import (
 	"github.com/fancl20/cion/pkg/scion"
 	"github.com/fancl20/cion/pkg/trust"
 	trustbbolt "github.com/fancl20/cion/pkg/trust/impl/bbolt"
+	"github.com/fancl20/cion/pkg/webpki"
 )
 
 // Test intervals, fast enough for the integration tests to watch the loops.
 const (
-	DiscoveryGap = 30 * time.Millisecond
 	Propagation  = 100 * time.Millisecond
 	Registration = 200 * time.Millisecond
 	EnrollRetry  = 100 * time.Millisecond
@@ -60,9 +60,9 @@ const (
 const TestDomain = "cion-core.test"
 
 // Node is one fully-wired node of a test topology — the same components the
-// run command wires in internal/services: data plane, the link store,
-// discovery, the BFD health monitor, trust, the control endpoint, the
-// beaconer, and — when configured — the WireGuard application.
+// run command wires in internal/services: data plane, the link store, the
+// BFD health monitor, trust, the control endpoint, the beaconer, and — when
+// configured — the WireGuard application.
 type Node struct {
 	IA        addr.IA
 	Internal  string
@@ -76,11 +76,10 @@ type Node struct {
 	Engine    *trust.Engine
 	Beaconer  *controlplane.Beaconer
 	StoreBcn  *controlplane.BeaconStore
-	CoreClt   *controlplane.CoreClient
+	CoreClt   *webpki.CoreClient
 	PeerClt   *controlplane.PeerClient
 	Provider  *scion.PathProvider
 	Lookup    *controlplane.LookupService
-	Discovery *controlplane.Discovery
 	Wireguard *wireguard.App
 	cancel    context.CancelFunc
 }
@@ -325,18 +324,11 @@ func StartNode(t *testing.T, cfg NodeConfig) *Node {
 		t.Fatal(err)
 	}
 	d.RunConfig = dataplane.RunConfig{NumProcessors: 2, NumSlowPathProcessors: 1, BatchSize: 64}
-	discovery, err := controlplane.NewDiscovery(controlplane.DiscoveryConfig{
-		IA:           ia,
-		ControlAddr:  control,
-		MACKey:       macKey,
-		InternalAddr: internal,
-		Store:        linkStore,
-		Interval:     DiscoveryGap,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := discovery.Register(provider); err != nil {
+	// The CS service maps to the control endpoint's socket — the registered
+	// service the drafts' service routing delivers to, the endpoint
+	// answering the drafts' resolution beside its own protocol.
+	if err := provider.AddSvc(addr.SvcCS, addr.HostIP(controlAddr.Addr()),
+		controlplane.EndpointPort); err != nil {
 		t.Fatal(err)
 	}
 
@@ -344,7 +336,6 @@ func StartNode(t *testing.T, cfg NodeConfig) *Node {
 	t.Cleanup(func() {
 		cancel()
 		provider.Stop()
-		_ = discovery.Close()
 	})
 	// The link store's file lock releases with the node's cancellation, so
 	// a restarted node — the same state directory — opens it instead of
@@ -354,7 +345,6 @@ func StartNode(t *testing.T, cfg NodeConfig) *Node {
 		_ = linkStore.Close()
 	}()
 	go func() { _ = d.Serve(ctx) }()
-	go discovery.Run(ctx)
 	go func() {
 		defer handlePanic()
 		monitor.Run(ctx)
@@ -375,8 +365,13 @@ func StartNode(t *testing.T, cfg NodeConfig) *Node {
 		return conn
 	}
 
+	endpointConn := scionConn(controlplane.EndpointPort)
+	// The HTTP/3 server serves until its socket closes; releasing it lets a
+	// re-run of the suite (go test -count) bind the fixed port again.
+	t.Cleanup(func() { _ = endpointConn.Close() })
+
 	var issuer *trust.Issuer
-	var coreClt *controlplane.CoreClient
+	var coreClt *webpki.CoreClient
 	if core {
 		keys, err := trust.LoadOrCreateCoreKeys(stateDir)
 		if err != nil {
@@ -394,39 +389,21 @@ func StartNode(t *testing.T, cfg NodeConfig) *Node {
 			t.Fatal(err)
 		}
 	} else {
-		coreClt, err = controlplane.NewCoreClient(controlplane.CoreClientConfig{
+		coreConn := scionConn(0)
+		// The resolution exchange reads its own conn: one shared with the
+		// client's QUIC transport would race it for the socket's packets.
+		resolutionConn := scionConn(0)
+		coreClt, err = webpki.NewCoreClient(webpki.CoreClientConfig{
 			Domain:  TestDomain,
-			Conn:    scionConn(0),
+			Conn:    coreConn,
 			RootCAs: wpki.pool,
+			ResolveService: func(ctx context.Context, peer *scion.Addr) (netip.AddrPort, error) {
+				return controlplane.ResolveService(ctx, resolutionConn, peer)
+			},
 		})
 		if err != nil {
 			t.Fatal(err)
 		}
-	}
-
-	var pathProvider *scion.PathProvider
-	coreRoute := func() *scion.Addr {
-		coreIA, coreEndpoint, ok := discovery.CoreEndpoint()
-		if !ok {
-			return nil
-		}
-		// The one-hop shortcut when the core is a neighbor and the monitor's
-		// verdict holds; a down link falls through to the composed route.
-		for ifID, n := range discovery.Neighbors() {
-			if n.IA.Equal(coreIA) && monitor.Up(ifID) {
-				return &scion.Addr{IA: coreIA,
-					Addr: netip.AddrPortFrom(n.ControlAddr.Addr(), controlplane.EndpointPort)}
-			}
-		}
-		if pathProvider != nil {
-			if path, err := pathProvider.LocalPath(coreIA); err == nil {
-				return &scion.Addr{IA: coreIA, Addr: coreEndpoint, Path: path}
-			}
-		}
-		return nil
-	}
-	if coreClt != nil {
-		coreClt.SetLocator(coreRoute)
 	}
 
 	remote := trust.Remote(nil)
@@ -442,9 +419,45 @@ func StartNode(t *testing.T, cfg NodeConfig) *Node {
 		return ias
 	}
 
+	var pathProvider *scion.PathProvider
+	var beaconer *controlplane.Beaconer
+	// coreRoute returns the drafts' route to the core (ADR-0009): the
+	// one-hop shortcut when a TRC-named core is a neighbor with its verdict
+	// up, else the reversed freshest up segment — or the bootstrap beacon's
+	// route, before any is verified — addressed to the core's control
+	// service.
+	coreRoute := func() *scion.Addr {
+		if pathProvider == nil || beaconer == nil {
+			return nil
+		}
+		for ifID, neighborIA := range linkTableOf(linkStore)() {
+			if neighborIA.IsZero() || !isCore(cores, neighborIA) {
+				continue
+			}
+			if monitor.Up(ifID) {
+				return &scion.Addr{IA: neighborIA, Service: addr.SvcCS, IfID: ifID}
+			}
+		}
+		for _, core := range []func() addr.IA{
+			func() addr.IA { return freshestUpCore(pathDB) },
+			beaconer.BootstrapCore,
+		} {
+			if coreIA := core(); !coreIA.IsZero() {
+				if path, err := pathProvider.LocalPath(coreIA); err == nil {
+					return &scion.Addr{IA: coreIA, Service: addr.SvcCS, Path: path}
+				}
+			}
+		}
+		return nil
+	}
+	if coreClt != nil {
+		coreClt.SetLocator(coreRoute)
+	}
+
+	peerConn := scionConn(0)
 	peerClt := controlplane.NewPeerClient(controlplane.PeerClientConfig{
 		Engine: engine,
-		Conn:   scionConn(0),
+		Conn:   peerConn,
 		PathTo: func(dst addr.IA) *spath.Decoded {
 			if pathProvider == nil {
 				return nil
@@ -466,14 +479,13 @@ func StartNode(t *testing.T, cfg NodeConfig) *Node {
 	lookup.CoreRoute = coreRoute
 
 	store := controlplane.NewBeaconStore()
-	beaconer, err := controlplane.NewBeaconer(controlplane.BeaconerConfig{
+	beaconer, err = controlplane.NewBeaconer(controlplane.BeaconerConfig{
 		IA:                   ia,
 		Engine:               engine,
 		MACKey:               macKey,
 		Store:                store,
 		DB:                   pathDB,
 		Links:                linkTableOf(linkStore),
-		Neighbors:            discovery.Neighbors,
 		Verdicts:             monitor.Verdicts,
 		Sender:               peerClt,
 		CoreRoute:            coreRoute,
@@ -495,7 +507,7 @@ func StartNode(t *testing.T, cfg NodeConfig) *Node {
 
 	var webPKIConf *tls.Config
 	if core {
-		conf, err := controlplane.ManageTLSCert(ctx, controlplane.TLSCertConfig{
+		conf, err := webpki.ManageTLSCert(ctx, webpki.TLSCertConfig{
 			Domain:   TestDomain,
 			CertFile: wpki.certFile,
 			KeyFile:  wpki.keyFile,
@@ -505,10 +517,6 @@ func StartNode(t *testing.T, cfg NodeConfig) *Node {
 		}
 		webPKIConf = conf
 	}
-	endpointConn := scionConn(controlplane.EndpointPort)
-	// The HTTP/3 server serves until its socket closes; releasing it lets a
-	// re-run of the suite (go test -count) bind the fixed port again.
-	t.Cleanup(func() { _ = endpointConn.Close() })
 	svc := &controlplane.Services{
 		TrustService: &controlplane.TrustService{DB: trustDB, Issuer: issuer},
 		SegmentService: &controlplane.SegmentService{
@@ -529,8 +537,6 @@ func StartNode(t *testing.T, cfg NodeConfig) *Node {
 	}()
 
 	if core {
-		endpoint := endpointConn.LocalAddr().(*scion.Addr).Addr
-		discovery.SetCoreEndpoint(ia, endpoint)
 		go func() {
 			defer handlePanic()
 			controlplane.RunCoreEnrollment(ctx, controlplane.EnrollmentConfig{
@@ -569,7 +575,6 @@ func StartNode(t *testing.T, cfg NodeConfig) *Node {
 		PeerClt:   peerClt,
 		Provider:  pathProvider,
 		Lookup:    lookup,
-		Discovery: discovery,
 		cancel:    cancel,
 	}
 
@@ -577,6 +582,33 @@ func StartNode(t *testing.T, cfg NodeConfig) *Node {
 		node.startWireguard(t, ctx, *cfg.Wireguard, stateDir, scionConn, coreRoute, controlAddr, provider)
 	}
 	return node
+}
+
+// isCore reports whether the IA names a core AS its ISD's TRC lists.
+func isCore(cores func(addr.ISD) []addr.IA, ia addr.IA) bool {
+	for _, core := range cores(ia.ISD()) {
+		if core.Equal(ia) {
+			return true
+		}
+	}
+	return false
+}
+
+// freshestUpCore returns the origin of the freshest up segment the node has
+// verified; zero when none is stored.
+func freshestUpCore(db pathdb.DB) addr.IA {
+	segs, err := db.Get(context.Background(), pathdb.Query{Type: pathdb.SegmentTypeUp})
+	if err != nil {
+		return 0
+	}
+	var core addr.IA
+	var best time.Time
+	for _, seg := range segs {
+		if core.IsZero() || seg.PCB.Timestamp().After(best) {
+			core, best = seg.FirstIA(), seg.PCB.Timestamp()
+		}
+	}
+	return core
 }
 
 // linkTableOf snapshots a link store into the interface-ID-to-neighbor map
@@ -707,7 +739,7 @@ func selfEnroll(
 }
 
 // StartPingResponder serves echo replies on the node's endhost port, the
-// loop the daemon's own core runs beside the control endpoint (ADR 0007) —
+// loop the daemon's own core runs beside the control endpoint (ADR 0009) —
 // the harness wires it by hand, its nodes not being the daemon's assembly.
 func StartPingResponder(t *testing.T, n *Node) {
 	t.Helper()

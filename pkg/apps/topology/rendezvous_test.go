@@ -107,6 +107,48 @@ func TestRendezvousRoundTrip(t *testing.T) {
 	}
 }
 
+// TestRendezvousNamesCandidate checks identity adoption as the exchange's
+// own act: a bootstrap claim with the zero ISD-AS mints an unnamed candidate,
+// and the same source's named dial — the joiner's identity completed — names
+// that entry instead of minting a second one. No live entry is left unnamed
+// past the exchange.
+func TestRendezvousNamesCandidate(t *testing.T) {
+	f := newRendezvousFixture(t, nil)
+	claim := netip.MustParseAddrPort("127.0.0.1:4242")
+
+	if _, _, err := RendezvousEcho(context.Background(),
+		netip.MustParseAddr("127.0.0.1"), f.addr, addr.IA(0), claim); err != nil {
+		t.Fatal(err)
+	}
+	entry, err := f.store.ByRemote(context.Background(), claim)
+	if err != nil || entry == nil {
+		t.Fatalf("no unnamed candidate recorded (%v)", err)
+	}
+	if !entry.NeighborIA.IsZero() {
+		t.Fatalf("bootstrap claim recorded %v, want unnamed", entry.NeighborIA)
+	}
+
+	reply, _, err := RendezvousEcho(context.Background(),
+		netip.MustParseAddr("127.0.0.1"), f.addr, rendezvousIA, claim)
+	if err != nil {
+		t.Fatal(err)
+	}
+	named, err := f.store.ByNeighbor(context.Background(), rendezvousIA)
+	if err != nil || named == nil {
+		t.Fatalf("the named dial named no entry (%v)", err)
+	}
+	if named.IfID != entry.IfID {
+		t.Error("the named dial minted a second entry instead of naming the claim's")
+	}
+	if reply.LinkAddr != named.Local || reply.IfID != named.IfID {
+		t.Error("the named dial's reply re-answered another entry's side")
+	}
+	entries, err := f.store.All(context.Background())
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("entries = %v (%v), want the one named", entries, err)
+	}
+}
+
 // TestRendezvousNoReplyAllocatesNothing checks the negative: a request
 // whose nonce echo never returns allocates nothing on the joiner's side —
 // and a dial to a silent port allocates nothing anywhere.

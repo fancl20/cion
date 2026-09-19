@@ -163,24 +163,6 @@ func TestTrustServiceChainRenewal(t *testing.T) {
 		}
 	})
 
-	t.Run("allowlist", func(t *testing.T) {
-		f := newTrustFixture(t)
-		svc := &TrustService{DB: f.db, Issuer: f.issuer,
-			AllowAS: map[addr.IA]bool{addr.MustIAFrom(20, 0xff0000000abc): true}}
-
-		csr, key := newCSR(t, nodeIATest)
-		req, err := trust.BuildRenewalRequest(csr, key)
-		if err != nil {
-			t.Fatal(err)
-		}
-		_, err = svc.ChainRenewal(context.Background(), connect.NewRequest(
-			&cppb.ChainRenewalRequest{CmsSignedRequest: req}))
-		if connect.CodeOf(err) != connect.CodePermissionDenied {
-			t.Errorf("allowlisted-out error code = %v, want PermissionDenied",
-				connect.CodeOf(err))
-		}
-	})
-
 	t.Run("wrong key", func(t *testing.T) {
 		f := newTrustFixture(t)
 		svc := &TrustService{DB: f.db, Issuer: f.issuer}
