@@ -1,11 +1,5 @@
 # Implement probe-driven link health
 
-*   Status: superseded by
-    [ADR-0008](/docs/adrs/0008-form-topology-with-measured-neighbor-selection.md)
-    — the verdict, up/down flag, and SCMP signaling machinery stand as
-    designed here; the probe carrier is BFD per the drafts instead of
-    the greeting stream's timestamps
-
 This proposal implements the health half of
 [ADR-0006](/docs/adrs/0006-form-topology-with-measured-neighbor-selection.md)'s
 measured-selection decision: the greeting stream becomes the probe that
@@ -245,3 +239,11 @@ service destinations: the greeting keeps its port, its one-hop path, and its
     shut down.
 
 ## Implementation history
+
+*   Never landed. Superseded before implementation by
+    [ADR-0008](/docs/adrs/0008-form-topology-with-measured-neighbor-selection.md),
+    which re-decided the probe carrier: the verdict, up/down flag, and
+    SCMP signaling machinery stand as designed here; the carrier is BFD
+    per the drafts instead of the greeting stream's timestamps. The
+    in-flight work was reverted with the re-decision.
+
