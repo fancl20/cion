@@ -9,6 +9,7 @@ import (
 
 	"github.com/scionproto/scion/pkg/addr"
 
+	"github.com/fancl20/cion/pkg/controlplane"
 	"github.com/fancl20/cion/pkg/dataplane"
 	"github.com/fancl20/cion/pkg/links"
 )
@@ -49,7 +50,7 @@ func DefaultDataplaneOptions() DataplaneOptions {
 }
 
 // generation is one serving data plane instance. The data plane never
-// mutates while serving (ADR-0006): a topology change retires the serving
+// mutates while serving (ADR-0008): a topology change retires the serving
 // generation and brings up its replacement, built from the link store's
 // non-retired entries with each link's stable local address rebound
 // identically — the swap invisible to the peers' connected sockets.
@@ -69,7 +70,7 @@ func (g *generation) stop() {
 }
 
 // setupMetrics creates the node's metrics, shared across generations; the
-// per-link counters reset with each generation (ADR-0006).
+// per-link counters reset with each generation (ADR-0008).
 func (n *node) setupMetrics() error {
 	metrics, err := dataplane.NewMetrics()
 	if err != nil {
@@ -115,11 +116,12 @@ func (n *node) startGeneration(ctx context.Context) (*generation, error) {
 		}
 		dlinks = append(dlinks, link)
 	}
-	// Every service backend the control plane and the applications own is
-	// registered on the new provider: the CS service's mapping to the
-	// control address, and whatever the applications registered through
-	// their callback.
-	if err := n.discovery.Register(provider); err != nil {
+	// The control service maps to the control endpoint's socket — the
+	// registered service the drafts' service routing delivers to, so every
+	// service-addressed packet, QUIC and resolution alike, reaches the
+	// endpoint — beside whatever the applications registered through their
+	// callback.
+	if err := n.registerControlService(provider); err != nil {
 		provider.Stop()
 		return nil, fmt.Errorf("registering control service: %w", err)
 	}
@@ -152,7 +154,7 @@ func (n *node) startGeneration(ctx context.Context) (*generation, error) {
 	return g, nil
 }
 
-// superviseDataplanes is the generation supervisor (ADR-0006): build a
+// superviseDataplanes is the generation supervisor (ADR-0008): build a
 // generation and serve it; on each link-store change, retire the serving
 // one — stop ingest, drain, close — and bring up its replacement, the same
 // link addresses rebound. The control plane never restarts: its sockets are
@@ -217,14 +219,14 @@ func (n *node) servingLinks(ctx context.Context) ([]*links.Link, error) {
 }
 
 // tableTTL bounds how long a cached link snapshot serves between the
-// change notifications: the writes that do not notify — a greeting adopting
-// a neighbor's name — still surface within it.
+// change notifications: the writes that do not notify still surface within
+// it.
 const tableTTL = time.Second
 
 // linkTable snapshots the live links' interface IDs and neighbors — the
-// source every consumer of the link set reads: discovery's greeting
-// validation, the beaconer's checks and targets, and the connections'
-// one-hop egress resolution. The snapshot caches: a one-hop send reads it
+// source every consumer of the link set reads: the beaconer's checks and
+// targets, the connections' one-hop egress resolution, and the core
+// route's one-hop shortcut. The snapshot caches: a one-hop send reads it
 // per packet, and every mutation is one notification away; the TTL covers
 // the writes that are not.
 func (n *node) linkTable() map[uint16]addr.IA {
@@ -242,6 +244,19 @@ func (n *node) linkTable() map[uint16]addr.IA {
 	n.tableBuilt = n.tableVersion
 	n.tableAt = time.Now()
 	return n.tableSnapshot
+}
+
+// registerControlService registers the CS service on a data plane provider:
+// the control endpoint's socket is the service's backend, so a packet
+// addressed to the service destination — the peer RPCs' QUIC and the drafts'
+// resolution requests alike — is delivered to the endpoint beside whose
+// services the resolution answers.
+func (n *node) registerControlService(provider *dataplane.UDPProvider) error {
+	host, err := parseControlHost(n.cfg.Control)
+	if err != nil {
+		return err
+	}
+	return provider.AddSvc(addr.SvcCS, addr.HostIP(host), controlplane.EndpointPort)
 }
 
 // backend is one service registration the applications own.

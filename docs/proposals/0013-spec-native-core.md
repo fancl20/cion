@@ -292,3 +292,91 @@ references name decisions, not documents.
     retry loop converging on the same ordering.
 
 ## Implementation history
+
+*   Resolution: `resolution.go` in `pkg/controlplane` — the drafts'
+    exchange (control plane draft, Section 5) as the core's one new
+    protocol surface. `ResolveService` sends the empty
+    ServiceResolutionRequest to a peer's service address — a one-hop path
+    for a neighbor, or the path the peer address carries — and returns
+    the QUIC transport address of the reply, unknown transports ignored
+    and a missing or malformed port an error; `ServeHTTP3` answers the
+    exchange beside HTTP/3 on the endpoint's own socket through a
+    demuxing conn, QUIC datagrams told by the two header-form bits and
+    everything else — an empty request included — answered on the spot
+    with the endpoint's own address. The CS registration the assembly
+    (`registerControlService`) and the test harness make on every data
+    plane generation maps to the endpoint socket, so the greeting's
+    delivery path now carries the `svc:`-destined RPC traffic of every
+    peer beside the exchange.
+*   Greeting: `discovery.go` and its suite deleted outright — frame, loop,
+    neighbor table, freshness, and core-endpoint relay. Identity
+    adoption became the rendezvous exchange's own act: the acceptor
+    names its entry when a named request finds the unnamed entry the
+    claim minted, the joiner's `CompleteIdentity` dials twice — the zero
+    ISD-AS of the provisional draw, then the completed one — and
+    `dialJoins` names its entry from the reply. The sweep's grace reads
+    its own outcomes: `candidateAlive` echoes the candidate's rendezvous
+    socket — the address its entry records, or the fixed rendezvous port
+    on the host of its recorded remote — and holds named candidates
+    alone, the unnamed entries the probes themselves mint retiring with
+    the window as they always did. `controlplane.Neighbor`, the
+    `Neighbors` pieces of the provider seam, and the `Discovery` pacing
+    went with the stream.
+*   Beaconer: origination, propagation, and registration address their
+    peers as `svc:` CS destinations — the neighbor's ISD-AS read from the
+    store's snapshot alone, links establishment has not named skipped —
+    and `neighborEndpoint` with the `Neighbors` config went with the
+    greeting's map.
+*   Core route: the assembly's and the test harness's `coreRoute` keep
+    their two branches without the teacher — the one-hop shortcut dials
+    the TRC-named core neighbor's control service as a service
+    destination on the link's own interface, and the at-distance branch
+    rides the reversed freshest up segment — or, before any is verified,
+    the bootstrap beacon's route, `Beaconer.BootstrapCore` naming its
+    origin — addressed to the core's control service the same way. The
+    WebPKI client's dial resolves that service destination through the
+    drafts' exchange (`ResolveService` wired as the config's resolution
+    hook), so the endpoint address is resolved, not remembered, and the
+    enrollment loop's retry interval absorbs the wait for the first
+    reversed segment. The exchange reads its conn for each reply's wait,
+    so it takes a dedicated one beside the client's — a conn the client's
+    QUIC transport reads would race it for the socket's packets, each
+    reader swallowing the other's, a hazard the race-detected suites'
+    second runs caught.
+*   Admission: `TrustService.AllowAS` and its wiring removed; the trust
+    service keeps the drafts' RPCs and the name-taken check, and
+    `--allow-ia` remains the measured provider's acceptor and
+    link-service gate alone, the run argument's help text updated.
+*   WebPKI: `tls.go` and `remote.go` moved verbatim into `pkg/webpki` —
+    `ManageTLSCert` and `CoreClient` under a package doc naming
+    ADR-0003's channel, the core client carrying its own ConnectRPC
+    client of the three trust services the lifecycle rides. The
+    dependency stays one-way — `pkg/webpki` imports the SCION library and
+    the trust material, never the control plane — and the enrollment
+    suites pass against the moved symbols, the greeting that once fed
+    their wait for the core replaced by the drafts' resolution.
+*   Record: ADR-0008 and ADR-0009 marked accepted; ADR-0009's second
+    point credits `pkg/peeria` with the peer-identity middleware and its
+    first point's closing sentence names the core's packages as the
+    enumeration's home; every superseded citation in the code re-read and
+    renumbered — ADR-0006 to ADR-0008 for the link store, the selection
+    machinery, the generational replacement, and the no-description
+    defaults; ADR-0007 to ADR-0009 for the core/apps boundary — the
+    `proto/node/v1` sources and their generated files edited in step.
+*   Tests: the resolution exchange end to end — a request on the one-hop
+    path answered with the registered endpoint's address, an unregistered
+    service refused cleanly with the peer's store untouched, and the
+    reply's parsing (the QUIC transport served, unknown transports
+    ignored, ports checked); the beaconer's service-destined targets
+    asserted in its fixture; the sweep-grace pair in a bubble — a named
+    candidate answering the window's probe holds, the silent and the
+    unnamed retire; the rendezvous naming case; the static lab gained the
+    enrollment-past-the-allowlist episode, a vouched link enrolling
+    against a core whose `--allow-ia` lists a foreign ISD-AS; and the
+    join, static-lab, BFD, ping, WireGuard, and enrollment suites pass
+    with no greeting anywhere — the joiner's cold start riding the
+    rendezvous exchange, the WebPKI domain channel, the bootstrap beacon,
+    and the first reversed up segment alone. The service-destined
+    control traffic surfaced one latent crash — an SCMP quote of an
+    SVC-addressed packet panicking the interface-down parser on
+    `Host.IP` — now guarded, the quote naming no host to drop by.

@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/netip"
 	"path/filepath"
+	"time"
 
 	"github.com/scionproto/scion/pkg/addr"
 	spath "github.com/scionproto/scion/pkg/slayers/path/scion"
@@ -13,21 +14,23 @@ import (
 	"github.com/fancl20/cion/pkg/apps/topology"
 	"github.com/fancl20/cion/pkg/controlplane"
 	linkbbolt "github.com/fancl20/cion/pkg/links/impl/bbolt"
+	"github.com/fancl20/cion/pkg/pathdb"
 	pathdbbbolt "github.com/fancl20/cion/pkg/pathdb/impl/bbolt"
 	"github.com/fancl20/cion/pkg/scion"
 	"github.com/fancl20/cion/pkg/trust"
 	"github.com/fancl20/cion/pkg/trust/impl/bbolt"
+	"github.com/fancl20/cion/pkg/webpki"
 )
 
 // setupControlPlane brings up the node's control plane, in phases: the state
 // databases and keys — the link store of proposal 0008 among them — the
 // trust role (the founding core's issuer or every other node's core client),
-// the messenger (trust engine and peer client), discovery, beaconing (the
-// lookup, beaconer, and path provider closing their cycle), the wiring of
-// the loaded topology provider over what the phases built, the control
-// endpoint's socket and the provider's mounted services, and the echo
-// responder. Each phase assigns what it opens to the node as it goes, so
-// setupNode's single deferred unwinding releases a partial node.
+// the messenger (trust engine and peer client), the BFD health monitor,
+// beaconing (the lookup, beaconer, and path provider closing their cycle),
+// the wiring of the loaded topology provider over what the phases built, the
+// control endpoint's socket and the provider's mounted services, and the
+// echo responder. Each phase assigns what it opens to the node as it goes,
+// so setupNode's single deferred unwinding releases a partial node.
 func (n *node) setupControlPlane(ctx context.Context) error {
 	if err := n.openState(ctx); err != nil {
 		return err
@@ -36,9 +39,6 @@ func (n *node) setupControlPlane(ctx context.Context) error {
 		return err
 	}
 	if err := n.buildMessenger(); err != nil {
-		return err
-	}
-	if err := n.assembleDiscovery(); err != nil {
 		return err
 	}
 	if err := n.assembleMonitor(); err != nil {
@@ -86,20 +86,32 @@ func (n *node) openState(ctx context.Context) error {
 // setupTrustRole establishes the node's trust role: the founding core
 // originates its TRC, issuer, and first chain synchronously — the chain
 // lifecycle's first pass — while every other node builds the client for
-// enrolling with its core over the SCION-native transport.
+// enrolling with its core over the WebPKI-verified channel, the core's
+// control service resolved through the drafts' exchange when the dial wants
+// an underlay address.
 func (n *node) setupTrustRole(ctx context.Context) error {
 	if n.ident.asType != trust.ASTypeCore {
 		// The client socket takes an ephemeral port on the control address;
-		// the local router delivers the core's replies to it.
+		// the local router delivers the core's replies to it. The resolution
+		// exchange takes its own beside it: the exchange reads its conn for
+		// each reply's wait, and a conn the client's QUIC transport reads
+		// would share its packets with that loop.
 		conn, err := n.scionConn(0)
 		if err != nil {
 			return err
 		}
-		coreClt, err := controlplane.NewCoreClient(controlplane.CoreClientConfig{
+		resolutionConn, err := n.scionConn(0)
+		if err != nil {
+			return err
+		}
+		coreClt, err := webpki.NewCoreClient(webpki.CoreClientConfig{
 			Domain:  n.cfg.Domain,
 			Conn:    conn,
 			RootCAs: n.cfg.RootCAs,
 			Locator: n.coreRoute,
+			ResolveService: func(ctx context.Context, peer *scion.Addr) (netip.AddrPort, error) {
+				return controlplane.ResolveService(ctx, resolutionConn, peer)
+			},
 		})
 		if err != nil {
 			return err
@@ -162,7 +174,8 @@ func (n *node) buildMessenger() error {
 // provider that closes the cycle between them: the provider resolves
 // through the lookup, the lookup fetches through the peer client, and the
 // beaconer bootstraps the provider. The beaconer reads the link table live —
-// a node may start with zero links.
+// a node may start with zero links — and the store's snapshot alone is its
+// neighbor identity.
 func (n *node) buildBeaconing() error {
 	cores := func(isd addr.ISD) []addr.IA {
 		ias, err := n.engine.CoreASes(isd)
@@ -191,7 +204,6 @@ func (n *node) buildBeaconing() error {
 		Store:                beacons,
 		DB:                   n.pathDB,
 		Links:                n.linkTable,
-		Neighbors:            n.discovery.Neighbors,
 		Verdicts:             n.monitor.Verdicts,
 		Sender:               n.peerClt,
 		CoreRoute:            n.coreRoute,
@@ -218,41 +230,19 @@ func (n *node) buildBeaconing() error {
 // wireTopology delivers the phases' products to the loaded provider: the
 // completed identity, the store its decisions land in, the peer client its
 // in-band requests ride, the path provider its comparator baselines with,
-// the trust engine its directory channel authenticates with, the neighbor
-// map — identity, however stale the greetings — and the monitor's verdicts.
-// The last step before the provider mounts and runs, and the one direction
-// the dependency ever crosses: the application imports the core and the
-// shared libraries, never the reverse.
+// the trust engine its directory channel authenticates with, and the
+// monitor's verdicts. The last step before the provider mounts and runs,
+// and the one direction the dependency ever crosses: the application
+// imports the core and the shared libraries, never the reverse.
 func (n *node) wireTopology() {
 	n.topology.Wire(topology.Pieces{
-		IA:        n.ident.ia,
-		Store:     n.linkStore,
-		Peer:      n.peerClt,
-		Provider:  n.pathProvider,
-		Engine:    n.engine,
-		Neighbors: n.discovery.Neighbors,
-		Verdicts:  n.monitor.Verdicts,
+		IA:       n.ident.ia,
+		Store:    n.linkStore,
+		Peer:     n.peerClt,
+		Provider: n.pathProvider,
+		Engine:   n.engine,
+		Verdicts: n.monitor.Verdicts,
 	})
-}
-
-// assembleDiscovery builds discovery over the store: the greeting stream,
-// the neighbor map, and the core-endpoint relay — CION's own but owed by
-// every node however its topology is decided (ADR-0007), the beaconer and
-// the endpoint build on it.
-func (n *node) assembleDiscovery() error {
-	discovery, err := controlplane.NewDiscovery(controlplane.DiscoveryConfig{
-		IA:           n.ident.ia,
-		ControlAddr:  n.cfg.Control,
-		MACKey:       n.ident.key,
-		InternalAddr: n.cfg.Internal,
-		Store:        n.linkStore,
-		Interval:     n.cfg.Pacing.Discovery,
-	})
-	if err != nil {
-		return err
-	}
-	n.discovery = discovery
-	return nil
 }
 
 // assembleMonitor builds the health monitor over the link store (ADR-0008's
@@ -282,11 +272,12 @@ func (n *node) assembleMonitor() error {
 // assembleEndpoint binds the control endpoint's socket and, on the core,
 // its WebPKI certificate. Every node serves its ConnectRPC services over
 // HTTP/3 on the endpoint port — the drafts' beside the loaded provider's
-// mounts — and the core's endpoint additionally serves the bootstrap
+// mounts, the drafts' service resolution answering beside them on the same
+// socket — and the core's endpoint additionally serves the bootstrap
 // channel for clients offering its domain as the TLS server name.
 func (n *node) assembleEndpoint(ctx context.Context) error {
 	if n.ident.asType == trust.ASTypeCore {
-		webPKI, err := controlplane.ManageTLSCert(ctx, controlplane.TLSCertConfig{
+		webPKI, err := webpki.ManageTLSCert(ctx, webpki.TLSCertConfig{
 			Domain:   n.cfg.Domain,
 			Email:    n.cfg.AcmeEmail,
 			CertFile: n.cfg.CertFile,
@@ -310,20 +301,14 @@ func (n *node) assembleEndpoint(ctx context.Context) error {
 	}
 	n.services = &controlplane.Services{
 		TrustService: &controlplane.TrustService{
-			DB:      n.trustDB,
-			Issuer:  n.issuer,
-			AllowAS: n.allowAS,
+			DB:     n.trustDB,
+			Issuer: n.issuer,
 		},
 		SegmentService: &controlplane.SegmentService{
 			Beaconer: n.beaconer,
 			Lookup:   n.lookup,
 		},
 		Mounts: mounts,
-	}
-
-	if n.ident.asType == trust.ASTypeCore {
-		n.discovery.SetCoreEndpoint(n.ident.ia,
-			endpointConn.LocalAddr().(*scion.Addr).Addr)
 	}
 	return nil
 }
@@ -347,44 +332,72 @@ func (n *node) scionConn(port uint16) (*scion.Conn, error) {
 	})
 }
 
-// coreRoute returns the route to the core this node enrolls with. The
-// one-hop path when the core is a neighbor whose verdict is up, else the
-// reversed freshest up segment, which exists from beaconing alone, or the
-// bootstrap route before the TRC is pinned. Local state only: resolving a
-// route inside a dial must not spawn RPCs over the transport being dialed.
+// coreRoute returns the route to the core this node enrolls with — the
+// drafts' own way of reaching one (ADR-0009): the one-hop path when a core
+// the pinned TRC names is a direct neighbor with its verdict up, addressed
+// to the core's control service; else the reversed freshest up segment —
+// or, before any is verified, the bootstrap beacon's route — addressed to
+// the core's control service the same way. The endpoint address the
+// greeting relay used to supply is resolved, not remembered: the drafts'
+// service resolution answers it at dial time. Local state only: resolving
+// a route inside a dial must not spawn RPCs over the transport being
+// dialed.
 func (n *node) coreRoute() *scion.Addr {
-	coreIA, coreEndpoint, ok := n.discovery.CoreEndpoint()
-	if !ok {
-		return nil
-	}
-	// The one-hop path when the core is a neighbor and its verdict holds;
-	// a link the monitor marked down falls through to the composed route.
-	for ifID, neighborIA := range n.linkTable() {
-		if neighborIA.Equal(coreIA) && n.monitor.Up(ifID) {
-			if remote, ok := n.remoteOf(ifID); ok {
-				return &scion.Addr{
-					IA:   coreIA,
-					Addr: netip.AddrPortFrom(remote.ControlAddr.Addr(), controlplane.EndpointPort),
-				}
-			}
+	// The one-hop shortcut: a core the TRC names, a direct neighbor, its
+	// verdict up — a link the monitor marked down falls through to the
+	// composed route.
+	table := n.linkTable()
+	for ifID, neighborIA := range table {
+		if neighborIA.IsZero() || !n.coreASes()[neighborIA] {
+			continue
+		}
+		if n.monitor.Up(ifID) {
+			return &scion.Addr{IA: neighborIA, Service: addr.SvcCS, IfID: ifID}
 		}
 	}
-	// ...else the reversed up segment from the path provider, when
-	// beaconing has already filled it.
-	if n.pathProvider != nil {
-		if path, err := n.pathProvider.LocalPath(coreIA); err == nil {
-			return &scion.Addr{IA: coreIA, Addr: coreEndpoint, Path: path}
+	// At distance: the core the node's own beaconing stands behind — the
+	// freshest up segment's origin, or the bootstrap beacon's before any is
+	// verified — over the reversed segment.
+	if n.pathProvider == nil || n.beaconer == nil {
+		return nil
+	}
+	for _, core := range []func() addr.IA{n.freshestUpCore, n.beaconer.BootstrapCore} {
+		if coreIA := core(); !coreIA.IsZero() {
+			if path, err := n.pathProvider.LocalPath(coreIA); err == nil {
+				return &scion.Addr{IA: coreIA, Service: addr.SvcCS, Path: path}
+			}
 		}
 	}
 	return nil
 }
 
-// remoteOf returns the neighbor's control address learned from greetings.
-func (n *node) remoteOf(ifID uint16) (controlplane.Neighbor, bool) {
-	for id, neighbor := range n.discovery.Neighbors() {
-		if id == ifID {
-			return neighbor, true
+// coreASes returns the core ASes the pinned TRC names, as a set.
+func (n *node) coreASes() map[addr.IA]bool {
+	ias, err := n.engine.CoreASes(n.ident.ia.ISD())
+	if err != nil {
+		return nil
+	}
+	set := make(map[addr.IA]bool, len(ias))
+	for _, ia := range ias {
+		set[ia] = true
+	}
+	return set
+}
+
+// freshestUpCore returns the origin of the freshest up segment the node has
+// verified — the core its own termination stands behind; zero when none is
+// stored.
+func (n *node) freshestUpCore() addr.IA {
+	segs, err := n.pathDB.Get(context.Background(), pathdb.Query{Type: pathdb.SegmentTypeUp})
+	if err != nil {
+		return 0
+	}
+	var core addr.IA
+	var best time.Time
+	for _, seg := range segs {
+		if core.IsZero() || seg.PCB.Timestamp().After(best) {
+			core, best = seg.FirstIA(), seg.PCB.Timestamp()
 		}
 	}
-	return controlplane.Neighbor{}, false
+	return core
 }

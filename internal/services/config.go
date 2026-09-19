@@ -13,20 +13,21 @@ import (
 	"github.com/fancl20/cion/pkg/dataplane"
 )
 
-// Default run arguments: a restart needs none of them (ADR-0006).
+// Default run arguments: a restart needs none of them (ADR-0008).
 const (
 	// DefaultState is the state directory's default.
 	DefaultState = "/var/lib/cion"
 	// DefaultInternal is the internal address's default.
 	DefaultInternal = "127.0.0.1:30042"
-	// DefaultControl is the control address's default.
-	DefaultControl = "127.0.0.1:30043"
+	// DefaultControl is the control address's default; its host carries the
+	// control service, rendezvous, and directory sockets.
+	DefaultControl = "127.0.0.1:30044"
 )
 
 // NodeConfig is the node's run arguments — everything the retiring
 // configuration file carried, as arguments with defaults: identity, links,
 // and the forwarding key come from the state directory, where the first
-// start generates them (ADR-0006).
+// start generates them (ADR-0008).
 type NodeConfig struct {
 	// Core marks the founding core: TRC genesis, issuer, self-enrollment. It
 	// takes no neighbor.
@@ -44,7 +45,7 @@ type NodeConfig struct {
 	// additional entries, idempotent by remote address. They select the
 	// measured topology provider, which loads by default.
 	Neighbors []string
-	// LinkSet points at the file provider's link-set (ADR 0007): neighbor
+	// LinkSet points at the file provider's link-set (ADR 0009): neighbor
 	// ISD-ASes with the links' two underlay addresses, reconciled into the
 	// store as the operator's vouch. It refuses to combine with --neighbor,
 	// and it never carries identity, keys, or bind addresses — those stay
@@ -55,8 +56,9 @@ type NodeConfig struct {
 	State    string
 	Internal string
 	Control  string
-	// AllowIA optionally restricts enrollment on the core and link admission
-	// everywhere; open when unset.
+	// AllowIA optionally restricts the loaded provider's link admission;
+	// open when unset. Enrollment admission is the provider's alone
+	// (ADR-0009): no chain is issued over a link the acceptor refused.
 	AllowIA []string
 	// BehindNAT publishes the node's reachability class as private: joinable
 	// by no one, candidate for no one's floor.
@@ -76,7 +78,6 @@ type NodeConfig struct {
 
 // NodePacing carries the test pacing of the node's loops.
 type NodePacing struct {
-	Discovery       time.Duration // greeting interval
 	Propagation     time.Duration // beacon origination and propagation
 	Registration    time.Duration // segment registration
 	Enrollment      time.Duration // enrollment retry
@@ -118,7 +119,7 @@ func (c NodeConfig) Validate() error {
 }
 
 // ConfigWireguard is the WireGuard application's configuration file. See
-// proposal 0006; the section moved out of the retiring node file (ADR-0006).
+// proposal 0006; the section moved out of the retiring node file (ADR-0008).
 type ConfigWireguard struct {
 	// Subnet is the node's overlay subnet, e.g. "10.64.1.0/24". Host
 	// addresses are assigned within it by the peer configuration.

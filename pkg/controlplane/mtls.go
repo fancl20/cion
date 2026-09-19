@@ -38,8 +38,8 @@ type EndpointTLSConfig struct {
 	// server name are served the bootstrap channel. Empty on non-core nodes,
 	// which serve only the SCION-native channel.
 	Domain string
-	// WebPKI serves the bootstrap channel; typically from ManageTLSCert. Nil
-	// disables the channel.
+	// WebPKI serves the bootstrap channel; typically from the shared
+	// library pkg/webpki's ManageTLSCert. Nil disables the channel.
 	WebPKI *tls.Config
 	// Engine provides the node's AS chain for the SCION-native channel.
 	Engine *trust.Engine

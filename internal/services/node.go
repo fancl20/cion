@@ -20,20 +20,21 @@ import (
 	"github.com/fancl20/cion/pkg/pathdb"
 	"github.com/fancl20/cion/pkg/scion"
 	"github.com/fancl20/cion/pkg/trust"
+	"github.com/fancl20/cion/pkg/webpki"
 )
 
-// node is the fully wired CION node: data plane generations, discovery, the
-// control plane, the resident applications, and — loaded through the
-// provider seam — the topology machinery of ADR-0006 (ADR-0007), per
-// proposals 0003-0008. setupNode assembles it phase by phase; start
-// launches its loops; Close releases it.
+// node is the fully wired CION node: data plane generations, the control
+// plane, the resident applications, and — loaded through the provider seam —
+// the topology machinery of ADR-0008 (ADR-0009), per proposals 0003-0008.
+// setupNode assembles it phase by phase; start launches its loops; Close
+// releases it.
 type node struct {
 	cfg   NodeConfig
 	ident identity
 	opts  DataplaneOptions
 
 	// topology is the loaded provider: the measured machinery by default,
-	// the file provider when --link-set names a link-set (ADR-0007). It
+	// the file provider when --link-set names a link-set (ADR-0009). It
 	// completes a first start's identity, seeds the store, mounts its
 	// services on the endpoint, and runs its loops under start.
 	topology topology.Provider
@@ -63,15 +64,14 @@ type node struct {
 	trustDB      trust.DB
 	pathDB       pathdb.DB
 	asKey        crypto.Signer
-	issuer       *trust.Issuer            // core only
-	coreClt      *controlplane.CoreClient // non-core only
+	issuer       *trust.Issuer      // core only
+	coreClt      *webpki.CoreClient // non-core only
 	engine       *trust.Engine
 	peerClt      *controlplane.PeerClient
 	lookup       *controlplane.LookupService
 	beaconer     *controlplane.Beaconer
 	beaconStore  *controlplane.BeaconStore
 	pathProvider *scion.PathProvider
-	discovery    *controlplane.Discovery
 	// monitor owns the BFD sessions and their verdicts; ifDown is the
 	// node's shared negative cache of interface-down signals its conns
 	// record and its path composition consults.
@@ -88,7 +88,7 @@ type node struct {
 }
 
 // identity is the node's decoded self: what every assembly phase needs from
-// the state directory, where the first start generated it (ADR-0006).
+// the state directory, where the first start generated it (ADR-0008).
 type identity struct {
 	ia        addr.IA
 	asType    trust.ASType
@@ -133,7 +133,7 @@ func loadIdentity(cfg NodeConfig) (identity, bool, error) {
 }
 
 // selectProvider loads the topology provider the run arguments name
-// (ADR-0007): the measured one by default — loading it is what makes a node
+// (ADR-0009): the measured one by default — loading it is what makes a node
 // zero-conf — the file one when --link-set names a link-set. The provider
 // completes a first start's identity before the phases assemble, Wire
 // delivers the phases' products to it, and Seed, Mounts, and Run follow.
@@ -257,9 +257,6 @@ func (n *node) Close() {
 	if n.peerClt != nil {
 		_ = n.peerClt.Close()
 	}
-	if n.discovery != nil {
-		_ = n.discovery.Close()
-	}
 	if n.linkStore != nil {
 		_ = n.linkStore.Close()
 	}
@@ -271,19 +268,15 @@ func (n *node) Close() {
 	}
 }
 
-// start launches the node's background loops: discovery, the BFD health
-// monitor, beaconing, the control endpoint, the SCMP echo responder, the
-// loaded topology provider's — the rendezvous acceptor, the joiner's dials,
-// the node directory, and the selection loop under the measured provider —
-// the chain lifecycle loop the node's role prescribes, and the resident
+// start launches the node's background loops: the BFD health monitor,
+// beaconing, the control endpoint, the SCMP echo responder, the loaded
+// topology provider's — the rendezvous acceptor, the joiner's dials, the
+// node directory, and the selection loop under the measured provider — the
+// chain lifecycle loop the node's role prescribes, and the resident
 // applications. Nothing serves before start, so assembly and serving stay
 // separate lifecycles; the data plane generations are served by
 // superviseDataplanes, the daemon's own body.
 func (n *node) start(ctx context.Context) {
-	runBackground(ctx, "discovery", func(ctx context.Context) error {
-		n.discovery.Run(ctx)
-		return nil
-	})
 	runBackground(ctx, "health monitor", func(ctx context.Context) error {
 		n.monitor.Run(ctx)
 		return nil

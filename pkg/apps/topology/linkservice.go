@@ -22,7 +22,7 @@ import (
 // admissions of one peer.
 const LinkMinInterval = time.Second
 
-// LinkService implements the in-band establishment of ADR-0006: a node that
+// LinkService implements the in-band establishment of ADR-0008: a node that
 // composed paths already reach asks over the control endpoint's authenticated
 // channel, the peer's chain identifying it. The acceptor applies its
 // admission policy, allocates its own interface ID and link address, records

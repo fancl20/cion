@@ -18,7 +18,6 @@ import (
 
 // fastPacing paces the assembly's loops for the integration tests.
 var fastPacing = services.NodePacing{
-	Discovery:       DiscoveryGap,
 	Propagation:     Propagation,
 	Registration:    Registration,
 	Enrollment:      EnrollRetry,
@@ -153,8 +152,8 @@ func TestJoinByRendezvous(t *testing.T) {
 	})
 	ctx := context.Background()
 
-	// The joins land: both sides of each link hold an entry, the joiner's
-	// adopting the acceptor's ISD-AS from its greetings.
+	// The joins land: both sides of each link hold an entry, each naming
+	// its neighbor from the rendezvous exchange alone.
 	Poll(t, "B's link to A", func() bool {
 		e := entryOf(b, a.app.IA())
 		return e != nil && e.State == links.StateEstablished
@@ -219,7 +218,9 @@ func TestJoinByRendezvous(t *testing.T) {
 	// Killing B leaves C connected through A.
 	b.cancel()
 	b.app.Close()
-	time.Sleep(3 * DiscoveryGap) // let C's greetings to B time out
+	// Let C's BFD sessions to B mark their verdicts down, so the composed
+	// route crosses no link the monitor distrusts.
+	time.Sleep(3 * fastPacing.BFD)
 	deadline := time.Now().Add(10 * time.Second)
 	for !pingFrom(ctx, c, a.app.IA(), a.host) {
 		// The freshest up segment — A's beacon over the direct link — takes

@@ -11,7 +11,7 @@ import (
 
 // addNodeFlags registers the node's run arguments on a command that assembles
 // one — the arguments the retiring configuration file carried, with defaults
-// so a restart needs none of them (ADR-0006).
+// so a restart needs none of them (ADR-0008).
 func addNodeFlags(flags *pflag.FlagSet, opts *services.NodeConfig) {
 	flags.BoolVar(&opts.Core, "core", false,
 		"mark the founding core: TRC genesis, issuer, self-enrollment (takes no --neighbor)")
@@ -34,9 +34,11 @@ func addNodeFlags(flags *pflag.FlagSet, opts *services.NodeConfig) {
 	flags.StringVar(&opts.Internal, "internal", services.DefaultInternal,
 		"the UDP address the router listens on for hosts in the local AS")
 	flags.StringVar(&opts.Control, "control", services.DefaultControl,
-		"the UDP address the control service listens on and advertises")
+		"the UDP address of the control service; its host carries the control, "+
+			"rendezvous, and directory sockets")
 	flags.StringSliceVar(&opts.AllowIA, "allow-ia", nil,
-		"restrict enrollment and link admission to the listed ISD-ASes; open when unset")
+		"restrict the loaded provider's link admission to the listed ISD-ASes; "+
+			"open when unset")
 	flags.BoolVar(&opts.BehindNAT, "behind-nat", false,
 		"publish the node's reachability class as private: joinable by no one")
 	flags.StringVar(&opts.WireguardConfig, "wireguard-config", "",

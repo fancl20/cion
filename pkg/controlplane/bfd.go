@@ -24,7 +24,7 @@ import (
 
 // The link's liveness constants (ADR-0008's fifth point): every session
 // shares them — a one-second transmission interval and a detect multiplier
-// of three, the same detection latency the greeting timeout derived before
+// of three, a detection latency the retired greeting stream once derived
 // BFD took the question.
 const (
 	// BFDTransmissionInterval is the interval every session transmits on.

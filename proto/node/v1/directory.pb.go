@@ -35,7 +35,7 @@ type Entry struct {
 	// rendezvous acceptor listens on for first contact.
 	RendezvousAddr string `protobuf:"bytes,3,opt,name=rendezvous_addr,json=rendezvousAddr,proto3" json:"rendezvous_addr,omitempty"`
 	// private marks a node behind address translation: joinable by no one,
-	// candidate for no one's redundancy floor (ADR-0006's reachability class).
+	// candidate for no one's redundancy floor (ADR-0008's reachability class).
 	Private       bool `protobuf:"varint,4,opt,name=private,proto3" json:"private,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache

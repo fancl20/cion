@@ -162,7 +162,7 @@ func (d *DataPlane) Serve(ctx context.Context) error {
 	}
 
 	<-ctx.Done()
-	// Graceful shutdown (ADR-0006): the underlay stops ingesting and its
+	// Graceful shutdown (ADR-0008): the underlay stops ingesting and its
 	// links flush and close, the processors drain their queues and exit, and
 	// Serve returns with the underlay addresses released — the replacement
 	// generation binds them next.

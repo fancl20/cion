@@ -9,7 +9,7 @@ import (
 
 // Client implements the Interface by making RPC calls to a remote server:
 // the drafts' services alone, the Link and Directory clients the topology
-// application owns living beside their services (ADR 0007).
+// application owns living beside their services (ADR 0009).
 type Client struct {
 	control_planeconnect.SegmentCreationServiceClient
 	control_planeconnect.TrustMaterialServiceClient

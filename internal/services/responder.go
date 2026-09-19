@@ -11,7 +11,7 @@ import (
 
 // assembleResponder binds the node's SCMP echo responder to the control
 // address's host on the endhost port, sending through the internal link.
-// The responder is core, not application (ADR 0007): every node's selection
+// The responder is core, not application (ADR 0009): every node's selection
 // baseline is an echo its peers must answer — a node that could decline the
 // responder silently disables the comparator on every neighbor — so it runs
 // beside the control-plane loops in every node, the one capability that

@@ -1,5 +1,5 @@
-// Package topology is the topology application (ADR 0007): the measured
-// machinery of ADR-0006 and proposal 0008 — the rendezvous acceptor, the
+// Package topology is the topology application (ADR 0009): the measured
+// machinery of ADR-0008 and proposal 0008 — the rendezvous acceptor, the
 // joiner's dials, the node directory, the in-band link service, and the
 // selection loop — beside the file provider, the static alternative. A
 // provider owns a node's topology policy; the node owns the mechanism that
@@ -7,7 +7,11 @@
 // addresses. The measured provider loads by default — loading it is what
 // makes a node zero-conf — and the file provider loads when --link-set
 // names a link-set; the two never combine, because two deciders writing
-// the same entries is flapping by construction.
+// the same entries is flapping by construction. The cross-node vocabulary
+// it speaks is exchanges with distinct jobs alone — rendezvous for first
+// contact and identity, the link service for in-band establishment, echo
+// for measurement, BFD for liveness — and a future provider interoperates
+// through the store and those exchanges alone.
 package topology
 
 import (
@@ -23,7 +27,7 @@ import (
 )
 
 // Provider is the seam between the node assembly and the topology machinery
-// (ADR 0007). A provider owns three moments of a node's topology — it
+// (ADR 0009). A provider owns three moments of a node's topology — it
 // completes a first start's provisional identity before the phases
 // assemble, it mounts the services it serves on the control endpoint, and
 // it runs the loops that decide links under the node's supervision — with
@@ -64,7 +68,9 @@ type Provider interface {
 type Pieces struct {
 	// IA is the node's completed ISD-AS.
 	IA addr.IA
-	// Store is the neighbor table — the provider's decisions land in it.
+	// Store is the neighbor table — the provider's decisions land in it, and
+	// its snapshot is the identity its loops read: the neighbor an
+	// establishment names is the one the link serves.
 	Store links.DB
 	// Peer is the channel's client; the in-band link requests ride its
 	// mutually verified side.
@@ -74,10 +80,6 @@ type Pieces struct {
 	// Engine provides the node's chain as the directory client's
 	// certificate.
 	Engine *trust.Engine
-	// Neighbors returns the neighbors learned from greetings by interface
-	// ID, with their LastSeen — identity, however stale the arrivals; the
-	// selection sweep's grace reads LastSeen directly.
-	Neighbors func() map[uint16]controlplane.Neighbor
 	// Verdicts returns the health monitor's link verdicts by interface ID:
 	// the selection loop's floor and demotions read them — established-but-
 	// down entries satisfy no floor and a down neighbor counts as

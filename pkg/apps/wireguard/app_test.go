@@ -286,9 +286,13 @@ func TestWireguardValidatesConfig(t *testing.T) {
 		UnregisterSvc: func(addr.SVC, uint16) error { return nil },
 	}
 
-	if _, err := New(base); err != nil {
+	app, err := New(base)
+	if err != nil {
 		t.Fatalf("a valid configuration was rejected: %v", err)
 	}
+	// Release the fixed host port: a re-run of the suite (go test -count)
+	// binds it again.
+	app.Close()
 
 	outside := base
 	outside.Peers = []HostPeer{{

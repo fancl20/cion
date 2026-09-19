@@ -1,4 +1,11 @@
-package controlplane
+// Package webpki is ADR-0003's bootstrap channel as a shared library: the
+// ACME certificate management of the core's endpoint and the WebPKI-verified
+// client of the core's control endpoint, serving the enrollment lifecycle
+// from outside the drafts' subset. The enrollment lifecycle keeps driving it
+// — the shared libraries exist to be imported by core and apps alike, and
+// the dependency direction stays one-way: this package imports the SCION
+// library and the trust material, never the control plane.
+package webpki
 
 import (
 	"context"
@@ -7,9 +14,9 @@ import (
 	"crypto/x509"
 	"errors"
 	"fmt"
-	"net"
 	"net/http"
 	"net/netip"
+	"strings"
 	"sync"
 
 	"connectrpc.com/connect"
@@ -17,6 +24,7 @@ import (
 	"github.com/quic-go/quic-go/http3"
 	"github.com/scionproto/scion/pkg/addr"
 	cppb "github.com/scionproto/scion/pkg/proto/control_plane"
+	"github.com/scionproto/scion/pkg/proto/control_plane/v1/control_planeconnect"
 	"github.com/scionproto/scion/pkg/scrypto/cppki"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
@@ -24,16 +32,37 @@ import (
 	"github.com/fancl20/cion/pkg/trust"
 )
 
+// client is the ConnectRPC client of the trust services the channel reaches:
+// the drafts' RPC machinery consumed as a library, the form the control
+// endpoint's own client takes beside the services this one does not ride.
+type client struct {
+	control_planeconnect.TrustMaterialServiceClient
+	control_planeconnect.ChainRenewalServiceClient
+}
+
+// newClient builds the trust client over the HTTP client at the base URL.
+func newClient(clt connect.HTTPClient, baseURL string) *client {
+	baseURL = strings.TrimRight(baseURL, "/")
+	return &client{
+		TrustMaterialServiceClient: control_planeconnect.NewTrustMaterialServiceClient(clt, baseURL),
+		ChainRenewalServiceClient:  control_planeconnect.NewChainRenewalServiceClient(clt, baseURL),
+	}
+}
+
 // CoreClient resolves trust material from the core's control endpoint:
 // ConnectRPC over HTTP/3 (QUIC) riding the SCION network, TLS-verified
 // end-to-end against the core's domain. The domain is a TLS identity, not a
-// locator; the locator supplies the SCION route — a one-hop neighbor's
-// address from discovery, or the provider's multi-hop path.
+// locator; the locator supplies the SCION route — the core's control service
+// as a service destination on the one-hop path, or the reversed up segment
+// the path provider composes.
 type CoreClient struct {
 	conn    *scion.Conn
 	qclt    *quic.Transport
-	clt     *Client
+	clt     *client
 	locator func() *scion.Addr
+	// resolve maps a service-destined locator to the QUIC transport address
+	// the drafts' service resolution returns; nil dials the locator as named.
+	resolve func(ctx context.Context, peer *scion.Addr) (netip.AddrPort, error)
 
 	mtx  sync.Mutex
 	core *scion.Addr
@@ -47,18 +76,27 @@ type CoreClientConfig struct {
 	Conn *scion.Conn
 	// RootCAs anchors the TLS verification; nil means the system roots.
 	RootCAs *x509.CertPool
-	// Locator resolves the core's SCION address: its IA, underlay endpoint,
-	// and path — the one-hop path when the core is a neighbor, else the
-	// reversed freshest up segment (proposal 0004). It is consulted at dial
-	// time, so later dials pick up fresh paths. Nil falls back to SetCore.
+	// Locator resolves the core's SCION address: its IA, the destination —
+	// the core's control service as a service destination, or an underlay
+	// address — and path — the one-hop path when the core is a neighbor,
+	// else the reversed freshest up segment (proposal 0004). It is
+	// consulted at dial time, so later dials pick up fresh paths. Nil falls
+	// back to SetCore.
 	Locator func() *scion.Addr
+	// ResolveService resolves a service-destined locator through the drafts'
+	// service discovery (control plane draft, Section 5): the request the
+	// control plane's own exchange answers with the service's QUIC
+	// transport address, which the dial then uses. Nil dials a
+	// service-destined locator as named, the receiving router delivering to
+	// the registered service.
+	ResolveService func(ctx context.Context, peer *scion.Addr) (netip.AddrPort, error)
 }
 
 // NewCoreClient dials the core's control endpoint. The client fails on use,
 // not on creation: until the locator names a reachable core, requests fail
 // fast and are retried by the caller.
 func NewCoreClient(cfg CoreClientConfig) (*CoreClient, error) {
-	c := &CoreClient{conn: cfg.Conn, locator: cfg.Locator}
+	c := &CoreClient{conn: cfg.Conn, locator: cfg.Locator, resolve: cfg.ResolveService}
 	c.qclt = &quic.Transport{Conn: cfg.Conn}
 
 	// QUIC datagrams are capped so a datagram wrapped in a SCION header
@@ -77,20 +115,35 @@ func NewCoreClient(cfg CoreClientConfig) (*CoreClient, error) {
 		Dial: func(ctx context.Context, _ string, tlsCfg *tls.Config,
 			cfg *quic.Config) (*quic.Conn, error) {
 
-			addr := c.coreAddr()
-			if addr == nil {
+			peer := c.coreAddr()
+			if peer == nil {
 				return nil, errors.New("core locator unknown")
 			}
-			return c.qclt.Dial(ctx, addr, tlsCfg, cfg)
+			if peer.Service != 0 && c.resolve != nil {
+				// The drafts' own step: the service resolution answers the
+				// address the QUIC connection then uses (control plane
+				// draft, Section 5).
+				resolved, err := c.resolve(ctx, peer)
+				if err != nil {
+					return nil, fmt.Errorf("resolving the core's control service: %w", err)
+				}
+				peer = &scion.Addr{
+					IA:      peer.IA,
+					Addr:    resolved,
+					IfID:    peer.IfID,
+					Path:    peer.Path,
+					Service: 0,
+				}
+			}
+			return c.qclt.Dial(ctx, peer, tlsCfg, cfg)
 		},
 	}
-	c.clt = NewClient(&http.Client{Transport: h3t}, "https://"+cfg.Domain)
+	c.clt = newClient(&http.Client{Transport: h3t}, "https://"+cfg.Domain)
 	return c, nil
 }
 
 // SetCore sets the SCION locator of the core: its IA and the underlay
-// address of its control endpoint, the discovery greeting's control address
-// with the endpoint port.
+// address of its control endpoint.
 func (c *CoreClient) SetCore(ia addr.IA, addr netip.AddrPort) {
 	c.mtx.Lock()
 	defer c.mtx.Unlock()
@@ -105,19 +158,13 @@ func (c *CoreClient) SetLocator(locator func() *scion.Addr) {
 
 // coreAddr resolves the core's current address: the locator when configured,
 // else the address set with SetCore. Nil means the locator is unknown.
-func (c *CoreClient) coreAddr() net.Addr {
-	var a *scion.Addr
+func (c *CoreClient) coreAddr() *scion.Addr {
 	if c.locator != nil {
-		a = c.locator()
-	} else {
-		c.mtx.Lock()
-		a = c.core
-		c.mtx.Unlock()
+		return c.locator()
 	}
-	if a == nil {
-		return nil
-	}
-	return a
+	c.mtx.Lock()
+	defer c.mtx.Unlock()
+	return c.core
 }
 
 // Close releases the underlying QUIC transport.

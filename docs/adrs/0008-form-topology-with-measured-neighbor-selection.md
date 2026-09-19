@@ -1,6 +1,6 @@
 # Form the Topology with Measured Neighbor Selection
 
-*   Status: proposed
+*   Status: accepted
 *   Supersedes:
     [ADR-0006](/docs/adrs/0006-form-topology-with-measured-neighbor-selection.md)
 *   Date: 2026-09-16

@@ -197,8 +197,8 @@ func (c *Conn) Close() error {
 
 // ReadFrom reads the next datagram, returning it with the peer's address.
 // Packets that are not SCION/UDP over a one-hop path are dropped silently —
-// unless they are the interface-down signal the cache recognizes; greetings
-// share the CS service address and are none of our business.
+// unless they are the interface-down signal the cache recognizes — the
+// drafts' error the library's receive paths once dropped silently.
 func (c *Conn) ReadFrom(b []byte) (int, net.Addr, error) {
 	buf := make([]byte, dataplane.BufferSize)
 	for {
