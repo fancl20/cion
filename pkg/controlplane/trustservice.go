@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/x509"
 	"errors"
+	"fmt"
 	"log/slog"
 	"time"
 
@@ -37,6 +38,10 @@ type TrustService struct {
 	// Issuer signs certificate chains. It is nil on nodes that do not issue
 	// chains — everything but the founding core, in this milestone.
 	Issuer *trust.Issuer
+	// Authorizer gates first issuance (ADR-0010): it is asked exactly when
+	// possession is verified and no chain exists for the name, never on a
+	// same-key renewal. Nil is open enrollment — the zero-conf default.
+	Authorizer EnrollmentAuthorizer
 }
 
 var _ ControlPlane = (*TrustService)(nil)
@@ -76,39 +81,83 @@ func (s *TrustService) TRC(
 
 // checkNameTaken rejects a renewal for an ISD-AS that already holds an
 // unexpired chain under a different subject key: the name is taken (ADR-0008's
-// enrollment gate). A same-key renewal — the chain's own holder — passes.
+// enrollment gate). It reports whether the same key already holds the name —
+// the chain's own holder renewing — for the authorizer is asked on the free
+// name alone.
 func (s *TrustService) checkNameTaken(
 	ctx context.Context,
 	ia addr.IA,
 	csr *x509.CertificateRequest,
 	now time.Time,
-) error {
+) (bool, error) {
 
 	chains, err := s.DB.Chains(ctx, trust.ChainQuery{
 		IA:       ia,
 		Validity: cppki.Validity{NotBefore: now, NotAfter: now},
 	})
 	if err != nil {
-		return connect.NewError(connect.CodeInternal,
+		return false, connect.NewError(connect.CodeInternal,
 			serrors.Wrap("querying the ISD-AS's chains", err))
 	}
 	if len(chains) == 0 {
+		return false, nil
+	}
+	skid, err := cppki.SubjectKeyID(csr.PublicKey)
+	if err != nil {
+		return false, connect.NewError(connect.CodeInvalidArgument,
+			serrors.Wrap("computing the CSR subject key", err))
+	}
+	for _, chain := range chains {
+		if bytes.Equal(chain[0].SubjectKeyId, skid) {
+			return true, nil // the current holder renewing its own chain
+		}
+	}
+	slog.Warn("Rejecting chain renewal of a taken ISD-AS",
+		"isd_as", ia, "holder", chains[0][0].SubjectKeyId)
+	return false, connect.NewError(connect.CodeAlreadyExists,
+		serrors.New("ISD-AS already holds a chain under another key", "isd_as", ia))
+}
+
+// authorizeFirstIssuance puts the authorizer's one question where ADR-0010
+// places it: possession verified, the name free, the verdict on the three
+// facts the exchange established decides. Allow returns nil, deny answers
+// PermissionDenied, and pending Unavailable — a verdict the joiner's
+// enrollment retry loop consumes without change. Both refusals are logged
+// with the facts beside them, so the node's log mirrors the operator's
+// phone.
+func (s *TrustService) authorizeFirstIssuance(
+	ctx context.Context,
+	ia addr.IA,
+	csr *x509.CertificateRequest,
+) error {
+
+	if s.Authorizer == nil {
 		return nil
+	}
+	facts := EnrollmentFacts{
+		IA:   ia,
+		Key:  csr.PublicKey,
+		Addr: remoteUnderlay(ctx),
 	}
 	skid, err := cppki.SubjectKeyID(csr.PublicKey)
 	if err != nil {
 		return connect.NewError(connect.CodeInvalidArgument,
 			serrors.Wrap("computing the CSR subject key", err))
 	}
-	for _, chain := range chains {
-		if bytes.Equal(chain[0].SubjectKeyId, skid) {
-			return nil // the current holder renewing its own chain
-		}
+	switch s.Authorizer.Authorize(ctx, facts) {
+	case EnrollmentAllow:
+		return nil
+	case EnrollmentPending:
+		slog.Info("Enrollment pending a decision",
+			"isd_as", facts.IA, "key", fmt.Sprintf("%x", skid), "source", facts.Addr)
+		return connect.NewError(connect.CodeUnavailable,
+			serrors.New("enrollment pending", "isd_as", facts.IA, "source", facts.Addr))
+	default:
+		slog.Warn("Denying enrollment", "isd_as", facts.IA,
+			"key", fmt.Sprintf("%x", skid), "source", facts.Addr)
+		return connect.NewError(connect.CodePermissionDenied,
+			serrors.New("enrollment denied", "isd_as", facts.IA, "source", facts.Addr))
 	}
-	slog.Warn("Rejecting chain renewal of a taken ISD-AS",
-		"isd_as", ia, "holder", chains[0][0].SubjectKeyId)
-	return connect.NewError(connect.CodeAlreadyExists,
-		serrors.New("ISD-AS already holds a chain under another key", "isd_as", ia))
 }
 
 // Chains serves the certificate chains matching the request.
@@ -190,7 +239,8 @@ func (s *TrustService) ChainRenewal(
 	// already holds an unexpired chain under a different subject key is
 	// taken. Renewals by the same key pass untouched.
 	now := time.Now()
-	if err := s.checkNameTaken(ctx, ia, csr, now); err != nil {
+	renewal, err := s.checkNameTaken(ctx, ia, csr, now)
+	if err != nil {
 		return nil, err
 	}
 	// The wrapper must be signed by the same key the CSR certifies; the
@@ -198,6 +248,13 @@ func (s *TrustService) ChainRenewal(
 	if !signed.SignedBy(csr.PublicKey) {
 		return nil, connect.NewError(connect.CodeInvalidArgument,
 			errors.New("request is not signed by the CSR subject key"))
+	}
+	// First issuance alone asks the authorizer (ADR-0010); the holder of
+	// the name renews without a prompt.
+	if !renewal {
+		if err := s.authorizeFirstIssuance(ctx, ia, csr); err != nil {
+			return nil, err
+		}
 	}
 
 	chain, err := s.Issuer.IssueChain(csr)

@@ -5,6 +5,7 @@ import (
 	"crypto"
 	"crypto/tls"
 	"crypto/x509"
+	"fmt"
 	"log/slog"
 	"sync"
 	"time"
@@ -16,6 +17,7 @@ import (
 	"github.com/fancl20/cion/pkg/apps/wireguard"
 	"github.com/fancl20/cion/pkg/controlplane"
 	"github.com/fancl20/cion/pkg/dataplane"
+	"github.com/fancl20/cion/pkg/enrollauth"
 	"github.com/fancl20/cion/pkg/links"
 	"github.com/fancl20/cion/pkg/pathdb"
 	"github.com/fancl20/cion/pkg/scion"
@@ -81,10 +83,16 @@ type node struct {
 	// Assembled sockets and services, started by start.
 	endpointConn *scion.Conn
 	webPKI       *tls.Config
-	allowAS      map[addr.IA]bool
 	services     *controlplane.Services
 	responder    *responder
 	wireguard    *wireguard.App
+
+	// enrollAuth gates the trust service's first issuance (ADR-0010); nil
+	// is open enrollment. enrollRun launches the selected method's own
+	// loops — the Telegram authorizer's poll — nil when the method has
+	// none.
+	enrollAuth controlplane.EnrollmentAuthorizer
+	enrollRun  func(context.Context)
 }
 
 // identity is the node's decoded self: what every assembly phase needs from
@@ -138,11 +146,6 @@ func loadIdentity(cfg NodeConfig) (identity, bool, error) {
 // completes a first start's identity before the phases assemble, Wire
 // delivers the phases' products to it, and Seed, Mounts, and Run follow.
 func (n *node) selectProvider() error {
-	allowAS, err := parseAllowIA(n.cfg.AllowIA)
-	if err != nil {
-		return err
-	}
-	n.allowAS = allowAS
 	host, err := parseControlHost(n.cfg.Control)
 	if err != nil {
 		return err
@@ -161,7 +164,6 @@ func (n *node) selectProvider() error {
 		Neighbors:   n.cfg.Neighbors,
 		BehindNAT:   n.cfg.BehindNAT,
 		ControlHost: host,
-		AllowAS:     allowAS,
 		NewConn: func() (*scion.Conn, error) {
 			return n.scionConn(0)
 		},
@@ -175,6 +177,27 @@ func (n *node) selectProvider() error {
 			CandidateWindow: n.cfg.Pacing.CandidateWindow,
 		},
 	})
+	return nil
+}
+
+// setupEnrollAuth loads the --enroll-auth selection (ADR-0010): the
+// authorizer the trust service asks at first issuance and, for a method
+// with loops of its own, the run that serves them. Unset is open enrollment;
+// Validate already refused the argument without --core, so a selected method
+// loads on the issuing node alone. The spec parses here once, so a malformed
+// one fails the boot, not the first joiner.
+func (n *node) setupEnrollAuth() error {
+	if n.cfg.EnrollAuth == "" {
+		return nil
+	}
+	auth, run, err := enrollauth.Load(n.cfg.EnrollAuth, enrollauth.LoadOptions{
+		TelegramAPI: n.cfg.TelegramAPI,
+	})
+	if err != nil {
+		return fmt.Errorf("parsing --enroll-auth: %w", err)
+	}
+	n.enrollAuth = auth
+	n.enrollRun = run
 	return nil
 }
 
@@ -222,6 +245,9 @@ func setupNode(ctx context.Context, cfg NodeConfig, opts DataplaneOptions) (n *n
 		}
 	}
 	if err = n.setupMetrics(); err != nil {
+		return n, err
+	}
+	if err = n.setupEnrollAuth(); err != nil {
 		return n, err
 	}
 	if err = n.setupControlPlane(ctx); err != nil {
@@ -332,6 +358,15 @@ func (n *node) start(ctx context.Context) {
 		})
 	}
 	slog.Info("Serving control endpoint", "port", controlplane.EndpointPort)
+	if n.enrollRun != nil {
+		// The selected authorizer's own loops — the Telegram poll — under
+		// the node's supervision like every other loop; core only, for the
+		// core is the only node that issues chains.
+		runBackground(ctx, "enrollment authorizer", func(ctx context.Context) error {
+			n.enrollRun(ctx)
+			return nil
+		})
+	}
 	if n.wireguard != nil {
 		runBackground(ctx, "wireguard", func(ctx context.Context) error {
 			return n.wireguard.Run(ctx)

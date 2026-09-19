@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/fancl20/cion/internal/services"
 	"github.com/fancl20/cion/pkg/links"
@@ -153,13 +154,12 @@ func TestStaticLabByLinkSet(t *testing.T) {
 	})
 }
 
-// TestStaticEnrollmentPastAllowlist checks the admission boundary
-// (ADR-0009): enrollment admission is the provider's alone. The core's
-// --allow-ia lists a foreign ISD-AS — the file provider's operator vouch
-// admits the link regardless, no acceptor reads the list — and the
-// enrollment over the vouched link stands: the trust service keeps no gate
-// of its own, the name-taken check excepted.
-func TestStaticEnrollmentPastAllowlist(t *testing.T) {
+// TestStaticEnrollmentByAuthorizer checks the admission boundary the
+// enrollment authorizer now is (ADR-0010): the file provider's operator
+// vouch admits the link — no acceptor reads any policy — while the core's
+// CIDR authorizer bounds enrollment, a joiner whose source address no
+// listed prefix contains never enrolling. No allowlist exists anywhere.
+func TestStaticEnrollmentByAuthorizer(t *testing.T) {
 	wpki := NewWebPKI(t)
 	ipA, ipB := addrIP(0x55), addrIP(0x56)
 	abA, abB := FreeUDPAddrOn(t, ipA), FreeUDPAddrOn(t, ipB)
@@ -192,8 +192,11 @@ func TestStaticEnrollmentPastAllowlist(t *testing.T) {
 		})
 		return n
 	}
+	// A prefix list that admits nothing on the lab's loopback addressing:
+	// the vouch below still admits the link, the authorizer still bounds
+	// the enrollment.
 	a := boot(t, ipA, true, linkSetOf(t), func(cfg *services.NodeConfig) {
-		cfg.AllowIA = []string{"20-ff00:0:99"} // no node of this network
+		cfg.EnrollAuth = "cidrs=10.0.0.0/8"
 	})
 	bFile := linkSetOf(t)
 	writeStaticSet(t, bFile, staticLink{IA: a.app.IA().String(), Local: abB, Remote: abA})
@@ -202,13 +205,21 @@ func TestStaticEnrollmentPastAllowlist(t *testing.T) {
 	writeStaticSet(t, a.linkSet,
 		staticLink{IA: b.app.IA().String(), Local: abA, Remote: abB, Interface: &ifID})
 
-	ctx := context.Background()
-	Poll(t, "the link stands", func() bool {
+	Poll(t, "the link stands by the operator's vouch", func() bool {
 		e := entryOf(b.assemblyNode, a.app.IA())
 		return e != nil && e.State == links.StateEstablished
 	})
-	// B enrolls over the vouched link: no ISD-AS the trust service refuses.
-	Poll(t, "B enrolled past the allowlist", func() bool {
-		return pingFrom(ctx, b.assemblyNode, a.app.IA(), a.host)
+	Poll(t, "the core's vouched link stands", func() bool {
+		e := entryOf(a.assemblyNode, b.app.IA())
+		return e != nil && e.State == links.StateEstablished
 	})
+	// The authorizer bounds enrollment: no chain ever names the joiner, on
+	// either side, however long the joiner's retries run.
+	time.Sleep(30 * fastPacing.Enrollment)
+	if holdsChain(b.assemblyNode) {
+		t.Error("a joiner outside the prefix list enrolled over the vouched link")
+	}
+	if !holdsNoChainFor(a.assemblyNode, b.assemblyNode) {
+		t.Error("the core issued a chain naming a joiner outside the prefix list")
+	}
 }

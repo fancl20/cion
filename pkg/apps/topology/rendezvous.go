@@ -215,9 +215,6 @@ type RendezvousConfig struct {
 	MinInterval time.Duration
 	// Store is the neighbor table.
 	Store links.DB
-	// AllowAS optionally restricts admission to the listed ISD-ASes; nil
-	// means open admission.
-	AllowAS map[addr.IA]bool
 	// MaxLinks caps the live link count.
 	MaxLinks int
 	// LinkHost is the host link addresses are allocated on.
@@ -289,9 +286,6 @@ func (r *Rendezvous) handle(raw []byte, src *net.UDPAddr) ([]byte, error) {
 	req, err := ParseRendezvousRequest(raw)
 	if err != nil {
 		return nil, err
-	}
-	if r.cfg.AllowAS != nil && !r.cfg.AllowAS[req.IA] {
-		return nil, fmt.Errorf("ISD-AS %s is not allowlisted", req.IA)
 	}
 	if req.IA.IsZero() {
 		if !r.byAddr.admit(req.LinkAddr) {
