@@ -257,4 +257,67 @@ persistent identities cost their prompts and nothing after.
 
 ## Implementation history
 
-*   (To be recorded as the change lands.)
+*   The binding: `VerifyBound` beside `Verify` in `pkg/trust/engine.go` —
+    the verifier constructed with `BoundIA` set to the caller's ISD-AS, the
+    comparison the verifier already carried deciding; the unbound `Verify`
+    keeps its callers. The beaconer's `verifySignatures` verifies each AS
+    entry with the entry's own claimed ISD-AS as the bound, so beacon
+    reception and segment registration — which share the helper — close
+    together. The engine suite covers the bound form — a foreign-IA
+    signature failing with both identities in the error, the signer's own
+    passing — and the beacon suite the fabrications: an entry claiming the
+    core's name but signed by another refused at reception and at
+    registration, the store and the path database left empty.
+*   The origin: `checkBeacon` grew the draft's core check between loop
+    prevention and the arrival binding — the first entry's ISD-AS must be
+    one the pinned TRC's `coreASes` names, an empty set waiving the check —
+    so the drop lands before signature verification spends work on the
+    beacon. `checkRegistered` is unchanged: its first-entry rule now binds
+    the signer. The beacon suite covers a non-core originator dropped with
+    the origin named and nothing registered from it, and the waiver — a
+    node without a pinned TRC accepting a non-core's beacon as its
+    bootstrap route exactly as today.
+*   The name: the bbolt `Chains` outer loop matches the bucket key exactly
+    — the first key past the sought name is another name, the scan ends
+    there, an unset IA still sweeps every bucket — while the inner
+    fingerprint scan keeps its prefix. The dbtest harness asks a name
+    another stored name extends and asserts the answer is empty; the
+    engine suite covers the selection — a chain held under `20-ff00:0:1f`
+    never serves as `20-ff00:0:1`'s signer; the trust service's extending
+    name episode covers the seam — a colliding fingerprint under the
+    extending name neither takes the victim's name nor reads as its
+    renewal, and the authorizer is asked.
+*   The serialization and the cap: `TrustService` grew `renewalMtx`, held
+    by `ChainRenewal` across the name check, the authorizer's question,
+    the issuance, and the insert, and `admit` ahead of it — one admission
+    per `EnrollmentMinInterval` (a second, the rendezvous acceptor's own
+    cap the shape) keyed by the request's SCION source address through
+    `remoteUnderlay`, the claimed ISD-AS when the context carries none,
+    answering `ResourceExhausted`. `sourceLimiter` — the acceptor's
+    limiter's shape — lives beside the service. The assembly passes
+    `Pacing.RendezvousRate` as the door's `MinInterval`, the pacing field
+    already documented as the admission rate caps. The trust suite covers
+    two concurrent first issuances of one free name from different sources
+    — one chain, one `AlreadyExists`, the holder's issuance completing
+    behind a blocked authorizer — and the door's edges: a same-source
+    second refused, a different source passing, the name-keyed fallback
+    admitting one per name. The same-key-renewal and taken-name episodes
+    of the existing suites set a microsecond cap, for they exercise the
+    checks on sequential asks, not the rate.
+*   The token and the map: the Bot API client's call helper wraps its
+    request-building and transport errors in `botAPIError` — the method
+    and the failure, a `*url.Error`'s request line stripped — so the
+    poll loop's warning and the prompt-send denial name `getUpdates
+    failed` and the cause, never the credential; the poll loop sweeps the
+    decision map each pass, dropping the entries whose window has passed.
+    The Telegram suite runs both against its double and a dead API host:
+    a failed send and a failed poll log no token and no URL, and an
+    expired decision leaves the map.
+*   Integration: the fabricating neighbor lab — a three-node line where
+    the enrolled middle signs an entry claiming the core's name and
+    delivers the beacon over the real channel — its refusal naming both
+    identities, every segment every store holds still verifying bound
+    after the beaconing and registration rounds, and the honest path to
+    the core undisturbed; the line lab's end-to-end verification reads the
+    bound form; the join, bootstrap, static, and enrollment-authorizer
+    labs run unchanged.

@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"crypto/x509"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -192,6 +193,80 @@ func TestEngineVerifyForeignSignature(t *testing.T) {
 	unbound := trust.Verifier{Engine: &trust.NetworkProvider{DB: f.db}}
 	if _, err := unbound.Verify(ctx, signedMsg); err != nil {
 		t.Errorf("unbound verifier rejected a TRC-anchored signature: %v", err)
+	}
+}
+
+// TestEngineVerifyBound checks the bound form (proposal 0015): a signature
+// from another IA fails against the bound identity — the mismatch naming
+// both — even though its chain verifies against the TRC, and passes against
+// its own.
+func TestEngineVerifyBound(t *testing.T) {
+	f := newEngineFixture(t)
+	ctx := context.Background()
+
+	foreignKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	csr, err := trust.CreateCSR(iaCore, foreignKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	foreignChain, err := f.issuer.IssueChain(csr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.InsertChain(ctx, foreignChain); err != nil {
+		t.Fatal(err)
+	}
+	foreign := trust.NewEngine(iaCore, foreignKey, &trust.NetworkProvider{DB: f.db})
+	signedMsg, err := foreign.Sign(ctx, []byte("foreign"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := f.engine.VerifyBound(ctx, iaNode, signedMsg); err == nil {
+		t.Error("bound verification accepted another IA's signature")
+	} else if msg := err.Error(); !strings.Contains(msg, iaNode.String()) ||
+		!strings.Contains(msg, iaCore.String()) {
+
+		t.Errorf("error = %q, want both the bound and the signing identity", msg)
+	}
+	if _, err := f.engine.VerifyBound(ctx, iaCore, signedMsg); err != nil {
+		t.Errorf("bound verification rejected the signer's own IA: %v", err)
+	}
+}
+
+// TestEngineSignerIgnoresExtendingName checks the chain selection's
+// exactness (proposal 0015): a chain held under a name that extends the
+// node's own — 20-ff00:0:1f beside 20-ff00:0:1, the AS numbers sharing
+// their rendered prefix — never serves as the node's chain.
+func TestEngineSignerIgnoresExtendingName(t *testing.T) {
+	f := newEngineFixture(t)
+	ctx := context.Background()
+
+	// The extending name holds a chain for the node's own key.
+	extending := addr.MustIAFrom(20, 0xff000000001f)
+	csr, err := trust.CreateCSR(extending, f.asKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	chain, err := f.issuer.IssueChain(csr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.InsertChain(ctx, chain); err != nil {
+		t.Fatal(err)
+	}
+
+	// iaNode renders 20-ff00:0:2, which no stored name extends; iaCore
+	// renders 20-ff00:0:1, which the extending name does.
+	if _, err := f.engine.Signer(ctx); err != nil {
+		t.Errorf("the node's own signer disturbed: %v", err)
+	}
+	core := trust.NewEngine(iaCore, f.asKey, &trust.NetworkProvider{DB: f.db})
+	if _, err := core.Signer(ctx); err == nil {
+		t.Error("signer built from a chain held under an extending name")
 	}
 }
 

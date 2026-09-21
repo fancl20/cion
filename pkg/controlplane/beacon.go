@@ -326,6 +326,16 @@ func (b *Beaconer) checkBeacon(pcb *segment.PCB, ingress uint16) error {
 	if pcb.ContainsIA(b.ia) {
 		return serrors.New("beacon already contains this ISD-AS", "isd_as", b.ia)
 	}
+	// The draft's core check itself, applied at reception: a beacon's origin
+	// — its first entry — names a core the pinned TRC lists, so a non-core's
+	// beacons never become up segments. The empty set of the not-yet-pinned
+	// bootstrap state waives the check, the tolerance the propagation
+	// pruning already carries (proposal 0015); the drop lands here, before
+	// signature verification spends work on the beacon.
+	if cores := b.coreASes(); cores != nil && !cores[pcb.FirstIA()] {
+		return serrors.New("beacon does not originate at a core the TRC names",
+			"origin", pcb.FirstIA())
+	}
 	neighbor, ok := b.linkTable()[ingress]
 	if !ok {
 		return serrors.New("beacon arrived on unknown interface", "interface", ingress)
@@ -385,12 +395,15 @@ func checkTimeWindow(pcb *segment.PCB, now time.Time) error {
 }
 
 // verifySignatures verifies every AS entry's signature against the
-// TRC-anchored chain the entry references, fetching missing chains through
-// the provider (Section 2.3.1, check 1).
+// TRC-anchored chain the entry references, bound to the identity the entry
+// claims: the signer's key must name the entry's own ISD-AS, so an enrolled
+// AS cannot sign entries in another's name (proposal 0015). Missing chains
+// are fetched through the provider (Section 2.3.1, check 1).
 func (b *Beaconer) verifySignatures(ctx context.Context, pcb *segment.PCB) error {
 	for i := range pcb.Entries {
 		entry := pcb.Entries[i]
-		if _, err := b.engine.Verify(ctx, entry.Signed, pcb.AssociatedData(i)...); err != nil {
+		if _, err := b.engine.VerifyBound(ctx, entry.IA, entry.Signed,
+			pcb.AssociatedData(i)...); err != nil {
 			return serrors.Wrap("verifying AS entry signature", err,
 				"index", i, "isd_as", entry.IA)
 		}

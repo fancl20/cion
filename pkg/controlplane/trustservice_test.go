@@ -9,7 +9,9 @@ import (
 	"crypto/x509"
 	"net/netip"
 	"path/filepath"
+	"sync"
 	"testing"
+	"time"
 
 	"connectrpc.com/connect"
 	"github.com/quic-go/quic-go/http3"
@@ -25,6 +27,9 @@ import (
 var (
 	coreIATest = addr.MustIAFrom(20, 0xff0000000001)
 	nodeIATest = addr.MustIAFrom(20, 0xff0000000002)
+	// iaExtendingTest renders 20-ff00:0:1f, extending the fixture core's
+	// own 20-ff00:0:1 by its name alone.
+	iaExtendingTest = addr.MustIAFrom(20, 0xff000000001f)
 )
 
 // trustFixture is a serving-side trust stack: DB with a genesis TRC and an
@@ -210,10 +215,12 @@ func TestTrustServiceChainRenewal(t *testing.T) {
 
 	// The enrollment gate of self-picked ISD-ASes (proposal 0008): a name
 	// that already holds an unexpired chain under a different subject key is
-	// taken; the holder's own renewal passes untouched.
+	// taken; the holder's own renewal passes untouched. The door's cap is
+	// off — a microsecond admits every sequential ask — for these episodes
+	// exercise the checks, not the rate.
 	t.Run("taken name", func(t *testing.T) {
 		f := newTrustFixture(t)
-		svc := &TrustService{DB: f.db, Issuer: f.issuer}
+		svc := &TrustService{DB: f.db, Issuer: f.issuer, MinInterval: time.Microsecond}
 
 		csr, key := newCSR(t, nodeIATest)
 		req, err := trust.BuildRenewalRequest(csr, key)
@@ -363,7 +370,8 @@ func TestTrustServiceEnrollmentAuthorizer(t *testing.T) {
 	t.Run("the holder's renewal is never asked", func(t *testing.T) {
 		f := newTrustFixture(t)
 		auth := &askAuthorizer{verdict: EnrollmentAllow}
-		svc := &TrustService{DB: f.db, Issuer: f.issuer, Authorizer: auth}
+		svc := &TrustService{DB: f.db, Issuer: f.issuer, Authorizer: auth,
+			MinInterval: time.Microsecond}
 		csr, key := newCSR(t, nodeIATest)
 		if err := ask(t, svc, context.Background(), csr, key); err != nil {
 			t.Fatal(err)
@@ -380,7 +388,8 @@ func TestTrustServiceEnrollmentAuthorizer(t *testing.T) {
 	t.Run("a taken name is never asked", func(t *testing.T) {
 		f := newTrustFixture(t)
 		auth := &askAuthorizer{verdict: EnrollmentAllow}
-		svc := &TrustService{DB: f.db, Issuer: f.issuer, Authorizer: auth}
+		svc := &TrustService{DB: f.db, Issuer: f.issuer, Authorizer: auth,
+			MinInterval: time.Microsecond}
 		csr, key := newCSR(t, nodeIATest)
 		if err := ask(t, svc, context.Background(), csr, key); err != nil {
 			t.Fatal(err)
@@ -395,4 +404,201 @@ func TestTrustServiceEnrollmentAuthorizer(t *testing.T) {
 				len(auth.asked))
 		}
 	})
+}
+
+// TestChainRenewalExtendingName checks the name's exactness (proposal
+// 0015): a chain held under a name that extends the petitioner's —
+// 20-ff00:0:1f beside 20-ff00:0:1 — neither takes the name nor renews it.
+// The colliding fingerprint does not read as a renewal — the chains share
+// the subject key — and the authorizer is asked on the first issuance the
+// free name allows.
+func TestChainRenewalExtendingName(t *testing.T) {
+	f := newTrustFixture(t)
+	auth := &askAuthorizer{verdict: EnrollmentAllow}
+	svc := &TrustService{DB: f.db, Issuer: f.issuer, Authorizer: auth}
+	ctx := context.Background()
+
+	// The extending name holds a chain for the petitioner's own key; the
+	// fixture's core — the victim, its name the shorter one — holds none.
+	csr, key := newCSR(t, coreIATest)
+	extendingCSR, err := trust.CreateCSR(iaExtendingTest, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	extending, err := f.issuer.IssueChain(extendingCSR)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.InsertChain(ctx, extending); err != nil {
+		t.Fatal(err)
+	}
+
+	req, err := trust.BuildRenewalRequest(csr, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.ChainRenewal(ctx, connect.NewRequest(
+		&cppb.ChainRenewalRequest{CmsSignedRequest: req})); err != nil {
+		t.Fatalf("the extending name took the petitioner's: %v", err)
+	}
+	if len(auth.asked) != 1 {
+		t.Errorf("the authorizer was asked %d times, want the one of the free name",
+			len(auth.asked))
+	}
+	chains, err := f.db.Chains(ctx, trust.ChainQuery{IA: coreIATest})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(chains) != 1 {
+		t.Fatalf("the victim's chains = %d, want the one issued", len(chains))
+	}
+	if ia, err := cppki.ExtractIA(chains[0][0].Subject); err != nil || !ia.Equal(coreIATest) {
+		t.Errorf("issued chain names %v, want the petitioner's own name", ia)
+	}
+}
+
+// blockingAuthorizer holds every ask until released, then allows — the
+// Telegram prompt's network send in miniature.
+type blockingAuthorizer struct {
+	asked   chan EnrollmentFacts
+	release chan struct{}
+}
+
+func (a *blockingAuthorizer) Authorize(_ context.Context, f EnrollmentFacts) EnrollmentVerdict {
+	a.asked <- f
+	<-a.release
+	return EnrollmentAllow
+}
+
+// sourceContext carries a SCION source address the way the QUIC transport
+// puts one in the request context, the port naming the source.
+func sourceContext(port string) context.Context {
+	return context.WithValue(context.Background(), http3.RemoteAddrContextKey,
+		&scion.Addr{IA: nodeIATest, Addr: netip.MustParseAddrPort("198.51.100.7:" + port)})
+}
+
+// TestChainRenewalSerialized checks the transaction of proposal 0015: two
+// concurrent first issuances of one free name — different sources, both
+// admitted by the door — yield one chain and one AlreadyExists, whatever
+// the authorizer's latency; the name-taken check settles the loser on its
+// retry, sequentially.
+func TestChainRenewalSerialized(t *testing.T) {
+	f := newTrustFixture(t)
+	auth := &blockingAuthorizer{
+		asked:   make(chan EnrollmentFacts),
+		release: make(chan struct{}),
+	}
+	svc := &TrustService{DB: f.db, Issuer: f.issuer, Authorizer: auth}
+
+	csrA, keyA := newCSR(t, nodeIATest)
+	reqA, err := trust.BuildRenewalRequest(csrA, keyA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	csrB, keyB := newCSR(t, nodeIATest)
+	reqB, err := trust.BuildRenewalRequest(csrB, keyB)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// One request holds the mutex inside the authorizer — the prompt's
+	// network send is the latency it must survive — while the other waits
+	// on the mutex; the holder's issuance completes, the waiter finds the
+	// name taken.
+	results := make(chan error, 2)
+	var wg sync.WaitGroup
+	for _, tc := range []struct {
+		req *cppb.ChainRenewalRequest
+		ctx context.Context
+	}{
+		{&cppb.ChainRenewalRequest{CmsSignedRequest: reqA}, sourceContext("40001")},
+		{&cppb.ChainRenewalRequest{CmsSignedRequest: reqB}, sourceContext("40002")},
+	} {
+		wg.Add(1)
+		go func(req *cppb.ChainRenewalRequest, ctx context.Context) {
+			defer wg.Done()
+			_, err := svc.ChainRenewal(ctx, connect.NewRequest(req))
+			results <- err
+		}(tc.req, tc.ctx)
+	}
+	<-auth.asked
+	close(auth.release)
+	wg.Wait()
+	close(results)
+
+	var issued, refused int
+	for err := range results {
+		switch {
+		case err == nil:
+			issued++
+		case connect.CodeOf(err) == connect.CodeAlreadyExists:
+			refused++
+		default:
+			t.Fatalf("concurrent first issuance: %v", err)
+		}
+	}
+	if issued != 1 || refused != 1 {
+		t.Fatalf("issued = %d, refused = %d, want one of each", issued, refused)
+	}
+	chains, err := f.db.Chains(context.Background(), trust.ChainQuery{IA: nodeIATest})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(chains) != 1 {
+		t.Errorf("chains for the name = %d, want the one", len(chains))
+	}
+}
+
+// TestChainRenewalRateCap checks the door of proposal 0015: one admission
+// per interval per source — the request's SCION source address the key, the
+// claimed ISD-AS when the context carries none — the second inside the
+// interval answering ResourceExhausted and a different source passing.
+func TestChainRenewalRateCap(t *testing.T) {
+	f := newTrustFixture(t)
+	svc := &TrustService{DB: f.db, Issuer: f.issuer, MinInterval: time.Hour}
+
+	ask := func(ctx context.Context, ia addr.IA) error {
+		csr, key := newCSR(t, ia)
+		req, err := trust.BuildRenewalRequest(csr, key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = svc.ChainRenewal(ctx, connect.NewRequest(
+			&cppb.ChainRenewalRequest{CmsSignedRequest: req}))
+		return err
+	}
+
+	// The first source's admission issues; its second inside the interval
+	// is refused at the door whatever name it claims.
+	if err := ask(sourceContext("40001"), nodeIATest); err != nil {
+		t.Fatalf("the first admission: %v", err)
+	}
+	if err := ask(sourceContext("40001"), iaExtendingTest); connect.CodeOf(err) !=
+		connect.CodeResourceExhausted {
+
+		t.Fatalf("the same source's second error code = %v, want ResourceExhausted",
+			connect.CodeOf(err))
+	}
+	// A different source passes the door; the name it claims is taken by
+	// now, and the answer is the name check's own.
+	if err := ask(sourceContext("40002"), nodeIATest); connect.CodeOf(err) !=
+		connect.CodeAlreadyExists {
+
+		t.Fatalf("a different source's error code = %v, want AlreadyExists",
+			connect.CodeOf(err))
+	}
+	// Without an address the claimed ISD-AS is the key: one admission per
+	// name, a different name passing.
+	if err := ask(context.Background(), iaExtendingTest); err != nil {
+		t.Fatalf("the first name-keyed admission: %v", err)
+	}
+	if err := ask(context.Background(), iaExtendingTest); connect.CodeOf(err) !=
+		connect.CodeResourceExhausted {
+
+		t.Fatalf("the same name's second error code = %v, want ResourceExhausted",
+			connect.CodeOf(err))
+	}
+	if err := ask(context.Background(), iaLineC); err != nil {
+		t.Fatalf("a different name's admission: %v", err)
+	}
 }

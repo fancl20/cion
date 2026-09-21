@@ -301,9 +301,10 @@ func (n *node) assembleEndpoint(ctx context.Context) error {
 	}
 	n.services = &controlplane.Services{
 		TrustService: &controlplane.TrustService{
-			DB:         n.trustDB,
-			Issuer:     n.issuer,
-			Authorizer: n.enrollAuth,
+			DB:          n.trustDB,
+			Issuer:      n.issuer,
+			Authorizer:  n.enrollAuth,
+			MinInterval: n.cfg.Pacing.RendezvousRate,
 		},
 		SegmentService: &controlplane.SegmentService{
 			Beaconer: n.beaconer,

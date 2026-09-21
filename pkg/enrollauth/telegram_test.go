@@ -1,6 +1,7 @@
 package enrollauth
 
 import (
+	"bytes"
 	"context"
 	"crypto"
 	"crypto/ecdsa"
@@ -9,9 +10,11 @@ import (
 	"encoding/json/v2"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -362,4 +365,84 @@ func TestTelegramRestart(t *testing.T) {
 		t.Errorf("a fresh instance's verdict = %v, want pending: it knows no decision", got)
 	}
 	waitFor(t, "the re-prompt to send", func() bool { return d.promptCount() == 2 })
+}
+
+// TestTelegramLogsNoToken checks the log hygiene of proposal 0015: a failed
+// send or poll logs the method and the failure — `sendMessage failed`, the
+// cause — never the URL the bot's token rides in.
+func TestTelegramLogsNoToken(t *testing.T) {
+	// An API host that refuses every connection.
+	dead := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {}))
+	dead.Close()
+
+	var buf lockedBuffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+
+	tg := NewTelegram(TelegramConfig{API: dead.URL, Chat: testChat, Token: "7:test"})
+	if got := tg.Authorize(context.Background(), factsOf(t, newKey(t))); got != controlplane.EnrollmentDeny {
+		t.Fatalf("verdict with the API down = %v, want deny", got)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go tg.Run(ctx)
+	waitFor(t, "the failed poll to log", func() bool {
+		return strings.Contains(buf.String(), "getUpdates failed")
+	})
+
+	logged := buf.String()
+	if strings.Contains(logged, "7:test") || strings.Contains(logged, dead.URL) {
+		t.Errorf("a Bot API failure logged the credential: %s", logged)
+	}
+	if !strings.Contains(logged, "sendMessage failed") {
+		t.Errorf("log = %s, want the failed send's method and cause", logged)
+	}
+}
+
+// lockedBuffer collects the log lines of the goroutines that share it.
+type lockedBuffer struct {
+	mtx sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mtx.Lock()
+	defer b.mtx.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mtx.Lock()
+	defer b.mtx.Unlock()
+	return b.buf.String()
+}
+
+// TestTelegramSweepExpiredDecisions checks the decision map's bound
+// (proposal 0015): entries whose window has passed are dropped when the
+// poll loop sweeps, so a stranger's persistent identities cost their
+// prompts and nothing after.
+func TestTelegramSweepExpiredDecisions(t *testing.T) {
+	d := newBotDouble(t)
+	tg := runTelegram(t, d, func(cfg *TelegramConfig) { cfg.Window = 100 * time.Millisecond })
+
+	facts := factsOf(t, newKey(t))
+	if got := tg.Authorize(context.Background(), facts); got != controlplane.EnrollmentPending {
+		t.Fatalf("first ask verdict = %v, want pending", got)
+	}
+	waitFor(t, "the prompt to send", func() bool { return d.promptCount() == 1 })
+	tg.mtx.Lock()
+	held := len(tg.asks)
+	tg.mtx.Unlock()
+	if held != 1 {
+		t.Fatalf("map entries = %d, want 1", held)
+	}
+
+	// Past the window the poll loop's sweep drops the entry; the map never
+	// forgets nothing, but no longer everything.
+	waitFor(t, "the expired decision to leave the map", func() bool {
+		tg.mtx.Lock()
+		defer tg.mtx.Unlock()
+		return len(tg.asks) == 0
+	})
 }
