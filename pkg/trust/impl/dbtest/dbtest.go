@@ -405,6 +405,36 @@ func testChain(t *testing.T, db trust.DB, cfg Config) {
 				t.Errorf("Chains should return chains for given ISD-AS, got %v, want %v", chains, expected)
 			}
 		})
+		t.Run("no chain for a name another name extends", func(t *testing.T) {
+			// An ISD-AS's rendered name is a prefix of every name that
+			// extends it — 1-ff00:0:110 extends 1-ff00:0:11 — and no name
+			// answers for another (proposal 0015).
+			chains, err := db.Chains(ctx, trust.ChainQuery{
+				IA:           addr.MustParseIA("1-ff00:0:11"),
+				SubjectKeyID: bern1Chain[0].SubjectKeyId,
+				Validity: cppki.Validity{
+					NotBefore: time.Date(2020, 6, 26, 13, 0, 0, 0, time.UTC),
+					NotAfter:  time.Date(2020, 6, 26, 13, 0, 0, 0, time.UTC),
+				},
+			})
+			if err != nil {
+				t.Errorf("Chains failed: %v", err)
+			}
+			if len(chains) != 0 {
+				t.Errorf("Chains returned %d chains for a name another extends, want none", len(chains))
+			}
+			// A colliding fingerprint under the extending name answers no
+			// more than the name itself does.
+			chains, err = db.Chains(ctx, trust.ChainQuery{
+				IA: addr.MustParseIA("1-ff00:0:1"),
+			})
+			if err != nil {
+				t.Errorf("Chains failed: %v", err)
+			}
+			if len(chains) != 0 {
+				t.Errorf("Chains returned %d chains for a name others extend, want none", len(chains))
+			}
+		})
 		t.Run("Existing chain overlap different key", func(t *testing.T) {
 			_, err := db.InsertChain(ctx, bern2Chain)
 			if err != nil {

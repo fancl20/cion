@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"hash"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -194,6 +195,167 @@ func TestHandleBeaconAccepts(t *testing.T) {
 	}
 	if got := f.store.Len(); got != 1 {
 		t.Errorf("store length = %d, want 1", got)
+	}
+}
+
+// fabricatedBeacon builds the beacon of a fabricating neighbor: the entry
+// claims the core's name but C's key signs it — a signature valid against
+// C's TRC-anchored chain, a claim it has no right to make — followed by an
+// honest entry of the fabricator itself, so every check but the binding
+// passes: the last entry names the arrival link's neighbor, the origin
+// names a core, and the entries chain.
+func fabricatedBeacon(t *testing.T, f *beaconFixture, now time.Time) *segment.PCB {
+	t.Helper()
+	pcb, err := segment.NewPCB(now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := pcb.AppendEntry(context.Background(), coreIATest, segment.EntryOptions{
+		Next:       nodeIATest,
+		EgressIfID: 1,
+	}, macFactory(), f.engines[iaLineC]); err != nil {
+		t.Fatal(err)
+	}
+	if err := pcb.AppendEntry(context.Background(), nodeIATest, segment.EntryOptions{
+		Next:        iaLineC,
+		IngressIfID: 1,
+		EgressIfID:  2,
+	}, macFactory(), f.engines[nodeIATest]); err != nil {
+		t.Fatal(err)
+	}
+	return pcb
+}
+
+// TestHandleBeaconFabricatedIdentity checks the binding of proposal 0015 at
+// reception: an entry signed by a chain naming another ISD-AS than the
+// entry claims fails verification with both identities in the error, and
+// the beacon never reaches the store.
+func TestHandleBeaconFabricatedIdentity(t *testing.T) {
+	f := newBeaconFixture(t)
+	pcb := fabricatedBeacon(t, f, time.Now())
+
+	// The fabricated [A, B] is delivered as C sees propagation from B: on
+	// C's link to B, whose neighbor the honest last entry names. B itself
+	// would refuse it at the arrival check — the last entry names B, not
+	// B's neighbor A — before the binding is reached.
+	reparsed, err := segment.ParsePCB(pcb.PB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	underC, err := NewBeaconer(BeaconerConfig{
+		IA:     iaLineC,
+		Engine: f.engines[iaLineC],
+		MACKey: []byte(testMACKey),
+		Store:  f.store,
+		DB:     f.pathDB,
+		Links:  func() map[uint16]addr.IA { return map[uint16]addr.IA{2: nodeIATest} },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = underC.HandleBeacon(context.Background(), reparsed, 2)
+	if err == nil {
+		t.Fatal("fabricated beacon accepted")
+	}
+	if msg := err.Error(); !strings.Contains(msg, coreIATest.String()) ||
+		!strings.Contains(msg, iaLineC.String()) {
+
+		t.Errorf("error = %q, want the claimed and the signing identity both named", msg)
+	}
+	if got := f.store.Len(); got != 0 {
+		t.Errorf("store length = %d, want 0", got)
+	}
+}
+
+// TestHandleBeaconNonCoreOrigin checks the origin rule of proposal 0015 at
+// reception: a beacon whose first entry names a non-core — C originating on
+// its link to B — is dropped with the origin named, before signature
+// verification spends work on it.
+func TestHandleBeaconNonCoreOrigin(t *testing.T) {
+	f := newBeaconFixture(t)
+
+	pcb, err := segment.NewPCB(time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := pcb.AppendEntry(context.Background(), iaLineC, segment.EntryOptions{
+		Next:       nodeIATest,
+		EgressIfID: 2,
+	}, macFactory(), f.engines[iaLineC]); err != nil {
+		t.Fatal(err)
+	}
+	reparsed, err := segment.ParsePCB(pcb.PB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = f.beaconer.HandleBeacon(context.Background(), reparsed, 2)
+	if err == nil || !strings.Contains(err.Error(), iaLineC.String()) {
+		t.Fatalf("error = %v, want the non-core origin named", err)
+	}
+	if got := f.store.Len(); got != 0 {
+		t.Errorf("store length = %d, want 0", got)
+	}
+
+	// The refusal is the whole of it: a stored nothing terminates into
+	// nothing, and no up segment ever reaches the path database.
+	f.beaconer.registerOnce(context.Background())
+	ups, err := f.pathDB.Get(context.Background(), pathdb.Query{Type: pathdb.SegmentTypeUp})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ups) != 0 {
+		t.Errorf("up segments = %d, want 0", len(ups))
+	}
+}
+
+// TestHandleBeaconNonCoreOriginWaivedWithoutTRC checks the bootstrap
+// tolerance the origin rule carries: a node that has not pinned the TRC
+// accepts a non-core's beacon as its route candidate exactly as today — the
+// check the pinned TRC arms.
+func TestHandleBeaconNonCoreOriginWaivedWithoutTRC(t *testing.T) {
+	f := newBeaconFixture(t)
+	ctx := context.Background()
+
+	freshDB, err := bbolt.New(filepath.Join(t.TempDir(), "trust.db"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = freshDB.Close() }()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fresh := trust.NewEngine(nodeIATest, key, &trust.NetworkProvider{DB: freshDB})
+	beaconer, err := NewBeaconer(BeaconerConfig{
+		IA:     nodeIATest,
+		Engine: fresh,
+		MACKey: []byte(testMACKey),
+		Store:  f.store,
+		DB:     f.pathDB,
+		Links:  func() map[uint16]addr.IA { return map[uint16]addr.IA{2: iaLineC} },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	pcb, err := segment.NewPCB(time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := pcb.AppendEntry(ctx, iaLineC, segment.EntryOptions{
+		Next:       nodeIATest,
+		EgressIfID: 2,
+	}, macFactory(), f.engines[iaLineC]); err != nil {
+		t.Fatal(err)
+	}
+	if err := beaconer.HandleBeacon(ctx, pcb, 2); err != nil {
+		t.Fatalf("non-core beacon refused without a pinned TRC: %v", err)
+	}
+	if got := f.store.Len(); got != 0 {
+		t.Errorf("store length = %d, want 0 (never stored unverified)", got)
+	}
+	if beaconer.BootstrapRoute(iaLineC) == nil {
+		t.Error("bootstrap route not recorded")
 	}
 }
 
@@ -482,6 +644,57 @@ func TestHandleRegistration(t *testing.T) {
 	}
 	if err := coreBeaconer.HandleRegistration(ctx, foreign.PB); err == nil {
 		t.Error("registration of a foreign-origin segment accepted")
+	}
+}
+
+// TestHandleRegistrationFabricatedIdentity checks the binding of proposal
+// 0015 at registration: a down segment whose first entry claims this core
+// but is signed by another's key is refused, so the core's down-segment
+// store inherits no fabrication — checkRegistered's origin claim is the
+// signer's own now.
+func TestHandleRegistrationFabricatedIdentity(t *testing.T) {
+	f := newBeaconFixture(t)
+	ctx := context.Background()
+
+	// The fabricated down segment: [A claimed but signed by C, B terminated],
+	// registered at the core A.
+	fab, err := segment.NewPCB(time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := fab.AppendEntry(ctx, coreIATest, segment.EntryOptions{
+		Next:       nodeIATest,
+		EgressIfID: 1,
+	}, macFactory(), f.engines[iaLineC]); err != nil {
+		t.Fatal(err)
+	}
+	if err := fab.AppendEntry(ctx, nodeIATest, segment.EntryOptions{
+		IngressIfID: 1,
+	}, macFactory(), f.engines[nodeIATest]); err != nil {
+		t.Fatal(err)
+	}
+
+	coreBeaconer, err := NewBeaconer(BeaconerConfig{
+		IA:     coreIATest,
+		Engine: f.engines[coreIATest],
+		MACKey: []byte(testMACKey),
+		Store:  NewBeaconStore(),
+		DB:     f.pathDB,
+		Links:  func() map[uint16]addr.IA { return map[uint16]addr.IA{1: nodeIATest} },
+		Core:   true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := coreBeaconer.HandleRegistration(ctx, fab.PB); err == nil {
+		t.Fatal("registration of a fabricated segment accepted")
+	}
+	downs, err := f.pathDB.Get(ctx, pathdb.Query{Type: pathdb.SegmentTypeDown})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(downs) != 0 {
+		t.Errorf("down segments = %d, want 0", len(downs))
 	}
 }
 

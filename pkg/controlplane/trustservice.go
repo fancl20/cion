@@ -7,6 +7,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/netip"
+	"sync"
 	"time"
 
 	"connectrpc.com/connect"
@@ -20,6 +22,11 @@ import (
 
 	"github.com/fancl20/cion/pkg/trust"
 )
+
+// EnrollmentMinInterval is the chain-renewal door's rate cap: the least
+// pause between admissions of one source — the rendezvous acceptor's own
+// cap the shape (proposal 0015).
+const EnrollmentMinInterval = time.Second
 
 // TrustService implements the trust material and chain renewal RPCs of the
 // control endpoint. The segment service RPCs it embeds unimplemented come
@@ -42,6 +49,20 @@ type TrustService struct {
 	// possession is verified and no chain exists for the name, never on a
 	// same-key renewal. Nil is open enrollment — the zero-conf default.
 	Authorizer EnrollmentAuthorizer
+	// MinInterval is the least pause between admissions of one source at the
+	// renewal door; zero uses the default.
+	MinInterval time.Duration
+
+	limiterOnce sync.Once
+	byAddr      sourceLimiter[netip.AddrPort]
+	byIA        sourceLimiter[addr.IA]
+	// renewalMtx serializes the renewal transaction — the name check, the
+	// authorizer's question, the issuance, and the insert hold it together —
+	// so two concurrent first issuances of one free name cannot both pass
+	// the check. A Telegram prompt's send holds a later renewal behind it
+	// for as long as its timeout; issuance is rare enough that the queue is
+	// the honest price of one name, one chain (proposal 0015).
+	renewalMtx sync.Mutex
 }
 
 var _ ControlPlane = (*TrustService)(nil)
@@ -160,6 +181,27 @@ func (s *TrustService) authorizeFirstIssuance(
 	}
 }
 
+// admit spends one rate slot of the renewal door: one admission per
+// interval keyed by the request's SCION source address — the
+// return-routable fact the context carries — with the claimed ISD-AS as the
+// key when the context carries no address. The cap's work is bounding, not
+// authenticating; each invented identity costs its slot, and no second
+// request is in flight (proposal 0015).
+func (s *TrustService) admit(ctx context.Context, ia addr.IA) bool {
+	s.limiterOnce.Do(func() {
+		interval := s.MinInterval
+		if interval == 0 {
+			interval = EnrollmentMinInterval
+		}
+		s.byAddr = newSourceLimiter[netip.AddrPort](interval)
+		s.byIA = newSourceLimiter[addr.IA](interval)
+	})
+	if src := remoteUnderlay(ctx); src.IsValid() {
+		return s.byAddr.admit(src)
+	}
+	return s.byIA.admit(ia)
+}
+
 // Chains serves the certificate chains matching the request.
 func (s *TrustService) Chains(
 	ctx context.Context,
@@ -235,6 +277,18 @@ func (s *TrustService) ChainRenewal(
 		return nil, connect.NewError(connect.CodeInvalidArgument,
 			serrors.Wrap("extracting ISD-AS from CSR", err))
 	}
+	// The door's rate cap, ahead of the work and the mutex: one admission
+	// per interval per source bounds the unauthenticated exchange whatever
+	// it asks (proposal 0015).
+	if !s.admit(ctx, ia) {
+		return nil, connect.NewError(connect.CodeResourceExhausted,
+			serrors.New("source exceeds the enrollment admission rate", "isd_as", ia))
+	}
+	// The renewal transaction: the name check, the authorizer's question,
+	// the issuance, and the insert hold the mutex together, whatever the
+	// authorizer's latency.
+	s.renewalMtx.Lock()
+	defer s.renewalMtx.Unlock()
 	// The enrollment gate of self-picked ISD-ASes (ADR-0008): a name that
 	// already holds an unexpired chain under a different subject key is
 	// taken. Renewals by the same key pass untouched.
@@ -280,4 +334,37 @@ func (s *TrustService) ChainRenewal(
 	return connect.NewResponse(&cppb.ChainRenewalResponse{
 		CmsSignedResponse: cmsRes,
 	}), nil
+}
+
+// sourceLimiter rate-caps admissions per key: one admission per interval,
+// refills over time, and stops tracking keys once silent — the rendezvous
+// acceptor's own limiter the shape (proposal 0015).
+type sourceLimiter[K comparable] struct {
+	interval time.Duration
+
+	mtx  sync.Mutex
+	last map[K]time.Time
+}
+
+func newSourceLimiter[K comparable](interval time.Duration) sourceLimiter[K] {
+	return sourceLimiter[K]{interval: interval, last: make(map[K]time.Time)}
+}
+
+// admit reports whether the key may be admitted now.
+func (l *sourceLimiter[K]) admit(key K) bool {
+	now := time.Now()
+	l.mtx.Lock()
+	defer l.mtx.Unlock()
+	if len(l.last) > 1024 {
+		for k, at := range l.last {
+			if now.Sub(at) > 10*l.interval {
+				delete(l.last, k)
+			}
+		}
+	}
+	if at, ok := l.last[key]; ok && now.Sub(at) < l.interval {
+		return false
+	}
+	l.last[key] = now
+	return true
 }

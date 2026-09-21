@@ -91,7 +91,7 @@ type NodePacing struct {
 	Selection       time.Duration // selection evaluation window
 	CandidateWindow time.Duration // unproven candidate lifetime
 	Directory       time.Duration // directory publish and fetch
-	RendezvousRate  time.Duration // admission rate caps
+	RendezvousRate  time.Duration // admission rate caps (rendezvous, link, and enrollment doors)
 	LinkSetPoll     time.Duration // the file provider's link-set poll
 	BFD             time.Duration // BFD transmission interval
 }

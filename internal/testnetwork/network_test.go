@@ -85,13 +85,14 @@ func TestLineTopology(t *testing.T) {
 	})
 
 	// The up segments C terminates carry the full line's signatures; verify
-	// one end to end through C's engine.
+	// one end to end through C's engine, each entry bound to the identity
+	// it claims.
 	ups, err := c.PathDB.Get(ctx, pathdb.Query{Type: pathdb.SegmentTypeUp})
 	if err != nil || len(ups) == 0 {
 		t.Fatalf("no up segments at C: %v", err)
 	}
 	for i := range ups[0].PCB.Entries {
-		if _, err := c.Engine.Verify(ctx,
+		if _, err := c.Engine.VerifyBound(ctx, ups[0].PCB.Entries[i].IA,
 			ups[0].PCB.Entries[i].Signed, ups[0].PCB.AssociatedData(i)...); err != nil {
 			t.Fatalf("up segment entry %d does not verify: %v", i, err)
 		}

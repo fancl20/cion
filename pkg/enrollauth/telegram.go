@@ -6,10 +6,12 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json/v2"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"sync"
 	"time"
 
@@ -154,7 +156,8 @@ func (t *Telegram) Authorize(
 }
 
 // Run receives the answer buttons until the context is canceled: one
-// getUpdates long poll after another, under the caller's supervision.
+// getUpdates long poll after another, under the caller's supervision, each
+// pass sweeping the decisions whose window has passed.
 func (t *Telegram) Run(ctx context.Context) {
 	var offset int64
 	for ctx.Err() == nil {
@@ -170,9 +173,24 @@ func (t *Telegram) Run(ctx context.Context) {
 			}
 			continue
 		}
+		t.sweep()
 		for _, u := range updates {
 			offset = u.UpdateID + 1
 			t.decide(ctx, u.Callback)
+		}
+	}
+}
+
+// sweep drops the decisions whose window has passed: a stranger's
+// persistent identities cost their prompts and nothing after (proposal
+// 0015).
+func (t *Telegram) sweep() {
+	now := time.Now()
+	t.mtx.Lock()
+	defer t.mtx.Unlock()
+	for key, d := range t.asks {
+		if !now.Before(d.expires) {
+			delete(t.asks, key)
 		}
 	}
 }
@@ -308,12 +326,12 @@ func call[T any](t *Telegram, ctx context.Context, method string, req any) (T, e
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost,
 		fmt.Sprintf("%s/bot%s/%s", t.api, t.token, method), bytes.NewReader(body))
 	if err != nil {
-		return zero, err
+		return zero, botAPIError(method, err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 	resp, err := t.hc.Do(httpReq)
 	if err != nil {
-		return zero, err
+		return zero, botAPIError(method, err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	raw, err := io.ReadAll(resp.Body)
@@ -332,6 +350,17 @@ func call[T any](t *Telegram, ctx context.Context, method string, req any) (T, e
 		return zero, fmt.Errorf("%s: %s", method, env.Description)
 	}
 	return env.Result, nil
+}
+
+// botAPIError names the method and the failure, never the URL: a
+// *url.Error renders the whole request line, and the request line carries
+// the bot's token (proposal 0015).
+func botAPIError(method string, err error) error {
+	var urlErr *url.Error
+	if errors.As(err, &urlErr) {
+		err = urlErr.Err
+	}
+	return fmt.Errorf("%s failed: %w", method, err)
 }
 
 // The Bot API's JSON shapes, only as much as the three calls need.

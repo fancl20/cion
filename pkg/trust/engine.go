@@ -118,6 +118,22 @@ func (e *Engine) Verify(
 	return v.Verify(ctx, signedMsg, associatedData...)
 }
 
+// VerifyBound verifies the signed message with the signer bound to ia: a
+// signature whose verification key names another ISD-AS fails with the
+// mismatch named. The signed bytes of a beacon's AS entry claim the entry's
+// own ISD-AS; this form reads the claim back to the signer and refuses the
+// difference (proposal 0015).
+func (e *Engine) VerifyBound(
+	ctx context.Context,
+	ia addr.IA,
+	signedMsg *cryptopb.SignedMessage,
+	associatedData ...[]byte,
+) (*signed.Message, error) {
+
+	v := Verifier{Engine: e.Provider, Cache: e.cache, BoundIA: ia}
+	return v.Verify(ctx, signedMsg, associatedData...)
+}
+
 // Chain returns the node's newest chain valid now, for the SCION-native TLS
 // channel's certificates. It reads local state only: a TLS handshake must
 // not spawn trust fetches, and an un-enrolled node simply has none.

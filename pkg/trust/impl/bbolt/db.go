@@ -52,7 +52,14 @@ func (b *bboltDB) Chains(ctx context.Context, query trust.ChainQuery) ([][]*x509
 		b := tx.Bucket([]byte("chains"))
 		c := b.Cursor()
 
-		for k, _ := c.Seek(ia); k != nil && bytes.HasPrefix(k, ia); k, _ = c.Next() {
+		// The outer loop matches the bucket key exactly: an ISD-AS's
+		// rendered name is a prefix of every name that extends it, and no
+		// name answers for another (proposal 0015). The first key past the
+		// sought name is another name, and the scan ends there; an unset
+		// IA sweeps every bucket. The inner scan keeps its fingerprint
+		// prefix, for a query without a fingerprint asks for every chain
+		// the name holds.
+		for k, _ := c.Seek(ia); k != nil && (len(ia) == 0 || bytes.Equal(k, ia)); k, _ = c.Next() {
 			c := b.Bucket(k).Cursor()
 
 			for k, v := c.Seek(query.SubjectKeyID); k != nil && bytes.HasPrefix(k, query.SubjectKeyID); k, v = c.Next() {
