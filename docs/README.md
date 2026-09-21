@@ -1,14 +1,19 @@
 # Documentation
 
-This directory holds CION's decision records (ADRs), its implementation
-plans (proposals), the SCION drafts the code implements (specs), and the
-style guides all of it is written under (styles). Work on CION moves
-through three layers — design, plan, code — and the first two live here.
+This directory holds CION's design overviews (design), its decision records
+(ADRs), its implementation plans (proposals), the SCION drafts the code
+implements (specs), and the style guides all of it is written under (styles).
+Work on CION moves through three layers — design, plan, code — and the first
+two live here.
 
 [TOC]
 
 ## Directory layout
 
+*   `design/` — the design as it stands: syntheses of the built system
+    (architecture, security model) that restate what the records decided.
+    They carry no status and decide nothing; a change that re-decides a
+    boundary lands as an ADR, and the overview follows the code.
 *   `adrs/` — Architecture Decision Records in
     [MADR](https://adr.github.io/madr/) format: what was decided, and
     why.
