@@ -32,6 +32,11 @@ const (
 	// packet itself is dropped either way; over-cap ones merely take no
 	// notification with them.
 	notifyCapPerSecond = 10
+
+	// macCacheEntries is the number of MAC cache slots a processor keeps:
+	// a few hundred flow positions, direct-mapped. A power of two, so the
+	// slot is a mask of the hash.
+	macCacheEntries = 512
 )
 
 // scmpNotifyLimiter rate-caps the SCMP notifications emitted per interface:
@@ -62,13 +67,59 @@ func (l *scmpNotifyLimiter) allow(ifID uint16, now time.Time) bool {
 	}
 }
 
+// macCache is the processor's memo of computed full MACs. The MAC input —
+// the info and hop fields, the tag no part of it — is a constant of the
+// flow's position on the path: every packet of a flow arriving on the same
+// segment presents the same input, so without the cache the router
+// recomputes the same full MAC for each. The cache is direct-mapped: the
+// slot is chosen by a hash of the input and disambiguated by comparing the
+// full key, so a collision costs a recomputation, never a wrong MAC. There
+// are no locks — each processor goroutine owns its cache — and the entries
+// live and die with the processor, whose lifetime is the forwarding key's
+// plane. The lookup branches only on packet-public fields, values any
+// observer of the segment reads off the wire; the tag comparison stays
+// constant-time on every path, cached or not.
+type macCache struct {
+	entries [macCacheEntries]macCacheEntry
+}
+
+// macCacheEntry is one direct-mapped slot: the MAC input it answers for,
+// beside the full MAC that input produced.
+type macCacheEntry struct {
+	input   [path.MACBufferSize]byte
+	fullMac [path.MACBufferSize]byte
+}
+
+// lookup returns the slot the input maps to, and whether that slot holds
+// this exact input's remembered MAC. A miss returns the slot to fill.
+func (c *macCache) lookup(input *[path.MACBufferSize]byte) (*macCacheEntry, bool) {
+	entry := &c.entries[macCacheSlot(input)]
+	return entry, entry.input == *input
+}
+
+// macCacheSlot maps a MAC input to one of the cache's slots.
+func macCacheSlot(input *[path.MACBufferSize]byte) int {
+	s := fnv1aOffset32
+	for _, b := range input {
+		s = hashFNV1a(s, b)
+	}
+	return int(s) & (macCacheEntries - 1)
+}
+
 func newPacketProcessor(d *DataPlane) *scionPacketProcessor {
 	p := &scionPacketProcessor{
 		d:              d,
 		mac:            d.macFactory(),
 		macInputBuffer: make([]byte, path.MACBufferSize),
+		now:            time.Now(),
 	}
 	p.scionLayer.RecyclePaths()
+	// Key the empty slots on an input no packet can present: MACInput
+	// always zeroes the first two bytes of its block, so a slot keyed on a
+	// nonzero first byte matches nothing until it is filled.
+	for i := range p.macCache.entries {
+		p.macCache.entries[i].input[0] = 1
+	}
 	return p
 }
 
@@ -90,7 +141,18 @@ type scionPacketProcessor struct {
 	peering         bool                   // Whether the current hop field is a peering hop field.
 	cachedMac       []byte                 // Full MAC. For a Xover, that of the down segment.
 	macInputBuffer  []byte                 // Reusable buffer for MAC computation.
-	bfdLayer        layers.BFD             // Reusable buffer for parsing BFD messages
+	// now is the clock reading the drained batch shares for hop-expiry
+	// validation: the run loop refreshes it once per batch, so a verdict
+	// can lag the packet's processing moment by at most one batch's
+	// processing time — a tolerance far below the seconds the wire format
+	// grades expiry in.
+	now time.Time
+	// macCache memoizes the full MACs computed for the MAC inputs the
+	// fast path presents; macKey is the scratch the current input is
+	// staged in. See macCache.
+	macCache macCache
+	macKey   [path.MACBufferSize]byte
+	bfdLayer layers.BFD // Reusable buffer for parsing BFD messages
 }
 
 func (p *scionPacketProcessor) reset() error {
@@ -300,7 +362,7 @@ func (p *scionPacketProcessor) determinePeer() disposition {
 func (p *scionPacketProcessor) validateHopExpiry() disposition {
 	expiration := time.Unix(int64(p.infoField.Timestamp), 0).
 		Add(path.ExpTimeToDuration(p.hopField.ExpTime))
-	expired := expiration.Before(time.Now())
+	expired := expiration.Before(p.now)
 	if !expired {
 		return pForward
 	}
@@ -447,7 +509,17 @@ func (p *scionPacketProcessor) currentHopPointer() uint16 {
 }
 
 func (p *scionPacketProcessor) verifyCurrentMAC() disposition {
-	fullMac := path.FullMAC(p.mac, p.infoField, p.hopField, p.macInputBuffer[:path.MACBufferSize])
+	path.MACInput(p.infoField.SegID, p.infoField.Timestamp, p.hopField.ExpTime,
+		p.hopField.ConsIngress, p.hopField.ConsEgress, p.macKey[:])
+	entry, hit := p.macCache.lookup(&p.macKey)
+	var fullMac []byte
+	if hit {
+		// A hit is a memoization of a pure function: the remembered MAC
+		// is the one the compute path below produces for this input.
+		fullMac = entry.fullMac[:]
+	} else {
+		fullMac = path.FullMAC(p.mac, p.infoField, p.hopField, p.macInputBuffer[:path.MACBufferSize])
+	}
 	if subtle.ConstantTimeCompare(p.hopField.Mac[:path.MacLen], fullMac[:path.MacLen]) == 0 {
 		p.pkt.slowPathRequest = slowPathRequest{
 			spType:  slowPathType(slayers.SCMPTypeParameterProblem),
@@ -455,6 +527,10 @@ func (p *scionPacketProcessor) verifyCurrentMAC() disposition {
 			pointer: p.currentHopPointer(),
 		}
 		return pSlowPath
+	}
+	if !hit {
+		entry.input = p.macKey
+		copy(entry.fullMac[:], fullMac)
 	}
 	// Add the full MAC to the SCION packet processor,
 	// such that EPIC does not need to recalculate it.

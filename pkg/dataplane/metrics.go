@@ -111,6 +111,73 @@ func UpdateOutputMetrics(ctx context.Context, metrics *InterfaceMetrics, packets
 	}
 }
 
+// inputMetricsStaging stages the input counters of one receive batch:
+// packets and bytes accumulated per size class, recorded once per non-zero
+// cell when the batch flushes — the input-side counterpart of the staging
+// UpdateOutputMetrics carries for output. A connection's receive loop owns
+// the batch boundary and one link's metrics.
+type inputMetricsStaging struct {
+	packets [maxSizeClass]int
+	bytes   [maxSizeClass]int
+}
+
+// add stages one received packet of the given size.
+func (s *inputMetricsStaging) add(size int) {
+	sc := ClassOfSize(size)
+	s.packets[sc]++
+	s.bytes[sc] += size
+}
+
+// flush records the staged counts and clears the staging for the next batch.
+func (s *inputMetricsStaging) flush(metrics *InterfaceMetrics) {
+	for sc := minSizeClass; sc < maxSizeClass; sc++ {
+		if packets := s.packets[sc]; packets > 0 {
+			metrics[sc].InputPacketsTotal.Add(context.Background(), int64(packets))
+			metrics[sc].InputBytesTotal.Add(context.Background(), int64(s.bytes[sc]))
+			s.packets[sc] = 0
+			s.bytes[sc] = 0
+		}
+	}
+}
+
+// processedStaging stages the processed counter of one ingress link over a
+// drained batch. A batch mixes the links the dispatch hash spread it over,
+// and the counter is labeled by ingress interface, so the processor keeps
+// one entry per link that appears in its batches — found by a pointer scan,
+// which the handful of links a plane carries keeps short — and flushes them
+// all at the batch's end.
+type processedStaging struct {
+	metrics *InterfaceMetrics
+	packets [maxSizeClass]int
+}
+
+// stageProcessed bumps the staged processed count for the given metrics,
+// growing the staging the first time a link appears. It returns the staging
+// slice, possibly extended.
+func stageProcessed(
+	staging []processedStaging, metrics *InterfaceMetrics, sc sizeClass,
+) []processedStaging {
+	for i := range staging {
+		if staging[i].metrics == metrics {
+			staging[i].packets[sc]++
+			return staging
+		}
+	}
+	staging = append(staging, processedStaging{metrics: metrics})
+	staging[len(staging)-1].packets[sc]++
+	return staging
+}
+
+// flush records the staged counts and clears them for the next batch.
+func (s *processedStaging) flush(ctx context.Context) {
+	for sc := minSizeClass; sc < maxSizeClass; sc++ {
+		if packets := s.packets[sc]; packets > 0 {
+			s.metrics[sc].ProcessedPackets.Add(ctx, int64(packets))
+			s.packets[sc] = 0
+		}
+	}
+}
+
 // interfaceMetrics is the set of metrics that are relevant for one given interface. It is a map
 // that associates each (traffic-type, size-class) pair with the set of metrics belonging to that
 // interface that have these label values. This set of metrics is itself a trafficMetric structure.

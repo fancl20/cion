@@ -346,6 +346,12 @@ func (u *udpConnection) receive(batchSize int, pool PacketPool) {
 	packets := make([]*Packet, batchSize)
 	numReusable := 0 // unused buffers from previous loop
 
+	// The input counters' staging: accumulated over the packets of one read
+	// batch and flushed before the next — the receive loop owns the batch
+	// boundary and this connection's single link's metrics. Drop counters
+	// stay per-event inside the links' receive.
+	var input inputMetricsStaging
+
 	for u.running.Load() {
 		// collect packets.
 
@@ -371,10 +377,12 @@ func (u *udpConnection) receive(batchSize int, pool PacketPool) {
 			size := msg.N
 			p := packets[i]
 			p.RawPacket = p.RawPacket[:size]
+			input.add(size)
 
 			// Hand the packet to the link that owns this connection.
 			u.link.receive(size, msg.Addr.(*net.UDPAddr), p)
 		}
+		input.flush(u.metrics)
 	}
 
 	// We have to stop receiving. Return the unused packets to the pool to
@@ -586,8 +594,6 @@ func (l *connectedLink) SendBlocking(p *Packet) {
 func (l *connectedLink) receive(size int, srcAddr *net.UDPAddr, p *Packet) {
 	metrics := l.metrics
 	sc := ClassOfSize(size)
-	metrics[sc].InputPacketsTotal.Add(context.Background(), 1)
-	metrics[sc].InputBytesTotal.Add(context.Background(), int64(size))
 
 	p.Link = l
 	// The src address does not need to be recorded in the packet. The link has
@@ -776,8 +782,6 @@ func (l *internalLink) SendBlocking(p *Packet) {
 func (l *internalLink) receive(size int, srcAddr *net.UDPAddr, p *Packet) {
 	metrics := l.metrics
 	sc := ClassOfSize(size)
-	metrics[sc].InputPacketsTotal.Add(context.Background(), 1)
-	metrics[sc].InputBytesTotal.Add(context.Background(), int64(size))
 
 	p.Link = l
 	// This is an unconnected link. We must record the src address in case the

@@ -248,57 +248,78 @@ func (d *DataPlane) initQueues(processorQueueSize int) ([]chan *Packet, []chan *
 func (d *DataPlane) runProcessor(ctx context.Context, id int, q <-chan *Packet, slowQ chan<- *Packet) {
 	slog.Debug("Initialize processor", "id", id)
 	processor := newPacketProcessor(d)
+	batch := make([]*Packet, d.RunConfig.BatchSize)
+	// The processed counter's staging, one entry per ingress link a batch
+	// presents. The slice grows to the plane's links and is reused across
+	// batches.
+	var processed []processedStaging
 	for d.isRunning() {
-		var p *Packet
+		// Block for the first packet of a batch, then drain what has
+		// accumulated without blocking, up to the batch bound — the
+		// sender's shape. The queue is still drained in order, and its
+		// overflow still drops with the busy-processor reason.
+		var ok bool
 		select {
 		case <-ctx.Done():
 			return
-		case got, ok := <-q:
+		case batch[0], ok = <-q:
 			if !ok {
 				continue
 			}
-			p = got
 		}
-		disp := processor.processPkt(p)
+		n := readUpTo(q, len(batch)-1, false, batch[1:]) + 1
 
-		sc := ClassOfSize(len(p.RawPacket))
-		metrics := p.Link.Metrics()
-		metrics[sc].ProcessedPackets.Add(ctx, 1)
+		// The batch's clock reading: one per drained batch, shared by the
+		// hop-expiry validation of every packet in it.
+		processor.now = time.Now()
 
-		switch disp {
-		case pForward:
-			// Normal processing proceeds.
-		case pSlowPath:
-			// Not an error, processing continues on the slow path.
-			select {
-			case slowQ <- p:
-			default:
-				metrics[sc].DroppedPacketsBusySlowPath.Add(ctx, 1)
+		for _, p := range batch[:n] {
+			disp := processor.processPkt(p)
+
+			sc := ClassOfSize(len(p.RawPacket))
+			metrics := p.Link.Metrics()
+			processed = stageProcessed(processed, metrics, sc)
+
+			switch disp {
+			case pForward:
+				// Normal processing proceeds.
+			case pSlowPath:
+				// Not an error, processing continues on the slow path.
+				select {
+				case slowQ <- p:
+				default:
+					metrics[sc].DroppedPacketsBusySlowPath.Add(ctx, 1)
+					d.packetPool.Put(p)
+				}
+				continue
+			case pDone: // Packets that don't need more processing (e.g. BFD)
 				d.packetPool.Put(p)
+				continue
+			case pDiscard: // Everything else
+				metrics[sc].DroppedPacketsInvalid.Add(ctx, 1)
+				d.packetPool.Put(p)
+				continue
+			default: // Newly added dispositions need to be handled.
+				slog.Debug("Unknown packet disposition", "disp", disp)
+				d.packetPool.Put(p)
+				continue
 			}
-			continue
-		case pDone: // Packets that don't need more processing (e.g. BFD)
-			d.packetPool.Put(p)
-			continue
-		case pDiscard: // Everything else
-			metrics[sc].DroppedPacketsInvalid.Add(ctx, 1)
-			d.packetPool.Put(p)
-			continue
-		default: // Newly added dispositions need to be handled.
-			slog.Debug("Unknown packet disposition", "disp", disp)
-			d.packetPool.Put(p)
-			continue
+			fwLink := d.interfaces[p.egress]
+			if fwLink == nil {
+				slog.Debug("Error determining forwarder. Egress is invalid", "egress", p.egress)
+				d.packetPool.Put(p)
+				metrics[sc].DroppedPacketsInvalid.Add(ctx, 1)
+				continue
+			}
+			if !fwLink.Send(p) {
+				d.packetPool.Put(p)
+				metrics[sc].DroppedPacketsBusyForwarder.Add(ctx, 1)
+			}
 		}
-		fwLink := d.interfaces[p.egress]
-		if fwLink == nil {
-			slog.Debug("Error determining forwarder. Egress is invalid", "egress", p.egress)
-			d.packetPool.Put(p)
-			metrics[sc].DroppedPacketsInvalid.Add(ctx, 1)
-			continue
-		}
-		if !fwLink.Send(p) {
-			d.packetPool.Put(p)
-			metrics[sc].DroppedPacketsBusyForwarder.Add(ctx, 1)
+
+		// The batch's processed counts, recorded once per non-zero cell.
+		for i := range processed {
+			processed[i].flush(ctx)
 		}
 	}
 }
