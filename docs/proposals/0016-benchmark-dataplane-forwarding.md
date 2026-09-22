@@ -214,4 +214,40 @@ non-canonical.
 
 ## Implementation history
 
-*   (To be recorded as the change lands.)
+*   Benchmarks: four files in `pkg/dataplane`, benchmarks only, production
+    code untouched. `bench_test.go` holds the harness — the transit
+    topology (the internal link and external links 1 and 2 over the UDP
+    provider, the links' far ends bound by the harness and funded with the
+    plane's receive buffers, so the kernel does not silently drop what the
+    in-flight window allows), the packet builders that chain hop MACs the
+    way the two-node suite's `directPath` already does (plain, cross-over,
+    reverse-direction, delivered-to-local, outbound, the expired-path and
+    BFD-framed shapes), and `TestBenchmarkGenerators`, which drives every
+    generator through `processPkt` once and asserts the disposition, egress
+    interface, and traffic type. `process_bench_test.go` holds the fast
+    path per class (`BenchmarkProcessPkt`) and the slow path
+    (`BenchmarkProcessSCMP`, on the full three-hop path whose reversal
+    carries an answer back). `component_bench_test.go` holds the named
+    costs: `BenchmarkDecodeLayers` over the shape and size matrix,
+    `BenchmarkComputeProcID` single-flow and varied, `BenchmarkPacketPool`,
+    `BenchmarkFullMAC`, `BenchmarkProcessBFD`, and `BenchmarkPacketMetrics`
+    under the default no-op provider and a configured one — the otel SDK,
+    added as a test-only dependency, whose readable counters also let the
+    pipeline benchmark name its losses by reason. `pipeline_bench_test.go`
+    holds `BenchmarkForwardPipeline` across the `RunConfig` matrix and both
+    flow loads, windowed to one in-flight batch — every queue a packet in
+    flight can rest in holds at least a batch — so a healthy run cannot
+    drop, failing with the per-reason drop counts when counts diverge and
+    reporting delivered packets per second. `-bench` opts in; the
+    correctness suites run unchanged without it.
+*   Smoke run (non-canonical; one container — an Intel i5-14450HX capped
+    at two Go threads, Linux): transit 209 ns/op at 0 allocs/op, the
+    cross-over shape 320 ns — the second MAC verification made visible —
+    inbound 261 ns at the documented allocation, an SCMP answer 449 ns at
+    8 allocs; header decode ~25 ns whatever the size; one MAC 35 ns; the
+    pool round trip 35 ns; the no-op metrics `Add` 29 ns and 40 B against
+    a configured provider's 64 ns; the pipeline delivers 250–320k
+    packets/s, batch 64 and up running ~15% ahead of batch 16. The
+    two-thread ceiling hides most of the single-flow stranding the flow
+    pair exists to show; that reading wants a machine with a processor per
+    queue.
