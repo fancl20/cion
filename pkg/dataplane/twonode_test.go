@@ -18,11 +18,11 @@ import (
 
 // freeUDPAddr returns a loopback UDP address with a port picked by the
 // kernel, so that concurrent test runs do not collide on fixed ports.
-func freeUDPAddr(t *testing.T) string {
-	t.Helper()
+func freeUDPAddr(tb testing.TB) string {
+	tb.Helper()
 	c, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
 	if err != nil {
-		t.Fatal(err)
+		tb.Fatal(err)
 	}
 	defer func() { _ = c.Close() }()
 	return c.LocalAddr().String()
