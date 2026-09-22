@@ -210,3 +210,58 @@ and the equivalence is what the tests assert.
     non-canonical per 0016's convention.
 
 ## Implementation history
+
+*   The drain: `runProcessor` (`pkg/dataplane/dataplain.go`) took the
+    sender's shape — block for the first packet of a batch, then the
+    non-blocking `readUpTo` up to `RunConfig.BatchSize` — and one pass of
+    its loop became the batch the other accountings flush against.
+    Ordering, the bounded queue, and the busy-processor overflow drop are
+    as they were; the supervision (0019) sees the same goroutine, panic
+    recovery, and lifecycle.
+*   The clock: the processor holds one `now`, refreshed once per drained
+    batch, and `validateHopExpiry` reads it (`pkg/dataplane/processor.go`).
+    The egress-down rate check keeps its own `time.Now`, on the failure
+    path where it always lived.
+*   The counters: beside `UpdateOutputMetrics` in
+    `pkg/dataplane/metrics.go`, `inputMetricsStaging` accumulates packets
+    and bytes per size class and is flushed by the connection's receive
+    loop once per `ReadBatch` (`pkg/dataplane/udpip.go`);
+    `processedStaging` holds one entry per ingress link a batch mixes —
+    found by a pointer scan, short because a plane carries a handful of
+    links — and flushes once per drained batch. Both copy
+    `UpdateOutputMetrics`'s arithmetic: fixed arrays, one record per
+    non-zero cell. Drop counters stay per-event.
+*   The MAC memo: `macCache` (`pkg/dataplane/processor.go`) — 512
+    direct-mapped slots per processor, the 16-byte input beside the full
+    16-byte MAC, the slot chosen by the FNV-1a hash the dispatch already
+    uses and disambiguated by the full key, no locks. A hit hands the
+    remembered MAC to the same constant-time tag comparison; a miss
+    computes as before and fills the slot, but only once the tag verified
+    — a prober cannot evict what it cannot forge. The empty slots are
+    keyed on an input `MACInput` cannot produce (its first two bytes are
+    always zero), so a never-filled slot matches no packet.
+*   Tests: `processor_test.go` — verdict equivalence over a randomized
+    corpus (a cold processor against a warm one, the MAC bytes the tag was
+    compared against equal), a searched-for slot collision disambiguated
+    by the full key with neither input borrowing the other's MAC, an
+    invalid tag presented on a hit routed to the slow path with the
+    invalid-hop-field-MAC code and the slot untouched, and the batch clock
+    under `testing/synctest`: strictly before and after verdict correctly,
+    the stale edge is accepted, and the next batch's fresh reading expires
+    the same packet. `batch_test.go` — the drain (queue order across
+    batches larger than the bound, reblocking for the next first packet,
+    cancellation), the busy-processor overflow drop recorded per event,
+    and the staged sums checked against a manual-reader provider over a
+    served plane with mixed sizes. The two-node line and the benchmark
+    generators' test pass unchanged.
+*   Smoke run (non-canonical; the same container and shape as 0016's — an
+    Intel i5-14450HX capped at two Go threads, Linux; `benchstat`, six
+    counts micro and three pipeline, no benchmark file changed):
+    `processPkt` transit 211 → 151 ns (−29%, past the proposal's ~45 ns
+    estimate), the cross-over shape 323 → 194 ns (−40%, both of its MACs
+    memoized), inbound 258 → 187 ns and outbound 219 → 155 ns, each still
+    at its documented allocation count; an SCMP answer, `FullMAC`, the
+    metrics `Add` under both providers, and `DecodeLayers` unchanged —
+    the suite's controls. The pipeline's delivered rate rose in all
+    eighteen configs, geomean 287k → 307k packets/s (+7%), though no
+    single config is significant at three counts.
