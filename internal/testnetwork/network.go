@@ -53,6 +53,12 @@ const (
 	WireguardRefresh = 200 * time.Millisecond
 	WireguardRetry   = 100 * time.Millisecond
 	TestTimeout      = 20 * time.Second
+	// RestartTimeout budgets the restart lab's convergence: the reboot puts
+	// the joiner's loop through serial stages — re-rendezvous, a fresh
+	// prompt, the press, the chain — whose wall-clock pacing stretches
+	// several-fold on a loaded runner under the race detector, where the
+	// fixed TestTimeout missed a pipeline still progressing.
+	RestartTimeout = 3 * TestTimeout
 )
 
 // TestDomain is the DNS identity of the core endpoint in tests; its
@@ -773,7 +779,14 @@ func handlePanic() {
 // Poll waits for cond to hold, failing the test at the timeout.
 func Poll(t *testing.T, what string, cond func() bool) {
 	t.Helper()
-	deadline := time.Now().Add(TestTimeout)
+	PollFor(t, TestTimeout, what, cond)
+}
+
+// PollFor is Poll under an explicit budget, for labs whose convergence
+// outgrows TestTimeout on a loaded runner.
+func PollFor(t *testing.T, budget time.Duration, what string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(budget)
 	for time.Now().Before(deadline) {
 		if cond() {
 			return
