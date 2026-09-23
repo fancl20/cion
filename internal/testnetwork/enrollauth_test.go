@@ -267,10 +267,13 @@ func TestJoinByEnrollAuthTelegramRestart(t *testing.T) {
 	})
 
 	// The joiner's loop converges and asks the fresh core, whose fresh
-	// authorizer prompts again — a join still in flight asks again.
-	Poll(t, "the operator's second prompt", func() bool { return bot.promptCount() == 2 })
+	// authorizer prompts again — a join still in flight asks again. Both
+	// post-restart polls run on RestartTimeout: the reboot adds serial
+	// stages whose wall-clock pacing stretches on a loaded runner, where
+	// the fixed TestTimeout missed a loop still converging.
+	PollFor(t, RestartTimeout, "the operator's second prompt", func() bool { return bot.promptCount() == 2 })
 	bot.press(t, 1, 0)
-	Poll(t, "the joiner to enroll after the restart", func() bool { return holdsChain(b) })
+	PollFor(t, RestartTimeout, "the joiner to enroll after the restart", func() bool { return holdsChain(b) })
 
 	// The enrolled node runs on with no prompt at all.
 	time.Sleep(20 * fastPacing.Enrollment)
