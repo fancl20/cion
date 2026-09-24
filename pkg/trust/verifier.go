@@ -8,7 +8,6 @@ import (
 	"net"
 	"time"
 
-	"github.com/patrickmn/go-cache"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/scionproto/scion/pkg/addr"
@@ -36,10 +35,16 @@ type Verifier struct {
 	// Engine provides verified certificate chains.
 	Engine Provider
 
-	// Cache keeps track of recently used certificates. If nil no cache is used.
-	// This API is experimental.
-	Cache              *cache.Cache
+	// MaxCacheExpiration bounds how long fetched chains are cached; zero
+	// means a minute, and a chain's own validity can shorten the window.
 	MaxCacheExpiration time.Duration
+
+	// chains and notifies hold the verifier's recently used certificate
+	// chains and deduplicate its TRC reports for a minute; the engine sets
+	// both, and a verifier built without them verifies uncached, every
+	// read through the provider.
+	chains   *ttlCache[[][]*x509.Certificate]
+	notifies *ttlCache[struct{}]
 }
 
 // Verify verifies the signature of the msg.
@@ -103,23 +108,21 @@ func (v Verifier) Verify(ctx context.Context, signedMsg *cryptopb.SignedMessage,
 
 func (v *Verifier) notifyTRC(ctx context.Context, id cppki.TRCID) error {
 	key := fmt.Sprintf("notify-%s", id)
-	_, ok := v.cacheGet(key, "notify_trc")
-	if ok {
+	if _, ok := v.notifies.get(key); ok {
 		return nil
 	}
 	if err := v.Engine.NotifyTRC(ctx, id, Server(v.BoundServer)); err != nil {
 		return err
 	}
-	v.cacheAdd(key, struct{}{}, time.Minute)
+	v.notifies.add(key, struct{}{}, time.Minute)
 	return nil
 }
 
 func (v *Verifier) getChains(ctx context.Context, q ChainQuery) ([][]*x509.Certificate, error) {
 	key := fmt.Sprintf("chain-%s-%x", q.IA, q.SubjectKeyID)
 
-	cachedChains, ok := v.cacheGet(key, "chains")
-	if ok {
-		return cachedChains.([][]*x509.Certificate), nil
+	if chains, ok := v.chains.get(key); ok {
+		return chains, nil
 	}
 
 	chains, err := v.Engine.GetChains(ctx, q, Server(v.BoundServer))
@@ -127,23 +130,9 @@ func (v *Verifier) getChains(ctx context.Context, q ChainQuery) ([][]*x509.Certi
 		return nil, err
 	}
 	if len(chains) != 0 {
-		v.cacheAdd(key, chains, v.cacheExpiration(chains))
+		v.chains.add(key, chains, v.cacheExpiration(chains))
 	}
 	return chains, nil
-}
-
-func (v *Verifier) cacheGet(key string, reqType string) (any, bool) {
-	if v.Cache == nil {
-		return nil, false
-	}
-	return v.Cache.Get(key)
-}
-
-func (v *Verifier) cacheAdd(key string, value any, d time.Duration) {
-	if v.Cache == nil {
-		return
-	}
-	_ = v.Cache.Add(key, value, d) // XXX(matzf): could use Set, subtle difference
 }
 
 func (v *Verifier) cacheExpiration(chains [][]*x509.Certificate) time.Duration {
