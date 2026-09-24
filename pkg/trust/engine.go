@@ -7,8 +7,6 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/patrickmn/go-cache"
-
 	"github.com/scionproto/scion/pkg/addr"
 	"github.com/scionproto/scion/pkg/private/serrors"
 	cryptopb "github.com/scionproto/scion/pkg/proto/crypto"
@@ -34,19 +32,20 @@ type Engine struct {
 	// on the nodes that enroll.
 	Provider Provider
 
-	// cache holds the verifier's recently used chains.
-	cache *cache.Cache
+	// chains and notifies cache the verifiers' recently used chains and
+	// deduplicate their TRC reports.
+	chains   *ttlCache[[][]*x509.Certificate]
+	notifies *ttlCache[struct{}]
 }
 
 // NewEngine returns an engine for the node's IA, AS key, and provider.
 func NewEngine(ia addr.IA, key crypto.Signer, provider Provider) *Engine {
-	// No janitor: expiry is checked on every read, and a cache without a
-	// background goroutine keeps the engine whole inside a fake-time bubble.
 	return &Engine{
 		IA:       ia,
 		Key:      key,
 		Provider: provider,
-		cache:    cache.New(defaultCacheExpiration, 0),
+		chains:   newTTLCache[[][]*x509.Certificate](),
+		notifies: newTTLCache[struct{}](),
 	}
 }
 
@@ -114,7 +113,7 @@ func (e *Engine) Verify(
 	associatedData ...[]byte,
 ) (*signed.Message, error) {
 
-	v := Verifier{Engine: e.Provider, Cache: e.cache}
+	v := Verifier{Engine: e.Provider, chains: e.chains, notifies: e.notifies}
 	return v.Verify(ctx, signedMsg, associatedData...)
 }
 
@@ -130,7 +129,7 @@ func (e *Engine) VerifyBound(
 	associatedData ...[]byte,
 ) (*signed.Message, error) {
 
-	v := Verifier{Engine: e.Provider, Cache: e.cache, BoundIA: ia}
+	v := Verifier{Engine: e.Provider, chains: e.chains, notifies: e.notifies, BoundIA: ia}
 	return v.Verify(ctx, signedMsg, associatedData...)
 }
 

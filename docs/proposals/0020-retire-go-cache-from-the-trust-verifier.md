@@ -158,4 +158,25 @@ module, so nothing else moves.
 
 ## Implementation history
 
-*   (To be recorded as the change lands.)
+*   The type: `ttlCache[V]` (`pkg/trust/ttlcache.go`) — one `RWMutex`
+    over a map of `{value, expires}` entries; `get` reports only
+    unexpired values and deletes what it refuses, the delete rechecking
+    under the write lock so a straggler add's fresh entry survives;
+    first-write-wins `add`; a nil cache is no cache.
+*   The engine's pair and the verifier's fields: `Engine` holds
+    `chains` and `notifies` (`pkg/trust/engine.go`), built by
+    `NewEngine` and lent to the `Verifier` both verify forms build; the
+    exported `Cache` leaves the `Verifier`, `MaxCacheExpiration` stays,
+    and `cacheGet` and `cacheAdd` leave with the `any` assertion
+    (`pkg/trust/verifier.go`).
+*   Tests: the cache suite under `testing/synctest` — the roundtrip, the
+    expired read refusing the value while the map still holds it and
+    then deleting it, the first-write-wins add over a live entry, and
+    concurrent episodes for the race detector
+    (`pkg/trust/ttlcache_test.go`); the engine suite gained a counting
+    provider — a second `Verify` asks for chains once and the notify
+    window deduplicates the report, and a bare `Verifier` asks on every
+    call (`pkg/trust/engine_test.go`).
+*   The removal: `patrickmn/go-cache` left `go.mod` and `go.sum`, and
+    `go mod tidy && go mod vendor` settled the graph with nothing else
+    moving.

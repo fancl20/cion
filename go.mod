@@ -7,7 +7,6 @@ require (
 	github.com/caddyserver/certmagic v0.25.4
 	github.com/google/go-cmp v0.7.0
 	github.com/gopacket/gopacket v1.3.1
-	github.com/patrickmn/go-cache v2.1.1-0.20180815053127-5633e0862627+incompatible
 	github.com/quic-go/quic-go v0.59.1
 	github.com/scionproto/scion v0.15.1
 	github.com/spf13/cobra v1.10.2

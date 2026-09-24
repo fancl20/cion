@@ -336,3 +336,79 @@ func TestNewestChain(t *testing.T) {
 		t.Errorf("chain valid past its expiry = %v, want nil", chain[0].NotAfter)
 	}
 }
+
+// countingProvider counts the chain queries and TRC reports that reach the
+// wrapped provider.
+type countingProvider struct {
+	trust.Provider
+	chains   int
+	notifies int
+}
+
+func (p *countingProvider) GetChains(ctx context.Context, q trust.ChainQuery,
+	opts ...trust.Option) ([][]*x509.Certificate, error) {
+
+	p.chains++
+	return p.Provider.GetChains(ctx, q, opts...)
+}
+
+func (p *countingProvider) NotifyTRC(ctx context.Context, id cppki.TRCID,
+	opts ...trust.Option) error {
+
+	p.notifies++
+	return p.Provider.NotifyTRC(ctx, id, opts...)
+}
+
+// TestEngineVerifyCaches checks the engine's caches from the outside: a
+// second verification of the same message within the window asks the
+// provider for its chains once, and the notify window deduplicates the
+// repeated TRC report (proposal 0020).
+func TestEngineVerifyCaches(t *testing.T) {
+	f := newEngineFixture(t)
+	ctx := context.Background()
+	provider := &countingProvider{Provider: &trust.NetworkProvider{DB: f.db}}
+	engine := trust.NewEngine(iaNode, f.asKey, provider)
+
+	signedMsg, err := f.engine.Sign(ctx, []byte("ping"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		if _, err := engine.Verify(ctx, signedMsg); err != nil {
+			t.Fatalf("verify: %v", err)
+		}
+	}
+	if provider.chains != 1 {
+		t.Errorf("provider asked for chains %d times, want once", provider.chains)
+	}
+	if provider.notifies != 1 {
+		t.Errorf("provider notified of the TRC %d times, want once", provider.notifies)
+	}
+}
+
+// TestVerifierUncached checks a bare verifier, built without the engine's
+// caches: its provider is asked on every verification (proposal 0020).
+func TestVerifierUncached(t *testing.T) {
+	f := newEngineFixture(t)
+	ctx := context.Background()
+	provider := &countingProvider{Provider: &trust.NetworkProvider{DB: f.db}}
+
+	signedMsg, err := f.engine.Sign(ctx, []byte("ping"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	v := trust.Verifier{Engine: provider}
+	for range 2 {
+		if _, err := v.Verify(ctx, signedMsg); err != nil {
+			t.Fatalf("verify: %v", err)
+		}
+	}
+	if provider.chains != 2 {
+		t.Errorf("provider asked for chains %d times, want once per verification",
+			provider.chains)
+	}
+	if provider.notifies != 2 {
+		t.Errorf("provider notified of the TRC %d times, want once per verification",
+			provider.notifies)
+	}
+}
