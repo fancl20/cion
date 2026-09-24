@@ -8,6 +8,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"slices"
+	"time"
 
 	"github.com/fancl20/cion/pkg/trust"
 
@@ -109,6 +110,73 @@ func (b *bboltDB) InsertChain(ctx context.Context, chain []*x509.Certificate) (b
 	return !existed, nil
 }
 
+// DeleteExpiredChains evicts the chains whose AS certificate expired before
+// the given time, taking an emptied ISD-AS sub-bucket with its last chain;
+// the trcs bucket is not opened (proposal 0018).
+func (b *bboltDB) DeleteExpiredChains(ctx context.Context, t time.Time) (int, error) {
+	// The read pass collects the expired keys, the write pass deletes them —
+	// the two-pass shape the path database's own DeleteExpired carries — so a
+	// malformed entry aborts the sweep having deleted nothing.
+	var dels []chainDeletion
+	if err := b.db.View(func(tx *bbolt.Tx) error {
+		chains := tx.Bucket([]byte("chains"))
+		c := chains.Cursor()
+		for name, _ := c.First(); name != nil; name, _ = c.Next() {
+			subb := chains.Bucket(name).Cursor()
+			for k, v := subb.First(); k != nil; k, v = subb.Next() {
+				chain, err := x509.ParseCertificates(slices.Clone(v))
+				if err != nil {
+					return err
+				}
+				if len(chain) == 0 {
+					return fmt.Errorf("empty chain entry in bucket %s", name)
+				}
+				if chain[0].NotAfter.Before(t) {
+					dels = append(dels, chainDeletion{
+						ia:  slices.Clone(name),
+						key: slices.Clone(k),
+					})
+				}
+			}
+		}
+		return nil
+	}); err != nil {
+		return 0, err
+	}
+	if len(dels) == 0 {
+		return 0, nil
+	}
+	if err := b.db.Update(func(tx *bbolt.Tx) error {
+		chains := tx.Bucket([]byte("chains"))
+		for _, d := range dels {
+			if err := chains.Bucket(d.ia).Delete(d.key); err != nil {
+				return err
+			}
+		}
+		// A sub-bucket emptied of its chains leaves with the last of them: a
+		// shell that outlives its chains is the same accumulation wearing a
+		// smaller shape. The empty ones are collected before any is deleted,
+		// for a bucket's deletion must not ride the cursor that just named
+		// it.
+		var emptied [][]byte
+		c := chains.Cursor()
+		for name, _ := c.First(); name != nil; name, _ = c.Next() {
+			if k, _ := chains.Bucket(name).Cursor().First(); k == nil {
+				emptied = append(emptied, slices.Clone(name))
+			}
+		}
+		for _, name := range emptied {
+			if err := chains.DeleteBucket(name); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		return 0, err
+	}
+	return len(dels), nil
+}
+
 // SignedTRC looks up the TRC identified by the id.
 func (b *bboltDB) SignedTRC(ctx context.Context, id cppki.TRCID) (cppki.SignedTRC, error) {
 	if id.Base.IsLatest() != id.Serial.IsLatest() {
@@ -180,4 +248,11 @@ func chainID(chain []*x509.Certificate) []byte {
 	h.Write(chain[0].Raw)
 	h.Write(chain[1].Raw)
 	return h.Sum(nil)
+}
+
+// chainDeletion names one expired chain: the ISD-AS sub-bucket holding it
+// and its key inside that bucket.
+type chainDeletion struct {
+	ia  []byte
+	key []byte
 }

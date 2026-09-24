@@ -246,6 +246,22 @@ func (d *memDB) InsertChain(ctx context.Context, chain []*x509.Certificate) (boo
 	return true, nil
 }
 
+func (d *memDB) DeleteExpiredChains(ctx context.Context, t time.Time) (int, error) {
+	d.mtx.Lock()
+	defer d.mtx.Unlock()
+	kept := d.chains[:0]
+	var deleted int
+	for _, chain := range d.chains {
+		if chain[0].NotAfter.Before(t) {
+			deleted++
+			continue
+		}
+		kept = append(kept, chain)
+	}
+	d.chains = kept
+	return deleted, nil
+}
+
 func (d *memDB) SignedTRC(ctx context.Context, id cppki.TRCID) (cppki.SignedTRC, error) {
 	d.mtx.Lock()
 	defer d.mtx.Unlock()

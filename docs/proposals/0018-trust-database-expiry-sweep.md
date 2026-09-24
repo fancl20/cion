@@ -140,4 +140,26 @@ no wiring beyond them.
 
 ## Implementation history
 
-*   (To be recorded as the change lands.)
+*   The delete: `DeleteExpiredChains` on `trust.DB` (`pkg/trust/db.go`) and
+    the bbolt store behind it (`pkg/trust/impl/bbolt/db.go`) — the read
+    pass walks the `chains` bucket's sub-buckets and parses every entry,
+    the write pass deletes the collected keys and every sub-bucket the
+    deletions emptied, the `trcs` bucket never opened. The empty sub-bucket
+    names are collected before any `DeleteBucket` runs, for a bucket's
+    deletion must not ride the cursor that just named it.
+*   The retention: `ChainRetention`, an hour, beside the validity constants
+    in `pkg/trust/certs.go`.
+*   The sweep: `sweepChains` on `EnrollmentConfig`
+    (`pkg/controlplane/lifecycle.go`) — a ticker on `ChainSweepInterval`,
+    an hour, whose every pass calls the once-shaped `sweepOnce` with
+    `time.Now()` less `ChainRetention`, errors logging the beaconer's way
+    — spawned by both `RunEnrollment` and `RunCoreEnrollment` before their
+    passes begin.
+*   Tests: the dbtest harness gained the sweep episodes — the expired
+    chains leave with the count naming them, the within-validity chain
+    stays through however many sweeps pass, the emptied name answers
+    nothing and accepts a chain again, the TRC survives; the bbolt suite
+    covers the two-pass shape — a malformed entry aborts with nothing
+    deleted — and the emptied store holding no sub-bucket; the lifecycle
+    suite runs the pass and the loop under `testing/synctest` — the valid
+    query answered exactly as before, the pinned TRC outliving the sweep.

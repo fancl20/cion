@@ -81,8 +81,9 @@ type TestableDB interface {
 func Run(t *testing.T, db TestableDB, cfg Config) {
 	cfg.InitDefaults()
 	tests := map[string]func(*testing.T, trust.DB, Config){
-		"test TRC":   testTRC,
-		"test chain": testChain,
+		"test TRC":         testTRC,
+		"test chain":       testChain,
+		"test chain sweep": testChainSweep,
 	}
 	// Run test suite on DB directly.
 	for name, test := range tests {
@@ -493,6 +494,91 @@ func testChain(t *testing.T, db trust.DB, cfg Config) {
 			}
 		})
 	})
+}
+
+// testChainSweep checks the expired-chain sweep every implementation must
+// carry (proposal 0018): a chain expired before the given time leaves the
+// store, a chain within its validity stays through however many sweeps pass,
+// an emptied ISD-AS name leaves no shell — it answers nothing and accepts a
+// fresh chain again — TRCs survive untouched, and the returned count names
+// what left.
+func testChainSweep(t *testing.T, db trust.DB, cfg Config) {
+	// bern1 and geneva1 expire 2020-06-27 12:00 UTC, bern3 2020-07-01.
+	bern1Chain := loadChainFiles(t, "bern", 1, cfg)
+	bern3Chain := loadChainFiles(t, "bern", 3, cfg)
+	geneva1Chain := loadChainFiles(t, "geneva", 1, cfg)
+	trc := loadTRCFile(t, "ISD1-B1-S1.trc", cfg)
+
+	ctx, cancelF := context.WithTimeout(context.Background(), cfg.Timeout)
+	defer cancelF()
+
+	for _, chain := range [][]*x509.Certificate{bern1Chain, bern3Chain, geneva1Chain} {
+		if _, err := db.InsertChain(ctx, chain); err != nil {
+			t.Fatalf("InsertChain failed: %v", err)
+		}
+	}
+	if _, err := db.InsertTRC(ctx, trc); err != nil {
+		t.Fatalf("InsertTRC failed: %v", err)
+	}
+
+	// Sweeping between the two expiries takes the expired chains and keeps
+	// the one still within its validity; however many further sweeps pass,
+	// the kept chain is never deleted.
+	mid := time.Date(2020, 6, 29, 12, 0, 0, 0, time.UTC)
+	if n, err := db.DeleteExpiredChains(ctx, mid); err != nil {
+		t.Fatalf("DeleteExpiredChains failed: %v", err)
+	} else if n != 2 {
+		t.Errorf("DeleteExpiredChains = %d, want 2 (bern1, geneva1)", n)
+	}
+	for range 2 {
+		if n, err := db.DeleteExpiredChains(ctx, mid); err != nil {
+			t.Fatalf("DeleteExpiredChains failed: %v", err)
+		} else if n != 0 {
+			t.Errorf("DeleteExpiredChains = %d, want 0 (nothing left to take)", n)
+		}
+	}
+	chains, err := db.Chains(ctx, trust.ChainQuery{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if expected := [][]*x509.Certificate{bern3Chain}; !chainsEqual(chains, expected) {
+		t.Errorf("Chains after sweep = %v, want only bern3", chains)
+	}
+
+	// The emptied name answers nothing and accepts a chain again — no shell
+	// outlives its chains.
+	geneva := addr.MustParseIA("1-ff00:0:120")
+	if chains, err = db.Chains(ctx, trust.ChainQuery{IA: geneva}); err != nil {
+		t.Fatal(err)
+	}
+	if len(chains) != 0 {
+		t.Errorf("Chains for the emptied name = %d, want 0", len(chains))
+	}
+	if in, err := db.InsertChain(ctx, geneva1Chain); err != nil || !in {
+		t.Errorf("re-InsertChain into the emptied name = (%v, %v), want (true, nil)", in, err)
+	}
+
+	// Sweeping past every expiry empties the store of chains; the TRC the
+	// sweep never touches survives.
+	late := time.Date(2020, 7, 2, 12, 0, 0, 0, time.UTC)
+	if n, err := db.DeleteExpiredChains(ctx, late); err != nil {
+		t.Fatalf("DeleteExpiredChains failed: %v", err)
+	} else if n != 2 {
+		t.Errorf("DeleteExpiredChains = %d, want 2 (bern3, geneva1)", n)
+	}
+	if chains, err = db.Chains(ctx, trust.ChainQuery{}); err != nil {
+		t.Fatal(err)
+	}
+	if len(chains) != 0 {
+		t.Errorf("Chains after the final sweep = %d, want 0", len(chains))
+	}
+	aTRC, err := db.SignedTRC(ctx, trc.TRC.ID)
+	if err != nil {
+		t.Fatalf("SignedTRC failed: %v", err)
+	}
+	if !cmp.Equal(trc, aTRC) {
+		t.Errorf("SignedTRC after the sweep = %v, want the inserted TRC", aTRC)
+	}
 }
 
 func loadTRCFile(t *testing.T, file string, cfg Config) cppki.SignedTRC {

@@ -56,6 +56,9 @@ func (d *flippableTrustDB) enroll(chain []*x509.Certificate) {
 func (d *flippableTrustDB) InsertChain(context.Context, []*x509.Certificate) (bool, error) {
 	return false, nil
 }
+func (d *flippableTrustDB) DeleteExpiredChains(context.Context, time.Time) (int, error) {
+	return 0, nil
+}
 func (d *flippableTrustDB) SignedTRC(context.Context, cppki.TRCID) (cppki.SignedTRC, error) {
 	return cppki.SignedTRC{}, nil
 }
