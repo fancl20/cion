@@ -124,10 +124,10 @@ The bound is `RunConfig.BatchSize` — the knob the batching design already
 names. Ordering within a queue is preserved because the queue is still
 drained in order; backpressure is unchanged because the queue is still
 bounded and its overflow still drops with the busy-processor reason. The
-processor's supervision
-([proposal 0019](/docs/proposals/0019-dataplane-processor-supervision.md))
-sees the same goroutine, the same panic recovery, the same lifecycle —
-the loop's body changes, not its contract.
+processor's slot
+([proposal 0019](/docs/proposals/0019-dataplane-processor-fail-fast.md))
+sees the same goroutine and the same lifecycle — the loop's body
+changes, not its contract.
 
 The drain is also the boundary the two accountings below flush against.
 A drained batch is one pass of the loop: one clock reading, one flush of

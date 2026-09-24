@@ -144,10 +144,13 @@ func (d *DataPlane) Serve(ctx context.Context) error {
 	for _, u := range d.underlays {
 		u.Start(ctx, d.packetPool, procQs)
 	}
+	// A slot's panic is unrecovered: the invariant breach crashes the
+	// process, the runtime's report names the cause, and the operator's
+	// process supervisor restarts the node (proposal 0019) — a recovered
+	// panic would silently blackhole the flows that hash to the dead slot.
 	for i := 0; i < d.RunConfig.NumProcessors; i++ {
 		d.processors.Add(1)
 		go func(i int) {
-			defer handlePanic()
 			defer d.processors.Done()
 			d.runProcessor(ctx, i, procQs[i], slowQs[i%d.RunConfig.NumSlowPathProcessors])
 		}(i)
@@ -155,7 +158,6 @@ func (d *DataPlane) Serve(ctx context.Context) error {
 	for i := 0; i < d.RunConfig.NumSlowPathProcessors; i++ {
 		d.processors.Add(1)
 		go func(i int) {
-			defer handlePanic()
 			defer d.processors.Done()
 			d.runSlowPathProcessor(ctx, i, slowQs[i])
 		}(i)
