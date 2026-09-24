@@ -25,6 +25,9 @@ const (
 	// EnrollmentTimeout bounds one enrollment attempt: a wedged connection
 	// must not stall the loop renewing through it.
 	EnrollmentTimeout = 10 * time.Second
+	// ChainSweepInterval is the period of the trust database's expired-chain
+	// sweep (proposal 0018).
+	ChainSweepInterval = time.Hour
 )
 
 // EnrollmentConfig configures the lifetime chain lifecycle of a node
@@ -76,8 +79,10 @@ func (cfg EnrollmentConfig) enroll(ctx context.Context) {
 // the newest chain's remaining validity, re-enrolls when it drops below the
 // renewal threshold or when no valid chain exists, and watches the pinned
 // TRC's validity the same way — log only, since a new base TRC means
-// redeploying (ADR-0003).
+// redeploying (ADR-0003). It also runs the trust database's expired-chain
+// sweep on its own interval (proposal 0018).
 func RunEnrollment(ctx context.Context, cfg EnrollmentConfig) {
+	go cfg.sweepChains(ctx)
 	for {
 		select {
 		case <-ctx.Done():
@@ -89,9 +94,11 @@ func RunEnrollment(ctx context.Context, cfg EnrollmentConfig) {
 
 // RunCoreEnrollment runs the founding core's chain lifecycle: the same loop
 // with a local action — self-issuing through the core's issuer whenever the
-// renewal threshold demands it. The synchronous startup self-enrollment is
-// the first pass; this loop keeps the chain valid for the node's lifetime.
+// renewal threshold demands it, and the same expired-chain sweep. The
+// synchronous startup self-enrollment is the first pass; this loop keeps the
+// chain valid for the node's lifetime.
 func RunCoreEnrollment(ctx context.Context, cfg EnrollmentConfig) {
+	go cfg.sweepChains(ctx)
 	for {
 		select {
 		case <-ctx.Done():
@@ -193,5 +200,33 @@ func logTRCValidity(ctx context.Context, cfg EnrollmentConfig) {
 	case remaining < trust.ChainRenewalThreshold:
 		slog.Warn("Pinned TRC approaching expiry; a new base TRC means redeploying",
 			"isd_as", cfg.IA, "remaining", remaining)
+	}
+}
+
+// sweepChains runs the trust database's expired-chain sweep until the
+// context is canceled (proposal 0018), the beaconer's own loop shape: a
+// ticker on ChainSweepInterval whose every pass deletes the chains expired
+// past the retention window. The enrollment loops already own the store's
+// validity semantics; the sweep is the same reading done for the store's
+// size instead of the node's chain.
+func (cfg EnrollmentConfig) sweepChains(ctx context.Context) {
+	ticker := time.NewTicker(ChainSweepInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			cfg.sweepOnce(ctx)
+		}
+	}
+}
+
+// sweepOnce deletes the trust database's chains expired past the retention
+// window; errors log the beaconer's sweepOnce way, and a successful sweep is
+// silent, for it is the common case.
+func (cfg EnrollmentConfig) sweepOnce(ctx context.Context) {
+	if _, err := cfg.DB.DeleteExpiredChains(ctx, time.Now().Add(-trust.ChainRetention)); err != nil {
+		slog.Error("Sweeping expired chains", "err", err)
 	}
 }

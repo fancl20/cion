@@ -5,6 +5,7 @@ import (
 	"crypto/x509"
 	"encoding/json/v2"
 	"fmt"
+	"time"
 
 	"github.com/scionproto/scion/pkg/addr"
 	"github.com/scionproto/scion/pkg/scrypto/cppki"
@@ -45,6 +46,11 @@ type DB interface {
 	Chains(context.Context, ChainQuery) ([][]*x509.Certificate, error)
 	// InsertChain inserts the given chain.
 	InsertChain(context.Context, []*x509.Certificate) (bool, error)
+	// DeleteExpiredChains evicts the chains whose AS certificate expired
+	// before the given time, and reports how many were evicted; TRCs are
+	// untouched, for the pinned base TRC anchors verification past its
+	// expiry as well (ADR-0003).
+	DeleteExpiredChains(ctx context.Context, t time.Time) (int, error)
 
 	// SignedTRC looks up the TRC identified by the id.
 	SignedTRC(ctx context.Context, id cppki.TRCID) (cppki.SignedTRC, error)

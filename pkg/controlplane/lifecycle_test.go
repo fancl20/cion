@@ -14,6 +14,7 @@ import (
 	"testing/synctest"
 	"time"
 
+	"github.com/google/go-cmp/cmp"
 	"github.com/scionproto/scion/pkg/scrypto/cppki"
 
 	"github.com/fancl20/cion/pkg/trust"
@@ -184,6 +185,96 @@ func TestEnrollmentPassFailing(t *testing.T) {
 		}
 		if got := lf.core.renewals(); got != 0 {
 			t.Errorf("renewals = %d, want 0 against a dark core", got)
+		}
+	})
+}
+
+// TestChainSweepPass checks one sweep pass of the enrollment loops' trust
+// database sweep (proposal 0018) in a fake-time bubble: a chain still within
+// its validity is never deleted by however many sweeps pass; past expiry and
+// the retention window it leaves, the store answers every valid query
+// exactly as before, and the pinned TRC survives a sweep of a store whose
+// chains are all expired.
+func TestChainSweepPass(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		f := newTrustFixture(t)
+		lf := newLifecycleFixture(t, f)
+		ctx := context.Background()
+		// Pin the fixture's genesis TRC the way enrollment does.
+		if _, err := lf.db.InsertTRC(ctx, f.trc); err != nil {
+			t.Fatal(err)
+		}
+		lf.enroll(t)
+
+		// The enrolled chain is valid for three days: however many sweeps
+		// pass, it stays.
+		for range 3 {
+			lf.cfg.sweepOnce(ctx)
+		}
+		chains, err := lf.db.Chains(ctx, trust.ChainQuery{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(chains) != 1 {
+			t.Fatalf("chains after sweeps of a valid chain = %d, want 1", len(chains))
+		}
+
+		// Past expiry the chain is already invisible to a query bounded by
+		// the present; past the retention window one sweep pass removes it
+		// for good — an unfiltered read is what changes, and nothing else.
+		time.Sleep(trust.ASValidity + trust.ChainRetention + time.Minute)
+		now := time.Now()
+		chains, err = lf.db.Chains(ctx, trust.ChainQuery{
+			Validity: cppki.Validity{NotBefore: now, NotAfter: now},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(chains) != 0 {
+			t.Fatalf("valid query past expiry = %d chains, want 0", len(chains))
+		}
+		lf.cfg.sweepOnce(ctx)
+		chains, err = lf.db.Chains(ctx, trust.ChainQuery{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(chains) != 0 {
+			t.Errorf("chains after the sweep = %d, want 0 (expired chain held)", len(chains))
+		}
+
+		// The pinned TRC survives the sweep of the emptied store.
+		trc, err := lf.db.SignedTRC(ctx, cppki.TRCID{ISD: nodeIATest.ISD(), Base: 1, Serial: 1})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !cmp.Equal(trc, f.trc) {
+			t.Error("the pinned TRC did not survive the sweep")
+		}
+	})
+}
+
+// TestChainSweepLoop checks the sweep's own loop: its hourly ticker fires
+// under fake time and deletes the expired chain without any pass of the
+// enrollment loop itself.
+func TestChainSweepLoop(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		f := newTrustFixture(t)
+		lf := newLifecycleFixture(t, f)
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		go lf.cfg.sweepChains(ctx)
+		lf.enroll(t)
+
+		// The chain expires and the retention window passes; the ticker's
+		// next fire sweeps it.
+		time.Sleep(trust.ASValidity + trust.ChainRetention + 2*ChainSweepInterval)
+		synctest.Wait()
+		chains, err := lf.db.Chains(ctx, trust.ChainQuery{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(chains) != 0 {
+			t.Errorf("chains after the sweep's ticker fired = %d, want 0", len(chains))
 		}
 	})
 }
