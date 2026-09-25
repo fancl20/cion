@@ -37,7 +37,7 @@ in-overlay service needs.
 
 This ADR decides how a host selects its egress, what carries the service, and
 what the host tunnel carries. Host membership is
-[ADR-0011](/docs/adrs/0011-admit-hosts-with-an-authorized-join.md)'s subject;
+[ADR-0011](/docs/adrs/0011-serve-hosts-with-a-tailscale-coordination-service.md)'s subject;
 NAT traversal remains the deferred milestone
 [proposal 0006](/docs/proposals/0006-wireguard-gateway-application.md) left
 it. Nothing here depends on either.
