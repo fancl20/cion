@@ -48,11 +48,12 @@ the list's origin is manual; and the core holds a WebPKI identity — domain
 and certificate machinery — a coordination endpoint can ride.
 
 This ADR decides how a host joins, what the host runs, where membership
-lives, and who assigns addresses. Egress selection changes ground under this
-record — the client's exit-node toggle takes the subject
-[ADR-0012](/docs/adrs/0012-serve-egress-as-an-overlay-socks-service.md)
-drafted its SOCKS service for — and that record's disposition is named
-below.
+lives, and who assigns addresses. Egress is none of these: the subject
+stays
+[ADR-0012](/docs/adrs/0012-serve-egress-as-an-overlay-socks-service.md)'s,
+though its ground moves under this record — the SOCKS service was drafted
+against the plain-WireGuard host boundary replaced here, and must be
+re-grounded on the tailnet boundary this record draws.
 
 ## Decision drivers
 
@@ -184,15 +185,14 @@ instruments **in the plugin** — realized as follows:
     zero-conf default.
 4.  **The netmap holds one peer: the node.** Each host's netmap names
     exactly its node — public key, host-facing endpoint, and allowed IPs
-    covering the tailnet — so the client's data plane is the access leg and
-    CION's mesh is everything beyond: host to node is the client's own
-    WireGuard over the internet, node to node the SCION mesh, and a host
-    reaches any peer through its node, same-node peers hairpinning locally.
-    The mesh is untouched. An egress-marked node is advertised with a
-    default route — the standard client's exit-node toggle — which is the
-    endhost routing action ADR-0012 pursued by bespoke means; this record
-    takes that record's subject, and its disposition is a consequence
-    below.
+    covering the tailnet and nothing else — so the client's data plane is
+    the access leg and CION's mesh is everything beyond: host to node is
+    the client's own WireGuard over the internet, node to node the SCION
+    mesh, and a host reaches any peer through its node, same-node peers
+    hairpinning locally. The mesh is untouched. No default route is
+    advertised: the tunnel carries the tailnet alone, internet egress is
+    not a property of the join but a service on the overlay, and how that
+    service is served is ADR-0012's to decide on this boundary.
 5.  **Membership is the coordination registry, distributed by the
     directory.** The registry is the single record — one gate, one
     artifact: the key, the address, the owning node — and, where the
@@ -231,9 +231,9 @@ instruments **in the plugin** — realized as follows:
     directory's, fetched on cadence.
 *   Addresses are unique by construction and stable per key; a
     re-registering host changes nothing.
-*   Exit selection is the client's native toggle over an advertised default
-    route: the endhost routing action, with no bespoke service to build or
-    secure.
+*   The host tunnel carries the tailnet alone: no routing decision hides
+    inside the join, and egress stays a service the egress record decides
+    rather than a property of membership.
 *   One plugin answers every boundary: enrollment and registration ask the
     same question with different context, and a single selection serves
     both.
@@ -270,9 +270,16 @@ instruments **in the plugin** — realized as follows:
 *   Admission stays durable with no removal mechanism: a lost host is a
     member until a later milestone adds its revocation, the directory the
     audit.
-*   ADR-0012's ground moves: its SOCKS service was drafted against a
-    plain-WireGuard host boundary this record replaces, and until that
-    record is re-decided the two drafts disagree about the host tunnel.
+*   Transparent internet egress through the tunnel ceases: no default
+    route is advertised, so a host reaches the internet only through
+    whatever service ADR-0012's re-grounding lands — SOCKS-aware
+    applications or a local forwarder until then — and the netstack egress
+    and echo relay the exit model built stand unfed.
+*   ADR-0012's ground moves: its SOCKS service was drafted against the
+    plain-WireGuard host boundary this record replaces, and the record
+    must be re-grounded on the tailnet boundary — its overlay-only tunnel
+    and destination-addressed service surviving nearly intact, but until
+    it is, its text describes the old host.
 *   A registration completes at the directory's cadence — the node programs
     a joined host when its next fetch lands — a pacing question the
     implementing proposal owns.
@@ -310,8 +317,6 @@ instruments **in the plugin** — realized as follows:
     demonstrates it, and the client libraries vendor like any other
     dependency — while the client base is bounded and older-server
     compatible by the protocol's own design.
-*   Good, because the endhost's exit choice becomes the client's native
-    toggle rather than a service to build.
 *   Bad, because it costs the standing protocol commitment, the vendor
     packages in the tree, and the single most privileged host-facing
     endpoint.
