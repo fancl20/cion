@@ -539,7 +539,7 @@ func StartNode(t *testing.T, cfg NodeConfig) *Node {
 
 	var webPKIConf *tls.Config
 	if core {
-		conf, err := webpki.ManageTLSCert(ctx, webpki.TLSCertConfig{
+		manager, err := webpki.PrepareTLSCert(ctx, webpki.TLSCertConfig{
 			Domain:   TestDomain,
 			CertFile: wpki.certFile,
 			KeyFile:  wpki.keyFile,
@@ -547,7 +547,7 @@ func StartNode(t *testing.T, cfg NodeConfig) *Node {
 		if err != nil {
 			t.Fatal(err)
 		}
-		webPKIConf = conf
+		webPKIConf = manager.TLSConfig()
 	}
 	svc := &controlplane.Services{
 		TrustService: &controlplane.TrustService{DB: trustDB, Issuer: issuer},

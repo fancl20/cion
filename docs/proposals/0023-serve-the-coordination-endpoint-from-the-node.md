@@ -169,14 +169,16 @@ it binds — the message standing as it does.
 
 The fork in `assembleEndpoint` retires. Every core prepares the identity
 and holds the certificate manager; after the applications assemble, the
-node knows the handlers it carries; at `start` it binds the HTTPS server
-synchronously — the address resolved, the listener held — and only then
-launches the certificate maintenance loop, so a first issuance's probe
-finds the port answered by structure rather than by retry. The bind
-decision is the node's own: the ACME-managed identity binds for the
-challenge alone when no app contributes handlers, the mounted handlers
-bind beside it when one does, and a static-file identity on a core whose
-apps mount nothing leaves the port unbound, as the tree behaves today.
+node knows the handlers it carries; the bind lands there, a phase of the
+assembly itself — the endpoint conn's own pattern of binding at assembly
+and serving at `start` — the address resolved, the listener held, so
+`start` launches the serving loop and the certificate maintenance against
+a listening server and a first issuance's probe finds the port answered by
+structure rather than by retry. The bind decision is the node's own: the
+ACME-managed identity binds for the challenge alone when no app
+contributes handlers, the mounted handlers bind beside it when one does,
+and a static-file identity on a core whose apps mount nothing leaves the
+port unbound, as the tree behaves today.
 
 The integration harness's override keeps its meaning: the coordination
 placement names the address the node binds and the certificate the relay
@@ -209,3 +211,50 @@ application that consumed it before.
     under a slow consumer is not cut by a server timeout.
 
 ## Implementation history
+
+*   The library: `pkg/webpki` grew the identity's serving half —
+    `ListenHTTPS` binding the address the assembly names on the shared
+    identity's clone (`http/1.1` and `acme-tls/1` beside the one
+    `GetCertificate` that answers both) and `ServeHTTPS` serving the
+    mounted handler under a read-header timeout alone, the listen/serve
+    pair the application owned moved whole — while `ManageTLSCert` and
+    the dedicated challenge listener (`serveTLSALPN01`) retired.
+    `HTTPSPort` names the port beside them, and `ACMEManaged` names the
+    fact the bind decision reads.
+*   The application: the `TLS` and `Addr` fields, the listener, and the
+    serving loop retired from `pkg/apps/coordination` — `New` builds the
+    three surfaces into the one handler `Handler()` hands to its
+    mounter, and `Close` keeps its work, the served noise conversations
+    and the relay's connected clients.
+*   The assembly: `assembleEndpoint` prepares the identity on every core,
+    the fork on `WireguardConfig` gone, and the new `assembleHTTPS`
+    phase — after `setupCoordination`, so the mounted handlers are known
+    — mounts the coordination application at its mux and binds the
+    address the node names: the harness placement when it names one, else
+    the control host at the HTTPS port, a wildcard control address
+    refused with the standing message. The bind is the assembly's own
+    act, the endpoint conn's pattern — bind at assembly, serve at
+    `start` — one step stronger than this proposal's letter, for a
+    failed bind refuses the boot itself; the body's bind sentence is
+    amended to match. The node releases the listener before the
+    application in `Close`, reverse startup order.
+*   The hand-wired integration harness and the enrollment episode moved
+    from `ManageTLSCert` to `PrepareTLSCert` and `TLSConfig` — static
+    files throughout, so no challenge listener stood to lose.
+*   Tests: the server's, in `pkg/webpki/tls_test.go` — a plain HTTP/1.1
+    request reaching a mounted handler over a static-file identity, the
+    port held when the bind returns, and an `acme-tls/1` client
+    completing its handshake against certmagic's challenge certificate
+    served from a cache seeded the way a distributed solve stores it; the
+    application's episodes re-served on an externally assembled server
+    over a test certificate, the shape the node's assembly serves; the
+    assembly's, in `internal/services/https_test.go` — the bind at the
+    placement with the port answering, the static-file-and-nothing
+    negative leaving the port unbound, and the wildcard refusal with the
+    published-endpoint message; the integration suites standing as they
+    ran, the vendored client engine joining through the node-served
+    endpoint on the harness's pinned placement, and the open map streams
+    of their logins carrying the long-lived-conversation proof a server
+    timeout would have cut. The ACME-managed identity's first issuance
+    against a live CA remains the untested arm, as it was before: no
+    episode in the tree can stand up Let's Encrypt.

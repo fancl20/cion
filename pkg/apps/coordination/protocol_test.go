@@ -7,6 +7,7 @@ import (
 	"crypto/x509"
 	"encoding/binary"
 	"encoding/json/v2"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -27,24 +28,38 @@ import (
 	"github.com/fancl20/cion/pkg/controlplane"
 )
 
-// serveCoordination binds the application's endpoint on a free port and
-// serves it, returning the address it answers on — bound before the call
-// returns, so a client may dial at once.
-func serveCoordination(t *testing.T, a *App) string {
+// serveCoordination serves the application's handler on an externally
+// assembled HTTPS server over the given certificate, bound on a free port —
+// the node assembly's own shape (proposal 0023): the listener and the TLS
+// identity the server's, the three surfaces the application's. The address
+// is bound before the call returns, so a client may dial at once.
+func serveCoordination(t *testing.T, a *App, tlsCfg *tls.Config) string {
 	t.Helper()
-	a.cfg.Addr = fmt.Sprintf("127.0.0.1:%d", freePort(t))
-	listener, err := a.listen()
+	clone := tlsCfg.Clone()
+	clone.NextProtos = []string{"http/1.1"}
+	listener, err := tls.Listen("tcp",
+		fmt.Sprintf("127.0.0.1:%d", freePort(t)), clone)
 	if err != nil {
 		t.Fatal(err)
 	}
+	srv := &http.Server{
+		Handler:           a.Handler(),
+		ReadHeaderTimeout: 30 * time.Second,
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- a.serve(ctx, listener) }()
+	go func() {
+		<-ctx.Done()
+		_ = listener.Close()
+	}()
+	go func() { done <- srv.Serve(listener) }()
 	t.Cleanup(func() {
 		cancel()
 		select {
 		case err := <-done:
-			if err != nil {
+			// The listener's close is the shutdown's own act — the same
+			// read the node's serving loop makes of the exit.
+			if err != nil && !errors.Is(err, http.ErrServerClosed) && ctx.Err() == nil {
 				t.Errorf("the coordination endpoint exited: %v", err)
 			}
 		case <-time.After(5 * time.Second):
@@ -191,8 +206,8 @@ func TestProtocolRegisterAndMap(t *testing.T) {
 		t.Fatal(err)
 	}
 	roots, tlsCfg := testCert(t)
-	a := testApp(t, Config{Store: store, TLS: tlsCfg})
-	addr := serveCoordination(t, a)
+	a := testApp(t, Config{Store: store})
+	addr := serveCoordination(t, a, tlsCfg)
 
 	client := noiseHTTP(t, addr, roots, a.machineKey.Public())
 	host := key.NewNode()
@@ -255,8 +270,8 @@ func TestProtocolRegistrationVerdicts(t *testing.T) {
 	}
 	auth := &askAuthorizer{}
 	roots, tlsCfg := testCert(t)
-	a := testApp(t, Config{Store: store, TLS: tlsCfg, Authorizer: auth})
-	addr := serveCoordination(t, a)
+	a := testApp(t, Config{Store: store, Authorizer: auth})
+	addr := serveCoordination(t, a, tlsCfg)
 	client := noiseHTTP(t, addr, roots, a.machineKey.Public())
 
 	// Pending: refused, nothing recorded, and the client's own polling
@@ -325,8 +340,8 @@ func TestProtocolRegistrationVerdicts(t *testing.T) {
 func TestProtocolMapRequiresRegistration(t *testing.T) {
 	store := &memStore{}
 	roots, tlsCfg := testCert(t)
-	a := testApp(t, Config{Store: store, TLS: tlsCfg})
-	addr := serveCoordination(t, a)
+	a := testApp(t, Config{Store: store})
+	addr := serveCoordination(t, a, tlsCfg)
 	client := noiseHTTP(t, addr, roots, a.machineKey.Public())
 	if _, err := fetchMap(t, client, key.NewNode()); err == nil {
 		t.Error("an unregistered key mapped, want refusal")

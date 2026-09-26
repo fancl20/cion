@@ -7,6 +7,8 @@ import (
 	"crypto/x509"
 	"fmt"
 	"log/slog"
+	"net"
+	"net/http"
 	"sync"
 	"time"
 
@@ -85,12 +87,20 @@ type node struct {
 	endpointConn *scion.Conn
 	webPKI       *tls.Config
 	certMgr      *webpki.CertManager
+	// httpsLn and httpsHandler are the node's HTTPS server (proposal
+	// 0023): the listener the assembly holds on internet HTTPS's port —
+	// answering the ACME TLS-ALPN challenge beside the mounted apps'
+	// handlers — and those handlers. nil when nothing binds: a non-core,
+	// or a static-file identity on a core whose apps mount nothing.
+	httpsLn      net.Listener
+	httpsHandler http.Handler
 	services     *controlplane.Services
 	responder    *responder
 	wireguard    *wireguard.App
 	// coordination is the core's coordination application (ADR-0011),
 	// assembled beside the WireGuard application when the node's arguments
-	// name a wireguard configuration; nil on every other node.
+	// name a wireguard configuration; nil on every other node. It owns no
+	// listener: its surfaces mount on the node's HTTPS server.
 	coordination *coordination.App
 
 	// enrollAuth gates the trust service's first issuance and the
@@ -270,6 +280,9 @@ func setupNode(ctx context.Context, cfg NodeConfig, opts DataplaneOptions) (n *n
 	if err = n.setupCoordination(); err != nil {
 		return n, err
 	}
+	if err = n.assembleHTTPS(); err != nil {
+		return n, err
+	}
 	return n, nil
 }
 
@@ -278,6 +291,9 @@ func setupNode(ctx context.Context, cfg NodeConfig, opts DataplaneOptions) (n *n
 // point setupNode can fail. The loops' own sockets (endpoint, responder,
 // clients) close with their owners when the process exits.
 func (n *node) Close() {
+	if n.httpsLn != nil {
+		_ = n.httpsLn.Close()
+	}
 	if n.coordination != nil {
 		// Before the wireguard application, whose store the coordination
 		// application borrows its view of.
@@ -383,10 +399,19 @@ func (n *node) start(ctx context.Context) {
 			return nil
 		})
 	}
+	if n.httpsLn != nil {
+		// The node's HTTPS server (proposal 0023): the listener is held
+		// from assembly, and the certificate maintenance below launches
+		// only after it — a first issuance's probe finds the port
+		// answered.
+		ln, handler := n.httpsLn, n.httpsHandler
+		runBackground(ctx, "https server", func(ctx context.Context) error {
+			return n.certMgr.ServeHTTPS(ctx, ln, handler)
+		})
+	}
 	if n.certMgr != nil {
-		// The certificate maintenance runs beside the servers that present
-		// it; under ACME the coordination endpoint answers the TLS-ALPN
-		// challenge on the port it serves.
+		// The certificate maintenance runs beside the server that presents
+		// it; static files manage nothing, so the loop is a no-op for them.
 		runBackground(ctx, "certificate management", func(ctx context.Context) error {
 			return n.certMgr.Manage(ctx)
 		})
@@ -394,11 +419,6 @@ func (n *node) start(ctx context.Context) {
 	if n.wireguard != nil {
 		runBackground(ctx, "wireguard", func(ctx context.Context) error {
 			return n.wireguard.Run(ctx)
-		})
-	}
-	if n.coordination != nil {
-		runBackground(ctx, "coordination", func(ctx context.Context) error {
-			return n.coordination.Run(ctx)
 		})
 	}
 }

@@ -270,39 +270,29 @@ func (n *node) assembleMonitor() error {
 }
 
 // assembleEndpoint binds the control endpoint's socket and, on the core,
-// its WebPKI certificate. Every node serves its ConnectRPC services over
-// HTTP/3 on the endpoint port — the drafts' beside the loaded provider's
-// mounts, the drafts' service resolution answering beside them on the same
-// socket — and the core's endpoint additionally serves the bootstrap
-// channel for clients offering its domain as the TLS server name.
+// prepares its WebPKI certificate. Every node serves its ConnectRPC
+// services over HTTP/3 on the endpoint port — the drafts' beside the loaded
+// provider's mounts, the drafts' service resolution answering beside them
+// on the same socket — and the core's endpoint additionally serves the
+// bootstrap channel for clients offering its domain as the TLS server
+// name. Every core prepares the identity the same way (proposal 0023): the
+// node's HTTPS server — assembled after the applications mount — serves it
+// and answers the ACME TLS-ALPN challenge on it, so no core's TLS path
+// branches on an app's presence.
 func (n *node) assembleEndpoint(ctx context.Context) error {
 	if n.ident.asType == trust.ASTypeCore {
-		certCfg := webpki.TLSCertConfig{
+		manager, err := webpki.PrepareTLSCert(ctx, webpki.TLSCertConfig{
 			Domain:   n.cfg.Domain,
 			Email:    n.cfg.AcmeEmail,
 			CertFile: n.cfg.CertFile,
 			KeyFile:  n.cfg.KeyFile,
 			Storage:  filepath.Join(n.cfg.State, "certs"),
+		})
+		if err != nil {
+			return err
 		}
-		if n.cfg.WireguardConfig != "" {
-			// The coordination application serves this core's port 443 and
-			// answers the ACME TLS-ALPN challenge on it itself, so the
-			// dedicated challenge listener never stands: the identity is
-			// prepared here and maintained under start, its configuration
-			// cloned by both serving surfaces (ADR-0011).
-			manager, err := webpki.PrepareTLSCert(ctx, certCfg)
-			if err != nil {
-				return err
-			}
-			n.certMgr = manager
-			n.webPKI = manager.TLSConfig()
-		} else {
-			webPKI, err := webpki.ManageTLSCert(ctx, certCfg)
-			if err != nil {
-				return err
-			}
-			n.webPKI = webPKI
-		}
+		n.certMgr = manager
+		n.webPKI = manager.TLSConfig()
 	}
 	endpointConn, err := n.scionConn(controlplane.EndpointPort)
 	if err != nil {

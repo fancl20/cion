@@ -2,27 +2,16 @@ package coordination
 
 import (
 	"context"
-	"crypto/tls"
 	"errors"
-	"fmt"
-	"log/slog"
-	"net"
 	"net/http"
 	"sync"
 	"time"
 
-	"github.com/mholt/acmez/v3"
 	"tailscale.com/types/key"
 
 	"github.com/fancl20/cion/pkg/apps/wireguard"
 	"github.com/fancl20/cion/pkg/controlplane"
 )
-
-// DefaultPort is the coordination endpoint's port: the one port internet
-// HTTPS means, beside which the ACME TLS-ALPN challenge is answered — the
-// dedicated challenge listener a coordination-serving core once needed
-// retires with this server standing on 443.
-const DefaultPort = "443"
 
 // Store is the registry the coordination application works on: the core's
 // directory store, read for node entries and written with host entries. The
@@ -55,15 +44,6 @@ type Config struct {
 	// Domain is the core's domain: the name the certificate answers for
 	// and the tailnet's own.
 	Domain string
-	// Addr is the HTTPS listen address, "host:port"; the port defaults to
-	// DefaultPort when Addr names none.
-	Addr string
-	// TLS presents the WebPKI certificate — certmagic's machinery behind
-	// --domain, the same GetCertificate the SCION endpoint's channel rides,
-	// consumed here where hosts can reach it: hosts are plain internet
-	// clients. Its GetCertificate also answers the TLS-ALPN challenge on
-	// this listener.
-	TLS *tls.Config
 	// Store is the registry: node entries read for the netmap and
 	// allocation, host entries written at admission.
 	Store Store
@@ -89,33 +69,35 @@ type Config struct {
 	RelayOnly bool
 }
 
-// App is the coordination application (ADR-0011): an internet-facing HTTPS
-// server on the core's domain presenting the WebPKI certificate, the noise
-// channel of the client protocol inside it carrying registration behind the
-// admission seam and the netmap holding one peer, and the DERP relay
-// fallback beside them. Minimal by decision: no ACL engine, no naming, no
-// user management, no key expiry, no credential minting.
+// App is the coordination application (ADR-0011): the noise channel of the
+// client protocol carrying registration behind the admission seam, the
+// netmap holding one peer, and the DERP relay fallback — its three surfaces
+// handed to the node's assembly, which serves them over the core's WebPKI
+// identity on the HTTPS port it owns (proposal 0023). Minimal by decision:
+// no ACL engine, no naming, no user management, no key expiry, no
+// credential minting, no listener of its own.
 type App struct {
 	cfg        Config
 	machineKey key.MachinePrivate
 
-	derp  derpServer
-	https *http.Server
+	derp derpServer
+	// handler is the mounted surface: the three paths of the client
+	// protocol, one handler.
+	handler http.Handler
 
 	// wg waits for the served noise conversations, so Close waits for what
-	// Run began.
+	// the mounting began.
 	wg sync.WaitGroup
 }
 
 // New assembles the application: keys load or create in its own state, the
-// DERP server stands on its node key, and the two HTTP surfaces mount — the
-// /ts2021 upgrade into the noise channel, the /derp relay. Run serves.
+// DERP server stands on its node key, and the HTTP surface builds — the
+// /ts2021 upgrade into the noise channel, the /derp relay, and the /key
+// fetch over plain TLS beside them. Handler hands the surface to its
+// mounter.
 func New(cfg Config) (*App, error) {
 	if cfg.Domain == "" {
 		return nil, errors.New("no domain configured")
-	}
-	if cfg.TLS == nil {
-		return nil, errors.New("no TLS configuration for the coordination endpoint")
 	}
 	if cfg.Store == nil {
 		return nil, errors.New("no registry store configured")
@@ -142,61 +124,20 @@ func New(cfg Config) (*App, error) {
 	// The client's first exchange is the key fetch over plain TLS: the
 	// noise machine key it must know before the handshake can begin.
 	mux.HandleFunc("/key", a.handleKey)
-	// The outer server speaks HTTP/1.1 — the client protocol's upgrade and
-	// the relay's both ride it — and answers the ACME TLS-ALPN challenge
-	// beside, through the shared certificate machinery.
-	tlsCfg := cfg.TLS.Clone()
-	tlsCfg.NextProtos = []string{"http/1.1", acmez.ACMETLS1Protocol}
-	a.https = &http.Server{
-		Handler:           mux,
-		TLSConfig:         tlsCfg,
-		ReadHeaderTimeout: 30 * time.Second,
-	}
+	a.handler = mux
 	return a, nil
 }
 
-// Run serves the coordination endpoint until the context is canceled — the
-// core's one host-facing surface, beside the WireGuard application.
-func (a *App) Run(ctx context.Context) error {
-	listener, err := a.listen()
-	if err != nil {
-		return err
-	}
-	return a.serve(ctx, listener)
-}
+// Handler returns the application's HTTP surface — the /key fetch, the
+// /ts2021 upgrade into the noise channel, and the /derp relay — for the
+// assembly's mux to mount. The serving server, the listener, and the TLS
+// identity are the assembly's; the keys, the state, and the conversations
+// stay the application's.
+func (a *App) Handler() http.Handler { return a.handler }
 
-// listen binds the coordination endpoint's HTTPS port.
-func (a *App) listen() (net.Listener, error) {
-	addr := a.cfg.Addr
-	if _, port, err := net.SplitHostPort(addr); err != nil || port == "" {
-		addr = net.JoinHostPort(addr, DefaultPort)
-	}
-	listener, err := tls.Listen("tcp", addr, a.https.TLSConfig)
-	if err != nil {
-		return nil, fmt.Errorf("binding the coordination endpoint: %w", err)
-	}
-	return listener, nil
-}
-
-// serve answers the endpoint until the context is canceled.
-func (a *App) serve(ctx context.Context, listener net.Listener) error {
-	go func() {
-		<-ctx.Done()
-		_ = listener.Close()
-	}()
-	slog.Info("Serving the coordination application",
-		"domain", a.cfg.Domain, "addr", listener.Addr().String())
-	err := a.https.Serve(listener)
-	if err != nil && !errors.Is(err, http.ErrServerClosed) && ctx.Err() == nil {
-		return err
-	}
-	return nil
-}
-
-// Close retires the application: the HTTPS server and its conversations,
-// the relay with its connected clients.
+// Close retires the application: the served noise conversations and the
+// relay with its connected clients.
 func (a *App) Close() error {
-	_ = a.https.Close()
 	a.wg.Wait()
 	return a.derp.close()
 }

@@ -11,7 +11,17 @@ import (
 	"time"
 
 	"github.com/caddyserver/certmagic"
+	"github.com/mholt/acmez/v3"
 )
+
+// HTTPSPort is the node's HTTPS port — internet HTTPS's one port, where the
+// ACME TLS-ALPN challenge is answered beside whatever protocols the mounted
+// apps speak.
+const HTTPSPort = "443"
+
+// readHeaderTimeout bounds one request's header read — the only
+// server-level bound the HTTPS surface carries.
+const readHeaderTimeout = 30 * time.Second
 
 // TLSCertConfig describes how the endpoint's TLS certificate is obtained:
 // explicit certificate files, or a certificate for the domain managed via
@@ -47,14 +57,13 @@ type CertManager struct {
 }
 
 // PrepareTLSCert prepares the certificate identity without binding the
-// TLS-ALPN-01 challenge port: with certificate files configured it loads
-// them once; otherwise certmagic's ACME machinery stands ready, its
-// HTTP-01 challenge answered on the dedicated port 80, and the maintenance
-// runs under Manage. A caller that serves its own TLS on port 443 — the
-// coordination endpoint of ADR-0011, whose GetCertificate answers the
-// TLS-ALPN-01 challenge beside its own protocols — takes this half; a
-// caller that serves nothing on 443 takes ManageTLSCert, which binds the
-// dedicated challenge listener.
+// HTTPS port: with certificate files configured it loads them once;
+// otherwise certmagic's ACME machinery stands ready, its HTTP-01 challenge
+// answered on the dedicated port 80, and the maintenance runs under
+// Manage. Every core takes this half and serves it on the node's HTTPS
+// server — ListenHTTPS and ServeHTTPS below — where the TLS-ALPN-01
+// challenge is answered beside the mounted apps' own protocols (proposal
+// 0023).
 func PrepareTLSCert(ctx context.Context, cfg TLSCertConfig) (*CertManager, error) {
 	if cfg.CertFile != "" || cfg.KeyFile != "" {
 		cert, err := tls.LoadX509KeyPair(cfg.CertFile, cfg.KeyFile)
@@ -110,6 +119,12 @@ func PrepareTLSCert(ctx context.Context, cfg TLSCertConfig) (*CertManager, error
 // copied: a serving surface clones it and names its own protocols.
 func (m *CertManager) TLSConfig() *tls.Config { return m.tlsCfg }
 
+// ACMEManaged reports whether certmagic maintains the identity — the
+// certificate obtained and renewed under ACME, its TLS-ALPN-01 challenge
+// answered on the HTTPS port. Static files manage nothing and bind no port
+// of their own.
+func (m *CertManager) ACMEManaged() bool { return m.magic != nil }
+
 // Manage maintains the certificate — obtaining it at first need and
 // renewing it on the cache's own schedule. Static files manage nothing.
 func (m *CertManager) Manage(ctx context.Context) error {
@@ -122,25 +137,55 @@ func (m *CertManager) Manage(ctx context.Context) error {
 	return nil
 }
 
-// ManageTLSCert prepares the certificate identity and serves the parts a
-// core that holds no port of its own needs: the ACME TLS-ALPN-01 challenge
-// answered on a dedicated TCP listener, port 443, and the maintenance
-// running until the context ends. With certificate files configured it
-// loads them once.
-func ManageTLSCert(ctx context.Context, cfg TLSCertConfig) (*tls.Config, error) {
-	manager, err := PrepareTLSCert(ctx, cfg)
+// ListenHTTPS binds the node's HTTPS server on the address the assembly
+// names — the listener held when the call returns, so the certificate
+// maintenance launches against a listening server and a first issuance's
+// probe finds the port answered. The TLS configuration is the shared
+// identity's clone advertising http/1.1 and the ACME TLS-ALPN name: the
+// mounted handler's protocol and the challenge inside one handshake, both
+// answered by the one GetCertificate.
+func (m *CertManager) ListenHTTPS(addr string) (net.Listener, error) {
+	ln, err := tls.Listen("tcp", addr, m.httpsTLSConfig())
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("binding the HTTPS port: %w", err)
 	}
-	if manager.magic != nil {
-		if err := serveTLSALPN01(ctx, manager.magic.TLSConfig()); err != nil {
-			return nil, err
-		}
-		if err := manager.Manage(ctx); err != nil {
-			return nil, err
-		}
+	return ln, nil
+}
+
+// ServeHTTPS serves the handler on the listener until the context is
+// canceled. The server carries the settings the surface needs — a
+// read-header timeout and nothing beside — for the netmap poll and the
+// relay conversations are long-lived connections a server-level write
+// timeout would cut.
+func (m *CertManager) ServeHTTPS(
+	ctx context.Context, ln net.Listener, handler http.Handler,
+) error {
+
+	srv := &http.Server{
+		Handler:           handler,
+		ReadHeaderTimeout: readHeaderTimeout,
 	}
-	return manager.TLSConfig(), nil
+	go func() {
+		<-ctx.Done()
+		_ = ln.Close()
+	}()
+	slog.Info("Serving the node's HTTPS server", "addr", ln.Addr().String())
+	err := srv.Serve(ln)
+	if err != nil && !errors.Is(err, http.ErrServerClosed) && ctx.Err() == nil {
+		return err
+	}
+	return nil
+}
+
+// httpsTLSConfig returns the shared identity cloned for the node's HTTPS
+// server: http/1.1 and the ACME TLS-ALPN name beside the GetCertificate
+// that answers both — the mounted apps' protocol and the challenge, the
+// one a client offering only the challenge name reaches, inside one TLS
+// configuration.
+func (m *CertManager) httpsTLSConfig() *tls.Config {
+	cfg := m.tlsCfg.Clone()
+	cfg.NextProtos = []string{"http/1.1", acmez.ACMETLS1Protocol}
+	return cfg
 }
 
 // serveHTTP01 answers the ACME HTTP-01 challenge on a dedicated TCP
@@ -161,40 +206,6 @@ func serveHTTP01(ctx context.Context, issuer *certmagic.ACMEIssuer) error {
 	go func() {
 		if err := srv.Serve(ln); !errors.Is(err, http.ErrServerClosed) {
 			slog.Error("HTTP-01 challenge server exited", "err", err)
-		}
-	}()
-	return nil
-}
-
-// serveTLSALPN01 answers the ACME TLS-ALPN-01 challenge on a dedicated TCP
-// listener, port 443. The challenge is solved by completing a TLS handshake
-// presenting the challenge certificate certmagic mints into its cache, so
-// plain handshakes are all the listener does.
-func serveTLSALPN01(ctx context.Context, conf *tls.Config) error {
-	ln, err := tls.Listen("tcp", ":443", conf)
-	if err != nil {
-		return fmt.Errorf("binding TLS-ALPN-01 challenge port: %w", err)
-	}
-	go func() {
-		defer func() { _ = ln.Close() }()
-		for {
-			conn, err := ln.Accept()
-			if err != nil {
-				if ctx.Err() == nil {
-					slog.Error("TLS-ALPN-01 accept", "err", err)
-				}
-				return
-			}
-			go func() {
-				defer func() { _ = conn.Close() }()
-				hctx, cancel := context.WithTimeout(ctx, 30*time.Second)
-				defer cancel()
-				if c, ok := conn.(*tls.Conn); ok {
-					// The handshake itself answers the challenge; the
-					// connection carries no application protocol.
-					_ = c.HandshakeContext(hctx)
-				}
-			}()
 		}
 	}()
 	return nil
