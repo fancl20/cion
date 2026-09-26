@@ -18,6 +18,7 @@ import (
 // enrolls through the reversed beacon over B, C registers a down segment at
 // A through B, and the provider resolves an end-to-end path from C to A.
 func TestLineTopology(t *testing.T) {
+	t.Parallel()
 	wpki := NewWebPKI(t)
 	ipA := addrIP(2)
 	ipB := addrIP(3)
@@ -107,6 +108,7 @@ func TestLineTopology(t *testing.T) {
 // segments from the persistent path database before the next beaconing
 // period.
 func TestRestartedNodeServesUpSegments(t *testing.T) {
+	t.Parallel()
 	wpki := NewWebPKI(t)
 	// Loopback addresses of its own, so the still-running endpoints of
 	// earlier tests keep their fixed ports.

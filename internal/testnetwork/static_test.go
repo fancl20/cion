@@ -48,6 +48,7 @@ func writeStaticSet(t *testing.T, path string, entries ...staticLink) {
 // core started first; and removing an entry from B's file retires the link
 // as a generation swap the surviving traffic rides through.
 func TestStaticLabByLinkSet(t *testing.T) {
+	t.Parallel()
 	wpki := NewWebPKI(t)
 	ipA, ipB, ipC := addrIP(0x51), addrIP(0x52), addrIP(0x53)
 
@@ -160,6 +161,7 @@ func TestStaticLabByLinkSet(t *testing.T) {
 // CIDR authorizer bounds enrollment, a joiner whose source address no
 // listed prefix contains never enrolling. No allowlist exists anywhere.
 func TestStaticEnrollmentByAuthorizer(t *testing.T) {
+	t.Parallel()
 	wpki := NewWebPKI(t)
 	ipA, ipB := addrIP(0x55), addrIP(0x56)
 	abA, abB := FreeUDPAddrOn(t, ipA), FreeUDPAddrOn(t, ipB)
