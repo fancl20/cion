@@ -187,14 +187,10 @@ func registeredHost(key wireguard.PublicKey) wireguard.HostEntry {
 func machineZero() key.MachinePublic { return key.MachinePublic{} }
 
 // testApp builds an application around the given registry with the test
-// core's identity, ready to serve or to call directly.
+// core's identity, its handler ready for an externally assembled server.
 func testApp(t *testing.T, cfg Config) *App {
 	t.Helper()
-	_, tlsCfg := testCert(t)
 	cfg.Domain = TestDomain
-	if cfg.TLS == nil {
-		cfg.TLS = tlsCfg
-	}
 	cfg.StateDir = t.TempDir()
 	a, err := New(cfg)
 	if err != nil {

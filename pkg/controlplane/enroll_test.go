@@ -108,7 +108,7 @@ func serveCore(t *testing.T, n *testNode, wpki *webPKI) *trustFixture {
 	t.Helper()
 	f := newTrustFixture(t)
 
-	tlsConf, err := webpki.ManageTLSCert(context.Background(), webpki.TLSCertConfig{
+	certMgr, err := webpki.PrepareTLSCert(context.Background(), webpki.TLSCertConfig{
 		Domain:   testDomain,
 		CertFile: wpki.certFile,
 		KeyFile:  wpki.keyFile,
@@ -116,6 +116,7 @@ func serveCore(t *testing.T, n *testNode, wpki *webPKI) *trustFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
+	tlsConf := certMgr.TLSConfig()
 	svc := &TrustService{DB: f.db, Issuer: f.issuer}
 	go func() {
 		if err := ServeHTTP3(n.newConn(t, EndpointPort), NewServer(svc).Handler,
