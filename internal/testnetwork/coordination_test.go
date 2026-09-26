@@ -3,6 +3,7 @@ package testnetwork
 import (
 	"context"
 	"encoding/json/v2"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -27,11 +28,9 @@ var TailnetRange = wireguard.Tailnet
 // wiring, the core serving the coordination endpoint beside its WireGuard
 // application. The hosts are real tailnet clients in-process — the
 // vendored client engine (tsnet) — the way real wireguard-go clients
-// served as the hosts of proposal 0006's proofs.
-var (
-	coordinationA = addrIP(0x41)
-	coordinationB = addrIP(0x42)
-)
+// served as the hosts of proposal 0006's proofs. Each suite holds its own
+// loopback pair — the fixed endpoint and rendezvous ports bind on them —
+// so the suites run parallel.
 
 // coordinationPlacement is the harness's placement of the core's
 // coordination endpoint: a loopback address the tailnet clients dial by,
@@ -101,18 +100,18 @@ func freeHostUDPPort(t *testing.T) uint16 {
 	return port
 }
 
-// coordCore boots the core of the coordination topology: the WebPKI
-// certificate files, the wireguard application with its tailnet slice, and
-// the coordination endpoint beside it.
-func coordCore(t *testing.T, wpki *WebPKI, place coordinationPlacement,
-	mutate func(*services.NodeConfig)) *assemblyNode {
+// coordCore boots the core of the coordination topology on its suite's
+// loopback host: the WebPKI certificate files, the wireguard application
+// with its tailnet slice, and the coordination endpoint beside it.
+func coordCore(t *testing.T, wpki *WebPKI, host netip.Addr,
+	place coordinationPlacement, mutate func(*services.NodeConfig)) *assemblyNode {
 
 	t.Helper()
 	return bootAssembly(t, func(cfg *services.NodeConfig) {
 		cfg.Core = true
 		cfg.State = t.TempDir()
-		cfg.Internal = FreeUDPAddrOn(t, coordinationA)
-		cfg.Control = FreeUDPAddrOn(t, coordinationA)
+		cfg.Internal = FreeUDPAddrOn(t, host)
+		cfg.Control = FreeUDPAddrOn(t, host)
 		cfg.CertFile = wpki.certFile
 		cfg.KeyFile = wpki.keyFile
 		cfg.WireguardConfig = writeWireguardConfig(t, "100.64.1.0/24",
@@ -128,17 +127,17 @@ func coordCore(t *testing.T, wpki *WebPKI, place coordinationPlacement,
 	})
 }
 
-// coordLeaf boots the leaf of the coordination topology: it joins by
-// rendezvous and runs the wireguard application with its own tailnet
-// slice and relay presence.
-func coordLeaf(t *testing.T, wpki *WebPKI, core *assemblyNode,
+// coordLeaf boots the leaf of the coordination topology on its suite's
+// loopback host: it joins by rendezvous and runs the wireguard
+// application with its own tailnet slice and relay presence.
+func coordLeaf(t *testing.T, wpki *WebPKI, host netip.Addr, core *assemblyNode,
 	place coordinationPlacement, mutate func(*services.NodeConfig)) *assemblyNode {
 
 	t.Helper()
 	return bootAssembly(t, func(cfg *services.NodeConfig) {
 		cfg.State = t.TempDir()
-		cfg.Internal = FreeUDPAddrOn(t, coordinationB)
-		cfg.Control = FreeUDPAddrOn(t, coordinationB)
+		cfg.Internal = FreeUDPAddrOn(t, host)
+		cfg.Control = FreeUDPAddrOn(t, host)
 		cfg.Neighbors = []string{core.rendezvousOf()}
 		cfg.RootCAs = wpki.pool
 		cfg.WireguardConfig = writeWireguardConfig(t, "100.64.2.0/24",
@@ -179,7 +178,7 @@ func tailnetHost(t *testing.T, name, controlURL, authKey string) *tsnet.Server {
 // approval deciding how long it takes.
 func hostUp(t *testing.T, srv *tsnet.Server) []netip.Addr {
 	t.Helper()
-	ips, failed := hostUpErr(t, srv)
+	ips, failed := hostUpErr(t, srv, TestTimeout)
 	if failed {
 		t.Fatal("the host's login never completed")
 	}
@@ -187,11 +186,11 @@ func hostUp(t *testing.T, srv *tsnet.Server) []netip.Addr {
 }
 
 // hostUpErr is hostUp's patient form: it reports whether the login
-// completed instead of failing the test, for the suites that prove a
-// login never does.
-func hostUpErr(t *testing.T, srv *tsnet.Server) ([]netip.Addr, bool) {
+// completed within the budget instead of failing the test, for the suites
+// that prove a login never does.
+func hostUpErr(t *testing.T, srv *tsnet.Server, budget time.Duration) ([]netip.Addr, bool) {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), TestTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), budget)
 	defer cancel()
 	status, err := srv.Up(ctx)
 	if err != nil {
@@ -209,9 +208,11 @@ func hostUpErr(t *testing.T, srv *tsnet.Server) ([]netip.Addr, bool) {
 func warmSession(t *testing.T, srv *tsnet.Server, far netip.Addr) {
 	t.Helper()
 	// The far end refuses the connection — nothing listens on the port —
-	// and that is fine: the exchange the warm-up wants is the host's own
-	// handshake with its node, which the dial's first packets begin. The
-	// retries cover the wireguard handshake's own cadence.
+	// and that refusal is the exchange the warm-up waits for: the host's
+	// own handshake with its node, which the dial's first packets begin,
+	// has carried a packet of the far end's back. While the node still
+	// drops the host's packets the dial instead times out, so the retries
+	// cover the wireguard handshake's own cadence.
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
@@ -220,6 +221,9 @@ func warmSession(t *testing.T, srv *tsnet.Server, far netip.Addr) {
 		cancel()
 		if err == nil {
 			_ = conn.Close()
+			return
+		}
+		if !errors.Is(err, context.DeadlineExceeded) {
 			return
 		}
 		time.Sleep(500 * time.Millisecond)
@@ -331,8 +335,8 @@ func TestCoordinationOpenJoin(t *testing.T) {
 	// clients' root store trusts.
 	wpki := packageWebPKI
 	place := placeCoordination(t)
-	a := coordCore(t, wpki, place, nil)
-	b := coordLeaf(t, wpki, a, place, nil)
+	a := coordCore(t, wpki, addrIP(0x41), place, nil)
+	b := coordLeaf(t, wpki, addrIP(0x42), a, place, nil)
 	// The nodes' counters, printed at the test's end: the overlay's own
 	// tooling, where the operating system's cannot see.
 	t.Cleanup(func() {

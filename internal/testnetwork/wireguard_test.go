@@ -138,6 +138,7 @@ func startWireguardNodes(t *testing.T, ipA, ipB netip.Addr) (*Node, *Node) {
 // devices from their fetched directories, and a host exchanges ICMP through
 // its node's device, the mesh, and the far node's delivery to its own host.
 func TestWireguardMeshExchange(t *testing.T) {
+	t.Parallel()
 	hostAKey, hostAPub := newHostKey(t)
 	hostBKey, hostBPub := newHostKey(t)
 	hostAAddr := netip.MustParseAddr("100.64.1.10")

@@ -24,8 +24,9 @@ import (
 // returns the link up with no generation swap: the serving instance's
 // session continuous across the episode.
 func TestBFDLivenessEpisode(t *testing.T) {
+	t.Parallel()
 	wpki := NewWebPKI(t)
-	ipA, ipB, ipC := addrIP(0x61), addrIP(0x62), addrIP(0x63)
+	ipA, ipB, ipC := addrIP(0x74), addrIP(0x75), addrIP(0x76)
 
 	a := bootAssembly(t, func(cfg *services.NodeConfig) {
 		cfg.Core = true
@@ -137,6 +138,7 @@ func TestBFDLivenessEpisode(t *testing.T) {
 // provider's links carry BFD like any other's. No selection loop runs
 // anywhere; the verdict gates forwarding and the signal reaches the source.
 func TestBFDStaticLabEpisode(t *testing.T) {
+	t.Parallel()
 	wpki := NewWebPKI(t)
 	ipA, ipB, ipC := addrIP(0x71), addrIP(0x72), addrIP(0x73)
 

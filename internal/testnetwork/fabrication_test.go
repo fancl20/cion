@@ -26,8 +26,9 @@ import (
 // segment every store holds still verifying bound to the identity each of
 // its entries claims.
 func TestFabricatingNeighbor(t *testing.T) {
+	t.Parallel()
 	wpki := NewWebPKI(t)
-	ipA, ipB, ipC := addrIP(0x41), addrIP(0x42), addrIP(0x43)
+	ipA, ipB, ipC := addrIP(0x44), addrIP(0x45), addrIP(0x46)
 	extA, extB1 := FreeUDPAddrOn(t, ipA), FreeUDPAddrOn(t, ipB)
 	extB2, extC := FreeUDPAddrOn(t, ipB), FreeUDPAddrOn(t, ipC)
 

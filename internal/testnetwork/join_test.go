@@ -121,6 +121,7 @@ func entryOf(n *assemblyNode, ia addr.IA) *links.Link {
 // redundancy floor; killing B leaves C connected through A; and a bare
 // restart serves from the persisted link store without rendezvous.
 func TestJoinByRendezvous(t *testing.T) {
+	t.Parallel()
 	wpki := NewWebPKI(t)
 	ipA, ipB, ipC := addrIP(0x31), addrIP(0x32), addrIP(0x33)
 
@@ -253,6 +254,7 @@ func TestJoinByRendezvous(t *testing.T) {
 // identity persists, nothing was allocated on any acceptor — and a retry
 // once a neighbor exists draws a fresh identity and joins.
 func TestBootstrapWithoutAnswer(t *testing.T) {
+	t.Parallel()
 	wpki := NewWebPKI(t)
 	ipA, ipD := addrIP(0x35), addrIP(0x36)
 	dead := FreeUDPAddrOn(t, ipA) // reserved, then released: nothing answers

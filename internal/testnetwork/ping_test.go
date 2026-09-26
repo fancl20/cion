@@ -23,6 +23,7 @@ import (
 // path — the first multi-segment carriage by the data plane — and the core's
 // requests ride the down segment alone.
 func TestPingForkTopology(t *testing.T) {
+	t.Parallel()
 	wpki := NewWebPKI(t)
 	// Loopback addresses of this test's own; earlier tests' endpoints keep
 	// theirs.
@@ -49,8 +50,10 @@ func TestPingForkTopology(t *testing.T) {
 	StartPingResponder(t, c)
 
 	// Beacons propagate, C enrolls, and the provider resolves the composed
-	// path C→A→B from C.
-	Poll(t, "path from C to B", func() bool {
+	// path C→A→B from C — the fork's three-node join pipeline, budgeted at
+	// the restart lab's patience: on a loaded runner it outgrows the plain
+	// test timeout while still progressing.
+	PollFor(t, RestartTimeout, "path from C to B", func() bool {
 		_, err := c.Provider.Path(ctx, nodeIA)
 		return err == nil
 	})
@@ -61,7 +64,10 @@ func TestPingForkTopology(t *testing.T) {
 		DstHost:  b.ControlIP,
 		Count:    3,
 		Interval: 100 * time.Millisecond,
-		Wait:     2 * time.Second,
+		// The reply wait tolerates a loaded runner's stall: a late reply
+		// still proves the composed carriage the run wants, lost only when
+		// nothing answers.
+		Wait: 5 * time.Second,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -95,7 +101,7 @@ func TestPingForkTopology(t *testing.T) {
 		DstHost:  c.ControlIP,
 		Count:    3,
 		Interval: 100 * time.Millisecond,
-		Wait:     2 * time.Second,
+		Wait:     5 * time.Second,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -117,6 +123,7 @@ func TestPingForkTopology(t *testing.T) {
 // stale up segment to a fresh one, with the replies proving the fresh path
 // carried them.
 func TestPingReresolvesExpiredPath(t *testing.T) {
+	t.Parallel()
 	iaP := addr.MustIAFrom(20, 0xff0000000021)
 	iaR := addr.MustIAFrom(20, 0xff0000000022)
 	ipP, ipR := addrIP(0x11), addrIP(0x12)
@@ -226,6 +233,7 @@ func (d *flipPathDB) Close() error                                          { re
 // TestPingUnreachable checks that a destination no path resolves for is an
 // error, not a hang.
 func TestPingUnreachable(t *testing.T) {
+	t.Parallel()
 	iaP := addr.MustIAFrom(20, 0xff0000000031)
 	iaR := addr.MustIAFrom(20, 0xff0000000032)
 	ipP, ipR := addrIP(0x13), addrIP(0x14)
@@ -266,6 +274,7 @@ func TestPingUnreachable(t *testing.T) {
 // responder is down loses every request, and the run still completes with
 // the summary.
 func TestPingLossSummary(t *testing.T) {
+	t.Parallel()
 	iaP := addr.MustIAFrom(20, 0xff0000000041)
 	iaR := addr.MustIAFrom(20, 0xff0000000042)
 	ipP, ipR := addrIP(0x15), addrIP(0x16)

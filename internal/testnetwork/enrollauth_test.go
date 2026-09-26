@@ -199,6 +199,7 @@ func bootTelegramJoiner(t *testing.T, wpki *WebPKI, ip netip.Addr,
 // rendezvous, TRC by the domain channel, enrollment allowed by prefix, and
 // the candidate established on its evidence.
 func TestJoinByEnrollAuthCIDR(t *testing.T) {
+	t.Parallel()
 	wpki := NewWebPKI(t)
 	ipA, ipB := addrIP(0x61), addrIP(0x62)
 	a := enrollAuthCore(t, wpki, ipA, "cidrs=127.0.0.0/8", "")
@@ -223,6 +224,7 @@ func TestJoinByEnrollAuthCIDR(t *testing.T) {
 // retries, the operator presses approve, and enrollment completes within one
 // retry interval.
 func TestJoinByEnrollAuthTelegram(t *testing.T) {
+	t.Parallel()
 	wpki := NewWebPKI(t)
 	bot := newOperatorBot(t)
 	ipA, ipB := addrIP(0x64), addrIP(0x65)
@@ -260,6 +262,7 @@ func TestJoinByEnrollAuthTelegram(t *testing.T) {
 // the restart forgot the pending one — and the enrolled node runs on with no
 // prompt at all, its renewals the chain check's own, never the map's.
 func TestJoinByEnrollAuthTelegramRestart(t *testing.T) {
+	t.Parallel()
 	wpki := NewWebPKI(t)
 	bot := newOperatorBot(t)
 	ipA, ipB := addrIP(0x67), addrIP(0x68)
@@ -306,6 +309,7 @@ func TestJoinByEnrollAuthTelegramRestart(t *testing.T) {
 // no evidence ever establishes the link and no chain ever names it, on
 // either side; and once it goes silent the window retires it.
 func TestJoinDeniedByEnrollAuth(t *testing.T) {
+	t.Parallel()
 	wpki := NewWebPKI(t)
 	ipA, ipB := addrIP(0x6a), addrIP(0x6b)
 	// A prefix list that admits nothing on the lab's loopback addressing.
@@ -345,6 +349,7 @@ func TestJoinDeniedByEnrollAuth(t *testing.T) {
 // transport state on the core, pending being a verdict the retry loop
 // consumes, not a connection held for a human's reaction time.
 func TestJoinPendingNeverCompletes(t *testing.T) {
+	t.Parallel()
 	wpki := NewWebPKI(t)
 	bot := newOperatorBot(t)
 	ipA, ipB := addrIP(0x6c), addrIP(0x6d)
