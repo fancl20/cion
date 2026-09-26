@@ -46,87 +46,58 @@ func assertNothing(t *testing.T, p *pipe) {
 	}
 }
 
-// TestRouterRoutesByDestination checks the table's lookups: host /32s to
-// their devices, mesh subnets longest-prefix first, and the per-decryption
-// default to the exit whose device decrypted the packet.
+// TestRouterRoutesByDestination checks the table's lookups (ADR-0011's
+// table): host /32s to the host device, mesh slices longest-prefix first —
+// and no default anywhere, a destination no slice claims counting
+// unroutable.
 func TestRouterRoutesByDestination(t *testing.T) {
 	cnt := &counters{}
 	r := newRouter(OverlayMTU, cnt)
-	hostA := newPipe("host-a", OverlayMTU, cnt) // the host device of exit X
-	meshX := newPipe("mesh-x", OverlayMTU, cnt) // exit X's mesh device
-	meshB := newPipe("mesh-b", OverlayMTU, cnt) // a remote subnet's device
+	hostDev := newPipe("host", OverlayMTU, cnt)
+	meshA := newPipe("mesh-a", OverlayMTU, cnt)
+	meshB := newPipe("mesh-b", OverlayMTU, cnt)
 
-	host := netip.MustParseAddr("10.64.1.10")
-	remoteNet := netip.MustParsePrefix("10.64.2.0/24")
-	xSubnet := netip.MustParsePrefix("10.64.3.0/24")
+	host := netip.MustParseAddr("100.64.1.10")
+	netA := netip.MustParsePrefix("100.64.1.0/24")
+	netWide := netip.MustParsePrefix("100.64.0.0/16")
 	r.rebuild(
-		[]hostRoute{{addr: host, pipe: hostA}},
-		[]route{{prefix: remoteNet, dst: meshB}, {prefix: xSubnet, dst: meshX}},
-		map[*pipe]*pipe{hostA: meshX},
+		[]hostRoute{{addr: host, pipe: hostDev}},
+		[]route{{prefix: netWide, dst: meshA}, {prefix: netA, dst: meshB}},
 	)
 
-	// A host peer's /32 goes to its host device — from anywhere.
-	fromMesh := func(pkt []byte) { r.route(pkt, meshB) }
-	fromMesh(ipPacket(t, netip.MustParseAddr("10.64.2.10"), host, nil))
-	if pkt := take(t, hostA); pkt == nil {
+	// A host's /32 goes to the host device — from anywhere.
+	fromMesh := func(pkt []byte) { r.route(pkt) }
+	fromMesh(ipPacket(t, netip.MustParseAddr("100.64.2.10"), host, nil))
+	if pkt := take(t, hostDev); pkt == nil {
 		t.Fatal("host /32 did not route")
 	}
 
-	// A remote overlay subnet wins over the default, longest prefix first.
-	r.route(ipPacket(t, host, netip.MustParseAddr("10.64.2.20"), nil), hostA)
+	// Longest prefix wins: the /24's slice routes to its device over the
+	// covering /16.
+	r.route(ipPacket(t, host, netip.MustParseAddr("100.64.1.20"), nil))
 	if pkt := take(t, meshB); pkt == nil {
-		t.Fatal("remote subnet did not route")
+		t.Fatal("the longest slice did not route to its device")
+	}
+	r.route(ipPacket(t, host, netip.MustParseAddr("100.64.9.20"), nil))
+	if pkt := take(t, meshA); pkt == nil {
+		t.Fatal("the covering slice did not route to its device")
 	}
 
-	// Everything else goes to the exit whose device decrypted the packet:
-	// traffic from exit X's host device defaults to X's mesh device.
-	internet := netip.MustParseAddr("192.0.2.53")
-	r.route(ipPacket(t, host, internet, nil), hostA)
-	if pkt := take(t, meshX); pkt == nil {
-		t.Fatal("exit default did not route to the exit's mesh device")
+	// No default exists: a destination no slice claims counts unroutable,
+	// wherever the packet came from — the internet is a service on the
+	// overlay, never a property of the routing.
+	before := cnt.unroutablePackets.Load()
+	r.route(ipPacket(t, host, netip.MustParseAddr("192.0.2.53"), nil))
+	if unroutable := cnt.unroutablePackets.Load(); unroutable != before+1 {
+		t.Errorf("unroutable count = %d after an internet-bound packet, want %d",
+			unroutable, before+1)
 	}
 
-	// Traffic decrypted by a mesh device for no overlay destination has
-	// reached the exit this node offers and enters the egress.
-	var egressed []byte
-	done := make(chan struct{})
-	r.setEgress(func(pkt []byte) {
-		egressed = pkt
-		close(done)
-	})
-	r.route(ipPacket(t, netip.MustParseAddr("203.0.113.9"), internet, nil), meshB)
-	select {
-	case <-done:
-	case <-time.After(2 * time.Second):
-		t.Fatal("default-routed mesh traffic did not enter the egress")
-	}
-	if len(egressed) == 0 {
-		t.Fatal("egress received no packet")
-	}
-
-	// A reply the egress produced routes to its host, never a default.
-	r.routeFromEgress(ipPacket(t, internet, host, nil))
-	if pkt := take(t, hostA); pkt == nil {
+	// A reply the egress produces still routes to its host, never a
+	// default.
+	r.routeFromEgress(ipPacket(t, netip.MustParseAddr("192.0.2.53"), host, nil))
+	if pkt := take(t, hostDev); pkt == nil {
 		t.Fatal("egress reply did not route to the host")
-	}
-}
-
-// TestRouterLocalExitDefault checks the local exit: the host device whose
-// exit is this node itself enters the egress directly.
-func TestRouterLocalExitDefault(t *testing.T) {
-	cnt := &counters{}
-	r := newRouter(OverlayMTU, cnt)
-	local := newPipe("host-local", OverlayMTU, cnt)
-	r.rebuild(nil, nil, map[*pipe]*pipe{local: nil})
-	egress := make(chan []byte, 1)
-	r.setEgress(func(pkt []byte) { egress <- pkt })
-
-	host := netip.MustParseAddr("10.64.1.10")
-	r.route(ipPacket(t, host, netip.MustParseAddr("192.0.2.1"), nil), local)
-	select {
-	case <-egress:
-	case <-time.After(2 * time.Second):
-		t.Fatal("local-exit default traffic did not enter the egress")
 	}
 }
 
@@ -136,19 +107,19 @@ func TestRouterDropsOversized(t *testing.T) {
 	cnt := &counters{}
 	r := newRouter(OverlayMTU, cnt)
 	dst := newPipe("dst", OverlayMTU, cnt)
-	host := netip.MustParseAddr("10.64.1.10")
-	r.rebuild([]hostRoute{{addr: host, pipe: dst}}, nil, nil)
+	host := netip.MustParseAddr("100.64.1.10")
+	r.rebuild([]hostRoute{{addr: host, pipe: dst}}, nil)
 
-	oversized := ipPacket(t, netip.MustParseAddr("10.64.2.1"), host,
+	oversized := ipPacket(t, netip.MustParseAddr("100.64.2.1"), host,
 		make([]byte, OverlayMTU))
-	r.route(oversized, nil)
+	r.route(oversized)
 	if dropped := cnt.droppedPackets.Load(); dropped == 0 {
 		t.Error("an oversized inner packet was not dropped")
 	}
 	assertNothing(t, dst)
 
 	// A non-IPv4 packet drops as well.
-	r.route([]byte{0x60, 0, 0, 0, 0, 0, 0, 0}, nil)
+	r.route([]byte{0x60, 0, 0, 0, 0, 0, 0, 0})
 	if dropped := cnt.droppedPackets.Load(); dropped < 2 {
 		t.Error("a non-IPv4 packet was not dropped")
 	}

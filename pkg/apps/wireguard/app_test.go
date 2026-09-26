@@ -30,9 +30,15 @@ func (d *recordingDirectory) Publish(ctx context.Context, entry Entry) error {
 	return nil
 }
 
-func (d *recordingDirectory) List(context.Context) ([]Entry, error) {
-	return d.entries, nil
+func (d *recordingDirectory) PublishHost(context.Context, HostEntry) error {
+	return nil
 }
+
+func (d *recordingDirectory) List(context.Context) (Directory, error) {
+	return Directory{Nodes: d.entries}, nil
+}
+
+func (d *recordingDirectory) Close() error { return nil }
 
 // flippableTrustDB serves no chains until it serves one; the publish loop
 // reads it while the test flips it.
@@ -103,7 +109,7 @@ func (r *recordingRegs) registered(svc addr.SVC) (uint16, bool) {
 // submitting to a sink, the shared host port on an ephemeral one, and the
 // core's store-side directory.
 func newTestWireguard(
-	t *testing.T, ia addr.IA, exits []addr.IA, peers []HostPeer, db *flippableTrustDB,
+	t *testing.T, ia addr.IA, db *flippableTrustDB,
 ) (*App, *recordingDirectory) {
 	t.Helper()
 	internal, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
@@ -124,11 +130,9 @@ func newTestWireguard(
 	regs := &recordingRegs{}
 	a, err := New(Config{
 		IA:         ia,
-		Subnet:     netip.MustParsePrefix("10.64.1.0/24"),
+		Subnet:     netip.MustParsePrefix("100.64.1.0/24"),
 		ListenHost: netip.MustParseAddr("127.0.0.1"),
 		ListenPort: listenPort,
-		Exits:      exits,
-		Peers:      peers,
 		StateDir:   t.TempDir(),
 		Provider:   provider,
 		Engine:     trust.NewEngine(ia, nil, &trust.NetworkProvider{DB: db}),
@@ -176,7 +180,7 @@ func newTestWireguard(
 func TestWireguardPublishesOnceEnrolled(t *testing.T) {
 	ia := addr.MustIAFrom(20, 0xff0000000211)
 	db := &flippableTrustDB{}
-	a, directory := newTestWireguard(t, ia, nil, nil, db)
+	a, directory := newTestWireguard(t, ia, db)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -195,8 +199,8 @@ func TestWireguardPublishesOnceEnrolled(t *testing.T) {
 		if !entry.IA.Equal(ia) {
 			t.Errorf("published entry for %s, want %s", entry.IA, ia)
 		}
-		if entry.Overlay.String() != "10.64.1.0/24" {
-			t.Errorf("published subnet %s, want 10.64.1.0/24", entry.Overlay)
+		if entry.Overlay.String() != "100.64.1.0/24" {
+			t.Errorf("published subnet %s, want 100.64.1.0/24", entry.Overlay)
 		}
 		if entry.PublicKey == (PublicKey{}) {
 			t.Error("published no public key")
@@ -212,7 +216,7 @@ func TestWireguardAppliesDirectoryDiff(t *testing.T) {
 	ia := addr.MustIAFrom(20, 0xff0000000221)
 	peer1 := addr.MustIAFrom(20, 0xff0000000231)
 	peer2 := addr.MustIAFrom(20, 0xff0000000232)
-	a, _ := newTestWireguard(t, ia, nil, nil, &flippableTrustDB{})
+	a, _ := newTestWireguard(t, ia, &flippableTrustDB{})
 
 	entry := func(peer addr.IA, subnet string) Entry {
 		return Entry{
@@ -221,18 +225,18 @@ func TestWireguardAppliesDirectoryDiff(t *testing.T) {
 			Overlay:   netip.MustParsePrefix(subnet),
 		}
 	}
-	e1 := entry(peer1, "10.64.11.0/24")
-	e2 := entry(peer2, "10.64.12.0/24")
+	e1 := entry(peer1, "100.64.11.0/24")
+	e2 := entry(peer2, "100.64.12.0/24")
 
-	a.applyDirectory([]Entry{e1})
+	a.applyDirectory(Directory{Nodes: []Entry{e1}})
 	if len(a.meshPeers) != 1 || a.meshPeers[peer1] == nil {
 		t.Fatalf("peers after the first directory = %v, want %s", a.meshPeers, peer1)
 	}
-	a.applyDirectory([]Entry{e1, e2})
+	a.applyDirectory(Directory{Nodes: []Entry{e1, e2}})
 	if len(a.meshPeers) != 2 {
 		t.Fatalf("peers after the second directory = %d, want 2", len(a.meshPeers))
 	}
-	a.applyDirectory([]Entry{e2})
+	a.applyDirectory(Directory{Nodes: []Entry{e2}})
 	if len(a.meshPeers) != 1 || a.meshPeers[peer2] == nil {
 		t.Fatalf("departed peer kept its device: %v", a.meshPeers)
 	}
@@ -252,30 +256,80 @@ func TestWireguardAppliesDirectoryDiff(t *testing.T) {
 	}
 }
 
+// TestWireguardAppliesHostEntries checks the host device's diff (proposal
+// 0022): an owned entry's key gains its /32 on the one host device, a
+// departed key loses it, and a foreign-owned key changes nothing — exactly
+// as the mesh diff treats the node's own entry.
+func TestWireguardAppliesHostEntries(t *testing.T) {
+	ia := addr.MustIAFrom(20, 0xff0000000221)
+	other := addr.MustIAFrom(20, 0xff0000000233)
+	a, _ := newTestWireguard(t, ia, &flippableTrustDB{})
+
+	owned := func(key byte, addr string) HostEntry {
+		return HostEntry{
+			PublicKey: mustPubKey(key),
+			Addr:      netip.MustParseAddr(addr),
+			IA:        ia,
+		}
+	}
+	foreign := HostEntry{
+		PublicKey: mustPubKey(0x99),
+		Addr:      netip.MustParseAddr("100.64.33.7"),
+		IA:        other,
+	}
+
+	// A foreign-owned entry changes nothing.
+	a.applyDirectory(Directory{Hosts: []HostEntry{foreign}})
+	if len(a.hostPeers) != 0 {
+		t.Fatalf("a foreign host programmed the device: %v", a.hostPeers)
+	}
+
+	// An owned entry gains its /32; the router table follows.
+	h1 := owned(1, "100.64.1.2")
+	a.applyDirectory(Directory{Hosts: []HostEntry{h1, foreign}})
+	if len(a.hostPeers) != 1 || a.hostPeers[h1.PublicKey].Addr != h1.Addr {
+		t.Fatalf("owned hosts after the first directory = %v, want the one", a.hostPeers)
+	}
+	if len(a.router.hosts) != 1 || a.router.hosts[h1.Addr] != a.hosts.pipe {
+		t.Fatalf("router hosts = %v, want the one to the host device", a.router.hosts)
+	}
+
+	// A second owned key joins; the first departs with the second fetch.
+	h2 := owned(2, "100.64.1.3")
+	a.applyDirectory(Directory{Hosts: []HostEntry{h1, h2}})
+	if len(a.hostPeers) != 2 {
+		t.Fatalf("owned hosts after the second directory = %d, want 2", len(a.hostPeers))
+	}
+	a.applyDirectory(Directory{Hosts: []HostEntry{h2}})
+	if len(a.hostPeers) != 1 || a.hostPeers[h2.PublicKey].Addr != h2.Addr {
+		t.Fatalf("the departed host kept its peer: %v", a.hostPeers)
+	}
+	if len(a.router.hosts) != 1 {
+		t.Fatalf("router holds %d host routes after the departure, want 1",
+			len(a.router.hosts))
+	}
+	// The snapshot the application exposes matches.
+	if snap := a.HostPeers(); len(snap) != 1 || snap[0] != h2 {
+		t.Fatalf("the host snapshot = %v, want the survivor", snap)
+	}
+}
+
 // TestWireguardValidatesConfig checks the configuration the node assembly
 // feeds: peer addresses inside the subnet, exits configured, one exit per
 // key.
 func TestWireguardValidatesConfig(t *testing.T) {
 	ia := addr.MustIAFrom(20, 0xff0000000241)
-	exit := addr.MustIAFrom(20, 0xff0000000242)
-	other := addr.MustIAFrom(20, 0xff0000000243)
 	internal, _ := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
 	t.Cleanup(func() { _ = internal.Close() })
 	base := Config{
 		IA:         ia,
-		Subnet:     netip.MustParsePrefix("10.64.1.0/24"),
+		Subnet:     netip.MustParsePrefix("100.64.1.0/24"),
 		ListenHost: netip.MustParseAddr("127.0.0.1"),
 		ListenPort: 51820,
-		Exits:      []addr.IA{exit},
-		Peers: []HostPeer{{
-			PublicKey: mustPubKey(1),
-			Addr:      netip.MustParseAddr("10.64.1.10"),
-			Exit:      exit,
-		}},
-		StateDir: t.TempDir(),
-		Provider: &scion.PathProvider{IA: ia},
-		Engine:   trust.NewEngine(ia, nil, nil),
-		Store:    &fakeStore{},
+		StateDir:   t.TempDir(),
+		Provider:   &scion.PathProvider{IA: ia},
+		Engine:     trust.NewEngine(ia, nil, nil),
+		Store:      &fakeStore{},
 		NewConn: func() (*scion.Conn, error) {
 			return scion.NewConn(scion.ConnConfig{
 				IA:           ia,
@@ -298,33 +352,15 @@ func TestWireguardValidatesConfig(t *testing.T) {
 	app.Close()
 
 	outside := base
-	outside.Peers = []HostPeer{{
-		PublicKey: mustPubKey(2),
-		Addr:      netip.MustParseAddr("10.65.9.9"),
-		Exit:      exit,
-	}}
+	outside.Subnet = netip.MustParsePrefix("10.64.1.0/24")
 	if _, err := New(outside); err == nil {
-		t.Error("a peer outside the subnet was accepted")
+		t.Error("a subnet outside the tailnet range was accepted")
 	}
 
-	unconfigured := base
-	unconfigured.Peers = []HostPeer{{
-		PublicKey: mustPubKey(3),
-		Addr:      netip.MustParseAddr("10.64.1.11"),
-		Exit:      other,
-	}}
-	if _, err := New(unconfigured); err == nil {
-		t.Error("a peer with an unconfigured exit was accepted")
-	}
-
-	duplicate := base
-	duplicate.Peers = append(duplicate.Peers, HostPeer{
-		PublicKey: mustPubKey(1),
-		Addr:      netip.MustParseAddr("10.64.1.12"),
-		Exit:      exit,
-	})
-	if _, err := New(duplicate); err == nil {
-		t.Error("the same host key under two peers was accepted")
+	wider := base
+	wider.Subnet = netip.MustParsePrefix("100.64.0.0/9")
+	if _, err := New(wider); err == nil {
+		t.Error("a subnet wider than the tailnet range was accepted")
 	}
 
 	noDirectory := base
@@ -339,5 +375,3 @@ func TestWireguardValidatesConfig(t *testing.T) {
 		t.Error("an application with no service registration was accepted")
 	}
 }
-
-func (d *recordingDirectory) Close() error { return nil }

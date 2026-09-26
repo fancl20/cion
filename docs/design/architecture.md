@@ -85,9 +85,13 @@ run no loops of their own and hold no policy.
     node directory, and the selection loop. It loads by default; a static
     file-driven alternative exists for deliberate deployments
     ([ADR-0009](/docs/adrs/0009-keep-a-minimal-node-core-and-move-everything-else-to-apps.md)).
-*   **Gateway** — serves plain hosts as WireGuard clients and carries their
-    traffic over SCION paths, with internet egress on exit nodes
-    ([ADR-0005](/docs/adrs/0005-serve-endhosts-with-a-wireguard-gateway.md)).
+*   **WireGuard** — carries host and mesh traffic over SCION paths between
+    nodes ([ADR-0005](/docs/adrs/0005-serve-endhosts-with-a-wireguard-gateway.md)).
+*   **Coordination** — the network's headscale, minimal by decision: hosts
+    join by logging in with a standard tailnet client against the core's
+    coordination endpoint, registration asks the admission seam, and the
+    registry distributes by the directory
+    ([ADR-0011](/docs/adrs/0011-serve-hosts-with-a-tailscale-coordination-service.md)).
 *   **Ping** — the network's probe, and the selection loop's measuring
     instrument.
 *   **Enrollment policy** — the authorizers a core can gate a joiner's first
@@ -138,11 +142,14 @@ changes are damped.
 
 ### Endhost service
 
-Hosts are ordinary WireGuard clients of their node's internal address. The
-gateway carries host-to-host traffic over SCION paths between gateways, and
-internet-bound traffic through an exit node. A host exercises path choice by
-choosing which of its provisioned destinations to send through, one key per
-path choice.
+Hosts are tailnet clients of their node: they join by logging in against
+the core's coordination service and run no CION software. A host's netmap
+names exactly its node, and the tunnel carries the tailnet alone — no
+default route exists anywhere. Host-to-host traffic crosses the SCION mesh
+between nodes; internet egress is a service on the overlay the egress
+record decides ([ADR-0012](/docs/adrs/0012-serve-egress-as-an-overlay-socks-service.md)).
+A join completes at the directory's fetch cadence: the node programs the
+joined host when its next fetch lands.
 
 ## See also
 

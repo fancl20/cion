@@ -13,6 +13,7 @@ import (
 	"github.com/scionproto/scion/pkg/addr"
 	"github.com/scionproto/scion/pkg/scrypto/cppki"
 
+	"github.com/fancl20/cion/pkg/apps/coordination"
 	"github.com/fancl20/cion/pkg/apps/topology"
 	"github.com/fancl20/cion/pkg/apps/wireguard"
 	"github.com/fancl20/cion/pkg/controlplane"
@@ -83,15 +84,21 @@ type node struct {
 	// Assembled sockets and services, started by start.
 	endpointConn *scion.Conn
 	webPKI       *tls.Config
+	certMgr      *webpki.CertManager
 	services     *controlplane.Services
 	responder    *responder
 	wireguard    *wireguard.App
+	// coordination is the core's coordination application (ADR-0011),
+	// assembled beside the WireGuard application when the node's arguments
+	// name a wireguard configuration; nil on every other node.
+	coordination *coordination.App
 
-	// enrollAuth gates the trust service's first issuance (ADR-0010); nil
-	// is open enrollment. enrollRun launches the selected method's own
+	// enrollAuth gates the trust service's first issuance and the
+	// coordination application's registrations (ADR-0010, ADR-0011); nil
+	// is open admission. enrollRun launches the selected method's own
 	// loops — the Telegram authorizer's poll — nil when the method has
 	// none.
-	enrollAuth controlplane.EnrollmentAuthorizer
+	enrollAuth controlplane.AdmissionAuthorizer
 	enrollRun  func(context.Context)
 }
 
@@ -192,6 +199,7 @@ func (n *node) setupEnrollAuth() error {
 	}
 	auth, run, err := enrollauth.Load(n.cfg.EnrollAuth, enrollauth.LoadOptions{
 		TelegramAPI: n.cfg.TelegramAPI,
+		State:       n.cfg.State,
 	})
 	if err != nil {
 		return fmt.Errorf("parsing --enroll-auth: %w", err)
@@ -259,6 +267,9 @@ func setupNode(ctx context.Context, cfg NodeConfig, opts DataplaneOptions) (n *n
 	if err = n.setupWireguard(); err != nil {
 		return n, err
 	}
+	if err = n.setupCoordination(); err != nil {
+		return n, err
+	}
 	return n, nil
 }
 
@@ -267,6 +278,11 @@ func setupNode(ctx context.Context, cfg NodeConfig, opts DataplaneOptions) (n *n
 // point setupNode can fail. The loops' own sockets (endpoint, responder,
 // clients) close with their owners when the process exits.
 func (n *node) Close() {
+	if n.coordination != nil {
+		// Before the wireguard application, whose store the coordination
+		// application borrows its view of.
+		_ = n.coordination.Close()
+	}
 	if n.wireguard != nil {
 		n.wireguard.Close()
 	}
@@ -367,9 +383,22 @@ func (n *node) start(ctx context.Context) {
 			return nil
 		})
 	}
+	if n.certMgr != nil {
+		// The certificate maintenance runs beside the servers that present
+		// it; under ACME the coordination endpoint answers the TLS-ALPN
+		// challenge on the port it serves.
+		runBackground(ctx, "certificate management", func(ctx context.Context) error {
+			return n.certMgr.Manage(ctx)
+		})
+	}
 	if n.wireguard != nil {
 		runBackground(ctx, "wireguard", func(ctx context.Context) error {
 			return n.wireguard.Run(ctx)
+		})
+	}
+	if n.coordination != nil {
+		runBackground(ctx, "coordination", func(ctx context.Context) error {
+			return n.coordination.Run(ctx)
 		})
 	}
 }

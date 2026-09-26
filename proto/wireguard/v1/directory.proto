@@ -5,15 +5,36 @@ package wireguard.v1;
 option go_package = "github.com/fancl20/cion/proto/wireguard/v1;wireguardv1";
 
 // Entry is one node's publication: everything another node needs to
-// establish a mesh tunnel to it.
+// establish a mesh tunnel to it, and a host's client needs to dial it.
 message Entry {
   // isd_as is the publisher's ISD-AS. The directory records the ISD-AS the
   // authenticated publisher's certificate names, never the claimed one.
   uint64 isd_as = 1;
   // public_key is the node's 32-byte WireGuard public key.
   bytes public_key = 2;
-  // overlay_subnet is the node's overlay subnet, e.g. "10.64.1.0/24".
+  // overlay_subnet is the node's overlay subnet, a slice of the tailnet
+  // range, e.g. "100.64.1.0/24".
   string overlay_subnet = 3;
+  // host_endpoint is the host-facing endpoint a host's client dials — the
+  // underlay address and shared port — the coordination service's netmap
+  // names beside the key. The mesh transport needs it not.
+  string host_endpoint = 4;
+}
+
+// HostEntry is one host's registry entry (ADR-0011): the record the
+// coordination service's gate allocates and the directory distributes. The
+// host's key is its identity; the address, the owning node, and the
+// approving plugin's note ride beside it.
+message HostEntry {
+  // public_key is the host's 32-byte WireGuard node key.
+  bytes public_key = 1;
+  // address is the tailnet address the coordination service allocated.
+  string address = 2;
+  // isd_as is the owning node, whose slice of the tailnet range the
+  // address came from.
+  uint64 isd_as = 3;
+  // note is the approving plugin's own account of its decision.
+  string note = 4;
 }
 
 message PublishRequest {
@@ -29,13 +50,17 @@ message ListRequest {}
 message ListResponse {
   // entries holds one entry per publishing node.
   repeated Entry entries = 1;
+  // hosts holds one entry per registered host.
+  repeated HostEntry hosts = 2;
 }
 
-// DirectoryService distributes node entries. Any authenticated node may
-// publish its own entry; every node may list the directory.
+// DirectoryService distributes node entries and host entries. Any
+// authenticated node may publish its own entry; every node may list the
+// directory. Host entries enter the core's store locally, through the
+// coordination application the core alone runs.
 service DirectoryService {
   // Publish records the caller's entry.
   rpc Publish(PublishRequest) returns (PublishResponse);
-  // List returns every published entry.
+  // List returns every published entry, nodes and hosts together.
   rpc List(ListRequest) returns (ListResponse);
 }

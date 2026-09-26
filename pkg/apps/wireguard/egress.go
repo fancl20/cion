@@ -288,23 +288,25 @@ func (e *egress) handleTCP(req *tcp.ForwarderRequest) {
 }
 
 // handleUDP maps one UDP flow to a single outbound socket with the
-// addresses rewritten; the socket itself is the reply mapping.
-func (e *egress) handleUDP(req *udp.ForwarderRequest) {
+// addresses rewritten; the socket itself is the reply mapping. The returned
+// handled reports whether the flow was taken — a request the mapping cannot
+// take returns to the stack to refuse.
+func (e *egress) handleUDP(req *udp.ForwarderRequest) bool {
 	if e.atCapacity() {
 		e.cnt.egressDroppedPackets.Add(1)
-		return
+		return false
 	}
 	var wq waiter.Queue
 	ep, err := req.CreateEndpoint(&wq)
 	if err != nil {
 		e.cnt.egressDroppedPackets.Add(1)
-		return
+		return false
 	}
 	out, listenErr := net.ListenUDP("udp", nil)
 	if listenErr != nil {
 		e.cnt.egressDroppedPackets.Add(1)
 		slog.Warn("Egress binding the UDP leg", "err", listenErr)
-		return
+		return false
 	}
 	id := req.ID()
 	dst := netip.AddrPortFrom(addressToNetip(id.LocalAddress), id.LocalPort)
@@ -313,6 +315,7 @@ func (e *egress) handleUDP(req *udp.ForwarderRequest) {
 	e.udpFlows[flow] = struct{}{}
 	e.mtx.Unlock()
 	go flow.pump(e)
+	return true
 }
 
 // tcpFlow is one spliced TCP flow: the terminated overlay leg and the

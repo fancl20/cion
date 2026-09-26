@@ -12,6 +12,7 @@ import (
 
 	"github.com/scionproto/scion/pkg/addr"
 
+	"github.com/fancl20/cion/pkg/apps/wireguard"
 	"github.com/fancl20/cion/pkg/controlplane"
 	"github.com/fancl20/cion/pkg/links"
 	"github.com/fancl20/cion/pkg/pathdb"
@@ -98,6 +99,11 @@ func (a *App) TrustDB() trust.DB { return a.node.trustDB }
 
 // PathDB returns the node's path database.
 func (a *App) PathDB() pathdb.DB { return a.node.pathDB }
+
+// Wireguard returns the node's WireGuard application, when its arguments
+// named a configuration; nil otherwise. The coordination suites watch its
+// host peers through it.
+func (a *App) Wireguard() *wireguard.App { return a.node.wireguard }
 
 // Close releases the node's resources.
 func (a *App) Close() {

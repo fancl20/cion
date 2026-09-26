@@ -1,9 +1,11 @@
-// Package enrollauth is the enrollment policy of ADR-0010: the
-// implementations the --enroll-auth run argument selects, living beside the
-// core they gate — the package imports the control plane's seam and is
-// imported by the node assembly alone, never the reverse. The CIDR
-// authorizer admits joiners by addressing; the Telegram authorizer admits
-// them one by one from an operator's phone.
+// Package enrollauth is the admission policy of ADR-0010, generalized by
+// ADR-0011: the implementations the --enroll-auth run argument selects,
+// living beside the core they gate — the package imports the control plane's
+// seam and is imported by the node assembly alone, never the reverse. The
+// one authorizer a selection loads answers both boundaries the seam serves:
+// the CIDR posture admits joiners by addressing, nodes and hosts alike; the
+// Telegram posture admits them one by one from an operator's phone, with
+// invitations a headless client can carry.
 package enrollauth
 
 import (
@@ -25,7 +27,7 @@ import (
 // loads: unset is open, the zero-conf default, and the single-value shape
 // leaves combination a later change that touches no interface.
 func Load(spec string, opts LoadOptions) (
-	controlplane.EnrollmentAuthorizer,
+	controlplane.AdmissionAuthorizer,
 	func(context.Context),
 	error,
 ) {
@@ -53,11 +55,15 @@ func Load(spec string, opts LoadOptions) (
 		if token == "" {
 			return nil, nil, fmt.Errorf("empty bot token")
 		}
-		telegram := NewTelegram(TelegramConfig{
+		telegram, err := NewTelegram(TelegramConfig{
 			API:   opts.TelegramAPI,
 			Chat:  id,
 			Token: token,
+			State: opts.State,
 		})
+		if err != nil {
+			return nil, nil, err
+		}
 		return telegram, telegram.Run, nil
 	default:
 		return nil, nil, fmt.Errorf("unknown enroll-auth method %q", method)
@@ -70,4 +76,8 @@ type LoadOptions struct {
 	// the public one when empty. The integration tests point it at their
 	// local double.
 	TelegramAPI string
+	// State is the core's state directory, the persistent home of the
+	// Telegram method's unspent invitations; the other methods hold no
+	// state of their own.
+	State string
 }

@@ -23,6 +23,7 @@ import (
 // fakeStore is an in-memory directory store.
 type fakeStore struct {
 	entries    []Entry
+	hosts      []HostEntry
 	publishErr error
 }
 
@@ -40,8 +41,21 @@ func (s *fakeStore) Publish(_ context.Context, entry Entry) error {
 	return nil
 }
 
-func (s *fakeStore) List(context.Context) ([]Entry, error) { return s.entries, nil }
-func (s *fakeStore) Close() error                          { return nil }
+func (s *fakeStore) PublishHost(_ context.Context, entry HostEntry) error {
+	for i := range s.hosts {
+		if s.hosts[i].PublicKey == entry.PublicKey {
+			s.hosts[i] = entry
+			return nil
+		}
+	}
+	s.hosts = append(s.hosts, entry)
+	return nil
+}
+
+func (s *fakeStore) List(context.Context) (Directory, error) {
+	return Directory{Nodes: s.entries, Hosts: s.hosts}, nil
+}
+func (s *fakeStore) Close() error { return nil }
 
 // requestWithIA builds a request context carrying the authenticated
 // publisher the middleware would have peered in.
@@ -74,12 +88,12 @@ func TestDirectoryPublishRecordsAuthenticatedIA(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(entries) != 1 {
-		t.Fatalf("store holds %d entries, want 1", len(entries))
+	if len(entries.Nodes) != 1 {
+		t.Fatalf("store holds %d entries, want 1", len(entries.Nodes))
 	}
-	if !entries[0].IA.Equal(publisher) {
+	if !entries.Nodes[0].IA.Equal(publisher) {
 		t.Errorf("entry recorded under %s, want the authenticated %s",
-			entries[0].IA, publisher)
+			entries.Nodes[0].IA, publisher)
 	}
 
 	// A publish without an authenticated ISD-AS never records.
@@ -93,19 +107,30 @@ func TestDirectoryPublishRecordsAuthenticatedIA(t *testing.T) {
 	}
 }
 
-// TestDirectoryListServesEntries checks List serves what Publish recorded.
+// TestDirectoryListServesEntries checks List serves what Publish recorded —
+// nodes beside hosts, one authenticated snapshot.
 func TestDirectoryListServesEntries(t *testing.T) {
 	store := &fakeStore{}
 	svc := &DirectoryService{Store: store, Cnt: &counters{}}
 	ia := addr.MustIAFrom(20, 0xff0000000131)
 	entry := Entry{
-		IA:        ia,
-		PublicKey: mustPubKey(0xab),
-		Overlay:   netip.MustParsePrefix("10.64.7.0/24"),
+		IA:           ia,
+		PublicKey:    mustPubKey(0xab),
+		Overlay:      netip.MustParsePrefix("100.64.7.0/24"),
+		HostEndpoint: netip.MustParseAddrPort("198.51.100.20:51820"),
 	}
 	if _, err := svc.Publish(requestWithIA(t, ia),
 		connect.NewRequest(&wireguardv1.PublishRequest{Entry: entry.pb()})); err != nil {
-		t.Fatal(err)
+		t.Fatalf("publishing: %v", err)
+	}
+	host := HostEntry{
+		PublicKey: mustPubKey(0xcd),
+		Addr:      netip.MustParseAddr("100.64.7.9"),
+		IA:        ia,
+		Note:      "telegram operator",
+	}
+	if err := store.PublishHost(context.Background(), host); err != nil {
+		t.Fatalf("publishing the host: %v", err)
 	}
 	resp, err := svc.List(context.Background(),
 		connect.NewRequest(&wireguardv1.ListRequest{}))
@@ -121,6 +146,16 @@ func TestDirectoryListServesEntries(t *testing.T) {
 	}
 	if got != entry {
 		t.Errorf("entry = %+v, want %+v", got, entry)
+	}
+	if len(resp.Msg.Hosts) != 1 {
+		t.Fatalf("list served %d hosts, want 1", len(resp.Msg.Hosts))
+	}
+	gotHost, err := hostEntryFromPB(resp.Msg.Hosts[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotHost != host {
+		t.Errorf("host entry = %+v, want %+v", gotHost, host)
 	}
 }
 

@@ -98,23 +98,32 @@ func (c *rpcDirectoryClient) Publish(ctx context.Context, entry Entry) error {
 	return err
 }
 
-// List fetches the directory from the core.
-func (c *rpcDirectoryClient) List(ctx context.Context) ([]Entry, error) {
+// List fetches the directory from the core, nodes and hosts together.
+func (c *rpcDirectoryClient) List(ctx context.Context) (Directory, error) {
 	clt, err := c.client()
 	if err != nil {
-		return nil, err
+		return Directory{}, err
 	}
 	resp, err := clt.List(ctx, connect.NewRequest(&wireguardv1.ListRequest{}))
 	if err != nil {
-		return nil, err
+		return Directory{}, err
 	}
-	entries := make([]Entry, 0, len(resp.Msg.Entries))
+	var directory Directory
+	directory.Nodes = make([]Entry, 0, len(resp.Msg.Entries))
 	for _, pb := range resp.Msg.Entries {
 		entry, err := entryFromPB(pb)
 		if err != nil {
-			return nil, fmt.Errorf("decoding an entry: %w", err)
+			return Directory{}, fmt.Errorf("decoding an entry: %w", err)
 		}
-		entries = append(entries, entry)
+		directory.Nodes = append(directory.Nodes, entry)
 	}
-	return entries, nil
+	directory.Hosts = make([]HostEntry, 0, len(resp.Msg.Hosts))
+	for _, pb := range resp.Msg.Hosts {
+		entry, err := hostEntryFromPB(pb)
+		if err != nil {
+			return Directory{}, fmt.Errorf("decoding a host entry: %w", err)
+		}
+		directory.Hosts = append(directory.Hosts, entry)
+	}
+	return directory, nil
 }

@@ -22,7 +22,7 @@ const (
 )
 
 // Entry is one node's publication: everything another node needs to
-// establish a mesh tunnel to it.
+// establish a mesh tunnel to it, and a host's client needs to dial it.
 type Entry struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// isd_as is the publisher's ISD-AS. The directory records the ISD-AS the
@@ -30,8 +30,13 @@ type Entry struct {
 	IsdAs uint64 `protobuf:"varint,1,opt,name=isd_as,json=isdAs,proto3" json:"isd_as,omitempty"`
 	// public_key is the node's 32-byte WireGuard public key.
 	PublicKey []byte `protobuf:"bytes,2,opt,name=public_key,json=publicKey,proto3" json:"public_key,omitempty"`
-	// overlay_subnet is the node's overlay subnet, e.g. "10.64.1.0/24".
+	// overlay_subnet is the node's overlay subnet, a slice of the tailnet
+	// range, e.g. "100.64.1.0/24".
 	OverlaySubnet string `protobuf:"bytes,3,opt,name=overlay_subnet,json=overlaySubnet,proto3" json:"overlay_subnet,omitempty"`
+	// host_endpoint is the host-facing endpoint a host's client dials — the
+	// underlay address and shared port — the coordination service's netmap
+	// names beside the key. The mesh transport needs it not.
+	HostEndpoint  string `protobuf:"bytes,4,opt,name=host_endpoint,json=hostEndpoint,proto3" json:"host_endpoint,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -87,6 +92,90 @@ func (x *Entry) GetOverlaySubnet() string {
 	return ""
 }
 
+func (x *Entry) GetHostEndpoint() string {
+	if x != nil {
+		return x.HostEndpoint
+	}
+	return ""
+}
+
+// HostEntry is one host's registry entry (ADR-0011): the record the
+// coordination service's gate allocates and the directory distributes. The
+// host's key is its identity; the address, the owning node, and the
+// approving plugin's note ride beside it.
+type HostEntry struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// public_key is the host's 32-byte WireGuard node key.
+	PublicKey []byte `protobuf:"bytes,1,opt,name=public_key,json=publicKey,proto3" json:"public_key,omitempty"`
+	// address is the tailnet address the coordination service allocated.
+	Address string `protobuf:"bytes,2,opt,name=address,proto3" json:"address,omitempty"`
+	// isd_as is the owning node, whose slice of the tailnet range the
+	// address came from.
+	IsdAs uint64 `protobuf:"varint,3,opt,name=isd_as,json=isdAs,proto3" json:"isd_as,omitempty"`
+	// note is the approving plugin's own account of its decision.
+	Note          string `protobuf:"bytes,4,opt,name=note,proto3" json:"note,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *HostEntry) Reset() {
+	*x = HostEntry{}
+	mi := &file_proto_wireguard_v1_directory_proto_msgTypes[1]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *HostEntry) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*HostEntry) ProtoMessage() {}
+
+func (x *HostEntry) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_wireguard_v1_directory_proto_msgTypes[1]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use HostEntry.ProtoReflect.Descriptor instead.
+func (*HostEntry) Descriptor() ([]byte, []int) {
+	return file_proto_wireguard_v1_directory_proto_rawDescGZIP(), []int{1}
+}
+
+func (x *HostEntry) GetPublicKey() []byte {
+	if x != nil {
+		return x.PublicKey
+	}
+	return nil
+}
+
+func (x *HostEntry) GetAddress() string {
+	if x != nil {
+		return x.Address
+	}
+	return ""
+}
+
+func (x *HostEntry) GetIsdAs() uint64 {
+	if x != nil {
+		return x.IsdAs
+	}
+	return 0
+}
+
+func (x *HostEntry) GetNote() string {
+	if x != nil {
+		return x.Note
+	}
+	return ""
+}
+
 type PublishRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// entry is the publisher's claimed entry; the ISD-AS comes from the
@@ -98,7 +187,7 @@ type PublishRequest struct {
 
 func (x *PublishRequest) Reset() {
 	*x = PublishRequest{}
-	mi := &file_proto_wireguard_v1_directory_proto_msgTypes[1]
+	mi := &file_proto_wireguard_v1_directory_proto_msgTypes[2]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -110,7 +199,7 @@ func (x *PublishRequest) String() string {
 func (*PublishRequest) ProtoMessage() {}
 
 func (x *PublishRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_wireguard_v1_directory_proto_msgTypes[1]
+	mi := &file_proto_wireguard_v1_directory_proto_msgTypes[2]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -123,7 +212,7 @@ func (x *PublishRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PublishRequest.ProtoReflect.Descriptor instead.
 func (*PublishRequest) Descriptor() ([]byte, []int) {
-	return file_proto_wireguard_v1_directory_proto_rawDescGZIP(), []int{1}
+	return file_proto_wireguard_v1_directory_proto_rawDescGZIP(), []int{2}
 }
 
 func (x *PublishRequest) GetEntry() *Entry {
@@ -141,7 +230,7 @@ type PublishResponse struct {
 
 func (x *PublishResponse) Reset() {
 	*x = PublishResponse{}
-	mi := &file_proto_wireguard_v1_directory_proto_msgTypes[2]
+	mi := &file_proto_wireguard_v1_directory_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -153,7 +242,7 @@ func (x *PublishResponse) String() string {
 func (*PublishResponse) ProtoMessage() {}
 
 func (x *PublishResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_wireguard_v1_directory_proto_msgTypes[2]
+	mi := &file_proto_wireguard_v1_directory_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -166,7 +255,7 @@ func (x *PublishResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PublishResponse.ProtoReflect.Descriptor instead.
 func (*PublishResponse) Descriptor() ([]byte, []int) {
-	return file_proto_wireguard_v1_directory_proto_rawDescGZIP(), []int{2}
+	return file_proto_wireguard_v1_directory_proto_rawDescGZIP(), []int{3}
 }
 
 type ListRequest struct {
@@ -177,7 +266,7 @@ type ListRequest struct {
 
 func (x *ListRequest) Reset() {
 	*x = ListRequest{}
-	mi := &file_proto_wireguard_v1_directory_proto_msgTypes[3]
+	mi := &file_proto_wireguard_v1_directory_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -189,7 +278,7 @@ func (x *ListRequest) String() string {
 func (*ListRequest) ProtoMessage() {}
 
 func (x *ListRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_wireguard_v1_directory_proto_msgTypes[3]
+	mi := &file_proto_wireguard_v1_directory_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -202,20 +291,22 @@ func (x *ListRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListRequest.ProtoReflect.Descriptor instead.
 func (*ListRequest) Descriptor() ([]byte, []int) {
-	return file_proto_wireguard_v1_directory_proto_rawDescGZIP(), []int{3}
+	return file_proto_wireguard_v1_directory_proto_rawDescGZIP(), []int{4}
 }
 
 type ListResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// entries holds one entry per publishing node.
-	Entries       []*Entry `protobuf:"bytes,1,rep,name=entries,proto3" json:"entries,omitempty"`
+	Entries []*Entry `protobuf:"bytes,1,rep,name=entries,proto3" json:"entries,omitempty"`
+	// hosts holds one entry per registered host.
+	Hosts         []*HostEntry `protobuf:"bytes,2,rep,name=hosts,proto3" json:"hosts,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *ListResponse) Reset() {
 	*x = ListResponse{}
-	mi := &file_proto_wireguard_v1_directory_proto_msgTypes[4]
+	mi := &file_proto_wireguard_v1_directory_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -227,7 +318,7 @@ func (x *ListResponse) String() string {
 func (*ListResponse) ProtoMessage() {}
 
 func (x *ListResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_wireguard_v1_directory_proto_msgTypes[4]
+	mi := &file_proto_wireguard_v1_directory_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -240,7 +331,7 @@ func (x *ListResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListResponse.ProtoReflect.Descriptor instead.
 func (*ListResponse) Descriptor() ([]byte, []int) {
-	return file_proto_wireguard_v1_directory_proto_rawDescGZIP(), []int{4}
+	return file_proto_wireguard_v1_directory_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *ListResponse) GetEntries() []*Entry {
@@ -250,22 +341,37 @@ func (x *ListResponse) GetEntries() []*Entry {
 	return nil
 }
 
+func (x *ListResponse) GetHosts() []*HostEntry {
+	if x != nil {
+		return x.Hosts
+	}
+	return nil
+}
+
 var File_proto_wireguard_v1_directory_proto protoreflect.FileDescriptor
 
 const file_proto_wireguard_v1_directory_proto_rawDesc = "" +
 	"\n" +
-	"\"proto/wireguard/v1/directory.proto\x12\fwireguard.v1\"d\n" +
+	"\"proto/wireguard/v1/directory.proto\x12\fwireguard.v1\"\x89\x01\n" +
 	"\x05Entry\x12\x15\n" +
 	"\x06isd_as\x18\x01 \x01(\x04R\x05isdAs\x12\x1d\n" +
 	"\n" +
 	"public_key\x18\x02 \x01(\fR\tpublicKey\x12%\n" +
-	"\x0eoverlay_subnet\x18\x03 \x01(\tR\roverlaySubnet\";\n" +
+	"\x0eoverlay_subnet\x18\x03 \x01(\tR\roverlaySubnet\x12#\n" +
+	"\rhost_endpoint\x18\x04 \x01(\tR\fhostEndpoint\"o\n" +
+	"\tHostEntry\x12\x1d\n" +
+	"\n" +
+	"public_key\x18\x01 \x01(\fR\tpublicKey\x12\x18\n" +
+	"\aaddress\x18\x02 \x01(\tR\aaddress\x12\x15\n" +
+	"\x06isd_as\x18\x03 \x01(\x04R\x05isdAs\x12\x12\n" +
+	"\x04note\x18\x04 \x01(\tR\x04note\";\n" +
 	"\x0ePublishRequest\x12)\n" +
 	"\x05entry\x18\x01 \x01(\v2\x13.wireguard.v1.EntryR\x05entry\"\x11\n" +
 	"\x0fPublishResponse\"\r\n" +
-	"\vListRequest\"=\n" +
+	"\vListRequest\"l\n" +
 	"\fListResponse\x12-\n" +
-	"\aentries\x18\x01 \x03(\v2\x13.wireguard.v1.EntryR\aentries2\x99\x01\n" +
+	"\aentries\x18\x01 \x03(\v2\x13.wireguard.v1.EntryR\aentries\x12-\n" +
+	"\x05hosts\x18\x02 \x03(\v2\x17.wireguard.v1.HostEntryR\x05hosts2\x99\x01\n" +
 	"\x10DirectoryService\x12F\n" +
 	"\aPublish\x12\x1c.wireguard.v1.PublishRequest\x1a\x1d.wireguard.v1.PublishResponse\x12=\n" +
 	"\x04List\x12\x19.wireguard.v1.ListRequest\x1a\x1a.wireguard.v1.ListResponseB8Z6github.com/fancl20/cion/proto/wireguard/v1;wireguardv1b\x06proto3"
@@ -282,26 +388,28 @@ func file_proto_wireguard_v1_directory_proto_rawDescGZIP() []byte {
 	return file_proto_wireguard_v1_directory_proto_rawDescData
 }
 
-var file_proto_wireguard_v1_directory_proto_msgTypes = make([]protoimpl.MessageInfo, 5)
+var file_proto_wireguard_v1_directory_proto_msgTypes = make([]protoimpl.MessageInfo, 6)
 var file_proto_wireguard_v1_directory_proto_goTypes = []any{
 	(*Entry)(nil),           // 0: wireguard.v1.Entry
-	(*PublishRequest)(nil),  // 1: wireguard.v1.PublishRequest
-	(*PublishResponse)(nil), // 2: wireguard.v1.PublishResponse
-	(*ListRequest)(nil),     // 3: wireguard.v1.ListRequest
-	(*ListResponse)(nil),    // 4: wireguard.v1.ListResponse
+	(*HostEntry)(nil),       // 1: wireguard.v1.HostEntry
+	(*PublishRequest)(nil),  // 2: wireguard.v1.PublishRequest
+	(*PublishResponse)(nil), // 3: wireguard.v1.PublishResponse
+	(*ListRequest)(nil),     // 4: wireguard.v1.ListRequest
+	(*ListResponse)(nil),    // 5: wireguard.v1.ListResponse
 }
 var file_proto_wireguard_v1_directory_proto_depIdxs = []int32{
 	0, // 0: wireguard.v1.PublishRequest.entry:type_name -> wireguard.v1.Entry
 	0, // 1: wireguard.v1.ListResponse.entries:type_name -> wireguard.v1.Entry
-	1, // 2: wireguard.v1.DirectoryService.Publish:input_type -> wireguard.v1.PublishRequest
-	3, // 3: wireguard.v1.DirectoryService.List:input_type -> wireguard.v1.ListRequest
-	2, // 4: wireguard.v1.DirectoryService.Publish:output_type -> wireguard.v1.PublishResponse
-	4, // 5: wireguard.v1.DirectoryService.List:output_type -> wireguard.v1.ListResponse
-	4, // [4:6] is the sub-list for method output_type
-	2, // [2:4] is the sub-list for method input_type
-	2, // [2:2] is the sub-list for extension type_name
-	2, // [2:2] is the sub-list for extension extendee
-	0, // [0:2] is the sub-list for field type_name
+	1, // 2: wireguard.v1.ListResponse.hosts:type_name -> wireguard.v1.HostEntry
+	2, // 3: wireguard.v1.DirectoryService.Publish:input_type -> wireguard.v1.PublishRequest
+	4, // 4: wireguard.v1.DirectoryService.List:input_type -> wireguard.v1.ListRequest
+	3, // 5: wireguard.v1.DirectoryService.Publish:output_type -> wireguard.v1.PublishResponse
+	5, // 6: wireguard.v1.DirectoryService.List:output_type -> wireguard.v1.ListResponse
+	5, // [5:7] is the sub-list for method output_type
+	3, // [3:5] is the sub-list for method input_type
+	3, // [3:3] is the sub-list for extension type_name
+	3, // [3:3] is the sub-list for extension extendee
+	0, // [0:3] is the sub-list for field type_name
 }
 
 func init() { file_proto_wireguard_v1_directory_proto_init() }
@@ -315,7 +423,7 @@ func file_proto_wireguard_v1_directory_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_proto_wireguard_v1_directory_proto_rawDesc), len(file_proto_wireguard_v1_directory_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   5,
+			NumMessages:   6,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

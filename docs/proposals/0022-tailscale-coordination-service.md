@@ -101,8 +101,9 @@ SOCKS-aware application can name — and the overlay-only tunnel that
 record decided is the tunnel this landing already carries. What the
 record needs is re-grounding, not re-deciding: the mechanism text
 restated for tailnet clients, the egress mark's advertisement, and the
-endhost's per-flow choice by destination. This landing annotates the
-moved ground; the re-grounding is that record's own follow-up.
+endhost's per-flow choice by destination. The record is still a draft,
+and this landing re-grounds it directly — its text restated on the
+boundary ADR-0011 draws, in the same step.
 
 ### Goals
 
@@ -141,11 +142,12 @@ moved ground; the re-grounding is that record's own follow-up.
     endpoint, and the node holds a DERP presence bridged into its shared
     host port, so a host on a network where UDP to the node cannot pass
     still reaches its node.
-*   The records: ADR-0005 annotated with the narrowed access client;
-    ADR-0010 annotated with the generalized seam; ADR-0012 annotated with
-    the moved ground, its re-grounding its own follow-up; ADR-0011
-    accepted at landing; the design documents' endhost sections rewritten
-    for tailnet clients.
+*   The records: ADR-0011 accepted at landing; ADR-0012, still a draft,
+    re-grounded directly on the tailnet boundary in the same landing, its
+    decisions kept; ADR-0005 and ADR-0010 standing as written — records
+    of their date, their narrowings carried by ADR-0011 and this
+    proposal; the design documents' endhost sections rewritten for
+    tailnet clients.
 
 ### Non-goals
 
@@ -383,18 +385,16 @@ names the same file, and the coordination application starts beside the
 WireGuard application on the core — the only node holding the directory
 store, whose shape already implies the service.
 
-The records follow the code: ADR-0005's standard-clients line is
-annotated with the narrowing — standard tailnet clients, both
-third-party and widely deployed, the no-CION-software promise kept
-whole; ADR-0010 is annotated with the generalization — its seam is
-ADR-0011's admission seam, one interface serving every boundary;
-ADR-0012 is annotated with the moved ground — its host boundary
-replaced, its overlay-only tunnel and destination-addressed service
-surviving, the re-grounding that record's own follow-up; ADR-0011
-is marked accepted, its implementing proposal landed; and the design
-documents' gateway and endhost sections are rewritten — hosts as
-tailnet clients of their node, the coordination application beside the
-WireGuard application among the core's applications and policy.
+The records follow the code: ADR-0011 is marked accepted, its
+implementing proposal landed; ADR-0012, still a draft, is re-grounded
+directly — its mechanism restated for tailnet clients, its decisions
+kept, the relay finding recorded among its consequences; ADR-0005 and
+ADR-0010 stand as written, records of their date, the narrowings
+carried by the records that performed them rather than edited into
+them; and the design documents' gateway and endhost sections are
+rewritten — hosts as tailnet clients of their node, the coordination
+application beside the WireGuard application among the core's
+applications and policy.
 
 ## Test plan
 
@@ -460,3 +460,99 @@ WireGuard application among the core's applications and policy.
     host configuration exists anywhere in the tree.
 
 ## Implementation history
+
+*   The vendored tree: `tailscale.com v1.102.5` joined the module and
+    vendored like the rest, MVS moving gvisor (one `udp.NewForwarder`
+    handler signature in the egress, the handler now answering its
+    handled bool), the x/ line, and klauspost/compress beside it; the
+    client engine itself — tsnet, magicsock, the noise and relay
+    packages — prices in at vendor's own scale.
+*   The seam: `pkg/controlplane/admission.go` carries the
+    boundary-neutral set — `AdmissionFacts{Boundary, Keys, Source,
+    Credential, Claim}`, the answer `AdmissionAnswer{Admission, Note}`
+    beside deny-as-zero verdicts, the one-method
+    `AdmissionAuthorizer`; the trust service's call site names its
+    boundary and passes the CSR subject key's fingerprint as the one
+    key, its SCION underlay as the source, its claimed ISD-AS as the
+    claim; both `pkg/enrollauth` implementations migrated, nothing of
+    `--enroll-auth` or the package's name moved.
+*   The invitation: the Telegram authorizer answers message updates in
+    the configured chat — "invite" mints a `cion-` credential and
+    replies with it, a pasted unspent key retires it — and a
+    registration presenting a minted unspent key approves on the
+    plugin's own records, spending it, the note it answers recorded
+    with the entry; the unspent set persists in
+    `<state>/enrollauth/telegram-invitations.json` behind `LoadOptions`
+    .State. Registration asks key by the machine key alone: a
+    registration attempt presents a freshly generated node key on every
+    retry until one completes, so the machine key is the identity that
+    survives the client's own polling (`identityOf`).
+*   The registry: `HostEntry{PublicKey, Addr, IA, Note}` beside node
+    entries in the same bbolt store, a `hosts` bucket keyed by public
+    key, the shared `List` returning both kinds as one `Directory` —
+    the proto's `ListResponse` carrying both, the contract tests
+    (`impl/dbtest`) growing the kind; the node entry gained the
+    host-facing endpoint (`HostEndpoint`) the netmap names.
+*   The allocation: `pkg/apps/coordination/allocator.go` — idempotent
+    per key from the standing record, the freest slice taking the host
+    with ties to the lowest ISD-AS, allocation starting after the
+    slice's first address, the full slice and the overlapping pair
+    both refused with their names.
+*   The application: `pkg/apps/coordination` — the HTTPS endpoint
+    presenting the WebPKI certificate (a clone of the endpoint's
+    config, HTTP/1.1 and the ACME challenge protocol beside), the
+    `/ts2021` upgrade into the noise channel (controlhttpserver) and
+    HTTP/2 over it carrying `/machine/register` behind the seam and
+    `/machine/map` answering zstd-framed full maps, `/derp` the relay,
+    and `/key` the plain-TLS key fetch the client's first exchange is.
+    The netmap holds the host's own address, its node as a
+    wireguard-only peer with the allocated /32s as allowed IPs — each
+    one a single-IP Tailscale address the client lines route
+    unconditionally, where the covering /10 would sit behind the
+    client's route-all preference — the one relay region, and a single
+    packet-filter rule admitting the tailnet. The capability pin is
+    the vendored `CurrentCapabilityVersion`, guarded by its own test.
+*   The node side: one host device behind the shared port, programmed
+    by the directory diff from the host entries it owns — a new key
+    gains its /32, a departed key loses it (`applyHostEntries`) — the
+    router's table holding the owned /32s and the node slices alone,
+    no default anywhere, the egress standing unfed; the peers, exits,
+    and per-exit devices retired, the mesh devices' `0.0.0.0/0` with
+    them, and a configuration file still naming a retired field stops
+    the boot (`RejectUnknownMembers`). The relay presence
+    (`derpbridge.go`): a derphttp client keyed by the node's own key,
+    its received datagrams fed to the shared host socket with a
+    synthetic endpoint naming the sender's key, its sends carrying the
+    replies, and wireguard's own last-arrival caching carrying the leg
+    switch.
+*   The wiring: the coordination application assembles on the core
+    beside the WireGuard application — the same store instance, the
+    same authorizer, the endpoint's certificate prepared once and
+    served by both surfaces, the dedicated TLS-ALPN challenge listener
+    retiring on a coordination-serving core (`webpki.PrepareTLSCert`
+    and `CertManager`), and `NodePacing.Directory` pacing the
+    application's publish and fetch when set.
+*   The records: ADR-0011 accepted; ADR-0012 re-grounded in place, its
+    text restated on the tailnet boundary with the relay finding among
+    its consequences — the vendored client line refuses DERP sends to
+    wireguard-only peers, so the host-side relay leg of the fallback is
+    not expressible under the ADR's chosen peer model in this line, the
+    node-side leg (the bridge) landed and proved; ADR-0005 and ADR-0010
+    untouched, their narrowings carried by the records that performed
+    them; and the design documents' gateway and endhost sections
+    rewritten.
+*   Tests: the seam and posture suites migrated and grown (both
+    boundaries, the invitation windows, persistence across restart,
+    the wrong chat ignored); the allocator, netmap, and registration
+    episodes against the vendored noise client itself
+    (`protocol_test.go`); the relay pair against the vendored derphttp
+    client; the bridge's roaming by last arrival with a real device
+    (`derpbridge_test.go`); the node-side host diff and the router's
+    defaultless table; the two-node labs with the vendored client
+    engine as the host double — the open join through login, netmap,
+    and a TCP echo across the mesh between two nodes' hosts; the
+    invitation joining unattended and its note recorded; the prompted
+    join completing on the operator's press; and the CIDR gate
+    refusing a host outside its prefixes. The mihomo line remains an
+    out-of-repo exercise of the documented endpoint, per the
+    compatibility pin the served capability guards.

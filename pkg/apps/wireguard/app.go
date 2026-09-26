@@ -53,24 +53,13 @@ const PersistentKeepalive = 25 * time.Second
 // in-process forwarding.
 const CountersInterval = time.Minute
 
-// HostPeer is one configured host: its public key — the operator's list, the
-// application's membership — its overlay address, and its exit.
-type HostPeer struct {
-	// PublicKey is the host's WireGuard public key.
-	PublicKey PublicKey
-	// Addr is the host's overlay address, inside the node's subnet.
-	Addr netip.Addr
-	// Exit is the exit ISD-AS the host sends through; the key it sends with
-	// selects it.
-	Exit addr.IA
-}
-
 // Config configures the application.
 type Config struct {
 	// IA is the node's ISD-AS.
 	IA addr.IA
-	// Subnet is the node's operator-assigned overlay subnet; host addresses
-	// are assigned within it by the peer configuration.
+	// Subnet is the node's slice of the tailnet range, 100.64.0.0/10: the
+	// space the coordination service allocates the node's hosts from. The
+	// slice's first address is the node's own.
 	Subnet netip.Prefix
 	// ListenHost is the underlay host the shared host-facing UDP port binds.
 	ListenHost netip.Addr
@@ -78,13 +67,14 @@ type Config struct {
 	// internet clients with a single endpoint to reach.
 	ListenPort uint16
 	// Egress marks an internet exit: the node runs the netstack egress only
-	// when set.
+	// when set — unfed until the egress record's service lights it
+	// (ADR-0012).
 	Egress bool
-	// Exits lists the offered exit ISD-ASes; one host device serves each,
-	// and every configured peer's exit must be among them.
-	Exits []addr.IA
-	// Peers lists the host public keys, addresses, and each peer's exit.
-	Peers []HostPeer
+	// DERP is the relay presence the node holds: received datagrams feed
+	// the shared host port and sends carry the replies, so a host on a
+	// network where UDP to the node cannot pass still reaches its node.
+	// Nil runs no presence, and the node serves its hosts over UDP alone.
+	DERP *DERPConfig
 	// StateDir is the application's own state directory: the WireGuard key
 	// pair's home.
 	StateDir string
@@ -125,11 +115,12 @@ type Config struct {
 	PublishRetry    time.Duration
 }
 
-// App is the WireGuard application (proposal 0006): the mesh transport and
-// directory, the host-facing devices behind their shared port, the in-process
-// router between the tunnels, and — on an exit — the netstack egress. The
-// node running it holds unprivileged UDP sockets and its own state, and
-// nothing else.
+// App is the WireGuard application (proposals 0006 and 0022): the mesh
+// transport and directory, the one host-facing device behind its shared port
+// — programmed from the host entries the directory distributes — the
+// in-process router between the tunnels, and — on an egress node — the
+// netstack egress. The node running it holds unprivileged UDP sockets and
+// its own state, and nothing else.
 type App struct {
 	cfg Config
 	key PrivateKey
@@ -151,11 +142,24 @@ type App struct {
 	// logger is wireguard-go's device logger.
 	logger *device.Logger
 
+	// bridge is the node's DERP presence, when configured.
+	bridge *derpBridge
+
 	mtx sync.Mutex
 	// meshPeers holds one mesh device per directory peer.
 	meshPeers map[addr.IA]*meshPeer
-	// hostDevices holds one device per offered exit.
-	hostDevices map[addr.IA]*hostDevice
+	// hosts holds the one host-facing device.
+	hosts *hostDevice
+	// hostPeers holds the host entries the device's peers are programmed
+	// from, keyed by the hosts' public keys.
+	hostPeers map[PublicKey]HostEntry
+}
+
+// hostDevice is the one host-facing device: the node's key pair on the
+// shared port, its peers the host entries the node owns.
+type hostDevice struct {
+	dev  *device.Device
+	pipe *pipe
 }
 
 // meshPeer is one directory peer's mesh device.
@@ -169,13 +173,6 @@ type meshPeer struct {
 type svcReg struct {
 	svc  addr.SVC
 	port uint16
-}
-
-// hostDevice is one exit's host-facing device.
-type hostDevice struct {
-	exit addr.IA
-	dev  *device.Device
-	pipe *pipe
 }
 
 // New assembles the application: it loads or creates the node's WireGuard key
@@ -208,7 +205,7 @@ func New(cfg Config) (*App, error) {
 	if cfg.Store == nil && cfg.CoreRoute == nil {
 		return nil, fmt.Errorf("neither a directory store nor a core route configured")
 	}
-	if err := validatePeers(cfg); err != nil {
+	if err := validateSubnet(cfg.Subnet); err != nil {
 		return nil, err
 	}
 	key, err := LoadOrCreateKey(cfg.StateDir)
@@ -227,15 +224,15 @@ func New(cfg Config) (*App, error) {
 		return nil, fmt.Errorf("binding the host port: %w", err)
 	}
 	a := &App{
-		cfg:         cfg,
-		key:         key,
-		cnt:         cnt,
-		mesh:        newMeshSocket(meshConn, cfg.Provider, cnt),
-		host:        newHostSocket(hostConn, cnt),
-		router:      newRouter(OverlayMTU, cnt),
-		meshPeers:   make(map[addr.IA]*meshPeer),
-		hostDevices: make(map[addr.IA]*hostDevice),
-		logger:      device.NewLogger(device.LogLevelError, "cion-wireguard"),
+		cfg:       cfg,
+		key:       key,
+		cnt:       cnt,
+		mesh:      newMeshSocket(meshConn, cfg.Provider, cnt),
+		host:      newHostSocket(hostConn, cnt),
+		router:    newRouter(OverlayMTU, cnt),
+		meshPeers: make(map[addr.IA]*meshPeer),
+		hostPeers: make(map[PublicKey]HostEntry),
+		logger:    device.NewLogger(device.LogLevelError, "cion-wireguard"),
 	}
 	if cfg.InterfaceDown != nil {
 		// The signal drops the quoted destination's cached path — the bind's
@@ -263,8 +260,10 @@ func New(cfg Config) (*App, error) {
 			a.release()
 			return nil, err
 		}
+		// The egress stands as the exit model built it, its replies routing
+		// home — but unfed: with no default anywhere, the service the
+		// egress record decides is the thing that lights it (ADR-0012).
 		a.egress = e
-		a.router.setEgress(e.Inbound)
 		e.setRouter(a.router.routeFromEgress)
 	}
 	if cfg.Store != nil {
@@ -291,12 +290,42 @@ func New(cfg Config) (*App, error) {
 		a.dirConn = newRPCDirectoryClient(dirConn, cfg.CoreRoute, cfg.Engine, cfg.Provider)
 		a.directory = a.dirConn
 	}
-	if err := a.startHostDevices(); err != nil {
+	if cfg.DERP != nil {
+		// The relay presence stands before the host device, so the device's
+		// sends can return over the relay from the first datagram.
+		a.bridge = newDERPBridge(derpBridgeConfig{
+			Key:    key,
+			Socket: a.host,
+			Cnt:    cnt,
+			URL:    cfg.DERP.URL,
+			IPv4:   cfg.DERP.IPv4,
+		})
+	}
+	if err := a.startHostDevice(); err != nil {
 		a.release()
 		return nil, err
 	}
 	return a, nil
 }
+
+// validateSubnet checks the slice's grammar: an IPv4 prefix the tailnet
+// range contains — the space the coordination service allocates from, the
+// anchor the directory already distributes.
+func validateSubnet(subnet netip.Prefix) error {
+	if !subnet.IsValid() || !subnet.Addr().Is4() {
+		return fmt.Errorf("overlay subnet %s is not IPv4", subnet)
+	}
+	if !Tailnet.Contains(subnet.Addr()) || subnet.Bits() < Tailnet.Bits() {
+		return fmt.Errorf("overlay subnet %s is not a slice of %s",
+			subnet, Tailnet)
+	}
+	return nil
+}
+
+// Tailnet is the overlay's host space, the range every node's slice is a
+// slice of (ADR-0011): the tunnel carries it and nothing else — no default
+// route is advertised anywhere.
+var Tailnet = netip.MustParsePrefix("100.64.0.0/10")
 
 // register registers a socket's port as a SCION service in this AS and
 // records the registration for Close to undo.
@@ -337,87 +366,35 @@ func (a *App) release() {
 	}
 }
 
-// validatePeers checks the operator's list: addresses inside the subnet,
-// exits configured, one exit per key.
-func validatePeers(cfg Config) error {
-	exits := make(map[addr.IA]bool, len(cfg.Exits))
-	for _, exit := range cfg.Exits {
-		exits[exit] = true
-	}
-	seen := make(map[PublicKey]bool, len(cfg.Peers))
-	for _, p := range cfg.Peers {
-		if !cfg.Subnet.Contains(p.Addr) {
-			return fmt.Errorf("host %s is outside the subnet %s", p.Addr, cfg.Subnet)
-		}
-		if !exits[p.Exit] {
-			return fmt.Errorf("host %s uses exit %s, which the node does not offer",
-				p.Addr, p.Exit)
-		}
-		if seen[p.PublicKey] {
-			return fmt.Errorf("host key %s configured more than once", p.PublicKey)
-		}
-		seen[p.PublicKey] = true
-	}
-	return nil
-}
-
-// firstAddr returns the first usable address of a prefix — the exit node's
-// own overlay address, which the netstack claims.
+// firstAddr returns the first usable address of a prefix — the node's own
+// overlay address, which the netstack claims on an egress node.
 func firstAddr(prefix netip.Prefix) (netip.Addr, error) {
 	base := prefix.Masked().Addr().As4()
 	base[3]++
 	return netip.AddrFrom4(base), nil
 }
 
-// startHostDevices creates one host device per offered exit, each on the
-// shared port's dispatcher, with the host peers configured under exactly one
-// exit's device — so the peer lookup demultiplexes the shared socket and
-// reply traffic routes by the peer's address to its exit's device.
-func (a *App) startHostDevices() error {
-	peersByExit := make(map[addr.IA][]HostPeer, len(a.cfg.Exits))
-	for _, p := range a.cfg.Peers {
-		peersByExit[p.Exit] = append(peersByExit[p.Exit], p)
-	}
-	for _, exit := range a.cfg.Exits {
-		dev, pipe, err := a.newHostDevice(exit, peersByExit[exit])
-		if err != nil {
-			for _, hd := range a.hostDevices {
-				hd.dev.Close()
-				_ = hd.pipe.Close()
-			}
-			return err
-		}
-		a.hostDevices[exit] = &hostDevice{exit: exit, dev: dev, pipe: pipe}
-	}
-	return nil
-}
-
-// newHostDevice builds one exit's host-facing device: the node's key pair —
-// every host device shares it, so any can decrypt a handshake while only the
-// one holding the sender's public key completes it — and the hosts
-// configured under this exit as /32 peers.
-func (a *App) newHostDevice(exit addr.IA, peers []HostPeer) (*device.Device, *pipe, error) {
-	pipe := newPipe("host-"+exit.String(), OverlayMTU, a.cnt)
-	dev := device.NewDevice(pipe, newHostBind(a.host), a.logger)
-	var ipc strings.Builder
-	ipc.WriteString("private_key=" + hex.EncodeToString(a.key[:]) + "\n")
-	ipc.WriteString("listen_port=" + strconv.Itoa(int(a.host.LocalPort())) + "\n")
-	ipc.WriteString("replace_peers=true\n")
-	for _, p := range peers {
-		ipc.WriteString("public_key=" + p.PublicKey.String() + "\n")
-		ipc.WriteString("allowed_ip=" + netip.PrefixFrom(p.Addr, 32).String() + "\n")
-	}
-	if err := dev.IpcSet(ipc.String()); err != nil {
+// startHostDevice creates the one host device on the shared port's
+// dispatcher — the node's key pair, no peers yet: the peers arrive with the
+// host entries the directory distributes, the diff applyDirectory programs.
+func (a *App) startHostDevice() error {
+	pipe := newPipe("host", OverlayMTU, a.cnt)
+	dev := device.NewDevice(pipe, newHostBind(a.host, a.bridge), a.logger)
+	ipc := "private_key=" + hex.EncodeToString(a.key[:]) + "\n" +
+		"listen_port=" + strconv.Itoa(int(a.host.LocalPort())) + "\n" +
+		"replace_peers=true\n"
+	if err := dev.IpcSet(ipc); err != nil {
 		dev.Close()
 		_ = pipe.Close()
-		return nil, nil, fmt.Errorf("configuring the host device for %s: %w", exit, err)
+		return fmt.Errorf("configuring the host device: %w", err)
 	}
 	if err := dev.Up(); err != nil {
 		dev.Close()
 		_ = pipe.Close()
-		return nil, nil, fmt.Errorf("raising the host device for %s: %w", exit, err)
+		return fmt.Errorf("raising the host device: %w", err)
 	}
-	return dev, pipe, nil
+	a.hosts = &hostDevice{dev: dev, pipe: pipe}
+	return nil
 }
 
 // newMeshDevice builds one directory peer's mesh device: the node's key pair,
@@ -435,9 +412,6 @@ func (a *App) newMeshDevice(entry Entry) (*meshPeer, error) {
 	ipc.WriteString("public_key=" + entry.PublicKey.String() + "\n")
 	ipc.WriteString("endpoint=" + endpointString(entry.IA) + "\n")
 	ipc.WriteString("allowed_ip=" + entry.Overlay.String() + "\n")
-	if containsExit(a.cfg.Exits, entry.IA) {
-		ipc.WriteString("allowed_ip=0.0.0.0/0\n")
-	}
 	ipc.WriteString("persistent_keepalive_interval=" +
 		strconv.Itoa(int(PersistentKeepalive.Seconds())) + "\n")
 	if err := dev.IpcSet(ipc.String()); err != nil {
@@ -453,14 +427,17 @@ func (a *App) newMeshDevice(entry Entry) (*meshPeer, error) {
 	return &meshPeer{entry: entry, dev: dev, pipe: pipe}, nil
 }
 
-// applyDirectory diffs a fetched directory against the mesh devices: new
-// peers gain a device; departed peers lose theirs and their router entries.
-// The node's own entry is not a peer.
-func (a *App) applyDirectory(entries []Entry) {
+// applyDirectory diffs a fetched directory against the mesh devices and the
+// one host device: new mesh peers gain a device, departed peers lose theirs
+// and their router entries; the host entries the node owns become the host
+// device's peers — a new key gains its /32, a departed key loses it — the
+// same diff shape the node entries give the mesh. A later milestone's host
+// removal arrives as this same diff.
+func (a *App) applyDirectory(directory Directory) {
 	a.mtx.Lock()
 	defer a.mtx.Unlock()
-	live := make(map[addr.IA]bool, len(entries))
-	for _, entry := range entries {
+	live := make(map[addr.IA]bool, len(directory.Nodes))
+	for _, entry := range directory.Nodes {
 		if entry.IA.Equal(a.cfg.IA) {
 			continue
 		}
@@ -476,7 +453,7 @@ func (a *App) applyDirectory(entries []Entry) {
 			continue
 		}
 		a.meshPeers[entry.IA] = peer
-		go peer.pipe.drain(a.router.routeFrom(peer.pipe))
+		go peer.pipe.drain(a.router.route)
 		slog.Info("WireGuard mesh tunnel up", "peer", entry.IA, "subnet", entry.Overlay)
 	}
 	for ia, peer := range a.meshPeers {
@@ -488,36 +465,78 @@ func (a *App) applyDirectory(entries []Entry) {
 		delete(a.meshPeers, ia)
 		slog.Info("WireGuard mesh tunnel down", "peer", ia)
 	}
+	a.applyHostEntries(directory.Hosts)
 	a.rebuildLocked()
 }
 
+// applyHostEntries programs the host device from the host entries the node
+// owns — the entries the coordination registry distributes. The IPC diff
+// adds the new keys and removes the departed ones, so a surviving peer's
+// cached endpoint — the address its datagrams last arrived from, UDP or
+// relay — survives the programming.
+func (a *App) applyHostEntries(hosts []HostEntry) {
+	if a.hosts == nil {
+		return
+	}
+	owned := make(map[PublicKey]HostEntry, len(hosts))
+	for _, host := range hosts {
+		if host.IA.Equal(a.cfg.IA) {
+			owned[host.PublicKey] = host
+		}
+	}
+	var ipc strings.Builder
+	for key, host := range owned {
+		if _, ok := a.hostPeers[key]; ok {
+			continue
+		}
+		ipc.WriteString("public_key=" + key.String() + "\n")
+		ipc.WriteString("allowed_ip=" + netip.PrefixFrom(host.Addr, 32).String() + "\n")
+	}
+	for key := range a.hostPeers {
+		if _, ok := owned[key]; ok {
+			continue
+		}
+		ipc.WriteString("public_key=" + key.String() + "\n")
+		ipc.WriteString("remove=true\n")
+	}
+	if ipc.Len() > 0 {
+		if err := a.hosts.dev.IpcSet(ipc.String()); err != nil {
+			slog.Warn("WireGuard host device", "err", err)
+			return
+		}
+	}
+	for key, host := range owned {
+		if _, ok := a.hostPeers[key]; !ok {
+			a.hostPeers[key] = host
+			slog.Info("WireGuard host joined",
+				"key", key, "addr", host.Addr, "note", host.Note)
+		}
+	}
+	for key := range a.hostPeers {
+		if _, ok := owned[key]; !ok {
+			delete(a.hostPeers, key)
+			slog.Info("WireGuard host departed", "key", key)
+		}
+	}
+}
+
 // rebuildLocked recomposes the router table from the devices; the
-// application's mutex serializes rebuilds with the device set.
+// application's mutex serializes rebuilds with the device set. The table
+// holds the owned hosts' /32s to the host device and each node entry's
+// slice to its mesh device — longest prefix first — and no default
+// anywhere: a destination no slice claims counts unroutable.
 func (a *App) rebuildLocked() {
 	nets := make([]route, 0, len(a.meshPeers))
 	for _, peer := range a.meshPeers {
 		nets = append(nets, route{prefix: peer.entry.Overlay, dst: peer.pipe})
 	}
-	hosts := make([]hostRoute, 0, len(a.cfg.Peers))
-	exits := make(map[*pipe]*pipe, len(a.hostDevices))
-	for exit, hd := range a.hostDevices {
-		for _, p := range a.cfg.Peers {
-			if p.Exit.Equal(exit) {
-				hosts = append(hosts, hostRoute{addr: p.Addr, pipe: hd.pipe})
-			}
-		}
-		// Exit selection is the router's default: traffic decrypted by this
-		// exit's host device flows to the exit's mesh device — the local
-		// exit enters the egress, whose sink the router already holds.
-		if mesh := a.meshPeers[exit]; mesh != nil {
-			exits[hd.pipe] = mesh.pipe
-		} else {
-			// The exit has no tunnel yet; default traffic drops until it
-			// has one.
-			exits[hd.pipe] = nil
+	var hosts []hostRoute
+	if a.hosts != nil {
+		for _, host := range a.hostPeers {
+			hosts = append(hosts, hostRoute{addr: host.Addr, pipe: a.hosts.pipe})
 		}
 	}
-	a.router.rebuild(hosts, nets, exits)
+	a.router.rebuild(hosts, nets)
 }
 
 // PublicKey returns the node's WireGuard public key — the public key a
@@ -538,6 +557,35 @@ func (a *App) MeshPeers() []addr.IA {
 	return a.meshPeerIAs()
 }
 
+// HostPeers snapshots the host entries the node owns — the peers the one
+// host device holds, programmed from the fetched directory.
+func (a *App) HostPeers() []HostEntry {
+	a.mtx.Lock()
+	defer a.mtx.Unlock()
+	hosts := make([]HostEntry, 0, len(a.hostPeers))
+	for _, host := range a.hostPeers {
+		hosts = append(hosts, host)
+	}
+	return hosts
+}
+
+// Directory fetches the node's view of the registry: the core's own store
+// beside it, every other node's fetched copy.
+func (a *App) Directory(ctx context.Context) (Directory, error) {
+	return a.directory.List(ctx)
+}
+
+// Counters snapshots the application's counters — the overlay's substitute
+// for the operating system's tooling.
+func (a *App) Counters() []any { return a.cnt.snapshot() }
+
+// Registry returns the coordination surface of the core's store — nil on
+// every other node, which fetches the directory over the core's route
+// instead.
+func (a *App) Registry() Registry {
+	return a.cfg.Store
+}
+
 // Run serves the application until the context is canceled: the sockets' read
 // loops, the devices' pipes through the router, the egress, the directory —
 // served by the core, published and fetched by everyone — and the counters
@@ -546,8 +594,11 @@ func (a *App) Run(ctx context.Context) error {
 	defer a.Close()
 	go a.mesh.run()
 	go a.host.run()
-	for _, hd := range a.hostDevices {
-		go hd.pipe.drain(a.router.routeFrom(hd.pipe))
+	if a.hosts != nil {
+		go a.hosts.pipe.drain(a.router.route)
+	}
+	if a.bridge != nil {
+		go a.bridge.run(ctx)
 	}
 	if a.egress != nil {
 		go a.egress.run(ctx)
@@ -613,11 +664,12 @@ func (a *App) Close() {
 		_ = peer.pipe.Close()
 	}
 	a.meshPeers = nil
-	for _, hd := range a.hostDevices {
-		hd.dev.Close()
-		_ = hd.pipe.Close()
+	if a.hosts != nil {
+		a.hosts.dev.Close()
+		_ = a.hosts.pipe.Close()
+		a.hosts = nil
 	}
-	a.hostDevices = nil
+	a.hostPeers = nil
 	a.deregisterAll()
 	a.mesh.Close()
 	a.host.Close()
@@ -633,13 +685,4 @@ func (a *App) Close() {
 	if a.cfg.Store != nil {
 		_ = a.cfg.Store.Close()
 	}
-}
-
-func containsExit(exits []addr.IA, ia addr.IA) bool {
-	for _, exit := range exits {
-		if exit.Equal(ia) {
-			return true
-		}
-	}
-	return false
 }

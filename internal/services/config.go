@@ -70,9 +70,15 @@ type NodeConfig struct {
 	// BehindNAT publishes the node's reachability class as private: joinable
 	// by no one, candidate for no one's floor.
 	BehindNAT bool
-	// WireguardConfig points at the WireGuard application's own file (host
-	// membership, subnets, exits); empty runs none.
+	// WireguardConfig points at the WireGuard application's own file (the
+	// tailnet slice, the shared port, the egress mark); empty runs none.
 	WireguardConfig string
+	// Coordination overrides the coordination endpoint's placement for the
+	// integration harness (proposal 0022): the loopback address its core
+	// serves on and the relay every node's presence dials, standing in for
+	// the production derivation from the core's domain. Nil serves the
+	// endpoint on the core's control host at the default port.
+	Coordination *CoordinationOptions
 	// RootCAs anchors the WebPKI verification of the core's domain
 	// certificate; nil uses the system roots. The integration tests inject
 	// their CA with it.
@@ -81,6 +87,34 @@ type NodeConfig struct {
 	// Pacing shortens the loops' periods; zero values keep the production
 	// constants. The daemon never sets it — the integration tests do.
 	Pacing NodePacing
+}
+
+// CoordinationOptions is the coordination endpoint's harness placement.
+type CoordinationOptions struct {
+	// Addr is the HTTPS address the core serves the coordination endpoint
+	// on, "host:port".
+	Addr string
+	// DERP overrides the relay the netmap advertises and the nodes'
+	// presences dial.
+	DERP DERPOptions
+	// RelayOnly strips the peer's endpoint from every netmap the endpoint
+	// serves — the harness's stand-in for a network where UDP to the node
+	// cannot pass, forcing the relay leg.
+	RelayOnly bool
+}
+
+// DERPOptions names a relay: the pieces of the DERP map's grammar the
+// harness needs beside the production derivation from the core's domain.
+type DERPOptions struct {
+	// URL is the relay's HTTPS address as the node's presence dials it.
+	URL string
+	// IPv4 dials the relay by address instead of DNS.
+	IPv4 string
+	// Port overrides the relay's HTTPS port in the netmap's advertisement.
+	Port int
+	// CertName pins the relay's certificate ("sha256-raw:<hex>" among the
+	// forms).
+	CertName string
 }
 
 // NodePacing carries the test pacing of the node's loops.
@@ -125,7 +159,8 @@ func (c NodeConfig) Validate() error {
 			return fmt.Errorf("--enroll-auth requires --core: " +
 				"the core is the only node that issues chains")
 		}
-		if _, _, err := enrollauth.Load(c.EnrollAuth, enrollauth.LoadOptions{}); err != nil {
+		if _, _, err := enrollauth.Load(c.EnrollAuth,
+			enrollauth.LoadOptions{State: c.State}); err != nil {
 			return fmt.Errorf("parsing --enroll-auth: %w", err)
 		}
 	}
@@ -133,32 +168,20 @@ func (c NodeConfig) Validate() error {
 }
 
 // ConfigWireguard is the WireGuard application's configuration file. See
-// proposal 0006; the section moved out of the retiring node file (ADR-0008).
+// proposals 0006 and 0022; the section moved out of the retiring node file
+// (ADR-0008). The hosts themselves configured nothing here anymore: a host
+// is a login against the core's coordination service, and its entry arrives
+// by the directory.
 type ConfigWireguard struct {
-	// Subnet is the node's overlay subnet, e.g. "10.64.1.0/24". Host
-	// addresses are assigned within it by the peer configuration.
+	// Subnet is the node's slice of the tailnet range, e.g.
+	// "100.64.1.0/24". The coordination service allocates the node's hosts
+	// within it; the slice's first address is the node's own.
 	Subnet string `json:"subnet"`
 	// ListenPort is the shared host-facing UDP port every host dials.
 	ListenPort uint16 `json:"listenPort"`
 	// Egress marks an internet exit: the node runs the netstack egress only
 	// when set.
 	Egress bool `json:"egress"`
-	// Exits lists the offered exit ISD-ASes, e.g. ["20-ff00:0:3"]; one host
-	// device serves each.
-	Exits []string `json:"exits"`
-	// Peers lists the host public keys — the operator's membership list —
-	// with an overlay address and an exit each.
-	Peers []ConfigWireguardPeer `json:"peers"`
-}
-
-// ConfigWireguardPeer is one host's entry in the application's configuration.
-type ConfigWireguardPeer struct {
-	// PublicKey is the host's 32-byte WireGuard public key, hexadecimal.
-	PublicKey string `json:"publicKey"`
-	// Address is the host's overlay address inside the subnet.
-	Address string `json:"address"`
-	// Exit is the exit ISD-AS the host sends through.
-	Exit string `json:"exit"`
 }
 
 // LoadWireguardConfig reads the WireGuard application's configuration from

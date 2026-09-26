@@ -30,17 +30,50 @@ const (
 )
 
 // Entry is one node's publication: everything another node needs to
-// establish a mesh tunnel to it. The ISD-AS comes from the authenticated
-// publisher's certificate chain, never from the claimed entry. A peer is its
-// ISD-AS, its key, and its subnet: the mesh transport is a SCION service
-// (proposal 0007), so no reachability data rides the entry.
+// establish a mesh tunnel to it, and a host's client needs to dial it. The
+// ISD-AS comes from the authenticated publisher's certificate chain, never
+// from the claimed entry. A mesh peer is its ISD-AS, its key, and its
+// subnet: the mesh transport is a SCION service (proposal 0007), so no
+// reachability data rides the entry for the mesh's own sake.
 type Entry struct {
 	// IA is the publisher's ISD-AS.
 	IA addr.IA
 	// PublicKey is the node's WireGuard public key.
 	PublicKey PublicKey
-	// Overlay is the node's overlay subnet.
+	// Overlay is the node's overlay subnet, its slice of the tailnet range.
 	Overlay netip.Prefix
+	// HostEndpoint is the host-facing endpoint — the underlay address and
+	// shared port a host's client dials. The mesh needs it not; the
+	// coordination service's netmap names it (ADR-0011).
+	HostEndpoint netip.AddrPort
+}
+
+// HostEntry is one host's registry entry (ADR-0011): the record the
+// coordination service's gate allocates and the directory distributes. The
+// host's key is its identity — the same key re-registering meets the same
+// entry — and the address, the owning node, and the approving plugin's note
+// ride beside it.
+type HostEntry struct {
+	// PublicKey is the host's WireGuard public key.
+	PublicKey PublicKey
+	// Addr is the tailnet address the coordination service allocated.
+	Addr netip.Addr
+	// IA is the owning node, whose slice of the tailnet range the address
+	// came from. The record never moves: a re-registering host changes
+	// nothing.
+	IA addr.IA
+	// Note is the approving plugin's own account of its decision.
+	Note string
+}
+
+// Directory is one fetch of the directory: node entries beside host
+// entries, the same authenticated snapshot every node programs itself from
+// (ADR-0011).
+type Directory struct {
+	// Nodes holds one entry per publishing node.
+	Nodes []Entry
+	// Hosts holds one entry per registered host.
+	Hosts []HostEntry
 }
 
 // DirectoryStore is the core's persisted directory, following the trust DB's
@@ -48,9 +81,22 @@ type Entry struct {
 type DirectoryStore interface {
 	// Publish records the entry, keyed by its ISD-AS.
 	Publish(ctx context.Context, entry Entry) error
-	// List returns every published entry.
-	List(ctx context.Context) ([]Entry, error)
+	// PublishHost records the host entry, keyed by its public key. Host
+	// entries enter the store locally, through the coordination application
+	// the core alone runs — never through the node-authenticated publish.
+	PublishHost(ctx context.Context, entry HostEntry) error
+	// List returns every published entry, nodes and hosts together.
+	List(ctx context.Context) (Directory, error)
 	Close() error
+}
+
+// Registry is the coordination surface of the core's store: node entries
+// read for the netmap and allocation, host entries written at admission
+// (ADR-0011). The store stays this application's; the coordination
+// application borrows the view beside it, never the file.
+type Registry interface {
+	List(ctx context.Context) (Directory, error)
+	PublishHost(ctx context.Context, entry HostEntry) error
 }
 
 // directoryClient is the publish and list surface, whichever side of the
@@ -58,7 +104,7 @@ type DirectoryStore interface {
 // core itself.
 type directoryClient interface {
 	Publish(ctx context.Context, entry Entry) error
-	List(ctx context.Context) ([]Entry, error)
+	List(ctx context.Context) (Directory, error)
 }
 
 // storeDirectoryClient serves the core's own application from its local
@@ -71,7 +117,7 @@ func (c storeDirectoryClient) Publish(ctx context.Context, entry Entry) error {
 	return c.store.Publish(ctx, entry)
 }
 
-func (c storeDirectoryClient) List(ctx context.Context) ([]Entry, error) {
+func (c storeDirectoryClient) List(ctx context.Context) (Directory, error) {
 	return c.store.List(ctx)
 }
 
@@ -120,9 +166,10 @@ func (a *App) publish(ctx context.Context) error {
 // selfEntry is the node's own publication.
 func (a *App) selfEntry() Entry {
 	return Entry{
-		IA:        a.cfg.IA,
-		PublicKey: a.key.PublicKey(),
-		Overlay:   a.cfg.Subnet,
+		IA:           a.cfg.IA,
+		PublicKey:    a.key.PublicKey(),
+		Overlay:      a.cfg.Subnet,
+		HostEndpoint: netip.AddrPortFrom(a.cfg.ListenHost, a.cfg.ListenPort),
 	}
 }
 
@@ -140,12 +187,12 @@ func (a *App) runSync(ctx context.Context) {
 		if !sleepCtx(ctx, interval) {
 			return
 		}
-		entries, err := a.directory.List(ctx)
+		directory, err := a.directory.List(ctx)
 		if err != nil {
 			slog.Warn("WireGuard directory fetch", "err", err)
 			continue
 		}
-		a.applyDirectory(entries)
+		a.applyDirectory(directory)
 		a.warmMeshPaths(ctx)
 	}
 }

@@ -1,11 +1,9 @@
 package testnetwork
 
 import (
+	"context"
 	"encoding/hex"
-	"io"
-	"net"
 	"net/netip"
-	"os"
 	"strings"
 	"testing"
 	"time"
@@ -13,7 +11,6 @@ import (
 	"github.com/scionproto/scion/pkg/addr"
 	wgconn "golang.zx2c4.com/wireguard/conn"
 	"golang.zx2c4.com/wireguard/device"
-	wgnetstack "golang.zx2c4.com/wireguard/tun/netstack"
 	"golang.zx2c4.com/wireguard/tun/tuntest"
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/header"
@@ -21,10 +18,11 @@ import (
 	"github.com/fancl20/cion/pkg/apps/wireguard"
 )
 
-// The WireGuard application's integration tests' topology: the core A — the
-// internet exit — and the leaf B, each running the application; the hosts
-// are in-process WireGuard clients, plain internet clients of their local
-// node.
+// The WireGuard application's integration tests' topology: the core A and
+// the leaf B, each running the application; the hosts' entries arrive by
+// the registry the core's store holds, exactly the coordination service's
+// record (ADR-0011) — these tests hand it there until the coordination
+// suites drive real logins.
 var (
 	wireguardA = addr.MustIAFrom(20, 0xff0000000051)
 	wireguardB = addr.MustIAFrom(20, 0xff0000000052)
@@ -73,46 +71,21 @@ func newRawHost(t *testing.T, nodeKey wireguard.PublicKey, hostKey wireguard.Pri
 	return &rawHost{dev: dev, tun: tun, addr: hostAddr}
 }
 
-// netstackHost is a host with a whole userspace TCP/IP stack: a real socket
-// surface to dial the internet from.
-type netstackHost struct {
-	dev *device.Device
-	net *wgnetstack.Net
-}
-
-// newNetstackHost builds a netstack-hosted host bound to the node's shared
-// port.
-func newNetstackHost(t *testing.T, nodeKey wireguard.PublicKey, hostKey wireguard.PrivateKey,
-	hostAddr netip.Addr, nodeAddr netip.AddrPort) *netstackHost {
-
-	t.Helper()
-	tun, net, err := wgnetstack.CreateNetTUN([]netip.Addr{hostAddr}, nil, 1280)
-	if err != nil {
-		t.Fatal(err)
-	}
-	dev := device.NewDevice(tun, wgconn.NewDefaultBind(),
-		device.NewLogger(device.LogLevelSilent, "cion-host-test"))
-	ipc := strings.Join([]string{
-		"private_key=" + hex.EncodeToString(hostKey[:]),
-		"public_key=" + nodeKey.String(),
-		"endpoint=" + nodeAddr.String(),
-		"allowed_ip=0.0.0.0/0",
-		"persistent_keepalive_interval=1",
-	}, "\n")
-	if err := dev.IpcSet(ipc); err != nil {
-		t.Fatal(err)
-	}
-	if err := dev.Up(); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(dev.Close)
-	return &netstackHost{dev: dev, net: net}
-}
-
 // hasMeshPeer reports whether the application holds the peer's mesh device.
 func hasMeshPeer(a *wireguard.App, peer addr.IA) bool {
 	for _, ia := range a.MeshPeers() {
 		if ia.Equal(peer) {
+			return true
+		}
+	}
+	return false
+}
+
+// hasHostPeer reports whether the application's host device holds the
+// host's entry.
+func hasHostPeer(a *wireguard.App, host wireguard.HostEntry) bool {
+	for _, h := range a.HostPeers() {
+		if h.PublicKey == host.PublicKey && h.Addr == host.Addr {
 			return true
 		}
 	}
@@ -124,41 +97,35 @@ func nodeHostPort(n *Node) netip.AddrPort {
 	return netip.AddrPortFrom(n.ControlIP, n.Wireguard.HostPort())
 }
 
-// startWireguardNodes brings up the two-node WireGuard topology: the core
-// A — the internet exit — and the leaf B whose hosts send through it. A's
-// own host is optional (a zero key runs A with none); B's hosts use A.
-func startWireguardNodes(
-	t *testing.T,
-	ipA, ipB netip.Addr,
-	hostAPub wireguard.PublicKey, hostAAddr netip.Addr,
-	hostBPub wireguard.PublicKey, hostBAddr netip.Addr,
-) (*Node, *Node) {
+// registerHost records one host's registry entry in the core's store — the
+// record the coordination service's gate writes (ADR-0011), handed here by
+// the tests that stand in for the service.
+func registerHost(t *testing.T, core *Node, host wireguard.HostEntry) {
+	t.Helper()
+	if err := core.WireguardStore.PublishHost(context.Background(), host); err != nil {
+		t.Fatal(err)
+	}
+}
 
+// startWireguardNodes brings up the two-node WireGuard topology: the core A
+// and the leaf B, meshed over their seeded link.
+func startWireguardNodes(t *testing.T, ipA, ipB netip.Addr) (*Node, *Node) {
 	t.Helper()
 	wpki := NewWebPKI(t)
 	extA, extB := FreeUDPAddrOn(t, ipA), FreeUDPAddrOn(t, ipB)
-	var hostAPeers []wireguard.HostPeer
-	if hostAPub != (wireguard.PublicKey{}) {
-		hostAPeers = append(hostAPeers,
-			wireguard.HostPeer{PublicKey: hostAPub, Addr: hostAAddr, Exit: wireguardA})
-	}
 	a := StartNode(t, NodeConfig{
 		IA: wireguardA, Host: ipA, Core: true, WPKI: wpki,
 		Links: []Link{{Local: extA, Remote: extB, Neighbor: wireguardB}},
 		Wireguard: &WireguardOptions{
-			Subnet: "10.64.1.0/24",
+			Subnet: "100.64.1.0/24",
 			Egress: true,
-			Exits:  []addr.IA{wireguardA},
-			Peers:  hostAPeers,
 		},
 	})
 	b := StartNode(t, NodeConfig{
 		IA: wireguardB, Host: ipB, WPKI: wpki,
 		Links: []Link{{Local: extB, Remote: extA, Neighbor: wireguardA}},
 		Wireguard: &WireguardOptions{
-			Subnet: "10.64.2.0/24",
-			Exits:  []addr.IA{wireguardA},
-			Peers:  []wireguard.HostPeer{{PublicKey: hostBPub, Addr: hostBAddr, Exit: wireguardA}},
+			Subnet: "100.64.2.0/24",
 		},
 	})
 	Poll(t, "A's mesh peer", func() bool { return hasMeshPeer(a.Wireguard, wireguardB) })
@@ -166,20 +133,31 @@ func startWireguardNodes(
 	return a, b
 }
 
-// TestWireguardMeshExchange is proposal 0006's mesh proof: the nodes
-// publish and fetch the directory, mesh devices handshake over the SCION
-// transport, and an in-process host exchanges ICMP through node B's host
-// device, the mesh, and node A's delivery to its own in-process host.
+// TestWireguardMeshExchange is the mesh proof on the tailnet boundary: the
+// host entries land in the core's registry, both nodes program their host
+// devices from their fetched directories, and a host exchanges ICMP through
+// its node's device, the mesh, and the far node's delivery to its own host.
 func TestWireguardMeshExchange(t *testing.T) {
 	hostAKey, hostAPub := newHostKey(t)
 	hostBKey, hostBPub := newHostKey(t)
-	hostAAddr := netip.MustParseAddr("10.64.1.10")
-	hostBAddr := netip.MustParseAddr("10.64.2.10")
+	hostAAddr := netip.MustParseAddr("100.64.1.10")
+	hostBAddr := netip.MustParseAddr("100.64.2.10")
 
-	// Loopback addresses of this test's own; the egress test's nodes keep
-	// theirs.
-	a, b := startWireguardNodes(t, addrIP(0x21), addrIP(0x22),
-		hostAPub, hostAAddr, hostBPub, hostBAddr)
+	a, b := startWireguardNodes(t, addrIP(0x21), addrIP(0x22))
+	registerHost(t, a, wireguard.HostEntry{
+		PublicKey: hostAPub, Addr: hostAAddr, IA: wireguardA, Note: "test"})
+	registerHost(t, a, wireguard.HostEntry{
+		PublicKey: hostBPub, Addr: hostBAddr, IA: wireguardB, Note: "test"})
+	// The nodes program themselves from the fetched set: both host devices
+	// gain their peers within one fetch cadence.
+	Poll(t, "A's host peer", func() bool {
+		return hasHostPeer(a.Wireguard, wireguard.HostEntry{
+			PublicKey: hostAPub, Addr: hostAAddr})
+	})
+	Poll(t, "B's host peer", func() bool {
+		return hasHostPeer(b.Wireguard, wireguard.HostEntry{
+			PublicKey: hostBPub, Addr: hostBAddr})
+	})
 
 	// Hosts: standard clients of their local nodes.
 	hostA := newRawHost(t, a.Wireguard.PublicKey(), hostAKey, hostAAddr, nodeHostPort(a))
@@ -214,88 +192,6 @@ func TestWireguardMeshExchange(t *testing.T) {
 		}
 	case <-time.After(TestTimeout):
 		t.Fatal("host A never received the echoed reply")
-	}
-}
-
-// internetHost returns a local non-loopback address to serve the "internet"
-// on: the hosts' userspace stacks reject loopback sources as martian packets
-// the way strict stacks do, so the stand-in internet must be a real address.
-func internetHost(t *testing.T) netip.Addr {
-	t.Helper()
-	ipStr := os.Getenv("CION_TEST_INTERNET_HOST")
-	if ipStr == "" {
-		addrs, err := net.InterfaceAddrs()
-		if err != nil {
-			t.Fatal(err)
-		}
-		for _, a := range addrs {
-			ap, ok := a.(*net.IPNet)
-			if !ok || ap.IP.IsLoopback() {
-				continue
-			}
-			// Interface addresses may carry the IPv4 as 4-in-6.
-			if ip, ok := netip.AddrFromSlice(ap.IP); ok && ip.Unmap().Is4() {
-				return ip.Unmap()
-			}
-		}
-		t.Skip("no non-loopback IPv4 address to serve the internet stand-in on")
-	}
-	ip, err := netip.ParseAddr(ipStr)
-	if err != nil || !ip.Is4() {
-		t.Skipf("CION_TEST_INTERNET_HOST %q is not an IPv4 address", ipStr)
-	}
-	return ip
-}
-
-// TestWireguardEgressProxiesInternet is proposal 0006's egress proof: an
-// exit proxies a host's TCP flow to a local "internet" service and returns
-// the reply — the host's handshake completing at the exit, the flow spliced
-// to one outbound connection from the node's own address.
-func TestWireguardEgressProxiesInternet(t *testing.T) {
-	// The "internet": an echo service on the host's real address.
-	listener, err := net.Listen("tcp", netip.AddrPortFrom(internetHost(t), 0).String())
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = listener.Close() })
-	go func() {
-		for {
-			conn, err := listener.Accept()
-			if err != nil {
-				return
-			}
-			go func() {
-				defer func() { _ = conn.Close() }()
-				_, _ = io.Copy(conn, conn)
-			}()
-		}
-	}()
-	internet := listener.Addr().(*net.TCPAddr).AddrPort()
-
-	hostBKey, hostBPub := newHostKey(t)
-	hostBAddr := netip.MustParseAddr("10.64.2.10")
-	_, b := startWireguardNodes(t, addrIP(0x23), addrIP(0x24),
-		wireguard.PublicKey{}, netip.Addr{}, hostBPub, hostBAddr)
-
-	host := newNetstackHost(t, b.Wireguard.PublicKey(), hostBKey, hostBAddr, nodeHostPort(b))
-	conn, err := host.net.DialTCPAddrPort(internet)
-	if err != nil {
-		t.Fatalf("the host's TCP flow through the exit failed: %v", err)
-	}
-	defer func() { _ = conn.Close() }()
-	msg := []byte("through the exit")
-	if _, err := conn.Write(msg); err != nil {
-		t.Fatal(err)
-	}
-	if err := conn.SetReadDeadline(time.Now().Add(TestTimeout)); err != nil {
-		t.Fatal(err)
-	}
-	got := make([]byte, len(msg))
-	if _, err := io.ReadFull(conn, got); err != nil {
-		t.Fatalf("the internet's reply never returned through the exit: %v", err)
-	}
-	if string(got) != string(msg) {
-		t.Errorf("echo = %q, want %q", got, msg)
 	}
 }
 

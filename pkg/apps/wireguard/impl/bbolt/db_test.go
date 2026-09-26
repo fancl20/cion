@@ -39,7 +39,7 @@ func TestDirectoryStoreIgnoresRetiredFields(t *testing.T) {
 	// An entry as proposal 0006 stored it: gatewayPort and underlay beside
 	// the fields that remain.
 	old := `{"publicKey":"` + hex.EncodeToString(key[:]) + `",` +
-		`"gatewayPort":30045,"underlay":"192.0.2.1","overlay":"10.64.1.0/24"}`
+		`"gatewayPort":30045,"underlay":"192.0.2.1","overlay":"100.64.1.0/24"}`
 	if err := db.Update(func(tx *bbolt.Tx) error {
 		return tx.Bucket(entriesBucket).Put([]byte("20-ff00:0:1"), []byte(old))
 	}); err != nil {
@@ -50,16 +50,16 @@ func TestDirectoryStoreIgnoresRetiredFields(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(entries) != 1 {
-		t.Fatalf("list served %d entries, want 1", len(entries))
+	if len(entries.Nodes) != 1 {
+		t.Fatalf("list served %d entries, want 1", len(entries.Nodes))
 	}
 	want := wireguard.Entry{
 		IA:        mustIA(),
 		PublicKey: key,
 		Overlay:   mustPrefix(),
 	}
-	if entries[0] != want {
-		t.Errorf("decoded entry = %+v, want %+v", entries[0], want)
+	if entries.Nodes[0] != want {
+		t.Errorf("decoded entry = %+v, want %+v", entries.Nodes[0], want)
 	}
 
 	// A re-publish replaces the old-shape entry wholesale.
@@ -71,8 +71,8 @@ func TestDirectoryStoreIgnoresRetiredFields(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(entries) != 1 || entries[0] != want {
-		t.Errorf("re-published entry = %+v, want %+v", entries[0], want)
+	if len(entries.Nodes) != 1 || entries.Nodes[0] != want {
+		t.Errorf("re-published entry = %+v, want %+v", entries.Nodes[0], want)
 	}
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
@@ -92,9 +92,9 @@ func mustKey() wireguard.PublicKey {
 }
 
 func mustPrefix() netip.Prefix {
-	return netip.MustParsePrefix("10.64.1.0/24")
+	return netip.MustParsePrefix("100.64.1.0/24")
 }
 
 func mustPrefix2() netip.Prefix {
-	return netip.MustParsePrefix("10.64.9.0/24")
+	return netip.MustParsePrefix("100.64.9.0/24")
 }

@@ -11,9 +11,11 @@ overview](/docs/design/architecture.md) names the components involved.
 
 ## Security boundaries
 
-*   **Host to node.** Hosts are ordinary clients of their own node, and what
+*   **Host to node.** Hosts are tailnet clients of their own node, and what
     crosses this boundary is already protected end to end: the node holds no
-    key that could undo that protection.
+    key that could undo that protection. The join itself rides the core's
+    WebPKI identity — the coordination endpoint is the one host-facing
+    surface where the WebPKI appears a second time.
 *   **Joiner to core, once.** The joiner's first fetch of the core's endpoint
     is anchored in the WebPKI through the core's domain — the only place the
     WebPKI appears. Every exchange after it rides the network's own trust.
@@ -53,11 +55,13 @@ Untrusted:
 *   **Consent is a signature.** An AS appears in a path only through the
     entries it signed itself — declining to sign is declining transit, and
     the data plane verifies each hop under the signer's key.
-*   **Admission decides on verified facts.** The single gate is a joiner's
-    first issuance: policy sees possession of the joiner's key and a
-    return-routable address, never the joiner's claims about itself.
+*   **Admission decides on verified facts.** One seam serves every
+    boundary: a node's first issuance and a host's registration ask the
+    same plugin with the keys the exchange presented and a
+    return-routable source, never the joiner's claims about itself.
     Admission is open by default, and a gate that cannot reach its signal
-    denies.
+    denies. The approving plugin's note is recorded with the entry — the
+    registry's own audit.
 *   **Bounds rather than revocation.** No revocation exists: admission rate
     caps bound strangers at the doors, expiration retires stale trust, and
     liveness is the node's own probe.

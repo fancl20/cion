@@ -33,38 +33,48 @@ type TLSCertConfig struct {
 	Storage string
 }
 
-// ManageTLSCert returns the server TLS configuration for the endpoint. With
-// certificate files configured it loads them once; otherwise the certificate
-// for the domain is managed by certmagic, with the ACME HTTP-01 and
-// TLS-ALPN-01 challenges answered on dedicated TCP listeners (ports 80 and
-// 443) — ACME servers validate over TCP, never QUIC. DNS-01 support follows
-// later.
-func ManageTLSCert(ctx context.Context, cfg TLSCertConfig) (*tls.Config, error) {
+// CertManager is the prepared certificate identity: a TLS configuration
+// whose GetCertificate presents the certificate — the one configuration
+// every serving surface of the core's domain clones for its own protocol
+// set — and, under ACME, the maintenance that keeps the certificate
+// current.
+type CertManager struct {
+	tlsCfg *tls.Config
+	// magic maintains the certificate under ACME; nil for static files.
+	magic *certmagic.Config
+	// domain is the maintained name; empty for static files.
+	domain string
+}
+
+// PrepareTLSCert prepares the certificate identity without binding the
+// TLS-ALPN-01 challenge port: with certificate files configured it loads
+// them once; otherwise certmagic's ACME machinery stands ready, its
+// HTTP-01 challenge answered on the dedicated port 80, and the maintenance
+// runs under Manage. A caller that serves its own TLS on port 443 — the
+// coordination endpoint of ADR-0011, whose GetCertificate answers the
+// TLS-ALPN-01 challenge beside its own protocols — takes this half; a
+// caller that serves nothing on 443 takes ManageTLSCert, which binds the
+// dedicated challenge listener.
+func PrepareTLSCert(ctx context.Context, cfg TLSCertConfig) (*CertManager, error) {
 	if cfg.CertFile != "" || cfg.KeyFile != "" {
 		cert, err := tls.LoadX509KeyPair(cfg.CertFile, cfg.KeyFile)
 		if err != nil {
 			return nil, fmt.Errorf("loading certificate: %w", err)
 		}
-		return &tls.Config{
+		return &CertManager{tlsCfg: &tls.Config{
 			Certificates: []tls.Certificate{cert},
 			NextProtos:   []string{"h3"},
 			MinVersion:   tls.VersionTLS13,
-		}, nil
+		}}, nil
 	}
 	if cfg.Domain == "" {
 		return nil, errors.New("TLSCertConfig needs a domain or certificate files")
 	}
-	return manageACME(ctx, cfg)
-}
 
-// manageACME obtains and maintains the domain certificate with certmagic
-// and wires serving of the HTTP-01 and TLS-ALPN-01 challenges.
-func manageACME(ctx context.Context, cfg TLSCertConfig) (*tls.Config, error) {
 	var storage certmagic.Storage
 	if cfg.Storage != "" {
 		storage = &certmagic.FileStorage{Path: cfg.Storage}
 	}
-
 	var magic *certmagic.Config
 	cache := certmagic.NewCache(certmagic.CacheOptions{
 		GetConfigForCert: func(certmagic.Certificate) (*certmagic.Config, error) {
@@ -79,26 +89,58 @@ func manageACME(ctx context.Context, cfg TLSCertConfig) (*tls.Config, error) {
 	}
 	issuer.Email = cfg.Email
 
-	// The challenges must be answerable before certificate issuance starts.
+	// The HTTP-01 challenge must be answerable before issuance starts; the
+	// TLS-ALPN-01 challenge rides whichever server holds port 443.
 	if err := serveHTTP01(ctx, issuer); err != nil {
 		cache.Stop()
 		return nil, err
 	}
-	alpnConf := magic.TLSConfig()
-	if err := serveTLSALPN01(ctx, alpnConf); err != nil {
-		cache.Stop()
+	return &CertManager{
+		tlsCfg: &tls.Config{
+			GetCertificate: magic.GetCertificate,
+			NextProtos:     []string{"h3"},
+			MinVersion:     tls.VersionTLS13,
+		},
+		magic:  magic,
+		domain: cfg.Domain,
+	}, nil
+}
+
+// TLSConfig returns the prepared identity. The configuration is shared, not
+// copied: a serving surface clones it and names its own protocols.
+func (m *CertManager) TLSConfig() *tls.Config { return m.tlsCfg }
+
+// Manage maintains the certificate — obtaining it at first need and
+// renewing it on the cache's own schedule. Static files manage nothing.
+func (m *CertManager) Manage(ctx context.Context) error {
+	if m.magic == nil {
+		return nil
+	}
+	if err := m.magic.ManageSync(ctx, []string{m.domain}); err != nil {
+		return fmt.Errorf("obtaining certificate for %s: %w", m.domain, err)
+	}
+	return nil
+}
+
+// ManageTLSCert prepares the certificate identity and serves the parts a
+// core that holds no port of its own needs: the ACME TLS-ALPN-01 challenge
+// answered on a dedicated TCP listener, port 443, and the maintenance
+// running until the context ends. With certificate files configured it
+// loads them once.
+func ManageTLSCert(ctx context.Context, cfg TLSCertConfig) (*tls.Config, error) {
+	manager, err := PrepareTLSCert(ctx, cfg)
+	if err != nil {
 		return nil, err
 	}
-
-	if err := magic.ManageSync(ctx, []string{cfg.Domain}); err != nil {
-		cache.Stop()
-		return nil, fmt.Errorf("obtaining certificate for %s: %w", cfg.Domain, err)
+	if manager.magic != nil {
+		if err := serveTLSALPN01(ctx, manager.magic.TLSConfig()); err != nil {
+			return nil, err
+		}
+		if err := manager.Manage(ctx); err != nil {
+			return nil, err
+		}
 	}
-	return &tls.Config{
-		GetCertificate: magic.GetCertificate,
-		NextProtos:     []string{"h3"},
-		MinVersion:     tls.VersionTLS13,
-	}, nil
+	return manager.TLSConfig(), nil
 }
 
 // serveHTTP01 answers the ACME HTTP-01 challenge on a dedicated TCP

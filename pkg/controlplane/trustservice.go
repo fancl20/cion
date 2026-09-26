@@ -4,8 +4,8 @@ import (
 	"bytes"
 	"context"
 	"crypto/x509"
+	"encoding/hex"
 	"errors"
-	"fmt"
 	"log/slog"
 	"net/netip"
 	"sync"
@@ -47,8 +47,10 @@ type TrustService struct {
 	Issuer *trust.Issuer
 	// Authorizer gates first issuance (ADR-0010): it is asked exactly when
 	// possession is verified and no chain exists for the name, never on a
-	// same-key renewal. Nil is open enrollment — the zero-conf default.
-	Authorizer EnrollmentAuthorizer
+	// same-key renewal. The same seam answers host registration on the
+	// coordination application. Nil is open admission — the zero-conf
+	// default.
+	Authorizer AdmissionAuthorizer
 	// MinInterval is the least pause between admissions of one source at the
 	// renewal door; zero uses the default.
 	MinInterval time.Duration
@@ -140,8 +142,8 @@ func (s *TrustService) checkNameTaken(
 }
 
 // authorizeFirstIssuance puts the authorizer's one question where ADR-0010
-// places it: possession verified, the name free, the verdict on the three
-// facts the exchange established decides. Allow returns nil, deny answers
+// places it: possession verified, the name free, the verdict on the facts
+// the exchange established decides. Allow returns nil, deny answers
 // PermissionDenied, and pending Unavailable — a verdict the joiner's
 // enrollment retry loop consumes without change. Both refusals are logged
 // with the facts beside them, so the node's log mirrors the operator's
@@ -155,29 +157,31 @@ func (s *TrustService) authorizeFirstIssuance(
 	if s.Authorizer == nil {
 		return nil
 	}
-	facts := EnrollmentFacts{
-		IA:   ia,
-		Key:  csr.PublicKey,
-		Addr: remoteUnderlay(ctx),
-	}
 	skid, err := cppki.SubjectKeyID(csr.PublicKey)
 	if err != nil {
 		return connect.NewError(connect.CodeInvalidArgument,
 			serrors.Wrap("computing the CSR subject key", err))
 	}
-	switch s.Authorizer.Authorize(ctx, facts) {
-	case EnrollmentAllow:
+	facts := AdmissionFacts{
+		Boundary: BoundaryEnrollment,
+		Keys:     []string{hex.EncodeToString(skid)},
+		Source:   remoteUnderlay(ctx),
+		Claim:    ia,
+	}
+	answer := s.Authorizer.Authorize(ctx, facts)
+	logFacts := []any{
+		"isd_as", ia, "key", facts.Keys[0], "source", facts.Source}
+	switch answer.Admission {
+	case AdmissionAllow:
 		return nil
-	case EnrollmentPending:
-		slog.Info("Enrollment pending a decision",
-			"isd_as", facts.IA, "key", fmt.Sprintf("%x", skid), "source", facts.Addr)
+	case AdmissionPending:
+		slog.Info("Enrollment pending a decision", logFacts...)
 		return connect.NewError(connect.CodeUnavailable,
-			serrors.New("enrollment pending", "isd_as", facts.IA, "source", facts.Addr))
+			serrors.New("enrollment pending", "isd_as", ia, "source", facts.Source))
 	default:
-		slog.Warn("Denying enrollment", "isd_as", facts.IA,
-			"key", fmt.Sprintf("%x", skid), "source", facts.Addr)
+		slog.Warn("Denying enrollment", logFacts...)
 		return connect.NewError(connect.CodePermissionDenied,
-			serrors.New("enrollment denied", "isd_as", facts.IA, "source", facts.Addr))
+			serrors.New("enrollment denied", "isd_as", ia, "source", facts.Source))
 	}
 }
 

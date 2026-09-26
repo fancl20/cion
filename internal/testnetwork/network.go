@@ -87,7 +87,10 @@ type Node struct {
 	Provider  *scion.PathProvider
 	Lookup    *controlplane.LookupService
 	Wireguard *wireguard.App
-	cancel    context.CancelFunc
+	// WireguardStore is the core's directory store — the registry the
+	// coordination application writes host entries into. Nil on non-cores.
+	WireguardStore wireguard.DirectoryStore
+	cancel         context.CancelFunc
 }
 
 // NewConn returns a SCION connection of the node, bound to the control
@@ -122,16 +125,27 @@ type WebPKI struct {
 	pool     *x509.CertPool
 	certFile string
 	keyFile  string
+	caFile   string
 }
 
 // NewWebPKI creates the CA and the server certificate for TestDomain,
 // returning the certificate files and the pool trusting the CA.
 func NewWebPKI(t *testing.T) *WebPKI {
 	t.Helper()
-	dir := t.TempDir()
-	caKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	wpki, err := mintWebPKI(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
+	}
+	return wpki
+}
+
+// mintWebPKI creates the CA and the server certificate for TestDomain in
+// the given directory, returning the certificate files, the pool trusting
+// the CA, and the CA's own certificate file.
+func mintWebPKI(dir string) (*WebPKI, error) {
+	caKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return nil, err
 	}
 	now := time.Now()
 	caTmpl := &x509.Certificate{
@@ -145,63 +159,75 @@ func NewWebPKI(t *testing.T) *WebPKI {
 	}
 	caDER, err := x509.CreateCertificate(rand.Reader, caTmpl, caTmpl, caKey.Public(), caKey)
 	if err != nil {
-		t.Fatal(err)
+		return nil, err
 	}
 	caCert, err := x509.ParseCertificate(caDER)
 	if err != nil {
-		t.Fatal(err)
+		return nil, err
 	}
 
 	serverKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
-		t.Fatal(err)
+		return nil, err
 	}
 	serverTmpl := &x509.Certificate{
 		SerialNumber: big.NewInt(2),
 		Subject:      pkix.Name{CommonName: TestDomain},
 		DNSNames:     []string{TestDomain},
-		NotBefore:    now.Add(-time.Hour),
-		NotAfter:     now.Add(24 * time.Hour),
-		KeyUsage:     x509.KeyUsageDigitalSignature,
-		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		// The loopback address beside the name: the coordination endpoint
+		// (ADR-0011) is an internet-facing surface, and the harness's
+		// tailnet clients dial it by address.
+		IPAddresses: []net.IP{net.IPv4(127, 0, 0, 1)},
+		NotBefore:   now.Add(-time.Hour),
+		NotAfter:    now.Add(24 * time.Hour),
+		KeyUsage:    x509.KeyUsageDigitalSignature,
+		ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 	}
 	serverDER, err := x509.CreateCertificate(rand.Reader, serverTmpl, caCert,
 		serverKey.Public(), caKey)
 	if err != nil {
-		t.Fatal(err)
+		return nil, err
 	}
 	serverKeyDER, err := x509.MarshalECPrivateKey(serverKey)
 	if err != nil {
-		t.Fatal(err)
+		return nil, err
 	}
 	certFile := filepath.Join(dir, "cert.pem")
 	keyFile := filepath.Join(dir, "key.pem")
 	if err := os.WriteFile(certFile, pem.EncodeToMemory(
 		&pem.Block{Type: "CERTIFICATE", Bytes: serverDER}), 0o600); err != nil {
-		t.Fatal(err)
+		return nil, err
 	}
 	if err := os.WriteFile(keyFile, pem.EncodeToMemory(
 		&pem.Block{Type: "EC PRIVATE KEY", Bytes: serverKeyDER}), 0o600); err != nil {
-		t.Fatal(err)
+		return nil, err
+	}
+	if err := os.WriteFile(filepath.Join(dir, "ca.pem"), pem.EncodeToMemory(
+		&pem.Block{Type: "CERTIFICATE", Bytes: caDER}), 0o600); err != nil {
+		return nil, err
 	}
 	pool := x509.NewCertPool()
 	pool.AddCert(caCert)
-	return &WebPKI{pool: pool, certFile: certFile, keyFile: keyFile}
+	return &WebPKI{
+		pool:     pool,
+		certFile: certFile,
+		keyFile:  keyFile,
+		caFile:   filepath.Join(dir, "ca.pem"),
+	}, nil
 }
 
 // WireguardOptions configures a node's WireGuard application; nil runs
 // none.
 type WireguardOptions struct {
-	// Subnet is the node's overlay subnet.
+	// Subnet is the node's slice of the tailnet range.
 	Subnet string
 	// Egress marks an internet exit.
 	Egress bool
-	// Exits lists the offered exit ISD-ASes.
-	Exits []addr.IA
-	// Peers lists the host public keys with address and exit.
-	Peers []wireguard.HostPeer
 	// ListenPort is the shared host-facing port; 0 takes an ephemeral one.
 	ListenPort uint16
+	// DERP names the relay presence the node holds, when the harness runs
+	// one beside the plain UDP leg; nil runs none.
+	DERP *wireguard.DERPConfig
 }
 
 // NodeConfig configures StartNode.
@@ -630,7 +656,7 @@ func linkTableOf(store links.DB) func() map[uint16]addr.IA {
 }
 
 // startWireguard starts the node's WireGuard application: the mesh
-// transport, the host devices behind their shared port, the router and
+// transport, the one host device behind its shared port, the router and
 // egress, and the directory — served by the core, published and fetched by
 // everyone — per the node assembly's own wiring.
 func (n *Node) startWireguard(
@@ -652,8 +678,7 @@ func (n *Node) startWireguard(
 		ListenHost: controlAddr.Addr(),
 		ListenPort: opts.ListenPort,
 		Egress:     opts.Egress,
-		Exits:      opts.Exits,
-		Peers:      opts.Peers,
+		DERP:       opts.DERP,
 		StateDir:   wgState,
 		Provider:   n.Provider,
 		Engine:     n.Engine,
@@ -697,6 +722,9 @@ func (n *Node) startWireguard(
 		t.Fatal(err)
 	}
 	n.Wireguard = app
+	if wgCfg.Store != nil {
+		n.WireguardStore = wgCfg.Store
+	}
 	go func() {
 		defer handlePanic()
 		if err := app.Run(ctx); err != nil {
