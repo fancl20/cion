@@ -100,8 +100,9 @@ status:
 
 *   A re-decision lands as a new ADR superseding the old. Superseded
     records are never deleted or rewritten.
-*   A narrowing lands as an annotation beside the narrowed point,
-    naming the record that narrows it.
+*   A narrowing lands in the narrowing record alone. Earlier records
+    stand as written — a decision at its date, not a description of
+    the tree as it stands.
 *   A factual or citation error is corrected in place.
 *   Otherwise a landed record's body is immutable; its status line is
     the one routine edit.
@@ -137,6 +138,6 @@ or the plan left the location unnamed.
     [conventional commits](/docs/styles/conventionalcommits.md), one
     one-line summary, with `(proposal NNNN)` naming the implemented
     proposal.
-*   The implementing commit carries the code, the history entry, the
-    ADR's status flip, and any annotations the landing narrows into
-    earlier records — one commit, so the record never trails the code.
+*   The implementing commit carries the code, the history entry, and
+    the ADR's status flip — one commit, so the record never trails the
+    code.
