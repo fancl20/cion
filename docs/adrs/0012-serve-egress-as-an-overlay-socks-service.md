@@ -68,8 +68,10 @@ the consequences.
 *   **Unprivileged Node:** The service adds no kernel state and no new
     capability; it runs on sockets the node already holds.
 *   **Operator Sovereignty:** What egresses an AS is its operator's offer —
-    visible, withdrawable — with admission riding the seam, per ADR-0009's
-    operating assumption that one operator runs an ISD.
+    this record makes every node offer by default and leaves the offer's
+    surface, which applications a node runs, to the applications
+    architecture record that follows — with admission riding the seam,
+    per ADR-0009's operating assumption that one operator runs an ISD.
 *   **Scope Stays Minimal:** No per-host egress policy, no naming service;
     membership is ADR-0011's landed subject and stays closed here.
 
@@ -127,19 +129,20 @@ follows:
     ten bytes of a tailnet datagram to an IPv4 destination; the payload
     budget an application should assume — 1242 bytes over the client's
     default tunnel MTU of 1280 — follows from it.
-3.  **The directory advertises egress; the netmap carries the address.** A
-    node's entry gains an egress mark — offering is a run argument, as the
-    egress flag is today, and withdrawal is the mark's disappearance — and
-    nothing else rides the entry: the serving address is the first address
-    of the slice the entry already carries. In the netmap, an advertising
+3.  **The netmap carries the serving addresses; every node serves.**
+    Nothing new rides the directory entry: the serving address is the
+    first address of the slice the entry already carries, and every
     node's own address joins the routed addresses as one more single-IP
     route, the same form the allocated host /32s already take and the client
     lines route unconditionally — a covering prefix would sit behind the
     client's route-all preference, a preference no host of this network is
-    asked to hold. The mesh needs nothing new: the slice routing that
-    carries a destination to its node's mesh device already carries the
-    serving address within it. Every client learns the offer and the
-    address from the map it already holds.
+    asked to hold. Every node offers by default; the surface that would
+    withhold the offer — which applications a node runs — is the
+    applications architecture record's to draw, and this record accepts
+    the default-on exposure until then. The mesh needs nothing new: the
+    slice routing that carries a destination to its node's mesh device
+    already carries the serving address within it. Every client learns
+    the address from the map it already holds.
 4.  **Exit selection is the client's destination decision.** One login, one
     netmap serve every advertised exit: the exit a flow uses is which
     tailnet address the flow is sent to — an application's proxy setting,
@@ -268,9 +271,9 @@ follows:
     nothing to learn.
 *   Bad, because the default is an exit choice the network makes for the
     host — the provisioned model surviving inside the service model.
-*   Bad, because a covering route sits behind the client's own route-all
-    preference, so the implicit exit rides a client setting the network
-    neither sets nor verifies.
+*   Bad, because a default route is an exit route the client lines carry
+    only for the exit node they select, so the implicit exit rides a
+    client setting the network neither sets nor verifies.
 *   Bad, because two egress paths are two behaviors to secure, test, and
     explain.
 
