@@ -47,6 +47,7 @@ func (s *hostSocket) run() {
 			s.finish()
 			return
 		}
+		s.cnt.hostDatagrams.Add(1)
 		s.deliver(buf[:n], &hostEndpoint{addr: from.AddrPort()})
 	}
 }
@@ -102,14 +103,17 @@ func (s *hostSocket) unsubscribe(b *hostBind) {
 // hostBind is one host device's half of the shared port.
 type hostBind struct {
 	socket *hostSocket
+	// bridge carries the sends of relay-sourced peers; nil when the node
+	// runs no relay presence.
+	bridge *derpBridge
 	recv   chan datagram
 	// closed wakes the receive function the device retires.
 	closed chan struct{}
 	once   sync.Once
 }
 
-func newHostBind(socket *hostSocket) *hostBind {
-	return &hostBind{socket: socket, closed: make(chan struct{})}
+func newHostBind(socket *hostSocket, bridge *derpBridge) *hostBind {
+	return &hostBind{socket: socket, bridge: bridge, closed: make(chan struct{})}
 }
 
 // Open registers with the shared socket. The requested port is ignored — the
@@ -134,11 +138,25 @@ func (b *hostBind) Close() error {
 
 func (b *hostBind) SetMark(uint32) error { return nil }
 
-// Send carries the datagrams to the host over the plain UDP socket.
+// Send carries the datagrams to the host: over the plain UDP socket to the
+// arrival address a host's datagrams came from, or over the relay presence
+// to the key a relay-sourced datagram named — whichever leg the peer's last
+// authenticated packet arrived on.
 func (b *hostBind) Send(bufs [][]byte, ep conn.Endpoint) error {
 	peer, ok := ep.(*hostEndpoint)
 	if !ok {
 		return conn.ErrWrongEndpointType
+	}
+	if peer.onDERP() {
+		if b.bridge == nil {
+			return errors.New("no relay presence for a relay-sourced peer")
+		}
+		for _, buf := range bufs {
+			if err := b.bridge.send(peer.derp, buf); err != nil {
+				return err
+			}
+		}
+		return nil
 	}
 	for _, buf := range bufs {
 		if _, err := b.socket.conn.WriteToUDPAddrPort(buf, peer.addr); err != nil {
@@ -172,15 +190,26 @@ func (b *hostBind) receive(packets [][]byte, sizes []int, eps []conn.Endpoint) (
 	}
 }
 
-// hostEndpoint is a host as wireguard-go sees it: the internet address its
-// datagrams arrived from, which replies return to.
+// hostEndpoint is a host as wireguard-go sees it: the leg its last
+// authenticated datagram arrived on — the internet address of a UDP
+// arrival, which replies return to, or the sender's key of a relay
+// arrival, which replies return over the relay.
 type hostEndpoint struct {
 	addr netip.AddrPort
+	derp PublicKey
 }
+
+// onDERP reports whether the endpoint names the relay leg.
+func (e *hostEndpoint) onDERP() bool { return e.derp != PublicKey{} }
 
 func (e *hostEndpoint) ClearSrc()           {}
 func (e *hostEndpoint) SrcToString() string { return "" }
-func (e *hostEndpoint) DstToString() string { return e.addr.String() }
-func (e *hostEndpoint) DstToBytes() []byte  { return e.addr.Addr().AsSlice() }
-func (e *hostEndpoint) DstIP() netip.Addr   { return e.addr.Addr() }
-func (e *hostEndpoint) SrcIP() netip.Addr   { return netip.Addr{} }
+func (e *hostEndpoint) DstToString() string {
+	if e.onDERP() {
+		return "derp:" + e.derp.String()
+	}
+	return e.addr.String()
+}
+func (e *hostEndpoint) DstToBytes() []byte { return e.addr.Addr().AsSlice() }
+func (e *hostEndpoint) DstIP() netip.Addr  { return e.addr.Addr() }
+func (e *hostEndpoint) SrcIP() netip.Addr  { return netip.Addr{} }

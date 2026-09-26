@@ -72,20 +72,23 @@ func (s *DirectoryService) Publish(
 	return connect.NewResponse(&wireguardv1.PublishResponse{}), nil
 }
 
-// List returns every published entry.
+// List returns every published entry, nodes and hosts together.
 func (s *DirectoryService) List(
 	ctx context.Context,
 	req *connect.Request[wireguardv1.ListRequest],
 ) (*connect.Response[wireguardv1.ListResponse], error) {
 
-	entries, err := s.Store.List(ctx)
+	directory, err := s.Store.List(ctx)
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInternal,
 			fmt.Errorf("reading the directory: %w", err))
 	}
 	resp := &wireguardv1.ListResponse{}
-	for _, e := range entries {
+	for _, e := range directory.Nodes {
 		resp.Entries = append(resp.Entries, e.pb())
+	}
+	for _, h := range directory.Hosts {
+		resp.Hosts = append(resp.Hosts, h.pb())
 	}
 	return connect.NewResponse(resp), nil
 }
@@ -101,18 +104,60 @@ func entryFromPB(pb *wireguardv1.Entry) (Entry, error) {
 	if err != nil {
 		return Entry{}, fmt.Errorf("parsing overlay subnet: %w", err)
 	}
-	return Entry{
+	entry := Entry{
 		IA:        addr.IA(pb.IsdAs),
 		PublicKey: key,
 		Overlay:   overlay,
-	}, nil
+	}
+	if pb.HostEndpoint != "" {
+		endpoint, err := netip.ParseAddrPort(pb.HostEndpoint)
+		if err != nil {
+			return Entry{}, fmt.Errorf("parsing host endpoint: %w", err)
+		}
+		entry.HostEndpoint = endpoint
+	}
+	return entry, nil
 }
 
 // pb encodes the entry for the wire.
 func (e Entry) pb() *wireguardv1.Entry {
-	return &wireguardv1.Entry{
+	pb := &wireguardv1.Entry{
 		IsdAs:         uint64(e.IA),
 		PublicKey:     e.PublicKey[:],
 		OverlaySubnet: e.Overlay.String(),
 	}
+	if e.HostEndpoint.IsValid() {
+		pb.HostEndpoint = e.HostEndpoint.String()
+	}
+	return pb
+}
+
+// pb encodes the host entry for the wire.
+func (h HostEntry) pb() *wireguardv1.HostEntry {
+	return &wireguardv1.HostEntry{
+		PublicKey: h.PublicKey[:],
+		Address:   h.Addr.String(),
+		IsdAs:     uint64(h.IA),
+		Note:      h.Note,
+	}
+}
+
+// hostEntryFromPB decodes a wire host entry.
+func hostEntryFromPB(pb *wireguardv1.HostEntry) (HostEntry, error) {
+	var key PublicKey
+	if len(pb.PublicKey) != len(key) {
+		return HostEntry{}, fmt.Errorf("public key must be %d bytes", len(key))
+	}
+	copy(key[:], pb.PublicKey)
+	entry := HostEntry{
+		PublicKey: key,
+		IA:        addr.IA(pb.IsdAs),
+		Note:      pb.Note,
+	}
+	addr, err := netip.ParseAddr(pb.Address)
+	if err != nil {
+		return HostEntry{}, fmt.Errorf("parsing address: %w", err)
+	}
+	entry.Addr = addr
+	return entry, nil
 }

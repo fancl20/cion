@@ -277,17 +277,32 @@ func (n *node) assembleMonitor() error {
 // channel for clients offering its domain as the TLS server name.
 func (n *node) assembleEndpoint(ctx context.Context) error {
 	if n.ident.asType == trust.ASTypeCore {
-		webPKI, err := webpki.ManageTLSCert(ctx, webpki.TLSCertConfig{
+		certCfg := webpki.TLSCertConfig{
 			Domain:   n.cfg.Domain,
 			Email:    n.cfg.AcmeEmail,
 			CertFile: n.cfg.CertFile,
 			KeyFile:  n.cfg.KeyFile,
 			Storage:  filepath.Join(n.cfg.State, "certs"),
-		})
-		if err != nil {
-			return err
 		}
-		n.webPKI = webPKI
+		if n.cfg.WireguardConfig != "" {
+			// The coordination application serves this core's port 443 and
+			// answers the ACME TLS-ALPN challenge on it itself, so the
+			// dedicated challenge listener never stands: the identity is
+			// prepared here and maintained under start, its configuration
+			// cloned by both serving surfaces (ADR-0011).
+			manager, err := webpki.PrepareTLSCert(ctx, certCfg)
+			if err != nil {
+				return err
+			}
+			n.certMgr = manager
+			n.webPKI = manager.TLSConfig()
+		} else {
+			webPKI, err := webpki.ManageTLSCert(ctx, certCfg)
+			if err != nil {
+				return err
+			}
+			n.webPKI = webPKI
+		}
 	}
 	endpointConn, err := n.scionConn(controlplane.EndpointPort)
 	if err != nil {

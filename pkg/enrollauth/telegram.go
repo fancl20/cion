@@ -3,6 +3,8 @@ package enrollauth
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json/v2"
@@ -12,11 +14,14 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
+	"slices"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/scionproto/scion/pkg/addr"
-	"github.com/scionproto/scion/pkg/scrypto/cppki"
 
 	"github.com/fancl20/cion/pkg/controlplane"
 )
@@ -25,9 +30,9 @@ import (
 const botAPI = "https://api.telegram.org"
 
 // The authorizer's own times: one prompt's verdict stands for a window — an
-// approved identity allows and a denied one denies for its remainder, and
-// the next ask past it prompts again, a stranger's persistence re-prompting
-// on a window, not on every retry. The Bot API calls carry their own bounds
+// approved identity allows and a denied one denies for its remainder, and the
+// next ask past it prompts again, a stranger's persistence re-prompting on a
+// window, not on every retry. The Bot API calls carry their own bounds
 // besides: a short send timeout, so a slow API answers pending promptly
 // rather than holding the request toward the joiner's attempt timeout, and
 // a long-poll wait with the retry that paces its failures.
@@ -43,63 +48,90 @@ const (
 	pollRetry = time.Second
 )
 
+// invitePrefix marks a minted invitation among the credentials a
+// registration may carry; inviteBytes is the random body's length.
+const (
+	invitePrefix = "cion-"
+	inviteBytes  = 16
+)
+
+// invitationsFile holds the unspent invitations beneath the core's state.
+const invitationsFile = "telegram-invitations.json"
+
 // TelegramConfig configures the Telegram authorizer.
 type TelegramConfig struct {
 	// API is the Bot API's base URL; empty is the public one.
 	API string
 	// Chat is the chat the prompts go to and the only one whose answers
-	// count.
+	// count — and the only one the operator can mint or retire invitations
+	// from.
 	Chat int64
 	// Token is the bot's token. It rides the run argument and so the
 	// process list — an accepted consequence of argument-driven
 	// configuration, the file indirection deliberately not built.
 	Token string
+	// State is the core's state directory: the unspent invitations's
+	// persistent home, so an invitation survives a restart while the
+	// transient asks stay in memory.
+	State string
 	// Window overrides how long one prompt's verdict stands; zero uses the
 	// default.
 	Window time.Duration
 }
 
-// Telegram is the enrollment authorizer of the operator's phone (ADR-0010):
-// per new identity — the claimed ISD-AS and the subject key's fingerprint
-// keyed together — it prompts the configured chat over the Bot API with the
-// claimed name, the fingerprint, the source address, and an approve and a
-// deny button, and answers on the long-polled callbacks, one prompt per
-// identity inside a decision window. It speaks the API directly over
-// net/http — no SDK, for a vendored tree prices every dependency, and the
-// three calls this needs are plain HTTPS and JSON. Everything lives in
-// memory: a restart forgets pending and denied entries, a join still in
-// flight asks again, and a callback for an identity the new process never
-// prompted is answered with exactly that and ignored.
+// Telegram is the admission authorizer of the operator's phone (ADR-0010,
+// ADR-0011): per new identity — the boundary, the claim, and the presented
+// keys' fingerprints keyed together — it prompts the configured chat over
+// the Bot API with the facts and an approve and a deny button, and answers
+// on the long-polled callbacks, one prompt per identity inside a decision
+// window. The invitation reverses the flow: the operator asks the bot for a
+// key in the configured chat, hands it to the headless client, and a
+// registration presenting a key the plugin minted and has not spent approves
+// on the plugin's own records and spends it; a spent or unknown key is a
+// bare joiner's, prompted as ever — a stale invitation fails toward the
+// human, not closed. It speaks the API directly over net/http — no SDK, for
+// a vendored tree prices every dependency, and the handful of calls this
+// needs are plain HTTPS and JSON. The prompts' decisions live in memory: a
+// restart forgets pending and denied entries and a join still in flight
+// asks again, while the unspent invitations persist in the state directory.
 type Telegram struct {
 	api    string
 	chat   int64
 	token  string
+	state  string
 	window time.Duration
 	hc     *http.Client
 
-	// mtx guards asks, shared by the enrollment handlers and the poll loop.
-	mtx  sync.Mutex
-	asks map[askKey]*decision
+	// mtx guards asks and invites, shared by the admission handlers and the
+	// poll loop.
+	mtx     sync.Mutex
+	asks    map[askKey]*decision
+	invites map[string]struct{}
 }
 
-// askKey names one identity: the claimed ISD-AS and the subject key's
-// fingerprint together, so two strangers claiming one name present two asks
-// and the operator approves at most one — the name-taken check settles the
-// loser on its next retry, exactly as it does today.
+// askKey names one identity: the boundary asking, the enrollment's claim,
+// and a digest of the presented keys' fingerprints, so two strangers
+// claiming one name present two asks and the operator approves at most one
+// — the name-taken check settles the loser on its next retry, exactly as it
+// does today. The digest is what an answer button carries; the standing
+// decision it resolves holds the fingerprints in full.
 type askKey struct {
-	ia   addr.IA
-	skid string
+	boundary controlplane.Boundary
+	claim    addr.IA
+	digest   string
 }
 
 // decision is one identity's standing verdict and the moment it stops
 // standing.
 type decision struct {
-	verdict controlplane.EnrollmentVerdict
-	expires time.Time
+	admission controlplane.AdmissionVerdict
+	label     string
+	expires   time.Time
 }
 
-// NewTelegram builds the authorizer; Run launches its poll loop.
-func NewTelegram(cfg TelegramConfig) *Telegram {
+// NewTelegram builds the authorizer; Run launches its poll loop. Unspent
+// invitations load from the state directory when its file exists.
+func NewTelegram(cfg TelegramConfig) (*Telegram, error) {
 	api := cfg.API
 	if api == "" {
 		api = botAPI
@@ -108,56 +140,87 @@ func NewTelegram(cfg TelegramConfig) *Telegram {
 	if window == 0 {
 		window = decisionWindow
 	}
-	return &Telegram{
-		api:    api,
-		chat:   cfg.Chat,
-		token:  cfg.Token,
-		window: window,
-		hc:     &http.Client{},
-		asks:   make(map[askKey]*decision),
+	t := &Telegram{
+		api:     api,
+		chat:    cfg.Chat,
+		token:   cfg.Token,
+		state:   cfg.State,
+		window:  window,
+		hc:      &http.Client{},
+		asks:    make(map[askKey]*decision),
+		invites: make(map[string]struct{}),
 	}
+	if err := t.loadInvites(); err != nil {
+		return nil, err
+	}
+	return t, nil
 }
 
-// Authorize answers a first issuance: a standing decision returns for its
-// window's remainder, and the first ask — or the first past the window —
-// sends the chat one prompt and pends. A prompt that cannot be sent denies:
-// with the API unreachable enrollment fails closed, safe, but unavailable
-// until it returns.
+// Authorize answers one admission exchange. A registration presenting a
+// credential the plugin minted and has not spent approves and spends it. A
+// standing decision returns for its window's remainder, and the first ask —
+// or the first past the window — sends the chat one prompt and pends. A
+// prompt that cannot be sent denies: with the API unreachable admission
+// fails closed, safe, but unavailable until it returns.
 func (t *Telegram) Authorize(
 	ctx context.Context,
-	f controlplane.EnrollmentFacts,
-) controlplane.EnrollmentVerdict {
+	f controlplane.AdmissionFacts,
+) controlplane.AdmissionAnswer {
 
-	skid, err := cppki.SubjectKeyID(f.Key)
-	if err != nil {
-		return controlplane.EnrollmentDeny
+	if f.Boundary == controlplane.BoundaryRegistration && f.Credential != "" {
+		if t.spendInvite(f.Credential) {
+			return controlplane.AdmissionAnswer{
+				Admission: controlplane.AdmissionAllow,
+				Note:      "telegram invitation",
+			}
+		}
 	}
-	key := askKey{ia: f.IA, skid: string(skid)}
+	if len(f.Keys) == 0 {
+		return controlplane.AdmissionAnswer{Admission: controlplane.AdmissionDeny}
+	}
+	key := askKey{
+		boundary: f.Boundary,
+		claim:    f.Claim,
+		digest:   string(keyDigest(identityOf(f))),
+	}
 	now := time.Now()
 	t.mtx.Lock()
 	if d, ok := t.asks[key]; ok && now.Before(d.expires) {
-		verdict := d.verdict
+		answer := controlplane.AdmissionAnswer{Admission: d.admission, Note: d.note()}
 		t.mtx.Unlock()
-		return verdict
+		return answer
 	}
 	t.mtx.Unlock()
-	if err := t.sendPrompt(ctx, f, skid); err != nil {
-		slog.Warn("Sending the enrollment prompt; denying",
-			"isd_as", f.IA, "source", f.Addr, "err", err)
-		return controlplane.EnrollmentDeny
+	if err := t.sendPrompt(ctx, f); err != nil {
+		slog.Warn("Sending the admission prompt; denying",
+			"boundary", f.Boundary, "claim", f.Claim, "source", f.Source, "err", err)
+		return controlplane.AdmissionAnswer{Admission: controlplane.AdmissionDeny}
 	}
 	t.mtx.Lock()
 	t.asks[key] = &decision{
-		verdict: controlplane.EnrollmentPending,
-		expires: now.Add(t.window),
+		admission: controlplane.AdmissionPending,
+		label:     strings.Join(f.Keys, ","),
+		expires:   now.Add(t.window),
 	}
 	t.mtx.Unlock()
-	return controlplane.EnrollmentPending
+	return controlplane.AdmissionAnswer{Admission: controlplane.AdmissionPending}
 }
 
-// Run receives the answer buttons until the context is canceled: one
+// note is the standing decision's own account of itself, the string the
+// registry records beside an entry the prompt approved.
+func (d *decision) note() string {
+	switch d.admission {
+	case controlplane.AdmissionAllow:
+		return "telegram operator"
+	default:
+		return ""
+	}
+}
+
+// Run receives the operator's chat until the context is canceled: one
 // getUpdates long poll after another, under the caller's supervision, each
-// pass sweeping the decisions whose window has passed.
+// pass sweeping the decisions whose window has passed and answering the
+// buttons pressed and the messages sent.
 func (t *Telegram) Run(ctx context.Context) {
 	var offset int64
 	for ctx.Err() == nil {
@@ -177,6 +240,7 @@ func (t *Telegram) Run(ctx context.Context) {
 		for _, u := range updates {
 			offset = u.UpdateID + 1
 			t.decide(ctx, u.Callback)
+			t.converse(ctx, u.Message)
 		}
 	}
 }
@@ -208,38 +272,160 @@ func (t *Telegram) getUpdates(ctx context.Context, offset int64) ([]tgUpdate, er
 // decide applies one answer button: only the configured chat's count — an
 // answer from any other chat is logged and ignored — and only a pending
 // identity is decided, its verdict standing for the window's remainder, the
-// strong no-prompt guarantee being the chain check's, not the map's.
+// strong no-prompt guarantee being the registry's, not the map's.
 func (t *Telegram) decide(ctx context.Context, cb *tgCallbackQuery) {
 	if cb == nil {
 		return // an update that carries no answer button
 	}
 	if cb.Chat() != t.chat {
-		slog.Warn("Ignoring an enrollment answer from another chat", "chat", cb.Chat())
+		slog.Warn("Ignoring an admission answer from another chat", "chat", cb.Chat())
 		return
 	}
 	approve, key, ok := parseCallbackData(cb.Data)
 	if !ok {
-		slog.Warn("Ignoring a malformed enrollment answer", "data", cb.Data)
+		slog.Warn("Ignoring a malformed admission answer", "data", cb.Data)
 		return
 	}
 	t.mtx.Lock()
 	d := t.asks[key]
-	if d == nil || d.verdict != controlplane.EnrollmentPending ||
+	if d == nil || d.admission != controlplane.AdmissionPending ||
 		!time.Now().Before(d.expires) {
 
 		t.mtx.Unlock()
-		t.answer(ctx, cb.ID, "no pending enrollment for this identity")
+		t.answer(ctx, cb.ID, "no pending admission for this identity")
 		return
 	}
 	if approve {
-		d.verdict = controlplane.EnrollmentAllow
+		d.admission = controlplane.AdmissionAllow
 	} else {
-		d.verdict = controlplane.EnrollmentDeny
+		d.admission = controlplane.AdmissionDeny
 	}
+	label := d.label
 	t.mtx.Unlock()
-	slog.Info("Enrollment decided", "isd_as", key.ia, "approved", approve)
-	t.answer(ctx, cb.ID, fmt.Sprintf("enrollment of %s %s", key.ia,
+	slog.Info("Admission decided", "boundary", key.boundary,
+		"claim", key.claim, "keys", label, "approved", approve)
+	t.answer(ctx, cb.ID, fmt.Sprintf("admission of %s %s", label,
 		map[bool]string{true: "approved", false: "denied"}[approve]))
+}
+
+// converse handles the operator's own messages — the invitation flow's
+// mint and retire. Only the configured chat's count: it is the one chat the
+// prompts went to, and the one channel this plugin treats as its console.
+func (t *Telegram) converse(ctx context.Context, msg *tgMessage) {
+	if msg == nil {
+		return // an update that carries no message
+	}
+	if msg.Chat.ID != t.chat {
+		slog.Warn("Ignoring a message from another chat", "chat", msg.Chat.ID)
+		return
+	}
+	text := strings.TrimSpace(msg.Text)
+	switch {
+	case strings.EqualFold(text, "invite"):
+		key := t.mintInvite()
+		slog.Info("Invitation minted", "chat", t.chat)
+		t.reply(ctx, fmt.Sprintf("Invitation (one use):\n%s\nRetire it by sending it back.", key))
+	case t.retireInvite(text):
+		slog.Info("Invitation retired", "chat", t.chat)
+		t.reply(ctx, "Invitation retired.")
+	default:
+		t.reply(ctx, "Send \"invite\" to mint an invitation, or an unspent one to retire it.")
+	}
+}
+
+// mintInvite creates one unspent invitation and persists the set.
+func (t *Telegram) mintInvite() string {
+	raw := make([]byte, inviteBytes)
+	if _, err := rand.Read(raw); err != nil {
+		// crypto/rand's failure is the process's own catastrophe; an empty
+		// invitation can never be presented and so never admits.
+		slog.Error("Minting an invitation", "err", err)
+		return invitePrefix + strings.Repeat("0", 2*inviteBytes)
+	}
+	key := invitePrefix + hex.EncodeToString(raw)
+	t.mtx.Lock()
+	t.invites[key] = struct{}{}
+	err := t.persistInvitesLocked()
+	t.mtx.Unlock()
+	if err != nil {
+		slog.Warn("Persisting the invitations", "err", err)
+	}
+	return key
+}
+
+// spendInvite removes one unspent invitation and persists the set,
+// reporting whether the credential spent.
+func (t *Telegram) spendInvite(key string) bool {
+	t.mtx.Lock()
+	defer t.mtx.Unlock()
+	if _, ok := t.invites[key]; !ok {
+		return false
+	}
+	delete(t.invites, key)
+	if err := t.persistInvitesLocked(); err != nil {
+		slog.Warn("Persisting the invitations", "err", err)
+	}
+	return true
+}
+
+// retireInvite removes one unspent invitation by its own text and persists
+// the set, reporting whether the text named one.
+func (t *Telegram) retireInvite(text string) bool {
+	return t.spendInvite(text)
+}
+
+// loadInvites reads the persisted unspent invitations. A missing file is a
+// fresh start; a present one the invitations an operator minted before the
+// restart.
+func (t *Telegram) loadInvites() error {
+	if t.state == "" {
+		return errors.New("no state directory configured for the invitations")
+	}
+	raw, err := os.ReadFile(t.invitesPath())
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return fmt.Errorf("reading the invitations: %w", err)
+	}
+	var keys []string
+	if err := json.Unmarshal(raw, &keys); err != nil {
+		return fmt.Errorf("parsing the invitations: %w", err)
+	}
+	for _, key := range keys {
+		t.invites[key] = struct{}{}
+	}
+	return nil
+}
+
+// persistInvitesLocked writes the unspent invitations back, atomically; the
+// caller holds the mutex.
+func (t *Telegram) persistInvitesLocked() error {
+	if t.state == "" {
+		return nil
+	}
+	keys := make([]string, 0, len(t.invites))
+	for key := range t.invites {
+		keys = append(keys, key)
+	}
+	slices.Sort(keys)
+	raw, err := json.Marshal(keys)
+	if err != nil {
+		return err
+	}
+	dir := filepath.Dir(t.invitesPath())
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return fmt.Errorf("creating the invitations' state: %w", err)
+	}
+	tmp := t.invitesPath() + ".tmp"
+	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
+		return fmt.Errorf("writing the invitations: %w", err)
+	}
+	return os.Rename(tmp, t.invitesPath())
+}
+
+func (t *Telegram) invitesPath() string {
+	return filepath.Join(t.state, "enrollauth", invitationsFile)
 }
 
 // answer acknowledges an answer button on the operator's phone.
@@ -250,55 +436,101 @@ func (t *Telegram) answer(ctx context.Context, id, text string) {
 		QueryID: id,
 		Text:    text,
 	}); err != nil {
-		slog.Debug("Acknowledging an enrollment answer", "err", err)
+		slog.Debug("Acknowledging an admission answer", "err", err)
 	}
 }
 
-// sendPrompt sends the chat one message naming the joiner — the claimed
-// name, the key fingerprint, the source address — with an approve and a
+// reply sends the chat one plain message — the invitation flow's side of
+// the conversation.
+func (t *Telegram) reply(ctx context.Context, text string) {
+	actx, cancel := context.WithTimeout(ctx, sendTimeout)
+	defer cancel()
+	if _, err := call[tgSent](t, actx, "sendMessage", tgSendMessage{
+		ChatID: t.chat,
+		Text:   text,
+	}); err != nil {
+		slog.Warn("Replying in the operator's chat", "err", err)
+	}
+}
+
+// sendPrompt sends the chat one message naming the joiner — the boundary,
+// the claim, the fingerprints, the source address — with an approve and a
 // deny button whose callback data carries the identity it answers.
 func (t *Telegram) sendPrompt(
 	ctx context.Context,
-	f controlplane.EnrollmentFacts,
-	skid []byte,
+	f controlplane.AdmissionFacts,
 ) error {
 
 	ctx, cancel := context.WithTimeout(ctx, sendTimeout)
 	defer cancel()
 	_, err := call[tgSent](t, ctx, "sendMessage", tgSendMessage{
 		ChatID: t.chat,
-		Text: fmt.Sprintf("CION enrollment request\nISD-AS: %s\nKey: %s\nSource: %s",
-			f.IA, hex.EncodeToString(skid), sourceOf(f)),
+		Text:   promptText(f),
 		ReplyMarkup: tgReplyMarkup{InlineKeyboard: [][]tgButton{{
-			{Text: "Approve", CallbackData: callbackData(true, f.IA, skid)},
-			{Text: "Deny", CallbackData: callbackData(false, f.IA, skid)},
+			{Text: "Approve", CallbackData: callbackData(true, f)},
+			{Text: "Deny", CallbackData: callbackData(false, f)},
 		}}},
 	})
 	return err
 }
 
-// sourceOf renders the source address fact, unknown included.
-func sourceOf(f controlplane.EnrollmentFacts) string {
-	if f.Addr.IsValid() {
-		return f.Addr.String()
+// identityOf is the stable identity an ask keys by and a button answers:
+// the enrollment's subject key, the registration's machine key — the one
+// fact that survives the client's own retries, for a registration attempt
+// presents a freshly generated node key each time until one completes.
+func identityOf(f controlplane.AdmissionFacts) string {
+	if f.Boundary == controlplane.BoundaryRegistration {
+		return f.Keys[0]
+	}
+	return strings.Join(f.Keys, ",")
+}
+
+// promptText renders one prompt: the enrollment's claimed name, the
+// registration's offered keys, the source beside them.
+func promptText(f controlplane.AdmissionFacts) string {
+	var b strings.Builder
+	switch f.Boundary {
+	case controlplane.BoundaryRegistration:
+		b.WriteString("CION registration request")
+	default:
+		b.WriteString("CION enrollment request")
+	}
+	if !f.Claim.IsZero() {
+		fmt.Fprintf(&b, "\nISD-AS: %s", f.Claim)
+	}
+	for _, key := range f.Keys {
+		fmt.Fprintf(&b, "\nKey: %s", key)
+	}
+	fmt.Fprintf(&b, "\nSource: %s", sourceOf(f))
+	return b.String()
+}
+
+// sourceOf renders the source fact, unknown included.
+func sourceOf(f controlplane.AdmissionFacts) string {
+	if f.Source.IsValid() {
+		return f.Source.String()
 	}
 	return "unknown"
 }
 
 // callbackData encodes an answer button's identity — one action byte, the
-// ISD-AS, the fingerprint — as hex, inside Telegram's sixty-four-byte cap: a
-// SHA-1 fingerprint's 29 bytes encode to 58 characters.
-func callbackData(approve bool, ia addr.IA, skid []byte) string {
-	b := make([]byte, 0, 1+8+len(skid))
+// boundary, the claim, a digest of the fingerprints — as hex, inside
+// Telegram's sixty-four-byte cap: the twenty-six bytes encode to fifty-two
+// characters. The digest stands for the fingerprints in the button; the
+// standing decision it resolves holds them in full.
+func callbackData(approve bool, f controlplane.AdmissionFacts) string {
+	digest := keyDigest(identityOf(f))
+	b := make([]byte, 0, 1+1+8+len(digest))
 	b = append(b, map[bool]byte{true: 'a', false: 'd'}[approve])
-	b = binary.BigEndian.AppendUint64(b, uint64(ia))
-	return hex.EncodeToString(append(b, skid...))
+	b = append(b, boundaryByte(f.Boundary))
+	b = binary.BigEndian.AppendUint64(b, uint64(f.Claim))
+	return hex.EncodeToString(append(b, digest...))
 }
 
 // parseCallbackData decodes an answer button's identity.
 func parseCallbackData(s string) (bool, askKey, bool) {
 	b, err := hex.DecodeString(s)
-	if err != nil || len(b) < 1+8+1 {
+	if err != nil || len(b) != 1+1+8+sha256.Size/2 {
 		return false, askKey{}, false
 	}
 	var approve bool
@@ -309,10 +541,34 @@ func parseCallbackData(s string) (bool, askKey, bool) {
 	default:
 		return false, askKey{}, false
 	}
+	var boundary controlplane.Boundary
+	switch b[1] {
+	case boundaryByte(controlplane.BoundaryEnrollment):
+		boundary = controlplane.BoundaryEnrollment
+	case boundaryByte(controlplane.BoundaryRegistration):
+		boundary = controlplane.BoundaryRegistration
+	default:
+		return false, askKey{}, false
+	}
 	return approve, askKey{
-		ia:   addr.IA(binary.BigEndian.Uint64(b[1:9])),
-		skid: string(b[9:]),
+		boundary: boundary,
+		claim:    addr.IA(binary.BigEndian.Uint64(b[2:10])),
+		digest:   string(b[10:]),
 	}, true
+}
+
+// keyDigest summarizes the presented fingerprints as the bytes a button
+// carries.
+func keyDigest(keys string) []byte {
+	sum := sha256.Sum256([]byte(keys))
+	return sum[:sha256.Size/2]
+}
+
+func boundaryByte(b controlplane.Boundary) byte {
+	if b == controlplane.BoundaryRegistration {
+		return 'r'
+	}
+	return 'e'
 }
 
 // call posts one Bot API method and decodes its envelope, the result
@@ -363,12 +619,13 @@ func botAPIError(method string, err error) error {
 	return fmt.Errorf("%s failed: %w", method, err)
 }
 
-// The Bot API's JSON shapes, only as much as the three calls need.
+// The Bot API's JSON shapes, only as much as the four calls need.
 
-// tgUpdate is one polled update; only the callback queries carry answers.
+// tgUpdate is one polled update: a pressed answer button or a message.
 type tgUpdate struct {
 	UpdateID int64            `json:"update_id"`
-	Callback *tgCallbackQuery `json:"callback_query"`
+	Callback *tgCallbackQuery `json:"callback_query,omitempty"`
+	Message  *tgMessage       `json:"message,omitempty"`
 }
 
 // tgCallbackQuery is one answer button press.
@@ -387,9 +644,10 @@ func (c *tgCallbackQuery) Chat() int64 {
 	return c.Message.Chat.ID
 }
 
-// tgMessage is the prompt an answer button rides on.
+// tgMessage is the message a button rides on or the operator sent.
 type tgMessage struct {
 	Chat tgChat `json:"chat"`
+	Text string `json:"text"`
 }
 
 // tgChat names a chat by its id.
@@ -402,16 +660,17 @@ type tgSent struct {
 	MessageID int64 `json:"message_id"`
 }
 
-// tgSendMessage is one prompted message with its answer buttons.
+// tgSendMessage is one prompted or plain message.
 type tgSendMessage struct {
 	ChatID      int64         `json:"chat_id"`
 	Text        string        `json:"text"`
-	ReplyMarkup tgReplyMarkup `json:"reply_markup"`
+	ReplyMarkup tgReplyMarkup `json:"reply_markup,omitempty"`
 }
 
-// tgReplyMarkup carries a message's inline keyboard.
+// tgReplyMarkup carries a message's inline keyboard; empty on a plain
+// reply.
 type tgReplyMarkup struct {
-	InlineKeyboard [][]tgButton `json:"inline_keyboard"`
+	InlineKeyboard [][]tgButton `json:"inline_keyboard,omitempty"`
 }
 
 // tgButton is one inline keyboard button.
@@ -420,7 +679,7 @@ type tgButton struct {
 	CallbackData string `json:"callback_data"`
 }
 
-// tgGetUpdates long-polls for answer buttons from a confirmed offset.
+// tgGetUpdates long-polls for updates from a confirmed offset.
 type tgGetUpdates struct {
 	Offset  int64 `json:"offset"`
 	Timeout int   `json:"timeout"`

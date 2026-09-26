@@ -123,6 +123,24 @@ func (b *operatorBot) press(t *testing.T, i, button int) {
 	close(waiting)
 }
 
+// say speaks one message in the configured chat — the operator's side of
+// the invitation conversation, a mint request among them.
+func (b *operatorBot) say(text string) {
+	b.mtx.Lock()
+	defer b.mtx.Unlock()
+	b.nextID++
+	b.updates = append(b.updates, map[string]any{
+		"update_id": b.nextID,
+		"message": map[string]any{
+			"chat": map[string]any{"id": float64(-1002147483647)},
+			"text": text,
+		},
+	})
+	waiting := b.waiting
+	b.waiting = make(chan struct{})
+	close(waiting)
+}
+
 // promptCount returns the number of prompts the operator's phone shows.
 func (b *operatorBot) promptCount() int {
 	b.mtx.Lock()

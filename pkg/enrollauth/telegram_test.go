@@ -7,6 +7,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"encoding/hex"
 	"encoding/json/v2"
 	"fmt"
 	"io"
@@ -14,6 +15,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -28,8 +31,9 @@ import (
 // testChat is the configured chat of the authorizers under test.
 const testChat = int64(-1002147483647)
 
-// botDouble is a local Bot API double: it records the prompts sent and the
-// acknowledgements answered, and long-polls the updates the test presses.
+// botDouble is a local Bot API double: it records the messages sent and the
+// acknowledgements answered, and long-polls the updates the test presses and
+// sends.
 type botDouble struct {
 	mtx     sync.Mutex
 	prompts []tgSendMessage
@@ -128,14 +132,29 @@ func (d *botDouble) press(chat int64, data string) {
 	close(waiting)
 }
 
-// prompt returns the recorded prompt number i.
+// say enqueues one chat message from the given chat — the operator's own
+// words, the invitation flow's side of the conversation.
+func (d *botDouble) say(chat int64, text string) {
+	d.mtx.Lock()
+	d.nextID++
+	d.updates = append(d.updates, tgUpdate{
+		UpdateID: d.nextID,
+		Message:  &tgMessage{Chat: tgChat{ID: chat}, Text: text},
+	})
+	waiting := d.waiting
+	d.waiting = make(chan struct{})
+	d.mtx.Unlock()
+	close(waiting)
+}
+
+// prompt returns the recorded message number i.
 func (d *botDouble) prompt(i int) tgSendMessage {
 	d.mtx.Lock()
 	defer d.mtx.Unlock()
 	return d.prompts[i]
 }
 
-// promptCount returns the number of prompts sent.
+// promptCount returns the number of messages sent.
 func (d *botDouble) promptCount() int {
 	d.mtx.Lock()
 	defer d.mtx.Unlock()
@@ -172,13 +191,41 @@ func newKey(t *testing.T) crypto.PublicKey {
 	return key.Public()
 }
 
-// factsOf builds one identity's facts.
-func factsOf(t *testing.T, key crypto.PublicKey) controlplane.EnrollmentFacts {
+// skidOf fingerprints a subject key the way the trust service's call site
+// does.
+func skidOf(t *testing.T, key crypto.PublicKey) string {
 	t.Helper()
-	return controlplane.EnrollmentFacts{
-		IA:   addr.MustIAFrom(20, 0xff0000000002),
-		Key:  key,
-		Addr: netip.MustParseAddrPort("198.51.100.7:41234"),
+	skid, err := cppki.SubjectKeyID(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return hex.EncodeToString(skid)
+}
+
+// enrollFactsOf builds one node identity's facts at the enrollment
+// boundary.
+func enrollFactsOf(t *testing.T, key crypto.PublicKey) controlplane.AdmissionFacts {
+	t.Helper()
+	return controlplane.AdmissionFacts{
+		Boundary: controlplane.BoundaryEnrollment,
+		Keys:     []string{skidOf(t, key)},
+		Claim:    addr.MustIAFrom(20, 0xff0000000002),
+		Source:   netip.MustParseAddrPort("198.51.100.7:41234"),
+	}
+}
+
+// registerFactsOf builds one host identity's facts at the registration
+// boundary — the machine and node keys a login presented, with an optional
+// credential.
+func registerFactsOf(t *testing.T, machine, node crypto.PublicKey,
+	credential string) controlplane.AdmissionFacts {
+
+	t.Helper()
+	return controlplane.AdmissionFacts{
+		Boundary:   controlplane.BoundaryRegistration,
+		Keys:       []string{skidOf(t, machine), skidOf(t, node)},
+		Source:     netip.MustParseAddrPort("198.51.100.9:52331"),
+		Credential: credential,
 	}
 }
 
@@ -186,11 +233,19 @@ func factsOf(t *testing.T, key crypto.PublicKey) controlplane.EnrollmentFacts {
 // until the test ends.
 func runTelegram(t *testing.T, d *botDouble, mutate func(*TelegramConfig)) *Telegram {
 	t.Helper()
-	cfg := TelegramConfig{API: d.url, Chat: testChat, Token: "7:test"}
+	cfg := TelegramConfig{
+		API:   d.url,
+		Chat:  testChat,
+		Token: "7:test",
+		State: t.TempDir(),
+	}
 	if mutate != nil {
 		mutate(&cfg)
 	}
-	telegram := NewTelegram(cfg)
+	telegram, err := NewTelegram(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	go telegram.Run(ctx)
@@ -210,6 +265,13 @@ func waitFor(t *testing.T, what string, cond func() bool) {
 	t.Fatalf("timed out waiting for %s", what)
 }
 
+// pendingOf reads one ask's standing verdict.
+func pendingOf(tg *Telegram, ctx context.Context,
+	f controlplane.AdmissionFacts) controlplane.AdmissionVerdict {
+
+	return tg.Authorize(ctx, f).Admission
+}
+
 // TestTelegramPromptAndDecide walks the authorizer's own rules (ADR-0010):
 // the first ask prompts and pends, retries do not re-prompt, the configured
 // chat's approve allows and deny denies, another chat's answer is ignored,
@@ -220,10 +282,10 @@ func TestTelegramPromptAndDecide(t *testing.T) {
 	tg := runTelegram(t, d, nil)
 
 	key := newKey(t)
-	facts := factsOf(t, key)
+	facts := enrollFactsOf(t, key)
 
 	// The first ask prompts and pends.
-	if got := tg.Authorize(context.Background(), facts); got != controlplane.EnrollmentPending {
+	if got := pendingOf(tg, context.Background(), facts); got != controlplane.AdmissionPending {
 		t.Fatalf("first ask verdict = %v, want pending", got)
 	}
 	waitFor(t, "the prompt to send", func() bool { return d.promptCount() == 1 })
@@ -232,9 +294,9 @@ func TestTelegramPromptAndDecide(t *testing.T) {
 	if prompt.ChatID != testChat || prompt.Text == "" {
 		t.Errorf("prompt = %+v, want one to the configured chat naming the joiner", prompt)
 	}
-	skid, err := cppki.SubjectKeyID(key)
-	if err != nil {
-		t.Fatal(err)
+	if !strings.Contains(prompt.Text, facts.Keys[0]) ||
+		!strings.Contains(prompt.Text, facts.Claim.String()) {
+		t.Errorf("prompt text = %q, want the claim and the fingerprint in it", prompt.Text)
 	}
 	buttons := prompt.ReplyMarkup.InlineKeyboard[0]
 	if len(buttons) != 2 || buttons[0].Text != "Approve" || buttons[1].Text != "Deny" {
@@ -242,30 +304,39 @@ func TestTelegramPromptAndDecide(t *testing.T) {
 	}
 	for i, approve := range []bool{true, false} {
 		want, wantKey, ok := parseCallbackData(buttons[i].CallbackData)
-		if !ok || want != approve || wantKey.skid != string(skid) || wantKey.ia != facts.IA {
-			t.Errorf("button %d data = %q, want the identity it answers", i, buttons[i].CallbackData)
+		wantDigest := string(keyDigest(strings.Join(facts.Keys, ",")))
+		if !ok || want != approve || wantKey.digest != wantDigest ||
+			wantKey.claim != facts.Claim ||
+			wantKey.boundary != controlplane.BoundaryEnrollment {
+
+			t.Errorf("button %d data = %q, want the identity it answers",
+				i, buttons[i].CallbackData)
 		}
 	}
 
 	// Retries within the window pend without re-sending: one prompt per
 	// identity.
-	if got := tg.Authorize(context.Background(), facts); got != controlplane.EnrollmentPending {
+	if got := pendingOf(tg, context.Background(), facts); got != controlplane.AdmissionPending {
 		t.Fatalf("retry verdict = %v, want pending", got)
 	}
 	if got := d.promptCount(); got != 1 {
 		t.Errorf("prompts after a retry = %d, want the one", got)
 	}
 
-	// The configured chat's approve allows.
+	// The configured chat's approve allows, and the note names the plugin's
+	// own account of the decision.
 	d.press(testChat, buttons[0].CallbackData)
 	waitFor(t, "the approve to land", func() bool {
-		return tg.Authorize(context.Background(), facts) == controlplane.EnrollmentAllow
+		return pendingOf(tg, context.Background(), facts) == controlplane.AdmissionAllow
 	})
+	if got := tg.Authorize(context.Background(), facts).Note; got == "" {
+		t.Error("an approved decision carries no note for the registry to record")
+	}
 
 	// Deny denies a fresh identity.
 	key2 := newKey(t)
-	facts2 := factsOf(t, key2)
-	if got := tg.Authorize(context.Background(), facts2); got != controlplane.EnrollmentPending {
+	facts2 := enrollFactsOf(t, key2)
+	if got := pendingOf(tg, context.Background(), facts2); got != controlplane.AdmissionPending {
 		t.Fatalf("second identity's first ask verdict = %v, want pending", got)
 	}
 	waitFor(t, "the second prompt to send", func() bool { return d.promptCount() == 2 })
@@ -274,16 +345,17 @@ func TestTelegramPromptAndDecide(t *testing.T) {
 	// which proves by update order the stranger's press was processed
 	// before the verdict below is read.
 	d.press(testChat+1, d.prompt(1).ReplyMarkup.InlineKeyboard[0][0].CallbackData)
-	strangerSkid, err := cppki.SubjectKeyID(newKey(t))
-	if err != nil {
-		t.Fatal(err)
+	stranger := controlplane.AdmissionFacts{
+		Boundary: controlplane.BoundaryEnrollment,
+		Keys:     []string{skidOf(t, newKey(t))},
+		Claim:    facts.Claim,
 	}
-	d.press(testChat, callbackData(true, facts.IA, strangerSkid))
+	d.press(testChat, callbackData(true, stranger))
 	waitFor(t, "the unknown callback to be acknowledged", func() bool {
 		d.mtx.Lock()
 		defer d.mtx.Unlock()
 		for _, a := range d.answers {
-			if a.Text == "no pending enrollment for this identity" {
+			if a.Text == "no pending admission for this identity" {
 				return true
 			}
 		}
@@ -292,13 +364,53 @@ func TestTelegramPromptAndDecide(t *testing.T) {
 	// The stranger's chat did not approve: a callback for an identity this
 	// process never prompted is answered with exactly that and ignored,
 	// and another chat's answer counts not at all.
-	if got := tg.Authorize(context.Background(), facts2); got != controlplane.EnrollmentPending {
+	if got := pendingOf(tg, context.Background(), facts2); got != controlplane.AdmissionPending {
 		t.Fatalf("verdict after another chat's approve = %v, want the pending untouched", got)
 	}
 	d.press(testChat, d.prompt(1).ReplyMarkup.InlineKeyboard[0][1].CallbackData)
 	waitFor(t, "the deny to land", func() bool {
-		return tg.Authorize(context.Background(), facts2) == controlplane.EnrollmentDeny
+		return pendingOf(tg, context.Background(), facts2) == controlplane.AdmissionDeny
 	})
+}
+
+// TestTelegramRegistrationPrompts checks the registration boundary's bare
+// joiner: the machine and node fingerprints prompt the configured chat the
+// same way, and the approve button answers that identity alone.
+func TestTelegramRegistrationPrompts(t *testing.T) {
+	d := newBotDouble(t)
+	tg := runTelegram(t, d, nil)
+
+	facts := registerFactsOf(t, newKey(t), newKey(t), "")
+	if got := pendingOf(tg, context.Background(), facts); got != controlplane.AdmissionPending {
+		t.Fatalf("first ask verdict = %v, want pending", got)
+	}
+	waitFor(t, "the prompt to send", func() bool { return d.promptCount() == 1 })
+	prompt := d.prompt(0)
+	for _, key := range facts.Keys {
+		if !strings.Contains(prompt.Text, key) {
+			t.Errorf("prompt text = %q, want the fingerprint %s in it", prompt.Text, key)
+		}
+	}
+	buttons := prompt.ReplyMarkup.InlineKeyboard[0]
+	_, wantKey, ok := parseCallbackData(buttons[0].CallbackData)
+	if !ok || wantKey.boundary != controlplane.BoundaryRegistration {
+		t.Errorf("button data = %q, want the registration identity", buttons[0].CallbackData)
+	}
+	// A different registration identity pends separately: one prompt per
+	// identity, the machine and node keys together.
+	other := registerFactsOf(t, newKey(t), newKey(t), "")
+	if got := pendingOf(tg, context.Background(), other); got != controlplane.AdmissionPending {
+		t.Fatalf("a second identity's first ask verdict = %v, want pending", got)
+	}
+	waitFor(t, "the second prompt to send", func() bool { return d.promptCount() == 2 })
+
+	d.press(testChat, buttons[0].CallbackData)
+	waitFor(t, "the approve to land", func() bool {
+		return pendingOf(tg, context.Background(), facts) == controlplane.AdmissionAllow
+	})
+	if got := pendingOf(tg, context.Background(), other); got != controlplane.AdmissionPending {
+		t.Fatalf("the other identity after the first's approve = %v, want pending", got)
+	}
 }
 
 // TestTelegramSendFailureDenies checks the fail-closed rule: with the API
@@ -309,8 +421,8 @@ func TestTelegramSendFailureDenies(t *testing.T) {
 	tg := runTelegram(t, d, nil)
 	d.setFail(true)
 
-	facts := factsOf(t, newKey(t))
-	if got := tg.Authorize(context.Background(), facts); got != controlplane.EnrollmentDeny {
+	facts := enrollFactsOf(t, newKey(t))
+	if got := pendingOf(tg, context.Background(), facts); got != controlplane.AdmissionDeny {
 		t.Errorf("verdict with the API down = %v, want deny", got)
 	}
 }
@@ -318,25 +430,25 @@ func TestTelegramSendFailureDenies(t *testing.T) {
 // TestTelegramWindowExpiry checks the window's edges: a denied identity
 // denies for the window and prompts again past it, and an approved one
 // allows for the window's remainder — the strong no-prompt guarantee being
-// the chain check's, not the map's.
+// the registry's, not the map's.
 func TestTelegramWindowExpiry(t *testing.T) {
 	d := newBotDouble(t)
 	tg := runTelegram(t, d, func(cfg *TelegramConfig) { cfg.Window = 100 * time.Millisecond })
 
-	facts := factsOf(t, newKey(t))
-	if got := tg.Authorize(context.Background(), facts); got != controlplane.EnrollmentPending {
+	facts := enrollFactsOf(t, newKey(t))
+	if got := pendingOf(tg, context.Background(), facts); got != controlplane.AdmissionPending {
 		t.Fatalf("first ask verdict = %v, want pending", got)
 	}
 	waitFor(t, "the prompt to send", func() bool { return d.promptCount() == 1 })
 	d.press(testChat, d.prompt(0).ReplyMarkup.InlineKeyboard[0][1].CallbackData)
 	waitFor(t, "the deny to land", func() bool {
-		return tg.Authorize(context.Background(), facts) == controlplane.EnrollmentDeny
+		return pendingOf(tg, context.Background(), facts) == controlplane.AdmissionDeny
 	})
 	// Past the window the same identity asks again: one prompt per identity
 	// holds inside a window, not forever. The retry's own ask is what
 	// re-prompts, exactly as the joiner's loop produces it.
 	waitFor(t, "the window to expire and the retry to re-prompt", func() bool {
-		return tg.Authorize(context.Background(), facts) == controlplane.EnrollmentPending
+		return pendingOf(tg, context.Background(), facts) == controlplane.AdmissionPending
 	})
 	if got := d.promptCount(); got != 2 {
 		t.Errorf("prompts past the window = %d, want the re-prompt", got)
@@ -349,19 +461,19 @@ func TestTelegramRestart(t *testing.T) {
 	d := newBotDouble(t)
 	tg := runTelegram(t, d, nil)
 
-	facts := factsOf(t, newKey(t))
-	if got := tg.Authorize(context.Background(), facts); got != controlplane.EnrollmentPending {
+	facts := enrollFactsOf(t, newKey(t))
+	if got := pendingOf(tg, context.Background(), facts); got != controlplane.AdmissionPending {
 		t.Fatalf("first ask verdict = %v, want pending", got)
 	}
 	waitFor(t, "the prompt to send", func() bool { return d.promptCount() == 1 })
 	d.press(testChat, d.prompt(0).ReplyMarkup.InlineKeyboard[0][0].CallbackData)
 	waitFor(t, "the approve to land", func() bool {
-		return tg.Authorize(context.Background(), facts) == controlplane.EnrollmentAllow
+		return pendingOf(tg, context.Background(), facts) == controlplane.AdmissionAllow
 	})
 
 	// A restart forgets the decision and asks again.
 	tg2 := runTelegram(t, d, nil)
-	if got := tg2.Authorize(context.Background(), facts); got != controlplane.EnrollmentPending {
+	if got := pendingOf(tg2, context.Background(), facts); got != controlplane.AdmissionPending {
 		t.Errorf("a fresh instance's verdict = %v, want pending: it knows no decision", got)
 	}
 	waitFor(t, "the re-prompt to send", func() bool { return d.promptCount() == 2 })
@@ -380,8 +492,12 @@ func TestTelegramLogsNoToken(t *testing.T) {
 	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
 	t.Cleanup(func() { slog.SetDefault(previous) })
 
-	tg := NewTelegram(TelegramConfig{API: dead.URL, Chat: testChat, Token: "7:test"})
-	if got := tg.Authorize(context.Background(), factsOf(t, newKey(t))); got != controlplane.EnrollmentDeny {
+	tg, err := NewTelegram(TelegramConfig{
+		API: dead.URL, Chat: testChat, Token: "7:test", State: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := pendingOf(tg, context.Background(), enrollFactsOf(t, newKey(t))); got != controlplane.AdmissionDeny {
 		t.Fatalf("verdict with the API down = %v, want deny", got)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -426,8 +542,8 @@ func TestTelegramSweepExpiredDecisions(t *testing.T) {
 	d := newBotDouble(t)
 	tg := runTelegram(t, d, func(cfg *TelegramConfig) { cfg.Window = 100 * time.Millisecond })
 
-	facts := factsOf(t, newKey(t))
-	if got := tg.Authorize(context.Background(), facts); got != controlplane.EnrollmentPending {
+	facts := enrollFactsOf(t, newKey(t))
+	if got := pendingOf(tg, context.Background(), facts); got != controlplane.AdmissionPending {
 		t.Fatalf("first ask verdict = %v, want pending", got)
 	}
 	waitFor(t, "the prompt to send", func() bool { return d.promptCount() == 1 })
@@ -445,4 +561,169 @@ func TestTelegramSweepExpiredDecisions(t *testing.T) {
 		defer tg.mtx.Unlock()
 		return len(tg.asks) == 0
 	})
+}
+
+// lastInvitation waits for the operator's mint request to be answered and
+// returns the invitation the reply carries.
+func lastInvitation(t *testing.T, d *botDouble) string {
+	t.Helper()
+	waitFor(t, "the minted invitation's reply", func() bool {
+		if d.promptCount() == 0 {
+			return false
+		}
+		return strings.Contains(d.prompt(d.promptCount()-1).Text, invitePrefix)
+	})
+	for _, line := range strings.Split(d.prompt(d.promptCount()-1).Text, "\n") {
+		if strings.HasPrefix(line, invitePrefix) {
+			return line
+		}
+	}
+	t.Fatalf("reply = %q, want an invitation in it", d.prompt(d.promptCount()-1).Text)
+	return ""
+}
+
+// TestTelegramInvitation walks the invitation flow (ADR-0011): the
+// configured chat asks, the bot mints and replies, a registration presenting
+// the unspent key approves and spends it, and a second presentation is a
+// bare joiner's prompt — a stale invitation fails toward the human, not
+// closed. Another chat can neither mint nor retire.
+func TestTelegramInvitation(t *testing.T) {
+	d := newBotDouble(t)
+	tg := runTelegram(t, d, nil)
+
+	// Another chat's mint request is ignored: the configured chat is the
+	// only console. Its update is ordered before the configured chat's, so
+	// by the time the mint's reply arrived, the stranger's was processed —
+	// and produced nothing.
+	d.say(testChat+1, "invite")
+	d.say(testChat, "invite")
+	key := lastInvitation(t, d)
+	if got := d.promptCount(); got != 1 {
+		t.Fatalf("messages after both mints = %d, want the configured chat's one", got)
+	}
+
+	// A registration presenting the unspent key approves and spends it.
+	presented := registerFactsOf(t, newKey(t), newKey(t), key)
+	answer := tg.Authorize(context.Background(), presented)
+	if answer.Admission != controlplane.AdmissionAllow {
+		t.Fatalf("an invited registration's verdict = %v, want allow", answer.Admission)
+	}
+	if answer.Note == "" {
+		t.Error("an invited approval carries no note for the registry to record")
+	}
+
+	// The spent key is a bare joiner's: the next presentation prompts.
+	bare := registerFactsOf(t, newKey(t), newKey(t), key)
+	if got := pendingOf(tg, context.Background(), bare); got != controlplane.AdmissionPending {
+		t.Fatalf("a spent invitation's verdict = %v, want the bare joiner's pending", got)
+	}
+	waitFor(t, "the bare joiner's prompt to send", func() bool {
+		return d.promptCount() == 2
+	})
+
+	// An unknown credential prompts the same way.
+	unknown := registerFactsOf(t, newKey(t), newKey(t), invitePrefix+"deadbeef")
+	if got := pendingOf(tg, context.Background(), unknown); got != controlplane.AdmissionPending {
+		t.Fatalf("an unknown credential's verdict = %v, want the bare joiner's pending", got)
+	}
+}
+
+// TestTelegramInvitationPersistence checks the invitations' own state: an
+// unspent key survives a restart in the state directory and is answerable
+// after it, a spent one is gone for good, and a retired one — sent back by
+// the operator — prompts as a bare joiner's. One instance answers one
+// double per phase, the way one process runs per core.
+func TestTelegramInvitationPersistence(t *testing.T) {
+	state := t.TempDir()
+
+	// The first instance mints at its operator's request.
+	d1 := newBotDouble(t)
+	runTelegram(t, d1, func(cfg *TelegramConfig) { cfg.State = state })
+	d1.say(testChat, "invite")
+	key := lastInvitation(t, d1)
+
+	// A restart carries the unspent invitation; the fresh instance spends
+	// it on presentation, and the spent key prompts the next time.
+	d2 := newBotDouble(t)
+	second, err := NewTelegram(TelegramConfig{
+		API: d2.url, Chat: testChat, Token: "7:test", State: state})
+	if err != nil {
+		t.Fatal(err)
+	}
+	invited := registerFactsOf(t, newKey(t), newKey(t), key)
+	if got := second.Authorize(context.Background(), invited).Admission; got != controlplane.AdmissionAllow {
+		t.Fatalf("a surviving invitation's verdict = %v, want allow", got)
+	}
+	if got := second.Authorize(context.Background(),
+		registerFactsOf(t, newKey(t), newKey(t), key)).Admission; got != controlplane.AdmissionPending {
+
+		t.Fatalf("the spent invitation's second presentation = %v, want the bare pending", got)
+	}
+
+	// Retirement is conversational: the operator sends an unspent key back,
+	// the bot retires it, and the next presentation prompts.
+	d3 := newBotDouble(t)
+	runTelegram(t, d3, func(cfg *TelegramConfig) { cfg.State = state })
+	d3.say(testChat, "invite")
+	key2 := lastInvitation(t, d3)
+	d3.say(testChat, key2)
+	waitFor(t, "the retirement's reply", func() bool {
+		last := d3.prompt(d3.promptCount() - 1).Text
+		return strings.Contains(last, "retired")
+	})
+	raw, err := os.ReadFile(filepath.Join(state, "enrollauth", invitationsFile))
+	if err != nil {
+		t.Fatalf("reading the persisted invitations: %v", err)
+	}
+	var keys []string
+	if err := json.Unmarshal(raw, &keys); err != nil {
+		t.Fatalf("parsing the persisted invitations: %v", err)
+	}
+	for _, k := range keys {
+		if k == key2 {
+			t.Errorf("the retired invitation %q persists", key2)
+		}
+	}
+
+	// A restart after the retirement still knows the invitation is spent.
+	d4 := newBotDouble(t)
+	third, err := NewTelegram(TelegramConfig{
+		API: d4.url, Chat: testChat, Token: "7:test", State: state})
+	if err != nil {
+		t.Fatal(err)
+	}
+	retired := registerFactsOf(t, newKey(t), newKey(t), key2)
+	if got := third.Authorize(context.Background(), retired).Admission; got != controlplane.AdmissionPending {
+		t.Fatalf("a retired invitation's verdict = %v, want the bare joiner's pending", got)
+	}
+}
+
+// TestTelegramInvitationsRequireState checks the persistence precondition:
+// an authorizer with no state directory configured refuses to build — a
+// lost invitation file must never be a silent behavior — and a mint
+// persists exactly the unspent set.
+func TestTelegramInvitationsRequireState(t *testing.T) {
+	_, err := NewTelegram(TelegramConfig{Chat: testChat, Token: "7:test"})
+	if err == nil {
+		t.Fatal("building without a state directory succeeded, want refusal")
+	}
+
+	state := t.TempDir()
+	tg, err := NewTelegram(TelegramConfig{
+		Chat: testChat, Token: "7:test", State: state})
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := tg.mintInvite()
+	raw, err := os.ReadFile(filepath.Join(state, "enrollauth", invitationsFile))
+	if err != nil {
+		t.Fatalf("reading the persisted invitations: %v", err)
+	}
+	var keys []string
+	if err := json.Unmarshal(raw, &keys); err != nil {
+		t.Fatalf("parsing the persisted invitations: %v", err)
+	}
+	if len(keys) != 1 || keys[0] != key {
+		t.Fatalf("persisted invitations = %v, want the one minted %q", keys, key)
+	}
 }

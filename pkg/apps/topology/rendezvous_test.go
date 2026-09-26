@@ -23,7 +23,6 @@ type rendezvousFixture struct {
 
 var (
 	rendezvousIA  = addr.MustIAFrom(20, 0xfd0000000021)
-	strangerIA    = addr.MustIAFrom(20, 0xfd0000000022)
 	strangerKeyIA = addr.MustIAFrom(20, 0xfd0000000023)
 )
 

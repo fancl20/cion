@@ -44,7 +44,7 @@ const (
 type DirectoryServiceClient interface {
 	// Publish records the caller's entry.
 	Publish(context.Context, *connect.Request[v1.PublishRequest]) (*connect.Response[v1.PublishResponse], error)
-	// List returns every published entry.
+	// List returns every published entry, nodes and hosts together.
 	List(context.Context, *connect.Request[v1.ListRequest]) (*connect.Response[v1.ListResponse], error)
 }
 
@@ -94,7 +94,7 @@ func (c *directoryServiceClient) List(ctx context.Context, req *connect.Request[
 type DirectoryServiceHandler interface {
 	// Publish records the caller's entry.
 	Publish(context.Context, *connect.Request[v1.PublishRequest]) (*connect.Response[v1.PublishResponse], error)
-	// List returns every published entry.
+	// List returns every published entry, nodes and hosts together.
 	List(context.Context, *connect.Request[v1.ListRequest]) (*connect.Response[v1.ListResponse], error)
 }
 

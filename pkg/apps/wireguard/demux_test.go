@@ -59,17 +59,16 @@ func newHostClient(
 }
 
 // TestSharedHostPortDemultiplexes checks the shared host-facing port's
-// demultiplexing: every host device shares the node's key pair and receives
-// every datagram, but only the device whose peer table holds the sender's
-// public key completes the handshake — a key configured under another exit
-// completes only on that exit's device, and a key no device holds is
-// dropped.
+// demultiplexing (proposal 0022's shape): the one host device holds the
+// node's key pair with every joined host as its peers, and only the peer
+// whose public key the device holds completes the handshake — a key no
+// entry programmed is dropped.
 func TestSharedHostPortDemultiplexes(t *testing.T) {
 	cnt := &counters{}
 	nodeKey, nodePub := newKeyPair(t)
-	hostXKey, hostXPub := newKeyPair(t) // configured under exit X
-	hostYKey, hostYPub := newKeyPair(t) // configured under exit Y
-	rogueKey, _ := newKeyPair(t)        // configured nowhere
+	hostXKey, hostXPub := newKeyPair(t) // joined, at address X
+	hostYKey, hostYPub := newKeyPair(t) // joined, at address Y
+	rogueKey, _ := newKeyPair(t)        // joined nowhere
 
 	udpConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
 	if err != nil {
@@ -80,73 +79,64 @@ func TestSharedHostPortDemultiplexes(t *testing.T) {
 	go socket.run()
 	nodeAddr := udpConn.LocalAddr().(*net.UDPAddr).AddrPort()
 
-	// Two host devices behind the shared port, one per exit.
-	newHostDevice := func(name string, peerKey PublicKey, peerAddr netip.Addr) *pipe {
-		pipe := newPipe(name, OverlayMTU, cnt)
-		dev := device.NewDevice(pipe, newHostBind(socket), testLogger)
-		ipc := strings.Join([]string{
-			"private_key=" + hex.EncodeToString(nodeKey[:]),
-			"listen_port=" + strconv.Itoa(int(nodeAddr.Port())),
-			"replace_peers=true",
-			"public_key=" + peerKey.String(),
-			"allowed_ip=" + netip.PrefixFrom(peerAddr, 32).String(),
-		}, "\n")
-		if err := dev.IpcSet(ipc); err != nil {
-			t.Fatal(err)
-		}
-		if err := dev.Up(); err != nil {
-			t.Fatal(err)
-		}
-		t.Cleanup(func() {
-			dev.Close()
-			_ = pipe.Close()
-		})
-		return pipe
+	// The one host device behind the shared port, both hosts as peers.
+	pipe := newPipe("host", OverlayMTU, cnt)
+	dev := device.NewDevice(pipe, newHostBind(socket, nil), testLogger)
+	addrX := netip.MustParseAddr("100.64.1.10")
+	addrY := netip.MustParseAddr("100.64.1.20")
+	ipc := strings.Join([]string{
+		"private_key=" + hex.EncodeToString(nodeKey[:]),
+		"listen_port=" + strconv.Itoa(int(nodeAddr.Port())),
+		"replace_peers=true",
+		"public_key=" + hostXPub.String(),
+		"allowed_ip=" + netip.PrefixFrom(addrX, 32).String(),
+		"public_key=" + hostYPub.String(),
+		"allowed_ip=" + netip.PrefixFrom(addrY, 32).String(),
+	}, "\n")
+	if err := dev.IpcSet(ipc); err != nil {
+		t.Fatal(err)
 	}
-	addrX := netip.MustParseAddr("10.64.1.10")
-	addrY := netip.MustParseAddr("10.64.1.20")
-	pipeX := newHostDevice("host-x", hostXPub, addrX)
-	pipeY := newHostDevice("host-y", hostYPub, addrY)
+	if err := dev.Up(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		dev.Close()
+		_ = pipe.Close()
+	})
 
-	// Exit X's host exchanges through the shared port: its packet, decrypted,
-	// arrives on X's device only.
+	// Host X exchanges through the shared port: its packet, decrypted by
+	// the peer table, arrives on the device.
 	_, clientXPipe := newHostClient(t, nodePub, hostXKey, nodeAddr)
-	clientXPipe.inbound <- ipPacket(t, addrX, netip.MustParseAddr("10.64.9.9"), []byte("x"))
+	clientXPipe.inbound <- ipPacket(t, addrX, netip.MustParseAddr("100.64.9.9"), []byte("x"))
 	select {
-	case pkt := <-pipeX.outbound:
+	case pkt := <-pipe.outbound:
 		if got := pkt[header.IPv4MinimumSize:]; string(got) != "x" {
 			t.Errorf("payload = %q, want %q", got, "x")
 		}
 	case <-time.After(10 * time.Second):
-		t.Fatal("exit X's host traffic never reached X's device")
-	}
-	select {
-	case pkt := <-pipeY.outbound:
-		t.Fatalf("exit X's host traffic leaked to Y's device: %x", pkt)
-	default:
+		t.Fatal("host X's traffic never reached the device")
 	}
 
-	// Exit Y's host completes only on Y's device.
+	// Host Y exchanges the same way: the second peer's session demultiplexes
+	// on the same key pair and port.
 	_, clientYPipe := newHostClient(t, nodePub, hostYKey, nodeAddr)
-	clientYPipe.inbound <- ipPacket(t, addrY, netip.MustParseAddr("10.64.9.9"), []byte("y"))
+	clientYPipe.inbound <- ipPacket(t, addrY, netip.MustParseAddr("100.64.9.9"), []byte("y"))
 	select {
-	case pkt := <-pipeY.outbound:
+	case pkt := <-pipe.outbound:
 		if got := pkt[header.IPv4MinimumSize:]; string(got) != "y" {
 			t.Errorf("payload = %q, want %q", got, "y")
 		}
 	case <-time.After(10 * time.Second):
-		t.Fatal("exit Y's host traffic never reached Y's device")
+		t.Fatal("host Y's traffic never reached the device")
 	}
 
-	// A public key no device holds is dropped: the rogue client's handshake
-	// completes nowhere and its traffic reaches no pipe.
+	// A public key no entry programmed is dropped: the rogue client's
+	// handshake completes nowhere and its traffic reaches no pipe.
 	_, roguePipe := newHostClient(t, nodePub, rogueKey, nodeAddr)
-	roguePipe.inbound <- ipPacket(t, addrX, netip.MustParseAddr("10.64.9.9"), []byte("r"))
+	roguePipe.inbound <- ipPacket(t, addrX, netip.MustParseAddr("100.64.9.9"), []byte("r"))
 	select {
-	case pkt := <-pipeX.outbound:
-		t.Fatalf("an unconfigured key's traffic reached X's device: %x", pkt)
-	case pkt := <-pipeY.outbound:
-		t.Fatalf("an unconfigured key's traffic reached Y's device: %x", pkt)
+	case pkt := <-pipe.outbound:
+		t.Fatalf("an unconfigured key's traffic reached the device: %x", pkt)
 	case <-time.After(2 * time.Second):
 	}
 }

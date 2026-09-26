@@ -25,6 +25,8 @@ type counters struct {
 	pathRefreshes atomic.Int64
 	// published counts accepted directory publications the core served.
 	published atomic.Int64
+	// hostDatagrams counts datagrams the shared host port received.
+	hostDatagrams atomic.Int64
 }
 
 // snapshot returns the counters as a slice for structured logging.
@@ -37,5 +39,6 @@ func (c *counters) snapshot() []any {
 		"send_failures", c.sendFailures.Load(),
 		"path_refreshes", c.pathRefreshes.Load(),
 		"published", c.published.Load(),
+		"host_datagrams", c.hostDatagrams.Load(),
 	}
 }

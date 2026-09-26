@@ -1,6 +1,6 @@
 # Serve Hosts with a Tailscale Coordination Service
 
-*   Status: draft
+*   Status: accepted
 *   Date: 2026-09-24
 
 [TOC]
@@ -52,8 +52,9 @@ lives, and who assigns addresses. Egress is none of these: the subject
 stays
 [ADR-0012](/docs/adrs/0012-serve-egress-as-an-overlay-socks-service.md)'s,
 though its ground moves under this record — the SOCKS service was drafted
-against the plain-WireGuard host boundary replaced here, and must be
-re-grounded on the tailnet boundary this record draws.
+against the plain-WireGuard host boundary replaced here, and is
+re-grounded on the tailnet boundary this record draws, in the same
+landing.
 
 ## Decision drivers
 
@@ -147,8 +148,8 @@ instruments **in the plugin** — realized as follows:
     its address, its node's key and endpoint. No CION software runs on the
     host, not even a one-shot helper. ADR-0005's standard-clients promise is
     kept whole and narrowed in mechanism — from standard WireGuard clients
-    to standard tailnet clients, both third-party and widely deployed — and
-    the annotation lands beside the record's line.
+    to standard tailnet clients, both third-party and widely deployed. This
+    record carries the narrowing; ADR-0005 stands as written.
 2.  **The coordination service is a minimal core application.** It lives
     beside the WireGuard application on the core, speaks the client protocol
     from vendored packages — the control channel riding the core's WebPKI
@@ -166,8 +167,8 @@ instruments **in the plugin** — realized as follows:
     the joiner carried — and the plugin answers approve, deny, or pending,
     with a note of its own the registry records beside the entry. One
     interface serves every boundary; the same plugin may answer enrollment
-    and registration, and the enrollment seam migrates to it, the
-    narrowing annotated beside ADR-0010 at landing. The CIDR plugin
+    and registration, and the enrollment seam migrates to it — this record
+    carries the narrowing, ADR-0010 standing as written. The CIDR plugin
     approves by source. The Telegram plugin is the control plane, and the
     control reverses: instead of the network asking a human per joiner,
     the operator issues invitations ahead of joiners — asking the bot for
@@ -276,10 +277,10 @@ instruments **in the plugin** — realized as follows:
     applications or a local forwarder until then — and the netstack egress
     and echo relay the exit model built stand unfed.
 *   ADR-0012's ground moves: its SOCKS service was drafted against the
-    plain-WireGuard host boundary this record replaces, and the record
-    must be re-grounded on the tailnet boundary — its overlay-only tunnel
-    and destination-addressed service surviving nearly intact, but until
-    it is, its text describes the old host.
+    plain-WireGuard host boundary this record replaces, and the record —
+    still a draft — is re-grounded on the tailnet boundary in this
+    landing, its overlay-only tunnel and destination-addressed service
+    surviving nearly intact.
 *   A registration completes at the directory's cadence — the node programs
     a joined host when its next fetch lands — a pacing question the
     implementing proposal owns.

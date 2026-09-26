@@ -19,7 +19,8 @@ func TestLoad(t *testing.T) {
 		t.Error("the cidrs method reported loops it does not have")
 	}
 
-	auth, run, err = Load("telegram=-1002147483647:7481532:AAFtoken", LoadOptions{})
+	auth, run, err = Load("telegram=-1002147483647:7481532:AAFtoken",
+		LoadOptions{State: t.TempDir()})
 	if err != nil {
 		t.Fatalf("loading the telegram method: %v", err)
 	}
@@ -38,6 +39,7 @@ func TestLoad(t *testing.T) {
 		"telegram=chat:token",   // unparsable chat
 		"telegram=-1002147483647",
 		"telegram=-1002147483647:",
+		"telegram=-1002147483647:token", // no state for the invitations
 	} {
 		if _, _, err := Load(spec, LoadOptions{}); err == nil {
 			t.Errorf("loading %q succeeded, want refusal", spec)

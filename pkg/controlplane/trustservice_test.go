@@ -7,6 +7,7 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/x509"
+	"encoding/hex"
 	"net/netip"
 	"path/filepath"
 	"sync"
@@ -259,13 +260,15 @@ func TestTrustServiceChainRenewal(t *testing.T) {
 // askAuthorizer records the facts the trust service asked with and answers
 // the verdict it was told to.
 type askAuthorizer struct {
-	asked   []EnrollmentFacts
-	verdict EnrollmentVerdict
+	asked   []AdmissionFacts
+	verdict AdmissionVerdict
 }
 
-func (a *askAuthorizer) Authorize(_ context.Context, f EnrollmentFacts) EnrollmentVerdict {
+func (a *askAuthorizer) Authorize(
+	_ context.Context, f AdmissionFacts) AdmissionAnswer {
+
 	a.asked = append(a.asked, f)
-	return a.verdict
+	return AdmissionAnswer{Admission: a.verdict}
 }
 
 // askContext carries a SCION source address the way the QUIC transport puts
@@ -305,7 +308,7 @@ func TestTrustServiceEnrollmentAuthorizer(t *testing.T) {
 
 	t.Run("allow issues with the request's facts", func(t *testing.T) {
 		f := newTrustFixture(t)
-		auth := &askAuthorizer{verdict: EnrollmentAllow}
+		auth := &askAuthorizer{verdict: AdmissionAllow}
 		svc := &TrustService{DB: f.db, Issuer: f.issuer, Authorizer: auth}
 		csr, key := newCSR(t, nodeIATest)
 
@@ -316,26 +319,37 @@ func TestTrustServiceEnrollmentAuthorizer(t *testing.T) {
 			t.Fatalf("the authorizer was asked %d times, want 1", len(auth.asked))
 		}
 		got := auth.asked[0]
-		if got.IA != nodeIATest {
-			t.Errorf("asked ISD-AS = %v, want the claimed %v", got.IA, nodeIATest)
+		if got.Boundary != BoundaryEnrollment {
+			t.Errorf("asked boundary = %v, want enrollment", got.Boundary)
 		}
-		if !got.Key.(interface{ Equal(crypto.PublicKey) bool }).Equal(csr.PublicKey) {
-			t.Error("asked key differs from the CSR's subject key")
+		if got.Claim != nodeIATest {
+			t.Errorf("asked claim = %v, want the claimed %v", got.Claim, nodeIATest)
 		}
-		if want := netip.MustParseAddrPort("198.51.100.7:41234"); got.Addr != want {
-			t.Errorf("asked source = %v, want the context's %v", got.Addr, want)
+		wantSKID, err := cppki.SubjectKeyID(csr.PublicKey)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(got.Keys) != 1 || got.Keys[0] != hex.EncodeToString(wantSKID) {
+			t.Errorf("asked keys = %v, want the CSR subject key's fingerprint %x",
+				got.Keys, wantSKID)
+		}
+		if want := netip.MustParseAddrPort("198.51.100.7:41234"); got.Source != want {
+			t.Errorf("asked source = %v, want the context's %v", got.Source, want)
+		}
+		if got.Credential != "" {
+			t.Errorf("asked credential = %q, want none at enrollment", got.Credential)
 		}
 	})
 
 	t.Run("no address in the context is a zero fact", func(t *testing.T) {
 		f := newTrustFixture(t)
-		auth := &askAuthorizer{verdict: EnrollmentAllow}
+		auth := &askAuthorizer{verdict: AdmissionAllow}
 		svc := &TrustService{DB: f.db, Issuer: f.issuer, Authorizer: auth}
 		csr, key := newCSR(t, nodeIATest)
 		if err := ask(t, svc, context.Background(), csr, key); err != nil {
 			t.Fatal(err)
 		}
-		if got := auth.asked[0].Addr; got.IsValid() {
+		if got := auth.asked[0].Source; got.IsValid() {
 			t.Errorf("asked source = %v, want the zero address", got)
 		}
 	})
@@ -343,7 +357,7 @@ func TestTrustServiceEnrollmentAuthorizer(t *testing.T) {
 	t.Run("deny is PermissionDenied", func(t *testing.T) {
 		f := newTrustFixture(t)
 		svc := &TrustService{DB: f.db, Issuer: f.issuer,
-			Authorizer: &askAuthorizer{verdict: EnrollmentDeny}}
+			Authorizer: &askAuthorizer{verdict: AdmissionDeny}}
 		csr, key := newCSR(t, nodeIATest)
 		err := ask(t, svc, context.Background(), csr, key)
 		if connect.CodeOf(err) != connect.CodePermissionDenied {
@@ -359,7 +373,7 @@ func TestTrustServiceEnrollmentAuthorizer(t *testing.T) {
 	t.Run("pending is Unavailable", func(t *testing.T) {
 		f := newTrustFixture(t)
 		svc := &TrustService{DB: f.db, Issuer: f.issuer,
-			Authorizer: &askAuthorizer{verdict: EnrollmentPending}}
+			Authorizer: &askAuthorizer{verdict: AdmissionPending}}
 		csr, key := newCSR(t, nodeIATest)
 		err := ask(t, svc, context.Background(), csr, key)
 		if connect.CodeOf(err) != connect.CodeUnavailable {
@@ -369,7 +383,7 @@ func TestTrustServiceEnrollmentAuthorizer(t *testing.T) {
 
 	t.Run("the holder's renewal is never asked", func(t *testing.T) {
 		f := newTrustFixture(t)
-		auth := &askAuthorizer{verdict: EnrollmentAllow}
+		auth := &askAuthorizer{verdict: AdmissionAllow}
 		svc := &TrustService{DB: f.db, Issuer: f.issuer, Authorizer: auth,
 			MinInterval: time.Microsecond}
 		csr, key := newCSR(t, nodeIATest)
@@ -387,7 +401,7 @@ func TestTrustServiceEnrollmentAuthorizer(t *testing.T) {
 
 	t.Run("a taken name is never asked", func(t *testing.T) {
 		f := newTrustFixture(t)
-		auth := &askAuthorizer{verdict: EnrollmentAllow}
+		auth := &askAuthorizer{verdict: AdmissionAllow}
 		svc := &TrustService{DB: f.db, Issuer: f.issuer, Authorizer: auth,
 			MinInterval: time.Microsecond}
 		csr, key := newCSR(t, nodeIATest)
@@ -414,7 +428,7 @@ func TestTrustServiceEnrollmentAuthorizer(t *testing.T) {
 // free name allows.
 func TestChainRenewalExtendingName(t *testing.T) {
 	f := newTrustFixture(t)
-	auth := &askAuthorizer{verdict: EnrollmentAllow}
+	auth := &askAuthorizer{verdict: AdmissionAllow}
 	svc := &TrustService{DB: f.db, Issuer: f.issuer, Authorizer: auth}
 	ctx := context.Background()
 
@@ -460,14 +474,16 @@ func TestChainRenewalExtendingName(t *testing.T) {
 // blockingAuthorizer holds every ask until released, then allows — the
 // Telegram prompt's network send in miniature.
 type blockingAuthorizer struct {
-	asked   chan EnrollmentFacts
+	asked   chan AdmissionFacts
 	release chan struct{}
 }
 
-func (a *blockingAuthorizer) Authorize(_ context.Context, f EnrollmentFacts) EnrollmentVerdict {
+func (a *blockingAuthorizer) Authorize(
+	_ context.Context, f AdmissionFacts) AdmissionAnswer {
+
 	a.asked <- f
 	<-a.release
-	return EnrollmentAllow
+	return AdmissionAnswer{Admission: AdmissionAllow}
 }
 
 // sourceContext carries a SCION source address the way the QUIC transport
@@ -485,7 +501,7 @@ func sourceContext(port string) context.Context {
 func TestChainRenewalSerialized(t *testing.T) {
 	f := newTrustFixture(t)
 	auth := &blockingAuthorizer{
-		asked:   make(chan EnrollmentFacts),
+		asked:   make(chan AdmissionFacts),
 		release: make(chan struct{}),
 	}
 	svc := &TrustService{DB: f.db, Issuer: f.issuer, Authorizer: auth}
