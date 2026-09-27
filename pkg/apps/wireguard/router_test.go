@@ -5,8 +5,16 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/go-cmp/cmp"
+	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/header"
 )
+
+// netipToAddress converts an overlay address for a netstack header — the
+// helper the egress machinery carried, kept for the packet builders here.
+func netipToAddress(ip netip.Addr) tcpip.Address {
+	return tcpip.AddrFromSlice(ip.AsSlice())
+}
 
 // ipPacket builds a minimal IPv4 packet between two overlay addresses; proto
 // 1 (ICMP) keeps the payload trivial.
@@ -90,14 +98,81 @@ func TestRouterRoutesByDestination(t *testing.T) {
 	r.route(ipPacket(t, host, netip.MustParseAddr("192.0.2.53"), nil))
 	if unroutable := cnt.unroutablePackets.Load(); unroutable != before+1 {
 		t.Errorf("unroutable count = %d after an internet-bound packet, want %d",
+			unroutable, before)
+	}
+
+	// A reply a service produces still routes to its host, never a default.
+	r.Route(ipPacket(t, netip.MustParseAddr("192.0.2.53"), host, nil))
+	if pkt := take(t, hostDev); pkt == nil {
+		t.Fatal("service reply did not route to the host")
+	}
+}
+
+// TestRouterDeliversServedAddress checks the delivery a resident service
+// installs (proposal 0024): with one standing, packets reach it by
+// destination exactly — from any arrival — while an address of the node's
+// own slice that is neither a host's nor the served one stays unroutable,
+// and the undo leaves the address unroutable again, the service's assembly
+// the only thing that routes it.
+func TestRouterDeliversServedAddress(t *testing.T) {
+	cnt := &counters{}
+	r := newRouter(OverlayMTU, cnt)
+	hostDev := newPipe("host", OverlayMTU, cnt)
+	mesh := newPipe("mesh", OverlayMTU, cnt)
+	host := netip.MustParseAddr("100.64.1.10")
+	own := netip.MustParseAddr("100.64.1.1")
+	r.rebuild(
+		[]hostRoute{{addr: host, pipe: hostDev}},
+		[]route{{prefix: netip.MustParsePrefix("100.64.2.0/24"), dst: mesh}},
+	)
+
+	// Without the application the node's own address stays unroutable.
+	before := cnt.unroutablePackets.Load()
+	r.route(ipPacket(t, host, own, nil))
+	if unroutable := cnt.unroutablePackets.Load(); unroutable != before+1 {
+		t.Fatalf("the unserved own address counted %d unroutable, want %d",
 			unroutable, before+1)
 	}
 
-	// A reply the egress produces still routes to its host, never a
-	// default.
-	r.routeFromEgress(ipPacket(t, netip.MustParseAddr("192.0.2.53"), host, nil))
-	if pkt := take(t, hostDev); pkt == nil {
-		t.Fatal("egress reply did not route to the host")
+	// delivery is one packet the served address received, by destination
+	// and payload — strings for go-cmp's eyes, netip being unexported
+	// fields all the way down.
+	type delivery struct {
+		Dst  string
+		Data string
+	}
+	var got []delivery
+	undo := r.Deliver(own, func(pkt []byte) {
+		got = append(got, delivery{
+			Dst:  addressToNetip(header.IPv4(pkt).DestinationAddress()).String(),
+			Data: string(pkt[header.IPv4MinimumSize:]),
+		})
+	})
+
+	// The host's leg and a far peer's leg alike: delivery is by
+	// destination, never by arrival.
+	r.route(ipPacket(t, host, own, []byte("near")))
+	r.route(ipPacket(t, netip.MustParseAddr("100.64.2.10"), own, []byte("far")))
+	want := []delivery{
+		{Dst: own.String(), Data: "near"},
+		{Dst: own.String(), Data: "far"},
+	}
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("the served address's deliveries (-want +got):\n%s", diff)
+	}
+
+	// An address of the node's own slice that is neither a host's nor the
+	// node's own stays unroutable.
+	before = cnt.unroutablePackets.Load()
+	r.route(ipPacket(t, host, netip.MustParseAddr("100.64.1.99"), nil))
+	if unroutable := cnt.unroutablePackets.Load(); unroutable != before+1 {
+		t.Errorf("an unallocated address of the own slice routed, want unroutable")
+	}
+
+	undo()
+	r.route(ipPacket(t, host, own, []byte("gone")))
+	if unroutable := cnt.unroutablePackets.Load(); unroutable != before+2 {
+		t.Error("the served address routed after the delivery's undo")
 	}
 }
 

@@ -14,24 +14,28 @@ import (
 )
 
 // setupWireguard assembles the WireGuard application (proposal 0006) when
-// the node's arguments name its configuration file, after the control plane
-// whose path provider and trust engine it consumes: the key loads or creates
-// in the application's own state, the mesh socket binds an ephemeral port
-// registered as the wireguard service in this AS, the one host device
-// serves the shared port with its peers arriving by directory, and the
-// router and — when egress is set — the netstack egress come with them. The
-// core node additionally serves the directory from its own store, over its
-// own registered service socket, and the coordination application serves
-// beside it (proposal 0022).
+// the node's arguments name its tailnet slice, after the control plane
+// whose path provider and trust engine it consumes: the key loads or
+// creates in the application's own state, the mesh socket binds an
+// ephemeral port registered as the wireguard service in this AS, the one
+// host device serves the shared port with its peers arriving by directory,
+// and the router comes with them. The core node additionally serves the
+// directory from its own store, over its own registered service socket,
+// and the coordination application serves beside it (proposal 0022). No
+// slice runs no application, the empty path's behavior carried over from
+// the retired configuration file.
 func (n *node) setupWireguard() error {
-	wg, err := LoadWireguardConfig(n.cfg.WireguardConfig)
-	if err != nil {
-		return err
-	}
-	if wg == nil {
+	if n.cfg.Slice == "" {
 		return nil
 	}
-	cfg, err := n.parseWireguardConfig(wg)
+	subnet, err := netip.ParsePrefix(n.cfg.Slice)
+	if err != nil {
+		// Validate already parsed the slice; a second failure is the
+		// argument's own.
+		return fmt.Errorf("parsing --slice: %w", err)
+	}
+	n.subnet = subnet
+	cfg, err := n.wireguardConfig(subnet)
 	if err != nil {
 		return err
 	}
@@ -47,26 +51,11 @@ func (n *node) setupWireguard() error {
 	return nil
 }
 
-// parseWireguardConfig validates the application's configuration into its
-// own form: the slice a prefix of the tailnet range, the shared port, the
-// egress mark — and the directory store the core serves from and the relay
-// presence every node holds.
-func (n *node) parseWireguardConfig(wg *ConfigWireguard) (wireguard.Config, error) {
-	subnet, err := netip.ParsePrefix(wg.Subnet)
-	if err != nil {
-		return wireguard.Config{}, fmt.Errorf("parsing the wireguard subnet: %w", err)
-	}
-	if wg.ListenPort == 0 {
-		return wireguard.Config{}, fmt.Errorf("the wireguard listen port must be set")
-	}
-	if !subnet.Addr().Is4() {
-		return wireguard.Config{}, fmt.Errorf("the wireguard subnet %s is not IPv4", subnet)
-	}
-	if !wireguard.Tailnet.Contains(subnet.Addr()) || subnet.Bits() < wireguard.Tailnet.Bits() {
-		return wireguard.Config{}, fmt.Errorf(
-			"the wireguard subnet %s is not a slice of the tailnet range %s",
-			subnet, wireguard.Tailnet)
-	}
+// wireguardConfig builds the application's configuration from the node's
+// run arguments: the slice and the shared port the arguments name, the
+// directory store the core serves from, and the relay presence every node
+// holds.
+func (n *node) wireguardConfig(subnet netip.Prefix) (wireguard.Config, error) {
 	listenHost, err := dataplane.ResolveAddrPort(n.cfg.Control)
 	if err != nil {
 		return wireguard.Config{}, fmt.Errorf("parsing the control address: %w", err)
@@ -75,8 +64,7 @@ func (n *node) parseWireguardConfig(wg *ConfigWireguard) (wireguard.Config, erro
 		IA:            n.ident.ia,
 		Subnet:        subnet,
 		ListenHost:    listenHost.Addr(),
-		ListenPort:    wg.ListenPort,
-		Egress:        wg.Egress,
+		ListenPort:    n.cfg.HostPort,
 		DERP:          n.relayPresence(),
 		StateDir:      filepath.Join(n.cfg.State, "wireguard"),
 		Provider:      n.pathProvider,

@@ -13,9 +13,6 @@ type counters struct {
 	// unroutablePackets counts packets no table entry and no default
 	// claimed.
 	unroutablePackets atomic.Int64
-	// egressDroppedPackets counts packets the egress dropped: unsupported
-	// protocols, full flow tables, failed dials.
-	egressDroppedPackets atomic.Int64
 	// sentDatagrams counts mesh datagrams the SCION transport carried.
 	sentDatagrams atomic.Int64
 	// sendFailures counts mesh sends that failed even after a path refresh.
@@ -34,7 +31,6 @@ func (c *counters) snapshot() []any {
 	return []any{
 		"dropped", c.droppedPackets.Load(),
 		"unroutable", c.unroutablePackets.Load(),
-		"egress_dropped", c.egressDroppedPackets.Load(),
 		"sent_datagrams", c.sentDatagrams.Load(),
 		"send_failures", c.sendFailures.Load(),
 		"path_refreshes", c.pathRefreshes.Load(),

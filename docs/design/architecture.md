@@ -17,9 +17,11 @@ is carried in the packet itself — no node holds a routing table — and the
 endpoint, not the network, chooses the path its traffic takes. A node joins
 with two facts, one neighbor's address and the core's domain, and needs
 nothing else: identity is generated locally, paths are discovered, links are
-earned by measurement, and plain hosts are served through an embedded
-gateway. CION is non-scalable by choice: it targets small multi-operator
-networks and cuts every mechanism whose only purpose is internet scale
+earned by measurement, and hosts are tailnet clients — one login against the
+core's coordination endpoint serves the network's life, every node an
+offered internet exit. CION is non-scalable by choice: it targets small
+multi-operator networks and cuts every mechanism whose only purpose is
+internet scale
 ([ADR-0001](/docs/adrs/0001-adopt-scion-architecture.md)).
 
 ## Design principles
@@ -87,6 +89,10 @@ run no loops of their own and hold no policy.
     ([ADR-0009](/docs/adrs/0009-keep-a-minimal-node-core-and-move-everything-else-to-apps.md)).
 *   **WireGuard** — carries host and mesh traffic over SCION paths between
     nodes ([ADR-0005](/docs/adrs/0005-serve-endhosts-with-a-wireguard-gateway.md)).
+*   **SOCKS** — internet egress as a service on the overlay: every node
+    serves it at its own tailnet address, and the destination a client
+    names is the exit it uses
+    ([ADR-0012](/docs/adrs/0012-serve-egress-as-an-overlay-socks-service.md)).
 *   **Coordination** — the network's headscale, minimal by decision: hosts
     join by logging in with a standard tailnet client against the core's
     coordination endpoint, registration asks the admission seam, and the
@@ -143,13 +149,13 @@ changes are damped.
 ### Endhost service
 
 Hosts are tailnet clients of their node: they join by logging in against
-the core's coordination service and run no CION software. A host's netmap
-names exactly its node, and the tunnel carries the tailnet alone — no
-default route exists anywhere. Host-to-host traffic crosses the SCION mesh
-between nodes; internet egress is a service on the overlay the egress
-record decides ([ADR-0012](/docs/adrs/0012-serve-egress-as-an-overlay-socks-service.md)).
-A join completes at the directory's fetch cadence: the node programs the
-joined host when its next fetch lands.
+the core's coordination service and run no CION software. The tunnel
+carries the tailnet alone — no default route is advertised — and internet
+reachability is a service every node offers at its own tailnet address:
+the exit a flow uses is the destination it names
+([ADR-0012](/docs/adrs/0012-serve-egress-as-an-overlay-socks-service.md)).
+Host-to-host and exit traffic alike cross the SCION mesh between nodes. A
+join completes at the directory's fetch cadence.
 
 ## See also
 

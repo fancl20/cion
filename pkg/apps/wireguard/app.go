@@ -66,10 +66,6 @@ type Config struct {
 	// ListenPort is the shared host-facing UDP port — hosts are plain
 	// internet clients with a single endpoint to reach.
 	ListenPort uint16
-	// Egress marks an internet exit: the node runs the netstack egress only
-	// when set — unfed until the egress record's service lights it
-	// (ADR-0012).
-	Egress bool
 	// DERP is the relay presence the node holds: received datagrams feed
 	// the shared host port and sends carry the replies, so a host on a
 	// network where UDP to the node cannot pass still reaches its node.
@@ -117,10 +113,10 @@ type Config struct {
 
 // App is the WireGuard application (proposals 0006 and 0022): the mesh
 // transport and directory, the one host-facing device behind its shared port
-// — programmed from the host entries the directory distributes — the
-// in-process router between the tunnels, and — on an egress node — the
-// netstack egress. The node running it holds unprivileged UDP sockets and
-// its own state, and nothing else.
+// — programmed from the host entries the directory distributes — and the
+// in-process router between the tunnels, the surface a resident service
+// application borrows (ADR-0012). The node running it holds unprivileged
+// UDP sockets and its own state, and nothing else.
 type App struct {
 	cfg Config
 	key PrivateKey
@@ -129,7 +125,6 @@ type App struct {
 	mesh   *meshSocket
 	host   *hostSocket
 	router *router
-	egress *egress
 
 	directory directoryClient
 	dirConn   *rpcDirectoryClient
@@ -179,10 +174,9 @@ type svcReg struct {
 // pair, binds the mesh socket on an ephemeral port and registers it under
 // the wireguard service in its own AS, binds the shared host-facing port,
 // creates one host device per offered exit with the configured peers, builds
-// the router and — when the node is an exit — the netstack egress, and wires
-// the directory surfaces: the core's store it serves over its own registered
-// service socket, the route every other node publishes and fetches through.
-// Run serves it.
+// the router, and wires the directory surfaces: the core's store it serves
+// over its own registered service socket, the route every other node
+// publishes and fetches through. Run serves it.
 func New(cfg Config) (*App, error) {
 	if cfg.IA.IsZero() {
 		return nil, fmt.Errorf("no ISD-AS configured")
@@ -243,28 +237,6 @@ func New(cfg Config) (*App, error) {
 	if err := a.register(SvcWireguard, meshConn.LocalPort()); err != nil {
 		a.release()
 		return nil, fmt.Errorf("registering the mesh socket: %w", err)
-	}
-	if cfg.Egress {
-		overlayAddr, err := firstAddr(cfg.Subnet)
-		if err != nil {
-			a.release()
-			return nil, err
-		}
-		e, err := newEgress(egressConfig{
-			OverlayAddr:   overlayAddr,
-			OverlayPrefix: cfg.Subnet,
-			MTU:           OverlayMTU,
-			Cnt:           cnt,
-		})
-		if err != nil {
-			a.release()
-			return nil, err
-		}
-		// The egress stands as the exit model built it, its replies routing
-		// home — but unfed: with no default anywhere, the service the
-		// egress record decides is the thing that lights it (ADR-0012).
-		a.egress = e
-		e.setRouter(a.router.routeFromEgress)
 	}
 	if cfg.Store != nil {
 		a.directory = storeDirectoryClient{store: cfg.Store}
@@ -355,9 +327,6 @@ func (a *App) release() {
 	a.deregisterAll()
 	a.mesh.Close()
 	a.host.Close()
-	if a.egress != nil {
-		a.egress.link.Close()
-	}
 	if a.dirConn != nil {
 		_ = a.dirConn.Close()
 	}
@@ -366,13 +335,11 @@ func (a *App) release() {
 	}
 }
 
-// firstAddr returns the first usable address of a prefix — the node's own
-// overlay address, which the netstack claims on an egress node.
-func firstAddr(prefix netip.Prefix) (netip.Addr, error) {
-	base := prefix.Masked().Addr().As4()
-	base[3]++
-	return netip.AddrFrom4(base), nil
-}
+// Router returns the overlay routing a resident service application borrows
+// (ADR-0012): the reply path its produced packets ride and the delivery
+// installation for the address it serves on. Without this application there
+// is nothing to borrow.
+func (a *App) Router() Router { return a.router }
 
 // startHostDevice creates the one host device on the shared port's
 // dispatcher — the node's key pair, no peers yet: the peers arrive with the
@@ -587,9 +554,8 @@ func (a *App) Registry() Registry {
 }
 
 // Run serves the application until the context is canceled: the sockets' read
-// loops, the devices' pipes through the router, the egress, the directory —
-// served by the core, published and fetched by everyone — and the counters
-// log.
+// loops, the devices' pipes through the router, the directory — served by
+// the core, published and fetched by everyone — and the counters log.
 func (a *App) Run(ctx context.Context) error {
 	defer a.Close()
 	go a.mesh.run()
@@ -600,9 +566,6 @@ func (a *App) Run(ctx context.Context) error {
 	if a.bridge != nil {
 		go a.bridge.run(ctx)
 	}
-	if a.egress != nil {
-		go a.egress.run(ctx)
-	}
 	if a.cfg.Store != nil {
 		a.serveDirectory(ctx)
 	}
@@ -610,7 +573,7 @@ func (a *App) Run(ctx context.Context) error {
 	go a.runSync(ctx)
 	slog.Info("Serving the WireGuard application",
 		"ia", a.cfg.IA, "subnet", a.cfg.Subnet,
-		"listenPort", a.cfg.ListenPort, "egress", a.cfg.Egress,
+		"listenPort", a.cfg.ListenPort,
 		"publicKey", a.PublicKey())
 	logTick := time.NewTicker(CountersInterval)
 	defer logTick.Stop()
@@ -673,9 +636,6 @@ func (a *App) Close() {
 	a.deregisterAll()
 	a.mesh.Close()
 	a.host.Close()
-	if a.egress != nil {
-		a.egress.link.Close()
-	}
 	if a.dirConn != nil {
 		_ = a.dirConn.Close()
 	}

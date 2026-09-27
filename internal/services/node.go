@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/netip"
 	"sync"
 	"time"
 
@@ -16,6 +17,7 @@ import (
 	"github.com/scionproto/scion/pkg/scrypto/cppki"
 
 	"github.com/fancl20/cion/pkg/apps/coordination"
+	"github.com/fancl20/cion/pkg/apps/socks"
 	"github.com/fancl20/cion/pkg/apps/topology"
 	"github.com/fancl20/cion/pkg/apps/wireguard"
 	"github.com/fancl20/cion/pkg/controlplane"
@@ -102,6 +104,13 @@ type node struct {
 	// name a wireguard configuration; nil on every other node. It owns no
 	// listener: its surfaces mount on the node's HTTPS server.
 	coordination *coordination.App
+	// socks is the SOCKS application (ADR-0012), assembled beside the
+	// WireGuard application whose router it borrows whenever that one
+	// assembles; nil without it.
+	socks *socks.App
+	// subnet is the parsed --slice, the node's slice of the tailnet range
+	// the applications share.
+	subnet netip.Prefix
 
 	// enrollAuth gates the trust service's first issuance and the
 	// coordination application's registrations (ADR-0010, ADR-0011); nil
@@ -277,6 +286,9 @@ func setupNode(ctx context.Context, cfg NodeConfig, opts DataplaneOptions) (n *n
 	if err = n.setupWireguard(); err != nil {
 		return n, err
 	}
+	if err = n.setupSocks(); err != nil {
+		return n, err
+	}
 	if err = n.setupCoordination(); err != nil {
 		return n, err
 	}
@@ -293,6 +305,11 @@ func setupNode(ctx context.Context, cfg NodeConfig, opts DataplaneOptions) (n *n
 func (n *node) Close() {
 	if n.httpsLn != nil {
 		_ = n.httpsLn.Close()
+	}
+	if n.socks != nil {
+		// Before the wireguard application, whose router the SOCKS
+		// application borrows its delivery and reply path from.
+		n.socks.Close()
 	}
 	if n.coordination != nil {
 		// Before the wireguard application, whose store the coordination
@@ -419,6 +436,11 @@ func (n *node) start(ctx context.Context) {
 	if n.wireguard != nil {
 		runBackground(ctx, "wireguard", func(ctx context.Context) error {
 			return n.wireguard.Run(ctx)
+		})
+	}
+	if n.socks != nil {
+		runBackground(ctx, "socks", func(ctx context.Context) error {
+			return n.socks.Run(ctx)
 		})
 	}
 }

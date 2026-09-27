@@ -2,13 +2,11 @@ package testnetwork
 
 import (
 	"context"
-	"encoding/json/v2"
 	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/netip"
-	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -70,23 +68,6 @@ func placeCoordination(t *testing.T) coordinationPlacement {
 	}
 }
 
-// writeWireguardConfig writes the application's configuration file.
-func writeWireguardConfig(t *testing.T, subnet string, port uint16) string {
-	t.Helper()
-	path := filepath.Join(t.TempDir(), "wireguard.json")
-	raw, err := json.Marshal(map[string]any{
-		"subnet":     subnet,
-		"listenPort": port,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(path, raw, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	return path
-}
-
 // freeHostUDPPort reserves an ephemeral UDP port on the loopback host for
 // the shared host-facing port.
 func freeHostUDPPort(t *testing.T) uint16 {
@@ -114,8 +95,8 @@ func coordCore(t *testing.T, wpki *WebPKI, host netip.Addr,
 		cfg.Control = FreeUDPAddrOn(t, host)
 		cfg.CertFile = wpki.certFile
 		cfg.KeyFile = wpki.keyFile
-		cfg.WireguardConfig = writeWireguardConfig(t, "100.64.1.0/24",
-			freeHostUDPPort(t))
+		cfg.Slice = "100.64.1.0/24"
+		cfg.HostPort = freeHostUDPPort(t)
 		cfg.Coordination = &services.CoordinationOptions{
 			Addr: place.addr,
 			DERP: services.DERPOptions{URL: place.derpURL, IPv4: "127.0.0.1"},
@@ -140,8 +121,8 @@ func coordLeaf(t *testing.T, wpki *WebPKI, host netip.Addr, core *assemblyNode,
 		cfg.Control = FreeUDPAddrOn(t, host)
 		cfg.Neighbors = []string{core.rendezvousOf()}
 		cfg.RootCAs = wpki.pool
-		cfg.WireguardConfig = writeWireguardConfig(t, "100.64.2.0/24",
-			freeHostUDPPort(t))
+		cfg.Slice = "100.64.2.0/24"
+		cfg.HostPort = freeHostUDPPort(t)
 		cfg.Coordination = &services.CoordinationOptions{
 			DERP: services.DERPOptions{URL: place.derpURL, IPv4: "127.0.0.1"},
 		}
