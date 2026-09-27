@@ -235,3 +235,60 @@ originating core.
     equal to the local ISD-AS still errors rather than composing.
 
 ## Implementation history
+
+*   The builders, beside `ForwardPath` and `ReversePath` in
+    [pkg/segment](/pkg/segment/segment.go): `ForwardPathFrom` — the seed
+    chained through the skipped entries, hop fields of the entries onward —
+    and `ReversePathTo` — `ReversePath`'s info field whole, hop fields from
+    the terminator down to the meeting. Each errors on a result below two
+    hop fields, making the singleton the data plane rejects unrepresentable
+    rather than merely avoided; the emptiness decisions (a meeting at the
+    local node carries no up part, at the destination no down part) live in
+    the provider's guards, where the proposal's Cases 2, 4, and 5 name
+    them. `ContainsIA` became a predicate over a new `IndexOfIA`, the index
+    the meeting computation and the local variant both read.
+*   The meeting rule in
+    [pkg/scion/provider.go](/pkg/scion/provider.go): `Path` fetches the
+    down segments once, loads every stored up segment, and considers one
+    candidate per (up, down) pair — the deepest common AS entry, by the sum
+    of the two construction-direction indices — beside the local node's own
+    entry on each down segment, the meeting no up segment names and the
+    core-source branch's general form. Selection is `joinRank`: fewest
+    joined hops, then the staler piece's creation timestamp — a join is
+    only as fresh as the piece that expires first — then total entries.
+    `freshestUp` dissolved into `upSegments` (every stored segment a
+    candidate, the staler-deeper motivation's own shape) and `containingUp`
+    (the freshest containing the destination, clean preferred).
+*   `LocalPath` resolves an on-path destination before the bootstrap
+    fallback exactly as planned; `Path` gained the explicit
+    equal-destination error ahead of composition. The plan's letter made it
+    structural for a reason the old code's shape only implied: a down
+    segment terminating at the local node — which a core's database always
+    holds for that node — composed into a route to self that revisited the
+    destination as its own last hop. One existing filter test had built
+    exactly that fixture and moved to a real destination.
+*   The interface-down filter judges the traversed stretch alone:
+    `crossesFrom` takes the meeting's index, so a signal on a core-ward
+    entry above the meeting or a down stretch beyond it no longer
+    disqualifies the shortcut; the crossing fallback keeps the first
+    crossing join, as it kept the first crossing composition before.
+*   Tests: the builders' in [pkg/segment](/pkg/segment/segment_test.go) —
+    the mid-segment forward path's walk states equal the untruncated walk's
+    at the same positions, the truncated reversed path's equal the
+    untruncated prefix, every kept hop's MAC verifying against them, and
+    the singleton guard erroring; the provider's in
+    [pkg/scion](/pkg/scion/provider_test.go) — the four meeting shapes
+    (shared core, shared ancestor, destination on the up segment, local
+    node on the down segment) resolving to the expected hop sequences, the
+    preference order (fewest hops over fresher, the fresher pair on ties),
+    the filter's three positions (traversed, dropped above the meeting,
+    dropped beyond it), and the negatives (the local ISD-AS and the
+    unreachable destination); the integration proofs in
+    [internal/testnetwork](/internal/testnetwork/ping_test.go) —
+    `TestPingLineMiddleNode` (C→B and B→C at two hops, the line's existing
+    episodes unchanged) and `TestPingSiblingNodes` (C↔D meeting at B,
+    four hops in two segments) — each episode polling for its side of the
+    join pipeline before pinging, a resolution a ping run does not retry.
+    The composed-path and expiry unit tests moved their destination off
+    the up segments — a middle the local variant now resolves without the
+    fetch they meant to exercise.

@@ -14,6 +14,7 @@ import (
 	"github.com/scionproto/scion/pkg/private/util"
 	"github.com/scionproto/scion/pkg/scrypto"
 	"github.com/scionproto/scion/pkg/slayers/path"
+	spath "github.com/scionproto/scion/pkg/slayers/path/scion"
 
 	"github.com/fancl20/cion/pkg/segment"
 	"github.com/fancl20/cion/pkg/trust"
@@ -186,6 +187,19 @@ func TestTermination(t *testing.T) {
 	}
 }
 
+// terminatedLine builds the line beacon terminated at C: the segment
+// [A, B, C] the truncating builders cut mid-way.
+func terminatedLine(t *testing.T, f *segFixture, now time.Time) *segment.PCB {
+	t.Helper()
+	pcb := buildLineBeacon(t, f, now)
+	if err := pcb.AppendEntry(context.Background(), iaC, segment.EntryOptions{
+		IngressIfID: 2,
+	}, macFactory(), f.engines[iaC]); err != nil {
+		t.Fatal(err)
+	}
+	return pcb
+}
+
 // TestForwardReversePath checks the data-plane paths built from a segment:
 // the forward path in construction direction with the originated segment ID,
 // the reverse path against it with the segment ID chained through every hop
@@ -193,12 +207,7 @@ func TestTermination(t *testing.T) {
 func TestForwardReversePath(t *testing.T) {
 	f := newSegFixture(t, iaA, iaB, iaC)
 	now := time.Now()
-	pcb := buildLineBeacon(t, f, now)
-	if err := pcb.AppendEntry(context.Background(), iaC, segment.EntryOptions{
-		IngressIfID: 2,
-	}, macFactory(), f.engines[iaC]); err != nil {
-		t.Fatal(err)
-	}
+	pcb := terminatedLine(t, f, now)
 
 	fwd := pcb.ForwardPath()
 	if !fwd.InfoFields[0].ConsDir {
@@ -238,6 +247,147 @@ func TestForwardReversePath(t *testing.T) {
 // binarySegID applies UpdateSegID's XOR of the MAC's first two bytes.
 func binarySegID(mac [path.MacLen]byte) uint16 {
 	return uint16(mac[0])<<8 | uint16(mac[1])
+}
+
+// consWalkStates returns the SegID state a construction-direction walk holds
+// at each hop — the state its router verifies the hop field's MAC against,
+// advanced by each hop it passes.
+func consWalkStates(p *spath.Decoded) []uint16 {
+	info := p.InfoFields[0]
+	states := make([]uint16, 0, len(p.HopFields))
+	for _, hop := range p.HopFields {
+		states = append(states, info.SegID)
+		info.UpdateSegID(hop.Mac)
+	}
+	return states
+}
+
+// antiWalkStates returns the SegID state a against-construction-direction
+// walk holds at each hop: the ingress router advances the state with the hop
+// it enters on, so the state at a hop is the initial one advanced through
+// the hops below it.
+func antiWalkStates(p *spath.Decoded) []uint16 {
+	info := p.InfoFields[0]
+	states := make([]uint16, 0, len(p.HopFields))
+	for i, hop := range p.HopFields {
+		if i > 0 {
+			info.UpdateSegID(hop.Mac)
+		}
+		states = append(states, info.SegID)
+	}
+	return states
+}
+
+// checkMACs verifies every hop field's MAC against the walk states — the
+// recomputation the routers perform.
+func checkMACs(t *testing.T, p *spath.Decoded, states []uint16) {
+	t.Helper()
+	for i, hop := range p.HopFields {
+		info := p.InfoFields[0]
+		info.SegID = states[i]
+		if want := path.MAC(macFactory()(), info, hop, nil); hop.Mac != want {
+			t.Errorf("hop %d MAC = %x, want %x (SegID %x)", i, hop.Mac, want, states[i])
+		}
+	}
+}
+
+// TestForwardPathFrom checks the mid-segment forward builder: the info field
+// chains the seed through the skipped entries, the kept hop fields' MAC
+// inputs are identical to the untruncated path's at the same positions, and
+// a start at or past the terminator errors rather than emitting the
+// singleton the data plane rejects.
+func TestForwardPathFrom(t *testing.T) {
+	f := newSegFixture(t, iaA, iaB, iaC)
+	pcb := terminatedLine(t, f, time.Now())
+
+	from, err := pcb.ForwardPathFrom(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(from.HopFields) != 2 {
+		t.Fatalf("path from entry 1 = %d hops, want 2", len(from.HopFields))
+	}
+	if !from.InfoFields[0].ConsDir {
+		t.Error("path from entry 1 is not in construction direction")
+	}
+	wantSegID := pcb.ID() ^ binarySegID(pcb.Entries[0].Hop.Mac)
+	if from.InfoFields[0].SegID != wantSegID {
+		t.Errorf("SegID = %x, want the seed chained through the skipped entry %x",
+			from.InfoFields[0].SegID, wantSegID)
+	}
+	for i, hop := range from.HopFields {
+		if hop != pcb.Entries[i+1].Hop {
+			t.Errorf("hop %d does not match entry %d", i, i+1)
+		}
+	}
+	// The states the routers recompute at the kept positions are the
+	// untruncated walk's own: skipping entries only starts the walk further
+	// along the same chain.
+	fullStates := consWalkStates(pcb.ForwardPath())
+	states := consWalkStates(from)
+	for i := range states {
+		if states[i] != fullStates[i+1] {
+			t.Errorf("walk state at hop %d = %x, want the untruncated %x",
+				i, states[i], fullStates[i+1])
+		}
+	}
+	checkMACs(t, from, states)
+
+	for _, i := range []int{-1, 2, 3} {
+		if _, err := pcb.ForwardPathFrom(i); err == nil {
+			t.Errorf("forward path from entry %d succeeded, want the singleton guard", i)
+		}
+	}
+}
+
+// TestReversePathTo checks the truncated reverse builder: the info field is
+// the untruncated one's own — reversed travel starts at the terminator
+// whatever the ending — the kept hop fields' MAC inputs are identical to the
+// untruncated path's at the same positions, and an ending at or past the
+// terminator errors rather than emitting the singleton the data plane
+// rejects.
+func TestReversePathTo(t *testing.T) {
+	f := newSegFixture(t, iaA, iaB, iaC)
+	pcb := terminatedLine(t, f, time.Now())
+
+	to, err := pcb.ReversePathTo(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(to.HopFields) != 2 {
+		t.Fatalf("path to entry 1 = %d hops, want 2", len(to.HopFields))
+	}
+	if to.InfoFields[0].ConsDir {
+		t.Error("path to entry 1 is in construction direction")
+	}
+	full := pcb.ReversePath()
+	if to.InfoFields[0] != full.InfoFields[0] {
+		t.Errorf("info field = %+v, want the untruncated %+v",
+			to.InfoFields[0], full.InfoFields[0])
+	}
+	for i, hop := range to.HopFields {
+		want := pcb.Entries[len(pcb.Entries)-1-i].Hop
+		if hop != want {
+			t.Errorf("hop %d does not mirror entry %d", i, len(pcb.Entries)-1-i)
+		}
+	}
+	// The kept hops are a prefix of the untruncated walk in travel order:
+	// truncation removes hops the kept routers never read.
+	fullStates := antiWalkStates(full)
+	states := antiWalkStates(to)
+	for i := range states {
+		if states[i] != fullStates[i] {
+			t.Errorf("walk state at hop %d = %x, want the untruncated %x",
+				i, states[i], fullStates[i])
+		}
+	}
+	checkMACs(t, to, states)
+
+	for _, m := range []int{-1, 2, 3} {
+		if _, err := pcb.ReversePathTo(m); err == nil {
+			t.Errorf("reversed path to entry %d succeeded, want the singleton guard", m)
+		}
+	}
 }
 
 // TestCompose checks that segment paths concatenate into an end-to-end path.

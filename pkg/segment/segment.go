@@ -181,14 +181,20 @@ func (p *PCB) FirstIA() addr.IA { return p.Entries[0].IA }
 // LastIA returns the ISD-AS of the last entry.
 func (p *PCB) LastIA() addr.IA { return p.Entries[len(p.Entries)-1].IA }
 
-// ContainsIA reports whether any entry names the given ISD-AS.
-func (p *PCB) ContainsIA(ia addr.IA) bool {
-	for _, e := range p.Entries {
+// IndexOfIA returns the index of the first entry naming the given ISD-AS, or
+// -1 when none does.
+func (p *PCB) IndexOfIA(ia addr.IA) int {
+	for i, e := range p.Entries {
 		if e.IA.Equal(ia) {
-			return true
+			return i
 		}
 	}
-	return false
+	return -1
+}
+
+// ContainsIA reports whether any entry names the given ISD-AS.
+func (p *PCB) ContainsIA(ia addr.IA) bool {
+	return p.IndexOfIA(ia) >= 0
 }
 
 // Expiration returns the earliest absolute hop expiration of the segment
@@ -371,18 +377,70 @@ func (p *PCB) ReversePath() *scion.Decoded {
 	return decodedPath(info, hops)
 }
 
+// ForwardPathFrom returns the data-plane path in construction direction
+// beginning mid-segment at entry i: the hop fields of entries i onward, the
+// segment ID chained through the entries the travel skips — the state at
+// position i, the same arithmetic ReversePath performs for the terminator.
+// A hop field's MAC depends on the hops before it in construction direction,
+// never on the hops after it, so starting past the skipped entries verifies
+// unchanged. The result carries at least two hop fields, the minimum the
+// data plane accepts of a segment without the peering flag.
+func (p *PCB) ForwardPathFrom(i int) (*scion.Decoded, error) {
+	if i < 0 || i > len(p.Entries)-2 {
+		return nil, serrors.New("forward path starts at or past the terminator",
+			"index", i, "entries", len(p.Entries))
+	}
+	info := path.InfoField{
+		SegID:     p.Info.ID,
+		ConsDir:   true,
+		Timestamp: util.TimeToSecs(p.Info.Timestamp),
+	}
+	for j := 0; j < i; j++ {
+		info.UpdateSegID(p.Entries[j].Hop.Mac)
+	}
+	hops := make([]path.HopField, len(p.Entries)-i)
+	for j, e := range p.Entries[i:] {
+		hops[j] = e.Hop
+	}
+	return decodedPath(info, hops), nil
+}
+
+// ReversePathTo returns the data-plane path against construction direction
+// ending mid-segment at entry m: reversed travel starts at the terminator
+// whatever the ending, so the info field is ReversePath's own — its chained
+// state covers entries 0 to n-2 independent of m — and the hop fields run
+// from the terminator down to m. Removing trailing hops changes no state a
+// kept router reads. The result carries at least two hop fields, the minimum
+// the data plane accepts of a segment without the peering flag.
+func (p *PCB) ReversePathTo(m int) (*scion.Decoded, error) {
+	if m < 0 || m > len(p.Entries)-2 {
+		return nil, serrors.New("reversed path ends at or past the terminator",
+			"index", m, "entries", len(p.Entries))
+	}
+	info := path.InfoField{
+		SegID:     p.Info.ID,
+		Timestamp: util.TimeToSecs(p.Info.Timestamp),
+	}
+	for i := 0; i < len(p.Entries)-1; i++ {
+		info.UpdateSegID(p.Entries[i].Hop.Mac)
+	}
+	hops := make([]path.HopField, len(p.Entries)-m)
+	for i, e := range p.Entries[m:] {
+		hops[len(p.Entries)-m-1-i] = e.Hop
+	}
+	return decodedPath(info, hops), nil
+}
+
 // decodedPath builds a single-segment data-plane path.
 func decodedPath(info path.InfoField, hops []path.HopField) *scion.Decoded {
 	return &scion.Decoded{
-		Base: scion.Base{
-			PathMeta: scion.MetaHdr{
-				CurrINF: 0,
-				CurrHF:  0,
-				SegLen:  [3]uint8{uint8(len(hops)), 0, 0},
-			},
-			NumINF:  1,
-			NumHops: len(hops),
+		PathMeta: scion.MetaHdr{
+			CurrINF: 0,
+			CurrHF:  0,
+			SegLen:  [3]uint8{uint8(len(hops)), 0, 0},
 		},
+		NumINF:     1,
+		NumHops:    len(hops),
 		InfoFields: []path.InfoField{info},
 		HopFields:  hops,
 	}
@@ -409,11 +467,9 @@ func Compose(parts ...*scion.Decoded) (*scion.Decoded, error) {
 		numHops += len(part.HopFields)
 	}
 	return &scion.Decoded{
-		Base: scion.Base{
-			PathMeta: scion.MetaHdr{CurrINF: 0, CurrHF: 0, SegLen: segLen},
-			NumINF:   len(parts),
-			NumHops:  numHops,
-		},
+		PathMeta:   scion.MetaHdr{CurrINF: 0, CurrHF: 0, SegLen: segLen},
+		NumINF:     len(parts),
+		NumHops:    numHops,
 		InfoFields: infos,
 		HopFields:  hops,
 	}, nil

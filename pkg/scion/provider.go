@@ -2,6 +2,7 @@ package scion
 
 import (
 	"context"
+	"time"
 
 	"github.com/scionproto/scion/pkg/addr"
 	"github.com/scionproto/scion/pkg/private/serrors"
@@ -49,10 +50,12 @@ func (p *PathProvider) LocalPath(dst addr.IA) (*spath.Decoded, error) {
 	if dst.Equal(p.IA) {
 		return nil, serrors.New("destination is the local ISD-AS", "isd_as", dst)
 	}
-	// A destination with an up segment from here is a core; the reversed
-	// freshest one is the route to it.
-	if up := p.freshestUp(dst); up != nil {
-		return up.PCB.ReversePath(), nil
+	// A destination an up segment already contains is on a route from here —
+	// a core at the segment's origin, an on-path AS mid-segment — and the
+	// freshest containing segment's truncated reversed path is the route to
+	// it.
+	if up, m := p.containingUp(dst); up != nil {
+		return up.PCB.ReversePathTo(m)
 	}
 	// Before any up segment is verified — a fresh node that has not even
 	// pinned the TRC — the bootstrap beacon's reversed route serves the
@@ -65,43 +68,97 @@ func (p *PathProvider) LocalPath(dst addr.IA) (*spath.Decoded, error) {
 	return nil, serrors.New("no path to destination", "isd_as", dst)
 }
 
-// Path returns a data-plane path from the local AS to dst: to a core, the
-// reversed freshest up segment — or, before any is verified, the reversed
-// bootstrap beacon; anywhere else, a down segment from a core the node can
-// reach — fetched with expiry-aware caching — composed after the reversed up
-// segment to that core. A composed path crossing a signaled interface is
+// Path returns a data-plane path from the local AS to dst. What LocalPath
+// resolves from local state comes from it; anything else joins a fetched
+// down segment to the stored up segments at their deepest common AS entry —
+// the shared core the same-origin rule composed at, a common ancestor below
+// it, or an endpoint one segment already contains — each part truncated at
+// the meeting so the joined path travels no hop beyond it. Among the joins
+// fewest hops wins, ties go to the fresher pair, then to the one with fewer
+// entries. A joined path whose traversed hops cross a signaled interface is
 // skipped while the cache entry lives; a crossing path stays a last resort.
 func (p *PathProvider) Path(ctx context.Context, dst addr.IA) (*spath.Decoded, error) {
+	if dst.Equal(p.IA) {
+		return nil, serrors.New("destination is the local ISD-AS", "isd_as", dst)
+	}
 	if path, err := p.LocalPath(dst); err == nil {
 		return path, nil
 	}
 	downs := p.Lookup(ctx, dst)
+	ups := p.upSegments()
+	var best *spath.Decoded
+	var bestRank joinRank
 	var crossing *spath.Decoded
-	for _, down := range downs {
-		var path *spath.Decoded
-		var up *pathdb.Segment
-		if down.FirstIA().Equal(p.IA) {
-			// The local node may itself be the core the down segment starts
-			// at; the segment alone is then the complete route.
-			path = down.PCB.ForwardPath()
-		} else {
-			up = p.freshestUp(down.FirstIA())
-			if up == nil {
-				continue
-			}
-			composed, err := segment.Compose(up.PCB.ReversePath(), down.PCB.ForwardPath())
+	consider := func(up *pathdb.Segment, mUp int, down *pathdb.Segment, mDown int) {
+		var parts []*spath.Decoded
+		clean := true
+		// A meeting at the local node carries no up part: the reversed up
+		// segment truncated there is the empty travel.
+		if up != nil && mUp < len(up.PCB.Entries)-1 {
+			part, err := up.PCB.ReversePathTo(mUp)
 			if err != nil {
-				continue
+				return
 			}
-			path = composed
+			parts = append(parts, part)
+			clean = !p.crossesFrom(up, mUp)
 		}
-		if p.crosses(down) || (up != nil && p.crosses(up)) {
+		// A meeting at the destination carries no down part, the same
+		// arithmetic on the far end.
+		if mDown < len(down.PCB.Entries)-1 {
+			part, err := down.PCB.ForwardPathFrom(mDown)
+			if err != nil {
+				return
+			}
+			parts = append(parts, part)
+			clean = clean && !p.crossesFrom(down, mDown)
+		}
+		if len(parts) == 0 {
+			// The meeting is both the local node and the destination, which
+			// the equal-destination guard excluded; unreachable.
+			return
+		}
+		path, err := segment.Compose(parts...)
+		if err != nil {
+			return
+		}
+		if !clean {
 			if crossing == nil {
 				crossing = path
 			}
-			continue
+			return
 		}
-		return path, nil
+		rank := joinRank{
+			hops:    len(path.HopFields),
+			fresh:   down.PCB.Timestamp(),
+			entries: len(down.PCB.Entries),
+		}
+		if up != nil {
+			if t := up.PCB.Timestamp(); t.Before(rank.fresh) {
+				rank.fresh = t
+			}
+			rank.entries += len(up.PCB.Entries)
+		}
+		if best == nil || rank.before(bestRank) {
+			best, bestRank = path, rank
+		}
+	}
+	for _, down := range downs {
+		// The local node's own entry on the down segment is a meeting no up
+		// segment names — the core the segment starts at, or an AS below it
+		// the node happens to be.
+		if mDown := down.PCB.IndexOfIA(p.IA); mDown >= 0 {
+			consider(nil, -1, down, mDown)
+		}
+		for _, up := range ups {
+			mUp, mDown, ok := meeting(up, down)
+			if !ok {
+				continue
+			}
+			consider(up, mUp, down, mDown)
+		}
+	}
+	if best != nil {
+		return best, nil
 	}
 	if crossing != nil {
 		return crossing, nil
@@ -109,14 +166,54 @@ func (p *PathProvider) Path(ctx context.Context, dst addr.IA) (*spath.Decoded, e
 	return nil, serrors.New("no path to destination", "isd_as", dst)
 }
 
-// crosses reports whether the segment's entries traverse a signaled
-// interface — the check composition makes of the cache at the moment it
-// holds full knowledge, each entry carrying its ISD-AS and interface IDs.
-func (p *PathProvider) crosses(seg *pathdb.Segment) bool {
+// meeting returns the deepest AS entry common to an up and a down segment —
+// construction-direction depth, the destination and the local node both
+// eligible — as its index in each. Beacons propagate away from cores and
+// never revisit an AS, so the entries two segments share nest, and the
+// deepest common entry truncates both the most.
+func meeting(up, down *pathdb.Segment) (mUp, mDown int, ok bool) {
+	index := make(map[addr.IA]int, len(up.PCB.Entries))
+	for i, e := range up.PCB.Entries {
+		index[e.IA] = i
+	}
+	for j, e := range down.PCB.Entries {
+		if i, common := index[e.IA]; common && (!ok || i+j > mUp+mDown) {
+			mUp, mDown, ok = i, j, true
+		}
+	}
+	return mUp, mDown, ok
+}
+
+// joinRank orders the joins of Path's composition loop: fewest joined hops
+// first, then the fresher pair by the staler piece's creation timestamp — a
+// join is only as fresh as the piece that expires first — then the pair with
+// fewer entries.
+type joinRank struct {
+	hops    int
+	fresh   time.Time
+	entries int
+}
+
+// before reports whether r outranks o.
+func (r joinRank) before(o joinRank) bool {
+	if r.hops != o.hops {
+		return r.hops < o.hops
+	}
+	if !r.fresh.Equal(o.fresh) {
+		return r.fresh.After(o.fresh)
+	}
+	return r.entries < o.entries
+}
+
+// crossesFrom reports whether the segment's entries from index from — the
+// stretch a joined path traverses — cross a signaled interface: the check
+// composition makes of the cache at the moment it holds full knowledge, each
+// entry carrying its ISD-AS and interface IDs.
+func (p *PathProvider) crossesFrom(seg *pathdb.Segment, from int) bool {
 	if p.InterfaceDown == nil {
 		return false
 	}
-	for _, e := range seg.PCB.Entries {
+	for _, e := range seg.PCB.Entries[from:] {
 		if e.Hop.ConsIngress != 0 &&
 			p.InterfaceDown.Holds(e.IA, e.Hop.ConsIngress) {
 			return true
@@ -128,30 +225,46 @@ func (p *PathProvider) crosses(seg *pathdb.Segment) bool {
 	return false
 }
 
-// freshestUp returns the freshest up segment originating at the given core,
-// or at any core when the argument is zero — the freshest one that crosses
-// no signaled interface, the freshest crossing one kept when nothing else
-// exists.
-func (p *PathProvider) freshestUp(core addr.IA) *pathdb.Segment {
-	q := pathdb.Query{Type: pathdb.SegmentTypeUp}
-	if !core.IsZero() {
-		q.SrcIA = core
-	}
-	segs, err := p.DB.Get(context.Background(), q)
+// crosses reports whether the segment's entries traverse a signaled
+// interface.
+func (p *PathProvider) crosses(seg *pathdb.Segment) bool {
+	return p.crossesFrom(seg, 0)
+}
+
+// upSegments returns every stored up segment. Each is a candidate meeting —
+// not only the freshest per origin core — because a staler segment through a
+// deeper parent can meet a down segment the freshest one cannot.
+func (p *PathProvider) upSegments() []*pathdb.Segment {
+	segs, err := p.DB.Get(context.Background(), pathdb.Query{Type: pathdb.SegmentTypeUp})
 	if err != nil {
 		return nil
 	}
+	return segs
+}
+
+// containingUp returns the freshest up segment whose entries contain the
+// given ISD-AS and that entry's index — a core at the origin, an on-path AS
+// mid-segment — the freshest one that crosses no signaled interface, the
+// freshest crossing one kept when nothing else exists.
+func (p *PathProvider) containingUp(ia addr.IA) (*pathdb.Segment, int) {
 	var best, clean *pathdb.Segment
-	for _, seg := range segs {
-		best = freshest(best, seg)
-		if !p.crosses(seg) {
-			clean = freshest(clean, seg)
+	bestAt, cleanAt := -1, -1
+	for _, seg := range p.upSegments() {
+		at := seg.PCB.IndexOfIA(ia)
+		if at < 0 {
+			continue
+		}
+		if freshest(best, seg) == seg {
+			best, bestAt = seg, at
+		}
+		if !p.crosses(seg) && freshest(clean, seg) == seg {
+			clean, cleanAt = seg, at
 		}
 	}
 	if clean != nil {
-		return clean
+		return clean, cleanAt
 	}
-	return best
+	return best, bestAt
 }
 
 // freshest picks the freshest of two segments — nil keeps the other — by

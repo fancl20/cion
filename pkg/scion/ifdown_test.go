@@ -164,10 +164,10 @@ func TestParseInterfaceDownPacket(t *testing.T) {
 }
 
 // crossingSegment builds an up segment whose entries traverse the given
-// interface — the crossing the cache skips.
+// interface — the crossing the cache skips — ending at the given terminator.
 func crossingSegment(
 	t *testing.T,
-	egressIA addr.IA,
+	egressIA, endIA addr.IA,
 	ifID uint16,
 	now time.Time,
 ) *pathdb.Segment {
@@ -182,7 +182,7 @@ func crossingSegment(
 	}, testMACHasher); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := pcb.AppendRouteHop(iaLeaf, segment.EntryOptions{
+	if _, err := pcb.AppendRouteHop(endIA, segment.EntryOptions{
 		IngressIfID: ifID,
 	}, testMACHasher); err != nil {
 		t.Fatal(err)
@@ -207,7 +207,7 @@ func TestCompositionSkipsCrossingPaths(t *testing.T) {
 		cache := newTestCache()
 		now := time.Now()
 		// The crossing segment is the freshest; the clean one a moment older.
-		crossing := crossingSegment(t, iaMid, testIfID, now)
+		crossing := crossingSegment(t, iaMid, iaLeaf, testIfID, now)
 		clean := upSegment(t, now.Add(-time.Second), iaMid, iaLeaf)
 		p := &PathProvider{
 			IA:            iaLeaf,
@@ -267,9 +267,9 @@ func TestCompositionSkipsCrossingDownSegment(t *testing.T) {
 	cache := newTestCache()
 	now := time.Now()
 	up := upSegment(t, now, iaMid, iaLeaf)
-	crossingDown := crossingSegment(t, iaMid, testIfID, now)
+	crossingDown := crossingSegment(t, iaMid, iaDest, testIfID, now)
 	crossingDown.Type = pathdb.SegmentTypeDown
-	cleanDown := upSegment(t, now.Add(-time.Second), iaMid, iaLeaf)
+	cleanDown := upSegment(t, now.Add(-time.Second), iaMid, iaDest)
 	cleanDown.Type = pathdb.SegmentTypeDown
 	p := &PathProvider{
 		IA: iaLeaf,
@@ -280,7 +280,7 @@ func TestCompositionSkipsCrossingDownSegment(t *testing.T) {
 		InterfaceDown: cache,
 	}
 	cache.Record(InterfaceDownSignal{IA: iaMid, IfID: testIfID})
-	path, err := p.Path(context.Background(), iaLeaf)
+	path, err := p.Path(context.Background(), iaDest)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -294,7 +294,7 @@ func TestCompositionSkipsCrossingDownSegment(t *testing.T) {
 	p.Lookup = func(context.Context, addr.IA) []*pathdb.Segment {
 		return []*pathdb.Segment{crossingDown}
 	}
-	if _, err := p.Path(context.Background(), iaLeaf); err != nil {
+	if _, err := p.Path(context.Background(), iaDest); err != nil {
 		t.Fatalf("the lone crossing composition was dropped: %v", err)
 	}
 }

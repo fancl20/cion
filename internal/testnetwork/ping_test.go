@@ -118,6 +118,151 @@ func TestPingForkTopology(t *testing.T) {
 	}
 }
 
+// TestPingLineMiddleNode is proposal 0025's line episode: on A(core)—B—C
+// the middle node B is pinged from below — C→B, the composition the old
+// same-origin rule built by revisiting the destination, which the inbound
+// check rejected — and pings below itself — B→C — with the reported hops
+// exactly the two ASes and the core absent from the road. Replies ride the
+// reversed arrival paths, and the line's existing episodes pass unchanged.
+func TestPingLineMiddleNode(t *testing.T) {
+	t.Parallel()
+	wpki := NewWebPKI(t)
+	ipA, ipB, ipC := addrIP(0x23), addrIP(0x24), addrIP(0x25)
+	extA, extB1 := FreeUDPAddrOn(t, ipA), FreeUDPAddrOn(t, ipB)
+	extB2, extC := FreeUDPAddrOn(t, ipB), FreeUDPAddrOn(t, ipC)
+
+	a := StartNode(t, NodeConfig{IA: coreIA, Host: ipA, Links: []Link{
+		{Local: extA, Remote: extB1, Neighbor: nodeIA},
+	}, Core: true, WPKI: wpki})
+	b := StartNode(t, NodeConfig{IA: nodeIA, Host: ipB, Links: []Link{
+		{Local: extB1, Remote: extA, Neighbor: coreIA},
+		{Local: extB2, Remote: extC, Neighbor: lineCIA},
+	}, WPKI: wpki})
+	c := StartNode(t, NodeConfig{IA: lineCIA, Host: ipC, Links: []Link{
+		{Local: extC, Remote: extB2, Neighbor: nodeIA},
+	}, WPKI: wpki})
+	ctx := context.Background()
+	StartPingResponder(t, a)
+	StartPingResponder(t, b)
+	StartPingResponder(t, c)
+
+	// C's up segment [A, B, C] and B's registered down segment [A, B] meet
+	// at B: the truncated reversed up segment alone is the route. The join
+	// pipeline runs through enrollment and registration, budgeted at the
+	// restart lab's patience like the fork's. B's and the core's own
+	// episodes wait for their side of the pipeline — C's down segment
+	// registered at the core — before pinging, the resolution a ping run
+	// does not retry.
+	PollFor(t, RestartTimeout, "path from C to B", func() bool {
+		path, err := c.Provider.Path(ctx, nodeIA)
+		return err == nil && len(path.HopFields) == 2
+	})
+	PollFor(t, RestartTimeout, "path from B to C", func() bool {
+		path, err := b.Provider.Path(ctx, lineCIA)
+		return err == nil && len(path.HopFields) == 2
+	})
+	PollFor(t, RestartTimeout, "path from A to C", func() bool {
+		path, err := a.Provider.Path(ctx, lineCIA)
+		return err == nil && len(path.HopFields) == 3
+	})
+
+	run := func(p *Node, dst addr.IA, host netip.Addr, wantHops, wantSegs int) {
+		t.Helper()
+		report, err := ping.Run(ctx, ping.Config{
+			Conn:     p.NewConn(t, 0),
+			Provider: p.Provider,
+			Dst:      dst,
+			DstHost:  host,
+			Count:    3,
+			Interval: 100 * time.Millisecond,
+			Wait:     5 * time.Second,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if report.Received != 3 || report.Loss() != 0 {
+			t.Fatalf("received %d of %d replies to %v, want 3 of 3",
+				report.Received, report.Sent, dst)
+		}
+		for _, reply := range report.Replies {
+			if reply.Hops != wantHops || reply.Segments != wantSegs {
+				t.Errorf("seq %d arrival path from %v = %d hops / %d segments, want %d/%d",
+					reply.Seq, dst, reply.Hops, reply.Segments, wantHops, wantSegs)
+			}
+		}
+	}
+	// The middle node reached from below and reaching below: the meeting at
+	// B truncates both sides, one segment each way.
+	run(c, nodeIA, b.ControlIP, 2, 1)
+	run(b, lineCIA, c.ControlIP, 2, 1)
+	// The line's existing episodes pass unchanged.
+	run(c, coreIA, a.ControlIP, 3, 1)
+	run(a, lineCIA, c.ControlIP, 3, 1)
+}
+
+// TestPingSiblingNodes is proposal 0025's sibling episode: on the fork with
+// a parent — A(core)—B, B—C, B—D — the siblings C and D ping each other and
+// the reported hops meet at their parent B, the core absent from the road
+// that today detours through it.
+func TestPingSiblingNodes(t *testing.T) {
+	t.Parallel()
+	iaD := addr.MustIAFrom(20, 0xff0000000004)
+	wpki := NewWebPKI(t)
+	ipA, ipB := addrIP(0x26), addrIP(0x27)
+	ipC, ipD := addrIP(0x28), addrIP(0x29)
+	extA, extB1 := FreeUDPAddrOn(t, ipA), FreeUDPAddrOn(t, ipB)
+	extB2, extC := FreeUDPAddrOn(t, ipB), FreeUDPAddrOn(t, ipC)
+	extB3, extD := FreeUDPAddrOn(t, ipB), FreeUDPAddrOn(t, ipD)
+
+	// The core and the parent run unattended: the episode reads only the
+	// siblings' ends.
+	StartNode(t, NodeConfig{IA: coreIA, Host: ipA, Links: []Link{
+		{Local: extA, Remote: extB1, Neighbor: nodeIA},
+	}, Core: true, WPKI: wpki})
+	StartNode(t, NodeConfig{IA: nodeIA, Host: ipB, Links: []Link{
+		{Local: extB1, Remote: extA, Neighbor: coreIA},
+		{Local: extB2, Remote: extC, Neighbor: lineCIA},
+		{Local: extB3, Remote: extD, Neighbor: iaD},
+	}, WPKI: wpki})
+	c := StartNode(t, NodeConfig{IA: lineCIA, Host: ipC, Links: []Link{
+		{Local: extC, Remote: extB2, Neighbor: nodeIA},
+	}, WPKI: wpki})
+	d := StartNode(t, NodeConfig{IA: iaD, Host: ipD, Links: []Link{
+		{Local: extD, Remote: extB3, Neighbor: nodeIA},
+	}, WPKI: wpki})
+	ctx := context.Background()
+	StartPingResponder(t, c)
+	StartPingResponder(t, d)
+
+	// C's up segment [A, B, C] and D's registered down segment [A, B, D]
+	// meet at B: [C, B] composed before [B, D], four hops in two segments.
+	PollFor(t, RestartTimeout, "path from C to D", func() bool {
+		path, err := c.Provider.Path(ctx, iaD)
+		return err == nil && len(path.HopFields) == 4
+	})
+	report, err := ping.Run(ctx, ping.Config{
+		Conn:     c.NewConn(t, 0),
+		Provider: c.Provider,
+		Dst:      iaD,
+		DstHost:  d.ControlIP,
+		Count:    3,
+		Interval: 100 * time.Millisecond,
+		Wait:     5 * time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Received != 3 || report.Loss() != 0 {
+		t.Fatalf("received %d of %d replies, want 3 of 3", report.Received, report.Sent)
+	}
+	for _, reply := range report.Replies {
+		if reply.Hops != 4 || reply.Segments != 2 {
+			t.Errorf("seq %d arrival path = %d hops / %d segments, want the sibling join's 4/2",
+				reply.Seq, reply.Hops, reply.Segments)
+		}
+	}
+}
+
 // TestPingReresolvesExpiredPath checks the mid-run expiry: a pinger whose
 // resolved path has expired re-resolves and the run continues — here from a
 // stale up segment to a fresh one, with the replies proving the fresh path
