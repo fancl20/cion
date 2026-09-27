@@ -203,7 +203,10 @@ func (b *bboltDB) SignedTRC(ctx context.Context, id cppki.TRCID) (cppki.SignedTR
 		if raw == nil {
 			return nil
 		}
-		trc, err = cppki.DecodeSignedTRC(raw)
+		// The value aliases the mmap, which a concurrent write growing the
+		// database re-maps — the decoded TRC's certificates and raw form
+		// would dangle after the transaction. Clone, as the chain reads do.
+		trc, err = cppki.DecodeSignedTRC(slices.Clone(raw))
 		return err
 	})
 
