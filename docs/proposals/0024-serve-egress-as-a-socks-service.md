@@ -414,3 +414,68 @@ recorded among the coordination record's consequences.
     of the documented endpoint, per the capability-pin precedent.
 
 ## Implementation history
+
+*   The application: `pkg/apps/socks` — the netstack, the listener, the
+    flow tables, the bound, the idle sweep, the dial timeout, the splice,
+    and the one-socket-per-flow UDP mapping moved to it whole from
+    `pkg/apps/wireguard/egress.go`, and the forwarders stayed behind with
+    the default they served: the application's netstack installs none, and
+    the listener is the serving surface — `gonet.ListenTCP` at the node's
+    own address on the registered port, a code constant (`socks.Port`)
+    beside the flow bounds. The application carries its own drop counter;
+    the WireGuard application's `egress_dropped` counter went with the
+    machinery, and the package's document comment, which still told
+    ADR-0005's exit model, tells the tailnet's.
+*   The borrowing: the router grew the narrow seam the record presumed —
+    `Deliver` installing one served address's inbound path, address-exact,
+    beside the host /32s and the mesh slices (`wireguard.Router`, returned
+    by the application's `Router`), and `Route` carrying the packets a
+    service produces, the old `routeFromEgress` alias's ground. The
+    delivery installs in `socks.New` and uninstalls at `Close`: the
+    address is routed exactly while the application exists.
+*   The map: `routedAddresses` lists the registry's whole occupied space —
+    every allocated host /32 beside every node entry's slice-first address,
+    sorted, single-IP alone, riding `AllowedIPs` and `Addresses` together.
+*   The retirements: `echo.go` and the egress wiring deleted, the `Egress`
+    field dying without promotion; `--wireguard-config`,
+    `LoadWireguardConfig`, and `ConfigWireguard` deleted with
+    `--slice` and `--host-port` promoted (the grammar validated in
+    `NodeConfig.Validate`, the flag parse refusing the retired name); the
+    labs setting the run arguments directly, the file-writing helper with
+    them. No CION code imports `golang.org/x/net/icmp` — the deletion the
+    build asserts; the vendored copy remains, for the tailnet client
+    engine's own `net/ping` holds it.
+*   The client double: `internal/socksclient` — the minimal RFC 1928
+    client, method none, CONNECT, UDP ASSOCIATE, whole datagrams — the
+    only SOCKS client in-tree, shared by the application's unit lab and
+    the integration suites.
+*   One dialect detail the record left open: CONNECT's success reply
+    carries a zero bound address and port — the outbound leg is the
+    node's own socket, no address of the tailnet's to name; UDP
+    ASSOCIATE's reply carries the exit's true address and the relay's
+    port, as pinned.
+*   The documents: ADR-0012 amended as the draft it still was and flipped
+    to accepted; the architecture's one view, applications list, and
+    endhost section carrying the service. The security model carries the
+    service nowhere: it crosses no trust seam the boundary list names, and
+    the default-on exposure is no risk the model owns under the
+    single-operator assumption the record itself rides — so the boundary
+    and residual-risk sections this proposal's letter would have extended
+    stand as they were.
+*   Tests: the application's, in `pkg/apps/socks` against the egress
+    suite's in-process lab — CONNECT both directions and its told
+    refusals, the method negotiation's, BIND's, the association's relay,
+    fragment, and arrival-address answers, the ICMP drop, the flow bound
+    (a test override of the constant, TCP and UDP counted together), the
+    idle sweep (a shifted now, the old suite's deterministic form), and
+    the association's teardown on its leg's close; the router's delivery
+    tests beside the standing table's; the netmap's beside the standing
+    map's; the run arguments' in `cmd/cion` and `internal/services`; the
+    integration proof, `TestEgressSocksService`, on the coordination lab —
+    the near exit, the far exit over the mesh, one host naming both, and
+    the direct dial that never enters the tunnel. The bounds and lifetime
+    group runs on real time rather than the planned `testing/synctest`:
+    the flows' outbound legs are real sockets, and a bubble never waits a
+    real socket out — the teardown's proof carries an hour-long idle bound
+    instead, so the teardown alone can be what closed the flows, and the
+    sweep's shifted-now form needs no bubble at all.

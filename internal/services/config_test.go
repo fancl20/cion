@@ -1,8 +1,6 @@
 package services
 
 import (
-	"os"
-	"path/filepath"
 	"testing"
 )
 
@@ -88,45 +86,5 @@ func TestNodeConfigValidate(t *testing.T) {
 				t.Error("the malformed run arguments were accepted")
 			}
 		})
-	}
-}
-
-// TestLoadWireguardConfig checks the application's own file: the section
-// parses, and unknown fields — a file still naming a retired one — are
-// refused rather than silently ignored.
-func TestLoadWireguardConfig(t *testing.T) {
-	write := func(t *testing.T, body string) string {
-		t.Helper()
-		path := filepath.Join(t.TempDir(), "wireguard.json")
-		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		return path
-	}
-
-	wg, err := LoadWireguardConfig(write(t, `{
-		"subnet": "10.64.1.0/24",
-		"listenPort": 51820
-	}`))
-	if err != nil {
-		t.Fatalf("loading the wireguard configuration: %v", err)
-	}
-	if wg == nil || wg.ListenPort != 51820 {
-		t.Errorf("wireguard configuration = %+v, want the configured one", wg)
-	}
-
-	if _, err := LoadWireguardConfig(write(t, `{
-		"subnet": "10.64.1.0/24",
-		"listenPort": 51820,
-		"stale": true
-	}`)); err == nil {
-		t.Error("a configuration naming an unknown field was accepted, want refusal")
-	}
-
-	if wg, err := LoadWireguardConfig(""); err != nil || wg != nil {
-		t.Errorf("an empty path = (%v, %v), want (nil, nil)", wg, err)
-	}
-	if _, err := LoadWireguardConfig(t.TempDir() + "/absent.json"); err == nil {
-		t.Error("loading an absent file succeeded, want the read error")
 	}
 }

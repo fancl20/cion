@@ -1,6 +1,6 @@
 # Serve Egress as an Overlay SOCKS Service
 
-*   Status: draft
+*   Status: accepted
 *   Date: 2026-09-26
 
 [TOC]
@@ -68,10 +68,11 @@ the consequences.
 *   **Unprivileged Node:** The service adds no kernel state and no new
     capability; it runs on sockets the node already holds.
 *   **Operator Sovereignty:** What egresses an AS is its operator's offer —
-    this record makes every node offer by default and leaves the offer's
-    surface, which applications a node runs, to the applications
-    architecture record that follows — with admission riding the seam,
-    per ADR-0009's operating assumption that one operator runs an ISD.
+    this record makes every node offer by default, adds nothing to the
+    directory entry the offer rides, and leaves the offer's surface, which
+    applications a node runs, to the applications architecture record to
+    come — with admission riding the seam, per ADR-0009's operating
+    assumption that one operator runs an ISD.
 *   **Scope Stays Minimal:** No per-host egress policy, no naming service;
     membership is ADR-0011's landed subject and stays closed here.
 

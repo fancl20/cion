@@ -42,8 +42,12 @@ func addNodeFlags(flags *pflag.FlagSet, opts *services.NodeConfig) {
 			"telegram=<chat>:<token> prompts the chat per joiner; open when unset")
 	flags.BoolVar(&opts.BehindNAT, "behind-nat", false,
 		"publish the node's reachability class as private: joinable by no one")
-	flags.StringVar(&opts.WireguardConfig, "wireguard-config", "",
-		"path to the WireGuard application's own JSON configuration file")
+	flags.StringVar(&opts.Slice, "slice", "",
+		"the node's slice of the tailnet range, e.g. 100.64.1.0/24: the space its hosts "+
+			"allocate from, the slice's first address the node's own — the SOCKS service's "+
+			"serving address (empty runs no WireGuard or SOCKS application)")
+	flags.Uint16Var(&opts.HostPort, "host-port", 0,
+		"the shared host-facing UDP port every host dials (required with --slice)")
 }
 
 // runOptions carries the run command's data-plane tuning flags.

@@ -118,7 +118,6 @@ func startWireguardNodes(t *testing.T, ipA, ipB netip.Addr) (*Node, *Node) {
 		Links: []Link{{Local: extA, Remote: extB, Neighbor: wireguardB}},
 		Wireguard: &WireguardOptions{
 			Subnet: "100.64.1.0/24",
-			Egress: true,
 		},
 	})
 	b := StartNode(t, NodeConfig{

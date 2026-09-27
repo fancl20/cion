@@ -221,8 +221,6 @@ func mintWebPKI(dir string) (*WebPKI, error) {
 type WireguardOptions struct {
 	// Subnet is the node's slice of the tailnet range.
 	Subnet string
-	// Egress marks an internet exit.
-	Egress bool
 	// ListenPort is the shared host-facing port; 0 takes an ephemeral one.
 	ListenPort uint16
 	// DERP names the relay presence the node holds, when the harness runs
@@ -656,9 +654,9 @@ func linkTableOf(store links.DB) func() map[uint16]addr.IA {
 }
 
 // startWireguard starts the node's WireGuard application: the mesh
-// transport, the one host device behind its shared port, the router and
-// egress, and the directory — served by the core, published and fetched by
-// everyone — per the node assembly's own wiring.
+// transport, the one host device behind its shared port, the router, and
+// the directory — served by the core, published and fetched by everyone —
+// per the node assembly's own wiring.
 func (n *Node) startWireguard(
 	t *testing.T,
 	ctx context.Context,
@@ -677,7 +675,6 @@ func (n *Node) startWireguard(
 		Subnet:     netip.MustParsePrefix(opts.Subnet),
 		ListenHost: controlAddr.Addr(),
 		ListenPort: opts.ListenPort,
-		Egress:     opts.Egress,
 		DERP:       opts.DERP,
 		StateDir:   wgState,
 		Provider:   n.Provider,

@@ -154,14 +154,16 @@ func (a *App) handleMap(w http.ResponseWriter, r *http.Request,
 // netmap builds one host's full map from the registry. The peer carries no
 // disco key: the node is a wireguard-only peer with a static endpoint, the
 // model the client lines already serve for third-party exits. The peer's
-// allowed IPs are the registry's allocated /32s — every host the tailnet
-// holds, covering the tailnet and nothing else, no default route anywhere —
-// as single-IP Tailscale addresses rather than the covering /10, the form
-// the client lines route unconditionally: a covering prefix is an
-// advertised subnet route behind the client's own route-all preference,
-// which no host of this network is asked to hold. The packet filter is a
-// single rule admitting the member's traffic: membership is the tailnet's
-// one policy, and no engine stands behind the rule to configure.
+// allowed IPs are the registry's whole occupied space — every allocated
+// host /32 beside every node's own address, the slice's first, each an
+// offered exit's serving address (ADR-0012) — covering the tailnet and
+// nothing else, no default route anywhere, as single-IP Tailscale addresses
+// rather than the covering /10, the form the client lines route
+// unconditionally: a covering prefix is an advertised subnet route behind
+// the client's own route-all preference, which no host of this network is
+// asked to hold. The packet filter is a single rule admitting the member's
+// traffic: membership is the tailnet's one policy, and no engine stands
+// behind the rule to configure.
 func (a *App) netmap(node key.NodePublic, machine key.MachinePublic,
 	directory wireguard.Directory, reqDisco key.DiscoPublic,
 	reqHostinfo tailcfg.HostinfoView) (*tailcfg.MapResponse, error) {
@@ -190,7 +192,7 @@ func (a *App) netmap(node key.NodePublic, machine key.MachinePublic,
 		return nil, fmt.Errorf("the owning node %s published no host endpoint", self.IA)
 	}
 	address := netip.PrefixFrom(self.Addr, 32)
-	hosts := allocatedHosts(directory)
+	routed := routedAddresses(directory)
 	now := time.Now()
 	online := true
 	if debugCfgControl {
@@ -200,8 +202,8 @@ func (a *App) netmap(node key.NodePublic, machine key.MachinePublic,
 		ID:                2,
 		User:              registerUserID,
 		Key:               nodePublicOf(owner.PublicKey),
-		AllowedIPs:        hosts,
-		Addresses:         hosts,
+		AllowedIPs:        routed,
+		Addresses:         routed,
 		Endpoints:         []netip.AddrPort{owner.HostEndpoint},
 		HomeDERP:          derpRegionID,
 		IsWireGuardOnly:   !debugCfgControl, // control experiment knob
@@ -256,17 +258,27 @@ var debugCfgControl bool
 // standard disco peer instead of a wireguard-only one.
 func SetDebugDiscoPeer(v bool) { debugCfgControl = v }
 
-// allocatedHosts lists every allocated host address as a /32, sorted: the
-// tailnet's whole occupied space, stable in the map it names.
-func allocatedHosts(directory wireguard.Directory) []netip.Prefix {
-	hosts := make([]netip.Prefix, 0, len(directory.Hosts))
+// routedAddresses lists every routed address as a /32, sorted: the
+// registry's whole occupied space — each allocated host beside each node's
+// own, the slice's first address, the serving address every node's SOCKS
+// offer answers on (ADR-0012). Nothing new rides the directory entry: the
+// node's address was always derivable from the slice the entry carries, and
+// the allocator never issues it to a host, so the addition cannot collide
+// with an allocation. One login serves every node, and the exit a flow uses
+// is which tailnet address it is sent to.
+func routedAddresses(directory wireguard.Directory) []netip.Prefix {
+	addrs := make([]netip.Prefix, 0,
+		len(directory.Hosts)+len(directory.Nodes))
 	for _, host := range directory.Hosts {
-		hosts = append(hosts, netip.PrefixFrom(host.Addr, 32))
+		addrs = append(addrs, netip.PrefixFrom(host.Addr, 32))
 	}
-	slices.SortFunc(hosts, func(a, b netip.Prefix) int {
+	for _, node := range directory.Nodes {
+		addrs = append(addrs, netip.PrefixFrom(firstAddress(node.Overlay), 32))
+	}
+	slices.SortFunc(addrs, func(a, b netip.Prefix) int {
 		return a.Addr().Compare(b.Addr())
 	})
-	return hosts
+	return addrs
 }
 
 // derpMap names the core's relay: one region, one node, on the coordination

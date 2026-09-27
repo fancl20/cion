@@ -2,14 +2,13 @@ package services
 
 import (
 	"crypto/x509"
-	"encoding/json/v2"
 	"fmt"
 	"net/netip"
-	"os"
 	"time"
 
 	"github.com/scionproto/scion/pkg/addr"
 
+	"github.com/fancl20/cion/pkg/apps/wireguard"
 	"github.com/fancl20/cion/pkg/dataplane"
 	"github.com/fancl20/cion/pkg/enrollauth"
 )
@@ -70,9 +69,15 @@ type NodeConfig struct {
 	// BehindNAT publishes the node's reachability class as private: joinable
 	// by no one, candidate for no one's floor.
 	BehindNAT bool
-	// WireguardConfig points at the WireGuard application's own file (the
-	// tailnet slice, the shared port, the egress mark); empty runs none.
-	WireguardConfig string
+	// Slice is the node's slice of the tailnet range, 100.64.0.0/10, e.g.
+	// "100.64.1.0/24" (proposal 0024): the space the coordination service
+	// allocates the node's hosts from, the slice's first address the
+	// node's own — the SOCKS service's serving address. Empty runs no
+	// WireGuard or SOCKS application.
+	Slice string
+	// HostPort is the shared host-facing UDP port every host dials;
+	// required with Slice.
+	HostPort uint16
 	// Coordination overrides the coordination endpoint's placement for the
 	// integration harness (proposal 0022): the loopback address its core
 	// serves on and the relay every node's presence dials, standing in for
@@ -164,43 +169,29 @@ func (c NodeConfig) Validate() error {
 			return fmt.Errorf("parsing --enroll-auth: %w", err)
 		}
 	}
+	if c.Slice != "" {
+		// The slice's grammar is the one the retired configuration file
+		// narrowed (proposal 0022): a prefix the tailnet range contains.
+		subnet, err := netip.ParsePrefix(c.Slice)
+		if err != nil {
+			return fmt.Errorf("parsing --slice %q: %w", c.Slice, err)
+		}
+		if !subnet.Addr().Is4() ||
+			!wireguard.Tailnet.Contains(subnet.Addr()) ||
+			subnet.Bits() < wireguard.Tailnet.Bits() {
+			return fmt.Errorf("--slice %s is not a slice of the tailnet range %s",
+				subnet, wireguard.Tailnet)
+		}
+		if c.HostPort == 0 {
+			return fmt.Errorf("--host-port is required with --slice: " +
+				"the shared host-facing port every host dials")
+		}
+	}
+	if c.HostPort != 0 && c.Slice == "" {
+		return fmt.Errorf("--host-port requires --slice: " +
+			"the port serves the applications the slice names")
+	}
 	return nil
-}
-
-// ConfigWireguard is the WireGuard application's configuration file. See
-// proposals 0006 and 0022; the section moved out of the retiring node file
-// (ADR-0008). The hosts themselves configured nothing here anymore: a host
-// is a login against the core's coordination service, and its entry arrives
-// by the directory.
-type ConfigWireguard struct {
-	// Subnet is the node's slice of the tailnet range, e.g.
-	// "100.64.1.0/24". The coordination service allocates the node's hosts
-	// within it; the slice's first address is the node's own.
-	Subnet string `json:"subnet"`
-	// ListenPort is the shared host-facing UDP port every host dials.
-	ListenPort uint16 `json:"listenPort"`
-	// Egress marks an internet exit: the node runs the netstack egress only
-	// when set.
-	Egress bool `json:"egress"`
-}
-
-// LoadWireguardConfig reads the WireGuard application's configuration from
-// the JSON file at the given path; an empty path runs no application.
-// Unknown fields are refused rather than silently ignored, so a file still
-// naming a retired field stops here.
-func LoadWireguardConfig(path string) (*ConfigWireguard, error) {
-	if path == "" {
-		return nil, nil
-	}
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		return nil, fmt.Errorf("reading the wireguard configuration: %w", err)
-	}
-	cfg := &ConfigWireguard{}
-	if err := json.Unmarshal(raw, cfg, json.RejectUnknownMembers(true)); err != nil {
-		return nil, fmt.Errorf("parsing the wireguard configuration: %w", err)
-	}
-	return cfg, nil
 }
 
 // controlBind returns the "host:port" address for the control endpoint: the
