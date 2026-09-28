@@ -217,3 +217,25 @@ command registers.
     `NodeConfig` directly, and no assembly path changes.
 
 ## Implementation history
+
+*   The tree: [run.go](/cmd/cion/run.go) holds the parent — no run
+    function, a bare invocation printing the roles — and the shared body
+    the leaves hand their assembled `NodeConfig` and tuning flags to, the
+    tuning sanity checks and the `services.Run` call moved to it
+    unchanged; the leaves and their role's registrations live one file
+    each, [run_core.go](/cmd/cion/run_core.go) and
+    [run_local.go](/cmd/cion/run_local.go). The root's usage names the
+    three entries, and `cion ping` composes the shared and local
+    registrations beside its own request flags, assembling a local node.
+*   The registrations: one per partition — `addSharedNodeFlags`,
+    `addCoreNodeFlags` (presetting the role beside its arguments),
+    `addLocalNodeFlags`, and `addTuningFlags`. The `(core only)`
+    parentheticals and `--link-set`'s refusal clause left the help texts —
+    the validator's message names the refusal the combination still needs —
+    and each command's `--domain` states its role's single meaning.
+*   The messages and the proofs: `Validate`'s missing-domain error states
+    the role's meaning and its enrollment refusal names the core role, so
+    no error text names `--core`; the command tests check the surfaces (the
+    core's role preset included), the unknown-flag refusals of the other
+    role's arguments and of both retirements, and ping's local surface —
+    the standing validation and the integration proofs pass unmodified.

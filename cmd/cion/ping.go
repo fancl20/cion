@@ -21,10 +21,10 @@ type pingOptions struct {
 	wait     time.Duration
 }
 
-// newPingCommand builds `cion ping`: the SCION echo application of proposal
-// 0005, printing one line per reply and a loss summary. It assembles the
-// node from the state directory and the same run arguments as `cion run`,
-// not from a file.
+// newPingCommand builds `cion ping`: the SCION echo application, printing
+// one line per reply and a loss summary. It assembles a local node from the
+// state directory and the same node arguments as `cion run local`, not from
+// a file.
 func newPingCommand() *cobra.Command {
 	opts := &services.NodeConfig{}
 	pingOpts := &pingOptions{}
@@ -32,15 +32,16 @@ func newPingCommand() *cobra.Command {
 		Use:   "ping isd-as,[host]",
 		Short: "Ping a destination ISD-AS over the node's own data and control plane",
 		Long: "Ping a destination ISD-AS over the node's own assembled data and control plane: " +
-			"boots the full node in place of serving from the state directory " +
-			"and the same run arguments as 'cion run', prints one line per reply plus a loss " +
-			"summary, and exits.",
+			"boots a local node in place of serving from the state directory and the " +
+			"same node arguments as 'cion run local', prints one line per reply plus a " +
+			"loss summary, and exits.",
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runPing(cmd.Context(), *opts, args[0], pingOpts)
 		},
 	}
-	addNodeFlags(cmd.Flags(), opts)
+	addSharedNodeFlags(cmd.Flags(), opts)
+	addLocalNodeFlags(cmd.Flags(), opts)
 	cmd.Flags().IntVar(&pingOpts.count, "count", 4, "number of requests")
 	cmd.Flags().DurationVar(&pingOpts.interval, "interval", time.Second, "time between requests")
 	cmd.Flags().DurationVar(&pingOpts.wait, "wait", 2*time.Second, "wait per reply")

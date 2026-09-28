@@ -13,16 +13,16 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// newRootCommand builds the cion command tree: the run daemon and the ping
-// application. The root itself has no run function, so a bare invocation
-// prints the usage instead of starting a node by accident.
+// newRootCommand builds the cion command tree: the run daemon's two roles
+// and the ping application. The root itself has no run function, so a bare
+// invocation prints the usage instead of starting a node by accident.
 func newRootCommand() *cobra.Command {
 	root := &cobra.Command{
 		Use:   "cion",
 		Short: "Run a CION node: a SCION router with a collapsed data plane for a one-node AS",
 		Long: "CION runs a one-node SCION AS: data plane, control plane, and applications " +
-			"in one process.\n\nRun 'cion run' to start the daemon; 'cion ping' to probe a " +
-			"destination over the node's own assembly.",
+			"in one process.\n\nRun 'cion run core' to found a network; 'cion run local' " +
+			"to join one; 'cion ping' to probe a destination over the node's own assembly.",
 		SilenceUsage:  true,
 		SilenceErrors: true,
 	}
