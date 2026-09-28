@@ -155,7 +155,7 @@ type scionPacketProcessor struct {
 	bfdLayer layers.BFD // Reusable buffer for parsing BFD messages
 }
 
-func (p *scionPacketProcessor) reset() error {
+func (p *scionPacketProcessor) reset() {
 	p.pkt = nil
 	p.ingressFromLink = 0
 	// p.scionLayer // cannot easily be reset
@@ -170,7 +170,6 @@ func (p *scionPacketProcessor) reset() error {
 	p.hbhLayer = slayers.HopByHopExtnSkipper{}
 	// Reset e2e layer
 	p.e2eLayer = slayers.EndToEndExtnSkipper{}
-	return nil
 }
 
 // Convenience function to log an error and return the pDiscard disposition.
@@ -181,9 +180,7 @@ func errorDiscard(ctx ...any) disposition {
 }
 
 func (p *scionPacketProcessor) processPkt(pkt *Packet) disposition {
-	if err := p.reset(); err != nil {
-		return errorDiscard("error", err)
-	}
+	p.reset()
 	p.pkt = pkt
 	p.ingressFromLink = pkt.Link.IfID()
 
@@ -972,7 +969,7 @@ func (p *slowPathPacketProcessor) processPacket(pkt *Packet) error {
 				Egress:  uint64(p.pkt.egress),
 			}
 		default:
-			panic(fmt.Errorf("unsupported slow-path type: %d", scmpType))
+			panic(fmt.Sprintf("unsupported slow-path type: %d", scmpType))
 		}
 		return p.packSCMP(scmpType, s.code, layer, true)
 	}

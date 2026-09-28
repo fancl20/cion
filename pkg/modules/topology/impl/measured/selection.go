@@ -19,12 +19,12 @@ import (
 	nodev1 "github.com/fancl20/cion/proto/node/v1"
 )
 
-// The selection loop's constants (ADR-0008: no operator tuning). A node keeps
-// at least NeighborFloor neighbors no single failure can partition it from,
-// caps the count to bound beaconing fan-out, promotes a candidate whose
-// direct link is meaningfully faster than its composed paths, demotes a
-// neighbor durably slower than its paths, and damp both directions to
-// sustained evidence — every link change re-shapes segments network-wide.
+// The selection loop's constants (no operator tuning). A node keeps at least
+// NeighborFloor neighbors no single failure can partition it from, caps the
+// count to bound beaconing fan-out, promotes a candidate whose direct link is
+// meaningfully faster than its composed paths, demotes a neighbor durably
+// slower than its paths, and damp both directions to sustained evidence —
+// every link change re-shapes segments network-wide.
 const (
 	// SelectionInterval is the evaluation window.
 	SelectionInterval = 30 * time.Second
@@ -117,10 +117,12 @@ func RunSelection(ctx context.Context, cfg SelectionConfig) {
 	}
 }
 
-// jitter spreads evaluation windows by up to a fraction of the interval.
+// jitter spreads evaluation windows by up to a fraction of the interval;
+// a randomness failure runs the window unjittered.
 func jitter(interval time.Duration) time.Duration {
 	raw := make([]byte, 8)
 	if _, err := rand.Read(raw); err != nil {
+		slog.Error("Reading jitter randomness", "err", err)
 		return interval
 	}
 	frac := binary.BigEndian.Uint64(raw) % uint64(SelectionJitter)
@@ -174,10 +176,10 @@ func (s *selection) pass(ctx context.Context) {
 	neighbors := s.neighbors(entries) // established, by IA
 	directory := s.directory()
 
-	// Probe every peer the directory names — neighbor and candidate alike
-	// (ADR-0008: the comparator never stops at admission) — each by its own
-	// carrier: the neighbor's direct side over the one-hop path, the
-	// candidate's by rendezvous echo.
+	// Probe every peer the directory names — neighbor and candidate alike (the
+	// comparator never stops at admission) — each by its own carrier: the
+	// neighbor's direct side over the one-hop path, the candidate's by rendezvous
+	// echo.
 	samples := make(map[addr.IA]measurement)
 	candidates := make([]DirectoryEntry, 0, len(directory))
 	for _, e := range directory {

@@ -66,9 +66,7 @@ func (s *DirectoryService) Publish(
 		return nil, connect.NewError(connect.CodeInternal,
 			fmt.Errorf("storing the entry: %w", err))
 	}
-	if s.Cnt != nil {
-		s.Cnt.published.Add(1)
-	}
+	s.Cnt.published.Add(1)
 	return connect.NewResponse(&wireguardv1.PublishResponse{}), nil
 }
 

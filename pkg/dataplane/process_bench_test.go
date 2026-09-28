@@ -41,7 +41,7 @@ func BenchmarkProcessPkt(b *testing.B) {
 }
 
 // BenchmarkProcessSCMP measures the slow path's per-answer cost — the cost
-// proposal 0012's notification cap bounds per unit of invalid traffic. A
+// the notification cap bounds per unit of invalid traffic. A
 // packet engineered to fail hop-expiry validation is driven through
 // slowPathPacketProcessor.processPacket: path reversal, the quoted original,
 // SCMP serialization, and the SCION header prepended into the buffer's

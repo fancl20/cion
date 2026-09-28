@@ -92,11 +92,19 @@ func signTRC(trc cppki.TRC, keys CoreKeys) (cppki.SignedTRC, error) {
 	}
 	// Order matters for verification error messages only; both voting
 	// certificates must sign.
-	if err := sd.AddSignerInfo([]*x509.Certificate{signerCert(trc, cppki.Sensitive)},
+	sensitive, err := signerCert(trc, cppki.Sensitive)
+	if err != nil {
+		return cppki.SignedTRC{}, err
+	}
+	if err := sd.AddSignerInfo([]*x509.Certificate{sensitive},
 		keys.Sensitive); err != nil {
 		return cppki.SignedTRC{}, fmt.Errorf("signing with sensitive voting key: %w", err)
 	}
-	if err := sd.AddSignerInfo([]*x509.Certificate{signerCert(trc, cppki.Regular)},
+	regular, err := signerCert(trc, cppki.Regular)
+	if err != nil {
+		return cppki.SignedTRC{}, err
+	}
+	if err := sd.AddSignerInfo([]*x509.Certificate{regular},
 		keys.Regular); err != nil {
 		return cppki.SignedTRC{}, fmt.Errorf("signing with regular voting key: %w", err)
 	}
@@ -115,11 +123,11 @@ func signTRC(trc cppki.TRC, keys CoreKeys) (cppki.SignedTRC, error) {
 }
 
 // signerCert returns the voting certificate of the given type in the TRC.
-func signerCert(trc cppki.TRC, ct cppki.CertType) *x509.Certificate {
+func signerCert(trc cppki.TRC, ct cppki.CertType) (*x509.Certificate, error) {
 	for _, cert := range trc.Certificates {
 		if classified, err := cppki.ValidateCert(cert); err == nil && classified == ct {
-			return cert
+			return cert, nil
 		}
 	}
-	return nil
+	return nil, fmt.Errorf("the TRC holds no %s voting certificate", ct)
 }

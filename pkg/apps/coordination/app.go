@@ -69,13 +69,12 @@ type Config struct {
 	RelayOnly bool
 }
 
-// App is the coordination application (ADR-0011): the noise channel of the
-// client protocol carrying registration behind the admission seam, the
-// netmap holding one peer, and the DERP relay fallback — its three surfaces
-// handed to the node's assembly, which serves them over the core's WebPKI
-// identity on the HTTPS port it owns (proposal 0023). Minimal by decision:
-// no ACL engine, no naming, no user management, no key expiry, no
-// credential minting, no listener of its own.
+// App is the coordination application: the noise channel of the client
+// protocol carrying registration behind the admission seam, the netmap holding
+// one peer, and the DERP relay fallback — its three surfaces handed to the
+// node's assembly, which serves them over the core's WebPKI identity on the
+// HTTPS port it owns. Minimal by decision: no ACL engine, no naming, no user
+// management, no key expiry, no credential minting, no listener of its own.
 type App struct {
 	cfg        Config
 	machineKey key.MachinePrivate

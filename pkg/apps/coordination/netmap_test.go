@@ -143,10 +143,10 @@ func TestNetmapRequiresRegistration(t *testing.T) {
 	}
 }
 
-// TestNetmapCarriesEveryNodesAddress checks the map's growth (ADR-0012):
-// every node entry contributes its slice's first address — the node's own,
-// the SOCKS service's serving address — as one more /32 among the host
-// /32s, sorted, and no covering prefix appears anywhere in the map.
+// TestNetmapCarriesEveryNodesAddress checks the map's growth: every node entry
+// contributes its slice's first address — the node's own, the SOCKS service's
+// serving address — as one more /32 among the host /32s, sorted, and no
+// covering prefix appears anywhere in the map.
 func TestNetmapCarriesEveryNodesAddress(t *testing.T) {
 	store := &memStore{}
 	if err := store.Publish(context.Background(),

@@ -407,9 +407,8 @@ func testChain(t *testing.T, db trustdb.DB, cfg Config) {
 			}
 		})
 		t.Run("no chain for a name another name extends", func(t *testing.T) {
-			// An ISD-AS's rendered name is a prefix of every name that
-			// extends it — 1-ff00:0:110 extends 1-ff00:0:11 — and no name
-			// answers for another (proposal 0015).
+			// An ISD-AS's rendered name is a prefix of every name that extends it —
+			// 1-ff00:0:110 extends 1-ff00:0:11 — and no name answers for another.
 			chains, err := db.Chains(ctx, trustdb.ChainQuery{
 				IA:           addr.MustParseIA("1-ff00:0:11"),
 				SubjectKeyID: bern1Chain[0].SubjectKeyId,
@@ -497,11 +496,10 @@ func testChain(t *testing.T, db trustdb.DB, cfg Config) {
 }
 
 // testChainSweep checks the expired-chain sweep every implementation must
-// carry (proposal 0018): a chain expired before the given time leaves the
-// store, a chain within its validity stays through however many sweeps pass,
-// an emptied ISD-AS name leaves no shell — it answers nothing and accepts a
-// fresh chain again — TRCs survive untouched, and the returned count names
-// what left.
+// carry: a chain expired before the given time leaves the store, a chain
+// within its validity stays through however many sweeps pass, an emptied
+// ISD-AS name leaves no shell — it answers nothing and accepts a fresh chain
+// again — TRCs survive untouched, and the returned count names what left.
 func testChainSweep(t *testing.T, db trustdb.DB, cfg Config) {
 	// bern1 and geneva1 expire 2020-06-27 12:00 UTC, bern3 2020-07-01.
 	bern1Chain := loadChainFiles(t, "bern", 1, cfg)

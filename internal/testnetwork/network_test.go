@@ -12,8 +12,8 @@ import (
 	"github.com/fancl20/cion/pkg/modules/trustdb"
 )
 
-// TestLineTopology is the integration test of proposal 0004: a three-node
-// line topology — the core A, the middle B, and C below with no A–C link —
+// TestLineTopology is the line topology's integration test: a three-node
+// line — the core A, the middle B, and C below with no A–C link —
 // where beacons propagate A→B→C with signatures verified at each hop, C
 // enrolls through the reversed beacon over B, C registers a down segment at
 // A through B, and the provider resolves an end-to-end path from C to A.

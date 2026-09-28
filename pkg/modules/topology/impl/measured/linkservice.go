@@ -22,8 +22,8 @@ import (
 // admissions of one peer.
 const LinkMinInterval = time.Second
 
-// LinkService implements the in-band establishment of ADR-0008: a node that
-// composed paths already reach asks over the control endpoint's authenticated
+// LinkService implements the in-band establishment: a node that composed
+// paths already reach asks over the control endpoint's authenticated
 // channel, the peer's chain identifying it. The acceptor applies its
 // admission policy, allocates its own interface ID and link address, records
 // the entry as established, and replies with them. Served by the measured
@@ -100,7 +100,11 @@ func (s *LinkService) Request(
 		return nil, connect.NewError(connect.CodeInternal, err)
 	}
 	if entry == nil {
-		if live := s.liveLinks(ctx); live >= s.MaxLinks {
+		live, err := s.liveLinks(ctx)
+		if err != nil {
+			return nil, connect.NewError(connect.CodeInternal, err)
+		}
+		if live >= s.MaxLinks {
 			return nil, connect.NewError(connect.CodeResourceExhausted,
 				fmt.Errorf("link cap reached (%d)", live))
 		}
@@ -138,11 +142,10 @@ func (s *LinkService) Request(
 	}), nil
 }
 
-func (s *LinkService) liveLinks(ctx context.Context) int {
+func (s *LinkService) liveLinks(ctx context.Context) (int, error) {
 	entries, err := s.Store.All(ctx)
 	if err != nil {
-		slog.Error("Reading the link store", "err", err)
-		return s.MaxLinks // refuse on a store that cannot be read
+		return 0, fmt.Errorf("reading the link store: %w", err)
 	}
 	live := 0
 	for _, l := range entries {
@@ -150,7 +153,7 @@ func (s *LinkService) liveLinks(ctx context.Context) int {
 			live++
 		}
 	}
-	return live
+	return live, nil
 }
 
 func (s *LinkService) changed() {

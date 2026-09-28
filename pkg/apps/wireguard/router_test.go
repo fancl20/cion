@@ -54,8 +54,8 @@ func assertNothing(t *testing.T, p *pipe) {
 	}
 }
 
-// TestRouterRoutesByDestination checks the table's lookups (ADR-0011's
-// table): host /32s to the host device, mesh slices longest-prefix first —
+// TestRouterRoutesByDestination checks the table's lookups: host /32s to
+// the host device, mesh slices longest-prefix first —
 // and no default anywhere, a destination no slice claims counting
 // unroutable.
 func TestRouterRoutesByDestination(t *testing.T) {
@@ -109,11 +109,10 @@ func TestRouterRoutesByDestination(t *testing.T) {
 }
 
 // TestRouterDeliversServedAddress checks the delivery a resident service
-// installs (proposal 0024): with one standing, packets reach it by
-// destination exactly — from any arrival — while an address of the node's
-// own slice that is neither a host's nor the served one stays unroutable,
-// and the undo leaves the address unroutable again, the service's assembly
-// the only thing that routes it.
+// installs: with one standing, packets reach it by destination exactly — from
+// any arrival — while an address of the node's own slice that is neither a
+// host's nor the served one stays unroutable, and the undo leaves the address
+// unroutable again, the service's assembly the only thing that routes it.
 func TestRouterDeliversServedAddress(t *testing.T) {
 	cnt := &counters{}
 	r := newRouter(OverlayMTU, cnt)

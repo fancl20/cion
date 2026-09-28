@@ -12,12 +12,12 @@ import (
 	"github.com/fancl20/cion/pkg/trust"
 )
 
-// Directory cadence (proposal 0006): the application owns its publication
-// rhythm. Publication begins once enrollment has produced the node's chain,
-// re-publishes on a constant — enrollment renews daily, so hourly is a
-// reasonable rate — and a refresh constant re-fetches the directory between;
-// a fresh node's tunnels come up as soon as its first publish lands and its
-// first fetch returns the others.
+// Directory cadence: the application owns its publication rhythm. Publication
+// begins once enrollment has produced the node's chain, re-publishes on a
+// constant — enrollment renews daily, so hourly is a reasonable rate — and a
+// refresh constant re-fetches the directory between; a fresh node's tunnels
+// come up as soon as its first publish lands and its first fetch returns the
+// others.
 const (
 	// PublishInterval is the re-publication cadence.
 	PublishInterval = time.Hour
@@ -29,12 +29,12 @@ const (
 	PublishRetry = 10 * time.Second
 )
 
-// Entry is one node's publication: everything another node needs to
-// establish a mesh tunnel to it, and a host's client needs to dial it. The
-// ISD-AS comes from the authenticated publisher's certificate chain, never
-// from the claimed entry. A mesh peer is its ISD-AS, its key, and its
-// subnet: the mesh transport is a SCION service (proposal 0007), so no
-// reachability data rides the entry for the mesh's own sake.
+// Entry is one node's publication: everything another node needs to establish
+// a mesh tunnel to it, and a host's client needs to dial it. The ISD-AS comes
+// from the authenticated publisher's certificate chain, never from the claimed
+// entry. A mesh peer is its ISD-AS, its key, and its subnet: the mesh
+// transport is a SCION service, so no reachability data rides the entry for
+// the mesh's own sake.
 type Entry struct {
 	// IA is the publisher's ISD-AS.
 	IA addr.IA
@@ -42,17 +42,16 @@ type Entry struct {
 	PublicKey PublicKey
 	// Overlay is the node's overlay subnet, its slice of the tailnet range.
 	Overlay netip.Prefix
-	// HostEndpoint is the host-facing endpoint — the underlay address and
-	// shared port a host's client dials. The mesh needs it not; the
-	// coordination service's netmap names it (ADR-0011).
+	// HostEndpoint is the host-facing endpoint — the underlay address and shared
+	// port a host's client dials. The mesh needs it not; the coordination
+	// service's netmap names it.
 	HostEndpoint netip.AddrPort
 }
 
-// HostEntry is one host's registry entry (ADR-0011): the record the
-// coordination service's gate allocates and the directory distributes. The
-// host's key is its identity — the same key re-registering meets the same
-// entry — and the address, the owning node, and the approving plugin's note
-// ride beside it.
+// HostEntry is one host's registry entry: the record the coordination
+// service's gate allocates and the directory distributes. The host's key is
+// its identity — the same key re-registering meets the same entry — and the
+// address, the owning node, and the approving plugin's note ride beside it.
 type HostEntry struct {
 	// PublicKey is the host's WireGuard public key.
 	PublicKey PublicKey
@@ -66,9 +65,8 @@ type HostEntry struct {
 	Note string
 }
 
-// Directory is one fetch of the directory: node entries beside host
-// entries, the same authenticated snapshot every node programs itself from
-// (ADR-0011).
+// Directory is one fetch of the directory: node entries beside host entries,
+// the same authenticated snapshot every node programs itself from.
 type Directory struct {
 	// Nodes holds one entry per publishing node.
 	Nodes []Entry
@@ -90,10 +88,10 @@ type DirectoryStore interface {
 	Close() error
 }
 
-// Registry is the coordination surface of the core's store: node entries
-// read for the netmap and allocation, host entries written at admission
-// (ADR-0011). The store stays this application's; the coordination
-// application borrows the view beside it, never the file.
+// Registry is the coordination surface of the core's store: node entries read
+// for the netmap and allocation, host entries written at admission. The store
+// stays this application's; the coordination application borrows the view
+// beside it, never the file.
 type Registry interface {
 	List(ctx context.Context) (Directory, error)
 	PublishHost(ctx context.Context, entry HostEntry) error

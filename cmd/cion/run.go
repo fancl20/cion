@@ -11,7 +11,7 @@ import (
 
 // addNodeFlags registers the node's run arguments on a command that assembles
 // one — the arguments the retiring configuration file carried, with defaults
-// so a restart needs none of them (ADR-0008).
+// so a restart needs none of them.
 func addNodeFlags(flags *pflag.FlagSet, opts *services.NodeConfig) {
 	flags.BoolVar(&opts.Core, "core", false,
 		"mark the founding core: TRC genesis, issuer, self-enrollment (takes no --neighbor)")
@@ -57,10 +57,9 @@ type runOptions struct {
 	queueSize  int
 }
 
-// newRunCommand builds `cion run`: the daemon of proposals 0003-0011 — data
-// plane, control plane, the loaded topology provider, and the resident
-// applications in one process — from the run arguments and the state
-// directory.
+// newRunCommand builds `cion run`: the daemon — data plane, control plane,
+// the loaded topology provider, and the resident applications in one
+// process — from the run arguments and the state directory.
 func newRunCommand() *cobra.Command {
 	opts := &services.NodeConfig{}
 	tuning := &runOptions{}
@@ -69,7 +68,7 @@ func newRunCommand() *cobra.Command {
 		Use:   "run",
 		Short: "Run the CION daemon",
 		Long: "Run the CION daemon: data plane, control plane, the loaded topology provider, " +
-			"and enabled applications in one process (proposals 0003-0011). Identity and links " +
+			"and enabled applications in one process. Identity and links " +
 			"come from the state directory; a non-core's first start needs a bootstrap " +
 			"--neighbor — or a --link-set file under the static provider — and the core's " +
 			"--domain.",

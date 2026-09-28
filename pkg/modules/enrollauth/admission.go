@@ -1,13 +1,12 @@
-// Package enrollauth is the node's admission policy, the policy module of
-// ADR-0013: the seam ADR-0010 places at a joiner node's first issuance and
-// ADR-0011 generalizes to every boundary, with its implementations filed
-// one package each beneath this root — the CIDR authorizer admitting
-// joiners by addressing, nodes and hosts alike, and the Telegram one
-// admitting them one by one from an operator's phone — and a shared
-// contract suite in impl/authtest every implementation runs. The
-// --enroll-auth run argument selects exactly one method, the caller
-// importing the implementation it names; unset is open enrollment, the
-// zero-conf default.
+// Package enrollauth is the node's admission policy module: the seam
+// gating a joiner node's first issuance and a joiner host's login, with
+// its implementations filed one package each beneath this root — the CIDR
+// authorizer admitting joiners by addressing, nodes and hosts alike, and
+// the Telegram one admitting them one by one from an operator's phone —
+// and a shared contract suite in impl/authtest every implementation
+// runs. The --enroll-auth run argument selects exactly one method, the
+// caller importing the implementation it names; unset is open
+// enrollment, the zero-conf default.
 //
 // Kind: policy — who is admitted, joiner node or host; selected by the
 // operator's --enroll-auth spec, exactly one method.
@@ -20,10 +19,10 @@ import (
 	"github.com/scionproto/scion/pkg/addr"
 )
 
-// Boundary names the boundary asking one admission question: ADR-0010's
-// enrollment at a joiner node's first issuance, ADR-0011's registration at a
-// joiner host's login. The same plugin answers both, distinguished only by
-// the context it is handed.
+// Boundary names the boundary asking one admission question: enrollment at
+// a joiner node's first issuance, registration at a joiner host's login.
+// The same plugin answers both, distinguished only by the context it is
+// handed.
 type Boundary int
 
 const (
@@ -33,15 +32,15 @@ const (
 	BoundaryRegistration
 )
 
-// AdmissionFacts are the verified facts of one admission exchange (ADR-0010's
-// rule, generalized by ADR-0011): the boundary asking, fingerprints of the
-// keys the exchange presented, the return-routable source, the credential
-// the joiner carried, and the enrollment's claim — all of it in the clear,
-// handed to the plugin, nothing else considered. The source is bound by the
-// completed handshake at both boundaries, yet it remains the joiner's own
-// claim otherwise: a node behind translation presents its private address, a
-// host behind it the translated public one, so a private-range entry is what
-// admits such joiners.
+// AdmissionFacts are the verified facts of one admission exchange: the
+// boundary asking, fingerprints of the keys the exchange presented, the
+// return-routable source, the credential the joiner carried, and the
+// enrollment's claim — all of it in the clear, handed to the plugin,
+// nothing else considered. The source is bound by the completed handshake
+// at both boundaries, yet it remains the joiner's own claim otherwise: a
+// node behind translation presents its private address, a host behind it
+// the translated public one, so a private-range entry is what admits such
+// joiners.
 type AdmissionFacts struct {
 	// Boundary is the boundary asking.
 	Boundary Boundary
@@ -89,12 +88,12 @@ type AdmissionAnswer struct {
 	Note string
 }
 
-// AdmissionAuthorizer is the seam ADR-0010 places at first issuance and
-// ADR-0011 generalizes to every boundary: the caller invokes it exactly when
-// the mechanical checks pass and nothing yet stands for the joiner —
-// possession verified, the name free at enrollment, the key unseen at
-// registration — and admits, refuses, or pends on its answer. The callers —
-// the control plane's trust service, the coordination application — import
+// AdmissionAuthorizer is the seam both boundaries ask: the caller invokes
+// it exactly when the mechanical checks pass and nothing yet stands for the
+// joiner — possession verified, the name free at enrollment, the key
+// unseen at registration — and admits, refuses, or pends on its answer.
+// The callers — the control plane's trust service, the coordination
+// application — import
 // this root to pose the question; the implementations beneath it import the
 // same root to answer it, and neither caller knows a type of them.
 type AdmissionAuthorizer interface {

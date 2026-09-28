@@ -51,9 +51,8 @@ func NewSegment(t SegmentType, pb *cppb.PathSegment) (*Segment, error) {
 	return &Segment{Type: t, PCB: pcb}, nil
 }
 
-// Key identifies a segment by origin, segment ID, and creation timestamp;
-// a newly registered segment replaces the stored segment with the same
-// identity (ADR-0004).
+// Key identifies a segment by origin, segment ID, and creation timestamp; a
+// newly registered segment replaces the stored segment with the same identity.
 type Key struct {
 	// Origin is the ISD-AS of the first AS entry.
 	Origin addr.IA

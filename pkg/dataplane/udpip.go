@@ -105,10 +105,6 @@ func (u *UDPProvider) Start(
 	procQs []chan *Packet,
 ) {
 	u.mu.Lock()
-	if len(procQs) == 0 {
-		// Pointless to run without any processor of incoming traffic
-		return
-	}
 	connSnapshot := slices.Clone(u.allConnections)
 	linkSnapshot := make([]udpLink, 0, len(u.allLinks))
 	for _, l := range u.allLinks {

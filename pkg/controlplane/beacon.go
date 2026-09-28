@@ -2,6 +2,7 @@ package controlplane
 
 import (
 	"context"
+	"fmt"
 	"hash"
 	"log/slog"
 	"sync"
@@ -29,9 +30,8 @@ const (
 	// order of a minute.
 	RegistrationInterval = time.Minute
 
-	// BestSetSize is the fixed bounded set of PCBs selected for forwarding
-	// and termination (ADR-0004: no policy engine, no per-policy
-	// configuration).
+	// BestSetSize is the fixed bounded set of PCBs selected for forwarding and
+	// termination (no policy engine, no per-policy configuration).
 	BestSetSize = 5
 
 	// SendTimeout bounds each beacon and registration RPC: a wedged
@@ -55,7 +55,7 @@ type SegmentSender interface {
 		segments []*control_plane.PathSegment) error
 }
 
-// Beaconer runs ADR-0004's exploration: the founding core originates signed
+// Beaconer runs beacon exploration: the founding core originates signed
 // path-segment beacons on its links, every node verifies the accumulated
 // signatures against the TRC before storing or propagating them, propagation
 // floods outward with the TRC naming the cores whose interfaces are pruned,
@@ -78,11 +78,10 @@ type Beaconer struct {
 	registration time.Duration
 	sendTimeout  time.Duration
 
-	// bootstrap keeps the freshest unverified beacon and the interface it
-	// arrived on: a fresh node receives beacons before it has pinned the TRC
-	// and may use their reversed path — extended with its own hop — as the
-	// route for its enrollment fetch; never for storing, propagating, or
-	// registering (proposal 0004).
+	// bootstrap keeps the freshest unverified beacon and the interface it arrived
+	// on: a fresh node receives beacons before it has pinned the TRC and may use
+	// their reversed path — extended with its own hop — as the route for its
+	// enrollment fetch; never for storing, propagating, or registering.
 	bootstrapMtx     sync.Mutex
 	bootstrap        *segment.PCB
 	bootstrapIngress uint16
@@ -184,17 +183,27 @@ func (b *Beaconer) linkTable() map[uint16]addr.IA {
 
 // Run executes the beaconing loops until the context is canceled: origination
 // on the core or propagation elsewhere, registration, and the expired-
-// segment sweep of the path database.
+// segment sweep of the path database. It returns once every loop has exited,
+// so a caller that waits for Run closes no store beneath an in-flight pass.
 func (b *Beaconer) Run(ctx context.Context) {
-	if b.core {
-		go b.loop(ctx, b.propagation, b.originateOnce)
-		go b.loop(ctx, b.registration, b.registerCoreOnce)
-	} else {
-		go b.loop(ctx, b.propagation, b.propagateOnce)
-		go b.loop(ctx, b.registration, b.registerOnce)
+	var wg sync.WaitGroup
+	loop := func(interval time.Duration, f func(context.Context)) {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			b.loop(ctx, interval, f)
+		}()
 	}
-	go b.loop(ctx, b.registration, b.sweepOnce)
+	if b.core {
+		loop(b.propagation, b.originateOnce)
+		loop(b.registration, b.registerCoreOnce)
+	} else {
+		loop(b.propagation, b.propagateOnce)
+		loop(b.registration, b.registerOnce)
+	}
+	loop(b.registration, b.sweepOnce)
 	<-ctx.Done()
+	wg.Wait()
 }
 
 func (b *Beaconer) loop(ctx context.Context, interval time.Duration, f func(context.Context)) {
@@ -279,12 +288,12 @@ func (b *Beaconer) BootstrapRoute(dst addr.IA) *spath.Decoded {
 	}
 	route, err := b.bootstrap.Clone()
 	if err != nil {
-		return nil
+		panic(fmt.Sprintf("cloning the bootstrap beacon: %v", err))
 	}
 	if _, err := route.AppendRouteHop(b.ia, segment.EntryOptions{
 		IngressIfID: b.bootstrapIngress,
 	}, b.macFactory); err != nil {
-		return nil
+		panic(fmt.Sprintf("extending the bootstrap beacon: %v", err))
 	}
 	return route.ReversePath()
 }
@@ -312,8 +321,7 @@ func (b *Beaconer) BootstrapCore() addr.IA {
 
 // checkBeacon applies the structural reception checks of Section 2.3.1: PCB
 // validity in time, loop prevention, the identity-to-link binding of the
-// arrival interface (the check ADR-0003 deferred to the first signed
-// control-plane message), and entry continuity. Under emergent link roles
+// arrival interface, and entry continuity. Under emergent link roles
 // the arrival interface is by definition the parent side, so no link-type
 // check exists to apply.
 func (b *Beaconer) checkBeacon(pcb *segment.PCB, ingress uint16) error {
@@ -326,12 +334,12 @@ func (b *Beaconer) checkBeacon(pcb *segment.PCB, ingress uint16) error {
 	if pcb.ContainsIA(b.ia) {
 		return serrors.New("beacon already contains this ISD-AS", "isd_as", b.ia)
 	}
-	// The draft's core check itself, applied at reception: a beacon's origin
-	// — its first entry — names a core the pinned TRC lists, so a non-core's
+	// The draft's core check itself, applied at reception: a beacon's origin —
+	// its first entry — names a core the pinned TRC lists, so a non-core's
 	// beacons never become up segments. The empty set of the not-yet-pinned
-	// bootstrap state waives the check, the tolerance the propagation
-	// pruning already carries (proposal 0015); the drop lands here, before
-	// signature verification spends work on the beacon.
+	// bootstrap state waives the check, the tolerance the propagation pruning
+	// already carries; the drop lands here, before signature verification spends
+	// work on the beacon.
 	if cores := b.coreASes(); cores != nil && !cores[pcb.FirstIA()] {
 		return serrors.New("beacon does not originate at a core the TRC names",
 			"origin", pcb.FirstIA())
@@ -396,9 +404,9 @@ func checkTimeWindow(pcb *segment.PCB, now time.Time) error {
 
 // verifySignatures verifies every AS entry's signature against the
 // TRC-anchored chain the entry references, bound to the identity the entry
-// claims: the signer's key must name the entry's own ISD-AS, so an enrolled
-// AS cannot sign entries in another's name (proposal 0015). Missing chains
-// are fetched through the provider (Section 2.3.1, check 1).
+// claims: the signer's key must name the entry's own ISD-AS, so an enrolled AS
+// cannot sign entries in another's name. Missing chains are fetched through
+// the provider (Section 2.3.1, check 1).
 func (b *Beaconer) verifySignatures(ctx context.Context, pcb *segment.PCB) error {
 	for i := range pcb.Entries {
 		entry := pcb.Entries[i]
@@ -414,7 +422,10 @@ func (b *Beaconer) verifySignatures(ctx context.Context, pcb *segment.PCB) error
 // trcPinned reports whether the ISD's base TRC is pinned locally.
 func (b *Beaconer) trcPinned() bool {
 	trc, err := b.engine.BaseTRC()
-	return err == nil && !trc.IsZero()
+	if err != nil {
+		panic(fmt.Sprintf("reading the pinned TRC: %v", err))
+	}
+	return !trc.IsZero()
 }
 
 // coreASes returns the ISD's core ASes named by the pinned TRC; empty when
@@ -423,7 +434,10 @@ func (b *Beaconer) trcPinned() bool {
 // any beacon containing itself.
 func (b *Beaconer) coreASes() map[addr.IA]bool {
 	ias, err := b.engine.CoreASes(b.ia.ISD())
-	if err != nil || len(ias) == 0 {
+	if err != nil {
+		panic(fmt.Sprintf("enumerating the core ASes: %v", err))
+	}
+	if len(ias) == 0 {
 		return nil
 	}
 	set := make(map[addr.IA]bool, len(ias))

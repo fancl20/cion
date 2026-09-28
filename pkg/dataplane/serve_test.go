@@ -7,11 +7,11 @@ import (
 	"time"
 )
 
-// TestServeDrainsOnCancellation serves a plane with several fast and
-// slow-path slots, drives traffic through the processors, and cancels: the
-// underlays stop, the slots drain their queues, and Serve returns nil with
-// the processors' WaitGroup spent — the shutdown shape the unrecovered
-// panic leaves untouched (proposal 0019).
+// TestServeDrainsOnCancellation serves a plane with several fast and slow-path
+// slots, drives traffic through the processors, and cancels: the underlays
+// stop, the slots drain their queues, and Serve returns nil with the
+// processors' WaitGroup spent — the shutdown shape the unrecovered panic
+// leaves untouched.
 func TestServeDrainsOnCancellation(t *testing.T) {
 	reader := newTestReader(t)
 	rc := RunConfig{

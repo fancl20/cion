@@ -72,9 +72,6 @@ func (v Verifier) Verify(ctx context.Context, signedMsg *cryptopb.SignedMessage,
 	if ia.IsWildcard() {
 		return nil, serrors.New("ISD-AS must not contain wildcard", "isd_as", ia)
 	}
-	if v.Engine == nil {
-		return nil, serrors.New("nil engine that provides cert chains")
-	}
 	id := cppki.TRCID{ISD: ia.ISD(),
 		Base:   scrypto.Version(keyID.TrcBase),   // nolint - name from published protobuf
 		Serial: scrypto.Version(keyID.TrcSerial), // nolint - name from published protobuf

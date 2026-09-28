@@ -25,7 +25,7 @@ func TestDirectoryStoreContract(t *testing.T) {
 }
 
 // TestDirectoryStoreIgnoresRetiredFields checks the store's leniency toward
-// proposal 0006's stored shape: a stored entry carrying the retired port and
+// the older stored shape: a stored entry carrying the retired port and
 // underlay fields decodes with them ignored, and a re-publish replaces it
 // with the new shape.
 func TestDirectoryStoreIgnoresRetiredFields(t *testing.T) {
@@ -36,7 +36,7 @@ func TestDirectoryStoreIgnoresRetiredFields(t *testing.T) {
 	}
 	db := store.(*directoryDB).db
 	key := mustKey()
-	// An entry as proposal 0006 stored it: gatewayPort and underlay beside
+	// An entry in the older stored shape: gatewayPort and underlay beside
 	// the fields that remain.
 	old := `{"publicKey":"` + hex.EncodeToString(key[:]) + `",` +
 		`"gatewayPort":30045,"underlay":"192.0.2.1","overlay":"100.64.1.0/24"}`

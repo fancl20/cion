@@ -27,18 +27,18 @@ import (
 	"github.com/fancl20/cion/pkg/trust"
 )
 
-// EnrollmentMinInterval is the chain-renewal door's rate cap: the least
-// pause between admissions of one source — the rendezvous acceptor's own
-// cap the shape (proposal 0015).
+// EnrollmentMinInterval is the chain-renewal door's rate cap: the least pause
+// between admissions of one source — the rendezvous acceptor's own cap the
+// shape.
 const EnrollmentMinInterval = time.Second
 
 // TrustService implements the trust material and chain renewal RPCs of the
-// control endpoint. The segment service RPCs it embeds unimplemented come
-// from SegmentService, which takes precedence in the Services composition.
-// Admission is the provider's alone (ADR-0009): enrollment is reachable only
-// over paths, paths exist only over established links, and the loaded
-// provider admits every link — the acceptor's policy is where the decision
-// lives, and this service's own check is the name-taken one.
+// control endpoint. The segment service RPCs it embeds unimplemented come from
+// SegmentService, which takes precedence in the Services composition.
+// Admission is the provider's alone: enrollment is reachable only over paths,
+// paths exist only over established links, and the loaded provider admits
+// every link — the acceptor's policy is where the decision lives, and this
+// service's own check is the name-taken one.
 type TrustService struct {
 	control_planeconnect.UnimplementedSegmentCreationServiceHandler
 	control_planeconnect.UnimplementedSegmentRegistrationServiceHandler
@@ -49,11 +49,10 @@ type TrustService struct {
 	// Issuer signs certificate chains. It is nil on nodes that do not issue
 	// chains — everything but the founding core, in this milestone.
 	Issuer *trust.Issuer
-	// Authorizer gates first issuance (ADR-0010): it is asked exactly when
-	// possession is verified and no chain exists for the name, never on a
-	// same-key renewal. The same seam answers host registration on the
-	// coordination application. Nil is open admission — the zero-conf
-	// default.
+	// Authorizer gates first issuance: it is asked exactly when possession is
+	// verified and no chain exists for the name, never on a same-key renewal. The
+	// same seam answers host registration on the coordination application. Nil is
+	// open admission — the zero-conf default.
 	Authorizer enrollauth.AdmissionAuthorizer
 	// MinInterval is the least pause between admissions of one source at the
 	// renewal door; zero uses the default.
@@ -63,11 +62,11 @@ type TrustService struct {
 	byAddr      sourceLimiter[netip.AddrPort]
 	byIA        sourceLimiter[addr.IA]
 	// renewalMtx serializes the renewal transaction — the name check, the
-	// authorizer's question, the issuance, and the insert hold it together —
-	// so two concurrent first issuances of one free name cannot both pass
-	// the check. A Telegram prompt's send holds a later renewal behind it
-	// for as long as its timeout; issuance is rare enough that the queue is
-	// the honest price of one name, one chain (proposal 0015).
+	// authorizer's question, the issuance, and the insert hold it together — so
+	// two concurrent first issuances of one free name cannot both pass the check.
+	// A Telegram prompt's send holds a later renewal behind it for as long as its
+	// timeout; issuance is rare enough that the queue is the honest price of one
+	// name, one chain.
 	renewalMtx sync.Mutex
 }
 
@@ -107,8 +106,8 @@ func (s *TrustService) TRC(
 }
 
 // checkNameTaken rejects a renewal for an ISD-AS that already holds an
-// unexpired chain under a different subject key: the name is taken (ADR-0008's
-// enrollment gate). It reports whether the same key already holds the name —
+// unexpired chain under a different subject key: the name is taken. It
+// reports whether the same key already holds the name —
 // the chain's own holder renewing — for the authorizer is asked on the free
 // name alone.
 func (s *TrustService) checkNameTaken(
@@ -145,8 +144,8 @@ func (s *TrustService) checkNameTaken(
 		serrors.New("ISD-AS already holds a chain under another key", "isd_as", ia))
 }
 
-// authorizeFirstIssuance puts the authorizer's one question where ADR-0010
-// places it: possession verified, the name free, the verdict on the facts
+// authorizeFirstIssuance asks the authorizer's one question at its moment:
+// possession verified, the name free, the verdict on the facts
 // the exchange established decides. Allow returns nil, deny answers
 // PermissionDenied, and pending Unavailable — a verdict the joiner's
 // enrollment retry loop consumes without change. Both refusals are logged
@@ -189,12 +188,11 @@ func (s *TrustService) authorizeFirstIssuance(
 	}
 }
 
-// admit spends one rate slot of the renewal door: one admission per
-// interval keyed by the request's SCION source address — the
-// return-routable fact the context carries — with the claimed ISD-AS as the
-// key when the context carries no address. The cap's work is bounding, not
-// authenticating; each invented identity costs its slot, and no second
-// request is in flight (proposal 0015).
+// admit spends one rate slot of the renewal door: one admission per interval
+// keyed by the request's SCION source address — the return-routable fact the
+// context carries — with the claimed ISD-AS as the key when the context
+// carries no address. The cap's work is bounding, not authenticating; each
+// invented identity costs its slot, and no second request is in flight.
 func (s *TrustService) admit(ctx context.Context, ia addr.IA) bool {
 	s.limiterOnce.Do(func() {
 		interval := s.MinInterval
@@ -285,9 +283,8 @@ func (s *TrustService) ChainRenewal(
 		return nil, connect.NewError(connect.CodeInvalidArgument,
 			serrors.Wrap("extracting ISD-AS from CSR", err))
 	}
-	// The door's rate cap, ahead of the work and the mutex: one admission
-	// per interval per source bounds the unauthenticated exchange whatever
-	// it asks (proposal 0015).
+	// The door's rate cap, ahead of the work and the mutex: one admission per
+	// interval per source bounds the unauthenticated exchange whatever it asks.
 	if !s.admit(ctx, ia) {
 		return nil, connect.NewError(connect.CodeResourceExhausted,
 			serrors.New("source exceeds the enrollment admission rate", "isd_as", ia))
@@ -297,9 +294,9 @@ func (s *TrustService) ChainRenewal(
 	// authorizer's latency.
 	s.renewalMtx.Lock()
 	defer s.renewalMtx.Unlock()
-	// The enrollment gate of self-picked ISD-ASes (ADR-0008): a name that
-	// already holds an unexpired chain under a different subject key is
-	// taken. Renewals by the same key pass untouched.
+	// The enrollment gate of self-picked ISD-ASes: a name that already holds an
+	// unexpired chain under a different subject key is taken. Renewals by the
+	// same key pass untouched.
 	now := time.Now()
 	renewal, err := s.checkNameTaken(ctx, ia, csr, now)
 	if err != nil {
@@ -311,8 +308,8 @@ func (s *TrustService) ChainRenewal(
 		return nil, connect.NewError(connect.CodeInvalidArgument,
 			errors.New("request is not signed by the CSR subject key"))
 	}
-	// First issuance alone asks the authorizer (ADR-0010); the holder of
-	// the name renews without a prompt.
+	// First issuance alone asks the authorizer; the holder of the name renews
+	// without a prompt.
 	if !renewal {
 		if err := s.authorizeFirstIssuance(ctx, ia, csr); err != nil {
 			return nil, err
@@ -346,7 +343,7 @@ func (s *TrustService) ChainRenewal(
 
 // sourceLimiter rate-caps admissions per key: one admission per interval,
 // refills over time, and stops tracking keys once silent — the rendezvous
-// acceptor's own limiter the shape (proposal 0015).
+// acceptor's own limiter the shape.
 type sourceLimiter[K comparable] struct {
 	interval time.Duration
 

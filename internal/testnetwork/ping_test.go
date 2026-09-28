@@ -118,12 +118,12 @@ func TestPingForkTopology(t *testing.T) {
 	}
 }
 
-// TestPingLineMiddleNode is proposal 0025's line episode: on A(core)—B—C
-// the middle node B is pinged from below — C→B, the composition the old
-// same-origin rule built by revisiting the destination, which the inbound
-// check rejected — and pings below itself — B→C — with the reported hops
-// exactly the two ASes and the core absent from the road. Replies ride the
-// reversed arrival paths, and the line's existing episodes pass unchanged.
+// TestPingLineMiddleNode is the line episode: on A(core)—B—C
+// the middle node B is pinged from below — C→B, the composition that
+// revisits the destination — and pings below itself — B→C — with the
+// reported hops exactly the two ASes and the core absent from the road.
+// Replies ride the reversed arrival paths, and the line's existing
+// episodes pass unchanged.
 func TestPingLineMiddleNode(t *testing.T) {
 	t.Parallel()
 	wpki := NewWebPKI(t)
@@ -200,10 +200,9 @@ func TestPingLineMiddleNode(t *testing.T) {
 	run(a, lineCIA, c.ControlIP, 3, 1)
 }
 
-// TestPingSiblingNodes is proposal 0025's sibling episode: on the fork with
+// TestPingSiblingNodes is the sibling episode: on the fork with
 // a parent — A(core)—B, B—C, B—D — the siblings C and D ping each other and
-// the reported hops meet at their parent B, the core absent from the road
-// that today detours through it.
+// the reported hops meet at their parent B, the core absent from the road.
 func TestPingSiblingNodes(t *testing.T) {
 	t.Parallel()
 	iaD := addr.MustIAFrom(20, 0xff0000000004)

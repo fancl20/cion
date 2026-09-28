@@ -2,6 +2,7 @@ package scion
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/scionproto/scion/pkg/addr"
@@ -14,7 +15,7 @@ import (
 
 // PathProvider composes up, core, and down segments into end-to-end SCION
 // paths — reversal, expiry filtering, and segment combination written once —
-// and is the only consumer seam of ADR-0004: the control transport and every
+// and is the segments' only consumer seam: the control transport and every
 // application consume identical paths through it.
 type PathProvider struct {
 	// IA is the local ISD-AS.
@@ -26,10 +27,10 @@ type PathProvider struct {
 	// lookup service, so that linking the library does not link the
 	// control plane.
 	Lookup func(ctx context.Context, dst addr.IA) []*pathdb.Segment
-	// Bootstrap yields the reversed data-plane path of the freshest
-	// unverified beacon originating at a core: the enrollment route of a
-	// node that has not pinned the TRC yet — the WebPKI-authenticated
-	// channel protects that exchange (proposal 0004).
+	// Bootstrap yields the reversed data-plane path of the freshest unverified
+	// beacon originating at a core: the enrollment route of a node that has not
+	// pinned the TRC yet — the WebPKI-authenticated channel protects that
+	// exchange.
 	Bootstrap func(core addr.IA) *spath.Decoded
 	// Cores enumerates the core ASes of an ISD named by the pinned TRC.
 	Cores func(isd addr.ISD) []addr.IA
@@ -89,7 +90,7 @@ func (p *PathProvider) Path(ctx context.Context, dst addr.IA) (*spath.Decoded, e
 	var best *spath.Decoded
 	var bestRank joinRank
 	var crossing *spath.Decoded
-	consider := func(up *pathdb.Segment, mUp int, down *pathdb.Segment, mDown int) {
+	consider := func(up *pathdb.Segment, mUp int, down *pathdb.Segment, mDown int) error {
 		var parts []*spath.Decoded
 		clean := true
 		// A meeting at the local node carries no up part: the reversed up
@@ -97,7 +98,7 @@ func (p *PathProvider) Path(ctx context.Context, dst addr.IA) (*spath.Decoded, e
 		if up != nil && mUp < len(up.PCB.Entries)-1 {
 			part, err := up.PCB.ReversePathTo(mUp)
 			if err != nil {
-				return
+				return fmt.Errorf("reversing the up segment: %w", err)
 			}
 			parts = append(parts, part)
 			clean = !p.crossesFrom(up, mUp)
@@ -107,25 +108,20 @@ func (p *PathProvider) Path(ctx context.Context, dst addr.IA) (*spath.Decoded, e
 		if mDown < len(down.PCB.Entries)-1 {
 			part, err := down.PCB.ForwardPathFrom(mDown)
 			if err != nil {
-				return
+				return fmt.Errorf("forwarding the down segment: %w", err)
 			}
 			parts = append(parts, part)
 			clean = clean && !p.crossesFrom(down, mDown)
 		}
-		if len(parts) == 0 {
-			// The meeting is both the local node and the destination, which
-			// the equal-destination guard excluded; unreachable.
-			return
-		}
 		path, err := segment.Compose(parts...)
 		if err != nil {
-			return
+			return fmt.Errorf("composing the joined path: %w", err)
 		}
 		if !clean {
 			if crossing == nil {
 				crossing = path
 			}
-			return
+			return nil
 		}
 		rank := joinRank{
 			hops:    len(path.HopFields),
@@ -141,20 +137,25 @@ func (p *PathProvider) Path(ctx context.Context, dst addr.IA) (*spath.Decoded, e
 		if best == nil || rank.before(bestRank) {
 			best, bestRank = path, rank
 		}
+		return nil
 	}
 	for _, down := range downs {
 		// The local node's own entry on the down segment is a meeting no up
 		// segment names — the core the segment starts at, or an AS below it
 		// the node happens to be.
 		if mDown := down.PCB.IndexOfIA(p.IA); mDown >= 0 {
-			consider(nil, -1, down, mDown)
+			if err := consider(nil, -1, down, mDown); err != nil {
+				return nil, err
+			}
 		}
 		for _, up := range ups {
 			mUp, mDown, ok := meeting(up, down)
 			if !ok {
 				continue
 			}
-			consider(up, mUp, down, mDown)
+			if err := consider(up, mUp, down, mDown); err != nil {
+				return nil, err
+			}
 		}
 	}
 	if best != nil {

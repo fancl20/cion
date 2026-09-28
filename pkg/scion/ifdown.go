@@ -91,9 +91,6 @@ func (c *InterfaceDownCache) Record(sig InterfaceDownSignal) {
 // Holds reports whether an interface is signaled down and the entry has not
 // lapsed.
 func (c *InterfaceDownCache) Holds(ia addr.IA, ifID uint16) bool {
-	if c == nil {
-		return false
-	}
 	c.mtx.Lock()
 	defer c.mtx.Unlock()
 	expiry, ok := c.signaled[ifDownKey{ia: ia, ifID: ifID}]
@@ -115,9 +112,6 @@ func (c *InterfaceDownCache) Empty() bool {
 
 // HoldsAny reports whether any live entry remains.
 func (c *InterfaceDownCache) HoldsAny() bool {
-	if c == nil {
-		return false
-	}
 	c.mtx.Lock()
 	defer c.mtx.Unlock()
 	now := time.Now()

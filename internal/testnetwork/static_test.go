@@ -40,13 +40,13 @@ func writeStaticSet(t *testing.T, path string, entries ...staticLink) {
 	}
 }
 
-// TestStaticLabByLinkSet is the file provider's integration proof (ADR
-// 0007): a three-node line — the founding core A, the middle B, and C below
-// — paired by link-set files only: no rendezvous acceptor, no node
-// directory, no selection loop runs anywhere. They beacon, forward, and
-// answer echo end to end; identity completes from the files, the founding
-// core started first; and removing an entry from B's file retires the link
-// as a generation swap the surviving traffic rides through.
+// TestStaticLabByLinkSet is the file provider's integration proof: a
+// three-node line — the founding core A, the middle B, and C below — paired by
+// link-set files only: no rendezvous acceptor, no node directory, no selection
+// loop runs anywhere. They beacon, forward, and answer echo end to end;
+// identity completes from the files, the founding core started first; and
+// removing an entry from B's file retires the link as a generation swap the
+// surviving traffic rides through.
 func TestStaticLabByLinkSet(t *testing.T) {
 	t.Parallel()
 	wpki := NewWebPKI(t)
@@ -156,10 +156,10 @@ func TestStaticLabByLinkSet(t *testing.T) {
 }
 
 // TestStaticEnrollmentByAuthorizer checks the admission boundary the
-// enrollment authorizer now is (ADR-0010): the file provider's operator
-// vouch admits the link — no acceptor reads any policy — while the core's
-// CIDR authorizer bounds enrollment, a joiner whose source address no
-// listed prefix contains never enrolling. No allowlist exists anywhere.
+// enrollment authorizer now is: the file provider's operator vouch admits the
+// link — no acceptor reads any policy — while the core's CIDR authorizer
+// bounds enrollment, a joiner whose source address no listed prefix contains
+// never enrolling. No allowlist exists anywhere.
 func TestStaticEnrollmentByAuthorizer(t *testing.T) {
 	t.Parallel()
 	wpki := NewWebPKI(t)

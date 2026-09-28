@@ -1,6 +1,6 @@
 // Package links stores the neighbor table: one entry per neighbor, holding
 // the addresses, interface IDs, and state of the link. The store is the one
-// source of truth ADR-0008 names — the control plane reads snapshots of it,
+// source of truth — the control plane reads snapshots of it,
 // and every data plane generation is built from its non-retired entries.
 // Beneath the contract, one package per implementation — the bbolt store
 // under the state directory, the memory store for tests and embeddings that

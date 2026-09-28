@@ -7,8 +7,8 @@ import (
 )
 
 // ASType is the tiered role of an AS, coupling the spec's core, voting, and
-// authoritative properties (ADR-0002). The type decides which key material a
-// node generates on first start.
+// authoritative properties. The type decides which key material a node
+// generates on first start.
 type ASType int
 
 const (

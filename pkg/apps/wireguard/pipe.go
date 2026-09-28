@@ -15,8 +15,8 @@ const pipeDepth = 256
 
 // pipe is an in-process packet pipe: wireguard-go's device interface with a
 // kernel TUN's two halves as channels. The router reads packets the device
-// decrypted from outbound and queues packets to encrypt on inbound; nothing
-// in the operating system ever holds overlay state (ADR-0005).
+// decrypted from outbound and queues packets to encrypt on inbound; nothing in
+// the operating system ever holds overlay state.
 type pipe struct {
 	name string
 	mtu  int

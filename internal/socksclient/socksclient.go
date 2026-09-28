@@ -1,8 +1,8 @@
 // Package socksclient is the minimal RFC 1928 client double the SOCKS
-// service's suites exercise — the only SOCKS client written in-tree
-// (proposal 0024): standard clients are the compatibility surface, and
-// nothing here grows past the dialect the service pins — method none,
-// CONNECT, UDP ASSOCIATE, whole datagrams.
+// service's suites exercise — the only SOCKS client written in-tree: standard
+// clients are the compatibility surface, and nothing here grows past the
+// dialect the service pins — method none, CONNECT, UDP ASSOCIATE, whole
+// datagrams.
 package socksclient
 
 import (

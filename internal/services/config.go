@@ -12,7 +12,7 @@ import (
 	"github.com/fancl20/cion/pkg/dataplane"
 )
 
-// Default run arguments: a restart needs none of them (ADR-0008).
+// Default run arguments: a restart needs none of them.
 const (
 	// DefaultState is the state directory's default.
 	DefaultState = "/var/lib/cion"
@@ -24,9 +24,9 @@ const (
 )
 
 // NodeConfig is the node's run arguments — everything the retiring
-// configuration file carried, as arguments with defaults: identity, links,
-// and the forwarding key come from the state directory, where the first
-// start generates them (ADR-0008).
+// configuration file carried, as arguments with defaults: identity, links, and
+// the forwarding key come from the state directory, where the first start
+// generates them.
 type NodeConfig struct {
 	// Core marks the founding core: TRC genesis, issuer, self-enrollment. It
 	// takes no neighbor.
@@ -44,22 +44,20 @@ type NodeConfig struct {
 	// additional entries, idempotent by remote address. They select the
 	// measured topology provider, which loads by default.
 	Neighbors []string
-	// LinkSet points at the file provider's link-set (ADR 0009): neighbor
-	// ISD-ASes with the links' two underlay addresses, reconciled into the
-	// store as the operator's vouch. It refuses to combine with --neighbor,
-	// and it never carries identity, keys, or bind addresses — those stay
-	// run arguments and state.
+	// LinkSet points at the file provider's link-set: neighbor ISD-ASes with the
+	// links' two underlay addresses, reconciled into the store as the operator's
+	// vouch. It refuses to combine with --neighbor, and it never carries
+	// identity, keys, or bind addresses — those stay run arguments and state.
 	LinkSet string
 	// State is the state directory; Internal and Control are the bind
 	// addresses.
 	State    string
 	Internal string
 	Control  string
-	// EnrollAuth selects the enrollment authorizer that gates first
-	// issuance (ADR-0010), "method=spec": "cidrs" with a comma-separated
-	// prefix list, "telegram" with <chat>:<token>. Empty is open enrollment
-	// — the zero-conf default — and the argument refuses to load without
-	// --core, the only node that issues chains.
+	// EnrollAuth selects the enrollment authorizer that gates first issuance,
+	// "method=spec": "cidrs" with a comma-separated prefix list, "telegram" with
+	// <chat>:<token>. Empty is open enrollment — the zero-conf default — and the
+	// argument refuses to load without --core, the only node that issues chains.
 	EnrollAuth string
 	// TelegramAPI overrides the Telegram Bot API's base URL for the
 	// telegram method of EnrollAuth; empty uses the public one. The
@@ -69,19 +67,18 @@ type NodeConfig struct {
 	// by no one, candidate for no one's floor.
 	BehindNAT bool
 	// Slice is the node's slice of the tailnet range, 100.64.0.0/10, e.g.
-	// "100.64.1.0/24" (proposal 0024): the space the coordination service
-	// allocates the node's hosts from, the slice's first address the
-	// node's own — the SOCKS service's serving address. Empty runs no
-	// WireGuard or SOCKS application.
+	// "100.64.1.0/24": the space the coordination service allocates the node's
+	// hosts from, the slice's first address the node's own — the SOCKS service's
+	// serving address. Empty runs no WireGuard or SOCKS application.
 	Slice string
 	// HostPort is the shared host-facing UDP port every host dials;
 	// required with Slice.
 	HostPort uint16
 	// Coordination overrides the coordination endpoint's placement for the
-	// integration harness (proposal 0022): the loopback address its core
-	// serves on and the relay every node's presence dials, standing in for
-	// the production derivation from the core's domain. Nil serves the
-	// endpoint on the core's control host at the default port.
+	// integration harness: the loopback address its core serves on and the relay
+	// every node's presence dials, standing in for the production derivation from
+	// the core's domain. Nil serves the endpoint on the core's control host at
+	// the default port.
 	Coordination *CoordinationOptions
 	// RootCAs anchors the WebPKI verification of the core's domain
 	// certificate; nil uses the system roots. The integration tests inject
@@ -168,8 +165,7 @@ func (c NodeConfig) Validate() error {
 		}
 	}
 	if c.Slice != "" {
-		// The slice's grammar is the one the retired configuration file
-		// narrowed (proposal 0022): a prefix the tailnet range contains.
+		// The slice's grammar: a prefix the tailnet range contains.
 		subnet, err := netip.ParsePrefix(c.Slice)
 		if err != nil {
 			return fmt.Errorf("parsing --slice %q: %w", c.Slice, err)

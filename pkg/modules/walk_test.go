@@ -1,5 +1,5 @@
-// Package modules is the node's pluggable surface (ADR-0013): every seam
-// the tree names, filed as a module — the contract at the module's root,
+// Package modules is the node's pluggable surface: every seam the tree
+// names, filed as a module — the contract at the module's root,
 // the implementations one package each beneath, a shared contract suite
 // every implementation runs, and the kind (storage, policy, or source)
 // declared in the module's own document. This package is the check that

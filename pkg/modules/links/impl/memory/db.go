@@ -95,17 +95,16 @@ func (d *DB) All(ctx context.Context) ([]*links.Link, error) {
 
 // ByRemote returns the live entry whose remote or rendezvous address matches.
 func (d *DB) ByRemote(ctx context.Context, remote netip.AddrPort) (*links.Link, error) {
-	entries, err := d.All(ctx)
-	if err != nil {
-		return nil, err
-	}
-	for _, l := range entries {
+	d.mtx.Lock()
+	defer d.mtx.Unlock()
+	for _, l := range d.entries {
 		if !l.Live() {
 			continue
 		}
 		if (l.Remote.IsValid() && l.Remote == remote) ||
 			(l.Rendezvous.IsValid() && l.Rendezvous == remote) {
-			return l, nil
+			copied := *l
+			return &copied, nil
 		}
 	}
 	return nil, nil
@@ -113,13 +112,12 @@ func (d *DB) ByRemote(ctx context.Context, remote netip.AddrPort) (*links.Link, 
 
 // ByNeighbor returns the live entry of the neighbor.
 func (d *DB) ByNeighbor(ctx context.Context, ia addr.IA) (*links.Link, error) {
-	entries, err := d.All(ctx)
-	if err != nil {
-		return nil, err
-	}
-	for _, l := range entries {
+	d.mtx.Lock()
+	defer d.mtx.Unlock()
+	for _, l := range d.entries {
 		if l.Live() && l.NeighborIA.Equal(ia) {
-			return l, nil
+			copied := *l
+			return &copied, nil
 		}
 	}
 	return nil, nil

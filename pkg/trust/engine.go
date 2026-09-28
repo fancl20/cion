@@ -24,7 +24,7 @@ const ChainRenewalThreshold = 24 * time.Hour
 // Engine composes the signer, verifier, and provider into the node's trust
 // interface: it signs control-plane messages with a signer backed by the
 // node's own chains, and verifies signatures against TRC-anchored chains
-// resolved through the provider (proposal 0004).
+// resolved through the provider.
 type Engine struct {
 	// IA is the node's ISD-AS.
 	IA addr.IA
@@ -53,7 +53,7 @@ func NewEngine(ia addr.IA, key crypto.Signer, provider Provider) *Engine {
 
 // Signer returns a signer backed by the node's newest chain valid now: the
 // algorithm is selected for the AS key, the TRC ID comes from the ISD's base
-// TRC, and validity and subject from the chain (proposal 0004).
+// TRC, and validity and subject from the chain.
 func (e *Engine) Signer(ctx context.Context) (Signer, error) {
 	now := time.Now()
 	chains, err := e.Provider.GetChains(ctx, trustdb.ChainQuery{
@@ -123,7 +123,7 @@ func (e *Engine) Verify(
 // signature whose verification key names another ISD-AS fails with the
 // mismatch named. The signed bytes of a beacon's AS entry claim the entry's
 // own ISD-AS; this form reads the claim back to the signer and refuses the
-// difference (proposal 0015).
+// difference.
 func (e *Engine) VerifyBound(
 	ctx context.Context,
 	ia addr.IA,

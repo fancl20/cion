@@ -23,7 +23,7 @@ import (
 )
 
 // setupControlPlane brings up the node's control plane, in phases: the state
-// databases and keys — the link store of proposal 0008 among them — the
+// databases and keys — the link store among them — the
 // trust role (the founding core's issuer or every other node's core client),
 // the messenger (trust engine and peer client), the BFD health monitor,
 // beaconing (the lookup, beaconer, and path provider closing their cycle),
@@ -245,15 +245,15 @@ func (n *node) wireTopology() {
 	})
 }
 
-// assembleMonitor builds the health monitor over the link store (ADR-0008's
-// ninth point, ADR-0009's core enumeration): a BFD session per serving link
-// whatever the loaded provider is doing — a neighbor's detection of the node
-// depends on the node answering its BFD, which makes answering a service of
-// the node itself. It is assembled before the first data plane generation,
-// so every generation finds a session per serving link, and the file
-// provider's nodes get them too: the monitor reads the store, not the
-// provider. The interface-down cache is assembled with it — the conns the
-// phases bind record the signals the data plane's egress-down branch sends.
+// assembleMonitor builds the health monitor over the link store: a BFD
+// session per serving link whatever the loaded provider is doing — a
+// neighbor's detection of the node depends on the node answering its BFD,
+// which makes answering a service of the node itself. It is assembled
+// before the first data plane generation, so every generation finds a
+// session per serving link, and the file provider's nodes get them too:
+// the monitor reads the store, not the provider. The interface-down cache
+// is assembled with it — the conns the phases bind record the signals the
+// data plane's egress-down branch sends.
 func (n *node) assembleMonitor() error {
 	monitor, err := controlplane.NewHealthMonitor(controlplane.HealthMonitorConfig{
 		IA:       n.ident.ia,
@@ -270,15 +270,14 @@ func (n *node) assembleMonitor() error {
 }
 
 // assembleEndpoint binds the control endpoint's socket and, on the core,
-// prepares its WebPKI certificate. Every node serves its ConnectRPC
-// services over HTTP/3 on the endpoint port — the drafts' beside the loaded
-// provider's mounts, the drafts' service resolution answering beside them
-// on the same socket — and the core's endpoint additionally serves the
-// bootstrap channel for clients offering its domain as the TLS server
-// name. Every core prepares the identity the same way (proposal 0023): the
-// node's HTTPS server — assembled after the applications mount — serves it
-// and answers the ACME TLS-ALPN challenge on it, so no core's TLS path
-// branches on an app's presence.
+// prepares its WebPKI certificate. Every node serves its ConnectRPC services
+// over HTTP/3 on the endpoint port — the drafts' beside the loaded provider's
+// mounts, the drafts' service resolution answering beside them on the same
+// socket — and the core's endpoint additionally serves the bootstrap channel
+// for clients offering its domain as the TLS server name. Every core prepares
+// the identity the same way: the node's HTTPS server — assembled after the
+// applications mount — serves it and answers the ACME TLS-ALPN challenge on
+// it, so no core's TLS path branches on an app's presence.
 func (n *node) assembleEndpoint(ctx context.Context) error {
 	if n.ident.asType == trust.ASTypeCore {
 		manager, err := webpki.PrepareTLSCert(ctx, webpki.TLSCertConfig{
@@ -339,16 +338,15 @@ func (n *node) scionConn(port uint16) (*scion.Conn, error) {
 	})
 }
 
-// coreRoute returns the route to the core this node enrolls with — the
-// drafts' own way of reaching one (ADR-0009): the one-hop path when a core
-// the pinned TRC names is a direct neighbor with its verdict up, addressed
-// to the core's control service; else the reversed freshest up segment —
-// or, before any is verified, the bootstrap beacon's route — addressed to
-// the core's control service the same way. The endpoint address the
-// greeting relay used to supply is resolved, not remembered: the drafts'
-// service resolution answers it at dial time. Local state only: resolving
-// a route inside a dial must not spawn RPCs over the transport being
-// dialed.
+// coreRoute returns the route to the core this node enrolls with — the drafts'
+// own way of reaching one: the one-hop path when a core the pinned TRC names
+// is a direct neighbor with its verdict up, addressed to the core's control
+// service; else the reversed freshest up segment — or, before any is verified,
+// the bootstrap beacon's route — addressed to the core's control service the
+// same way. The endpoint address is
+// resolved, not remembered: the drafts' service resolution answers it at dial
+// time. Local state only: resolving a route inside a dial must not spawn RPCs
+// over the transport being dialed.
 func (n *node) coreRoute() *scion.Addr {
 	// The one-hop shortcut: a core the TRC names, a direct neighbor, its
 	// verdict up — a link the monitor marked down falls through to the
@@ -365,9 +363,6 @@ func (n *node) coreRoute() *scion.Addr {
 	// At distance: the core the node's own beaconing stands behind — the
 	// freshest up segment's origin, or the bootstrap beacon's before any is
 	// verified — over the reversed segment.
-	if n.pathProvider == nil || n.beaconer == nil {
-		return nil
-	}
 	for _, core := range []func() addr.IA{n.freshestUpCore, n.beaconer.BootstrapCore} {
 		if coreIA := core(); !coreIA.IsZero() {
 			if path, err := n.pathProvider.LocalPath(coreIA); err == nil {
@@ -382,6 +377,7 @@ func (n *node) coreRoute() *scion.Addr {
 func (n *node) coreASes() map[addr.IA]bool {
 	ias, err := n.engine.CoreASes(n.ident.ia.ISD())
 	if err != nil {
+		slog.Error("Enumerating the core ASes", "err", err)
 		return nil
 	}
 	set := make(map[addr.IA]bool, len(ias))
@@ -397,6 +393,7 @@ func (n *node) coreASes() map[addr.IA]bool {
 func (n *node) freshestUpCore() addr.IA {
 	segs, err := n.pathDB.Get(context.Background(), pathdb.Query{Type: pathdb.SegmentTypeUp})
 	if err != nil {
+		slog.Error("Reading the path database", "err", err)
 		return 0
 	}
 	var core addr.IA

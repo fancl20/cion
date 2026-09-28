@@ -149,12 +149,10 @@ func (a *App) serveRelay(asc *association) {
 		if err != nil {
 			return
 		}
-		udp, ok := from.(*net.UDPAddr)
-		if !ok || udp.IP == nil {
-			continue
-		}
-		peer, _ := netip.AddrFromSlice(udp.IP)
-		a.datagram(asc, netip.AddrPortFrom(peer.Unmap(), uint16(udp.Port)), buf[:n])
+		udp := from.(*net.UDPAddr)
+		peer := netip.AddrPortFrom(netip.AddrFrom4([4]byte(udp.IP)),
+			uint16(udp.Port))
+		a.datagram(asc, peer, buf[:n])
 	}
 }
 

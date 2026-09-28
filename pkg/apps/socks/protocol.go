@@ -13,7 +13,7 @@ import (
 	"syscall"
 )
 
-// The SOCKS dialect (RFC 1928), pinned end to end by ADR-0012: method none
+// The SOCKS dialect (RFC 1928): method none
 // is the one offer — tailnet reachability is the admission, hosts existing
 // only through registration at the one seam; CONNECT and UDP ASSOCIATE are
 // the two commands served, BIND refused; a datagram with FRAG set is
@@ -82,9 +82,6 @@ func (d destination) String() string {
 // terminates is IPv4, the outbound legs the node's own sockets.
 func (d destination) resolve() (netip.AddrPort, error) {
 	if d.name == "" {
-		if !d.ip.IsValid() {
-			return netip.AddrPort{}, errors.New("no destination address")
-		}
 		return netip.AddrPortFrom(d.ip, d.port), nil
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), egressDialTimeout)

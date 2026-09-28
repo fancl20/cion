@@ -30,9 +30,9 @@ import (
 
 // serveCoordination serves the application's handler on an externally
 // assembled HTTPS server over the given certificate, bound on a free port —
-// the node assembly's own shape (proposal 0023): the listener and the TLS
-// identity the server's, the three surfaces the application's. The address
-// is bound before the call returns, so a client may dial at once.
+// the node assembly's own shape: the listener and the TLS identity the
+// server's, the three surfaces the application's. The address is bound before
+// the call returns, so a client may dial at once.
 func serveCoordination(t *testing.T, a *App, tlsCfg *tls.Config) string {
 	t.Helper()
 	clone := tlsCfg.Clone()

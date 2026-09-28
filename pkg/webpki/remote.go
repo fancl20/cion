@@ -1,4 +1,4 @@
-// Package webpki is ADR-0003's bootstrap channel as a shared library: the
+// Package webpki is the bootstrap channel as a shared library: the
 // ACME certificate management of the core's endpoint and the WebPKI-verified
 // client of the core's control endpoint, serving the enrollment lifecycle
 // from outside the drafts' subset. The enrollment lifecycle keeps driving it
@@ -78,12 +78,11 @@ type CoreClientConfig struct {
 	Conn *scion.Conn
 	// RootCAs anchors the TLS verification; nil means the system roots.
 	RootCAs *x509.CertPool
-	// Locator resolves the core's SCION address: its IA, the destination —
-	// the core's control service as a service destination, or an underlay
-	// address — and path — the one-hop path when the core is a neighbor,
-	// else the reversed freshest up segment (proposal 0004). It is
-	// consulted at dial time, so later dials pick up fresh paths. Nil falls
-	// back to SetCore.
+	// Locator resolves the core's SCION address: its IA, the destination — the
+	// core's control service as a service destination, or an underlay address —
+	// and path — the one-hop path when the core is a neighbor, else the reversed
+	// freshest up segment. It is consulted at dial time, so later dials pick up
+	// fresh paths. Nil falls back to SetCore.
 	Locator func() *scion.Addr
 	// ResolveService resolves a service-destined locator through the drafts'
 	// service discovery (control plane draft, Section 5): the request the

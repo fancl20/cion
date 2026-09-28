@@ -25,10 +25,8 @@ import (
 
 // PeerClient is the SCION-native channel's RPC client: ConnectRPC over HTTP/3
 // (QUIC) riding SCION paths, peers authenticated by AS certificate chains
-// verified against the pinned TRC (proposal 0004). The peer address carries
-// either a neighbor — sent over a one-hop path — or a SCION path supplied by
-// the provider.
-//
+// verified against the pinned TRC. The peer address carries either a neighbor
+// — sent over a one-hop path — or a SCION path supplied by the provider.
 // Beacons ride a client-authenticated channel whose server certificate is
 // not verified: their receivers may not be enrolled yet, and the PCB's
 // signatures authenticate the path authoritatively anyway. Registrations and
@@ -80,8 +78,7 @@ func NewPeerClient(cfg PeerClientConfig) *PeerClient {
 // (QUIC) riding the connection's SCION paths, presenting the node's chain as
 // the client certificate and — with verifyServer set — verifying the peer's
 // chain against the pinned TRC. The control endpoint's client machinery as a
-// library, the form the WireGuard application's directory client consumes
-// (proposal 0006).
+// library, the form the WireGuard application's directory client consumes.
 // Closing qclt releases the connections the client dials.
 func NewSCIONClient(
 	cfg PeerClientConfig,

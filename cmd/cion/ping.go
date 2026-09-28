@@ -31,8 +31,8 @@ func newPingCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "ping isd-as,[host]",
 		Short: "Ping a destination ISD-AS over the node's own data and control plane",
-		Long: "Ping a destination ISD-AS over the node's own assembled data and control plane " +
-			"(proposal 0005): boots the full node in place of serving from the state directory " +
+		Long: "Ping a destination ISD-AS over the node's own assembled data and control plane: " +
+			"boots the full node in place of serving from the state directory " +
 			"and the same run arguments as 'cion run', prints one line per reply plus a loss " +
 			"summary, and exits.",
 		Args: cobra.ExactArgs(1),
@@ -47,9 +47,9 @@ func newPingCommand() *cobra.Command {
 	return cmd
 }
 
-// runPing boots the full node in place of serving (proposal 0005): the
-// pinger's packets cross the data plane and its paths come from the node's
-// own beaconing, so the node serves underneath the run.
+// runPing boots the full node in place of serving: the pinger's packets cross
+// the data plane and its paths come from the node's own beaconing, so the node
+// serves underneath the run.
 func runPing(ctx context.Context, cfg services.NodeConfig, target string, opts *pingOptions) error {
 	dst, host, err := parsePingTarget(target)
 	if err != nil {

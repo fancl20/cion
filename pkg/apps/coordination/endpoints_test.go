@@ -48,10 +48,9 @@ func TestKeysPersist(t *testing.T) {
 	}
 }
 
-// TestCapabilityPin is the compatibility commitment's guard (ADR-0011):
-// the service advertises exactly the vendored client protocol's current
-// capability version, and a vendored upgrade that moves it moves this pin
-// or fails here.
+// TestCapabilityPin is the compatibility commitment's guard: the service
+// advertises exactly the vendored client protocol's current capability
+// version, and a vendored upgrade that moves it moves this pin or fails here.
 func TestCapabilityPin(t *testing.T) {
 	if servedCapabilityVersion != tailcfg.CurrentCapabilityVersion {
 		t.Fatalf("the served capability %d is not the vendored %d",

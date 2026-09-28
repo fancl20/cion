@@ -1,15 +1,13 @@
-// Package peeria is the peer-identity middleware of the SCION-native
-// channel (ADR 0009): the piece both sides of the node's boundary speak —
-// the core's endpoint, the topology application's services, and the
-// WireGuard directory all authenticate their peers with it. A shared
-// library: no loops of its own, no policy, only the verified chain's
-// ISD-AS.
+// Package peeria is the peer-identity middleware of the SCION-native channel:
+// the piece both sides of the node's boundary speak — the core's endpoint, the
+// topology application's services, and the WireGuard directory all
+// authenticate their peers with it. A shared library: no loops of its own, no
+// policy, only the verified chain's ISD-AS.
 package peeria
 
 import (
 	"context"
 	"crypto/x509"
-	"errors"
 	"net/http"
 
 	"github.com/scionproto/scion/pkg/addr"
@@ -52,8 +50,5 @@ func Authenticate(next http.Handler) http.Handler {
 
 // peerIA extracts the ISD-AS a verified chain's leaf names.
 func peerIA(chain []*x509.Certificate) (addr.IA, error) {
-	if len(chain) == 0 {
-		return addr.IA(0), errors.New("no peer certificate")
-	}
 	return cppki.ExtractIA(chain[0].Subject)
 }

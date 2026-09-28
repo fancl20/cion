@@ -35,18 +35,17 @@ import (
 
 // node is the fully wired CION node: data plane generations, the control
 // plane, the resident applications, and — loaded through the provider seam —
-// the topology machinery of ADR-0008 (ADR-0009), per proposals 0003-0008.
-// setupNode assembles it phase by phase; start launches its loops; Close
-// releases it.
+// the topology machinery. setupNode assembles it phase by phase; start
+// launches its loops; Close releases it.
 type node struct {
 	cfg   NodeConfig
 	ident identity
 	opts  DataplaneOptions
 
-	// topology is the loaded source module (ADR-0013): the measured
-	// provider by default, the file provider when --link-set names a
-	// link-set. It completes a first start's identity, seeds the store,
-	// mounts its services on the endpoint, and runs its loops under start.
+	// topology is the loaded source module: the measured provider by
+	// default, the file provider when --link-set names a link-set. It
+	// completes a first start's identity, seeds the store, mounts its
+	// services on the endpoint, and runs its loops under start.
 	topology topology.Provider
 
 	// Link state: the neighbor table as the one source of truth, and the
@@ -92,40 +91,38 @@ type node struct {
 	endpointConn *scion.Conn
 	webPKI       *tls.Config
 	certMgr      *webpki.CertManager
-	// httpsLn and httpsHandler are the node's HTTPS server (proposal
-	// 0023): the listener the assembly holds on internet HTTPS's port —
-	// answering the ACME TLS-ALPN challenge beside the mounted apps'
-	// handlers — and those handlers. nil when nothing binds: a non-core,
-	// or a static-file identity on a core whose apps mount nothing.
+	// httpsLn and httpsHandler are the node's HTTPS server: the listener the
+	// assembly holds on internet HTTPS's port — answering the ACME TLS-ALPN
+	// challenge beside the mounted apps' handlers — and those handlers. nil when
+	// nothing binds: a non-core, or a static-file identity on a core whose apps
+	// mount nothing.
 	httpsLn      net.Listener
 	httpsHandler http.Handler
 	services     *controlplane.Services
 	responder    *responder
 	wireguard    *wireguard.App
-	// coordination is the core's coordination application (ADR-0011),
-	// assembled beside the WireGuard application when the node's arguments
-	// name a wireguard configuration; nil on every other node. It owns no
-	// listener: its surfaces mount on the node's HTTPS server.
+	// coordination is the core's coordination application, assembled beside the
+	// WireGuard application when the node's arguments name a wireguard
+	// configuration; nil on every other node. It owns no listener: its surfaces
+	// mount on the node's HTTPS server.
 	coordination *coordination.App
-	// socks is the SOCKS application (ADR-0012), assembled beside the
-	// WireGuard application whose router it borrows whenever that one
-	// assembles; nil without it.
+	// socks is the SOCKS application, assembled beside the WireGuard application
+	// whose router it borrows whenever that one assembles; nil without it.
 	socks *socks.App
 	// subnet is the parsed --slice, the node's slice of the tailnet range
 	// the applications share.
 	subnet netip.Prefix
 
-	// enrollAuth gates the trust service's first issuance and the
-	// coordination application's registrations (ADR-0010, ADR-0011); nil
-	// is open admission. enrollRun launches the selected method's own
-	// loops — the Telegram authorizer's poll — nil when the method has
-	// none.
+	// enrollAuth gates the trust service's first issuance and the coordination
+	// application's registrations; nil is open admission. enrollRun launches the
+	// selected method's own loops — the Telegram authorizer's poll — nil when the
+	// method has none.
 	enrollAuth enrollauth.AdmissionAuthorizer
 	enrollRun  func(context.Context)
 }
 
 // identity is the node's decoded self: what every assembly phase needs from
-// the state directory, where the first start generated it (ADR-0008).
+// the state directory, where the first start generated it.
 type identity struct {
 	ia        addr.IA
 	asType    trust.ASType
@@ -169,12 +166,12 @@ func loadIdentity(cfg NodeConfig) (identity, bool, error) {
 	return identity{ia: ia, asType: asType, key: key, localHost: localHost}, created, nil
 }
 
-// selectProvider loads the source module the run arguments name
-// (ADR-0013): the measured implementation by default — loading it is what
-// makes a node zero-conf — the file one when --link-set names a link-set.
-// The provider
-// completes a first start's identity before the phases assemble, Wire
-// delivers the phases' products to it, and Seed, Mounts, and Run follow.
+// selectProvider loads the source module the run arguments name: the
+// measured implementation by default — loading it is what makes a node
+// zero-conf — the file one when --link-set names a link-set. The
+// provider completes a first start's identity before the phases
+// assemble, Wire delivers the phases' products to it, and Seed, Mounts,
+// and Run follow.
 func (n *node) selectProvider() error {
 	host, err := parseControlHost(n.cfg.Control)
 	if err != nil {
@@ -210,12 +207,12 @@ func (n *node) selectProvider() error {
 	return nil
 }
 
-// setupEnrollAuth loads the --enroll-auth selection (ADR-0010): the
-// authorizer the trust service asks at first issuance and, for a method
-// with loops of its own, the run that serves them. Unset is open enrollment;
-// Validate already refused the argument without --core, so a selected method
-// loads on the issuing node alone. The spec parses here once, so a malformed
-// one fails the boot, not the first joiner.
+// setupEnrollAuth loads the --enroll-auth selection: the authorizer the trust
+// service asks at first issuance and, for a method with loops of its own, the
+// run that serves them. Unset is open enrollment; Validate already refused the
+// argument without --core, so a selected method loads on the issuing node
+// alone. The spec parses here once, so a malformed one fails the boot, not the
+// first joiner.
 func (n *node) setupEnrollAuth() error {
 	if n.cfg.EnrollAuth == "" {
 		return nil
@@ -419,10 +416,9 @@ func (n *node) start(ctx context.Context) {
 		})
 	}
 	if n.httpsLn != nil {
-		// The node's HTTPS server (proposal 0023): the listener is held
-		// from assembly, and the certificate maintenance below launches
-		// only after it — a first issuance's probe finds the port
-		// answered.
+		// The node's HTTPS server: the listener is held from assembly, and the
+		// certificate maintenance below launches only after it — a first issuance's
+		// probe finds the port answered.
 		ln, handler := n.httpsLn, n.httpsHandler
 		runBackground(ctx, "https server", func(ctx context.Context) error {
 			return n.certMgr.ServeHTTPS(ctx, ln, handler)
@@ -456,11 +452,20 @@ func (n *node) linkEvidence(l *links.Link) bool {
 		return false
 	}
 	now := time.Now()
-	chains, err := n.trustDB.Chains(context.Background(), trustdb.ChainQuery{
+	chains := mustChains(n.trustDB, trustdb.ChainQuery{
 		IA:       l.NeighborIA,
 		Validity: cppki.Validity{NotBefore: now, NotAfter: now},
 	})
-	return err == nil && len(chains) > 0
+	return len(chains) > 0
+}
+
+// mustChains queries the trust database, panicking on a read failure.
+func mustChains(db trustdb.DB, q trustdb.ChainQuery) [][]*x509.Certificate {
+	chains, err := db.Chains(context.Background(), q)
+	if err != nil {
+		panic(fmt.Sprintf("querying the chains of %s: %v", q.IA, err))
+	}
+	return chains
 }
 
 // selfEnroll issues the core's own certificate chain locally, through the

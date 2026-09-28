@@ -106,7 +106,7 @@ func (i *Issuer) ensureCACert() (*x509.Certificate, error) {
 	i.mtx.Lock()
 	defer i.mtx.Unlock()
 	minExpiration := time.Now().Add(ASValidity)
-	if i.caCert != nil && i.caCert.NotAfter.After(minExpiration) {
+	if i.caCert.NotAfter.After(minExpiration) {
 		return i.caCert, nil
 	}
 	rootCert, err := rootCertificate(i.TRC)

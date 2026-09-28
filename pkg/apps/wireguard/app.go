@@ -28,12 +28,11 @@ import (
 // no kernel TUN exists to do it.
 const OverlayMTU = 1280
 
-// CION's private SCION service values (proposal 0007). The drafts' registry
-// names the low values — DS 0x0001, CS 0x0002, the wildcard 0x0010 — and the
-// SVC type's top bit is the multicast flag, so CION's own services take a
-// private slice above both, 0x7ff1 through 0x7fff. The drafts define no
-// WireGuard service: the values are CION's to allocate, the convention
-// proto/wireguard/v1 is.
+// CION's private SCION service values. The drafts' registry names the low
+// values — DS 0x0001, CS 0x0002, the wildcard 0x0010 — and the SVC type's top
+// bit is the multicast flag, so CION's own services take a private slice above
+// both, 0x7ff1 through 0x7fff. The drafts define no WireGuard service: the
+// values are CION's to allocate, the convention proto/wireguard/v1 is.
 const (
 	// SvcWireguard is the mesh transport service. Every node's application
 	// registers its mesh socket under this value in its own AS.
@@ -111,12 +110,11 @@ type Config struct {
 	PublishRetry    time.Duration
 }
 
-// App is the WireGuard application (proposals 0006 and 0022): the mesh
-// transport and directory, the one host-facing device behind its shared port
-// — programmed from the host entries the directory distributes — and the
-// in-process router between the tunnels, the surface a resident service
-// application borrows (ADR-0012). The node running it holds unprivileged
-// UDP sockets and its own state, and nothing else.
+// App is the WireGuard application: the mesh transport and directory, the one
+// host-facing device behind its shared port — programmed from the host entries
+// the directory distributes — and the in-process router between the tunnels,
+// the surface a resident service application borrows. The node running it
+// holds unprivileged UDP sockets and its own state, and nothing else.
 type App struct {
 	cfg Config
 	key PrivateKey
@@ -180,9 +178,6 @@ type svcReg struct {
 func New(cfg Config) (*App, error) {
 	if cfg.IA.IsZero() {
 		return nil, fmt.Errorf("no ISD-AS configured")
-	}
-	if !cfg.Subnet.IsValid() || !cfg.Subnet.Addr().Is4() {
-		return nil, fmt.Errorf("overlay subnet %s is not IPv4", cfg.Subnet)
 	}
 	if cfg.ListenPort == 0 {
 		return nil, fmt.Errorf("no listen port configured")
@@ -294,9 +289,9 @@ func validateSubnet(subnet netip.Prefix) error {
 	return nil
 }
 
-// Tailnet is the overlay's host space, the range every node's slice is a
-// slice of (ADR-0011): the tunnel carries it and nothing else — no default
-// route is advertised anywhere.
+// Tailnet is the overlay's host space, the range every node's slice is a slice
+// of: the tunnel carries it and nothing else — no default route is advertised
+// anywhere.
 var Tailnet = netip.MustParsePrefix("100.64.0.0/10")
 
 // register registers a socket's port as a SCION service in this AS and
@@ -335,10 +330,10 @@ func (a *App) release() {
 	}
 }
 
-// Router returns the overlay routing a resident service application borrows
-// (ADR-0012): the reply path its produced packets ride and the delivery
-// installation for the address it serves on. Without this application there
-// is nothing to borrow.
+// Router returns the overlay routing a resident service application borrows:
+// the reply path its produced packets ride and the delivery installation for
+// the address it serves on. Without this application there is nothing to
+// borrow.
 func (a *App) Router() Router { return a.router }
 
 // startHostDevice creates the one host device on the shared port's

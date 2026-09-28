@@ -1,9 +1,7 @@
 // Package measured is the topology source's measured implementation: the
 // rendezvous acceptor, the joiner's dials, the node directory, the in-band
-// link service, and the selection loop of ADR-0008 and proposal 0008. The
-// node's assembly loads it by default — loading it is what makes a node
-// zero-conf; nothing about its behavior differs from what the node itself
-// ran but its import path.
+// link service, and the selection loop. The node's assembly loads it by
+// default — loading it is what makes a node zero-conf.
 package measured
 
 import (
@@ -76,8 +74,7 @@ type Pacing struct {
 }
 
 // Provider is the measured provider, the node's configuration source by
-// default: loading it is what makes a node zero-conf. Its machinery runs
-// unchanged from ADR-0008 and proposal 0008.
+// default: loading it is what makes a node zero-conf.
 type Provider struct {
 	cfg Config
 	pcs topology.Pieces
@@ -327,10 +324,7 @@ func (z *Provider) Mounts() ([]controlplane.Mount, error) {
 // fetch, and the selection sweep.
 func (z *Provider) Run(ctx context.Context) {
 	if err := z.assemble(); err != nil {
-		// Mounts assembled the machinery already; a provider run without it
-		// keeps the error here rather than crashing the node.
-		slog.Error("Assembling the measured provider", "err", err)
-		return
+		panic(fmt.Sprintf("assembling the measured provider: %v", err))
 	}
 	if z.rendezvous != nil {
 		runLoop(ctx, "rendezvous", z.rendezvous.Run)

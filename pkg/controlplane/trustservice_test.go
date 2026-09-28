@@ -216,11 +216,11 @@ func TestTrustServiceChainRenewal(t *testing.T) {
 		}
 	})
 
-	// The enrollment gate of self-picked ISD-ASes (proposal 0008): a name
-	// that already holds an unexpired chain under a different subject key is
-	// taken; the holder's own renewal passes untouched. The door's cap is
-	// off — a microsecond admits every sequential ask — for these episodes
-	// exercise the checks, not the rate.
+	// The enrollment gate of self-picked ISD-ASes: a name that already holds an
+	// unexpired chain under a different subject key is taken; the holder's own
+	// renewal passes untouched. The door's cap is off — a microsecond admits
+	// every sequential ask — for these episodes exercise the checks, not the
+	// rate.
 	t.Run("taken name", func(t *testing.T) {
 		f := newTrustFixture(t)
 		svc := &TrustService{DB: f.db, Issuer: f.issuer, MinInterval: time.Microsecond}
@@ -280,7 +280,7 @@ func askContext() context.Context {
 		&scion.Addr{IA: nodeIATest, Addr: netip.MustParseAddrPort("198.51.100.7:41234")})
 }
 
-// TestTrustServiceEnrollmentAuthorizer checks the seam of ADR-0010: the
+// TestTrustServiceEnrollmentAuthorizer checks the enrollment seam: the
 // trust service asks the authorizer exactly at first issuance — never on a
 // same-key renewal, never on a taken name — with the request's own facts,
 // issuing on allow, refusing with PermissionDenied on deny, and answering
@@ -422,12 +422,11 @@ func TestTrustServiceEnrollmentAuthorizer(t *testing.T) {
 	})
 }
 
-// TestChainRenewalExtendingName checks the name's exactness (proposal
-// 0015): a chain held under a name that extends the petitioner's —
-// 20-ff00:0:1f beside 20-ff00:0:1 — neither takes the name nor renews it.
-// The colliding fingerprint does not read as a renewal — the chains share
-// the subject key — and the authorizer is asked on the first issuance the
-// free name allows.
+// TestChainRenewalExtendingName checks the name's exactness: a chain held
+// under a name that extends the petitioner's — 20-ff00:0:1f beside 20-ff00:0:1
+// — neither takes the name nor renews it. The colliding fingerprint does not
+// read as a renewal — the chains share the subject key — and the authorizer is
+// asked on the first issuance the free name allows.
 func TestChainRenewalExtendingName(t *testing.T) {
 	f := newTrustFixture(t)
 	auth := &askAuthorizer{verdict: enrollauth.AdmissionAllow}
@@ -495,7 +494,7 @@ func sourceContext(port string) context.Context {
 		&scion.Addr{IA: nodeIATest, Addr: netip.MustParseAddrPort("198.51.100.7:" + port)})
 }
 
-// TestChainRenewalSerialized checks the transaction of proposal 0015: two
+// TestChainRenewalSerialized checks the name transaction: two
 // concurrent first issuances of one free name — different sources, both
 // admitted by the door — yield one chain and one AlreadyExists, whatever
 // the authorizer's latency; the name-taken check settles the loser on its
@@ -567,7 +566,7 @@ func TestChainRenewalSerialized(t *testing.T) {
 	}
 }
 
-// TestChainRenewalRateCap checks the door of proposal 0015: one admission
+// TestChainRenewalRateCap checks the admission door: one admission
 // per interval per source — the request's SCION source address the key, the
 // claimed ISD-AS when the context carries none — the second inside the
 // interval answering ResourceExhausted and a different source passing.

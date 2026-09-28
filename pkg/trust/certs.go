@@ -14,8 +14,8 @@ import (
 	"github.com/scionproto/scion/pkg/scrypto/cppki"
 )
 
-// Recommended validity periods of the trust material (proposal 0003; PKI
-// draft, Section 2.5). There is no automated renewal yet: an expired node
+// Recommended validity periods of the trust material (PKI draft,
+// Section 2.5). There is no automated renewal yet: an expired node
 // re-runs enrollment, and a new base TRC means redeploying.
 const (
 	TRCValidity     = 365 * 24 * time.Hour
@@ -25,12 +25,11 @@ const (
 	ASValidity      = 3 * 24 * time.Hour
 	signingBackdate = -1 * time.Minute
 
-	// ChainRetention is how long an expired chain outlives its expiry before
-	// the trust database's sweep deletes it: skew tolerance, the
-	// signingBackdate's minute enlarged to cover the fetch it guards — a peer
-	// whose clock trails by less than the window still fetches from the node
-	// the chain under which, on that peer's clock, the node's signatures
-	// still verify (proposal 0018).
+	// ChainRetention is how long an expired chain outlives its expiry before the
+	// trust database's sweep deletes it: skew tolerance, the signingBackdate's
+	// minute enlarged to cover the fetch it guards — a peer whose clock trails by
+	// less than the window still fetches from the node the chain under which, on
+	// that peer's clock, the node's signatures still verify.
 	ChainRetention = time.Hour
 )
 

@@ -13,10 +13,10 @@ import (
 	"github.com/fancl20/cion/pkg/segment"
 )
 
-// SegmentService implements the segment RPCs of the control endpoint
-// (ADR-0004): beacon reception on SegmentCreationService, down-segment
-// registration on SegmentRegistrationService, and the source-AS
-// segment-request handler on SegmentLookupService.
+// SegmentService implements the segment RPCs of the control endpoint: beacon
+// reception on SegmentCreationService, down-segment registration on
+// SegmentRegistrationService, and the source-AS segment-request handler on
+// SegmentLookupService.
 type SegmentService struct {
 	// Beaconer receives and verifies beacons and registrations.
 	Beaconer *Beaconer
