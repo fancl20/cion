@@ -39,7 +39,7 @@ func TestDirectoryStoreIgnoresRetiredFields(t *testing.T) {
 	// An entry in the older stored shape: gatewayPort and underlay beside
 	// the fields that remain.
 	old := `{"publicKey":"` + hex.EncodeToString(key[:]) + `",` +
-		`"gatewayPort":30045,"underlay":"192.0.2.1","overlay":"100.64.1.0/24"}`
+		`"gatewayPort":51820,"underlay":"192.0.2.1","overlay":"100.64.1.0/24"}`
 	if err := db.Update(func(tx *bbolt.Tx) error {
 		return tx.Bucket(entriesBucket).Put([]byte("20-ff00:0:1"), []byte(old))
 	}); err != nil {

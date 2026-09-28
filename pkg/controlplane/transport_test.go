@@ -164,7 +164,7 @@ func (n *testNode) linkTable() map[uint16]addr.IA {
 func TestPeerAuthorityRoundTrip(t *testing.T) {
 	ia := addr.MustIAFrom(20, 0xff0000000021)
 	for _, peer := range []*scion.Addr{
-		{IA: ia, Addr: netip.MustParseAddrPort("192.0.2.7:30044")},
+		{IA: ia, Addr: netip.MustParseAddrPort("192.0.2.7:30042")},
 		{IA: ia, Service: addr.SVC(0x7ff2)},
 	} {
 		got, err := peerFromAuthority(PeerAuthority(peer))

@@ -290,8 +290,8 @@ func TestConnServiceWithoutBackend(t *testing.T) {
 // as ISD-AS and address, a service destination as ISD-AS and service value.
 func TestAddrString(t *testing.T) {
 	ia := addr.MustIAFrom(20, 0xff0000000031)
-	underlay := &Addr{IA: ia, Addr: netip.MustParseAddrPort("192.0.2.7:30045")}
-	if want := ia.String() + ",192.0.2.7:30045"; underlay.String() != want {
+	underlay := &Addr{IA: ia, Addr: netip.MustParseAddrPort("192.0.2.7:40001")}
+	if want := ia.String() + ",192.0.2.7:40001"; underlay.String() != want {
 		t.Errorf("underlay string = %q, want %q", underlay.String(), want)
 	}
 	service := &Addr{IA: ia, Service: addr.SVC(0x7ff1)}

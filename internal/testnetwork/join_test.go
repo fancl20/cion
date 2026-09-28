@@ -2,7 +2,10 @@ package testnetwork
 
 import (
 	"context"
+	"net"
 	"net/netip"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -304,5 +307,47 @@ func TestBootstrapWithoutAnswer(t *testing.T) {
 	})
 	if got := d.app.IA().ISD(); got != a.app.IA().ISD() {
 		t.Errorf("the joiner's ISD = %d, want the network's %d", got, a.app.IA().ISD())
+	}
+}
+
+// heldHostSlot hands out the loopback hosts above the labs' static slots,
+// one per run: the failed boot's proof leaks its node's endpoint socket —
+// the loops' own sockets release with the process, not the failed setup —
+// so a repeated run's copy on the same host would find that port held and
+// fail for the wrong reason.
+var heldHostSlot atomic.Uint32
+
+// TestHeldHostPortRefusesBoot checks the default's failure mode: a boot
+// against a shared port another socket already holds — the machine's
+// existing WireGuard interface — fails loudly at the bind, the argument's
+// override the remedy.
+func TestHeldHostPortRefusesBoot(t *testing.T) {
+	t.Parallel()
+	wpki := NewWebPKI(t)
+	ip := addrIP(byte(0x80 + heldHostSlot.Add(1)))
+	held, err := net.ListenUDP("udp",
+		net.UDPAddrFromAddrPort(netip.AddrPortFrom(ip, services.DefaultHostPort)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = held.Close() }()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	_, err = services.BootApp(ctx, services.NodeConfig{
+		Core:     true,
+		Domain:   TestDomain,
+		State:    t.TempDir(),
+		Internal: FreeUDPAddrOn(t, ip),
+		Control:  FreeUDPAddrOn(t, ip),
+		CertFile: wpki.certFile,
+		KeyFile:  wpki.keyFile,
+		HostPort: services.DefaultHostPort,
+	})
+	if err == nil {
+		t.Fatal("a boot against a held shared port succeeded")
+	}
+	if want := "binding the host port"; !strings.Contains(err.Error(), want) {
+		t.Errorf("the boot's refusal = %v, want it to name %q", err, want)
 	}
 }

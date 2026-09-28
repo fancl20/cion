@@ -171,3 +171,20 @@ for.
     hosts dial the shared port unasked.
 
 ## Implementation history
+
+*   Proposal 0029 landed first, so the accommodation is its branch: the
+    host port's gate reads the zero test alone
+    ([wireguard.go](/internal/services/wireguard.go)), no pairing left to
+    keep its shape.
+*   The literals the plan left unnamed found their numbers: the wireguard
+    bind suite's peer underlay addresses and the SCION address suite's
+    string fixture left the block for an arbitrary port
+    ([bind_test.go](/pkg/apps/wireguard/bind_test.go),
+    [conn_test.go](/pkg/scion/conn_test.go)), and the retired-shape
+    fixture's gatewayPort carries the conventional 51820
+    ([db_test.go](/pkg/apps/wireguard/impl/bbolt/db_test.go)).
+*   The defaulted-port proofs live in the coordination and wireguard labs
+    ([coordination_test.go](/internal/testnetwork/coordination_test.go),
+    [wireguard_test.go](/internal/testnetwork/wireguard_test.go)), the
+    held-port refusal in
+    [join_test.go](/internal/testnetwork/join_test.go).

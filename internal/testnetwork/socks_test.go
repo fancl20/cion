@@ -117,8 +117,9 @@ func TestEgressSocksService(t *testing.T) {
 	wpki := packageWebPKI
 	place := placeCoordination(t)
 	// The lab takes its own loopback hosts: every node binds the fixed
-	// control-endpoint port on its host, so a host shared with another lab
-	// is a bind collision whenever the two run concurrently.
+	// control-endpoint, rendezvous, and shared host ports on its host, so a
+	// host shared with another lab is a bind collision whenever the two run
+	// concurrently.
 	a := coordCore(t, wpki, addrIP(0x57), place, nil)
 	b := coordLeaf(t, wpki, addrIP(0x58), a, place, nil)
 	t.Cleanup(func() {

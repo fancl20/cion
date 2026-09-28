@@ -53,7 +53,7 @@ func directoryEntryPB(control, rendezvous string) *nodev1.Entry {
 // records.
 func TestDirectoryPublishRecordsAuthenticatedIA(t *testing.T) {
 	svc := &DirectoryService{Store: NewDirectoryStore()}
-	entry := directoryEntryPB("192.0.2.7:30043", "192.0.2.7:30045")
+	entry := directoryEntryPB("192.0.2.7:30042", "192.0.2.7:30043")
 	entry.IsdAs = uint64(addr.MustIAFrom(20, 0xfd0000000099)) // a false claim
 	if err := directoryPublish(context.Background(), svc, directoryIA, entry); err != nil {
 		t.Fatal(err)
@@ -65,22 +65,22 @@ func TestDirectoryPublishRecordsAuthenticatedIA(t *testing.T) {
 	if len(entries) != 1 || !entries[0].IA.Equal(directoryIA) {
 		t.Fatalf("entries = %v, want the authenticated %v only", entries, directoryIA)
 	}
-	if entries[0].ControlAddr != netip.MustParseAddrPort("192.0.2.7:30043") {
+	if entries[0].ControlAddr != netip.MustParseAddrPort("192.0.2.7:30042") {
 		t.Errorf("control address = %v", entries[0].ControlAddr)
 	}
-	if entries[0].RendezvousAddr != netip.MustParseAddrPort("192.0.2.7:30045") {
+	if entries[0].RendezvousAddr != netip.MustParseAddrPort("192.0.2.7:30043") {
 		t.Errorf("rendezvous address = %v", entries[0].RendezvousAddr)
 	}
 
 	if err := directoryPublish(context.Background(), svc, addr.IA(0),
-		directoryEntryPB("192.0.2.7:30043", "192.0.2.7:30045")); err == nil {
+		directoryEntryPB("192.0.2.7:30042", "192.0.2.7:30043")); err == nil {
 		t.Error("a publish without an authenticated ISD-AS was recorded")
 	}
 	if err := directoryPublish(context.Background(), svc, directoryIA, nil); err == nil {
 		t.Error("a publish without an entry was recorded")
 	}
 	if err := directoryPublish(context.Background(), svc, directoryIA,
-		directoryEntryPB("nope", "192.0.2.7:30045")); err == nil {
+		directoryEntryPB("nope", "192.0.2.7:30043")); err == nil {
 		t.Error("a publish with a malformed address was recorded")
 	}
 }
@@ -92,19 +92,19 @@ func TestDirectoryExpiry(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		svc := &DirectoryService{Store: NewDirectoryStore()}
 		if err := directoryPublish(context.Background(), svc, directoryIA,
-			directoryEntryPB("192.0.2.7:30043", "192.0.2.7:30045")); err != nil {
+			directoryEntryPB("192.0.2.7:30042", "192.0.2.7:30043")); err != nil {
 			t.Fatal(err)
 		}
 		other := addr.MustIAFrom(20, 0xfd0000000042)
 		if err := directoryPublish(context.Background(), svc, other,
-			directoryEntryPB("192.0.2.8:30043", "192.0.2.8:30045")); err != nil {
+			directoryEntryPB("192.0.2.8:30042", "192.0.2.8:30043")); err != nil {
 			t.Fatal(err)
 		}
 
 		// A refresh of the first publisher only.
 		time.Sleep(NodeDirectoryTTL / 2)
 		if err := directoryPublish(context.Background(), svc, directoryIA,
-			directoryEntryPB("192.0.2.7:30043", "192.0.2.7:30045")); err != nil {
+			directoryEntryPB("192.0.2.7:30042", "192.0.2.7:30043")); err != nil {
 			t.Fatal(err)
 		}
 		time.Sleep(NodeDirectoryTTL)

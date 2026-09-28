@@ -15,11 +15,17 @@ import (
 const (
 	// DefaultState is the state directory's default.
 	DefaultState = "/var/lib/cion"
-	// DefaultInternal is the internal address's default.
-	DefaultInternal = "127.0.0.1:30042"
+	// DefaultInternal is the internal address's default: the loopback at the
+	// underlay block's bottom, the port that binds the node alone — a peer
+	// cannot observe the internal link's number.
+	DefaultInternal = "127.0.0.1:30044"
 	// DefaultControl is the control address's default; its host carries the
-	// control service, rendezvous, and directory sockets.
-	DefaultControl = "127.0.0.1:30044"
+	// control, rendezvous, and directory sockets at the endpoint's port.
+	DefaultControl = "127.0.0.1:30042"
+	// DefaultHostPort is the host-facing port's default, the WireGuard
+	// ecosystem's conventional port; zero is the explicit refusal, running
+	// no host-serving application.
+	DefaultHostPort = 51820
 )
 
 // NodeConfig is the node's run arguments — everything the retiring

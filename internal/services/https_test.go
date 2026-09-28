@@ -130,7 +130,7 @@ func TestAssembleHTTPSBind(t *testing.T) {
 // unbound, as the tree behaves today, and a non-core holds no identity to
 // serve at all.
 func TestAssembleHTTPSNoBind(t *testing.T) {
-	n := &node{cfg: NodeConfig{Control: "127.0.0.1:30044"}, certMgr: staticCertMgr(t)}
+	n := &node{cfg: NodeConfig{Control: "127.0.0.1:30042"}, certMgr: staticCertMgr(t)}
 	if err := n.assembleHTTPS(); err != nil {
 		t.Fatalf("assembleHTTPS() = %v, want nil", err)
 	}
@@ -156,7 +156,7 @@ func TestAssembleHTTPSWildcardRefused(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = app.Close() })
 	n := &node{
-		cfg:          NodeConfig{Control: "0.0.0.0:30044"},
+		cfg:          NodeConfig{Control: "0.0.0.0:30042"},
 		certMgr:      staticCertMgr(t),
 		coordination: app,
 	}

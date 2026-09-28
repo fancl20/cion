@@ -69,7 +69,7 @@ func TestServiceResolutionUnregistered(t *testing.T) {
 // transport's address served, unknown transports ignored per the drafts, and
 // a missing or malformed port an error rather than an address.
 func TestParseResolutionResponse(t *testing.T) {
-	quic := &control_plane.Transport{Address: "192.0.2.10:30044"}
+	quic := &control_plane.Transport{Address: "192.0.2.10:30042"}
 	raw, err := proto.Marshal(&control_plane.ServiceResolutionResponse{
 		Transports: map[string]*control_plane.Transport{
 			TransportQUIC: quic,
@@ -83,7 +83,7 @@ func TestParseResolutionResponse(t *testing.T) {
 	if !ok {
 		t.Fatal("a response with the QUIC transport did not parse")
 	}
-	if want := netip.MustParseAddrPort("192.0.2.10:30044"); got != want {
+	if want := netip.MustParseAddrPort("192.0.2.10:30042"); got != want {
 		t.Errorf("parsed address = %v, want %v", got, want)
 	}
 

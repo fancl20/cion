@@ -48,8 +48,8 @@ var (
 func entryOf(ia addr.IA) DirectoryEntry {
 	return DirectoryEntry{
 		IA:             ia,
-		ControlAddr:    netip.MustParseAddrPort("127.0.0.1:30043"),
-		RendezvousAddr: netip.MustParseAddrPort("127.0.0.1:30045"),
+		ControlAddr:    netip.MustParseAddrPort("127.0.0.1:30042"),
+		RendezvousAddr: netip.MustParseAddrPort("127.0.0.1:30043"),
 	}
 }
 
@@ -58,7 +58,7 @@ func entryOf(ia addr.IA) DirectoryEntry {
 func scopedEntry(ia addr.IA, rendezvous string) DirectoryEntry {
 	return DirectoryEntry{
 		IA:             ia,
-		ControlAddr:    netip.MustParseAddrPort("127.0.0.1:30044"),
+		ControlAddr:    netip.MustParseAddrPort("127.0.0.1:30042"),
 		RendezvousAddr: netip.MustParseAddrPort(rendezvous),
 	}
 }
@@ -96,7 +96,7 @@ func newSelFixture(t *testing.T, neighbors ...addr.IA) *selFixture {
 			Window:  time.Hour, // the candidate sweep never retires in these
 			// The viewer sits on loopback, so the loopback entries below
 			// share its scope and pass the loop's filter.
-			ControlAddr: netip.MustParseAddrPort("127.0.0.1:30044"),
+			ControlAddr: netip.MustParseAddrPort("127.0.0.1:30042"),
 		},
 		streaks: make(map[addr.IA]*peerStreak),
 		probeFn: func(_ context.Context, e DirectoryEntry, _ *links.Link) measurement {
@@ -530,11 +530,11 @@ func TestSelectionSweepGrace(t *testing.T) {
 func TestSelectionScopeFilter(t *testing.T) {
 	newDirectory := func() ([]addr.IA, map[addr.IA]string) {
 		return []addr.IA{selA, selB, selC, selD, selE}, map[addr.IA]string{
-			selA: "192.0.2.10:30045",  // global
-			selB: "127.0.0.5:30045",   // loopback
-			selC: "192.168.1.5:30045", // private
-			selD: "100.64.0.5:30045",  // the CGNAT shared range
-			selE: "169.254.0.5:30045", // link-local
+			selA: "192.0.2.10:30043",  // global
+			selB: "127.0.0.5:30043",   // loopback
+			selC: "192.168.1.5:30043", // private
+			selD: "100.64.0.5:30043",  // the CGNAT shared range
+			selE: "169.254.0.5:30043", // link-local
 		}
 	}
 
@@ -562,7 +562,7 @@ func TestSelectionScopeFilter(t *testing.T) {
 
 	// The global viewer: the global entries alone.
 	f = newSelFixture(t)
-	f.sel.cfg.ControlAddr = netip.MustParseAddrPort("203.0.113.7:30044")
+	f.sel.cfg.ControlAddr = netip.MustParseAddrPort("203.0.113.7:30042")
 	ias, rendezvous = newDirectory()
 	for _, ia := range ias {
 		f.directory = append(f.directory, scopedEntry(ia, rendezvous[ia]))

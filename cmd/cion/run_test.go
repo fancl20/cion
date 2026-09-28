@@ -70,7 +70,7 @@ func TestRunArgumentsParse(t *testing.T) {
 
 	opts, err = parseNodeArgs(t, "local",
 		"--domain", "core.example.org",
-		"--neighbor", "192.0.2.7:30045",
+		"--neighbor", "192.0.2.7:30043",
 		"--state", "/var/lib/cion2",
 	)
 	if err != nil {
@@ -82,11 +82,28 @@ func TestRunArgumentsParse(t *testing.T) {
 	if opts.Domain != "core.example.org" {
 		t.Errorf("--domain = %q", opts.Domain)
 	}
-	if len(opts.Neighbors) != 1 || opts.Neighbors[0] != "192.0.2.7:30045" {
+	if len(opts.Neighbors) != 1 || opts.Neighbors[0] != "192.0.2.7:30043" {
 		t.Errorf("--neighbor = %v", opts.Neighbors)
 	}
 	if opts.State != "/var/lib/cion2" {
 		t.Errorf("--state = %q", opts.State)
+	}
+	// The unpassed arguments hold their defaults: the host port's 51820, the
+	// addresses the swapped block's.
+	if opts.HostPort != 51820 {
+		t.Errorf("the host port's default = %d, want 51820", opts.HostPort)
+	}
+	if opts.Internal != services.DefaultInternal || opts.Control != services.DefaultControl {
+		t.Errorf("the address defaults = %q, %q", opts.Internal, opts.Control)
+	}
+
+	// Zero is the explicit refusal of the host-serving applications.
+	opts, err = parseNodeArgs(t, "local", "--host-port=0")
+	if err != nil {
+		t.Fatalf("parsing the refused host port: %v", err)
+	}
+	if opts.HostPort != 0 {
+		t.Errorf("--host-port=0 = %d, want the refusal", opts.HostPort)
 	}
 
 	// The commands themselves carry their role's partition.
@@ -98,7 +115,7 @@ func TestRunArgumentsParse(t *testing.T) {
 	}
 	if err := newRunLocalCommand().Flags().Parse([]string{
 		"--domain", "core.example.org",
-		"--neighbor", "192.0.2.7:30045",
+		"--neighbor", "192.0.2.7:30043",
 	}); err != nil {
 		t.Errorf("parsing run local's own surface: %v", err)
 	}
@@ -178,8 +195,8 @@ func TestRunArgumentsValidate(t *testing.T) {
 		Core:     true,
 		Domain:   "core.example.org",
 		State:    "/var/lib/cion",
-		Internal: "127.0.0.1:30042",
-		Control:  "127.0.0.1:30044",
+		Internal: "127.0.0.1:30044",
+		Control:  "127.0.0.1:30042",
 	}
 	valid := base
 	valid.HostPort = 51820

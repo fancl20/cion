@@ -13,5 +13,7 @@ package controlplane
 // EndpointPort is the SCION UDP port of the control endpoint — the socket
 // registered as the control service, so a peer addressing the service
 // destination reaches the endpoint beside whose services the drafts'
-// resolution exchange answers.
-const EndpointPort = 30044
+// resolution exchange answers. It sits one step below the SCION endhost
+// port in the underlay block's ladder, the slot every peer depends on: the
+// drafts' own services, the node's most settled protocol.
+const EndpointPort = 30042
