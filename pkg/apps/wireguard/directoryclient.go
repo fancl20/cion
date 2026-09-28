@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/netip"
 	"sync"
 
 	"connectrpc.com/connect"
@@ -86,16 +87,24 @@ func (c *rpcDirectoryClient) client() (wireguardv1connect.DirectoryServiceClient
 	return c.clt, nil
 }
 
-// Publish records the node's entry with the core.
-func (c *rpcDirectoryClient) Publish(ctx context.Context, entry Entry) error {
+// Publish records the node's entry with the core and answers with the
+// store's assignment: the slice the publication placed.
+func (c *rpcDirectoryClient) Publish(ctx context.Context, entry Entry) (netip.Prefix, error) {
 	clt, err := c.client()
 	if err != nil {
-		return err
+		return netip.Prefix{}, err
 	}
-	_, err = clt.Publish(ctx, connect.NewRequest(&wireguardv1.PublishRequest{
+	resp, err := clt.Publish(ctx, connect.NewRequest(&wireguardv1.PublishRequest{
 		Entry: entry.pb(),
 	}))
-	return err
+	if err != nil {
+		return netip.Prefix{}, err
+	}
+	subnet, err := netip.ParsePrefix(resp.Msg.OverlaySubnet)
+	if err != nil {
+		return netip.Prefix{}, fmt.Errorf("parsing the assigned slice: %w", err)
+	}
+	return subnet, nil
 }
 
 // List fetches the directory from the core, nodes and hosts together.

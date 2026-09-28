@@ -107,7 +107,8 @@ func registerHost(t *testing.T, core *Node, host wireguard.HostEntry) {
 }
 
 // startWireguardNodes brings up the two-node WireGuard topology: the core A
-// and the leaf B, meshed over their seeded link.
+// and the leaf B, meshed over their seeded link, each holding the slice the
+// directory assigned its publication.
 func startWireguardNodes(t *testing.T, ipA, ipB netip.Addr) (*Node, *Node) {
 	t.Helper()
 	wpki := NewWebPKI(t)
@@ -115,34 +116,70 @@ func startWireguardNodes(t *testing.T, ipA, ipB netip.Addr) (*Node, *Node) {
 	a := StartNode(t, NodeConfig{
 		IA: wireguardA, Host: ipA, Core: true, WPKI: wpki,
 		Links: []Link{{Local: extA, Remote: extB, Neighbor: wireguardB}},
-		Wireguard: &WireguardOptions{
-			Subnet: "100.64.1.0/24",
-		},
+		Wireguard: &WireguardOptions{},
 	})
 	b := StartNode(t, NodeConfig{
 		IA: wireguardB, Host: ipB, WPKI: wpki,
 		Links: []Link{{Local: extB, Remote: extA, Neighbor: wireguardA}},
-		Wireguard: &WireguardOptions{
-			Subnet: "100.64.2.0/24",
-		},
+		Wireguard: &WireguardOptions{},
 	})
 	Poll(t, "A's mesh peer", func() bool { return hasMeshPeer(a.Wireguard, wireguardB) })
 	Poll(t, "B's mesh peer", func() bool { return hasMeshPeer(b.Wireguard, wireguardA) })
 	return a, b
 }
 
+// assignedSlice waits for the node's directory entry to carry its assigned
+// slice and returns it: the harness places its nodes by publication.
+func assignedSlice(t *testing.T, n *Node) netip.Prefix {
+	t.Helper()
+	Poll(t, "the node's assigned slice", func() bool {
+		return sliceOf(n).IsValid()
+	})
+	return sliceOf(n)
+}
+
+// sliceOf returns the slice the node's directory entry carries, invalid
+// while none does.
+func sliceOf(n *Node) netip.Prefix {
+	directory, err := n.Wireguard.Directory(context.Background())
+	if err != nil {
+		return netip.Prefix{}
+	}
+	for _, entry := range directory.Nodes {
+		if entry.IA.Equal(n.IA) {
+			return entry.Overlay
+		}
+	}
+	return netip.Prefix{}
+}
+
+// sliceHostAddr returns an address within the assigned /24 — the offset-th,
+// past the network's and the node's own.
+func sliceHostAddr(slice netip.Prefix, offset byte) netip.Addr {
+	b := slice.Masked().Addr().As4()
+	b[3] = offset
+	return netip.AddrFrom4(b)
+}
+
 // TestWireguardMeshExchange is the mesh proof on the tailnet boundary: the
-// host entries land in the core's registry, both nodes program their host
-// devices from their fetched directories, and a host exchanges ICMP through
-// its node's device, the mesh, and the far node's delivery to its own host.
+// host entries land in the core's registry — placed in the assigned slices —
+// both nodes program their host devices from their fetched directories, and
+// a host exchanges ICMP through its node's device, the mesh, and the far
+// node's delivery to its own host.
 func TestWireguardMeshExchange(t *testing.T) {
 	t.Parallel()
 	hostAKey, hostAPub := newHostKey(t)
 	hostBKey, hostBPub := newHostKey(t)
-	hostAAddr := netip.MustParseAddr("100.64.1.10")
-	hostBAddr := netip.MustParseAddr("100.64.2.10")
 
 	a, b := startWireguardNodes(t, addrIP(0x21), addrIP(0x22))
+	// The two placements are distinct — unique by construction — and the
+	// hosts' addresses come from them.
+	sliceA, sliceB := assignedSlice(t, a), assignedSlice(t, b)
+	if sliceA.Overlaps(sliceB) {
+		t.Fatalf("the assigned slices %s and %s overlap", sliceA, sliceB)
+	}
+	hostAAddr := sliceHostAddr(sliceA, 10)
+	hostBAddr := sliceHostAddr(sliceB, 10)
 	registerHost(t, a, wireguard.HostEntry{
 		PublicKey: hostAPub, Addr: hostAAddr, IA: wireguardA, Note: "test"})
 	registerHost(t, a, wireguard.HostEntry{

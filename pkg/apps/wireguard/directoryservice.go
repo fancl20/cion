@@ -38,7 +38,8 @@ var (
 
 // Publish records the caller's entry. The entry's ISD-AS is the
 // authenticated one; a claim of another ISD-AS is recorded under the
-// authenticated one all the same.
+// authenticated one all the same. The store assigns the slice — a claimed
+// overlay never enters — and the response answers with it.
 func (s *DirectoryService) Publish(
 	ctx context.Context,
 	req *connect.Request[wireguardv1.PublishRequest],
@@ -62,12 +63,15 @@ func (s *DirectoryService) Publish(
 			"authenticated", publisher, "claimed", entry.IA)
 	}
 	entry.IA = publisher
-	if err := s.Store.Publish(ctx, entry); err != nil {
+	recorded, err := s.Store.Publish(ctx, entry)
+	if err != nil {
 		return nil, connect.NewError(connect.CodeInternal,
 			fmt.Errorf("storing the entry: %w", err))
 	}
 	s.Cnt.published.Add(1)
-	return connect.NewResponse(&wireguardv1.PublishResponse{}), nil
+	return connect.NewResponse(&wireguardv1.PublishResponse{
+		OverlaySubnet: recorded.Overlay.String(),
+	}), nil
 }
 
 // List returns every published entry, nodes and hosts together.
@@ -91,21 +95,24 @@ func (s *DirectoryService) List(
 	return connect.NewResponse(resp), nil
 }
 
-// entryFromPB decodes a wire entry.
+// entryFromPB decodes a wire entry. A publish request's entry carries no
+// overlay — the store assigns the slice — while a listed entry always does.
 func entryFromPB(pb *wireguardv1.Entry) (Entry, error) {
 	var key PublicKey
 	if len(pb.PublicKey) != len(key) {
 		return Entry{}, fmt.Errorf("public key must be %d bytes", len(key))
 	}
 	copy(key[:], pb.PublicKey)
-	overlay, err := netip.ParsePrefix(pb.OverlaySubnet)
-	if err != nil {
-		return Entry{}, fmt.Errorf("parsing overlay subnet: %w", err)
-	}
 	entry := Entry{
 		IA:        addr.IA(pb.IsdAs),
 		PublicKey: key,
-		Overlay:   overlay,
+	}
+	if pb.OverlaySubnet != "" {
+		overlay, err := netip.ParsePrefix(pb.OverlaySubnet)
+		if err != nil {
+			return Entry{}, fmt.Errorf("parsing overlay subnet: %w", err)
+		}
+		entry.Overlay = overlay
 	}
 	if pb.HostEndpoint != "" {
 		endpoint, err := netip.ParseAddrPort(pb.HostEndpoint)
@@ -120,9 +127,11 @@ func entryFromPB(pb *wireguardv1.Entry) (Entry, error) {
 // pb encodes the entry for the wire.
 func (e Entry) pb() *wireguardv1.Entry {
 	pb := &wireguardv1.Entry{
-		IsdAs:         uint64(e.IA),
-		PublicKey:     e.PublicKey[:],
-		OverlaySubnet: e.Overlay.String(),
+		IsdAs:     uint64(e.IA),
+		PublicKey: e.PublicKey[:],
+	}
+	if e.Overlay.IsValid() {
+		pb.OverlaySubnet = e.Overlay.String()
 	}
 	if e.HostEndpoint.IsValid() {
 		pb.HostEndpoint = e.HostEndpoint.String()

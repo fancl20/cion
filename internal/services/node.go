@@ -9,7 +9,6 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
-	"net/netip"
 	"sync"
 	"time"
 
@@ -106,12 +105,13 @@ type node struct {
 	// configuration; nil on every other node. It owns no listener: its surfaces
 	// mount on the node's HTTPS server.
 	coordination *coordination.App
-	// socks is the SOCKS application, assembled beside the WireGuard application
-	// whose router it borrows whenever that one assembles; nil without it.
+	// socksMtx guards socks, which the serving loop assembles when the
+	// directory's assignment arrives — after start, not at setup.
+	socksMtx sync.Mutex
+	// socks is the SOCKS application, assembled beside the WireGuard
+	// application whose router it borrows, when the assigned slice arrives;
+	// nil until then and without the WireGuard application.
 	socks *socks.App
-	// subnet is the parsed --slice, the node's slice of the tailnet range
-	// the applications share.
-	subnet netip.Prefix
 
 	// enrollAuth gates the trust service's first issuance and the coordination
 	// application's registrations; nil is open admission. enrollRun launches the
@@ -295,9 +295,6 @@ func setupNode(ctx context.Context, cfg NodeConfig, opts DataplaneOptions) (n *n
 	if err = n.setupWireguard(); err != nil {
 		return n, err
 	}
-	if err = n.setupSocks(); err != nil {
-		return n, err
-	}
 	if err = n.setupCoordination(); err != nil {
 		return n, err
 	}
@@ -315,10 +312,14 @@ func (n *node) Close() {
 	if n.httpsLn != nil {
 		_ = n.httpsLn.Close()
 	}
-	if n.socks != nil {
+	n.socksMtx.Lock()
+	socks := n.socks
+	n.socks = nil
+	n.socksMtx.Unlock()
+	if socks != nil {
 		// Before the wireguard application, whose router the SOCKS
 		// application borrows its delivery and reply path from.
-		n.socks.Close()
+		socks.Close()
 	}
 	if n.coordination != nil {
 		// Before the wireguard application, whose store the coordination
@@ -445,10 +446,8 @@ func (n *node) start(ctx context.Context) {
 		runBackground(ctx, "wireguard", func(ctx context.Context) error {
 			return n.wireguard.Run(ctx)
 		})
-	}
-	if n.socks != nil {
 		runBackground(ctx, "socks", func(ctx context.Context) error {
-			return n.socks.Run(ctx)
+			return n.serveSocks(ctx)
 		})
 	}
 }

@@ -83,10 +83,9 @@ func TestAllocatePlacement(t *testing.T) {
 }
 
 // TestAllocateRefusals checks the allocator's two refusals: a full slice
-// refuses its node new hosts, and overlapping live slices — the operator's
-// error — refuse registrations into either, with the pair named, while a
-// clean slice beside them still takes hosts. An empty directory holds no
-// placement at all.
+// refuses its node new hosts, and an empty directory holds no placement at
+// all — the slices the directory assigns cannot overlap, so no third
+// refusal exists to name one.
 func TestAllocateRefusals(t *testing.T) {
 	// A full /29: network, node's own, five allocatable minus five issued.
 	// Sized so the issued set exhausts it exactly.
@@ -102,27 +101,6 @@ func TestAllocateRefusals(t *testing.T) {
 	}
 	if _, err := allocate(testHostKey(0x7f), full); err == nil {
 		t.Error("a full slice allocated, want refusal")
-	}
-
-	// Overlapping slices refuse with the pair named; the clean third slice
-	// beside them still takes the host.
-	overlap := wireguard.Directory{Nodes: []wireguard.Entry{
-		testNode(mustIA("1-ff00:0:1"), "100.64.1.0/24", "198.51.100.10:51820"),
-		testNode(mustIA("1-ff00:0:2"), "100.64.1.0/25", "198.51.100.20:51820"),
-		testNode(mustIA("1-ff00:0:3"), "100.64.3.0/24", "198.51.100.30:51820"),
-	}}
-	host, err := allocate(testHostKey(1), overlap)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !host.IA.Equal(mustIA("1-ff00:0:3")) {
-		t.Fatalf("placement beside overlaps = %s, want the clean 1-ff00:0:3", host.IA)
-	}
-	// With only the overlapping pair left, the refusal names it.
-	overlap.Nodes = overlap.Nodes[:2]
-	_, err = allocate(testHostKey(2), overlap)
-	if err == nil {
-		t.Fatal("an overlapping-slice directory allocated, want refusal")
 	}
 
 	if _, err := allocate(testHostKey(1), wireguard.Directory{}); err == nil {

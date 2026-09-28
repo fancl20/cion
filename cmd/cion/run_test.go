@@ -40,7 +40,6 @@ func TestRunArgumentsParse(t *testing.T) {
 		"--cert-file", "/tmp/cert.pem",
 		"--key-file", "/tmp/key.pem",
 		"--enroll-auth", "cidrs=192.0.2.0/24",
-		"--slice", "100.64.1.0/24",
 		"--host-port", "51820",
 		"--processors", "2",
 	)
@@ -61,9 +60,6 @@ func TestRunArgumentsParse(t *testing.T) {
 	}
 	if opts.EnrollAuth != "cidrs=192.0.2.0/24" {
 		t.Errorf("--enroll-auth = %q", opts.EnrollAuth)
-	}
-	if opts.Slice != "100.64.1.0/24" {
-		t.Errorf("--slice = %q", opts.Slice)
 	}
 	if opts.HostPort != 51820 {
 		t.Errorf("--host-port = %d", opts.HostPort)
@@ -124,7 +120,7 @@ func refuse(t *testing.T, command, flag string, flags *pflag.FlagSet) {
 // TestRunCommandsRefuseForeignArguments checks the partition's bookkeeping
 // the parse performs: each command refuses the other role's arguments as
 // unknown flags naming the argument, and the retired --core,
-// --wireguard-config, and --behind-nat are refused everywhere.
+// --wireguard-config, --behind-nat, and --slice are refused everywhere.
 func TestRunCommandsRefuseForeignArguments(t *testing.T) {
 	for _, command := range []struct {
 		name string
@@ -134,7 +130,9 @@ func TestRunCommandsRefuseForeignArguments(t *testing.T) {
 		{"run local", newRunLocalCommand()},
 		{"ping", newPingCommand()},
 	} {
-		for _, flag := range []string{"--core", "--wireguard-config", "--behind-nat"} {
+		for _, flag := range []string{
+			"--core", "--wireguard-config", "--behind-nat", "--slice",
+		} {
 			refuse(t, command.name, flag, command.cmd.Flags())
 		}
 	}
@@ -174,8 +172,7 @@ func TestRunCommandsPresetRole(t *testing.T) {
 }
 
 // TestRunArgumentsValidate checks the arguments' validation through the
-// node configuration they build: a slice the tailnet range contains and a
-// usable port.
+// node configuration they build: the host port alone carries.
 func TestRunArgumentsValidate(t *testing.T) {
 	base := services.NodeConfig{
 		Core:     true,
@@ -185,9 +182,11 @@ func TestRunArgumentsValidate(t *testing.T) {
 		Control:  "127.0.0.1:30044",
 	}
 	valid := base
-	valid.Slice = "100.64.1.0/24"
 	valid.HostPort = 51820
 	if err := valid.Validate(); err != nil {
-		t.Fatalf("the valid slice and port: %v", err)
+		t.Fatalf("the host port alone: %v", err)
+	}
+	if err := base.Validate(); err != nil {
+		t.Fatalf("a node that sets no host port: %v", err)
 	}
 }
