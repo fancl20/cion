@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/netip"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -39,11 +40,15 @@ type Config struct {
 	// start needs at least one, later starts seed additional entries,
 	// idempotent by remote address.
 	Neighbors []string
-	// BehindNAT publishes the node's reachability class as private:
-	// joinable by no one, candidate for no one's floor.
-	BehindNAT bool
-	// ControlHost is the control address's host: the rendezvous port, the
-	// directory's advertised addresses, and the probe claims sit on it.
+	// Domain is the founding core's own domain, the name its published host
+	// resolves from; the non-cores learn theirs from the rendezvous
+	// exchange instead.
+	Domain string
+	// StateDir persists the learned external host beside the identity;
+	// empty keeps it in memory alone.
+	StateDir string
+	// ControlHost is the control address's host: every socket binds it,
+	// the rendezvous port and the probe claims among them.
 	ControlHost netip.Addr
 	// NewConn binds a SCION connection on an ephemeral port: the socket the
 	// directory's publish and fetch ride on non-core nodes and the selection
@@ -79,6 +84,12 @@ type Provider struct {
 	cfg Config
 	pcs topology.Pieces
 
+	// external is the learned external host, persisted beside the identity
+	// so a restart republishes it; domain resolves the founding core's own
+	// published host from its domain.
+	external externalHost
+	domain   domainHost
+
 	// bootstrap is the first start's completed rendezvous, the seed it
 	// taught both sides landing complete.
 	bootstrap *bootstrapped
@@ -95,9 +106,53 @@ type Provider struct {
 	assembled      bool
 }
 
-// New builds the measured provider.
-func New(cfg Config) *Provider {
-	return &Provider{cfg: cfg}
+// New builds the measured provider, loading the learned external host a
+// previous run persisted.
+func New(cfg Config) (*Provider, error) {
+	host, err := loadExternalHost(cfg.StateDir)
+	if err != nil {
+		return nil, err
+	}
+	return &Provider{
+		cfg: cfg,
+		external: externalHost{
+			path:    externalHostPath(cfg.StateDir),
+			current: host,
+		},
+		domain: domainHost{domain: cfg.Domain, fallback: cfg.ControlHost},
+	}, nil
+}
+
+// externalHostPath returns the learned external host's file, empty for a
+// stateless provider.
+func externalHostPath(stateDir string) string {
+	if stateDir == "" {
+		return ""
+	}
+	return filepath.Join(stateDir, ExternalHostFile)
+}
+
+// learn records the external host a rendezvous reply observed for the node,
+// logging a persistence failure — the loops that learn have no error to
+// return.
+func (z *Provider) learn(host netip.Addr) {
+	if err := z.external.observe(host); err != nil {
+		slog.Error("Persisting the learned external host", "err", err)
+	}
+}
+
+// publishedHost resolves the host the node's own entry publishes: the
+// learned external host when one is recorded, else the control host. The
+// founding core — which dials no rendezvous — resolves its own domain, the
+// control host beside it as the fallback.
+func (z *Provider) publishedHost(ctx context.Context) netip.Addr {
+	if z.cfg.Core {
+		return z.domain.resolve(ctx)
+	}
+	if host := z.external.host(); host.IsValid() {
+		return host
+	}
+	return z.cfg.ControlHost
 }
 
 // bootstrapped is what a first-start joiner's rendezvous taught it: the
@@ -157,6 +212,7 @@ func (z *Provider) CompleteIdentity(ctx context.Context, ia addr.IA) (addr.IA, e
 		if err != nil {
 			return ia, fmt.Errorf("naming the bootstrap neighbor's entry: %w", err)
 		}
+		z.learn(reply.Observed.Addr())
 		z.bootstrap = &bootstrapped{target: target, reply: reply, local: local}
 		return ia, nil
 	}
@@ -262,12 +318,8 @@ func (z *Provider) assemble() error {
 		Changed:     z.cfg.Notify,
 	}
 	directoryCfg := NodeDirectoryConfig{
-		Entry: DirectoryEntry{
-			IA:             z.pcs.IA,
-			ControlAddr:    netip.AddrPortFrom(z.cfg.ControlHost, controlplane.EndpointPort),
-			RendezvousAddr: netip.AddrPortFrom(z.cfg.ControlHost, RendezvousPort),
-			Private:        z.cfg.BehindNAT,
-		},
+		IA:              z.pcs.IA,
+		Host:            z.publishedHost,
 		Engine:          z.pcs.Engine,
 		Provider:        z.pcs.Provider,
 		PublishInterval: z.cfg.Pacing.Directory,
@@ -367,6 +419,7 @@ func (z *Provider) selectionConfig() SelectionConfig {
 		ControlAddr: netip.AddrPortFrom(z.cfg.ControlHost, controlplane.EndpointPort),
 		LinkHost:    z.cfg.ControlHost,
 		Link:        &linkClient{peer: z.pcs.Peer},
+		Learn:       z.learn,
 		Evidence:    z.cfg.Evidence,
 		Changed:     z.cfg.Notify,
 		Interval:    z.cfg.Pacing.Selection,
@@ -413,6 +466,7 @@ func (z *Provider) dialJoins(ctx context.Context) {
 			slog.Debug("Rendezvous dial", "rendezvous", l.Rendezvous, "err", err)
 			continue
 		}
+		z.learn(reply.Observed.Addr())
 		l.NeighborIA = reply.IA
 		l.Remote = reply.LinkAddr
 		l.RemoteIfID = reply.IfID

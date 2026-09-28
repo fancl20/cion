@@ -235,3 +235,20 @@ join but cannot be joined are the translated ones no mapping serves.
     publishes and probes loopback-to-loopback, the exemption's own case.
 
 ## Implementation history
+
+*   The observed field and its tolerant parse live in
+    [rendezvous.go](/pkg/modules/topology/impl/measured/rendezvous.go),
+    the learned host's record and persistence and the core's domain
+    resolution in [external.go](/pkg/modules/topology/impl/measured/external.go),
+    the publication's resolved host in
+    [directory.go](/pkg/modules/topology/impl/measured/directory.go),
+    and the scope filter and the establishment guard in
+    [selection.go](/pkg/modules/topology/impl/measured/selection.go);
+    `--behind-nat` retires from the local registration
+    ([run_local.go](/cmd/cion/run_local.go)) and `private` from the wire
+    ([directory.proto](/proto/node/v1/directory.proto)).
+*   Divergence: [ADR-0008](/docs/adrs/0008-form-topology-with-measured-neighbor-selection.md)
+    and [proposal 0027](/docs/proposals/0027-split-the-run-command-by-the-nodes-role.md)
+    stand as written — a landed record's body is immutable, and the
+    narrowing lands in this record alone
+    ([docs/README.md](/docs/README.md)).

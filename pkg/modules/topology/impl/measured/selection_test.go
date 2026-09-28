@@ -26,7 +26,10 @@ type selFixture struct {
 	down      map[addr.IA]bool // neighbors whose verdict is down
 	// alive holds the candidates whose rendezvous socket answers the
 	// sweep's probe, keyed by neighbor ISD-AS.
-	alive       map[addr.IA]bool
+	alive map[addr.IA]bool
+	// probed holds the directory entries the last pass measured, the scope
+	// filter's own record.
+	probed      map[addr.IA]bool
 	established []addr.IA // the promoted candidates, in order
 	changed     int
 	sel         *selection
@@ -39,6 +42,7 @@ var (
 	selB    = addr.MustIAFrom(20, 0xfd0000000012)
 	selC    = addr.MustIAFrom(20, 0xfd0000000013)
 	selD    = addr.MustIAFrom(20, 0xfd0000000014)
+	selE    = addr.MustIAFrom(20, 0xfd0000000015)
 )
 
 func entryOf(ia addr.IA) DirectoryEntry {
@@ -46,6 +50,16 @@ func entryOf(ia addr.IA) DirectoryEntry {
 		IA:             ia,
 		ControlAddr:    netip.MustParseAddrPort("127.0.0.1:30043"),
 		RendezvousAddr: netip.MustParseAddrPort("127.0.0.1:30045"),
+	}
+}
+
+// scopedEntry builds a directory entry whose published rendezvous address
+// sits at the given scope's address.
+func scopedEntry(ia addr.IA, rendezvous string) DirectoryEntry {
+	return DirectoryEntry{
+		IA:             ia,
+		ControlAddr:    netip.MustParseAddrPort("127.0.0.1:30044"),
+		RendezvousAddr: netip.MustParseAddrPort(rendezvous),
 	}
 }
 
@@ -58,6 +72,7 @@ func newSelFixture(t *testing.T, neighbors ...addr.IA) *selFixture {
 		silent:   make(map[addr.IA]bool),
 		down:     make(map[addr.IA]bool),
 		alive:    make(map[addr.IA]bool),
+		probed:   make(map[addr.IA]bool),
 	}
 	for _, ia := range neighbors {
 		if err := f.store.Insert(context.Background(), &links.Link{
@@ -79,9 +94,13 @@ func newSelFixture(t *testing.T, neighbors ...addr.IA) *selFixture {
 			Store:   f.store,
 			Changed: func() { f.changed++ },
 			Window:  time.Hour, // the candidate sweep never retires in these
+			// The viewer sits on loopback, so the loopback entries below
+			// share its scope and pass the loop's filter.
+			ControlAddr: netip.MustParseAddrPort("127.0.0.1:30044"),
 		},
 		streaks: make(map[addr.IA]*peerStreak),
 		probeFn: func(_ context.Context, e DirectoryEntry, _ *links.Link) measurement {
+			f.probed[e.IA] = true
 			return f.samples[e.IA]
 		},
 		establishFn: func(_ context.Context, e DirectoryEntry, _ string) bool {
@@ -501,4 +520,124 @@ func TestSelectionSweepGrace(t *testing.T) {
 		}
 		_ = answering
 	})
+}
+
+// TestSelectionScopeFilter checks the candidate skip's scope filter: a
+// loopback viewer probes loopback and global entries and skips the private,
+// shared, and link-local ones; a global viewer probes the global entries
+// alone. Every entry carries an unreachable sample, so the filter is the
+// only thing that decides what the pass measures.
+func TestSelectionScopeFilter(t *testing.T) {
+	newDirectory := func() ([]addr.IA, map[addr.IA]string) {
+		return []addr.IA{selA, selB, selC, selD, selE}, map[addr.IA]string{
+			selA: "192.0.2.10:30045",  // global
+			selB: "127.0.0.5:30045",   // loopback
+			selC: "192.168.1.5:30045", // private
+			selD: "100.64.0.5:30045",  // the CGNAT shared range
+			selE: "169.254.0.5:30045", // link-local
+		}
+	}
+
+	// The loopback viewer: loopback shares its scope, global is always
+	// probeable, the rest skip.
+	f := newSelFixture(t)
+	ias, rendezvous := newDirectory()
+	for _, ia := range ias {
+		f.directory = append(f.directory, scopedEntry(ia, rendezvous[ia]))
+		f.samples[ia] = measurement{path: 10 * time.Millisecond}
+	}
+	f.pass(t)
+	for _, ia := range []addr.IA{selA, selB} {
+		if !f.probed[ia] {
+			t.Errorf("the loopback viewer skipped %v at %s, want it probed", ia,
+				rendezvous[ia])
+		}
+	}
+	for _, ia := range []addr.IA{selC, selD, selE} {
+		if f.probed[ia] {
+			t.Errorf("the loopback viewer probed %v at %s, want it skipped", ia,
+				rendezvous[ia])
+		}
+	}
+
+	// The global viewer: the global entries alone.
+	f = newSelFixture(t)
+	f.sel.cfg.ControlAddr = netip.MustParseAddrPort("203.0.113.7:30044")
+	ias, rendezvous = newDirectory()
+	for _, ia := range ias {
+		f.directory = append(f.directory, scopedEntry(ia, rendezvous[ia]))
+		f.samples[ia] = measurement{path: 10 * time.Millisecond}
+	}
+	f.pass(t)
+	if !f.probed[selA] {
+		t.Error("the global viewer skipped the global entry")
+	}
+	for _, ia := range []addr.IA{selB, selC, selD, selE} {
+		if f.probed[ia] {
+			t.Errorf("the global viewer probed %v at %s, want it skipped", ia,
+				rendezvous[ia])
+		}
+	}
+}
+
+// TestSelectionRendezvousGuard checks the rendezvous establishment's guard:
+// a reply naming the entry's ISD-AS records the link, one naming another
+// ISD-AS — the answer of a colliding subnet's real peer at the published
+// address — is refused, and the dial learns the reply's observed host.
+func TestSelectionRendezvousGuard(t *testing.T) {
+	f := newRendezvousFixture(t, func(cfg *RendezvousConfig) {
+		cfg.IA = rendezvousIA
+	})
+	var learned []netip.Addr
+	s := &selection{
+		cfg: SelectionConfig{
+			Store:    memory.New(),
+			LinkHost: netip.MustParseAddr("127.0.0.1"),
+			Learn:    func(host netip.Addr) { learned = append(learned, host) },
+		},
+	}
+	entry := func(t *testing.T, claimed addr.IA) *links.Link {
+		t.Helper()
+		l := &links.Link{
+			NeighborIA: claimed,
+			Local:      netip.MustParseAddrPort("127.0.0.1:40001"),
+			State:      links.StateCandidate,
+		}
+		if err := s.cfg.Store.Insert(context.Background(), l); err != nil {
+			t.Fatal(err)
+		}
+		return l
+	}
+
+	// The matching reply records the link's remote side.
+	l := entry(t, rendezvousIA)
+	e := scopedEntry(rendezvousIA, f.addr.String())
+	if !s.establishByRendezvous(context.Background(), e, l) {
+		t.Fatal("the guarded establishment of the matching reply failed")
+	}
+	updated, err := s.cfg.Store.ByNeighbor(context.Background(), rendezvousIA)
+	if err != nil || updated == nil {
+		t.Fatalf("no recorded establishment (%v)", err)
+	}
+	if !updated.Remote.IsValid() || updated.RemoteIfID == 0 {
+		t.Errorf("recorded remote = %v, interface %d, want the reply's side",
+			updated.Remote, updated.RemoteIfID)
+	}
+	if len(learned) != 1 || learned[0] != netip.MustParseAddr("127.0.0.1") {
+		t.Errorf("learned hosts = %v, want the dial's observed 127.0.0.1", learned)
+	}
+
+	// A reply naming another ISD-AS is refused: the entry keeps its side.
+	l = entry(t, strangerKeyIA)
+	e = scopedEntry(strangerKeyIA, f.addr.String())
+	if s.establishByRendezvous(context.Background(), e, l) {
+		t.Error("an establishment whose reply named another ISD-AS recorded")
+	}
+	updated, err = s.cfg.Store.ByNeighbor(context.Background(), strangerKeyIA)
+	if err != nil || updated == nil {
+		t.Fatalf("no entry of the refused establishment (%v)", err)
+	}
+	if updated.Remote.IsValid() {
+		t.Errorf("the refused establishment recorded the remote %v", updated.Remote)
+	}
 }

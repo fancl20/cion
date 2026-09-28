@@ -85,6 +85,14 @@ func TestRendezvousRoundTrip(t *testing.T) {
 	if reply.IfID != entry.IfID {
 		t.Errorf("reply interface ID = %d, want the entry's %d", reply.IfID, entry.IfID)
 	}
+	// The reply echoes the request's observed source: the dialer's own
+	// address as the acceptor saw it, the host what it learns from.
+	if reply.Observed.Addr() != netip.MustParseAddr("127.0.0.1") {
+		t.Errorf("observed source = %v, want the dialer's bind host", reply.Observed)
+	}
+	if reply.Observed.Port() == 0 {
+		t.Error("the observed source carries no port")
+	}
 
 	// A re-request of the same peer is idempotent: the recorded side
 	// re-answers, no second entry.
@@ -264,6 +272,25 @@ func TestRendezvousWireFormat(t *testing.T) {
 	}
 	if gotReply != reply {
 		t.Fatalf("reply round trip = %+v, want %+v", gotReply, reply)
+	}
+	if gotReply.Observed.IsValid() {
+		t.Error("a reply that echoes no source parsed one")
+	}
+
+	echoed := reply
+	echoed.Observed = netip.MustParseAddrPort("198.51.100.6:54321")
+	gotEchoed, err := ParseRendezvousReply(echoed.Marshal())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotEchoed.Observed != echoed.Observed {
+		t.Errorf("observed source round trip = %v, want %v",
+			gotEchoed.Observed, echoed.Observed)
+	}
+	// A reader tolerates what follows the field it knows: bytes appended
+	// after the observed source are a later version's, read past.
+	if _, err := ParseRendezvousReply(append(echoed.Marshal(), 0, 0)); err != nil {
+		t.Errorf("a reply with trailing bytes parsed no: %v", err)
 	}
 
 	// Truncated and version-mangled forms are refused.

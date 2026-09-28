@@ -75,7 +75,6 @@ func TestRunArgumentsParse(t *testing.T) {
 	opts, err = parseNodeArgs(t, "local",
 		"--domain", "core.example.org",
 		"--neighbor", "192.0.2.7:30045",
-		"--behind-nat",
 		"--state", "/var/lib/cion2",
 	)
 	if err != nil {
@@ -89,9 +88,6 @@ func TestRunArgumentsParse(t *testing.T) {
 	}
 	if len(opts.Neighbors) != 1 || opts.Neighbors[0] != "192.0.2.7:30045" {
 		t.Errorf("--neighbor = %v", opts.Neighbors)
-	}
-	if !opts.BehindNAT {
-		t.Error("--behind-nat left unset")
 	}
 	if opts.State != "/var/lib/cion2" {
 		t.Errorf("--state = %q", opts.State)
@@ -127,8 +123,8 @@ func refuse(t *testing.T, command, flag string, flags *pflag.FlagSet) {
 
 // TestRunCommandsRefuseForeignArguments checks the partition's bookkeeping
 // the parse performs: each command refuses the other role's arguments as
-// unknown flags naming the argument, and the retired --core and
-// --wireguard-config are refused everywhere.
+// unknown flags naming the argument, and the retired --core,
+// --wireguard-config, and --behind-nat are refused everywhere.
 func TestRunCommandsRefuseForeignArguments(t *testing.T) {
 	for _, command := range []struct {
 		name string
@@ -138,11 +134,11 @@ func TestRunCommandsRefuseForeignArguments(t *testing.T) {
 		{"run local", newRunLocalCommand()},
 		{"ping", newPingCommand()},
 	} {
-		for _, flag := range []string{"--core", "--wireguard-config"} {
+		for _, flag := range []string{"--core", "--wireguard-config", "--behind-nat"} {
 			refuse(t, command.name, flag, command.cmd.Flags())
 		}
 	}
-	for _, flag := range []string{"--neighbor", "--behind-nat"} {
+	for _, flag := range []string{"--neighbor"} {
 		refuse(t, "run core", flag, newRunCoreCommand().Flags())
 	}
 	for _, flag := range []string{"--acme-email", "--cert-file", "--key-file", "--enroll-auth"} {

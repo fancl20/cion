@@ -63,9 +63,6 @@ type NodeConfig struct {
 	// telegram method of EnrollAuth; empty uses the public one. The
 	// integration tests point it at their local double.
 	TelegramAPI string
-	// BehindNAT publishes the node's reachability class as private: joinable
-	// by no one, candidate for no one's floor.
-	BehindNAT bool
 	// Slice is the node's slice of the tailnet range, 100.64.0.0/10, e.g.
 	// "100.64.1.0/24": the space the coordination service allocates the node's
 	// hosts from, the slice's first address the node's own — the SOCKS service's

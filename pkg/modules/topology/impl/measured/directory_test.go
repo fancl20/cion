@@ -10,6 +10,7 @@ import (
 	"connectrpc.com/connect"
 	"github.com/scionproto/scion/pkg/addr"
 
+	"github.com/fancl20/cion/pkg/controlplane"
 	"github.com/fancl20/cion/pkg/peeria"
 	nodev1 "github.com/fancl20/cion/proto/node/v1"
 )
@@ -42,8 +43,8 @@ func directoryList(ctx context.Context, svc *DirectoryService) ([]DirectoryEntry
 	return out, nil
 }
 
-func directoryEntryPB(control, rendezvous string, private bool) *nodev1.Entry {
-	return &nodev1.Entry{ControlAddr: control, RendezvousAddr: rendezvous, Private: private}
+func directoryEntryPB(control, rendezvous string) *nodev1.Entry {
+	return &nodev1.Entry{ControlAddr: control, RendezvousAddr: rendezvous}
 }
 
 // TestDirectoryPublishRecordsAuthenticatedIA checks the handlers record the
@@ -52,7 +53,7 @@ func directoryEntryPB(control, rendezvous string, private bool) *nodev1.Entry {
 // records.
 func TestDirectoryPublishRecordsAuthenticatedIA(t *testing.T) {
 	svc := &DirectoryService{Store: NewDirectoryStore()}
-	entry := directoryEntryPB("192.0.2.7:30043", "192.0.2.7:30045", false)
+	entry := directoryEntryPB("192.0.2.7:30043", "192.0.2.7:30045")
 	entry.IsdAs = uint64(addr.MustIAFrom(20, 0xfd0000000099)) // a false claim
 	if err := directoryPublish(context.Background(), svc, directoryIA, entry); err != nil {
 		t.Fatal(err)
@@ -72,14 +73,14 @@ func TestDirectoryPublishRecordsAuthenticatedIA(t *testing.T) {
 	}
 
 	if err := directoryPublish(context.Background(), svc, addr.IA(0),
-		directoryEntryPB("192.0.2.7:30043", "192.0.2.7:30045", false)); err == nil {
+		directoryEntryPB("192.0.2.7:30043", "192.0.2.7:30045")); err == nil {
 		t.Error("a publish without an authenticated ISD-AS was recorded")
 	}
 	if err := directoryPublish(context.Background(), svc, directoryIA, nil); err == nil {
 		t.Error("a publish without an entry was recorded")
 	}
 	if err := directoryPublish(context.Background(), svc, directoryIA,
-		directoryEntryPB("nope", "192.0.2.7:30045", false)); err == nil {
+		directoryEntryPB("nope", "192.0.2.7:30045")); err == nil {
 		t.Error("a publish with a malformed address was recorded")
 	}
 }
@@ -91,19 +92,19 @@ func TestDirectoryExpiry(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		svc := &DirectoryService{Store: NewDirectoryStore()}
 		if err := directoryPublish(context.Background(), svc, directoryIA,
-			directoryEntryPB("192.0.2.7:30043", "192.0.2.7:30045", false)); err != nil {
+			directoryEntryPB("192.0.2.7:30043", "192.0.2.7:30045")); err != nil {
 			t.Fatal(err)
 		}
 		other := addr.MustIAFrom(20, 0xfd0000000042)
 		if err := directoryPublish(context.Background(), svc, other,
-			directoryEntryPB("192.0.2.8:30043", "192.0.2.8:30045", false)); err != nil {
+			directoryEntryPB("192.0.2.8:30043", "192.0.2.8:30045")); err != nil {
 			t.Fatal(err)
 		}
 
 		// A refresh of the first publisher only.
 		time.Sleep(NodeDirectoryTTL / 2)
 		if err := directoryPublish(context.Background(), svc, directoryIA,
-			directoryEntryPB("192.0.2.7:30043", "192.0.2.7:30045", false)); err != nil {
+			directoryEntryPB("192.0.2.7:30043", "192.0.2.7:30045")); err != nil {
 			t.Fatal(err)
 		}
 		time.Sleep(NodeDirectoryTTL)
@@ -125,4 +126,49 @@ func TestDirectoryExpiry(t *testing.T) {
 			t.Errorf("entries beyond every TTL = %v, want none", entries)
 		}
 	})
+}
+
+// TestDirectoryPublishResolvesHost checks the publication's host: the entry
+// is built at each cadence from the host the configuration resolves — the
+// learned external host when one is recorded, else the control host — the
+// endpoint and rendezvous ports fixed beside it.
+func TestDirectoryPublishResolvesHost(t *testing.T) {
+	store := NewDirectoryStore()
+	host := netip.MustParseAddr("127.0.0.1")
+	d, err := NewNodeDirectory(NodeDirectoryConfig{
+		IA:    directoryIA,
+		Host:  func(context.Context) netip.Addr { return host },
+		Store: store,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if err := d.publish(ctx); err != nil {
+		t.Fatal(err)
+	}
+	entries := store.List(time.Now())
+	if len(entries) != 1 {
+		t.Fatalf("entries = %v, want the one", entries)
+	}
+	published := func(host netip.Addr) (control, rendezvous netip.AddrPort) {
+		return netip.AddrPortFrom(host, controlplane.EndpointPort),
+			netip.AddrPortFrom(host, RendezvousPort)
+	}
+	wantControl, wantRendezvous := published(host)
+	if entries[0].ControlAddr != wantControl || entries[0].RendezvousAddr != wantRendezvous {
+		t.Errorf("published addresses = %v, %v, want %v, %v",
+			entries[0].ControlAddr, entries[0].RendezvousAddr, wantControl, wantRendezvous)
+	}
+
+	// The next cadence publishes the host it resolves then: a host learned
+	// mid-run follows without a restart.
+	host = netip.MustParseAddr("203.0.113.7")
+	if err := d.publish(ctx); err != nil {
+		t.Fatal(err)
+	}
+	_, wantRendezvous = published(host)
+	if got := store.List(time.Now())[0].RendezvousAddr; got != wantRendezvous {
+		t.Errorf("published rendezvous after learning = %v, want %v", got, wantRendezvous)
+	}
 }

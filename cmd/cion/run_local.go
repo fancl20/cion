@@ -8,16 +8,14 @@ import (
 )
 
 // addLocalNodeFlags registers the joining node's arguments: the network's
-// core domain, the bootstrap neighbor, and the reachability class the node
-// advertises. The local role is the configuration's zero value.
+// core domain and the bootstrap neighbor. The local role is the
+// configuration's zero value.
 func addLocalNodeFlags(flags *pflag.FlagSet, opts *services.NodeConfig) {
 	flags.StringVar(&opts.Domain, "domain", "",
 		"the network's core domain, the WebPKI identity of the enrollment and TRC fetch "+
 			"(required)")
 	flags.StringSliceVar(&opts.Neighbors, "neighbor", nil,
 		"an existing node's rendezvous underlay address; repeatable")
-	flags.BoolVar(&opts.BehindNAT, "behind-nat", false,
-		"publish the node's reachability class as private: joinable by no one")
 }
 
 // newRunLocalCommand builds `cion run local`: a node joining an existing

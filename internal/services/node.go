@@ -186,10 +186,10 @@ func (n *node) selectProvider() error {
 		})
 		return nil
 	}
-	n.topology = measured.New(measured.Config{
+	cfg := measured.Config{
 		Core:        n.cfg.Core,
 		Neighbors:   n.cfg.Neighbors,
-		BehindNAT:   n.cfg.BehindNAT,
+		StateDir:    n.cfg.State,
 		ControlHost: host,
 		NewConn: func() (*scion.Conn, error) {
 			return n.scionConn(0)
@@ -203,7 +203,17 @@ func (n *node) selectProvider() error {
 			Selection:       n.cfg.Pacing.Selection,
 			CandidateWindow: n.cfg.Pacing.CandidateWindow,
 		},
-	})
+	}
+	if n.cfg.Core {
+		// The core's published host derives from its own domain; a
+		// non-core's is what the rendezvous exchange teaches it.
+		cfg.Domain = n.cfg.Domain
+	}
+	provider, err := measured.New(cfg)
+	if err != nil {
+		return err
+	}
+	n.topology = provider
 	return nil
 }
 
