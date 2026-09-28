@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/spf13/cobra"
@@ -9,25 +10,12 @@ import (
 	"github.com/fancl20/cion/internal/services"
 )
 
-// addNodeFlags registers the node's run arguments on a command that assembles
-// one — the arguments the retiring configuration file carried, with defaults
-// so a restart needs none of them.
-func addNodeFlags(flags *pflag.FlagSet, opts *services.NodeConfig) {
-	flags.BoolVar(&opts.Core, "core", false,
-		"mark the founding core: TRC genesis, issuer, self-enrollment (takes no --neighbor)")
-	flags.StringVar(&opts.Domain, "domain", "",
-		"the core's domain: the core's own with --core, the network's core domain otherwise "+
-			"(required)")
-	flags.StringVar(&opts.AcmeEmail, "acme-email", "",
-		"the ACME account email for the core's certificate (core only, optional)")
-	flags.StringVar(&opts.CertFile, "cert-file", "",
-		"the core's TLS certificate file, the offline fallback to ACME (core only)")
-	flags.StringVar(&opts.KeyFile, "key-file", "",
-		"the core's TLS key file, the offline fallback to ACME (core only)")
-	flags.StringSliceVar(&opts.Neighbors, "neighbor", nil,
-		"an existing node's rendezvous underlay address; repeatable")
+// addSharedNodeFlags registers the node arguments every assembling command
+// takes — the arguments the retiring configuration file carried, with
+// defaults so a restart needs none of them.
+func addSharedNodeFlags(flags *pflag.FlagSet, opts *services.NodeConfig) {
 	flags.StringVar(&opts.LinkSet, "link-set", "",
-		"path to a JSON link-set file naming the static topology (refuses --neighbor): "+
+		"path to a JSON link-set file naming the static topology: "+
 			"neighbor ISD-ASes with each link's two underlay addresses")
 	flags.StringVar(&opts.State, "state", services.DefaultState,
 		"the state directory, where the first start generates the identity")
@@ -36,12 +24,6 @@ func addNodeFlags(flags *pflag.FlagSet, opts *services.NodeConfig) {
 	flags.StringVar(&opts.Control, "control", services.DefaultControl,
 		"the UDP address of the control service; its host carries the control, "+
 			"rendezvous, and directory sockets")
-	flags.StringVar(&opts.EnrollAuth, "enroll-auth", "",
-		"gate first issuance with a policy (core only): "+
-			"cidrs=<comma-separated prefix list> admits by source address, "+
-			"telegram=<chat>:<token> prompts the chat per joiner; open when unset")
-	flags.BoolVar(&opts.BehindNAT, "behind-nat", false,
-		"publish the node's reachability class as private: joinable by no one")
 	flags.StringVar(&opts.Slice, "slice", "",
 		"the node's slice of the tailnet range, e.g. 100.64.1.0/24: the space its hosts "+
 			"allocate from, the slice's first address the node's own — the SOCKS service's "+
@@ -50,57 +32,62 @@ func addNodeFlags(flags *pflag.FlagSet, opts *services.NodeConfig) {
 		"the shared host-facing UDP port every host dials (required with --slice)")
 }
 
-// runOptions carries the run command's data-plane tuning flags.
+// runOptions carries the run commands' data-plane tuning flags.
 type runOptions struct {
 	processors int
 	batchSize  int
 	queueSize  int
 }
 
-// newRunCommand builds `cion run`: the daemon — data plane, control plane,
-// the loaded topology provider, and the resident applications in one
-// process — from the run arguments and the state directory.
-func newRunCommand() *cobra.Command {
-	opts := &services.NodeConfig{}
-	tuning := &runOptions{}
+// addTuningFlags registers the data-plane tuning flags the run commands
+// carry, from the dataplane defaults.
+func addTuningFlags(flags *pflag.FlagSet, tuning *runOptions) {
 	defaults := services.DefaultDataplaneOptions()
+	flags.IntVar(&tuning.processors, "processors", defaults.Processors,
+		"number of fast-path packet processors")
+	flags.IntVar(&tuning.batchSize, "batch-size", defaults.BatchSize,
+		"receive batch size per underlay socket")
+	flags.IntVar(&tuning.queueSize, "queue-size", defaults.QueueSize,
+		"queue depth of the internal and external links")
+}
+
+// runDaemon is the body both run commands share: the tuning sanity checks
+// and the services.Run call over the node configuration the command
+// assembled, so the two differ in their arguments and nothing else.
+func runDaemon(ctx context.Context, cfg services.NodeConfig, tuning *runOptions) error {
+	// A zero processor count or batch size would panic deep inside
+	// Serve, which divides by them; fail at the flag instead.
+	for _, check := range []struct {
+		name  string
+		value int
+	}{
+		{"processors", tuning.processors},
+		{"batch-size", tuning.batchSize},
+		{"queue-size", tuning.queueSize},
+	} {
+		if check.value < 1 {
+			return fmt.Errorf("--%s must be at least 1", check.name)
+		}
+	}
+	return services.Run(ctx, cfg, services.DataplaneOptions{
+		Processors: tuning.processors,
+		BatchSize:  tuning.batchSize,
+		QueueSize:  tuning.queueSize,
+	})
+}
+
+// newRunCommand builds `cion run`: the daemon's two roles as subcommands.
+// The parent has no run function, so a bare invocation prints the roles the
+// way a bare `cion` prints the commands.
+func newRunCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "run",
 		Short: "Run the CION daemon",
 		Long: "Run the CION daemon: data plane, control plane, the loaded topology provider, " +
-			"and enabled applications in one process. Identity and links " +
-			"come from the state directory; a non-core's first start needs a bootstrap " +
-			"--neighbor — or a --link-set file under the static provider — and the core's " +
-			"--domain.",
-		Args: cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, args []string) error {
-			// A zero processor count or batch size would panic deep inside
-			// Serve, which divides by them; fail at the flag instead.
-			for _, check := range []struct {
-				name  string
-				value int
-			}{
-				{"processors", tuning.processors},
-				{"batch-size", tuning.batchSize},
-				{"queue-size", tuning.queueSize},
-			} {
-				if check.value < 1 {
-					return fmt.Errorf("--%s must be at least 1", check.name)
-				}
-			}
-			return services.Run(cmd.Context(), *opts, services.DataplaneOptions{
-				Processors: tuning.processors,
-				BatchSize:  tuning.batchSize,
-				QueueSize:  tuning.queueSize,
-			})
-		},
+			"and enabled applications in one process. Identity and links come from the " +
+			"state directory.\n\nRun 'cion run core' to found a network; 'cion run local' " +
+			"to join one.",
 	}
-	addNodeFlags(cmd.Flags(), opts)
-	cmd.Flags().IntVar(&tuning.processors, "processors", defaults.Processors,
-		"number of fast-path packet processors")
-	cmd.Flags().IntVar(&tuning.batchSize, "batch-size", defaults.BatchSize,
-		"receive batch size per underlay socket")
-	cmd.Flags().IntVar(&tuning.queueSize, "queue-size", defaults.QueueSize,
-		"queue depth of the internal and external links")
+	cmd.AddCommand(newRunCoreCommand(), newRunLocalCommand())
 	return cmd
 }

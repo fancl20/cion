@@ -57,7 +57,7 @@ type NodeConfig struct {
 	// EnrollAuth selects the enrollment authorizer that gates first issuance,
 	// "method=spec": "cidrs" with a comma-separated prefix list, "telegram" with
 	// <chat>:<token>. Empty is open enrollment — the zero-conf default — and the
-	// argument refuses to load without --core, the only node that issues chains.
+	// argument refuses to load off the core, the only node that issues chains.
 	EnrollAuth string
 	// TelegramAPI overrides the Telegram Bot API's base URL for the
 	// telegram method of EnrollAuth; empty uses the public one. The
@@ -135,7 +135,12 @@ type NodePacing struct {
 // required; the core takes no neighbor.
 func (c NodeConfig) Validate() error {
 	if c.Domain == "" {
-		return fmt.Errorf("--domain is required: the core's own on --core, the network's core domain otherwise")
+		if c.Core {
+			return fmt.Errorf("--domain is required: the core's own, " +
+				"the WebPKI identity of its certificate")
+		}
+		return fmt.Errorf("--domain is required: the network's core domain, " +
+			"the WebPKI identity of the enrollment and TRC fetch")
 	}
 	if c.Core && len(c.Neighbors) > 0 {
 		return fmt.Errorf("the founding core takes no --neighbor: nodes join it")
@@ -157,7 +162,7 @@ func (c NodeConfig) Validate() error {
 		// role-aware checks exist to refuse: only the core issues chains,
 		// so only the core's gate means anything.
 		if !c.Core {
-			return fmt.Errorf("--enroll-auth requires --core: " +
+			return fmt.Errorf("--enroll-auth requires the core role: " +
 				"the core is the only node that issues chains")
 		}
 		if _, _, err := loadEnrollAuth(c.EnrollAuth, c.TelegramAPI, c.State); err != nil {

@@ -210,7 +210,7 @@ func (n *node) selectProvider() error {
 // setupEnrollAuth loads the --enroll-auth selection: the authorizer the trust
 // service asks at first issuance and, for a method with loops of its own, the
 // run that serves them. Unset is open enrollment; Validate already refused the
-// argument without --core, so a selected method loads on the issuing node
+// argument off the core, so a selected method loads on the issuing node
 // alone. The spec parses here once, so a malformed one fails the boot, not the
 // first joiner.
 func (n *node) setupEnrollAuth() error {
