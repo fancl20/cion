@@ -121,7 +121,7 @@ func TestMeshSocketCachesPath(t *testing.T) {
 
 	peer := &meshEndpoint{addr: scion.Addr{
 		IA:   core,
-		Addr: netip.MustParseAddrPort("127.0.0.1:30045"),
+		Addr: netip.MustParseAddrPort("127.0.0.1:40001"),
 	}}
 	for i := 0; i < 5; i++ {
 		if err := socket.send(peer, [][]byte{[]byte("datagram")}); err != nil {
@@ -147,7 +147,7 @@ func TestMeshSocketRefreshesExpiredPath(t *testing.T) {
 
 	peer := &meshEndpoint{addr: scion.Addr{
 		IA:   core,
-		Addr: netip.MustParseAddrPort("127.0.0.1:30045"),
+		Addr: netip.MustParseAddrPort("127.0.0.1:40001"),
 	}}
 	if err := socket.send(peer, [][]byte{[]byte("datagram")}); err != nil {
 		t.Fatalf("send over a stale path: %v", err)
@@ -181,7 +181,7 @@ func TestMeshSocketRefreshesFailedSend(t *testing.T) {
 
 	peer := &meshEndpoint{addr: scion.Addr{
 		IA:   core,
-		Addr: netip.MustParseAddrPort("127.0.0.1:30045"),
+		Addr: netip.MustParseAddrPort("127.0.0.1:40001"),
 	}}
 	if err := socket.send(peer, [][]byte{[]byte("datagram")}); err != nil {
 		t.Fatalf("first send: %v", err)
@@ -261,7 +261,7 @@ func TestMeshSocketDropsPathOnSignal(t *testing.T) {
 
 	peer := &meshEndpoint{addr: scion.Addr{
 		IA:   core,
-		Addr: netip.MustParseAddrPort("127.0.0.1:30045"),
+		Addr: netip.MustParseAddrPort("127.0.0.1:40001"),
 	}}
 	if err := socket.send(peer, [][]byte{[]byte("datagram")}); err != nil {
 		t.Fatal(err)

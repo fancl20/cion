@@ -18,8 +18,10 @@ import (
 )
 
 // RendezvousPort is the UDP port every node's rendezvous acceptor listens on
-// for first contact, beside the endpoint on the control address's host.
-const RendezvousPort = 30045
+// for first contact, beside the endpoint on the control address's host: one
+// step further down the underlay block's ladder, the port that binds
+// joiners only, and only before identity.
+const RendezvousPort = 30043
 
 const rendezvousVersion = 1
 

@@ -122,7 +122,7 @@ func testUpdate(t *testing.T, db TestableDB) {
 func testLookups(t *testing.T, db TestableDB) {
 	ctx := context.Background()
 	a := link(iaA, links.StateEstablished)
-	a.Rendezvous = netip.MustParseAddrPort("127.0.0.1:30045")
+	a.Rendezvous = netip.MustParseAddrPort("127.0.0.1:30043")
 	if err := db.Insert(ctx, a); err != nil {
 		t.Fatal(err)
 	}

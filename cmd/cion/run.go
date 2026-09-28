@@ -24,10 +24,10 @@ func addSharedNodeFlags(flags *pflag.FlagSet, opts *services.NodeConfig) {
 	flags.StringVar(&opts.Control, "control", services.DefaultControl,
 		"the UDP address of the control service; its host carries the control, "+
 			"rendezvous, and directory sockets")
-	flags.Uint16Var(&opts.HostPort, "host-port", 0,
+	flags.Uint16Var(&opts.HostPort, "host-port", services.DefaultHostPort,
 		"the shared host-facing UDP port every host dials; the directory assigns "+
 			"the node's slice of the tailnet range at its first publication "+
-			"(empty runs no WireGuard or SOCKS application)")
+			"(zero runs no WireGuard or SOCKS application)")
 }
 
 // runOptions carries the run commands' data-plane tuning flags.

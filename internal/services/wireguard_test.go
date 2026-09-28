@@ -33,8 +33,8 @@ func wireguardNodeConfig(t *testing.T, stateDir string) NodeConfig {
 		Core:     true,
 		Domain:   "core.example.org",
 		State:    stateDir,
-		Internal: "127.0.0.1:30042",
-		Control:  "127.0.0.1:30043",
+		Internal: DefaultInternal,
+		Control:  DefaultControl,
 		HostPort: 51820,
 	}
 }

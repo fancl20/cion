@@ -78,7 +78,7 @@ func newLookupFixture(t *testing.T) *lookupFixture {
 	return &lookupFixture{db: db, lookup: lookup, fetch: fetch, now: now}
 }
 
-var fakeCoreEndpoint = netip.MustParseAddrPort("192.0.2.10:30044")
+var fakeCoreEndpoint = netip.MustParseAddrPort("192.0.2.10:30042")
 
 // terminatedSegment builds a signed [core, end] segment fixture.
 func terminatedSegment(

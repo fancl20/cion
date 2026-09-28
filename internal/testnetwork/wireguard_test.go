@@ -15,6 +15,7 @@ import (
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/header"
 
+	"github.com/fancl20/cion/internal/services"
 	"github.com/fancl20/cion/pkg/apps/wireguard"
 )
 
@@ -107,21 +108,22 @@ func registerHost(t *testing.T, core *Node, host wireguard.HostEntry) {
 }
 
 // startWireguardNodes brings up the two-node WireGuard topology: the core A
-// and the leaf B, meshed over their seeded link, each holding the slice the
-// directory assigned its publication.
+// and the leaf B, meshed over their seeded link, each serving its hosts on
+// the default shared port and holding the slice the directory assigned its
+// publication.
 func startWireguardNodes(t *testing.T, ipA, ipB netip.Addr) (*Node, *Node) {
 	t.Helper()
 	wpki := NewWebPKI(t)
 	extA, extB := FreeUDPAddrOn(t, ipA), FreeUDPAddrOn(t, ipB)
 	a := StartNode(t, NodeConfig{
 		IA: wireguardA, Host: ipA, Core: true, WPKI: wpki,
-		Links: []Link{{Local: extA, Remote: extB, Neighbor: wireguardB}},
-		Wireguard: &WireguardOptions{},
+		Links:     []Link{{Local: extA, Remote: extB, Neighbor: wireguardB}},
+		Wireguard: &WireguardOptions{ListenPort: services.DefaultHostPort},
 	})
 	b := StartNode(t, NodeConfig{
 		IA: wireguardB, Host: ipB, WPKI: wpki,
-		Links: []Link{{Local: extB, Remote: extA, Neighbor: wireguardA}},
-		Wireguard: &WireguardOptions{},
+		Links:     []Link{{Local: extB, Remote: extA, Neighbor: wireguardA}},
+		Wireguard: &WireguardOptions{ListenPort: services.DefaultHostPort},
 	})
 	Poll(t, "A's mesh peer", func() bool { return hasMeshPeer(a.Wireguard, wireguardB) })
 	Poll(t, "B's mesh peer", func() bool { return hasMeshPeer(b.Wireguard, wireguardA) })

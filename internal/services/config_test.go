@@ -11,8 +11,8 @@ func nodeConfig() NodeConfig {
 		Core:     true,
 		Domain:   "core.example.org",
 		State:    "/var/lib/cion",
-		Internal: "127.0.0.1:30042",
-		Control:  "127.0.0.1:30043",
+		Internal: DefaultInternal,
+		Control:  DefaultControl,
 	}
 }
 
@@ -26,7 +26,7 @@ func TestNodeConfigValidate(t *testing.T) {
 
 	cfg := nodeConfig()
 	cfg.Core = false
-	cfg.Neighbors = []string{"192.0.2.7:30045"}
+	cfg.Neighbors = []string{"192.0.2.7:30043"}
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("validating a joiner: %v", err)
 	}
@@ -46,12 +46,12 @@ func TestNodeConfigValidate(t *testing.T) {
 	bad := map[string]func(*NodeConfig){
 		"missing domain":     func(c *NodeConfig) { c.Domain = "" },
 		"missing state":      func(c *NodeConfig) { c.State = "" },
-		"core with neighbor": func(c *NodeConfig) { c.Neighbors = []string{"192.0.2.7:30045"} },
+		"core with neighbor": func(c *NodeConfig) { c.Neighbors = []string{"192.0.2.7:30043"} },
 		"bad neighbor":       func(c *NodeConfig) { c.Core = false; c.Neighbors = []string{"nope"} },
 		"missing internal":   func(c *NodeConfig) { c.Internal = "" },
 		"enroll-auth without core": func(c *NodeConfig) {
 			c.Core = false
-			c.Neighbors = []string{"192.0.2.7:30045"}
+			c.Neighbors = []string{"192.0.2.7:30043"}
 			c.EnrollAuth = "cidrs=192.0.2.0/24"
 		},
 		"unknown enroll-auth method": func(c *NodeConfig) {
@@ -75,7 +75,7 @@ func TestNodeConfigValidate(t *testing.T) {
 		"link-set plus neighbor": func(c *NodeConfig) {
 			c.Core = false
 			c.LinkSet = "/tmp/link-set.json"
-			c.Neighbors = []string{"192.0.2.7:30045"}
+			c.Neighbors = []string{"192.0.2.7:30043"}
 		},
 	}
 	for name, mutate := range bad {

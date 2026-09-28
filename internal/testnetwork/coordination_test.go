@@ -26,8 +26,9 @@ var TailnetRange = wireguard.Tailnet
 // serving the coordination endpoint beside its WireGuard application. The
 // hosts are real tailnet clients in-process — the vendored client engine
 // (tsnet) — the way real wireguard-go clients served as the hosts of proposal
-// 0006's proofs. Each suite holds its own loopback pair — the fixed endpoint
-// and rendezvous ports bind on them — so the suites run parallel.
+// 0006's proofs. Each suite holds its own loopback pair — the fixed endpoint,
+// rendezvous, and shared host ports bind on them — so the suites run
+// parallel, the hosts dialing the default port unasked.
 
 // coordinationPlacement is the harness's placement of the core's
 // coordination endpoint: a loopback address the tailnet clients dial by,
@@ -67,23 +68,10 @@ func placeCoordination(t *testing.T) coordinationPlacement {
 	}
 }
 
-// freeHostUDPPort reserves an ephemeral UDP port on the loopback host for
-// the shared host-facing port.
-func freeHostUDPPort(t *testing.T) uint16 {
-	t.Helper()
-	conn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
-	if err != nil {
-		t.Fatal(err)
-	}
-	port := uint16(conn.LocalAddr().(*net.UDPAddr).Port)
-	_ = conn.Close()
-	return port
-}
-
 // coordCore boots the core of the coordination topology on its suite's
 // loopback host: the WebPKI certificate files, the wireguard application —
-// its tailnet slice the directory's assignment — and the coordination
-// endpoint beside it.
+// its tailnet slice the directory's assignment, its hosts dialed on the
+// default shared port — and the coordination endpoint beside it.
 func coordCore(t *testing.T, wpki *WebPKI, host netip.Addr,
 	place coordinationPlacement, mutate func(*services.NodeConfig)) *assemblyNode {
 
@@ -95,7 +83,7 @@ func coordCore(t *testing.T, wpki *WebPKI, host netip.Addr,
 		cfg.Control = FreeUDPAddrOn(t, host)
 		cfg.CertFile = wpki.certFile
 		cfg.KeyFile = wpki.keyFile
-		cfg.HostPort = freeHostUDPPort(t)
+		cfg.HostPort = services.DefaultHostPort
 		cfg.Coordination = &services.CoordinationOptions{
 			Addr: place.addr,
 			DERP: services.DERPOptions{URL: place.derpURL, IPv4: "127.0.0.1"},
@@ -109,7 +97,8 @@ func coordCore(t *testing.T, wpki *WebPKI, host netip.Addr,
 
 // coordLeaf boots the leaf of the coordination topology on its suite's
 // loopback host: it joins by rendezvous and runs the wireguard application
-// with its relay presence, its tailnet slice the directory's assignment.
+// with its relay presence, its tailnet slice the directory's assignment and
+// its hosts dialed on the default shared port.
 func coordLeaf(t *testing.T, wpki *WebPKI, host netip.Addr, core *assemblyNode,
 	place coordinationPlacement, mutate func(*services.NodeConfig)) *assemblyNode {
 
@@ -120,7 +109,7 @@ func coordLeaf(t *testing.T, wpki *WebPKI, host netip.Addr, core *assemblyNode,
 		cfg.Control = FreeUDPAddrOn(t, host)
 		cfg.Neighbors = []string{core.rendezvousOf()}
 		cfg.RootCAs = wpki.pool
-		cfg.HostPort = freeHostUDPPort(t)
+		cfg.HostPort = services.DefaultHostPort
 		cfg.Coordination = &services.CoordinationOptions{
 			DERP: services.DERPOptions{URL: place.derpURL, IPv4: "127.0.0.1"},
 		}
