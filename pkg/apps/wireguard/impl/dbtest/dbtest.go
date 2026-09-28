@@ -14,42 +14,54 @@ import (
 	"github.com/fancl20/cion/pkg/apps/wireguard"
 )
 
-// TestDirectoryStore runs the contract every directory store keeps: entries
-// round-trip beside host entries, a re-publish replaces, and the store reads
-// back what it holds.
+// TestDirectoryStore runs the contract every directory store keeps: the
+// store assigns each publisher the first free /24 of the tailnet range by
+// address order — unique across publishers, stable per ISD-AS across
+// re-publications, the claimed overlay ignored — beside host entries that
+// round-trip and a re-registration that replaces.
 func TestDirectoryStore(t *testing.T, open func(t *testing.T) wireguard.DirectoryStore) {
 	ctx := context.Background()
 	store := open(t)
 	t.Cleanup(func() { _ = store.Close() })
 
+	// The claims carry overlays the assignment must ignore; the answers
+	// place each publisher's slice in address order instead.
 	entries := []wireguard.Entry{
 		{
 			IA:           mustIA(t, "20-ff00:0:1"),
 			PublicKey:    mustKey(t, 0x01),
-			Overlay:      mustPrefix(t, "100.64.1.0/24"),
+			Overlay:      mustPrefix(t, "100.64.200.0/24"),
 			HostEndpoint: mustAddrPort(t, "198.51.100.10:51820"),
 		},
 		{
 			IA:        mustIA(t, "20-ff00:0:2"),
 			PublicKey: mustKey(t, 0x02),
-			Overlay:   mustPrefix(t, "100.64.2.0/24"),
+			Overlay:   mustPrefix(t, "100.64.200.0/24"),
 		},
 	}
+	assigned := []wireguard.Entry{entries[0], entries[1]}
+	assigned[0].Overlay = mustPrefix(t, "100.64.0.0/24")
+	assigned[1].Overlay = mustPrefix(t, "100.64.1.0/24")
 	for _, e := range entries {
-		if err := store.Publish(ctx, e); err != nil {
+		recorded, err := store.Publish(ctx, e)
+		if err != nil {
 			t.Fatalf("publishing %s: %v", e.IA, err)
+		}
+		if recorded.Overlay != assigned[0].Overlay && recorded.Overlay != assigned[1].Overlay {
+			t.Errorf("publishing %s answered %s, want one of %s, %s",
+				e.IA, recorded.Overlay, assigned[0].Overlay, assigned[1].Overlay)
 		}
 	}
 	hosts := []wireguard.HostEntry{
 		{
 			PublicKey: mustKey(t, 0x81),
-			Addr:      netip.MustParseAddr("100.64.1.4"),
+			Addr:      netip.MustParseAddr("100.64.0.4"),
 			IA:        mustIA(t, "20-ff00:0:1"),
 			Note:      "telegram operator",
 		},
 		{
 			PublicKey: mustKey(t, 0x82),
-			Addr:      netip.MustParseAddr("100.64.2.5"),
+			Addr:      netip.MustParseAddr("100.64.1.5"),
 			IA:        mustIA(t, "20-ff00:0:2"),
 		},
 	}
@@ -58,7 +70,7 @@ func TestDirectoryStore(t *testing.T, open func(t *testing.T) wireguard.Director
 			t.Fatalf("publishing the host %s: %v", h.PublicKey, err)
 		}
 	}
-	want := wireguard.Directory{Nodes: entries, Hosts: hosts}
+	want := wireguard.Directory{Nodes: assigned, Hosts: hosts}
 	got, err := store.List(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -66,15 +78,23 @@ func TestDirectoryStore(t *testing.T, open func(t *testing.T) wireguard.Director
 	if diff := cmp.Diff(want, got,
 		cmpopts.EquateComparable(netip.Addr{}, netip.Prefix{}, netip.AddrPort{},
 			wireguard.PublicKey{})); diff != "" {
-
 		t.Errorf("list mismatch (-want +got):\n%s", diff)
 	}
 
-	// A re-publish replaces the publisher's entry and no one else's.
+	// A re-publish replaces the publisher's key and endpoint, keeps its
+	// slice — stable per ISD-AS — and ignores whatever overlay it claims;
+	// no one else's entry moves.
 	updated := entries[0]
+	updated.PublicKey = mustKey(t, 0x03)
 	updated.Overlay = mustPrefix(t, "100.64.9.0/24")
-	if err := store.Publish(ctx, updated); err != nil {
+	updated.HostEndpoint = mustAddrPort(t, "198.51.100.11:51820")
+	recorded, err := store.Publish(ctx, updated)
+	if err != nil {
 		t.Fatalf("re-publishing %s: %v", updated.IA, err)
+	}
+	if recorded.Overlay != assigned[0].Overlay {
+		t.Errorf("re-publishing %s answered the claimed %s, want the held %s",
+			updated.IA, recorded.Overlay, assigned[0].Overlay)
 	}
 	// A host's re-registration replaces its own record and no one else's.
 	reRegistered := hosts[0]
@@ -91,8 +111,19 @@ func TestDirectoryStore(t *testing.T, open func(t *testing.T) wireguard.Director
 			len(got.Nodes), len(got.Hosts))
 	}
 	for _, e := range got.Nodes {
-		if e.IA.Equal(entries[0].IA) && e.Overlay.String() != "100.64.9.0/24" {
-			t.Errorf("re-publish left the old subnet %s", e.Overlay)
+		switch {
+		case e.IA.Equal(entries[0].IA):
+			if e.Overlay != assigned[0].Overlay {
+				t.Errorf("re-publish moved the slice to %s", e.Overlay)
+			}
+			if e.PublicKey != updated.PublicKey ||
+				e.HostEndpoint != updated.HostEndpoint {
+				t.Errorf("re-publish left the entry %+v, want the key and endpoint replaced", e)
+			}
+		case e.IA.Equal(entries[1].IA):
+			if e.Overlay != assigned[1].Overlay || e.PublicKey != entries[1].PublicKey {
+				t.Errorf("re-publishing %s moved its neighbor: %+v", entries[0].IA, e)
+			}
 		}
 	}
 	for _, h := range got.Hosts {

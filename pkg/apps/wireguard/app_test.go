@@ -17,18 +17,43 @@ import (
 	"github.com/fancl20/cion/pkg/trust"
 )
 
-// recordingDirectory records publications and serves a directory it holds.
+// recordingDirectory records publications and serves a directory it holds,
+// assigning slices the store's way — first free /24 by address order, kept
+// per ISD-AS — with answer as the override the bad-assignment test sets.
 type recordingDirectory struct {
 	published chan Entry
 	entries   []Entry
+	answer    netip.Prefix
 }
 
-func (d *recordingDirectory) Publish(ctx context.Context, entry Entry) error {
+func (d *recordingDirectory) Publish(_ context.Context, entry Entry) (Entry, error) {
+	subnet, err := AssignSlice(entry.IA, d.entries)
+	if err != nil {
+		return Entry{}, err
+	}
+	if d.answer.IsValid() {
+		subnet = d.answer
+	}
+	claim := entry
+	entry.Overlay = subnet
+	for i := range d.entries {
+		if d.entries[i].IA.Equal(entry.IA) {
+			d.entries[i] = entry
+			d.record(claim)
+			return entry, nil
+		}
+	}
+	d.entries = append(d.entries, entry)
+	d.record(claim)
+	return entry, nil
+}
+
+// record hands the published claim — no slice in it — to the test.
+func (d *recordingDirectory) record(entry Entry) {
 	select {
 	case d.published <- entry:
 	default:
 	}
-	return nil
 }
 
 func (d *recordingDirectory) PublishHost(context.Context, HostEntry) error {
@@ -131,7 +156,6 @@ func newTestWireguard(
 	regs := &recordingRegs{}
 	a, err := New(Config{
 		IA:         ia,
-		Subnet:     netip.MustParsePrefix("100.64.1.0/24"),
 		ListenHost: netip.MustParseAddr("127.0.0.1"),
 		ListenPort: listenPort,
 		StateDir:   t.TempDir(),
@@ -176,8 +200,8 @@ func newTestWireguard(
 }
 
 // TestWireguardPublishesOnceEnrolled checks the publication cadence: the loop
-// retries while enrollment has produced no chain, and publishes once one
-// exists.
+// retries while enrollment has produced no chain, publishes once one exists
+// — claiming no slice — and holds the answered assignment as the node's.
 func TestWireguardPublishesOnceEnrolled(t *testing.T) {
 	ia := addr.MustIAFrom(20, 0xff0000000211)
 	db := &flippableTrustDB{}
@@ -200,14 +224,46 @@ func TestWireguardPublishesOnceEnrolled(t *testing.T) {
 		if !entry.IA.Equal(ia) {
 			t.Errorf("published entry for %s, want %s", entry.IA, ia)
 		}
-		if entry.Overlay.String() != "100.64.1.0/24" {
-			t.Errorf("published subnet %s, want 100.64.1.0/24", entry.Overlay)
+		if entry.Overlay.IsValid() {
+			t.Errorf("the publication claimed the slice %s, want none", entry.Overlay)
 		}
 		if entry.PublicKey == (PublicKey{}) {
 			t.Error("published no public key")
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("publication never happened after enrollment")
+	}
+	// The answer is the node's slice, and every wait returns it.
+	answer, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	subnet, err := a.Subnet(answer)
+	if err != nil {
+		t.Fatalf("the assignment never arrived: %v", err)
+	}
+	if want := "100.64.0.0/24"; subnet.String() != want {
+		t.Errorf("assigned slice = %s, want the first free %s", subnet, want)
+	}
+}
+
+// TestWireguardRefusesBadAssignment checks the answer's fail-fast check: an
+// assignment that is not a /24 of the tailnet range never becomes the node's
+// slice — the publication retries instead, the core's bug surfacing at the
+// seam nearest it.
+func TestWireguardRefusesBadAssignment(t *testing.T) {
+	ia := addr.MustIAFrom(20, 0xff0000000212)
+	db := &flippableTrustDB{}
+	a, directory := newTestWireguard(t, ia, db)
+	directory.answer = netip.MustParsePrefix("10.0.0.0/24")
+	db.enroll([]*x509.Certificate{iaSubjectCert(t, ia)})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go a.runPublish(ctx)
+
+	wait, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	if _, err := a.Subnet(wait); err == nil {
+		t.Error("an assignment outside the tailnet range became the node's slice")
 	}
 }
 
@@ -316,15 +372,13 @@ func TestWireguardAppliesHostEntries(t *testing.T) {
 }
 
 // TestWireguardValidatesConfig checks the configuration the node assembly
-// feeds: peer addresses inside the subnet, exits configured, one exit per
-// key.
+// feeds: a directory side and a service registration named.
 func TestWireguardValidatesConfig(t *testing.T) {
 	ia := addr.MustIAFrom(20, 0xff0000000241)
 	internal, _ := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
 	t.Cleanup(func() { _ = internal.Close() })
 	base := Config{
 		IA:         ia,
-		Subnet:     netip.MustParsePrefix("100.64.1.0/24"),
 		ListenHost: netip.MustParseAddr("127.0.0.1"),
 		ListenPort: 51820,
 		StateDir:   t.TempDir(),
@@ -352,18 +406,6 @@ func TestWireguardValidatesConfig(t *testing.T) {
 	// binds it again.
 	app.Close()
 
-	outside := base
-	outside.Subnet = netip.MustParsePrefix("10.64.1.0/24")
-	if _, err := New(outside); err == nil {
-		t.Error("a subnet outside the tailnet range was accepted")
-	}
-
-	wider := base
-	wider.Subnet = netip.MustParsePrefix("100.64.0.0/9")
-	if _, err := New(wider); err == nil {
-		t.Error("a subnet wider than the tailnet range was accepted")
-	}
-
 	noDirectory := base
 	noDirectory.Store = nil
 	if _, err := New(noDirectory); err == nil {
@@ -374,5 +416,23 @@ func TestWireguardValidatesConfig(t *testing.T) {
 	noRegistration.RegisterSvc = nil
 	if _, err := New(noRegistration); err == nil {
 		t.Error("an application with no service registration was accepted")
+	}
+}
+
+// TestWireguardValidatesAssignment checks the answer's fail-fast grammar:
+// only a /24 the tailnet range contains becomes the node's slice.
+func TestWireguardValidatesAssignment(t *testing.T) {
+	if err := validateAssignment(netip.MustParsePrefix("100.64.1.0/24")); err != nil {
+		t.Fatalf("a /24 of the tailnet range was refused: %v", err)
+	}
+	for _, bad := range []netip.Prefix{
+		{},
+		netip.MustParsePrefix("10.64.1.0/24"),
+		netip.MustParsePrefix("100.64.0.0/16"),
+		netip.MustParsePrefix("2001:db8::/64"),
+	} {
+		if err := validateAssignment(bad); err == nil {
+			t.Errorf("the assignment %s was accepted", bad)
+		}
 	}
 }

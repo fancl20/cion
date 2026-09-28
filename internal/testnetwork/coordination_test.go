@@ -81,8 +81,9 @@ func freeHostUDPPort(t *testing.T) uint16 {
 }
 
 // coordCore boots the core of the coordination topology on its suite's
-// loopback host: the WebPKI certificate files, the wireguard application
-// with its tailnet slice, and the coordination endpoint beside it.
+// loopback host: the WebPKI certificate files, the wireguard application —
+// its tailnet slice the directory's assignment — and the coordination
+// endpoint beside it.
 func coordCore(t *testing.T, wpki *WebPKI, host netip.Addr,
 	place coordinationPlacement, mutate func(*services.NodeConfig)) *assemblyNode {
 
@@ -94,7 +95,6 @@ func coordCore(t *testing.T, wpki *WebPKI, host netip.Addr,
 		cfg.Control = FreeUDPAddrOn(t, host)
 		cfg.CertFile = wpki.certFile
 		cfg.KeyFile = wpki.keyFile
-		cfg.Slice = "100.64.1.0/24"
 		cfg.HostPort = freeHostUDPPort(t)
 		cfg.Coordination = &services.CoordinationOptions{
 			Addr: place.addr,
@@ -108,8 +108,8 @@ func coordCore(t *testing.T, wpki *WebPKI, host netip.Addr,
 }
 
 // coordLeaf boots the leaf of the coordination topology on its suite's
-// loopback host: it joins by rendezvous and runs the wireguard
-// application with its own tailnet slice and relay presence.
+// loopback host: it joins by rendezvous and runs the wireguard application
+// with its relay presence, its tailnet slice the directory's assignment.
 func coordLeaf(t *testing.T, wpki *WebPKI, host netip.Addr, core *assemblyNode,
 	place coordinationPlacement, mutate func(*services.NodeConfig)) *assemblyNode {
 
@@ -120,7 +120,6 @@ func coordLeaf(t *testing.T, wpki *WebPKI, host netip.Addr, core *assemblyNode,
 		cfg.Control = FreeUDPAddrOn(t, host)
 		cfg.Neighbors = []string{core.rendezvousOf()}
 		cfg.RootCAs = wpki.pool
-		cfg.Slice = "100.64.2.0/24"
 		cfg.HostPort = freeHostUDPPort(t)
 		cfg.Coordination = &services.CoordinationOptions{
 			DERP: services.DERPOptions{URL: place.derpURL, IPv4: "127.0.0.1"},

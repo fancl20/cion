@@ -12,8 +12,10 @@ message Entry {
   uint64 isd_as = 1;
   // public_key is the node's 32-byte WireGuard public key.
   bytes public_key = 2;
-  // overlay_subnet is the node's overlay subnet, a slice of the tailnet
-  // range, e.g. "100.64.1.0/24".
+  // overlay_subnet is the node's assigned slice of the tailnet range, e.g.
+  // "100.64.1.0/24" — the slice the directory's store assigned at the
+  // node's first publication. A publish request's entry claims none; one an
+  // older client still sends is ignored.
   string overlay_subnet = 3;
   // host_endpoint is the host-facing endpoint a host's client dials — the
   // underlay address and shared port — the coordination service's netmap
@@ -38,12 +40,19 @@ message HostEntry {
 }
 
 message PublishRequest {
-  // entry is the publisher's claimed entry; the ISD-AS comes from the
-  // authenticated certificate chain, the rest from the entry.
+  // entry is the publisher's claim; the ISD-AS comes from the
+  // authenticated certificate chain, and the store assigns the slice.
   Entry entry = 1;
 }
 
-message PublishResponse {}
+// PublishResponse answers the publication with the assigned slice: the
+// store's record of the publisher, which never moves.
+message PublishResponse {
+  // overlay_subnet is the slice the store assigned the publisher — the
+  // first free /24 of the tailnet range at its first publication, kept on
+  // every one after.
+  string overlay_subnet = 1;
+}
 
 message ListRequest {}
 

@@ -217,10 +217,9 @@ func mintWebPKI(dir string) (*WebPKI, error) {
 }
 
 // WireguardOptions configures a node's WireGuard application; nil runs
-// none.
+// none. The node's slice of the tailnet range is the directory's
+// assignment, answered at the first publication.
 type WireguardOptions struct {
-	// Subnet is the node's slice of the tailnet range.
-	Subnet string
 	// ListenPort is the shared host-facing port; 0 takes an ephemeral one.
 	ListenPort uint16
 	// DERP names the relay presence the node holds, when the harness runs
@@ -665,7 +664,6 @@ func (n *Node) startWireguard(
 	wgState := filepath.Join(stateDir, "wireguard")
 	wgCfg := wireguard.Config{
 		IA:         n.IA,
-		Subnet:     netip.MustParsePrefix(opts.Subnet),
 		ListenHost: controlAddr.Addr(),
 		ListenPort: opts.ListenPort,
 		DERP:       opts.DERP,

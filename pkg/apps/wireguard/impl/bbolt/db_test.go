@@ -62,9 +62,10 @@ func TestDirectoryStoreIgnoresRetiredFields(t *testing.T) {
 		t.Errorf("decoded entry = %+v, want %+v", entries.Nodes[0], want)
 	}
 
-	// A re-publish replaces the old-shape entry wholesale.
-	want.Overlay = mustPrefix2()
-	if err := store.Publish(context.Background(), want); err != nil {
+	// A re-publish replaces the old-shape entry wholesale — and keeps the
+	// slice the older state held, an ISD-AS that already holds one keeping
+	// it.
+	if _, err := store.Publish(context.Background(), want); err != nil {
 		t.Fatal(err)
 	}
 	entries, err = store.List(context.Background())
@@ -93,8 +94,4 @@ func mustKey() wireguard.PublicKey {
 
 func mustPrefix() netip.Prefix {
 	return netip.MustParsePrefix("100.64.1.0/24")
-}
-
-func mustPrefix2() netip.Prefix {
-	return netip.MustParsePrefix("100.64.9.0/24")
 }

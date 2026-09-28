@@ -20,25 +20,31 @@ import (
 	wireguardv1 "github.com/fancl20/cion/proto/wireguard/v1"
 )
 
-// fakeStore is an in-memory directory store.
+// fakeStore is an in-memory directory store, assigning slices the store's
+// way: the first free /24 of the tailnet range, kept per ISD-AS.
 type fakeStore struct {
 	entries    []Entry
 	hosts      []HostEntry
 	publishErr error
 }
 
-func (s *fakeStore) Publish(_ context.Context, entry Entry) error {
+func (s *fakeStore) Publish(_ context.Context, entry Entry) (Entry, error) {
 	if s.publishErr != nil {
-		return s.publishErr
+		return Entry{}, s.publishErr
 	}
+	overlay, err := AssignSlice(entry.IA, s.entries)
+	if err != nil {
+		return Entry{}, err
+	}
+	entry.Overlay = overlay
 	for i := range s.entries {
 		if s.entries[i].IA.Equal(entry.IA) {
 			s.entries[i] = entry
-			return nil
+			return entry, nil
 		}
 	}
 	s.entries = append(s.entries, entry)
-	return nil
+	return entry, nil
 }
 
 func (s *fakeStore) PublishHost(_ context.Context, entry HostEntry) error {
@@ -67,8 +73,8 @@ func requestWithIA(t *testing.T, ia addr.IA) context.Context {
 
 // TestDirectoryPublishRecordsAuthenticatedIA checks the handlers record the
 // authenticated ISD-AS: a publish claiming another ISD-AS is recorded under
-// the authenticated one, and one without an authenticated ISD-AS never
-// records.
+// the authenticated one, the store's assigned slice answering the
+// publication, and one without an authenticated ISD-AS never records.
 func TestDirectoryPublishRecordsAuthenticatedIA(t *testing.T) {
 	store := &fakeStore{}
 	svc := &DirectoryService{Store: store, Cnt: &counters{}}
@@ -80,9 +86,14 @@ func TestDirectoryPublishRecordsAuthenticatedIA(t *testing.T) {
 		PublicKey: PublicKey{},
 		Overlay:   netip.MustParsePrefix("10.64.1.0/24"),
 	}
-	if _, err := svc.Publish(requestWithIA(t, publisher),
-		connect.NewRequest(&wireguardv1.PublishRequest{Entry: entry.pb()})); err != nil {
+	resp, err := svc.Publish(requestWithIA(t, publisher),
+		connect.NewRequest(&wireguardv1.PublishRequest{Entry: entry.pb()}))
+	if err != nil {
 		t.Fatalf("publishing: %v", err)
+	}
+	if want := "100.64.0.0/24"; resp.Msg.OverlaySubnet != want {
+		t.Errorf("the publish answer = %q, want the assigned %q",
+			resp.Msg.OverlaySubnet, want)
 	}
 	entries, err := store.List(context.Background())
 	if err != nil {
@@ -108,7 +119,8 @@ func TestDirectoryPublishRecordsAuthenticatedIA(t *testing.T) {
 }
 
 // TestDirectoryListServesEntries checks List serves what Publish recorded —
-// nodes beside hosts, one authenticated snapshot.
+// nodes beside hosts, one authenticated snapshot, the claimed overlay
+// nowhere in it.
 func TestDirectoryListServesEntries(t *testing.T) {
 	store := &fakeStore{}
 	svc := &DirectoryService{Store: store, Cnt: &counters{}}
@@ -123,6 +135,7 @@ func TestDirectoryListServesEntries(t *testing.T) {
 		connect.NewRequest(&wireguardv1.PublishRequest{Entry: entry.pb()})); err != nil {
 		t.Fatalf("publishing: %v", err)
 	}
+	entry.Overlay = netip.MustParsePrefix("100.64.0.0/24")
 	host := HostEntry{
 		PublicKey: mustPubKey(0xcd),
 		Addr:      netip.MustParseAddr("100.64.7.9"),

@@ -241,3 +241,24 @@ argument.
     wireguard-only proofs pass over assigned slices.
 
 ## Implementation history
+
+*   The assignment rule is [AssignSlice](/pkg/apps/wireguard/directory.go),
+    placed over the entries the store holds, and the store applies it at
+    [Publish](/pkg/apps/wireguard/impl/bbolt/db.go); the claim-free
+    publication and its answered slice are the wire's two fields
+    ([directory.proto](/proto/wireguard/v1/directory.proto)), the
+    application's waiting surface is
+    [Subnet](/pkg/apps/wireguard/directory.go), and the SOCKS assembly
+    waiting on it is [socks.go](/internal/services/socks.go); the
+    allocator's overlap refusal and eligibility filter left
+    [allocator.go](/pkg/apps/coordination/allocator.go), `--slice` the
+    shared registration ([run.go](/cmd/cion/run.go)), and the contract
+    suite covers the rule
+    ([dbtest.go](/pkg/apps/wireguard/impl/dbtest/dbtest.go)).
+*   Divergence: [ADR-0011](/docs/adrs/0011-serve-hosts-with-a-tailscale-coordination-service.md)
+    stands as written — the sixth decision's extension this record's
+    Outcomes names lands here, not as an in-place amendment, a landed
+    record's body being immutable
+    ([docs/README.md](/docs/README.md)); the same holds for
+    [ADR-0012](/docs/adrs/0012-serve-egress-as-an-overlay-socks-service.md)'s
+    renumbering note.

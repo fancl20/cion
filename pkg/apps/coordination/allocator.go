@@ -12,8 +12,9 @@ import (
 // node's slice of the tailnet range, keyed by the host's public key —
 // unique by construction, stable per key, idempotent to repeat, nothing
 // ever freed. The owning node is chosen at registration — the slice with
-// the most free addresses, ties to the lowest ISD-AS — and the record never
-// moves: a re-registering host changes nothing.
+// the most free addresses, ties to the lowest ISD-AS, over slices the
+// directory assigned and so cannot overlap — and the record never moves: a
+// re-registering host changes nothing.
 func allocate(key wireguard.PublicKey, directory wireguard.Directory) (
 	wireguard.HostEntry, error) {
 
@@ -25,35 +26,11 @@ func allocate(key wireguard.PublicKey, directory wireguard.Directory) (
 		}
 	}
 
-	// Two live node entries claiming overlapping slices are an operator
-	// error the allocator refuses to arbitrate: registrations into either
-	// fail with the pair named, the error surfacing at the gate it would
-	// corrupt. A clean slice beside them still takes hosts.
-	var overlap error
-	eligible := make([]wireguard.Entry, 0, len(directory.Nodes))
-	for i, a := range directory.Nodes {
-		conflict := false
-		for j, b := range directory.Nodes {
-			if i != j && a.Overlay.Overlaps(b.Overlay) {
-				conflict = true
-				if overlap == nil {
-					overlap = fmt.Errorf(
-						"the slices of %s and %s overlap: the operator's error, not the joiner's",
-						a.IA, b.IA)
-				}
-				break
-			}
-		}
-		if !conflict {
-			eligible = append(eligible, a)
-		}
-	}
-
 	// The freest slice takes the host; ties go to the lowest ISD-AS.
 	var owner *wireguard.Entry
 	free := 0
-	for i := range eligible {
-		entry := &eligible[i]
+	for i := range directory.Nodes {
+		entry := &directory.Nodes[i]
 		count := freeAddresses(entry.Overlay, directory.Hosts)
 		if count > free || (count == free && owner != nil &&
 			uint64(entry.IA) < uint64(owner.IA)) {
@@ -63,8 +40,6 @@ func allocate(key wireguard.PublicKey, directory wireguard.Directory) (
 		}
 	}
 	switch {
-	case owner == nil && overlap != nil:
-		return wireguard.HostEntry{}, overlap
 	case owner == nil:
 		return wireguard.HostEntry{}, errors.New(
 			"the directory holds no node entry to place a host in")

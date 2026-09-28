@@ -30,8 +30,10 @@ type Entry struct {
 	IsdAs uint64 `protobuf:"varint,1,opt,name=isd_as,json=isdAs,proto3" json:"isd_as,omitempty"`
 	// public_key is the node's 32-byte WireGuard public key.
 	PublicKey []byte `protobuf:"bytes,2,opt,name=public_key,json=publicKey,proto3" json:"public_key,omitempty"`
-	// overlay_subnet is the node's overlay subnet, a slice of the tailnet
-	// range, e.g. "100.64.1.0/24".
+	// overlay_subnet is the node's assigned slice of the tailnet range, e.g.
+	// "100.64.1.0/24" — the slice the directory's store assigned at the
+	// node's first publication. A publish request's entry claims none; one an
+	// older client still sends is ignored.
 	OverlaySubnet string `protobuf:"bytes,3,opt,name=overlay_subnet,json=overlaySubnet,proto3" json:"overlay_subnet,omitempty"`
 	// host_endpoint is the host-facing endpoint a host's client dials — the
 	// underlay address and shared port — the coordination service's netmap
@@ -178,8 +180,8 @@ func (x *HostEntry) GetNote() string {
 
 type PublishRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// entry is the publisher's claimed entry; the ISD-AS comes from the
-	// authenticated certificate chain, the rest from the entry.
+	// entry is the publisher's claim; the ISD-AS comes from the
+	// authenticated certificate chain, and the store assigns the slice.
 	Entry         *Entry `protobuf:"bytes,1,opt,name=entry,proto3" json:"entry,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -222,8 +224,14 @@ func (x *PublishRequest) GetEntry() *Entry {
 	return nil
 }
 
+// PublishResponse answers the publication with the assigned slice: the
+// store's record of the publisher, which never moves.
 type PublishResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// overlay_subnet is the slice the store assigned the publisher — the
+	// first free /24 of the tailnet range at its first publication, kept on
+	// every one after.
+	OverlaySubnet string `protobuf:"bytes,1,opt,name=overlay_subnet,json=overlaySubnet,proto3" json:"overlay_subnet,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -256,6 +264,13 @@ func (x *PublishResponse) ProtoReflect() protoreflect.Message {
 // Deprecated: Use PublishResponse.ProtoReflect.Descriptor instead.
 func (*PublishResponse) Descriptor() ([]byte, []int) {
 	return file_proto_wireguard_v1_directory_proto_rawDescGZIP(), []int{3}
+}
+
+func (x *PublishResponse) GetOverlaySubnet() string {
+	if x != nil {
+		return x.OverlaySubnet
+	}
+	return ""
 }
 
 type ListRequest struct {
@@ -366,8 +381,9 @@ const file_proto_wireguard_v1_directory_proto_rawDesc = "" +
 	"\x06isd_as\x18\x03 \x01(\x04R\x05isdAs\x12\x12\n" +
 	"\x04note\x18\x04 \x01(\tR\x04note\";\n" +
 	"\x0ePublishRequest\x12)\n" +
-	"\x05entry\x18\x01 \x01(\v2\x13.wireguard.v1.EntryR\x05entry\"\x11\n" +
-	"\x0fPublishResponse\"\r\n" +
+	"\x05entry\x18\x01 \x01(\v2\x13.wireguard.v1.EntryR\x05entry\"8\n" +
+	"\x0fPublishResponse\x12%\n" +
+	"\x0eoverlay_subnet\x18\x01 \x01(\tR\roverlaySubnet\"\r\n" +
 	"\vListRequest\"l\n" +
 	"\fListResponse\x12-\n" +
 	"\aentries\x18\x01 \x03(\v2\x13.wireguard.v1.EntryR\aentries\x12-\n" +

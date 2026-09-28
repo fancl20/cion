@@ -60,23 +60,66 @@ type wireHostEntry struct {
 }
 
 // Publish records the entry, keyed by its ISD-AS: a publisher's later entry
-// replaces its earlier one.
-func (b *directoryDB) Publish(ctx context.Context, entry wireguard.Entry) error {
+// replaces its earlier one, and its slice — placed at its first publication
+// as the first free /24 of the tailnet range, the claimed overlay ignored —
+// never moves.
+func (b *directoryDB) Publish(ctx context.Context, entry wireguard.Entry) (wireguard.Entry, error) {
 	endpoint := ""
 	if entry.HostEndpoint.IsValid() {
 		endpoint = entry.HostEndpoint.String()
 	}
-	return b.db.Update(func(tx *bbolt.Tx) error {
+	var recorded wireguard.Entry
+	err := b.db.Update(func(tx *bbolt.Tx) error {
+		held, err := heldEntries(tx)
+		if err != nil {
+			return err
+		}
+		overlay, err := wireguard.AssignSlice(entry.IA, held)
+		if err != nil {
+			return err
+		}
 		raw, err := json.Marshal(wireEntry{
 			PublicKey:    entry.PublicKey.String(),
-			Overlay:      entry.Overlay.String(),
+			Overlay:      overlay.String(),
 			HostEndpoint: endpoint,
 		})
 		if err != nil {
 			return err
 		}
-		return tx.Bucket(entriesBucket).Put([]byte(entry.IA.String()), raw)
+		if err := tx.Bucket(entriesBucket).Put([]byte(entry.IA.String()), raw); err != nil {
+			return err
+		}
+		recorded = entry
+		recorded.Overlay = overlay
+		return nil
 	})
+	if err != nil {
+		return wireguard.Entry{}, err
+	}
+	return recorded, nil
+}
+
+// heldEntries decodes the node entries the store holds — the assignment's
+// input: the slice each ISD-AS keeps and the ones the next placement avoids.
+func heldEntries(tx *bbolt.Tx) ([]wireguard.Entry, error) {
+	var entries []wireguard.Entry
+	c := tx.Bucket(entriesBucket).Cursor()
+	for k, v := c.First(); k != nil; k, v = c.Next() {
+		var wire wireEntry
+		if err := json.Unmarshal(v, &wire); err != nil {
+			return nil, fmt.Errorf("decoding the entry for %s: %w", k, err)
+		}
+		ia, err := parseIA(string(k))
+		if err != nil {
+			return nil, err
+		}
+		overlay, err := parsePrefix(wire.Overlay)
+		if err != nil {
+			return nil, fmt.Errorf("decoding the entry for %s: %w", k, err)
+		}
+		entries = append(entries, wireguard.Entry{IA: ia, Overlay: overlay})
+	}
+	return entries, nil
 }
 
 // PublishHost records the host entry, keyed by its public key: the same key

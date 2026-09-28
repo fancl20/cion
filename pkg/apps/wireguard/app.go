@@ -56,10 +56,6 @@ const CountersInterval = time.Minute
 type Config struct {
 	// IA is the node's ISD-AS.
 	IA addr.IA
-	// Subnet is the node's slice of the tailnet range, 100.64.0.0/10: the
-	// space the coordination service allocates the node's hosts from. The
-	// slice's first address is the node's own.
-	Subnet netip.Prefix
 	// ListenHost is the underlay host the shared host-facing UDP port binds.
 	ListenHost netip.Addr
 	// ListenPort is the shared host-facing UDP port — hosts are plain
@@ -146,6 +142,11 @@ type App struct {
 	// hostPeers holds the host entries the device's peers are programmed
 	// from, keyed by the hosts' public keys.
 	hostPeers map[PublicKey]HostEntry
+	// subnet is the slice the directory assigned — set once, when the
+	// publication's answer arrives, and assigned closes to wake the waits
+	// on it.
+	subnet   netip.Prefix
+	assigned chan struct{}
 }
 
 // hostDevice is the one host-facing device: the node's key pair on the
@@ -194,9 +195,6 @@ func New(cfg Config) (*App, error) {
 	if cfg.Store == nil && cfg.CoreRoute == nil {
 		return nil, fmt.Errorf("neither a directory store nor a core route configured")
 	}
-	if err := validateSubnet(cfg.Subnet); err != nil {
-		return nil, err
-	}
 	key, err := LoadOrCreateKey(cfg.StateDir)
 	if err != nil {
 		return nil, fmt.Errorf("loading the application key: %w", err)
@@ -221,6 +219,7 @@ func New(cfg Config) (*App, error) {
 		router:    newRouter(OverlayMTU, cnt),
 		meshPeers: make(map[addr.IA]*meshPeer),
 		hostPeers: make(map[PublicKey]HostEntry),
+		assigned:  make(chan struct{}),
 		logger:    device.NewLogger(device.LogLevelError, "cion-wireguard"),
 	}
 	if cfg.InterfaceDown != nil {
@@ -275,15 +274,14 @@ func New(cfg Config) (*App, error) {
 	return a, nil
 }
 
-// validateSubnet checks the slice's grammar: an IPv4 prefix the tailnet
-// range contains — the space the coordination service allocates from, the
-// anchor the directory already distributes.
-func validateSubnet(subnet netip.Prefix) error {
-	if !subnet.IsValid() || !subnet.Addr().Is4() {
-		return fmt.Errorf("overlay subnet %s is not IPv4", subnet)
-	}
-	if !Tailnet.Contains(subnet.Addr()) || subnet.Bits() < Tailnet.Bits() {
-		return fmt.Errorf("overlay subnet %s is not a slice of %s",
+// validateAssignment checks the assigned slice fail-fast: a /24 the tailnet
+// range contains, the shape the store's assignment guarantees — a core that
+// answers anything else surfaces at the publication, the seam nearest it,
+// rather than deep in the netstack.
+func validateAssignment(subnet netip.Prefix) error {
+	if !subnet.IsValid() || !subnet.Addr().Is4() || subnet.Bits() != 24 ||
+		!Tailnet.Contains(subnet.Addr()) {
+		return fmt.Errorf("the assigned slice %s is not a /24 of the tailnet range %s",
 			subnet, Tailnet)
 	}
 	return nil
@@ -567,8 +565,7 @@ func (a *App) Run(ctx context.Context) error {
 	go a.runPublish(ctx)
 	go a.runSync(ctx)
 	slog.Info("Serving the WireGuard application",
-		"ia", a.cfg.IA, "subnet", a.cfg.Subnet,
-		"listenPort", a.cfg.ListenPort,
+		"ia", a.cfg.IA, "listenPort", a.cfg.ListenPort,
 		"publicKey", a.PublicKey())
 	logTick := time.NewTicker(CountersInterval)
 	defer logTick.Stop()

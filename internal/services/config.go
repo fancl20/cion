@@ -8,7 +8,6 @@ import (
 
 	"github.com/scionproto/scion/pkg/addr"
 
-	"github.com/fancl20/cion/pkg/apps/wireguard"
 	"github.com/fancl20/cion/pkg/dataplane"
 )
 
@@ -63,13 +62,10 @@ type NodeConfig struct {
 	// telegram method of EnrollAuth; empty uses the public one. The
 	// integration tests point it at their local double.
 	TelegramAPI string
-	// Slice is the node's slice of the tailnet range, 100.64.0.0/10, e.g.
-	// "100.64.1.0/24": the space the coordination service allocates the node's
-	// hosts from, the slice's first address the node's own — the SOCKS service's
-	// serving address. Empty runs no WireGuard or SOCKS application.
-	Slice string
-	// HostPort is the shared host-facing UDP port every host dials;
-	// required with Slice.
+	// HostPort is the shared host-facing UDP port every host dials. It alone
+	// decides whether the node serves hosts: zero runs no WireGuard or SOCKS
+	// application, and the directory assigns the slice their addresses come
+	// from.
 	HostPort uint16
 	// Coordination overrides the coordination endpoint's placement for the
 	// integration harness: the loopback address its core serves on and the relay
@@ -165,27 +161,6 @@ func (c NodeConfig) Validate() error {
 		if _, _, err := loadEnrollAuth(c.EnrollAuth, c.TelegramAPI, c.State); err != nil {
 			return fmt.Errorf("parsing --enroll-auth: %w", err)
 		}
-	}
-	if c.Slice != "" {
-		// The slice's grammar: a prefix the tailnet range contains.
-		subnet, err := netip.ParsePrefix(c.Slice)
-		if err != nil {
-			return fmt.Errorf("parsing --slice %q: %w", c.Slice, err)
-		}
-		if !subnet.Addr().Is4() ||
-			!wireguard.Tailnet.Contains(subnet.Addr()) ||
-			subnet.Bits() < wireguard.Tailnet.Bits() {
-			return fmt.Errorf("--slice %s is not a slice of the tailnet range %s",
-				subnet, wireguard.Tailnet)
-		}
-		if c.HostPort == 0 {
-			return fmt.Errorf("--host-port is required with --slice: " +
-				"the shared host-facing port every host dials")
-		}
-	}
-	if c.HostPort != 0 && c.Slice == "" {
-		return fmt.Errorf("--host-port requires --slice: " +
-			"the port serves the applications the slice names")
 	}
 	return nil
 }
