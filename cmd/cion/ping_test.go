@@ -2,15 +2,14 @@ package main
 
 import (
 	"net/netip"
-	"strings"
 	"testing"
 
 	"github.com/scionproto/scion/pkg/addr"
 )
 
 // TestPingArgumentsParse checks the ping command's surface: the shared and
-// local node arguments parse — the command assembles a local node — and the
-// core's issuance arguments are unknown to it.
+// local node arguments parse — the command assembles a local node. The
+// partition's refusals are the shared matrix's.
 func TestPingArgumentsParse(t *testing.T) {
 	cmd := newPingCommand()
 	if err := cmd.Flags().Parse([]string{
@@ -19,11 +18,6 @@ func TestPingArgumentsParse(t *testing.T) {
 		"--state", "/var/lib/cion",
 	}); err != nil {
 		t.Fatalf("parsing the local surface: %v", err)
-	}
-	if err := cmd.Flags().Parse([]string{"--trust.acme-email", "admin@example.org"}); err == nil {
-		t.Error("--trust.acme-email parsed under ping, want the unknown-flag refusal")
-	} else if !strings.Contains(err.Error(), "acme-email") {
-		t.Errorf("the refusal = %v, want it to name the flag", err)
 	}
 }
 

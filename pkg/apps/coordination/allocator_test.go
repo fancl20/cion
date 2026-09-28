@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/fancl20/cion/pkg/apps/wireguard"
+	"github.com/fancl20/cion/pkg/apps/wireguard/impl/dbtest"
 )
 
 // TestAllocateIssuesInOrder checks the sequence: allocation starts after
@@ -13,7 +14,7 @@ func TestAllocateIssuesInOrder(t *testing.T) {
 	directory := wireguard.Directory{Nodes: []wireguard.Entry{
 		testNode(mustIA("1-ff00:0:1"), "100.64.1.0/24", "198.51.100.10:51820"),
 	}}
-	first, err := allocate(testHostKey(1), directory)
+	first, err := allocate(dbtest.MustKey(1), directory)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -26,7 +27,7 @@ func TestAllocateIssuesInOrder(t *testing.T) {
 	}
 	// Idempotence: the same key re-registers to the same address.
 	directory.Hosts = append(directory.Hosts, first)
-	again, err := allocate(testHostKey(1), directory)
+	again, err := allocate(dbtest.MustKey(1), directory)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -34,7 +35,7 @@ func TestAllocateIssuesInOrder(t *testing.T) {
 		t.Fatalf("a re-registration = %+v, want the same record %+v", again, first)
 	}
 	// A new key takes the next address.
-	next, err := allocate(testHostKey(2), directory)
+	next, err := allocate(dbtest.MustKey(2), directory)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -53,10 +54,10 @@ func TestAllocatePlacement(t *testing.T) {
 	}}
 	// The second node's slice is the emptiest beside the first's one host.
 	directory.Hosts = append(directory.Hosts,
-		wireguard.HostEntry{PublicKey: testHostKey(0xa), Addr: ip("100.64.1.2"), IA: mustIA("1-ff00:0:1")},
-		wireguard.HostEntry{PublicKey: testHostKey(0xb), Addr: ip("100.64.3.2"), IA: mustIA("1-ff00:0:3")},
+		wireguard.HostEntry{PublicKey: dbtest.MustKey(0xa), Addr: ip("100.64.1.2"), IA: mustIA("1-ff00:0:1")},
+		wireguard.HostEntry{PublicKey: dbtest.MustKey(0xb), Addr: ip("100.64.3.2"), IA: mustIA("1-ff00:0:3")},
 	)
-	host, err := allocate(testHostKey(1), directory)
+	host, err := allocate(dbtest.MustKey(1), directory)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -70,10 +71,10 @@ func TestAllocatePlacement(t *testing.T) {
 		testNode(mustIA("1-ff00:0:1"), "100.64.1.0/24", "198.51.100.10:51820"),
 	}}
 	tie.Hosts = append(tie.Hosts,
-		wireguard.HostEntry{PublicKey: testHostKey(0xb), Addr: ip("100.64.2.2"), IA: mustIA("1-ff00:0:2")},
-		wireguard.HostEntry{PublicKey: testHostKey(0xa), Addr: ip("100.64.1.2"), IA: mustIA("1-ff00:0:1")},
+		wireguard.HostEntry{PublicKey: dbtest.MustKey(0xb), Addr: ip("100.64.2.2"), IA: mustIA("1-ff00:0:2")},
+		wireguard.HostEntry{PublicKey: dbtest.MustKey(0xa), Addr: ip("100.64.1.2"), IA: mustIA("1-ff00:0:1")},
 	)
-	host, err = allocate(testHostKey(2), tie)
+	host, err = allocate(dbtest.MustKey(2), tie)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -94,16 +95,16 @@ func TestAllocateRefusals(t *testing.T) {
 	}}
 	for i := 0; i < 5; i++ {
 		full.Hosts = append(full.Hosts, wireguard.HostEntry{
-			PublicKey: testHostKey(byte(i + 1)),
+			PublicKey: dbtest.MustKey(byte(i + 1)),
 			Addr:      ipMasked("100.64.1.", byte(2+i)),
 			IA:        mustIA("1-ff00:0:1"),
 		})
 	}
-	if _, err := allocate(testHostKey(0x7f), full); err == nil {
+	if _, err := allocate(dbtest.MustKey(0x7f), full); err == nil {
 		t.Error("a full slice allocated, want refusal")
 	}
 
-	if _, err := allocate(testHostKey(1), wireguard.Directory{}); err == nil {
+	if _, err := allocate(dbtest.MustKey(1), wireguard.Directory{}); err == nil {
 		t.Error("an empty directory allocated, want refusal")
 	}
 }

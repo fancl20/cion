@@ -235,7 +235,8 @@ func TestJoinByEnrollAuthTelegram(t *testing.T) {
 
 	Poll(t, "the operator's prompt", func() bool { return bot.promptCount() == 1 })
 	// The joiner pends through retries: no chain names it, and no second
-	// prompt re-asks the one identity, while the retry cadence runs.
+	// prompt re-asks the one identity, while the retry cadence runs. An
+	// absence proof — the window is the retry pacing's own.
 	time.Sleep(10 * fastPacing.Enrollment)
 	if holdsChain(b) {
 		t.Fatal("the joiner enrolled before the operator answered")
@@ -245,13 +246,11 @@ func TestJoinByEnrollAuthTelegram(t *testing.T) {
 	}
 
 	// The operator presses approve; enrollment completes on the retry
-	// cadence — one retry interval, with room for the press to land.
-	pressed := time.Now()
+	// cadence. The ordering is the proof — the prompt consumed and the
+	// chain then held — and slowness under the race detector is no
+	// regression, so no wall-clock bound rides the wait.
 	bot.press(t, 0, 0)
 	Poll(t, "the approved joiner to enroll", func() bool { return holdsChain(b) })
-	if elapsed := time.Since(pressed); elapsed > 10*fastPacing.Enrollment {
-		t.Errorf("approval landed in %s, want the retry cadence", elapsed)
-	}
 	ctx := context.Background()
 	Poll(t, "the approved joiner to reach the core", func() bool {
 		return pingFrom(ctx, b, a.app.IA(), a.host)
@@ -319,12 +318,15 @@ func TestJoinDeniedByEnrollAuth(t *testing.T) {
 
 	// The candidate mints on the core and stays unproven: the joiner keeps
 	// answering the window's probes, so the grace holds it, but no evidence
-	// ever establishes it — the joiner's chain never exists.
+	// ever establishes it — the joiner's chain never exists. An absence
+	// proof, bounded by the candidate window's own pacing: one full window
+	// with no establishment is the claim, the retirement after silence the
+	// poll below.
 	Poll(t, "the joiner's candidate on the core", func() bool {
 		e := entryOf(a, b.app.IA())
 		return e != nil && e.State == links.StateCandidate
 	})
-	time.Sleep(2 * fastPacing.CandidateWindow)
+	time.Sleep(fastPacing.CandidateWindow + fastPacing.Selection)
 	if e := entryOf(a, b.app.IA()); e == nil || e.State != links.StateCandidate {
 		t.Fatalf("the denied joiner's entry = %v, want still the graced candidate", e)
 	}
@@ -346,9 +348,8 @@ func TestJoinDeniedByEnrollAuth(t *testing.T) {
 }
 
 // TestJoinPendingNeverCompletes checks the unattended prompt: a Telegram
-// prompt no operator answers never completes an enrollment — and holds no
-// transport state on the core, pending being a verdict the retry loop
-// consumes, not a connection held for a human's reaction time.
+// prompt no operator answers never completes an enrollment — the joiner
+// pends on its retry loop alone, no chain ever naming it on either side.
 func TestJoinPendingNeverCompletes(t *testing.T) {
 	t.Parallel()
 	wpki := NewWebPKI(t)

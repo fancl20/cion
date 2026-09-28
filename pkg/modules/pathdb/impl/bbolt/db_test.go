@@ -2,43 +2,35 @@ package bbolt_test
 
 import (
 	"context"
-	"path/filepath"
 	"testing"
 
+	filedb "github.com/fancl20/cion/internal/dbtest"
 	"github.com/fancl20/cion/pkg/modules/pathdb"
 	"github.com/fancl20/cion/pkg/modules/pathdb/impl/bbolt"
 	"github.com/fancl20/cion/pkg/modules/pathdb/impl/dbtest"
 )
 
+// testDB adapts the bbolt implementation to the contract test harness over
+// the shared file-backed lifecycle.
 type testDB struct {
 	pathdb.DB
-	path string
+	file *filedb.FileDB[pathdb.DB]
 }
 
 func (db *testDB) Prepare(t *testing.T, ctx context.Context) {
-	db.path = ""
-	db.open(t)
+	db.file.Prepare(t)
+	db.DB = db.file.DB()
 }
 
 func (db *testDB) Reopen(t *testing.T, ctx context.Context) {
-	if err := db.Close(); err != nil {
-		t.Fatalf("closing database: %v", err)
-	}
-	db.open(t)
-}
-
-func (db *testDB) open(t *testing.T) {
-	t.Helper()
-	if db.path == "" {
-		db.path = filepath.Join(t.TempDir(), "path.db")
-	}
-	b, err := bbolt.New(db.path, nil)
-	if err != nil {
-		t.Fatalf("creating test database: %v", err)
-	}
-	db.DB = b
+	db.file.Reopen(t)
+	db.DB = db.file.DB()
 }
 
 func TestDB(t *testing.T) {
-	dbtest.Run(t, &testDB{})
+	dbtest.Run(t, &testDB{
+		file: filedb.NewFileDB(func(path string) (pathdb.DB, error) {
+			return bbolt.New(path, nil)
+		}),
+	})
 }

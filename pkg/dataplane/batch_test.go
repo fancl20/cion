@@ -68,6 +68,35 @@ func collectSums(t *testing.T, reader *sdkmetric.ManualReader) map[metricKey]int
 	return sums
 }
 
+// settleSums polls the recorded counters until every wanted sum holds,
+// returning the settled snapshot, failing the test at the timeout — the
+// flushes are asynchronous, so the episodes read to completion rather than
+// sleep.
+func settleSums(
+	t *testing.T, reader *sdkmetric.ManualReader, want map[metricKey]int64,
+) map[metricKey]int64 {
+
+	t.Helper()
+	deadline := time.Now().Add(testTimeout)
+	for {
+		sums := collectSums(t, reader)
+		settled := true
+		for k, v := range want {
+			if sums[k] != v {
+				settled = false
+				break
+			}
+		}
+		if settled {
+			return sums
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("counters did not settle; got %v, want %v", sums, want)
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+}
+
 // TestProcessorDrainsInBatches drives the processor's batch-drain loop
 // directly: a queue fed more packets than one batch holds is drained in
 // order, the processor blocks again for the next first packet once the
@@ -189,11 +218,8 @@ func TestIngestCounterStaging(t *testing.T) {
 	reader := newTestReader(t)
 	n := newBenchNode(t, benchRunConfig)
 	ctx, cancel := context.WithCancel(context.Background())
-	serveDone := make(chan struct{})
-	go func() {
-		defer close(serveDone)
-		_ = n.d.Serve(ctx)
-	}()
+	serveDone := make(chan error, 1)
+	go func() { serveDone <- n.d.Serve(ctx) }()
 	t.Cleanup(func() {
 		cancel()
 		<-serveDone
@@ -232,29 +258,10 @@ func TestIngestCounterStaging(t *testing.T) {
 		}
 	}
 
-	// The flushes are asynchronous; poll until the sums settle.
-	deadline := time.Now().Add(testTimeout)
-	for {
-		sums := collectSums(t, reader)
-		settled := true
-		for k, v := range want {
-			if sums[k] != v {
-				settled = false
-				break
-			}
+	// Nothing else may be recorded against the internal link.
+	for k, v := range settleSums(t, reader, want) {
+		if k[1] == "0" && v != want[k] {
+			t.Fatalf("unexpected %v = %d on the internal link", k, v)
 		}
-		if settled {
-			// Nothing else may be recorded against the internal link.
-			for k, v := range sums {
-				if k[1] == "0" && v != want[k] {
-					t.Fatalf("unexpected %v = %d on the internal link", k, v)
-				}
-			}
-			return
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("counters did not settle; got %v, want %v", sums, want)
-		}
-		time.Sleep(2 * time.Millisecond)
 	}
 }

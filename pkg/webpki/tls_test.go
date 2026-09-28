@@ -190,41 +190,18 @@ func TestServeHTTPSACMEChallenge(t *testing.T) {
 }
 
 // acmeManager builds a certmagic-backed identity — PrepareTLSCert's ACME
-// arm without its port-80 listener, which the tests may not bind — with a
-// solved TLS-ALPN challenge seeded into the cache the way a distributed
-// solve stores it, and binds the node's HTTPS server for it.
+// arm without its port-80 listener — with a solved TLS-ALPN challenge
+// seeded into the cache the way a distributed solve stores it, and binds
+// the node's HTTPS server for it.
 func acmeManager(t *testing.T, domain string) (*CertManager, net.Listener) {
 	t.Helper()
-	storage := &certmagic.FileStorage{Path: t.TempDir()}
-	var magic *certmagic.Config
-	cache := certmagic.NewCache(certmagic.CacheOptions{
-		GetConfigForCert: func(certmagic.Certificate) (*certmagic.Config, error) {
-			return magic, nil
-		},
-	})
-	magic = certmagic.New(cache, certmagic.Config{Storage: storage})
-	issuer, ok := magic.Issuers[0].(*certmagic.ACMEIssuer)
-	if !ok {
-		t.Fatal("certmagic did not configure an ACME issuer")
-	}
-	// The challenge certmagic's own solve would present: one solved
-	// TLS-ALPN challenge for the domain, stored where the handshake's
-	// cache read finds it.
-	chal, err := json.Marshal(acme.Challenge{
+	magic, issuer := newTestIssuer(t)
+	seedChallenge(t, magic, issuer, acme.Challenge{
 		Type:             "tls-alpn-01",
 		Token:            "token",
 		KeyAuthorization: "key-authorization",
 		Identifier:       acme.Identifier{Type: "dns", Value: domain},
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	tokenKey := filepath.Join("acme",
-		certmagic.StorageKeys.Safe(issuer.IssuerKey()), "challenge_tokens",
-		certmagic.StorageKeys.Safe(domain)+".json")
-	if err := storage.Store(context.Background(), tokenKey, chal); err != nil {
-		t.Fatal(err)
-	}
 	manager := &CertManager{
 		tlsCfg: &tls.Config{
 			GetCertificate: magic.GetCertificate,
@@ -239,4 +216,98 @@ func acmeManager(t *testing.T, domain string) (*CertManager, net.Listener) {
 	}
 	t.Cleanup(func() { _ = ln.Close() })
 	return manager, ln
+}
+
+// newTestIssuer builds certmagic's ACME machinery over a throwaway storage,
+// the identity the tests seed and read challenges through.
+func newTestIssuer(t *testing.T) (*certmagic.Config, *certmagic.ACMEIssuer) {
+	t.Helper()
+	storage := &certmagic.FileStorage{Path: t.TempDir()}
+	var magic *certmagic.Config
+	cache := certmagic.NewCache(certmagic.CacheOptions{
+		GetConfigForCert: func(certmagic.Certificate) (*certmagic.Config, error) {
+			return magic, nil
+		},
+	})
+	magic = certmagic.New(cache, certmagic.Config{Storage: storage})
+	t.Cleanup(cache.Stop)
+	issuer, ok := magic.Issuers[0].(*certmagic.ACMEIssuer)
+	if !ok {
+		t.Fatal("certmagic did not configure an ACME issuer")
+	}
+	return magic, issuer
+}
+
+// seedChallenge stores one solved challenge where certmagic's distributed
+// solve leaves it — the store its own handlers read the challenge from.
+func seedChallenge(
+	t *testing.T, magic *certmagic.Config, issuer *certmagic.ACMEIssuer, chal acme.Challenge,
+) {
+
+	t.Helper()
+	raw, err := json.Marshal(chal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tokenKey := filepath.Join("acme",
+		certmagic.StorageKeys.Safe(issuer.IssuerKey()), "challenge_tokens",
+		certmagic.StorageKeys.Safe(chal.Identifier.Value)+".json")
+	if err := magic.Storage.Store(context.Background(), tokenKey, raw); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestHTTP01ChallengeSolves checks the dedicated challenge server: an
+// HTTP-01 validation on the conventional port 80 — the number the ACME
+// drafts fix for it, the reason the episode binds it — is answered with the
+// seeded key authorization, and every other request reaches the wrapped
+// handler.
+func TestHTTP01ChallengeSolves(t *testing.T) {
+	magic, issuer := newTestIssuer(t)
+	domain := "cion-core-01.test"
+	seedChallenge(t, magic, issuer, acme.Challenge{
+		Type:             "http-01",
+		Token:            "token",
+		KeyAuthorization: "token.key-authorization",
+		Identifier:       acme.Identifier{Type: "dns", Value: domain},
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := serveHTTP01(ctx, issuer); err != nil {
+		t.Fatalf("serving the HTTP-01 challenge: %v", err)
+	}
+
+	// The validation an ACME CA performs: the identifier as the Host, the
+	// challenge's resource path.
+	req, err := http.NewRequest(http.MethodGet,
+		"http://127.0.0.1/.well-known/acme-challenge/token", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Host = domain
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("the challenge request on port 80: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1024))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK || string(body) != "token.key-authorization" {
+		t.Errorf("the challenge answer = %d %q, want the seeded key authorization",
+			resp.StatusCode, body)
+	}
+
+	// Every other request reaches the wrapped handler.
+	resp, err = http.Get("http://127.0.0.1/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("an ordinary request = %d, want the wrapped handler's 404",
+			resp.StatusCode)
+	}
 }

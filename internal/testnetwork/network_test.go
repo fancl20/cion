@@ -12,20 +12,13 @@ import (
 	"github.com/fancl20/cion/pkg/modules/trustdb"
 )
 
-// TestLineTopology is the line topology's integration test: a three-node
-// line — the core A, the middle B, and C below with no A–C link —
-// where beacons propagate A→B→C with signatures verified at each hop, C
-// enrolls through the reversed beacon over B, C registers a down segment at
-// A through B, and the provider resolves an end-to-end path from C to A.
-func TestLineTopology(t *testing.T) {
-	t.Parallel()
-	wpki := NewWebPKI(t)
-	ipA := addrIP(2)
-	ipB := addrIP(3)
-	ipC := addrIP(4)
+// startLine brings up the harness's three-node line — the founding core A,
+// the middle B, and C below — on the given loopback hosts, its two seeded
+// links the placement every line episode builds on.
+func startLine(t *testing.T, wpki *WebPKI, ipA, ipB, ipC netip.Addr) (*Node, *Node, *Node) {
+	t.Helper()
 	extA, extB1 := FreeUDPAddrOn(t, ipA), FreeUDPAddrOn(t, ipB)
 	extB2, extC := FreeUDPAddrOn(t, ipB), FreeUDPAddrOn(t, ipC)
-
 	a := StartNode(t, NodeConfig{IA: coreIA, Host: ipA, Links: []Link{
 		{Local: extA, Remote: extB1, Neighbor: nodeIA},
 	}, Core: true, WPKI: wpki})
@@ -36,6 +29,18 @@ func TestLineTopology(t *testing.T) {
 	c := StartNode(t, NodeConfig{IA: lineCIA, Host: ipC, Links: []Link{
 		{Local: extC, Remote: extB2, Neighbor: nodeIA},
 	}, WPKI: wpki})
+	return a, b, c
+}
+
+// TestLineTopology is the line topology's integration test: a three-node
+// line — the core A, the middle B, and C below with no A–C link —
+// where beacons propagate A→B→C with signatures verified at each hop, C
+// enrolls through the reversed beacon over B, C registers a down segment at
+// A through B, and the provider resolves an end-to-end path from C to A.
+func TestLineTopology(t *testing.T) {
+	t.Parallel()
+	wpki := NewWebPKI(t)
+	a, b, c := startLine(t, wpki, addrIP(2), addrIP(3), addrIP(4))
 	ctx := context.Background()
 
 	// Beacons propagate A→B→C with signatures verified at each hop: the

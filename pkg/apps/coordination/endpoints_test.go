@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/fancl20/cion/pkg/apps/wireguard/impl/dbtest"
 	"tailscale.com/derp"
 	"tailscale.com/tailcfg"
 	"tailscale.com/types/key"
@@ -63,7 +64,7 @@ func TestCapabilityPin(t *testing.T) {
 // the handshake without.
 func TestKeyEndpoint(t *testing.T) {
 	roots, tlsCfg := testCert(t)
-	a := testApp(t, Config{Store: &memStore{}})
+	a := testApp(t, Config{Store: &dbtest.MemStore{}})
 	addr := serveCoordination(t, a, tlsCfg)
 
 	client := &http.Client{Transport: &http.Transport{
@@ -99,7 +100,7 @@ func TestKeyEndpoint(t *testing.T) {
 // relay carries a datagram from one to the other by key.
 func TestDERPRelay(t *testing.T) {
 	roots, tlsCfg := testCert(t)
-	a := testApp(t, Config{Store: &memStore{}})
+	a := testApp(t, Config{Store: &dbtest.MemStore{}})
 	addr := serveCoordination(t, a, tlsCfg)
 
 	aliceKey := key.NewNode()

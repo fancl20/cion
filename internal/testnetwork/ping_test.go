@@ -93,7 +93,12 @@ func TestPingForkTopology(t *testing.T) {
 	}
 
 	// The core pings down its other leaf: its own down segment is the
-	// complete route.
+	// complete route — its resolution waited for first, the run not
+	// retrying one.
+	PollFor(t, RestartTimeout, "path from A to C", func() bool {
+		path, err := a.Provider.Path(ctx, lineCIA)
+		return err == nil && len(path.HopFields) == 2
+	})
 	report, err = ping.Run(ctx, ping.Config{
 		Conn:     a.NewConn(t, 0),
 		Provider: a.Provider,
@@ -127,20 +132,7 @@ func TestPingForkTopology(t *testing.T) {
 func TestPingLineMiddleNode(t *testing.T) {
 	t.Parallel()
 	wpki := NewWebPKI(t)
-	ipA, ipB, ipC := addrIP(0x23), addrIP(0x24), addrIP(0x25)
-	extA, extB1 := FreeUDPAddrOn(t, ipA), FreeUDPAddrOn(t, ipB)
-	extB2, extC := FreeUDPAddrOn(t, ipB), FreeUDPAddrOn(t, ipC)
-
-	a := StartNode(t, NodeConfig{IA: coreIA, Host: ipA, Links: []Link{
-		{Local: extA, Remote: extB1, Neighbor: nodeIA},
-	}, Core: true, WPKI: wpki})
-	b := StartNode(t, NodeConfig{IA: nodeIA, Host: ipB, Links: []Link{
-		{Local: extB1, Remote: extA, Neighbor: coreIA},
-		{Local: extB2, Remote: extC, Neighbor: lineCIA},
-	}, WPKI: wpki})
-	c := StartNode(t, NodeConfig{IA: lineCIA, Host: ipC, Links: []Link{
-		{Local: extC, Remote: extB2, Neighbor: nodeIA},
-	}, WPKI: wpki})
+	a, b, c := startLine(t, wpki, addrIP(0x23), addrIP(0x24), addrIP(0x25))
 	ctx := context.Background()
 	StartPingResponder(t, a)
 	StartPingResponder(t, b)

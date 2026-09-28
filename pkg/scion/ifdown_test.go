@@ -16,7 +16,7 @@ import (
 	"github.com/fancl20/cion/pkg/segment"
 )
 
-// newTestCache returns a cache holding signals for the node-lifetime TTL.
+// newTestCache returns a cache at the package's own signal TTL.
 func newTestCache() *InterfaceDownCache {
 	return NewInterfaceDownCache()
 }

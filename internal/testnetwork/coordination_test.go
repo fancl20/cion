@@ -291,12 +291,15 @@ func echoOverTailnet(t *testing.T, dst *tsnet.Server, dstAddr netip.Addr,
 	if string(reply) != payload {
 		t.Fatalf("the echo returned %q, want %q", reply, payload)
 	}
+	// The destination's side of the exchange blocks on its own timeout, the
+	// same budget the reply read carried.
 	select {
 	case err := <-done:
 		if err != nil {
 			t.Fatalf("the destination's side of the echo: %v", err)
 		}
-	default:
+	case <-time.After(TestTimeout):
+		t.Fatal("the destination's side of the echo never finished")
 	}
 }
 
@@ -306,6 +309,7 @@ func echoOverTailnet(t *testing.T, dst *tsnet.Server, dstAddr netip.Addr,
 // registry within one cadence; and two hosts exchange traffic through the
 // mesh — the tunnel carrying the tailnet and nothing else.
 func TestCoordinationOpenJoin(t *testing.T) {
+	t.Parallel()
 	// The package CA: its certificate file is the one the vendored
 	// clients' root store trusts.
 	wpki := packageWebPKI

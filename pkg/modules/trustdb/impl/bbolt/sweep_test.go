@@ -3,39 +3,16 @@ package bbolt
 import (
 	"context"
 	"crypto/x509"
-	"fmt"
 	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/scionproto/scion/pkg/addr"
-	"github.com/scionproto/scion/pkg/scrypto/cppki"
 	"go.etcd.io/bbolt"
 
 	"github.com/fancl20/cion/pkg/modules/trustdb"
+	"github.com/fancl20/cion/pkg/modules/trustdb/impl/dbtest"
 )
-
-// loadChainFixture reads a chain fixture from the shared dbtest test data:
-// the AS certificate of the given version under the CP CA certificate.
-func loadChainFixture(t *testing.T, org string, version int) []*x509.Certificate {
-	t.Helper()
-	dir := filepath.Join("..", "dbtest", "testdata", org)
-	as := loadCertFixture(t, filepath.Join(dir, fmt.Sprintf("cp-as%d.crt", version)))
-	ca := loadCertFixture(t, filepath.Join(dir, "cp-ca.crt"))
-	return []*x509.Certificate{as, ca}
-}
-
-func loadCertFixture(t *testing.T, name string) *x509.Certificate {
-	t.Helper()
-	certs, err := cppki.ReadPEMCerts(name)
-	if err != nil {
-		t.Fatalf("Failed to read cert file %s: %v", name, err)
-	}
-	if len(certs) != 1 {
-		t.Fatalf("Expected 1 certificate in file %s, got %d", name, len(certs))
-	}
-	return certs[0]
-}
 
 // newSweepDB opens a throwaway database and inserts the given chains.
 func newSweepDB(t *testing.T, chains ...[]*x509.Certificate) *bboltDB {
@@ -58,9 +35,9 @@ func newSweepDB(t *testing.T, chains ...[]*x509.Certificate) *bboltDB {
 // chains, collected before the cursor reaches the corrupted geneva entry,
 // stay in the store.
 func TestDeleteExpiredChainsAbortsOnMalformed(t *testing.T) {
-	bern1 := loadChainFixture(t, "bern", 1)
-	bern3 := loadChainFixture(t, "bern", 3)
-	geneva1 := loadChainFixture(t, "geneva", 1)
+	bern1 := dbtest.ChainFixture(t, "bern", 1)
+	bern3 := dbtest.ChainFixture(t, "bern", 3)
+	geneva1 := dbtest.ChainFixture(t, "geneva", 1)
 	b := newSweepDB(t, bern1, bern3, geneva1)
 
 	// Corrupt geneva's stored chain; the name sorts after bern's, so the
@@ -97,8 +74,8 @@ func TestDeleteExpiredChainsAbortsOnMalformed(t *testing.T) {
 // sub-bucket is deleted with its last chain: the chains bucket holds no
 // sub-bucket the sweep has emptied.
 func TestDeleteExpiredChainsLeavesNoShell(t *testing.T) {
-	bern1 := loadChainFixture(t, "bern", 1)
-	geneva1 := loadChainFixture(t, "geneva", 1)
+	bern1 := dbtest.ChainFixture(t, "bern", 1)
+	geneva1 := dbtest.ChainFixture(t, "geneva", 1)
 	b := newSweepDB(t, bern1, geneva1)
 
 	n, err := b.DeleteExpiredChains(context.Background(), time.Date(2021, 1, 1, 0, 0, 0, 0, time.UTC))

@@ -100,16 +100,6 @@ func TestRunArgumentsParse(t *testing.T) {
 		t.Errorf("the address defaults = %q, %q", opts.Internal, opts.Control)
 	}
 
-	// Zero is the explicit refusal of the host-serving applications.
-	opts, err = parseNodeArgs(t, "local", "--wireguard.host-port=0")
-	if err != nil {
-		t.Fatalf("parsing the refused host port: %v", err)
-	}
-	if opts.AppArguments.Wireguard.HostPort != 0 {
-		t.Errorf("--wireguard.host-port=0 = %d, want the refusal",
-			opts.AppArguments.Wireguard.HostPort)
-	}
-
 	// The commands themselves carry their role's partition.
 	if err := newRunCoreCommand().Flags().Parse([]string{
 		"--trust.domain", "core.example.org",

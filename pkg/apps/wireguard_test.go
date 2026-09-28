@@ -31,10 +31,14 @@ func wireguardEnvironment(t *testing.T, core bool) *Environment {
 // assigning it — the relay presence from the core's domain, and the
 // core's own store beside the joiner's core route.
 func TestWireguardConfigFromEnvironment(t *testing.T) {
-	cfg, err := wireguardConfig(wireguardEnvironment(t, true))
+	core, err := wireguardConfig(wireguardEnvironment(t, true))
 	if err != nil {
 		t.Fatal(err)
 	}
+	cfg := core
+	// The derivation opened the core's directory store; the episode closes
+	// what the constructor opened.
+	t.Cleanup(func() { _ = core.Store.Close() })
 	if cfg.ListenPort != DefaultHostPort {
 		t.Errorf("listen port = %d", cfg.ListenPort)
 	}

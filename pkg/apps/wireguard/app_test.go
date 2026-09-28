@@ -377,10 +377,19 @@ func TestWireguardValidatesConfig(t *testing.T) {
 	ia := addr.MustIAFrom(20, 0xff0000000241)
 	internal, _ := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
 	t.Cleanup(func() { _ = internal.Close() })
+	// An ephemeral host port: the episode validates the configuration's
+	// shape, not the conventional port the run arguments default.
+	held, err := net.ListenUDP("udp",
+		&net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := uint16(held.LocalAddr().(*net.UDPAddr).Port)
+	_ = held.Close()
 	base := Config{
 		IA:         ia,
 		ListenHost: netip.MustParseAddr("127.0.0.1"),
-		ListenPort: 51820,
+		ListenPort: port,
 		StateDir:   t.TempDir(),
 		Provider:   &scion.PathProvider{IA: ia},
 		Engine:     trust.NewEngine(ia, nil, nil),
@@ -402,8 +411,7 @@ func TestWireguardValidatesConfig(t *testing.T) {
 	if err != nil {
 		t.Fatalf("a valid configuration was rejected: %v", err)
 	}
-	// Release the fixed host port: a re-run of the suite (go test -count)
-	// binds it again.
+	// Release the bound host port with the application.
 	app.Close()
 
 	noDirectory := base

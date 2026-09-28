@@ -180,6 +180,38 @@ func TestLookupCacheUntilExpiry(t *testing.T) {
 	})
 }
 
+// TestLookupEmptyAnswerNotCached checks the empty-answer seam: a fetch that
+// answers nothing is not cached — the registration it raced can land any
+// moment, so the next request asks the core again and sees it.
+func TestLookupEmptyAnswerNotCached(t *testing.T) {
+	fx := newLookupFixture(t)
+	ctx := context.Background()
+
+	// The core holds no down segment for the middle node yet.
+	fx.fetch.mtx.Lock()
+	canned := fx.fetch.down
+	fx.fetch.down = nil
+	fx.fetch.mtx.Unlock()
+	for range 2 {
+		if segs := fx.lookup.Down(ctx, iaLineC); len(segs) != 0 {
+			t.Fatalf("down segments = %d, want none while the core holds none", len(segs))
+		}
+	}
+	fx.fetch.mtx.Lock()
+	if got := len(fx.fetch.requests); got != 2 {
+		t.Errorf("fetches after empty answers = %d, want 2 (an empty answer is not cached)", got)
+	}
+	fx.fetch.mtx.Unlock()
+
+	// The registration lands; the very next request sees it.
+	fx.fetch.mtx.Lock()
+	fx.fetch.down = canned
+	fx.fetch.mtx.Unlock()
+	if segs := fx.lookup.Down(ctx, iaLineC); len(segs) != 1 {
+		t.Fatalf("down segments after the registration = %d, want 1", len(segs))
+	}
+}
+
 // TestLookupCoreHandler checks the core's handler (Section 4.2.3): the
 // source must be this core; core destinations are served from the core
 // segments, everything else from the down segments.

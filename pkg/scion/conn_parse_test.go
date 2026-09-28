@@ -12,12 +12,12 @@ import (
 // TestParseDatagramPacket checks the wire round trip of the datagram
 // encoding the transport produces and parses.
 func TestParseDatagramPacket(t *testing.T) {
-	local := netip.MustParseAddrPort("127.0.0.1:30044")
-	peer := netip.MustParseAddrPort("127.0.0.1:30111")
+	local := netip.MustParseAddrPort(freeUDPAddr(t))
+	peer := netip.MustParseAddrPort(freeUDPAddr(t))
 	conn, err := NewConn(ConnConfig{
 		IA:           addr.MustIAFrom(20, 0xff0000000001),
 		Bind:         local.String(),
-		InternalAddr: "127.0.0.1:30041",
+		InternalAddr: freeUDPAddr(t),
 		MACKey:       testMACKeyBytes,
 		Links:        func() map[uint16]addr.IA { return map[uint16]addr.IA{1: addr.MustIAFrom(20, 0xff0000000002)} },
 	})
@@ -58,11 +58,11 @@ func TestParseDatagramPacket(t *testing.T) {
 // destination port is zero — the destination names no port, the receiving
 // AS's registration owns it.
 func TestWritePacketServiceHeader(t *testing.T) {
-	local := netip.MustParseAddrPort("127.0.0.1:30044")
+	local := netip.MustParseAddrPort(freeUDPAddr(t))
 	conn, err := NewConn(ConnConfig{
 		IA:           addr.MustIAFrom(20, 0xff0000000001),
 		Bind:         local.String(),
-		InternalAddr: "127.0.0.1:30041",
+		InternalAddr: freeUDPAddr(t),
 		MACKey:       testMACKeyBytes,
 		Links:        func() map[uint16]addr.IA { return map[uint16]addr.IA{1: addr.MustIAFrom(20, 0xff0000000002)} },
 	})

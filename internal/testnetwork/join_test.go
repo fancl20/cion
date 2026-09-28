@@ -117,6 +117,42 @@ func entryOf(n *assemblyNode, ia addr.IA) *links.Link {
 	return nil
 }
 
+// bootRendezvousLine brings up the assembly's three-node line — the
+// founding core A, the middle B joined to it by rendezvous, and C below
+// joined to B — on the given loopback hosts.
+func bootRendezvousLine(t *testing.T, wpki *WebPKI,
+	ipA, ipB, ipC netip.Addr) (a, b, c *assemblyNode) {
+
+	t.Helper()
+	// The founding core; its certificate files are the offline fallback the
+	// tests always take.
+	a = bootAssembly(t, func(cfg *services.NodeConfig) {
+		cfg.Core = true
+		cfg.State = t.TempDir()
+		cfg.Internal = FreeUDPAddrOn(t, ipA)
+		cfg.Control = FreeUDPAddrOn(t, ipA)
+		cfg.CertFile = wpki.certFile
+		cfg.KeyFile = wpki.keyFile
+	})
+	// B joins the core by rendezvous.
+	b = bootAssembly(t, func(cfg *services.NodeConfig) {
+		cfg.State = t.TempDir()
+		cfg.Internal = FreeUDPAddrOn(t, ipB)
+		cfg.Control = FreeUDPAddrOn(t, ipB)
+		cfg.Neighbors = []string{a.rendezvousOf()}
+		cfg.RootCAs = wpki.pool
+	})
+	// C joins B — a non-core neighbor — with the core's domain.
+	c = bootAssembly(t, func(cfg *services.NodeConfig) {
+		cfg.State = t.TempDir()
+		cfg.Internal = FreeUDPAddrOn(t, ipC)
+		cfg.Control = FreeUDPAddrOn(t, ipC)
+		cfg.Neighbors = []string{b.rendezvousOf()}
+		cfg.RootCAs = wpki.pool
+	})
+	return a, b, c
+}
+
 // TestJoinByRendezvous is the rendezvous join's integration proof: a
 // three-node line — the core A, the middle B, and C below — where B and C join by
 // rendezvous with one bootstrap neighbor and the core's domain, enroll,
@@ -128,33 +164,7 @@ func TestJoinByRendezvous(t *testing.T) {
 	t.Parallel()
 	wpki := NewWebPKI(t)
 	ipA, ipB, ipC := addrIP(0x31), addrIP(0x32), addrIP(0x33)
-
-	// The founding core; its certificate files are the offline fallback the
-	// tests always take.
-	a := bootAssembly(t, func(cfg *services.NodeConfig) {
-		cfg.Core = true
-		cfg.State = t.TempDir()
-		cfg.Internal = FreeUDPAddrOn(t, ipA)
-		cfg.Control = FreeUDPAddrOn(t, ipA)
-		cfg.CertFile = wpki.certFile
-		cfg.KeyFile = wpki.keyFile
-	})
-	// B joins the core by rendezvous.
-	b := bootAssembly(t, func(cfg *services.NodeConfig) {
-		cfg.State = t.TempDir()
-		cfg.Internal = FreeUDPAddrOn(t, ipB)
-		cfg.Control = FreeUDPAddrOn(t, ipB)
-		cfg.Neighbors = []string{a.rendezvousOf()}
-		cfg.RootCAs = wpki.pool
-	})
-	// C joins B — a non-core neighbor — with the core's domain.
-	c := bootAssembly(t, func(cfg *services.NodeConfig) {
-		cfg.State = t.TempDir()
-		cfg.Internal = FreeUDPAddrOn(t, ipC)
-		cfg.Control = FreeUDPAddrOn(t, ipC)
-		cfg.Neighbors = []string{b.rendezvousOf()}
-		cfg.RootCAs = wpki.pool
-	})
+	a, b, c := bootRendezvousLine(t, wpki, ipA, ipB, ipC)
 	ctx := context.Background()
 
 	// The joins land: both sides of each link hold an entry, each naming
@@ -223,9 +233,13 @@ func TestJoinByRendezvous(t *testing.T) {
 	// Killing B leaves C connected through A.
 	b.cancel()
 	b.app.Close()
-	// Let C's BFD sessions to B mark their verdicts down, so the composed
-	// route crosses no link the monitor distrusts.
-	time.Sleep(3 * fastPacing.BFD)
+	// C's BFD verdict on its link to B turns down — the condition the wait
+	// wants, not a fixed multiple of the transmission interval — so the
+	// composed route crosses no link the monitor distrusts.
+	cbEntry := entryOf(c, b.app.IA())
+	Poll(t, "C to mark the C–B link down", func() bool {
+		return !c.app.Monitor().Up(cbEntry.IfID)
+	})
 	deadline := time.Now().Add(10 * time.Second)
 	for !pingFrom(ctx, c, a.app.IA(), a.host) {
 		// The freshest up segment — A's beacon over the direct link — takes

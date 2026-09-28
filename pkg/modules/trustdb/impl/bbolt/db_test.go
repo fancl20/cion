@@ -2,28 +2,30 @@ package bbolt_test
 
 import (
 	"context"
-	"os"
-	"path/filepath"
 	"testing"
 
+	filedb "github.com/fancl20/cion/internal/dbtest"
 	"github.com/fancl20/cion/pkg/modules/trustdb"
 	"github.com/fancl20/cion/pkg/modules/trustdb/impl/bbolt"
 	"github.com/fancl20/cion/pkg/modules/trustdb/impl/dbtest"
 )
 
+// testDB adapts the bbolt implementation to the contract test harness over
+// the shared file-backed lifecycle.
 type testDB struct {
 	trustdb.DB
+	file *filedb.FileDB[trustdb.DB]
 }
 
 func (db *testDB) Prepare(t *testing.T, ctx context.Context) {
-	_ = os.Remove(filepath.Join(t.TempDir(), "test.db"))
-	b, err := bbolt.New(filepath.Join(t.TempDir(), "test.db"), nil)
-	if err != nil {
-		t.Fatalf("failed to create test database: %v", err)
-	}
-	db.DB = b
+	db.file.Prepare(t)
+	db.DB = db.file.DB()
 }
 
 func TestDB(t *testing.T) {
-	dbtest.Run(t, &testDB{}, dbtest.Config{})
+	dbtest.Run(t, &testDB{
+		file: filedb.NewFileDB(func(path string) (trustdb.DB, error) {
+			return bbolt.New(path, nil)
+		}),
+	}, dbtest.Config{})
 }

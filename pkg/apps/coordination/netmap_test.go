@@ -10,6 +10,7 @@ import (
 	"tailscale.com/types/key"
 
 	"github.com/fancl20/cion/pkg/apps/wireguard"
+	"github.com/fancl20/cion/pkg/apps/wireguard/impl/dbtest"
 )
 
 // TestNetmapHoldsOnePeer checks the map the registry builds for one host:
@@ -19,13 +20,11 @@ import (
 // filter rule admitting the member's traffic, and the DERP map naming the
 // core's region.
 func TestNetmapHoldsOnePeer(t *testing.T) {
-	store := &memStore{}
+	store := &dbtest.MemStore{}
 	nodeEntry := testNode(mustIA("1-ff00:0:1"), "100.64.1.0/24", "198.51.100.10:51820")
-	nodeEntry.PublicKey = testHostKey(0x11)
-	if err := store.Publish(context.Background(), nodeEntry); err != nil {
-		t.Fatal(err)
-	}
-	hostKey := testHostKey(0x22)
+	nodeEntry.PublicKey = dbtest.MustKey(0x11)
+	store.Seed(nodeEntry)
+	hostKey := dbtest.MustKey(0x22)
 	host := registeredHost(hostKey)
 	if err := store.PublishHost(context.Background(), host); err != nil {
 		t.Fatal(err)
@@ -123,21 +122,21 @@ func TestNetmapHoldsOnePeer(t *testing.T) {
 // TestNetmapRequiresRegistration checks the map refuses keys the registry
 // does not hold and nodes that published no host-facing endpoint.
 func TestNetmapRequiresRegistration(t *testing.T) {
-	store := &memStore{}
+	store := &dbtest.MemStore{}
 	a := testApp(t, Config{Store: store})
 	directory, err := store.List(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := a.netmap(nodePublicOf(testHostKey(1)), machineZero(), directory,
+	if _, err := a.netmap(nodePublicOf(dbtest.MustKey(1)), machineZero(), directory,
 		key.DiscoPublic{}, tailcfg.HostinfoView{}); err == nil {
 		t.Error("an unregistered key mapped, want refusal")
 	}
-	if err := store.PublishHost(context.Background(), registeredHost(testHostKey(1))); err != nil {
+	if err := store.PublishHost(context.Background(), registeredHost(dbtest.MustKey(1))); err != nil {
 		t.Fatal(err)
 	}
 	directory, _ = store.List(context.Background())
-	if _, err := a.netmap(nodePublicOf(testHostKey(1)), machineZero(), directory,
+	if _, err := a.netmap(nodePublicOf(dbtest.MustKey(1)), machineZero(), directory,
 		key.DiscoPublic{}, tailcfg.HostinfoView{}); err == nil {
 		t.Error("a host with no owning node entry mapped, want refusal")
 	}
@@ -148,19 +147,13 @@ func TestNetmapRequiresRegistration(t *testing.T) {
 // serving address — as one more /32 among the host /32s, sorted, and no
 // covering prefix appears anywhere in the map.
 func TestNetmapCarriesEveryNodesAddress(t *testing.T) {
-	store := &memStore{}
-	if err := store.Publish(context.Background(),
-		testNode(mustIA("1-ff00:0:1"), "100.64.1.0/24", "198.51.100.10:51820")); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.Publish(context.Background(),
-		testNode(mustIA("1-ff00:0:2"), "100.64.8.0/24", "198.51.100.11:51820")); err != nil {
-		t.Fatal(err)
-	}
+	store := &dbtest.MemStore{}
+	store.Seed(testNode(mustIA("1-ff00:0:1"), "100.64.1.0/24", "198.51.100.10:51820"))
+	store.Seed(testNode(mustIA("1-ff00:0:2"), "100.64.8.0/24", "198.51.100.11:51820"))
 	for _, host := range []wireguard.HostEntry{
-		{PublicKey: testHostKey(0x21), Addr: netip.MustParseAddr("100.64.1.2"),
+		{PublicKey: dbtest.MustKey(0x21), Addr: netip.MustParseAddr("100.64.1.2"),
 			IA: mustIA("1-ff00:0:1")},
-		{PublicKey: testHostKey(0x22), Addr: netip.MustParseAddr("100.64.8.9"),
+		{PublicKey: dbtest.MustKey(0x22), Addr: netip.MustParseAddr("100.64.8.9"),
 			IA: mustIA("1-ff00:0:2")},
 	} {
 		if err := store.PublishHost(context.Background(), host); err != nil {
@@ -173,7 +166,7 @@ func TestNetmapCarriesEveryNodesAddress(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	resp, err := a.netmap(nodePublicOf(testHostKey(0x21)), machineZero(),
+	resp, err := a.netmap(nodePublicOf(dbtest.MustKey(0x21)), machineZero(),
 		directory, key.DiscoPublic{}, tailcfg.HostinfoView{})
 	if err != nil {
 		t.Fatal(err)
@@ -200,12 +193,10 @@ func TestNetmapCarriesEveryNodesAddress(t *testing.T) {
 // the standing resend ticker carries the new map — a full map still the
 // smallest correct answer.
 func TestNetmapResendFollowsNodes(t *testing.T) {
-	store := &memStore{}
+	store := &dbtest.MemStore{}
 	owner := testNode(mustIA("1-ff00:0:1"), "100.64.1.0/24", "198.51.100.10:51820")
-	if err := store.Publish(context.Background(), owner); err != nil {
-		t.Fatal(err)
-	}
-	host := registeredHost(testHostKey(0x31))
+	store.Seed(owner)
+	host := registeredHost(dbtest.MustKey(0x31))
 	if err := store.PublishHost(context.Background(), host); err != nil {
 		t.Fatal(err)
 	}
@@ -216,7 +207,7 @@ func TestNetmapResendFollowsNodes(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		resp, err := a.netmap(nodePublicOf(testHostKey(0x31)), machineZero(),
+		resp, err := a.netmap(nodePublicOf(dbtest.MustKey(0x31)), machineZero(),
 			directory, key.DiscoPublic{}, tailcfg.HostinfoView{})
 		if err != nil {
 			t.Fatal(err)
@@ -226,10 +217,7 @@ func TestNetmapResendFollowsNodes(t *testing.T) {
 	before := build()
 
 	// A node's arrival flips the verdict: its own address joins the map.
-	if err := store.Publish(context.Background(),
-		testNode(mustIA("1-ff00:0:2"), "100.64.2.0/24", "198.51.100.11:51820")); err != nil {
-		t.Fatal(err)
-	}
+	store.Seed(testNode(mustIA("1-ff00:0:2"), "100.64.2.0/24", "198.51.100.11:51820"))
 	after := build()
 	if netmapsEqual(before, after) {
 		t.Error("a node's arrival left the map unchanged, want the resend to fire")

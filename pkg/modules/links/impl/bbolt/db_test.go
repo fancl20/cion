@@ -2,8 +2,6 @@ package bbolt
 
 import (
 	"context"
-	"errors"
-	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -11,46 +9,34 @@ import (
 	"github.com/scionproto/scion/pkg/addr"
 	"go.etcd.io/bbolt"
 
+	filedb "github.com/fancl20/cion/internal/dbtest"
 	"github.com/fancl20/cion/pkg/modules/links"
 	"github.com/fancl20/cion/pkg/modules/links/impl/dbtest"
 )
 
-// testableDB adapts the bbolt implementation to the contract test harness.
+// testableDB adapts the bbolt implementation to the contract test harness
+// over the shared file-backed lifecycle.
 type testableDB struct {
 	links.DB
-	t    *testing.T
-	path string
+	file *filedb.FileDB[links.DB]
 }
 
 func (d *testableDB) Prepare(t *testing.T, ctx context.Context) {
-	d.t = t
-	if d.DB != nil {
-		_ = d.Close()
-		if err := os.Remove(d.path); err != nil && !errors.Is(err, os.ErrNotExist) {
-			t.Fatal(err)
-		}
-	}
-	db, err := New(d.path, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	d.DB = db
+	d.file.Prepare(t)
+	d.DB = d.file.DB()
 }
 
 func (d *testableDB) Reopen(t *testing.T, ctx context.Context) {
-	if err := d.Close(); err != nil {
-		t.Fatal(err)
-	}
-	db, err := New(d.path, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	d.DB = db
+	d.file.Reopen(t)
+	d.DB = d.file.DB()
 }
 
 func TestDB(t *testing.T) {
-	db := &testableDB{path: filepath.Join(t.TempDir(), "links.db")}
-	dbtest.Run(t, db)
+	dbtest.Run(t, &testableDB{
+		file: filedb.NewFileDB(func(path string) (links.DB, error) {
+			return New(path, nil)
+		}),
+	})
 }
 
 // TestAllocateHoldsRetired checks the interface ID holdback: with the counter

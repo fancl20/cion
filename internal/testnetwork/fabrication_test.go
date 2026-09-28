@@ -28,20 +28,7 @@ import (
 func TestFabricatingNeighbor(t *testing.T) {
 	t.Parallel()
 	wpki := NewWebPKI(t)
-	ipA, ipB, ipC := addrIP(0x44), addrIP(0x45), addrIP(0x46)
-	extA, extB1 := FreeUDPAddrOn(t, ipA), FreeUDPAddrOn(t, ipB)
-	extB2, extC := FreeUDPAddrOn(t, ipB), FreeUDPAddrOn(t, ipC)
-
-	a := StartNode(t, NodeConfig{IA: coreIA, Host: ipA, Links: []Link{
-		{Local: extA, Remote: extB1, Neighbor: nodeIA},
-	}, Core: true, WPKI: wpki})
-	b := StartNode(t, NodeConfig{IA: nodeIA, Host: ipB, Links: []Link{
-		{Local: extB1, Remote: extA, Neighbor: coreIA},
-		{Local: extB2, Remote: extC, Neighbor: lineCIA},
-	}, WPKI: wpki})
-	c := StartNode(t, NodeConfig{IA: lineCIA, Host: ipC, Links: []Link{
-		{Local: extC, Remote: extB2, Neighbor: nodeIA},
-	}, WPKI: wpki})
+	a, b, c := startLine(t, wpki, addrIP(0x44), addrIP(0x45), addrIP(0x46))
 	ctx := context.Background()
 
 	// The honest line stands: B enrolled, C terminates verified up segments
