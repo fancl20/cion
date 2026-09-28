@@ -11,14 +11,12 @@ message Entry {
   // authenticated publisher's certificate names, never the claimed one.
   uint64 isd_as = 1;
   // control_addr is the underlay "host:port" address of the publisher's
-  // control service; its endpoint and rendezvous ports derive from the host.
+  // control service, the endpoint port on the published host.
   string control_addr = 2;
   // rendezvous_addr is the underlay "host:port" address the publisher's
-  // rendezvous acceptor listens on for first contact.
+  // rendezvous acceptor listens on for first contact, the fixed rendezvous
+  // port on the published host.
   string rendezvous_addr = 3;
-  // private marks a node behind address translation: joinable by no one,
-  // candidate for no one's redundancy floor (ADR-0008's reachability class).
-  bool private = 4;
 }
 
 message PublishRequest {

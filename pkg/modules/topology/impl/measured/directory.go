@@ -45,14 +45,12 @@ type DirectoryEntry struct {
 	// IA is the publisher's ISD-AS.
 	IA addr.IA
 	// ControlAddr is the underlay address of the publisher's control
-	// service; the endpoint and rendezvous ports derive from its host.
+	// service, the endpoint port on the published host.
 	ControlAddr netip.AddrPort
 	// RendezvousAddr is the underlay address the publisher's rendezvous
-	// acceptor listens on for first contact.
+	// acceptor listens on for first contact, the fixed rendezvous port on
+	// the published host.
 	RendezvousAddr netip.AddrPort
-	// Private marks a node behind address translation: joinable by no one,
-	// candidate for no one's redundancy floor.
-	Private bool
 	// Published is the publish time the core recorded.
 	Published time.Time
 }
@@ -161,7 +159,6 @@ func entryFromPB(pb *nodev1.Entry) (DirectoryEntry, error) {
 		IA:             addr.IA(pb.IsdAs),
 		ControlAddr:    control,
 		RendezvousAddr: rendezvous,
-		Private:        pb.Private,
 	}, nil
 }
 
@@ -170,7 +167,6 @@ func (e DirectoryEntry) pb() *nodev1.Entry {
 		IsdAs:          uint64(e.IA),
 		ControlAddr:    e.ControlAddr.String(),
 		RendezvousAddr: e.RendezvousAddr.String(),
-		Private:        e.Private,
 	}
 }
 
@@ -295,8 +291,14 @@ type NodeDirectory struct {
 
 // NodeDirectoryConfig configures a NodeDirectory.
 type NodeDirectoryConfig struct {
-	// Entry is the node's own publication.
-	Entry DirectoryEntry
+	// IA is the publisher's ISD-AS.
+	IA addr.IA
+	// Host resolves the published entry's host at each publication: the
+	// learned external host when one is recorded, else the control host —
+	// the founding core's its own domain's address, the control host the
+	// fallback. Every socket keeps binding the control host whatever this
+	// returns.
+	Host func(context.Context) netip.Addr
 	// Engine provides the node's AS chain as the client certificate; a node
 	// without a chain cannot publish.
 	Engine *trust.Engine
@@ -319,6 +321,9 @@ type NodeDirectoryConfig struct {
 // NewNodeDirectory builds the node's directory view. The core keeps its own
 // store as the client.
 func NewNodeDirectory(cfg NodeDirectoryConfig) (*NodeDirectory, error) {
+	if cfg.Host == nil {
+		return nil, errors.New("the node directory needs its published host")
+	}
 	d := &NodeDirectory{cfg: cfg}
 	if cfg.CoreRoute == nil {
 		if cfg.Store == nil {
@@ -381,7 +386,9 @@ func (d *NodeDirectory) runPublish(ctx context.Context) {
 }
 
 // publish sends the node's entry once the node's chain exists: an un-enrolled
-// node has no certificate to authenticate the channel with.
+// node has no certificate to authenticate the channel with. The entry is
+// built, not baked: its host resolves at each publication, so a host learned
+// or a domain's address changed mid-run publishes on the next cadence.
 func (d *NodeDirectory) publish(ctx context.Context) error {
 	if d.cfg.Engine != nil {
 		chain, err := d.cfg.Engine.Chain(ctx)
@@ -392,7 +399,12 @@ func (d *NodeDirectory) publish(ctx context.Context) error {
 			return errors.New("no certificate chain yet; enrollment has not produced one")
 		}
 	}
-	return d.client.Publish(ctx, d.cfg.Entry)
+	host := d.cfg.Host(ctx)
+	return d.client.Publish(ctx, DirectoryEntry{
+		IA:             d.cfg.IA,
+		ControlAddr:    netip.AddrPortFrom(host, controlplane.EndpointPort),
+		RendezvousAddr: netip.AddrPortFrom(host, RendezvousPort),
+	})
 }
 
 // runFetch re-fetches the directory on the cadence, replacing the local copy.

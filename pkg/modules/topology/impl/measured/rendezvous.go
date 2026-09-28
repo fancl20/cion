@@ -80,23 +80,37 @@ func ParseRendezvousRequest(b []byte) (RendezvousRequest, error) {
 
 // RendezvousReply echoes the nonce and carries the acceptor's link address,
 // interface ID, and ISD-AS — its ISD is the network's, what a joiner's
-// identity completes with.
+// identity completes with — beside the request's observed source address,
+// the one fact address translation cannot hide: the dialer keeps its host
+// as its learned external host.
 type RendezvousReply struct {
 	Nonce    [16]byte
 	LinkAddr netip.AddrPort
 	IfID     uint16
 	IA       addr.IA
+	// Observed is the source address the acceptor observed the request
+	// arrive from — the address it already replies to. Zero when the reply
+	// does not echo one.
+	Observed netip.AddrPort
 }
 
 func (r RendezvousReply) Marshal() []byte {
 	a := r.LinkAddr.String()
-	buf := make([]byte, 0, 30+len(a))
+	buf := make([]byte, 0, 32+len(a))
 	buf = binary.BigEndian.AppendUint16(buf, rendezvousVersion)
 	buf = append(buf, r.Nonce[:]...)
 	buf = binary.BigEndian.AppendUint16(buf, uint16(len(a)))
 	buf = append(buf, a...)
 	buf = binary.BigEndian.AppendUint16(buf, r.IfID)
-	return binary.BigEndian.AppendUint64(buf, uint64(r.IA))
+	buf = binary.BigEndian.AppendUint64(buf, uint64(r.IA))
+	if !r.Observed.IsValid() {
+		// An absent echo: the appended field is the reply's last, so the
+		// form without it is the reply a predecessor writes.
+		return buf
+	}
+	o := r.Observed.String()
+	buf = binary.BigEndian.AppendUint16(buf, uint16(len(o)))
+	return append(buf, o...)
 }
 
 func ParseRendezvousReply(b []byte) (RendezvousReply, error) {
@@ -118,6 +132,20 @@ func ParseRendezvousReply(b []byte) (RendezvousReply, error) {
 		return RendezvousReply{}, fmt.Errorf("parsing rendezvous link address: %w", err)
 	}
 	reply.LinkAddr = linkAddr
+	// The observed source is appended after the form every version shares:
+	// a reply that carries no such field is one that does not echo it.
+	if len(rd.b) > 0 {
+		n := int(rd.uint16())
+		o := rd.bytes(n)
+		if rd.err != nil {
+			return RendezvousReply{}, fmt.Errorf("reading rendezvous reply: %w", rd.err)
+		}
+		observed, err := netip.ParseAddrPort(string(o))
+		if err != nil {
+			return RendezvousReply{}, fmt.Errorf("parsing rendezvous observed source: %w", err)
+		}
+		reply.Observed = observed
+	}
 	return reply, nil
 }
 
@@ -378,6 +406,7 @@ func (r *Rendezvous) handle(raw []byte, src *net.UDPAddr) ([]byte, error) {
 		LinkAddr: entry.Local,
 		IfID:     entry.IfID,
 		IA:       r.cfg.IA,
+		Observed: src.AddrPort(),
 	}
 	return reply.Marshal(), nil
 }
@@ -447,7 +476,9 @@ func RendezvousEcho(
 	req.LinkAddr = linkAddr
 	raw := req.Marshal()
 
-	buf := make([]byte, 128)
+	// The reply carries two addresses beside the fixed fields; the buffer
+	// holds the longest form an IPv6 reply takes.
+	buf := make([]byte, 192)
 	for attempt := 0; attempt < RendezvousAttempts; attempt++ {
 		if err := ctx.Err(); err != nil {
 			return RendezvousReply{}, 0, err

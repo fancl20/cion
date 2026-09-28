@@ -29,16 +29,14 @@ type Entry struct {
 	// authenticated publisher's certificate names, never the claimed one.
 	IsdAs uint64 `protobuf:"varint,1,opt,name=isd_as,json=isdAs,proto3" json:"isd_as,omitempty"`
 	// control_addr is the underlay "host:port" address of the publisher's
-	// control service; its endpoint and rendezvous ports derive from the host.
+	// control service, the endpoint port on the published host.
 	ControlAddr string `protobuf:"bytes,2,opt,name=control_addr,json=controlAddr,proto3" json:"control_addr,omitempty"`
 	// rendezvous_addr is the underlay "host:port" address the publisher's
-	// rendezvous acceptor listens on for first contact.
+	// rendezvous acceptor listens on for first contact, the fixed rendezvous
+	// port on the published host.
 	RendezvousAddr string `protobuf:"bytes,3,opt,name=rendezvous_addr,json=rendezvousAddr,proto3" json:"rendezvous_addr,omitempty"`
-	// private marks a node behind address translation: joinable by no one,
-	// candidate for no one's redundancy floor (ADR-0008's reachability class).
-	Private       bool `protobuf:"varint,4,opt,name=private,proto3" json:"private,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
 }
 
 func (x *Entry) Reset() {
@@ -90,13 +88,6 @@ func (x *Entry) GetRendezvousAddr() string {
 		return x.RendezvousAddr
 	}
 	return ""
-}
-
-func (x *Entry) GetPrivate() bool {
-	if x != nil {
-		return x.Private
-	}
-	return false
 }
 
 type PublishRequest struct {
@@ -266,12 +257,11 @@ var File_proto_node_v1_directory_proto protoreflect.FileDescriptor
 
 const file_proto_node_v1_directory_proto_rawDesc = "" +
 	"\n" +
-	"\x1dproto/node/v1/directory.proto\x12\anode.v1\"\x84\x01\n" +
+	"\x1dproto/node/v1/directory.proto\x12\anode.v1\"j\n" +
 	"\x05Entry\x12\x15\n" +
 	"\x06isd_as\x18\x01 \x01(\x04R\x05isdAs\x12!\n" +
 	"\fcontrol_addr\x18\x02 \x01(\tR\vcontrolAddr\x12'\n" +
-	"\x0frendezvous_addr\x18\x03 \x01(\tR\x0erendezvousAddr\x12\x18\n" +
-	"\aprivate\x18\x04 \x01(\bR\aprivate\"6\n" +
+	"\x0frendezvous_addr\x18\x03 \x01(\tR\x0erendezvousAddr\"6\n" +
 	"\x0ePublishRequest\x12$\n" +
 	"\x05entry\x18\x01 \x01(\v2\x0e.node.v1.EntryR\x05entry\"\x11\n" +
 	"\x0fPublishResponse\"\r\n" +

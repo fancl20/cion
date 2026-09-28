@@ -79,12 +79,17 @@ type SelectionConfig struct {
 	Provider *scion.PathProvider
 	// Conn carries the SCMP echo probes; its port is the reply address.
 	Conn *scion.Conn
-	// ControlAddr is the node's own control address, claimed in probes.
+	// ControlAddr is the node's own control address, claimed in probes; its
+	// host is the scope the loop's own dials leave from, the half of the
+	// scope filter the viewer supplies.
 	ControlAddr netip.AddrPort
 	// LinkHost is the host link addresses are allocated on.
 	LinkHost netip.Addr
 	// Link establishes a link in-band.
 	Link LinkRequester
+	// Learn records the external host a rendezvous reply's observed source
+	// names for the node, latest observation winning; nil discards it.
+	Learn func(netip.Addr)
 	// Evidence reports whether a candidate's peer has proven itself — a
 	// verified beacon or an enrollment the node has seen.
 	Evidence func(*links.Link) bool
@@ -179,11 +184,13 @@ func (s *selection) pass(ctx context.Context) {
 	// Probe every peer the directory names — neighbor and candidate alike (the
 	// comparator never stops at admission) — each by its own carrier: the
 	// neighbor's direct side over the one-hop path, the candidate's by rendezvous
-	// echo.
+	// echo. The scope filter skips what the viewer cannot dial, whoever
+	// published it.
 	samples := make(map[addr.IA]measurement)
 	candidates := make([]DirectoryEntry, 0, len(directory))
 	for _, e := range directory {
-		if e.IA.Equal(s.cfg.IA) || e.Private {
+		if e.IA.Equal(s.cfg.IA) ||
+			!probeable(s.cfg.ControlAddr.Addr(), e.RendezvousAddr.Addr()) {
 			continue
 		}
 		if l, ok := neighbors[e.IA]; ok {
@@ -271,9 +278,26 @@ func (s *selection) candidateAlive(ctx context.Context, l *links.Link) bool {
 	if !target.IsValid() {
 		return false
 	}
-	_, _, err := RendezvousEcho(ctx, s.cfg.ControlAddr.Addr(), target,
+	_, _, err := s.echo(ctx, s.cfg.ControlAddr.Addr(), target,
 		addr.IA(0), s.cfg.ControlAddr)
 	return err == nil
+}
+
+// echo dials one rendezvous exchange, recording the external host the
+// reply's observed source names for the node — every dial teaches the
+// dialer its external host.
+func (s *selection) echo(
+	ctx context.Context,
+	bind netip.Addr,
+	target netip.AddrPort,
+	ia addr.IA,
+	linkAddr netip.AddrPort,
+) (RendezvousReply, time.Duration, error) {
+	reply, rtt, err := RendezvousEcho(ctx, bind, target, ia, linkAddr)
+	if err == nil && s.cfg.Learn != nil {
+		s.cfg.Learn(reply.Observed.Addr())
+	}
+	return reply, rtt, err
 }
 
 // neighbors maps the established entries by their neighbor ISD-AS.
@@ -303,6 +327,54 @@ func (s *selection) directory() []DirectoryEntry {
 		return nil
 	}
 	return s.cfg.Directory()
+}
+
+// addrScope is an address's reachability scope: what can route to it.
+type addrScope uint8
+
+const (
+	scopeGlobal    addrScope = iota // globally routable
+	scopeLoopback                   // the host's own addresses
+	scopePrivate                    // RFC 1918 and IPv6 unique-local
+	scopeShared                     // the CGNAT shared range, RFC 6598
+	scopeLinkLocal                  // one link alone
+	// scopeNone marks addresses no dial routes to: invalid, unspecified,
+	// and multicast ones, which share no viewer's scope.
+	scopeNone
+)
+
+// cgnat is the shared address range RFC 6598 allocates — carrier-side
+// translation, reachable from inside whatever deployment claimed it.
+var cgnat = netip.MustParsePrefix("100.64.0.0/10")
+
+// scopeOf classifies an address by its reachability scope.
+func scopeOf(a netip.Addr) addrScope {
+	switch {
+	case !a.IsValid() || a.IsUnspecified() || a.IsMulticast():
+		return scopeNone
+	case a.IsLoopback():
+		return scopeLoopback
+	case a.IsLinkLocalUnicast():
+		return scopeLinkLocal
+	case a.Is4() && cgnat.Contains(a):
+		return scopeShared
+	case a.IsPrivate():
+		return scopePrivate
+	default:
+		return scopeGlobal
+	}
+}
+
+// probeable reports whether a dial from the viewer can route to the entry:
+// a globally routable address always, and whatever shares the viewer's own
+// scope beside it — the loopback pairing the integration labs run on, one
+// host routing its own addresses. Private, shared, and link-local scopes
+// answer no dial from a global viewer, whoever published them; both of an
+// entry's published addresses sit on the one host, so the rendezvous
+// address's test covers the control address beside it.
+func probeable(viewer, entry netip.Addr) bool {
+	es := scopeOf(entry)
+	return es == scopeGlobal || (es != scopeNone && es == scopeOf(viewer))
 }
 
 // measure runs the window's probe of one peer — a nil neighbor entry means
@@ -342,7 +414,7 @@ func (s *selection) probe(ctx context.Context, e DirectoryEntry, l *links.Link) 
 			IA:   e.IA,
 			Addr: netip.AddrPortFrom(e.ControlAddr.Addr(), dataplane.EndhostPort),
 		})
-	} else if _, rtt, err := RendezvousEcho(ctx, s.cfg.ControlAddr.Addr(),
+	} else if _, rtt, err := s.echo(ctx, s.cfg.ControlAddr.Addr(),
 		e.RendezvousAddr, addr.IA(0), s.cfg.ControlAddr); err == nil {
 		m.direct = rtt
 	}
@@ -641,10 +713,31 @@ func (s *selection) establishLink(ctx context.Context, e DirectoryEntry, why str
 	// No composed path, or one that did not answer: the rendezvous exchange
 	// is the establishment, the entries starting as candidates the peer's
 	// evidence settles.
-	reply, _, err := RendezvousEcho(ctx, s.cfg.LinkHost, e.RendezvousAddr,
-		s.cfg.IA, entry.Local)
+	if !s.establishByRendezvous(ctx, e, entry) {
+		return false
+	}
+	s.streak(e.IA).promote = 0
+	slog.Info("Link joined by rendezvous", "neighbor", e.IA, "why", why,
+		"interface", entry.IfID, "local", entry.Local, "remote", entry.Remote)
+	return true
+}
+
+// establishByRendezvous lands a promotion through the rendezvous exchange —
+// the establishment a joiner with no paths uses. The reply must name the
+// entry's ISD-AS: the published address can be a learned public host, and an
+// answer arriving from a different node — a colliding subnet's real peer —
+// must not mint an entry naming one ISD-AS at another's address.
+func (s *selection) establishByRendezvous(
+	ctx context.Context, e DirectoryEntry, entry *links.Link,
+) bool {
+	reply, _, err := s.echo(ctx, s.cfg.LinkHost, e.RendezvousAddr, s.cfg.IA, entry.Local)
 	if err != nil {
 		slog.Warn("The rendezvous establishment failed", "neighbor", e.IA, "err", err)
+		return false
+	}
+	if !reply.IA.Equal(e.IA) {
+		slog.Warn("The rendezvous reply names another ISD-AS than the entry",
+			"neighbor", e.IA, "answered", reply.IA)
 		return false
 	}
 	entry.Remote = reply.LinkAddr
@@ -653,9 +746,6 @@ func (s *selection) establishLink(ctx context.Context, e DirectoryEntry, why str
 		slog.Error("Recording the rendezvous establishment", "neighbor", e.IA, "err", err)
 		return false
 	}
-	s.streak(e.IA).promote = 0
-	slog.Info("Link joined by rendezvous", "neighbor", e.IA, "why", why,
-		"interface", entry.IfID, "local", entry.Local, "remote", entry.Remote)
 	return true
 }
 
