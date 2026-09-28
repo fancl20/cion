@@ -11,6 +11,7 @@ import (
 	"github.com/scionproto/scion/pkg/addr"
 	"tailscale.com/tsnet"
 
+	"github.com/fancl20/cion/internal/services"
 	"github.com/fancl20/cion/internal/socksclient"
 	"github.com/fancl20/cion/pkg/apps/socks"
 )
@@ -30,7 +31,7 @@ func socksPort(ip netip.Addr) netip.AddrPort {
 // slice's first, the address the allocator never issues.
 func servingAddresses(t *testing.T, a *assemblyNode) map[addr.IA]netip.Addr {
 	t.Helper()
-	directory, err := a.app.Wireguard().Directory(context.Background())
+	directory, err := wireguardOf(a).Directory(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -123,8 +124,8 @@ func TestEgressSocksService(t *testing.T) {
 	a := coordCore(t, wpki, addrIP(0x57), place, nil)
 	b := coordLeaf(t, wpki, addrIP(0x58), a, place, nil)
 	t.Cleanup(func() {
-		t.Logf("node A counters: %v", a.app.Wireguard().Counters())
-		t.Logf("node B counters: %v", b.app.Wireguard().Counters())
+		t.Logf("node A counters: %v", wireguardOf(a).Counters())
+		t.Logf("node B counters: %v", wireguardOf(b).Counters())
 	})
 
 	// The mesh stands before any host joins, in both directions.
@@ -152,7 +153,7 @@ func TestEgressSocksService(t *testing.T) {
 	serving := servingAddresses(t, a)
 	near, far := serving[owner], serving[otherIA(t, a, owner)]
 	Poll(t, "the owning node's host device programmed", func() bool {
-		return len(nodeOf(t, a, b, owner).app.Wireguard().HostPeers()) == 1
+		return len(wireguardOf(nodeOf(t, a, b, owner)).HostPeers()) == 1
 	})
 	// The host's session with its node begins with the host's own
 	// outbound exchange.
@@ -236,6 +237,82 @@ func TestEgressSocksService(t *testing.T) {
 	if conn, err := host.Dial(ctx, "tcp", "192.0.2.1:80"); err == nil {
 		_ = conn.Close()
 		t.Fatal("a direct dial to an internet destination connected, want no route")
+	}
+}
+
+// TestWithheldExitOffer is the withheld offer's proof: a node that names
+// --applications wireguard serves its hosts and withholds the SOCKS
+// offer, the exit's address riding the map unanswered — the map lists
+// addresses, not offers — so a host's flow to the withheld exit dies
+// unroutable at the node that withholds it.
+func TestWithheldExitOffer(t *testing.T) {
+	t.Parallel()
+	// The topology: the core A offering every service, the leaf B serving
+	// hosts with no SOCKS offer, on the suite's own loopback hosts.
+	wpki := packageWebPKI
+	place := placeCoordination(t)
+	a := coordCore(t, wpki, addrIP(0x59), place, nil)
+	b := coordLeaf(t, wpki, addrIP(0x5a), a, place, func(cfg *services.NodeConfig) {
+		cfg.Applications = []string{"wireguard"}
+	})
+	if got := b.app.Application("socks"); got != nil {
+		t.Fatal("the node that named wireguard alone loaded the SOCKS application")
+	}
+
+	// The mesh stands before any host joins, in both directions, and the
+	// registry holds both nodes' entries — the withheld exit's address
+	// among them.
+	Poll(t, "the leaf reaches the core", func() bool {
+		return pingFrom(context.Background(), b, a.app.IA(), a.host)
+	})
+	Poll(t, "the core reaches the leaf", func() bool {
+		return pingFrom(context.Background(), a, b.app.IA(), b.host)
+	})
+	Poll(t, "the core's registry holding B's entry", func() bool {
+		return len(servingAddresses(t, a)) == 2
+	})
+
+	// One host, one login — the netmap it holds naming every exit's
+	// address, the offered and the withheld alike. The host's slice is the
+	// allocator's choice; whichever node owns it, the flows below cross
+	// the mesh to the exit they name.
+	host := tailnetHost(t, "host-withheld", place.controlURL, "")
+	ips := hostUp(t, host)
+	if len(ips) != 1 || !ips[0].Is4() || !TailnetRange.Contains(ips[0]) {
+		t.Fatalf("the host's addresses = %v, want one of the tailnet range", ips)
+	}
+	serving := servingAddresses(t, a)
+	Poll(t, "the owning node's host device programmed", func() bool {
+		return len(wireguardOf(nodeOf(t, a, b,
+			ownerOf(t, a, b, ips[0]))).HostPeers()) == 1
+	})
+
+	// The control: the same host's flow to the offering core connects —
+	// the withheld flow below dies for the offer alone, not the path.
+	tcpNet := internetTCPEcho(t)
+	offer := socksDial(t, host, serving[a.app.IA()])
+	nearConn, err := socksclient.Connect(offer, tcpNet.String())
+	if err != nil {
+		t.Fatalf("CONNECT through the offering node: %v", err)
+	}
+	_ = nearConn.Close()
+
+	// The withheld exit: the flow dies unroutable at the node that
+	// withholds it — no delivery claims the address — and the client's own
+	// dial says so, every attempt within the budget.
+	deadline := time.Now().Add(8 * time.Second)
+	for {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		conn, err := host.Dial(ctx, "tcp", socksPort(serving[b.app.IA()]).String())
+		cancel()
+		if err == nil {
+			_ = conn.Close()
+			t.Fatal("the host's flow to the withheld exit connected")
+		}
+		if time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(250 * time.Millisecond)
 	}
 }
 

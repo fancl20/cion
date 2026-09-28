@@ -597,6 +597,11 @@ func (a *App) serveDirectory(ctx context.Context) {
 	slog.Info("Serving the WireGuard directory", "service", serviceName(SvcDirectory))
 }
 
+// HTTPSHandler is nil: the application's surfaces are its own registered
+// sockets and the handlers it serves over them, and it mounts nothing on
+// the node's HTTPS server.
+func (a *App) HTTPSHandler() http.Handler { return nil }
+
 // DirectoryHandler is the core's directory HTTP handler: the ConnectRPC
 // service behind the middleware that peers each request's verified chain
 // into its context.

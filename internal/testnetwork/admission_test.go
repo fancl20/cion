@@ -61,7 +61,7 @@ func TestCoordinationInvitationJoin(t *testing.T) {
 	}
 	// The registry records the approving note beside the entry.
 	Poll(t, "the entry carrying the invitation's note", func() bool {
-		hosts := a.app.Wireguard().HostPeers()
+		hosts := wireguardOf(a).HostPeers()
 		return len(hosts) == 1 && hosts[0].Note == "telegram invitation"
 	})
 }
@@ -133,7 +133,7 @@ func TestCoordinationCIDRGate(t *testing.T) {
 	if _, failed := hostUpErr(t, host, TestTimeout/2); !failed {
 		t.Fatal("a host outside the listed prefixes joined")
 	}
-	if hosts := a.app.Wireguard().HostPeers(); len(hosts) != 0 {
+	if hosts := wireguardOf(a).HostPeers(); len(hosts) != 0 {
 		t.Fatalf("the gate recorded %d hosts, want none", len(hosts))
 	}
 }

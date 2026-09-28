@@ -8,12 +8,14 @@ import (
 	"github.com/spf13/pflag"
 
 	"github.com/fancl20/cion/internal/services"
+	"github.com/fancl20/cion/pkg/apps"
 )
 
 // addSharedNodeFlags registers the node arguments every assembling command
-// takes: the bare three that place the daemon and the static topology
-// provider's selection — the arguments the retiring configuration file
-// carried, with defaults so a restart needs none of them.
+// takes: the bare three that place the daemon, the static topology
+// provider's selection, and the composition's list — the arguments the
+// retiring configuration file carried, with defaults so a restart needs
+// none of them.
 func addSharedNodeFlags(flags *pflag.FlagSet, opts *services.NodeConfig) {
 	flags.StringVar(&opts.State, "state", services.DefaultState,
 		"the state directory, where the first start generates the identity")
@@ -25,15 +27,18 @@ func addSharedNodeFlags(flags *pflag.FlagSet, opts *services.NodeConfig) {
 	flags.StringVar(&opts.LinkSet, "topology.link-set", "",
 		"path to a JSON link-set file naming the static topology: "+
 			"neighbor ISD-ASes with each link's two underlay addresses")
+	flags.StringSliceVar(&opts.Applications, "applications", nil,
+		"the resident applications the node runs, comma-separated and "+
+			"repeatable: unset loads what the arguments imply, the empty value "+
+			"loads none — the deliberate core — and a list loads exactly the "+
+			"named (wireguard, coordination, socks)")
 }
 
-// addWireguardFlags registers the host-serving application's loading
-// argument.
-func addWireguardFlags(flags *pflag.FlagSet, opts *services.NodeConfig) {
-	flags.Uint16Var(&opts.HostPort, "wireguard.host-port", services.DefaultHostPort,
-		"the shared host-facing UDP port every host dials; the directory assigns "+
-			"the node's slice of the tailnet range at its first publication "+
-			"(zero runs no WireGuard or SOCKS application)")
+// addApplicationFlags registers the resident applications' own run
+// arguments by walking the table: each entry's block in table order,
+// after the composition's list.
+func addApplicationFlags(flags *pflag.FlagSet, opts *services.NodeConfig) {
+	apps.RegisterFlags(flags, &opts.AppArguments)
 }
 
 // runOptions carries the run commands' data-plane tuning flags.

@@ -15,6 +15,7 @@ import (
 	"tailscale.com/tsnet"
 
 	"github.com/fancl20/cion/internal/services"
+	"github.com/fancl20/cion/pkg/apps"
 	"github.com/fancl20/cion/pkg/apps/wireguard"
 )
 
@@ -83,7 +84,7 @@ func coordCore(t *testing.T, wpki *WebPKI, host netip.Addr,
 		cfg.Control = FreeUDPAddrOn(t, host)
 		cfg.CertFile = wpki.certFile
 		cfg.KeyFile = wpki.keyFile
-		cfg.HostPort = services.DefaultHostPort
+		cfg.AppArguments.Wireguard.HostPort = apps.DefaultHostPort
 		cfg.Coordination = &services.CoordinationOptions{
 			Addr: place.addr,
 			DERP: services.DERPOptions{URL: place.derpURL, IPv4: "127.0.0.1"},
@@ -109,7 +110,7 @@ func coordLeaf(t *testing.T, wpki *WebPKI, host netip.Addr, core *assemblyNode,
 		cfg.Control = FreeUDPAddrOn(t, host)
 		cfg.Neighbors = []string{core.rendezvousOf()}
 		cfg.RootCAs = wpki.pool
-		cfg.HostPort = services.DefaultHostPort
+		cfg.AppArguments.Wireguard.HostPort = apps.DefaultHostPort
 		cfg.Coordination = &services.CoordinationOptions{
 			DERP: services.DERPOptions{URL: place.derpURL, IPv4: "127.0.0.1"},
 		}
@@ -117,6 +118,12 @@ func coordLeaf(t *testing.T, wpki *WebPKI, host netip.Addr, core *assemblyNode,
 			mutate(cfg)
 		}
 	})
+}
+
+// wireguardOf returns the node's booted WireGuard application, where the
+// labs watch host peers — the same assertion the borrowing entries make.
+func wireguardOf(n *assemblyNode) *wireguard.App {
+	return n.app.Application("wireguard").(*wireguard.App)
 }
 
 // tailnetHost is a real tailnet client in-process — the vendored client
@@ -202,7 +209,7 @@ func warmSession(t *testing.T, srv *tsnet.Server, far netip.Addr) {
 func ownerOf(t *testing.T, a, b *assemblyNode, ip netip.Addr) addr.IA {
 	t.Helper()
 	ctx := context.Background()
-	directory, err := a.app.Wireguard().Directory(ctx)
+	directory, err := wireguardOf(a).Directory(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -308,8 +315,8 @@ func TestCoordinationOpenJoin(t *testing.T) {
 	// The nodes' counters, printed at the test's end: the overlay's own
 	// tooling, where the operating system's cannot see.
 	t.Cleanup(func() {
-		t.Logf("node A counters: %v", a.app.Wireguard().Counters())
-		t.Logf("node B counters: %v", b.app.Wireguard().Counters())
+		t.Logf("node A counters: %v", wireguardOf(a).Counters())
+		t.Logf("node B counters: %v", wireguardOf(b).Counters())
 	})
 
 	// The mesh stands before any host joins — in both directions, for
@@ -327,7 +334,7 @@ func TestCoordinationOpenJoin(t *testing.T) {
 	// can place in its slice: the directory's own convergence, the same
 	// one the mesh rides.
 	Poll(t, "the core's registry holding B's entry", func() bool {
-		directory, err := a.app.Wireguard().Directory(context.Background())
+		directory, err := wireguardOf(a).Directory(context.Background())
 		if err != nil {
 			return false
 		}
@@ -362,10 +369,10 @@ func TestCoordinationOpenJoin(t *testing.T) {
 	// host speaks, for a node that has not fetched its host's entry drops
 	// the host's first handshake.
 	Poll(t, "A's host device programmed", func() bool {
-		return len(a.app.Wireguard().HostPeers()) == 1
+		return len(wireguardOf(a).HostPeers()) == 1
 	})
 	Poll(t, "B's host device programmed", func() bool {
-		return len(b.app.Wireguard().HostPeers()) == 1
+		return len(wireguardOf(b).HostPeers()) == 1
 	})
 
 	// Each host's session with its node begins with the host's own

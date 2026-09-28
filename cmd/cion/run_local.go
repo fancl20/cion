@@ -39,7 +39,7 @@ func newRunLocalCommand() *cobra.Command {
 	cmd.Flags().SortFlags = false
 	addSharedNodeFlags(cmd.Flags(), opts)
 	addLocalNodeFlags(cmd.Flags(), opts)
-	addWireguardFlags(cmd.Flags(), opts)
+	addApplicationFlags(cmd.Flags(), opts)
 	addTuningFlags(cmd.Flags(), tuning)
 	return cmd
 }

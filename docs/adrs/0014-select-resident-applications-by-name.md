@@ -1,6 +1,6 @@
 # Select Resident Applications by Name
 
-*   Status: proposed
+*   Status: accepted
 *   Date: 2026-09-27
 
 [TOC]

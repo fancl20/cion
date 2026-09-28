@@ -12,6 +12,7 @@ import (
 	"github.com/scionproto/scion/pkg/addr"
 
 	"github.com/fancl20/cion/internal/services"
+	"github.com/fancl20/cion/pkg/apps"
 	"github.com/fancl20/cion/pkg/apps/ping"
 	"github.com/fancl20/cion/pkg/modules/links"
 	"github.com/fancl20/cion/pkg/modules/pathdb"
@@ -326,7 +327,7 @@ func TestHeldHostPortRefusesBoot(t *testing.T) {
 	wpki := NewWebPKI(t)
 	ip := addrIP(byte(0x80 + heldHostSlot.Add(1)))
 	held, err := net.ListenUDP("udp",
-		net.UDPAddrFromAddrPort(netip.AddrPortFrom(ip, services.DefaultHostPort)))
+		net.UDPAddrFromAddrPort(netip.AddrPortFrom(ip, apps.DefaultHostPort)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -342,12 +343,62 @@ func TestHeldHostPortRefusesBoot(t *testing.T) {
 		Control:  FreeUDPAddrOn(t, ip),
 		CertFile: wpki.certFile,
 		KeyFile:  wpki.keyFile,
-		HostPort: services.DefaultHostPort,
+		AppArguments: apps.Arguments{
+			Wireguard: apps.WireguardArguments{HostPort: apps.DefaultHostPort},
+		},
 	})
 	if err == nil {
 		t.Fatal("a boot against a held shared port succeeded")
 	}
 	if want := "binding the host port"; !strings.Contains(err.Error(), want) {
 		t.Errorf("the boot's refusal = %v, want it to name %q", err, want)
+	}
+}
+
+// TestDeliberateCore is the empty list's proof: a core and a joiner that
+// name --applications empty — the deliberate core, no application loaded
+// — join and enroll over the control endpoint's own services, and neither
+// node binds any application surface: the pure forwarder a stated shape
+// rather than an accident of unset arguments.
+func TestDeliberateCore(t *testing.T) {
+	t.Parallel()
+	wpki := NewWebPKI(t)
+	ipA, ipB := addrIP(0x37), addrIP(0x38)
+
+	a := bootAssembly(t, func(cfg *services.NodeConfig) {
+		cfg.Core = true
+		cfg.Applications = []string{}
+		cfg.State = t.TempDir()
+		cfg.Internal = FreeUDPAddrOn(t, ipA)
+		cfg.Control = FreeUDPAddrOn(t, ipA)
+		cfg.CertFile = wpki.certFile
+		cfg.KeyFile = wpki.keyFile
+	})
+	b := bootAssembly(t, func(cfg *services.NodeConfig) {
+		cfg.Applications = []string{}
+		cfg.State = t.TempDir()
+		cfg.Internal = FreeUDPAddrOn(t, ipB)
+		cfg.Control = FreeUDPAddrOn(t, ipB)
+		cfg.Neighbors = []string{a.rendezvousOf()}
+		cfg.RootCAs = wpki.pool
+	})
+
+	Poll(t, "the joiner's link to the core", func() bool {
+		e := entryOf(b, a.app.IA())
+		return e != nil && e.State == links.StateEstablished
+	})
+	Poll(t, "the joiner enrolled", func() bool {
+		return pingFrom(context.Background(), b, a.app.IA(), a.host)
+	})
+	for _, node := range []struct {
+		name string
+		app  *services.App
+	}{{"the core", a.app}, {"the joiner", b.app}} {
+		for _, resident := range []string{"wireguard", "coordination", "socks"} {
+			if got := node.app.Application(resident); got != nil {
+				t.Errorf("%s loaded the %s application beside an empty list",
+					node.name, resident)
+			}
+		}
 	}
 }

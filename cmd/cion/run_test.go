@@ -24,7 +24,7 @@ func parseNodeArgs(t *testing.T, use string, args ...string) (*services.NodeConf
 	} else {
 		addLocalNodeFlags(flags, opts)
 	}
-	addWireguardFlags(flags, opts)
+	addApplicationFlags(flags, opts)
 	addTuningFlags(flags, tuning)
 	err := flags.Parse(args)
 	return opts, err
@@ -62,8 +62,9 @@ func TestRunArgumentsParse(t *testing.T) {
 	if opts.EnrollAuth != "cidrs=192.0.2.0/24" {
 		t.Errorf("--trust.enroll-auth = %q", opts.EnrollAuth)
 	}
-	if opts.HostPort != 51820 {
-		t.Errorf("--wireguard.host-port = %d", opts.HostPort)
+	if opts.AppArguments.Wireguard.HostPort != 51820 {
+		t.Errorf("--wireguard.host-port = %d",
+			opts.AppArguments.Wireguard.HostPort)
 	}
 	if opts.State != services.DefaultState {
 		t.Errorf("--state = %q, want the default %q", opts.State, services.DefaultState)
@@ -91,8 +92,9 @@ func TestRunArgumentsParse(t *testing.T) {
 	}
 	// The unpassed arguments hold their defaults: the host port's 51820, the
 	// addresses the swapped block's.
-	if opts.HostPort != 51820 {
-		t.Errorf("the host port's default = %d, want 51820", opts.HostPort)
+	if opts.AppArguments.Wireguard.HostPort != 51820 {
+		t.Errorf("the host port's default = %d, want 51820",
+			opts.AppArguments.Wireguard.HostPort)
 	}
 	if opts.Internal != services.DefaultInternal || opts.Control != services.DefaultControl {
 		t.Errorf("the address defaults = %q, %q", opts.Internal, opts.Control)
@@ -103,8 +105,9 @@ func TestRunArgumentsParse(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parsing the refused host port: %v", err)
 	}
-	if opts.HostPort != 0 {
-		t.Errorf("--wireguard.host-port=0 = %d, want the refusal", opts.HostPort)
+	if opts.AppArguments.Wireguard.HostPort != 0 {
+		t.Errorf("--wireguard.host-port=0 = %d, want the refusal",
+			opts.AppArguments.Wireguard.HostPort)
 	}
 
 	// The commands themselves carry their role's partition.
@@ -134,6 +137,7 @@ func TestRunCommandsHelpReadsInParts(t *testing.T) {
 		{"run core", newRunCoreCommand(), []string{
 			"--state", "--internal", "--control",
 			"--topology.link-set",
+			"--applications",
 			"--trust.domain", "--trust.acme-email", "--trust.cert-file",
 			"--trust.key-file", "--trust.enroll-auth",
 			"--wireguard.host-port",
@@ -142,7 +146,9 @@ func TestRunCommandsHelpReadsInParts(t *testing.T) {
 		}},
 		{"run local", newRunLocalCommand(), []string{
 			"--state", "--internal", "--control",
-			"--topology.link-set", "--topology.neighbor",
+			"--topology.link-set",
+			"--applications",
+			"--topology.neighbor",
 			"--trust.domain",
 			"--wireguard.host-port",
 			"--dataplane.processors", "--dataplane.batch-size",
@@ -150,7 +156,9 @@ func TestRunCommandsHelpReadsInParts(t *testing.T) {
 		}},
 		{"ping", newPingCommand(), []string{
 			"--state", "--internal", "--control",
-			"--topology.link-set", "--topology.neighbor",
+			"--topology.link-set",
+			"--applications",
+			"--topology.neighbor",
 			"--trust.domain",
 			"--wireguard.host-port",
 		}},
@@ -283,22 +291,39 @@ func TestRunTuningChecksNameTheSurface(t *testing.T) {
 	}
 }
 
-// TestRunArgumentsValidate checks the arguments' validation through the
-// node configuration they build: the host port alone carries.
-func TestRunArgumentsValidate(t *testing.T) {
-	base := services.NodeConfig{
-		Core:     true,
-		Domain:   "core.example.org",
-		State:    "/var/lib/cion",
-		Internal: "127.0.0.1:30044",
-		Control:  "127.0.0.1:30042",
+// TestApplicationsArgumentParses checks the composition's list on every
+// assembling command: nil is the inference, the empty value the deliberate
+// none — the distinction the flag's documentation carries — and a list
+// parses repeatable and comma-separated.
+func TestApplicationsArgumentParses(t *testing.T) {
+	parse := func(t *testing.T, flags *pflag.FlagSet, args ...string) []string {
+		t.Helper()
+		opts := &services.NodeConfig{}
+		addSharedNodeFlags(flags, opts)
+		if err := flags.Parse(args); err != nil {
+			t.Fatalf("parsing %v: %v", args, err)
+		}
+		return opts.Applications
 	}
-	valid := base
-	valid.HostPort = 51820
-	if err := valid.Validate(); err != nil {
-		t.Fatalf("the host port alone: %v", err)
-	}
-	if err := base.Validate(); err != nil {
-		t.Fatalf("a node that sets no host port: %v", err)
-	}
+	t.Run("run core", func(t *testing.T) {
+		if got := parse(t, pflag.NewFlagSet("core", pflag.ContinueOnError)); got != nil {
+			t.Errorf("the unpassed list = %v, want nil", got)
+		}
+	})
+	t.Run("run local", func(t *testing.T) {
+		got := parse(t, pflag.NewFlagSet("local", pflag.ContinueOnError),
+			"--applications=")
+		if got == nil || len(got) != 0 {
+			t.Errorf("the empty list = %v, want the deliberate none", got)
+		}
+	})
+	t.Run("ping", func(t *testing.T) {
+		got := parse(t, pflag.NewFlagSet("ping", pflag.ContinueOnError),
+			"--applications", "socks,wireguard", "--applications", "coordination")
+		if len(got) != 3 || got[0] != "socks" || got[1] != "wireguard" ||
+			got[2] != "coordination" {
+
+			t.Errorf("the repeated list = %v, want the spelled order kept", got)
+		}
+	})
 }

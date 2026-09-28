@@ -12,7 +12,7 @@ import (
 
 	"github.com/scionproto/scion/pkg/addr"
 
-	"github.com/fancl20/cion/pkg/apps/wireguard"
+	"github.com/fancl20/cion/pkg/apps"
 	"github.com/fancl20/cion/pkg/controlplane"
 	"github.com/fancl20/cion/pkg/modules/links"
 	"github.com/fancl20/cion/pkg/modules/pathdb"
@@ -100,10 +100,12 @@ func (a *App) TrustDB() trustdb.DB { return a.node.trustDB }
 // PathDB returns the node's path database.
 func (a *App) PathDB() pathdb.DB { return a.node.pathDB }
 
-// Wireguard returns the node's WireGuard application, when its arguments
-// named a configuration; nil otherwise. The coordination suites watch its
-// host peers through it.
-func (a *App) Wireguard() *wireguard.App { return a.node.wireguard }
+// Application returns the loaded application the name names, nil when it
+// did not load. The labs assert the concrete application where they watch
+// host peers — the same assertion the borrowing entries make.
+func (a *App) Application(name string) apps.Application {
+	return apps.AppOf(a.node.apps, name)
+}
 
 // Close releases the node's resources.
 func (a *App) Close() {

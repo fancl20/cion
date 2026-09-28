@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/fancl20/cion/pkg/apps"
 	"github.com/fancl20/cion/pkg/apps/coordination"
 	"github.com/fancl20/cion/pkg/apps/wireguard"
 	"github.com/fancl20/cion/pkg/webpki"
@@ -96,7 +97,7 @@ func TestAssembleHTTPSBind(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = app.Close() })
+	t.Cleanup(app.Close)
 	reserved, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -104,9 +105,9 @@ func TestAssembleHTTPSBind(t *testing.T) {
 	addr := reserved.Addr().String()
 	_ = reserved.Close()
 	n := &node{
-		cfg:          NodeConfig{Coordination: &CoordinationOptions{Addr: addr}},
-		certMgr:      staticCertMgr(t),
-		coordination: app,
+		cfg:     NodeConfig{Coordination: &CoordinationOptions{Addr: addr}},
+		certMgr: staticCertMgr(t),
+		apps:    []apps.Loaded{{Name: "coordination", App: app}},
 	}
 	if err := n.assembleHTTPS(); err != nil {
 		t.Fatalf("assembleHTTPS() = %v, want nil", err)
@@ -154,11 +155,11 @@ func TestAssembleHTTPSWildcardRefused(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = app.Close() })
+	t.Cleanup(app.Close)
 	n := &node{
-		cfg:          NodeConfig{Control: "0.0.0.0:30042"},
-		certMgr:      staticCertMgr(t),
-		coordination: app,
+		cfg:     NodeConfig{Control: "0.0.0.0:30042"},
+		certMgr: staticCertMgr(t),
+		apps:    []apps.Loaded{{Name: "coordination", App: app}},
 	}
 	_, err = n.httpsBindAddr()
 	if err == nil {

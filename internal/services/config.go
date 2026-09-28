@@ -8,6 +8,7 @@ import (
 
 	"github.com/scionproto/scion/pkg/addr"
 
+	"github.com/fancl20/cion/pkg/apps"
 	"github.com/fancl20/cion/pkg/dataplane"
 )
 
@@ -22,10 +23,6 @@ const (
 	// DefaultControl is the control address's default; its host carries the
 	// control, rendezvous, and directory sockets at the endpoint's port.
 	DefaultControl = "127.0.0.1:30042"
-	// DefaultHostPort is the host-facing port's default, the WireGuard
-	// ecosystem's conventional port; zero is the explicit refusal, running
-	// no host-serving application.
-	DefaultHostPort = 51820
 )
 
 // NodeConfig is the node's run arguments — everything the retiring
@@ -68,11 +65,17 @@ type NodeConfig struct {
 	// telegram method of EnrollAuth; empty uses the public one. The
 	// integration tests point it at their local double.
 	TelegramAPI string
-	// HostPort is the shared host-facing UDP port every host dials. It alone
-	// decides whether the node serves hosts: zero runs no WireGuard or SOCKS
-	// application, and the directory assigns the slice their addresses come
-	// from.
-	HostPort uint16
+	// Applications selects the resident applications by name: nil keeps the
+	// inference — an application loads when its role bounds hold, its
+	// requirements load, and its required arguments are present; the empty
+	// list runs the deliberate core, no application at all; a given list
+	// loads exactly the named, in table order whatever order the list
+	// spells. Validate refuses every miscombination with the fix named.
+	Applications []string
+	// AppArguments carries the resident applications' own run arguments,
+	// one block per entry; the commands register them from the
+	// applications table.
+	AppArguments apps.Arguments
 	// Coordination overrides the coordination endpoint's placement for the
 	// integration harness: the loopback address its core serves on and the relay
 	// every node's presence dials, standing in for the production derivation from
@@ -167,6 +170,11 @@ func (c NodeConfig) Validate() error {
 		if _, _, err := loadEnrollAuth(c.EnrollAuth, c.TelegramAPI, c.State); err != nil {
 			return fmt.Errorf("parsing --trust.enroll-auth: %w", err)
 		}
+	}
+	// The applications list's miscombinations refuse here, before any
+	// assembly runs: the same resolution the assembly's walk selects.
+	if _, err := apps.Select(c.Applications, c.Core, c.AppArguments); err != nil {
+		return err
 	}
 	return nil
 }

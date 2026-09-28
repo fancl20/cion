@@ -103,11 +103,19 @@ composition root, policy and the source by the operator's run arguments.
 
 ### Applications
 
+Applications are what a node offers beyond itself, enumerated in one
+closed table — the one place that answers what a node can be. The
+`--applications` run argument selects among them: unset loads what the
+run arguments already imply — the zero-conf default — and a list, the
+empty one included, states the combination deliberately; one that cannot
+load refuses the boot with the fix named
+([ADR-0014](/docs/adrs/0014-select-resident-applications-by-name.md)).
+
 *   **WireGuard** — carries host and mesh traffic over SCION paths between
     nodes ([ADR-0005](/docs/adrs/0005-serve-endhosts-with-a-wireguard-gateway.md)).
 *   **SOCKS** — internet egress as a service on the overlay: every node
-    serves it at its own tailnet address, and the destination a client
-    names is the exit it uses
+    serves it by default at its own tailnet address, and the destination a
+    client names is the exit it uses
     ([ADR-0012](/docs/adrs/0012-serve-egress-as-an-overlay-socks-service.md)).
 *   **Coordination** — the network's headscale, minimal by decision: hosts
     join by logging in with a standard tailnet client against the core's
@@ -164,8 +172,8 @@ changes are damped.
 Hosts are tailnet clients of their node: they join by logging in against
 the core's coordination service and run no CION software. The tunnel
 carries the tailnet alone — no default route is advertised — and internet
-reachability is a service every node offers at its own tailnet address:
-the exit a flow uses is the destination it names
+reachability is a service every node offers by default at its own tailnet
+address: the exit a flow uses is the destination it names
 ([ADR-0012](/docs/adrs/0012-serve-egress-as-an-overlay-socks-service.md)).
 Host-to-host and exit traffic alike cross the SCION mesh between nodes. A
 join completes at the directory's fetch cadence.
