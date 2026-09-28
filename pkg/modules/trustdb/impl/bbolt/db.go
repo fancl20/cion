@@ -53,12 +53,11 @@ func (b *bboltDB) Chains(ctx context.Context, query trustdb.ChainQuery) ([][]*x5
 		b := tx.Bucket([]byte("chains"))
 		c := b.Cursor()
 
-		// The outer loop matches the bucket key exactly: an ISD-AS's
-		// rendered name is a prefix of every name that extends it, and no
-		// name answers for another (proposal 0015). The first key past the
-		// sought name is another name, and the scan ends there; an unset
-		// IA sweeps every bucket. The inner scan keeps its fingerprint
-		// prefix, for a query without a fingerprint asks for every chain
+		// The outer loop matches the bucket key exactly: an ISD-AS's rendered name
+		// is a prefix of every name that extends it, and no name answers for
+		// another. The first key past the sought name is another name, and the scan
+		// ends there; an unset IA sweeps every bucket. The inner scan keeps its
+		// fingerprint prefix, for a query without a fingerprint asks for every chain
 		// the name holds.
 		for k, _ := c.Seek(ia); k != nil && (len(ia) == 0 || bytes.Equal(k, ia)); k, _ = c.Next() {
 			c := b.Bucket(k).Cursor()
@@ -111,8 +110,8 @@ func (b *bboltDB) InsertChain(ctx context.Context, chain []*x509.Certificate) (b
 }
 
 // DeleteExpiredChains evicts the chains whose AS certificate expired before
-// the given time, taking an emptied ISD-AS sub-bucket with its last chain;
-// the trcs bucket is not opened (proposal 0018).
+// the given time, taking an emptied ISD-AS sub-bucket with its last chain; the
+// trcs bucket is not opened.
 func (b *bboltDB) DeleteExpiredChains(ctx context.Context, t time.Time) (int, error) {
 	// The read pass collects the expired keys, the write pass deletes them —
 	// the two-pass shape the path database's own DeleteExpired carries — so a

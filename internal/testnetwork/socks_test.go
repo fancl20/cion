@@ -15,11 +15,11 @@ import (
 	"github.com/fancl20/cion/pkg/apps/socks"
 )
 
-// The SOCKS egress suites (ADR-0012, proposal 0024) ride the coordination
-// lab: the core-and-leaf assembly with the tsnet host double, every node
-// offering the service on its slice's first address by default, and the
-// netmap carrying those addresses beside the allocated hosts — one login
-// serving every exit, the exit a flow uses the destination it names.
+// The SOCKS egress suites ride the coordination lab: the core-and-leaf
+// assembly with the tsnet host double, every node offering the service on its
+// slice's first address by default, and the netmap carrying those addresses
+// beside the allocated hosts — one login serving every exit, the exit a flow
+// uses the destination it names.
 
 // socksPort dials the SOCKS service on a serving address.
 func socksPort(ip netip.Addr) netip.AddrPort {
@@ -105,8 +105,8 @@ func socksDial(t *testing.T, srv *tsnet.Server, exit netip.Addr) net.Conn {
 	}
 }
 
-// TestEgressSocksService is ADR-0012's proof on the coordination lab: a
-// host SOCKS-dials its own node's serving address and the far node's — TCP
+// TestEgressSocksService is the SOCKS egress proof on the coordination lab:
+// a host SOCKS-dials its own node's serving address and the far node's — TCP
 // by CONNECT and UDP by association — one host, two exits, the choice the
 // destination alone; and a direct dial to an internet destination never
 // enters the tunnel, the map carrying the tailnet and nothing else.

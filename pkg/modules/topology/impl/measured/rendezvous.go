@@ -23,10 +23,10 @@ const RendezvousPort = 30045
 
 const rendezvousVersion = 1
 
-// Rendezvous cadence and limits. The exchange is underlay-level and carries
-// no cryptography, because the joiner has nothing to show yet: the nonce echo
-// is the return-routability check, and the rate cap and the link-count cap
-// bound admission (ADR-0008).
+// Rendezvous cadence and limits. The exchange is underlay-level and carries no
+// cryptography, because the joiner has nothing to show yet: the nonce echo is
+// the return-routability check, and the rate cap and the link-count cap bound
+// admission.
 const (
 	// RendezvousAttempts bounds one dial's request runs and
 	// RendezvousAttemptWait each reply wait.
@@ -185,10 +185,10 @@ func AllocateLinkAddr(host netip.Addr) (netip.AddrPort, error) {
 // Rendezvous is the acceptor every node runs on its advertised rendezvous
 // address: one unconnected UDP socket answering first-contact requests. The
 // entries it creates start as candidates — a peer that produces no verified
-// beacon or enrollment within the candidate window retires (ADR-0008).
-// Identity adoption is the exchange's own act: the acceptor names its entry
-// from the request's ISD-AS and the joiner names its own from the reply, so
-// every establishment names both sides before the link serves.
+// beacon or enrollment within the candidate window retires. Identity adoption
+// is the exchange's own act: the acceptor names its entry from the request's
+// ISD-AS and the joiner names its own from the reply, so every establishment
+// names both sides before the link serves.
 type Rendezvous struct {
 	conn *net.UDPConn
 	cfg  RendezvousConfig
@@ -291,7 +291,11 @@ func (r *Rendezvous) handle(raw []byte, src *net.UDPAddr) ([]byte, error) {
 		if !r.byAddr.admit(req.LinkAddr) {
 			return nil, fmt.Errorf("claim %s exceeds the admission rate", req.LinkAddr)
 		}
-		if r.unnamedLinks() >= r.cfg.MaxLinks {
+		unnamed, err := r.unnamedLinks()
+		if err != nil {
+			return nil, err
+		}
+		if unnamed >= r.cfg.MaxLinks {
 			return nil, fmt.Errorf("unnamed candidate cap reached (%d)", r.cfg.MaxLinks)
 		}
 	} else if !r.byIA.admit(req.IA) {
@@ -337,7 +341,11 @@ func (r *Rendezvous) handle(raw []byte, src *net.UDPAddr) ([]byte, error) {
 		}
 	}
 	if entry == nil {
-		if live := r.namedLinks(); live >= r.cfg.MaxLinks {
+		live, err := r.namedLinks()
+		if err != nil {
+			return nil, err
+		}
+		if live >= r.cfg.MaxLinks {
 			return nil, fmt.Errorf("link cap reached (%d)", live)
 		}
 		local, err := AllocateLinkAddr(r.cfg.LinkHost)
@@ -377,7 +385,7 @@ func (r *Rendezvous) handle(raw []byte, src *net.UDPAddr) ([]byte, error) {
 // unnamedLinks counts the live entries without a neighbor name — probes and
 // bootstrap claims, bounded by the same cap until the candidate window
 // retires them.
-func (r *Rendezvous) unnamedLinks() int {
+func (r *Rendezvous) unnamedLinks() (int, error) {
 	return r.countLinks(func(l *links.Link) bool {
 		return l.Live() && l.NeighborIA.IsZero()
 	})
@@ -386,18 +394,17 @@ func (r *Rendezvous) unnamedLinks() int {
 // namedLinks counts the live entries that name a neighbor — the ones the
 // link cap bounds, since only they carry beacons. Unnamed candidates —
 // probes and bootstrap claims — retire with the candidate window.
-func (r *Rendezvous) namedLinks() int {
+func (r *Rendezvous) namedLinks() (int, error) {
 	return r.countLinks(func(l *links.Link) bool {
 		return l.Live() && !l.NeighborIA.IsZero()
 	})
 }
 
 // countLinks counts the entries a predicate keeps.
-func (r *Rendezvous) countLinks(keep func(*links.Link) bool) int {
+func (r *Rendezvous) countLinks(keep func(*links.Link) bool) (int, error) {
 	entries, err := r.cfg.Store.All(context.Background())
 	if err != nil {
-		slog.Error("Reading the link store", "err", err)
-		return r.cfg.MaxLinks // refuse on a store that cannot be read
+		return 0, fmt.Errorf("reading the link store: %w", err)
 	}
 	live := 0
 	for _, l := range entries {
@@ -405,7 +412,7 @@ func (r *Rendezvous) countLinks(keep func(*links.Link) bool) int {
 			live++
 		}
 	}
-	return live
+	return live, nil
 }
 
 func (r *Rendezvous) changed() {

@@ -79,21 +79,21 @@ type Config struct {
 	Window time.Duration
 }
 
-// Authorizer is the admission authorizer of the operator's phone (ADR-0010,
-// ADR-0011): per new identity — the boundary, the claim, and the presented
-// keys' fingerprints keyed together — it prompts the configured chat over
-// the Bot API with the facts and an approve and a deny button, and answers
-// on the long-polled callbacks, one prompt per identity inside a decision
-// window. The invitation reverses the flow: the operator asks the bot for a
-// key in the configured chat, hands it to the headless client, and a
-// registration presenting a key the plugin minted and has not spent approves
-// on the plugin's own records and spends it; a spent or unknown key is a
-// bare joiner's, prompted as ever — a stale invitation fails toward the
-// human, not closed. It speaks the API directly over net/http — no SDK, for
-// a vendored tree prices every dependency, and the handful of calls this
-// needs are plain HTTPS and JSON. The prompts' decisions live in memory: a
-// restart forgets pending and denied entries and a join still in flight
-// asks again, while the unspent invitations persist in the state directory.
+// Authorizer is the admission authorizer of the operator's phone: per new
+// identity — the boundary, the claim, and the presented keys' fingerprints
+// keyed together — it prompts the configured chat over the Bot API with the
+// facts and an approve and a deny button, and answers on the long-polled
+// callbacks, one prompt per identity inside a decision window. The invitation
+// reverses the flow: the operator asks the bot for a key in the configured
+// chat, hands it to the headless client, and a registration presenting a key
+// the plugin minted and has not spent approves on the plugin's own records and
+// spends it; a spent or unknown key is a bare joiner's, prompted as ever — a
+// stale invitation fails toward the human, not closed. It speaks the API
+// directly over net/http — no SDK, for a vendored tree prices every
+// dependency, and the handful of calls this needs are plain HTTPS and JSON.
+// The prompts' decisions live in memory: a restart forgets pending and denied
+// entries and a join still in flight asks again, while the unspent invitations
+// persist in the state directory.
 type Authorizer struct {
 	api    string
 	chat   int64
@@ -112,9 +112,9 @@ type Authorizer struct {
 // askKey names one identity: the boundary asking, the enrollment's claim,
 // and a digest of the presented keys' fingerprints, so two strangers
 // claiming one name present two asks and the operator approves at most one
-// — the name-taken check settles the loser on its next retry, exactly as it
-// does today. The digest is what an answer button carries; the standing
-// decision it resolves holds the fingerprints in full.
+// — the name-taken check settles the loser on its next retry. The digest
+// is what an answer button carries; the standing decision it resolves
+// holds the fingerprints in full.
 type askKey struct {
 	boundary enrollauth.Boundary
 	claim    addr.IA
@@ -245,9 +245,8 @@ func (t *Authorizer) Run(ctx context.Context) {
 	}
 }
 
-// sweep drops the decisions whose window has passed: a stranger's
-// persistent identities cost their prompts and nothing after (proposal
-// 0015).
+// sweep drops the decisions whose window has passed: a stranger's persistent
+// identities cost their prompts and nothing after.
 func (t *Authorizer) sweep() {
 	now := time.Now()
 	t.mtx.Lock()
@@ -401,9 +400,6 @@ func (t *Authorizer) loadInvites() error {
 // persistInvitesLocked writes the unspent invitations back, atomically; the
 // caller holds the mutex.
 func (t *Authorizer) persistInvitesLocked() error {
-	if t.state == "" {
-		return nil
-	}
 	keys := make([]string, 0, len(t.invites))
 	for key := range t.invites {
 		keys = append(keys, key)
@@ -608,9 +604,9 @@ func call[T any](t *Authorizer, ctx context.Context, method string, req any) (T,
 	return env.Result, nil
 }
 
-// botAPIError names the method and the failure, never the URL: a
-// *url.Error renders the whole request line, and the request line carries
-// the bot's token (proposal 0015).
+// botAPIError names the method and the failure, never the URL: a *url.Error
+// renders the whole request line, and the request line carries the bot's
+// token.
 func botAPIError(method string, err error) error {
 	var urlErr *url.Error
 	if errors.As(err, &urlErr) {

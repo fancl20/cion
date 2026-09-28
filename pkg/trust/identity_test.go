@@ -6,8 +6,8 @@ import (
 
 // TestIdentityPersistence checks the generated identity's lifecycle: a fresh
 // state directory holds none, a draw comes from the private ranges, and the
-// persisted name reads back unchanged — identity survives restarts through
-// the same persistence the trust material uses (ADR-0008).
+// persisted name reads back unchanged — identity survives restarts through the
+// same persistence the trust material uses.
 func TestIdentityPersistence(t *testing.T) {
 	dir := t.TempDir()
 

@@ -6,7 +6,6 @@ package bbolt
 import (
 	"context"
 	"encoding/json/v2"
-	"errors"
 	"fmt"
 	"net/netip"
 
@@ -63,9 +62,6 @@ type wireHostEntry struct {
 // Publish records the entry, keyed by its ISD-AS: a publisher's later entry
 // replaces its earlier one.
 func (b *directoryDB) Publish(ctx context.Context, entry wireguard.Entry) error {
-	if entry.IA.IsZero() {
-		return errors.New("entry has no ISD-AS")
-	}
 	endpoint := ""
 	if entry.HostEndpoint.IsValid() {
 		endpoint = entry.HostEndpoint.String()
@@ -87,9 +83,6 @@ func (b *directoryDB) Publish(ctx context.Context, entry wireguard.Entry) error 
 // re-registering meets the same record, and a re-registration replaces it
 // wholesale.
 func (b *directoryDB) PublishHost(ctx context.Context, entry wireguard.HostEntry) error {
-	if entry.PublicKey == (wireguard.PublicKey{}) {
-		return errors.New("host entry has no public key")
-	}
 	return b.db.Update(func(tx *bbolt.Tx) error {
 		raw, err := json.Marshal(wireHostEntry{
 			Addr: entry.Addr.String(),
@@ -104,9 +97,8 @@ func (b *directoryDB) PublishHost(ctx context.Context, entry wireguard.HostEntry
 }
 
 // List returns every published entry, nodes and hosts together. Stored
-// entries shaped by proposal 0006 carry their retired port and underlay
-// fields beside these; the JSON decode ignores what the struct no longer
-// names.
+// entries from older states carry their retired port and underlay fields
+// beside these; the JSON decode ignores what the struct no longer names.
 func (b *directoryDB) List(ctx context.Context) (wireguard.Directory, error) {
 	var directory wireguard.Directory
 	err := b.db.View(func(tx *bbolt.Tx) error {

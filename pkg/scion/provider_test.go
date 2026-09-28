@@ -129,8 +129,8 @@ func TestProviderLocalPath(t *testing.T) {
 	}
 }
 
-// TestProviderLocalPathOnPath checks the on-path resolution of proposal 0025:
-// a destination an up segment already contains mid-segment resolves to the
+// TestProviderLocalPathOnPath checks the on-path resolution: a destination
+// an up segment already contains mid-segment resolves to the
 // truncated reversed path, still without any fetch.
 func TestProviderLocalPathOnPath(t *testing.T) {
 	up := linePCB(t, time.Now(), iaCore, iaMid, iaLeaf)

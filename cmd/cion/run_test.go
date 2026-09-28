@@ -50,7 +50,7 @@ func TestRunArgumentsParse(t *testing.T) {
 
 // TestRunArgumentsValidate checks the arguments' validation through the
 // node configuration they build: a slice the tailnet range contains and a
-// usable port, the grammar the retired file's loader checked.
+// usable port.
 func TestRunArgumentsValidate(t *testing.T) {
 	base := services.NodeConfig{
 		Core:     true,

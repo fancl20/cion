@@ -1,7 +1,6 @@
 // Package file is the topology source's static implementation: a link-set
-// file the operator vouches for, reconciled into the store the way the old
-// configured interfaces worked. The node's assembly loads it when
-// --link-set names a link-set.
+// file the operator vouches for, reconciled into the store. The node's
+// assembly loads it when --link-set names a link-set.
 package file
 
 import (
@@ -40,11 +39,11 @@ type Config struct {
 	WatchInterval time.Duration
 }
 
-// Provider is the static topology provider (ADR 0009): a link-set file the
-// operator vouches for, reconciled into the store the way the old
-// configured interfaces worked — an entry named in the file established
-// with its pinned addresses, an entry absent from it retired, every change
-// a data plane generation swap the node already performs. It runs none of
+// Provider is the static topology provider: a link-set file the operator
+// vouches for, reconciled into the store — an entry named in the file
+// established with its pinned addresses, an entry absent from it retired,
+// every change a data plane generation swap the node already performs. It
+// runs none of
 // the measured machinery: no rendezvous acceptor, no node directory, no
 // selection loop; the entries arrive named and established — the operator's
 // vouch — so liveness and beaconing treat a static link exactly as a
@@ -72,8 +71,7 @@ func New(cfg Config) *Provider {
 // addresses belongs to the measured provider, so a static link has no
 // handshake — each node's file names the other's address. The interface ID
 // is optional, allocated monotonically when absent. Identity, keys, and the
-// node's bind arguments never ride the file: it is a policy artifact, not
-// the retired configuration file reborn.
+// node's bind arguments never ride the file: it is a policy artifact.
 type Entry struct {
 	// IA is the neighbor's ISD-AS.
 	IA string `json:"ia"`
@@ -97,8 +95,8 @@ type fileEntry struct {
 }
 
 // readLinkSet reads and parses the link-set: unknown members are refused
-// rather than silently ignored — the WireGuard configuration's discipline —
-// so a file still naming a retired field fails loudly.
+// rather than silently ignored, so a file still naming a field the struct
+// no longer carries fails loudly.
 func readLinkSet(path string) ([]Entry, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {

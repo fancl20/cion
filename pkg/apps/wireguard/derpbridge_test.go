@@ -118,11 +118,11 @@ func (b *captureBind) receive(packets [][]byte, sizes []int, eps []conn.Endpoint
 	}
 }
 
-// TestDERPBridgeRoamsByLastArrival checks the relay fallback's node side
-// (ADR-0011): a DERP-sourced datagram reaches the host device with the
-// sender's key as its endpoint, the reply to a DERP endpoint leaves over
-// the relay, and a later UDP-sourced datagram roams the peer to the UDP
-// leg — whichever leg's authenticated packet arrived last.
+// TestDERPBridgeRoamsByLastArrival checks the relay fallback's node side: a
+// DERP-sourced datagram reaches the host device with the sender's key as its
+// endpoint, the reply to a DERP endpoint leaves over the relay, and a later
+// UDP-sourced datagram roams the peer to the UDP leg — whichever leg's
+// authenticated packet arrived last.
 func TestDERPBridgeRoamsByLastArrival(t *testing.T) {
 	cnt := &counters{}
 	nodeKey, nodePub := newKeyPair(t)

@@ -21,14 +21,13 @@ import (
 // TailnetRange is the overlay's host space, mirrored from the application.
 var TailnetRange = wireguard.Tailnet
 
-// The coordination suites' topology (ADR-0011): the core A and the leaf B
-// of the wireguard topology, assembled through the run command's own
-// wiring, the core serving the coordination endpoint beside its WireGuard
-// application. The hosts are real tailnet clients in-process — the
-// vendored client engine (tsnet) — the way real wireguard-go clients
-// served as the hosts of proposal 0006's proofs. Each suite holds its own
-// loopback pair — the fixed endpoint and rendezvous ports bind on them —
-// so the suites run parallel.
+// The coordination suites' topology: the core A and the leaf B of the
+// wireguard topology, assembled through the run command's own wiring, the core
+// serving the coordination endpoint beside its WireGuard application. The
+// hosts are real tailnet clients in-process — the vendored client engine
+// (tsnet) — the way real wireguard-go clients served as the hosts of proposal
+// 0006's proofs. Each suite holds its own loopback pair — the fixed endpoint
+// and rendezvous ports bind on them — so the suites run parallel.
 
 // coordinationPlacement is the harness's placement of the core's
 // coordination endpoint: a loopback address the tailnet clients dial by,
@@ -306,7 +305,7 @@ func echoOverTailnet(t *testing.T, dst *tsnet.Server, dstAddr netip.Addr,
 	}
 }
 
-// TestCoordinationOpenJoin is ADR-0011's join proof on the two-node
+// TestCoordinationOpenJoin is the coordination join proof on the two-node
 // topology: a host registers through the open default, its login
 // completing on the spot; the node programs itself from the fetched
 // registry within one cadence; and two hosts exchange traffic through the

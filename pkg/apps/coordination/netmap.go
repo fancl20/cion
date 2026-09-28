@@ -45,11 +45,11 @@ const (
 	maxMapBody = 1 << 20
 )
 
-// servedCapabilityVersion is the one capability version the service serves
-// and advertises — the vendored client protocol's own current version, the
-// pin of the standing compatibility commitment (ADR-0011): the vendor's and
-// mihomo's client lines are verified against it, and a vendored upgrade
-// that moves it moves this with it or fails the pin's test.
+// servedCapabilityVersion is the one capability version the service serves and
+// advertises — the vendored client protocol's own current version, the pin of
+// the standing compatibility commitment: the vendor's and mihomo's client
+// lines are verified against it, and a vendored upgrade that moves it moves
+// this with it or fails the pin's test.
 const servedCapabilityVersion = tailcfg.CurrentCapabilityVersion
 
 // handleMap answers one netmap request. Each host's map names exactly its
@@ -154,16 +154,15 @@ func (a *App) handleMap(w http.ResponseWriter, r *http.Request,
 // netmap builds one host's full map from the registry. The peer carries no
 // disco key: the node is a wireguard-only peer with a static endpoint, the
 // model the client lines already serve for third-party exits. The peer's
-// allowed IPs are the registry's whole occupied space — every allocated
-// host /32 beside every node's own address, the slice's first, each an
-// offered exit's serving address (ADR-0012) — covering the tailnet and
-// nothing else, no default route anywhere, as single-IP Tailscale addresses
-// rather than the covering /10, the form the client lines route
-// unconditionally: a covering prefix is an advertised subnet route behind
-// the client's own route-all preference, which no host of this network is
-// asked to hold. The packet filter is a single rule admitting the member's
-// traffic: membership is the tailnet's one policy, and no engine stands
-// behind the rule to configure.
+// allowed IPs are the registry's whole occupied space — every allocated host
+// /32 beside every node's own address, the slice's first, each an offered
+// exit's serving address — covering the tailnet and nothing else, no default
+// route anywhere, as single-IP Tailscale addresses rather than the covering
+// /10, the form the client lines route unconditionally: a covering prefix is
+// an advertised subnet route behind the client's own route-all preference,
+// which no host of this network is asked to hold. The packet filter is a
+// single rule admitting the member's traffic: membership is the tailnet's one
+// policy, and no engine stands behind the rule to configure.
 func (a *App) netmap(node key.NodePublic, machine key.MachinePublic,
 	directory wireguard.Directory, reqDisco key.DiscoPublic,
 	reqHostinfo tailcfg.HostinfoView) (*tailcfg.MapResponse, error) {
@@ -258,14 +257,14 @@ var debugCfgControl bool
 // standard disco peer instead of a wireguard-only one.
 func SetDebugDiscoPeer(v bool) { debugCfgControl = v }
 
-// routedAddresses lists every routed address as a /32, sorted: the
-// registry's whole occupied space — each allocated host beside each node's
-// own, the slice's first address, the serving address every node's SOCKS
-// offer answers on (ADR-0012). Nothing new rides the directory entry: the
-// node's address was always derivable from the slice the entry carries, and
-// the allocator never issues it to a host, so the addition cannot collide
-// with an allocation. One login serves every node, and the exit a flow uses
-// is which tailnet address it is sent to.
+// routedAddresses lists every routed address as a /32, sorted: the registry's
+// whole occupied space — each allocated host beside each node's own, the
+// slice's first address, the serving address every node's SOCKS offer answers
+// on. Nothing new rides the directory entry: the node's address was always
+// derivable from the slice the entry carries, and the allocator never issues
+// it to a host, so the addition cannot collide with an allocation. One login
+// serves every node, and the exit a flow uses is which tailnet address it is
+// sent to.
 func routedAddresses(directory wireguard.Directory) []netip.Prefix {
 	addrs := make([]netip.Prefix, 0,
 		len(directory.Hosts)+len(directory.Nodes))
@@ -337,13 +336,14 @@ func writeMapFrame(w io.Writer, resp *tailcfg.MapResponse) error {
 // netmapsEqual reports whether two full maps name the same things — the
 // resend decision, so an open stream carries changes and nothing else.
 func netmapsEqual(a, b *tailcfg.MapResponse) bool {
-	return jsonStr(a) == jsonStr(b)
+	return mustJSON(a) == mustJSON(b)
 }
 
-func jsonStr(v any) string {
+// mustJSON marshals v, panicking on a value that cannot marshal.
+func mustJSON(v any) string {
 	raw, err := json.Marshal(v)
 	if err != nil {
-		return ""
+		panic(fmt.Sprintf("marshaling %T: %v", v, err))
 	}
 	return string(raw)
 }

@@ -144,9 +144,6 @@ func Enroll(
 	key crypto.Signer,
 ) ([]*x509.Certificate, error) {
 
-	if err := validateISD(ia); err != nil {
-		return nil, err
-	}
 	now := time.Now()
 	if chains, err := db.Chains(ctx, trustdb.ChainQuery{
 		IA:       ia,

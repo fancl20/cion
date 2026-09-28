@@ -197,10 +197,9 @@ func TestEngineVerifyForeignSignature(t *testing.T) {
 	}
 }
 
-// TestEngineVerifyBound checks the bound form (proposal 0015): a signature
-// from another IA fails against the bound identity — the mismatch naming
-// both — even though its chain verifies against the TRC, and passes against
-// its own.
+// TestEngineVerifyBound checks the bound form: a signature from another IA
+// fails against the bound identity — the mismatch naming both — even though
+// its chain verifies against the TRC, and passes against its own.
 func TestEngineVerifyBound(t *testing.T) {
 	f := newEngineFixture(t)
 	ctx := context.Background()
@@ -238,10 +237,10 @@ func TestEngineVerifyBound(t *testing.T) {
 	}
 }
 
-// TestEngineSignerIgnoresExtendingName checks the chain selection's
-// exactness (proposal 0015): a chain held under a name that extends the
-// node's own — 20-ff00:0:1f beside 20-ff00:0:1, the AS numbers sharing
-// their rendered prefix — never serves as the node's chain.
+// TestEngineSignerIgnoresExtendingName checks the chain selection's exactness:
+// a chain held under a name that extends the node's own — 20-ff00:0:1f beside
+// 20-ff00:0:1, the AS numbers sharing their rendered prefix — never serves as
+// the node's chain.
 func TestEngineSignerIgnoresExtendingName(t *testing.T) {
 	f := newEngineFixture(t)
 	ctx := context.Background()
@@ -360,10 +359,9 @@ func (p *countingProvider) NotifyTRC(ctx context.Context, id cppki.TRCID,
 	return p.Provider.NotifyTRC(ctx, id, opts...)
 }
 
-// TestEngineVerifyCaches checks the engine's caches from the outside: a
-// second verification of the same message within the window asks the
-// provider for its chains once, and the notify window deduplicates the
-// repeated TRC report (proposal 0020).
+// TestEngineVerifyCaches checks the engine's caches from the outside: a second
+// verification of the same message within the window asks the provider for its
+// chains once, and the notify window deduplicates the repeated TRC report.
 func TestEngineVerifyCaches(t *testing.T) {
 	f := newEngineFixture(t)
 	ctx := context.Background()
@@ -388,7 +386,7 @@ func TestEngineVerifyCaches(t *testing.T) {
 }
 
 // TestVerifierUncached checks a bare verifier, built without the engine's
-// caches: its provider is asked on every verification (proposal 0020).
+// caches: its provider is asked on every verification.
 func TestVerifierUncached(t *testing.T) {
 	f := newEngineFixture(t)
 	ctx := context.Background()

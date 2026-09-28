@@ -273,11 +273,11 @@ func pendingOf(tg *Authorizer, ctx context.Context,
 	return tg.Authorize(ctx, f).Admission
 }
 
-// TestTelegramPromptAndDecide walks the authorizer's own rules (ADR-0010):
-// the first ask prompts and pends, retries do not re-prompt, the configured
-// chat's approve allows and deny denies, another chat's answer is ignored,
-// and a callback for an identity this process never prompted is answered
-// with exactly that and ignored.
+// TestTelegramPromptAndDecide walks the authorizer's own rules: the first ask
+// prompts and pends, retries do not re-prompt, the configured chat's approve
+// allows and deny denies, another chat's answer is ignored, and a callback for
+// an identity this process never prompted is answered with exactly that and
+// ignored.
 func TestTelegramPromptAndDecide(t *testing.T) {
 	d := newBotDouble(t)
 	tg := runTelegram(t, d, nil)
@@ -480,8 +480,8 @@ func TestTelegramRestart(t *testing.T) {
 	waitFor(t, "the re-prompt to send", func() bool { return d.promptCount() == 2 })
 }
 
-// TestTelegramLogsNoToken checks the log hygiene of proposal 0015: a failed
-// send or poll logs the method and the failure — `sendMessage failed`, the
+// TestTelegramLogsNoToken checks the log hygiene: a failed send or poll
+// logs the method and the failure — `sendMessage failed`, the
 // cause — never the URL the bot's token rides in.
 func TestTelegramLogsNoToken(t *testing.T) {
 	// An API host that refuses every connection.
@@ -535,10 +535,9 @@ func (b *lockedBuffer) String() string {
 	return b.buf.String()
 }
 
-// TestTelegramSweepExpiredDecisions checks the decision map's bound
-// (proposal 0015): entries whose window has passed are dropped when the
-// poll loop sweeps, so a stranger's persistent identities cost their
-// prompts and nothing after.
+// TestTelegramSweepExpiredDecisions checks the decision map's bound: entries
+// whose window has passed are dropped when the poll loop sweeps, so a
+// stranger's persistent identities cost their prompts and nothing after.
 func TestTelegramSweepExpiredDecisions(t *testing.T) {
 	d := newBotDouble(t)
 	tg := runTelegram(t, d, func(cfg *Config) { cfg.Window = 100 * time.Millisecond })
@@ -583,11 +582,11 @@ func lastInvitation(t *testing.T, d *botDouble) string {
 	return ""
 }
 
-// TestTelegramInvitation walks the invitation flow (ADR-0011): the
-// configured chat asks, the bot mints and replies, a registration presenting
-// the unspent key approves and spends it, and a second presentation is a
-// bare joiner's prompt — a stale invitation fails toward the human, not
-// closed. Another chat can neither mint nor retire.
+// TestTelegramInvitation walks the invitation flow: the configured chat asks,
+// the bot mints and replies, a registration presenting the unspent key
+// approves and spends it, and a second presentation is a bare joiner's prompt
+// — a stale invitation fails toward the human, not closed. Another chat can
+// neither mint nor retire.
 func TestTelegramInvitation(t *testing.T) {
 	d := newBotDouble(t)
 	tg := runTelegram(t, d, nil)

@@ -227,7 +227,7 @@ func fabricatedBeacon(t *testing.T, f *beaconFixture, now time.Time) *segment.PC
 	return pcb
 }
 
-// TestHandleBeaconFabricatedIdentity checks the binding of proposal 0015 at
+// TestHandleBeaconFabricatedIdentity checks the identity binding at
 // reception: an entry signed by a chain naming another ISD-AS than the
 // entry claims fails verification with both identities in the error, and
 // the beacon never reaches the store.
@@ -268,7 +268,7 @@ func TestHandleBeaconFabricatedIdentity(t *testing.T) {
 	}
 }
 
-// TestHandleBeaconNonCoreOrigin checks the origin rule of proposal 0015 at
+// TestHandleBeaconNonCoreOrigin checks the origin rule at
 // reception: a beacon whose first entry names a non-core — C originating on
 // its link to B — is dropped with the origin named, before signature
 // verification spends work on it.
@@ -494,7 +494,7 @@ func TestHandleBeaconWithoutTRC(t *testing.T) {
 	}
 }
 
-// TestPropagateOnce checks ADR-0004's propagation rule: every external
+// TestPropagateOnce checks the propagation rule: every external
 // interface except the one the beacon arrived on, and except interfaces
 // whose neighbor the TRC names as a core.
 func TestPropagateOnce(t *testing.T) {

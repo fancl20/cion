@@ -22,15 +22,15 @@ import (
 	"github.com/fancl20/cion/pkg/trust"
 )
 
-// The SCION-native channel (proposal 0004): peers present their AS
-// certificate chains — issued with id-kp-serverAuth and id-kp-clientAuth
-// (PKI draft, Section 2.7.4) — mutually authenticated by verifying the
-// chain against the pinned TRC's root pool instead of WebPKI roots, with the
-// peer's IA extracted from the certificate subject. A node that has not
-// pinned the TRC yet cannot authenticate anyone: its handshakes degrade to
-// encryption without authentication, the window in which a fresh node
-// receives the unverified beacons that route its enrollment fetch. Beacons
-// carry the authoritative signature; this layer authenticates the transport.
+// The SCION-native channel: peers present their AS certificate chains — issued
+// with id-kp-serverAuth and id-kp-clientAuth (PKI draft, Section 2.7.4) —
+// mutually authenticated by verifying the chain against the pinned TRC's root
+// pool instead of WebPKI roots, with the peer's IA extracted from the
+// certificate subject. A node that has not pinned the TRC yet cannot
+// authenticate anyone: its handshakes degrade to encryption without
+// authentication, the window in which a fresh node receives the unverified
+// beacons that route its enrollment fetch. Beacons carry the authoritative
+// signature; this layer authenticates the transport.
 
 // EndpointTLSConfig configures the endpoint's two channels.
 type EndpointTLSConfig struct {
@@ -45,10 +45,9 @@ type EndpointTLSConfig struct {
 	Engine *trust.Engine
 }
 
-// EndpointTLS composes the endpoint's TLS configuration: the bootstrap
-// channel — the WebPKI certificate for clients offering the core's domain as
-// the TLS server name — and the SCION-native channel for everything else
-// (proposal 0004).
+// EndpointTLS composes the endpoint's TLS configuration: the bootstrap channel
+// — the WebPKI certificate for clients offering the core's domain as the TLS
+// server name — and the SCION-native channel for everything else.
 func EndpointTLS(cfg EndpointTLSConfig) *tls.Config {
 	native := &tls.Config{
 		MinVersion: tls.VersionTLS13,

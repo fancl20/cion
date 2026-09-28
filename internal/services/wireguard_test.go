@@ -42,7 +42,7 @@ func wireguardNodeConfig(t *testing.T, stateDir string) NodeConfig {
 }
 
 // TestWireguardConfigFromArguments checks the configuration the run
-// arguments build (the retired file's fields, promoted): the slice and the
+// arguments build: the slice and the
 // shared port carry into the application's configuration, the relay
 // presence deriving from the core's domain. The node is a core, so it takes
 // the directory store and no core route.
@@ -70,7 +70,7 @@ func TestWireguardConfigFromArguments(t *testing.T) {
 }
 
 // TestWireguardConfigRejectsSlices checks the slice grammar the argument
-// validates (the one the retired loader checked): malformed slices and ones
+// validates: malformed slices and ones
 // outside the tailnet range stop the boot, not the application.
 func TestWireguardConfigRejectsSlices(t *testing.T) {
 	valid := func(t *testing.T) NodeConfig { return wireguardNodeConfig(t, t.TempDir()) }

@@ -26,10 +26,10 @@ type ControlPlane interface {
 	control_planeconnect.ChainRenewalServiceHandler
 }
 
-// Mount is one handler a loaded application serves on the control endpoint
-// (ADR 0009): the pattern the HTTP mux mounts the handler at, the handler
-// itself behind the peer-identity middleware. The core learns no type of the
-// application that built it.
+// Mount is one handler a loaded application serves on the control endpoint:
+// the pattern the HTTP mux mounts the handler at, the handler itself behind
+// the peer-identity middleware. The core learns no type of the application
+// that built it.
 type Mount struct {
 	// Pattern is the mux pattern the handler mounts at.
 	Pattern string
@@ -147,6 +147,7 @@ func (c *resolutionConn) answer(from net.Addr) {
 		},
 	})
 	if err != nil {
+		slog.Debug("Marshaling the resolution reply", "peer", from, "err", err)
 		return
 	}
 	if _, err := c.conn.WriteTo(resp, from); err != nil {

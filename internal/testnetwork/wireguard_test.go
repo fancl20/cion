@@ -18,11 +18,10 @@ import (
 	"github.com/fancl20/cion/pkg/apps/wireguard"
 )
 
-// The WireGuard application's integration tests' topology: the core A and
-// the leaf B, each running the application; the hosts' entries arrive by
-// the registry the core's store holds, exactly the coordination service's
-// record (ADR-0011) — these tests hand it there until the coordination
-// suites drive real logins.
+// The WireGuard application's integration tests' topology: the core A and the
+// leaf B, each running the application; the hosts' entries arrive by the
+// registry the core's store holds, exactly the coordination service's record —
+// these tests hand it there until the coordination suites drive real logins.
 var (
 	wireguardA = addr.MustIAFrom(20, 0xff0000000051)
 	wireguardB = addr.MustIAFrom(20, 0xff0000000052)
@@ -98,8 +97,8 @@ func nodeHostPort(n *Node) netip.AddrPort {
 }
 
 // registerHost records one host's registry entry in the core's store — the
-// record the coordination service's gate writes (ADR-0011), handed here by
-// the tests that stand in for the service.
+// record the coordination service's gate writes, handed here by the tests that
+// stand in for the service.
 func registerHost(t *testing.T, core *Node, host wireguard.HostEntry) {
 	t.Helper()
 	if err := core.WireguardStore.PublishHost(context.Background(), host); err != nil {

@@ -1,5 +1,5 @@
-// Package scion is the node's SCION library, the application seam of
-// ADR-0005: the socket (Conn) that carries datagrams over SCION paths and
+// Package scion is the node's SCION library, the application seam: the
+// socket (Conn) that carries datagrams over SCION paths and
 // reverses arrival paths for replies, the address (Addr) naming a peer by
 // ISD-AS and underlay address or service, and the path resolver
 // (PathProvider) that composes discovered segments into end-to-end paths.
@@ -131,12 +131,9 @@ func NewConn(cfg ConnConfig) (*Conn, error) {
 	if err != nil {
 		return nil, fmt.Errorf("parsing internal address: %w", err)
 	}
-	if _, err := scrypto.InitMac(cfg.MACKey); err != nil {
+	mac, err := scrypto.InitMac(cfg.MACKey)
+	if err != nil {
 		return nil, fmt.Errorf("initializing MAC: %w", err)
-	}
-	macFactory := func() hash.Hash {
-		mac, _ := scrypto.InitMac(cfg.MACKey)
-		return mac
 	}
 	conn, err := net.ListenUDP("udp", net.UDPAddrFromAddrPort(local))
 	if err != nil {
@@ -147,14 +144,14 @@ func NewConn(cfg ConnConfig) (*Conn, error) {
 	bound := conn.LocalAddr().(*net.UDPAddr)
 	boundIP, ok := netip.AddrFromSlice(bound.IP)
 	if !ok {
-		return nil, fmt.Errorf("invalid bound address %v", bound)
+		return nil, fmt.Errorf("bound address %v carries no IP", bound)
 	}
 	local = netip.AddrPortFrom(boundIP.Unmap(), uint16(bound.Port))
 	return &Conn{
 		localIA:  cfg.IA,
 		local:    local,
 		internal: internal,
-		mac:      macFactory(),
+		mac:      mac,
 		links:    cfg.Links,
 		ifDown:   cfg.InterfaceDown,
 		conn:     conn,

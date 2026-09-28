@@ -59,7 +59,7 @@ func newHostClient(
 }
 
 // TestSharedHostPortDemultiplexes checks the shared host-facing port's
-// demultiplexing (proposal 0022's shape): the one host device holds the
+// demultiplexing: the one host device holds the
 // node's key pair with every joined host as its peers, and only the peer
 // whose public key the device holds completes the handshake — a key no
 // entry programmed is dropped.

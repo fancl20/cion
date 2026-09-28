@@ -34,7 +34,7 @@ func mintedInvitation(t *testing.T, bot *operatorBot) string {
 	return ""
 }
 
-// TestCoordinationInvitationJoin is ADR-0011's invitation proof: the
+// TestCoordinationInvitationJoin is the invitation join's proof: the
 // operator asks the bot for a key in the configured chat, hands it to the
 // headless client, and the client joins unattended — the registration
 // presenting the minted key approving on the plugin's own records, the
@@ -66,7 +66,7 @@ func TestCoordinationInvitationJoin(t *testing.T) {
 	})
 }
 
-// TestCoordinationTelegramPromptJoin is ADR-0010's posture at the
+// TestCoordinationTelegramPromptJoin is the prompted join at the
 // registration boundary: a bare host pends behind a prompt until the
 // operator presses approve, the login completing on the client's own
 // retry.

@@ -10,7 +10,7 @@ import (
 
 // storePerInterface bounds the candidate PCBs kept per ingress interface: the
 // store is write-heavy and valid for one beaconing period at a time, so the
-// freshest candidates are enough (ADR-0004).
+// freshest candidates are enough.
 const storePerInterface = 64
 
 // beaconKey identifies a candidate by its ingress interface and segment ID.
@@ -31,7 +31,7 @@ type BeaconStore struct {
 // Candidate is a stored beacon with the interface it arrived on.
 type Candidate struct {
 	// Ingress is the interface the beacon arrived on: the node's parent
-	// side of that link (ADR-0004's emergent link roles).
+	// side of that link.
 	Ingress uint16
 	// PCB is the candidate beacon.
 	PCB *segment.PCB
@@ -89,13 +89,10 @@ func (s *BeaconStore) evictStale(ingress uint16) {
 	}
 }
 
-// BestSet returns the fixed bounded set of freshest unexpired candidates —
-// the store's per-key freshness ordering is the only selection rule
-// (ADR-0004: no policy engine).
+// BestSet returns the fixed bounded set of freshest unexpired candidates — the
+// store's per-key freshness ordering is the only selection rule (no policy
+// engine).
 func (s *BeaconStore) BestSet(n int) []Candidate {
-	if n <= 0 {
-		return nil
-	}
 	s.mtx.Lock()
 	defer s.mtx.Unlock()
 	now := time.Now()

@@ -113,8 +113,8 @@ func entryOf(n *assemblyNode, ia addr.IA) *links.Link {
 	return nil
 }
 
-// TestJoinByRendezvous is proposal 0008's integration proof: a three-node
-// line — the core A, the middle B, and C below — where B and C join by
+// TestJoinByRendezvous is the rendezvous join's integration proof: a
+// three-node line — the core A, the middle B, and C below — where B and C join by
 // rendezvous with one bootstrap neighbor and the core's domain, enroll,
 // publish, and fetch the node directory; C probes A by rendezvous echo
 // against the two-hop path and promotes the direct link below the

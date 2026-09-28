@@ -10,18 +10,17 @@ import (
 	"github.com/fancl20/cion/pkg/webpki"
 )
 
-// assembleHTTPS binds the node's HTTPS server (proposal 0023): the one
-// server that holds internet HTTPS's port, presents the core's WebPKI
-// identity, and answers the ACME TLS-ALPN challenge beside whatever
-// protocols the mounted apps speak. The identity is every core's already;
-// here, after the applications assemble, the node knows the handlers it
-// carries and binds the address it names. The ACME-managed identity binds
-// for the challenge alone when no app contributes handlers, and a
-// static-file identity on a core whose apps mount nothing leaves the port
-// unbound, as the tree behaves today. The listener is held here, before
-// start launches the serving loop and the certificate maintenance, so a
-// first issuance's probe finds the port answered by structure rather than
-// by retry.
+// assembleHTTPS binds the node's HTTPS server: the one server that holds
+// internet HTTPS's port, presents the core's WebPKI identity, and answers the
+// ACME TLS-ALPN challenge beside whatever protocols the mounted apps speak.
+// The identity is every core's already; here, after the applications assemble,
+// the node knows the handlers it carries and binds the address it names. The
+// ACME-managed identity binds for the challenge alone when no app contributes
+// handlers, and a static-file identity on a core whose apps mount nothing
+// leaves the port unbound, as the tree behaves today. The listener is held
+// here, before start launches the serving loop and the certificate
+// maintenance, so a first issuance's probe finds the port answered by
+// structure rather than by retry.
 func (n *node) assembleHTTPS() error {
 	if n.certMgr == nil {
 		// A non-core holds no WebPKI identity to serve.
@@ -64,7 +63,7 @@ func (n *node) httpsBindAddr() (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("parsing the control address: %w", err)
 	}
-	if !listenHost.Addr().IsValid() || listenHost.Addr().IsUnspecified() {
+	if listenHost.Addr().IsUnspecified() {
 		return "", errors.New("the coordination endpoint needs a specific host: " +
 			"a wildcard control address would publish an endpoint no host could dial")
 	}

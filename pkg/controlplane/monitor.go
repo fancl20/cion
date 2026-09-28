@@ -15,8 +15,8 @@ import (
 )
 
 // HealthMonitor owns a BFD session per serving link and reduces the
-// arrivals to one verdict per interface — ADR-0008's ninth point made code:
-// liveness is a service the node owes its neighbors, run for every serving
+// arrivals to one verdict per interface: liveness is a service the node
+// owes its neighbors, run for every serving
 // link whatever the loaded provider is doing, because a neighbor's detection
 // of the node depends on the node answering its BFD. The monitor reads the
 // store, not the provider, so the file provider's links carry sessions like
@@ -71,9 +71,6 @@ func (cfg HealthMonitorConfig) detectMultiplier() uint8 {
 // assembles it before the first data plane generation, so every generation
 // finds a session per serving link.
 func NewHealthMonitor(cfg HealthMonitorConfig) (*HealthMonitor, error) {
-	if cfg.Store == nil {
-		return nil, fmt.Errorf("no link store configured")
-	}
 	macFactory, err := initMac(cfg.MACKey)
 	if err != nil {
 		return nil, fmt.Errorf("initializing MAC: %w", err)

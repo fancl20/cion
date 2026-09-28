@@ -165,8 +165,8 @@ func holdsNoChainFor(core, joiner *assemblyNode) bool {
 	return err == nil && len(chains) == 0
 }
 
-// enrollAuthCore boots a founding core with the given enrollment policy
-// (ADR-0010) on its own loopback address.
+// enrollAuthCore boots a founding core with the given enrollment policy on its
+// own loopback address.
 func enrollAuthCore(t *testing.T, wpki *WebPKI, ip netip.Addr,
 	enrollAuth, telegramAPI string) *assemblyNode {
 	t.Helper()

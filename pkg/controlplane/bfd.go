@@ -22,10 +22,8 @@ import (
 	"github.com/fancl20/cion/pkg/dataplane"
 )
 
-// The link's liveness constants (ADR-0008's fifth point): every session
-// shares them — a one-second transmission interval and a detect multiplier
-// of three, a detection latency the retired greeting stream once derived
-// BFD took the question.
+// The link's liveness constants: every session shares them — a one-second
+// transmission interval and a detect multiplier of three.
 const (
 	// BFDTransmissionInterval is the interval every session transmits on.
 	BFDTransmissionInterval = time.Second

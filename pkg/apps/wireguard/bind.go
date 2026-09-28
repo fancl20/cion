@@ -1,13 +1,12 @@
-// Package wireguard is CION's WireGuard application (proposals 0006 and
-// 0022): wireguard-go embedded in the CION binary, carrying the tailnet's
-// hosts and the node-to-node mesh. Hosts are tailnet clients of their node
-// behind one shared UDP port — one device whose peers the registry's host
-// entries program — nodes tunnel to each other through a WireGuard
-// transport (conn.Bind) on the path library's SCION socket, and an
-// in-process router forwards between the tunnels over packet pipes, the
-// surface a resident service application borrows (ADR-0012). The
-// application publishes its entry to the directory the core node's
-// application serves, authenticated by TRC-anchored certificate chains.
+// Package wireguard is CION's WireGuard application: wireguard-go embedded in
+// the CION binary, carrying the tailnet's hosts and the node-to-node mesh.
+// Hosts are tailnet clients of their node behind one shared UDP port — one
+// device whose peers the registry's host entries program — nodes tunnel to
+// each other through a WireGuard transport (conn.Bind) on the path library's
+// SCION socket, and an in-process router forwards between the tunnels over
+// packet pipes, the surface a resident service application borrows. The
+// application publishes its entry to the directory the core node's application
+// serves, authenticated by TRC-anchored certificate chains.
 package wireguard
 
 import (
@@ -87,10 +86,7 @@ func (s *meshSocket) run() {
 			s.finish()
 			return
 		}
-		peer, ok := from.(*scion.Addr)
-		if !ok {
-			continue
-		}
+		peer := from.(*scion.Addr)
 		s.deliver(buf[:n], &meshEndpoint{addr: *peer})
 	}
 }

@@ -1,9 +1,8 @@
 // Package testnetwork is the integration tests' topology harness: the fully
-// wired nodes of pkg/controlplane/network_test.go's harness, extended per
-// proposal 0006 with the WireGuard application and per proposal 0008 with
-// the link store, moved where the applications' own integration tests can
-// assemble beside them — the harness imports the control plane, so the
-// control plane's package cannot host it.
+// wired nodes, WireGuard application and link store included, where the
+// applications' own integration tests assemble beside them — the harness
+// imports the control plane, so the control plane's package cannot host
+// it.
 package testnetwork
 
 import (
@@ -175,9 +174,9 @@ func mintWebPKI(dir string) (*WebPKI, error) {
 		SerialNumber: big.NewInt(2),
 		Subject:      pkix.Name{CommonName: TestDomain},
 		DNSNames:     []string{TestDomain},
-		// The loopback address beside the name: the coordination endpoint
-		// (ADR-0011) is an internet-facing surface, and the harness's
-		// tailnet clients dial it by address.
+		// The loopback address beside the name: the coordination endpoint is an
+		// internet-facing surface, and the harness's tailnet clients dial it by
+		// address.
 		IPAddresses: []net.IP{net.IPv4(127, 0, 0, 1)},
 		NotBefore:   now.Add(-time.Hour),
 		NotAfter:    now.Add(24 * time.Hour),
@@ -324,7 +323,7 @@ func StartNode(t *testing.T, cfg NodeConfig) *Node {
 	serving := links.Serving(entries)
 
 	// The BFD health monitor the daemon's own assembly builds: a session per
-	// serving link, the store its source either way (ADR-0008).
+	// serving link, the store its source either way.
 	monitor, err := controlplane.NewHealthMonitor(controlplane.HealthMonitorConfig{
 		IA:     ia,
 		MACKey: macKey,
@@ -452,15 +451,11 @@ func StartNode(t *testing.T, cfg NodeConfig) *Node {
 
 	var pathProvider *scion.PathProvider
 	var beaconer *controlplane.Beaconer
-	// coreRoute returns the drafts' route to the core (ADR-0009): the
-	// one-hop shortcut when a TRC-named core is a neighbor with its verdict
-	// up, else the reversed freshest up segment — or the bootstrap beacon's
-	// route, before any is verified — addressed to the core's control
-	// service.
+	// coreRoute returns the drafts' route to the core: the one-hop shortcut when
+	// a TRC-named core is a neighbor with its verdict up, else the reversed
+	// freshest up segment — or the bootstrap beacon's route, before any is
+	// verified — addressed to the core's control service.
 	coreRoute := func() *scion.Addr {
-		if pathProvider == nil || beaconer == nil {
-			return nil
-		}
 		for ifID, neighborIA := range linkTableOf(linkStore)() {
 			if neighborIA.IsZero() || !isCore(cores, neighborIA) {
 				continue
@@ -490,9 +485,6 @@ func StartNode(t *testing.T, cfg NodeConfig) *Node {
 		Engine: engine,
 		Conn:   peerConn,
 		PathTo: func(dst addr.IA) *spath.Decoded {
-			if pathProvider == nil {
-				return nil
-			}
 			path, err := pathProvider.LocalPath(dst)
 			if err != nil {
 				return nil
@@ -770,9 +762,9 @@ func selfEnroll(
 	return err
 }
 
-// StartPingResponder serves echo replies on the node's endhost port, the
-// loop the daemon's own core runs beside the control endpoint (ADR 0009) —
-// the harness wires it by hand, its nodes not being the daemon's assembly.
+// StartPingResponder serves echo replies on the node's endhost port, the loop
+// the daemon's own core runs beside the control endpoint — the harness wires
+// it by hand, its nodes not being the daemon's assembly.
 func StartPingResponder(t *testing.T, n *Node) {
 	t.Helper()
 	conn := n.NewConn(t, dataplane.EndhostPort)

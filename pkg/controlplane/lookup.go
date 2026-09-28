@@ -236,7 +236,9 @@ func (s *LookupService) fetchCached(
 	return segs
 }
 
-// DBGet reads the local database.
+// DBGet reads the local database. A read failure logs and answers empty: the
+// read also serves dial paths, where a store closed under a write in flight
+// is the shutdown racing the send, not corruption.
 func (s *LookupService) DBGet(q pathdb.Query) []*pathdb.Segment {
 	ctx := context.Background()
 	segs, err := s.DB.Get(ctx, q)

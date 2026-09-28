@@ -19,8 +19,8 @@ import (
 	"tailscale.com/util/eventbus"
 )
 
-// DERPConfig configures the node's relay presence (ADR-0011): the address
-// of the core's relay and the stands-ins the integration harness needs.
+// DERPConfig configures the node's relay presence: the address of the core's
+// relay and the stands-ins the integration harness needs.
 type DERPConfig struct {
 	// URL is the relay's HTTPS address, "https://host[:port]" — the core's
 	// coordination endpoint on its own identity.

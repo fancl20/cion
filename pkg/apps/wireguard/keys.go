@@ -26,9 +26,7 @@ type PublicKey [32]byte
 func (k PrivateKey) PublicKey() PublicKey {
 	priv, err := ecdh.X25519().NewPrivateKey(k[:])
 	if err != nil {
-		// A clamped 32-byte scalar always derives a public key; the error
-		// path exists only for malformed input lengths.
-		return PublicKey{}
+		panic(fmt.Sprintf("deriving the public key: %v", err))
 	}
 	var pub PublicKey
 	copy(pub[:], priv.PublicKey().Bytes())

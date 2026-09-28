@@ -144,10 +144,10 @@ func (d *DataPlane) Serve(ctx context.Context) error {
 	for _, u := range d.underlays {
 		u.Start(ctx, d.packetPool, procQs)
 	}
-	// A slot's panic is unrecovered: the invariant breach crashes the
-	// process, the runtime's report names the cause, and the operator's
-	// process supervisor restarts the node (proposal 0019) — a recovered
-	// panic would silently blackhole the flows that hash to the dead slot.
+	// A slot's panic is unrecovered: the invariant breach crashes the process,
+	// the runtime's report names the cause, and the operator's process supervisor
+	// restarts the node — a recovered panic would silently blackhole the flows
+	// that hash to the dead slot.
 	for i := 0; i < d.RunConfig.NumProcessors; i++ {
 		d.processors.Add(1)
 		go func(i int) {
@@ -164,10 +164,10 @@ func (d *DataPlane) Serve(ctx context.Context) error {
 	}
 
 	<-ctx.Done()
-	// Graceful shutdown (ADR-0008): the underlay stops ingesting and its
-	// links flush and close, the processors drain their queues and exit, and
-	// Serve returns with the underlay addresses released — the replacement
-	// generation binds them next.
+	// Graceful shutdown: the underlay stops ingesting and its links flush and
+	// close, the processors drain their queues and exit, and Serve returns with
+	// the underlay addresses released — the replacement generation binds them
+	// next.
 	for _, u := range d.underlays {
 		u.Stop()
 	}
@@ -350,13 +350,7 @@ func (d *DataPlane) runSlowPathProcessor(ctx context.Context, id int, q <-chan *
 		}
 		// All slowpath packets are responses to the sender. Therefore, the egress link is always
 		// the ingress link.
-		egressLink := p.Link
-		if egressLink == nil {
-			slog.Debug("Error determining return link. No ingress link")
-			d.packetPool.Put(p)
-			continue
-		}
-		if !egressLink.Send(p) {
+		if !p.Link.Send(p) {
 			d.packetPool.Put(p)
 		}
 	}

@@ -31,7 +31,7 @@ func TestNodeConfigValidate(t *testing.T) {
 		t.Fatalf("validating a joiner: %v", err)
 	}
 
-	// Both methods of the selector parse (ADR-0010).
+	// Both methods of the selector parse.
 	for _, spec := range []string{
 		"cidrs=192.0.2.0/24,198.51.100.0/24",
 		"telegram=-1002147483647:7481532:AAFtoken",

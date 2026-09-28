@@ -14,7 +14,7 @@ import (
 	"github.com/fancl20/cion/pkg/modules/links"
 )
 
-// TestBFDLivenessEpisode is proposal 0012's integration proof: a three-node
+// TestBFDLivenessEpisode is the BFD integration proof: a three-node
 // line — the core A, the middle B, and C below — where killing B is the
 // blackhole on the A–B link's sockets. A marks the link down within the
 // window while its BFD keeps leaving on the link's own socket; a ping from

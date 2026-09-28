@@ -22,9 +22,9 @@ import (
 	nodev1connect "github.com/fancl20/cion/proto/node/v1/nodev1connect"
 )
 
-// Node directory cadence (ADR-0008): once enrolled, a node publishes its
-// entry on a constant cadence and a fetch constant refreshes the local copy
-// in between; entries expire without refresh.
+// Node directory cadence: once enrolled, a node publishes its entry on a
+// constant cadence and a fetch constant refreshes the local copy in between;
+// entries expire without refresh.
 const (
 	// NodePublishInterval is the re-publication cadence.
 	NodePublishInterval = time.Minute

@@ -1,18 +1,17 @@
-// Package socks is the SOCKS application (ADR-0012, proposal 0024):
-// internet egress as a service the node's own tailnet address names. RFC
-// 1928 CONNECT and UDP ASSOCIATE are served on a gVisor netstack the node
-// runs in-process — the machinery the egress already was, its forwarders
-// left behind with the default they served — with the listener as the
-// serving surface and the flow bounds, idle sweep, and dial timeout
-// unchanged. The application assembles beside the WireGuard application and
-// borrows its router the way the coordination application borrows its
-// store: the node's own address — the slice's first, which the coordination
-// allocator never issues — stands delivered to the application's inbound
-// path exactly while the application runs, and the packets the netstack
-// produces route back to whatever device the destination claims. It carries
-// no selection semantics of its own: it assembles whenever the WireGuard
-// application does, every node offering by default, a unit the applications
-// architecture record to come can select.
+// Package socks is the SOCKS application: internet egress as a service the
+// node's own tailnet address names. RFC 1928 CONNECT and UDP ASSOCIATE are
+// served on a gVisor netstack the node runs in-process — the machinery the
+// egress already was, its forwarders left behind with the default they served
+// — with the listener as the serving surface and the flow bounds, idle sweep,
+// and dial timeout unchanged. The application assembles beside the WireGuard
+// application and borrows its router the way the coordination application
+// borrows its store: the node's own address — the slice's first, which the
+// coordination allocator never issues — stands delivered to the application's
+// inbound path exactly while the application runs, and the packets the
+// netstack produces route back to whatever device the destination claims. It
+// carries no selection semantics of its own: it assembles whenever the
+// WireGuard application does, every node offering by default, a unit the
+// applications architecture record to come can select.
 package socks
 
 import (
@@ -38,9 +37,9 @@ import (
 	"github.com/fancl20/cion/pkg/apps/wireguard"
 )
 
-// Egress flow policy (ADR-0005), carried whole by the service: flow state
-// is bounded by a code constant and expired by idleness, and the outbound
-// legs are the node's own sockets.
+// Egress flow policy, carried whole by the service: flow state is bounded by a
+// code constant and expired by idleness, and the outbound legs are the node's
+// own sockets.
 const (
 	// maxEgressFlows bounds the concurrent flows — CONNECT legs, the
 	// associations' outbound sockets, and the associations themselves
@@ -131,9 +130,6 @@ type App struct {
 // The delivery installs here and uninstalls at Close: the address is routed
 // exactly while the application exists.
 func New(cfg Config) (*App, error) {
-	if !cfg.Subnet.IsValid() || !cfg.Subnet.Addr().Is4() {
-		return nil, fmt.Errorf("the tailnet slice %s is not IPv4", cfg.Subnet)
-	}
 	if cfg.Router == nil {
 		return nil, fmt.Errorf("no overlay router configured to borrow")
 	}
@@ -202,12 +198,11 @@ func New(cfg Config) (*App, error) {
 	return a, nil
 }
 
-// Inbound takes a plaintext packet the borrowed router delivered to the
-// node's own address: TCP and UDP — the listener's legs and the
-// associations' relays — enter the netstack, and everything else is dropped
-// and counted, internet ICMP included. The echo relay that served it
-// retired with the default it served, and no protocol exists to inherit it
-// (ADR-0012).
+// Inbound takes a plaintext packet the borrowed router delivered to the node's
+// own address: TCP and UDP — the listener's legs and the associations' relays
+// — enter the netstack, and everything else is dropped and counted, internet
+// ICMP included. The echo relay that served it retired with the default it
+// served, and no protocol exists to inherit it.
 func (a *App) Inbound(pkt []byte) {
 	if len(pkt) < header.IPv4MinimumSize || pkt[0]>>4 != 4 {
 		a.cnt.droppedPackets.Add(1)

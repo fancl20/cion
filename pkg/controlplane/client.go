@@ -7,9 +7,9 @@ import (
 	"github.com/scionproto/scion/pkg/proto/control_plane/v1/control_planeconnect"
 )
 
-// Client implements the Interface by making RPC calls to a remote server:
-// the drafts' services alone, the Link and Directory clients the topology
-// application owns living beside their services (ADR 0009).
+// Client implements the Interface by making RPC calls to a remote server: the
+// drafts' services alone, the Link and Directory clients the topology
+// application owns living beside their services.
 type Client struct {
 	control_planeconnect.SegmentCreationServiceClient
 	control_planeconnect.TrustMaterialServiceClient

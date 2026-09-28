@@ -17,11 +17,11 @@ type route struct {
 
 // Router is the overlay routing surface the application lends a resident
 // service application: Route carries a plaintext packet the service produced
-// toward its overlay destination, and Deliver installs one address the
-// service serves on — the router handing packets addressed to it to the
-// delivery — for as long as the returned function stands uncalled. The SOCKS
-// application (ADR-0012) is the shape's first borrower, the way the
-// coordination application borrows the store.
+// toward its overlay destination, and Deliver installs one address the service
+// serves on — the router handing packets addressed to it to the delivery — for
+// as long as the returned function stands uncalled. The SOCKS application is
+// the shape's first borrower, the way the coordination application borrows the
+// store.
 type Router interface {
 	// Route sends one plaintext packet the service produced — a reply or a
 	// relay — on by its destination, dropping it when it exceeds the overlay
@@ -37,10 +37,10 @@ type Router interface {
 // router moves plaintext packets between the devices' pipes by destination:
 // each owned host's /32 to the host device, each installed service's address
 // to its delivery, each directory peer's slice to its mesh device — longest
-// prefix first — and no default anywhere: a destination no slice claims
-// counts unroutable, and internet egress is a service on the overlay the
-// egress record decides, never a property of the routing (ADR-0011). The
-// router also enforces the overlay MTU, since no kernel TUN exists to do it.
+// prefix first — and no default anywhere: a destination no slice claims counts
+// unroutable, and internet egress is a service on the overlay the egress
+// record decides, never a property of the routing. The router also enforces
+// the overlay MTU, since no kernel TUN exists to do it.
 type router struct {
 	mtu int
 	cnt *counters
@@ -152,7 +152,7 @@ func (r *router) route(pkt []byte) {
 func addressToNetip(a tcpip.Address) netip.Addr {
 	ip, ok := netip.AddrFromSlice(a.AsSlice())
 	if !ok {
-		return netip.Addr{}
+		panic("netstack address is no IP address")
 	}
 	return ip.Unmap()
 }

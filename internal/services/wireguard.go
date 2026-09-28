@@ -13,17 +13,15 @@ import (
 	"github.com/fancl20/cion/pkg/trust"
 )
 
-// setupWireguard assembles the WireGuard application (proposal 0006) when
-// the node's arguments name its tailnet slice, after the control plane
-// whose path provider and trust engine it consumes: the key loads or
-// creates in the application's own state, the mesh socket binds an
-// ephemeral port registered as the wireguard service in this AS, the one
-// host device serves the shared port with its peers arriving by directory,
-// and the router comes with them. The core node additionally serves the
-// directory from its own store, over its own registered service socket,
-// and the coordination application serves beside it (proposal 0022). No
-// slice runs no application, the empty path's behavior carried over from
-// the retired configuration file.
+// setupWireguard assembles the WireGuard application when the node's arguments
+// name its tailnet slice, after the control plane whose path provider and
+// trust engine it consumes: the key loads or creates in the application's own
+// state, the mesh socket binds an ephemeral port registered as the wireguard
+// service in this AS, the one host device serves the shared port with its
+// peers arriving by directory, and the router comes with them. The core node
+// additionally serves the directory from its own store, over its own
+// registered service socket, and the coordination application serves beside
+// it. No slice runs no application.
 func (n *node) setupWireguard() error {
 	if n.cfg.Slice == "" {
 		return nil
@@ -74,9 +72,9 @@ func (n *node) wireguardConfig(subnet netip.Prefix) (wireguard.Config, error) {
 		UnregisterSvc: n.unregisterSvc,
 		InterfaceDown: n.ifDown,
 	}
-	// The pacing knob the join's tail latency rides (ADR-0011): the
-	// directory's fetch cadence bounds when a joined host's node programs
-	// it. Zero keeps the production constants.
+	// The pacing knob the join's tail latency rides: the directory's fetch
+	// cadence bounds when a joined host's node programs it. Zero keeps the
+	// production constants.
 	if d := n.cfg.Pacing.Directory; d != 0 {
 		cfg.PublishInterval = d
 		cfg.RefreshInterval = d
@@ -121,9 +119,6 @@ func (n *node) relayPresence() *wireguard.DERPConfig {
 // client rides — a neighbor core one hop, anything else the reversed
 // freshest up segment.
 func (n *node) directoryRoute() *scion.Addr {
-	if n.coreClt == nil {
-		return nil
-	}
 	route := n.coreRoute()
 	if route == nil {
 		return nil

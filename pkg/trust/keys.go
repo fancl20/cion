@@ -47,9 +47,9 @@ type CoreKeys struct {
 	CA crypto.Signer
 }
 
-// IAFile holds the node's ISD-AS in the state directory's root; ForwardingKeyFile
-// holds the forwarding key beside the AS keys. Both are generated on first
-// start and persisted for the node's lifetime (ADR-0008).
+// IAFile holds the node's ISD-AS in the state directory's root;
+// ForwardingKeyFile holds the forwarding key beside the AS keys. Both are
+// generated on first start and persisted for the node's lifetime.
 const (
 	// IAFile is the node's ISD-AS, one line, e.g. "20-fd00:0:123".
 	IAFile = "ia"
@@ -95,7 +95,7 @@ func GenerateIA() (addr.IA, error) {
 
 // LoadOrCreateForwardingKey returns the node's forwarding key, generating and
 // persisting a new one on first start. The key MACs only the node's own hop
-// fields, so it needs no coordination (ADR-0008).
+// fields, so it needs no coordination.
 func LoadOrCreateForwardingKey(stateDir string) ([]byte, error) {
 	path := filepath.Join(keyDir(stateDir), ForwardingKeyFile)
 	if raw, err := os.ReadFile(path); err == nil {

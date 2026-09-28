@@ -11,16 +11,14 @@ import (
 	"github.com/fancl20/cion/pkg/modules/enrollauth/impl/telegram"
 )
 
-// loadEnrollAuth builds the authorizer a --enroll-auth spec names
-// (ADR-0010) — "method=spec": "cidrs" with a comma-separated prefix list,
-// "telegram" with <chat>:<token>, the split on the first colon so the
-// token's own colon survives intact. The policy module's kind leaves the
-// choice to the caller: this, the assembly, imports the implementation the
-// spec selects directly, exactly one method. The run function launches the
-// selected method's own loops — the Telegram authorizer's poll — under the
-// caller's supervision; nil when the method has none. The spec parses here
-// once, so a malformed one fails the boot, not the first joiner, and unset
-// is open enrollment — the zero-conf default.
+// loadEnrollAuth builds the authorizer a --enroll-auth spec names —
+// "method=spec": "cidrs" with a comma-separated prefix list, "telegram"
+// with <chat>:<token>, the split on the first colon so the token's own
+// colon survives intact. The assembly imports the implementation the spec
+// names directly. The run function launches the selected method's own
+// loops — the Telegram authorizer's poll — under the caller's supervision;
+// nil when the method has none. The spec parses here once, so a malformed
+// one fails the boot, not the first joiner.
 func loadEnrollAuth(spec string, api, state string) (
 	enrollauth.AdmissionAuthorizer,
 	func(context.Context),

@@ -1,5 +1,5 @@
-// Package controlplane implements the node core's control endpoint of
-// ADR-0009: the drafts' services over HTTP/3 (QUIC) riding SCION paths —
+// Package controlplane implements the node core's control endpoint: the
+// drafts' services over HTTP/3 (QUIC) riding SCION paths —
 // segment creation, registration, and lookup, trust material and chain
 // renewal — and the drafts' service resolution beside them (control plane
 // draft, Section 5), every protocol the core speaks the drafts' own. Peer

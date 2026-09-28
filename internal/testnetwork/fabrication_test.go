@@ -17,7 +17,7 @@ import (
 	"github.com/fancl20/cion/pkg/segment"
 )
 
-// TestFabricatingNeighbor is proposal 0015's fabrication lab: an enrolled
+// TestFabricatingNeighbor is the fabrication lab: an enrolled
 // node — B, the middle of the line — signs an entry claiming the core's
 // name and propagates the beacon to C over the same channel the honest
 // beacons ride. The binding refuses it at C's reception with both

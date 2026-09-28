@@ -49,11 +49,11 @@ func DefaultDataplaneOptions() DataplaneOptions {
 	}
 }
 
-// generation is one serving data plane instance. The data plane never
-// mutates while serving (ADR-0008): a topology change retires the serving
-// generation and brings up its replacement, built from the link store's
-// non-retired entries with each link's stable local address rebound
-// identically — the swap invisible to the peers' connected sockets.
+// generation is one serving data plane instance. The data plane never mutates
+// while serving: a topology change retires the serving generation and brings
+// up its replacement, built from the link store's non-retired entries with
+// each link's stable local address rebound identically — the swap invisible to
+// the peers' connected sockets.
 type generation struct {
 	provider *dataplane.UDPProvider
 	dp       *dataplane.DataPlane
@@ -70,7 +70,7 @@ func (g *generation) stop() {
 }
 
 // setupMetrics creates the node's metrics, shared across generations; the
-// per-link counters reset with each generation (ADR-0008).
+// per-link counters reset with each generation.
 func (n *node) setupMetrics() error {
 	metrics, err := dataplane.NewMetrics()
 	if err != nil {
@@ -101,10 +101,10 @@ func (n *node) startGeneration(ctx context.Context) (*generation, error) {
 	}
 	dlinks = append(dlinks, internalLink)
 	for _, l := range entries {
-		// Each serving link carries its BFD session — the monitor's, keyed
-		// by interface ID and surviving the swap — and the verdict through
-		// it: the link attaches its own raw writer, so the session's stream
-		// keeps leaving on the rebound address (ADR-0008).
+		// Each serving link carries its BFD session — the monitor's, keyed by
+		// interface ID and surviving the swap — and the verdict through it: the link
+		// attaches its own raw writer, so the session's stream keeps leaving on the
+		// rebound address.
 		session := n.monitor.Session(l)
 		link, err := provider.NewExternalLink(
 			n.opts.QueueSize, session, l.Local.String(), l.Remote.String(), l.IfID,
@@ -154,13 +154,13 @@ func (n *node) startGeneration(ctx context.Context) (*generation, error) {
 	return g, nil
 }
 
-// superviseDataplanes is the generation supervisor (ADR-0008): build a
-// generation and serve it; on each link-store change, retire the serving
-// one — stop ingest, drain, close — and bring up its replacement, the same
-// link addresses rebound. The control plane never restarts: its sockets are
-// its own, and it submits packets to the internal link's address, which
-// each generation rebinds. A swap is packet loss measured in milliseconds;
-// the QUIC connections of the control channel retransmit through it.
+// superviseDataplanes is the generation supervisor: build a generation and
+// serve it; on each link-store change, retire the serving one — stop ingest,
+// drain, close — and bring up its replacement, the same link addresses
+// rebound. The control plane never restarts: its sockets are its own, and it
+// submits packets to the internal link's address, which each generation
+// rebinds. A swap is packet loss measured in milliseconds; the QUIC
+// connections of the control channel retransmit through it.
 func (n *node) superviseDataplanes(ctx context.Context) error {
 	gen, err := n.startGeneration(ctx)
 	if err != nil {
@@ -200,11 +200,7 @@ func (n *node) supervise(ctx context.Context, gen *generation) error {
 			}
 			gen = next
 			n.setGeneration(gen)
-			serving, err := n.servingLinks(ctx)
-			if err != nil {
-				slog.Error("Reading the link store after the swap", "err", err)
-			}
-			slog.Info("Swapped the data plane generation", "links", len(serving))
+			slog.Info("Swapped the data plane generation")
 		}
 	}
 }
@@ -237,6 +233,9 @@ func (n *node) linkTable() map[uint16]addr.IA {
 	}
 	entries, err := n.linkStore.All(context.Background())
 	if err != nil {
+		// The write path reads this from quic-go's send goroutines, which
+		// outlive Close by a write in flight: a closed store here is the
+		// shutdown racing one last send, not corruption.
 		slog.Error("Reading the link store", "err", err)
 		return nil
 	}

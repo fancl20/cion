@@ -1,20 +1,20 @@
-// Package topology is the node's configuration source, the source module of
-// ADR-0013: what it provides is not a service the node offers but the
-// node's own inputs — identity, links — granted from outside, for a node
-// cannot author its own name in the namespace or its own edges in the
-// graph. A provider owns a node's topology policy; the node owns the
-// mechanism that applies it: the links module's store, the generation
-// swap, and the stable link addresses. Beneath the contract, one package
-// per implementation — the measured provider, whose rendezvous acceptor,
-// joiner's dials, node directory, in-band link service, and selection loop
-// load by default, loading them being what makes a node zero-conf, and the
-// file provider beside it, the static alternative an operator vouches for.
-// The two never combine, because two deciders writing the same entries is
-// flapping by construction; the cross-node vocabulary either speaks is
-// exchanges with distinct jobs alone — rendezvous for first contact and
-// identity, the link service for in-band establishment, echo for
-// measurement, BFD for liveness — and a future provider interoperates
-// through the store and those exchanges alone.
+// Package topology is the node's configuration source: what it provides is
+// not a service the node offers but the node's own inputs — identity,
+// links — granted from outside, for a node cannot author its own name in
+// the namespace or its own edges in the graph. A provider owns a node's
+// topology policy; the node owns the mechanism that applies it: the links
+// module's store, the generation swap, and the stable link addresses.
+// Beneath the contract, one package per implementation — the measured
+// provider, whose rendezvous acceptor, joiner's dials, node directory,
+// in-band link service, and selection loop load by default, loading them
+// being what makes a node zero-conf, and the file provider beside it, the
+// static alternative an operator vouches for. The two never combine,
+// because two deciders writing the same entries is flapping by
+// construction; the cross-node vocabulary either speaks is exchanges with
+// distinct jobs alone — rendezvous for first contact and identity, the
+// link service for in-band establishment, echo for measurement, BFD for
+// liveness — and a future provider interoperates through the store and
+// those exchanges alone.
 //
 // Kind: source — where topology decisions come from, selected by the run
 // arguments of its own: the measured provider by default, the file
@@ -33,7 +33,7 @@ import (
 )
 
 // Provider is the seam between the node assembly and the topology
-// machinery (ADR-0013). A provider owns three moments of a node's topology
+// machinery. A provider owns three moments of a node's topology
 // — it completes a first start's provisional identity before the phases
 // assemble, it mounts the services it serves on the control endpoint, and
 // it runs the loops that decide links under the node's supervision — with

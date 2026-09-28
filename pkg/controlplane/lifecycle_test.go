@@ -191,11 +191,10 @@ func TestEnrollmentPassFailing(t *testing.T) {
 }
 
 // TestChainSweepPass checks one sweep pass of the enrollment loops' trust
-// database sweep (proposal 0018) in a fake-time bubble: a chain still within
-// its validity is never deleted by however many sweeps pass; past expiry and
-// the retention window it leaves, the store answers every valid query
-// exactly as before, and the pinned TRC survives a sweep of a store whose
-// chains are all expired.
+// database sweep in a fake-time bubble: a chain still within its validity is
+// never deleted by however many sweeps pass; past expiry and the retention
+// window it leaves, the store answers every valid query exactly as before, and
+// the pinned TRC survives a sweep of a store whose chains are all expired.
 func TestChainSweepPass(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		f := newTrustFixture(t)
