@@ -15,9 +15,7 @@ import (
 	"github.com/scionproto/scion/pkg/addr"
 	"github.com/scionproto/scion/pkg/scrypto/cppki"
 
-	"github.com/fancl20/cion/pkg/apps/coordination"
-	"github.com/fancl20/cion/pkg/apps/socks"
-	"github.com/fancl20/cion/pkg/apps/wireguard"
+	"github.com/fancl20/cion/pkg/apps"
 	"github.com/fancl20/cion/pkg/controlplane"
 	"github.com/fancl20/cion/pkg/dataplane"
 	"github.com/fancl20/cion/pkg/modules/enrollauth"
@@ -99,19 +97,12 @@ type node struct {
 	httpsHandler http.Handler
 	services     *controlplane.Services
 	responder    *responder
-	wireguard    *wireguard.App
-	// coordination is the core's coordination application, assembled beside the
-	// WireGuard application when the node's arguments name a wireguard
-	// configuration; nil on every other node. It owns no listener: its surfaces
-	// mount on the node's HTTPS server.
-	coordination *coordination.App
-	// socksMtx guards socks, which the serving loop assembles when the
-	// directory's assignment arrives — after start, not at setup.
-	socksMtx sync.Mutex
-	// socks is the SOCKS application, assembled beside the WireGuard
-	// application whose router it borrows, when the assigned slice arrives;
-	// nil until then and without the WireGuard application.
-	socks *socks.App
+	// apps is the loaded resident applications in table order — the
+	// WireGuard application first, its borrowers after — constructed at
+	// setup with their borrows resolved. start launches them under the
+	// node's supervision; Close releases them in reverse, the borrowers
+	// before the machinery they borrow.
+	apps []apps.Loaded
 
 	// enrollAuth gates the trust service's first issuance and the coordination
 	// application's registrations; nil is open admission. enrollRun launches the
@@ -292,10 +283,7 @@ func setupNode(ctx context.Context, cfg NodeConfig, opts DataplaneOptions) (n *n
 	if err = n.topology.Seed(ctx); err != nil {
 		return n, err
 	}
-	if err = n.setupWireguard(); err != nil {
-		return n, err
-	}
-	if err = n.setupCoordination(); err != nil {
+	if err = n.setupApplications(); err != nil {
 		return n, err
 	}
 	if err = n.assembleHTTPS(); err != nil {
@@ -312,22 +300,10 @@ func (n *node) Close() {
 	if n.httpsLn != nil {
 		_ = n.httpsLn.Close()
 	}
-	n.socksMtx.Lock()
-	socks := n.socks
-	n.socks = nil
-	n.socksMtx.Unlock()
-	if socks != nil {
-		// Before the wireguard application, whose router the SOCKS
-		// application borrows its delivery and reply path from.
-		socks.Close()
-	}
-	if n.coordination != nil {
-		// Before the wireguard application, whose store the coordination
-		// application borrows its view of.
-		_ = n.coordination.Close()
-	}
-	if n.wireguard != nil {
-		n.wireguard.Close()
+	// The applications release in reverse table order — the borrowers
+	// before the WireGuard application whose machinery they borrow.
+	for i := len(n.apps) - 1; i >= 0; i-- {
+		n.apps[i].App.Close()
 	}
 	n.backendsMtx.Lock()
 	gen := n.gen
@@ -442,13 +418,10 @@ func (n *node) start(ctx context.Context) {
 			return n.certMgr.Manage(ctx)
 		})
 	}
-	if n.wireguard != nil {
-		runBackground(ctx, "wireguard", func(ctx context.Context) error {
-			return n.wireguard.Run(ctx)
-		})
-		runBackground(ctx, "socks", func(ctx context.Context) error {
-			return n.serveSocks(ctx)
-		})
+	// The resident applications under the node's supervision: a panic in
+	// one application's loop is absorbed and logged, nothing restarted.
+	for _, l := range n.apps {
+		runBackground(ctx, l.Name, l.App.Run)
 	}
 }
 

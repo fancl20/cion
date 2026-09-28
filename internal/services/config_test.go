@@ -1,7 +1,10 @@
 package services
 
 import (
+	"strings"
 	"testing"
+
+	"github.com/fancl20/cion/pkg/apps"
 )
 
 // nodeConfig builds a minimal valid run-argument set for the validation and
@@ -84,6 +87,70 @@ func TestNodeConfigValidate(t *testing.T) {
 			mutate(&cfg)
 			if err := cfg.Validate(); err == nil {
 				t.Error("the malformed run arguments were accepted")
+			}
+		})
+	}
+}
+
+// TestNodeConfigValidateApplications checks the applications list's
+// regimes and refusals where every role-aware check reads them, at
+// Validate and before any assembly runs.
+func TestNodeConfigValidateApplications(t *testing.T) {
+	// The inference and the deliberate core need no list at all: an unset
+	// list with refused arguments loads nothing, an empty one states it.
+	if err := nodeConfig().Validate(); err != nil {
+		t.Fatalf("an unset list with the port refused: %v", err)
+	}
+	deliberate := nodeConfig()
+	deliberate.Applications = []string{}
+	if err := deliberate.Validate(); err != nil {
+		t.Fatalf("the deliberate core: %v", err)
+	}
+	serving := nodeConfig()
+	serving.AppArguments.Wireguard.HostPort = apps.DefaultHostPort
+	if err := serving.Validate(); err != nil {
+		t.Fatalf("the inference with the port given: %v", err)
+	}
+
+	refusals := map[string]struct {
+		mutate func(*NodeConfig)
+		want   string
+	}{
+		"an unknown name": {
+			func(c *NodeConfig) { c.Applications = []string{"middlebox"} },
+			"the residents are wireguard, coordination, socks",
+		},
+		"coordination off the core": {
+			func(c *NodeConfig) {
+				c.Core = false
+				c.Applications = []string{"coordination", "wireguard"}
+				c.AppArguments.Wireguard.HostPort = apps.DefaultHostPort
+			},
+			"coordination, which requires the core role",
+		},
+		"socks without wireguard": {
+			func(c *NodeConfig) { c.Applications = []string{"socks"} },
+			"requires wireguard beside it",
+		},
+		"coordination without wireguard": {
+			func(c *NodeConfig) { c.Applications = []string{"coordination"} },
+			"requires wireguard beside it",
+		},
+		"wireguard beside the refused port": {
+			func(c *NodeConfig) { c.Applications = []string{"wireguard"} },
+			"--wireguard.host-port is zero",
+		},
+	}
+	for name, tc := range refusals {
+		t.Run(name, func(t *testing.T) {
+			cfg := nodeConfig()
+			tc.mutate(&cfg)
+			err := cfg.Validate()
+			if err == nil {
+				t.Fatal("the miscombination was accepted")
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("the refusal = %q, want it to carry %q", err, tc.want)
 			}
 		})
 	}

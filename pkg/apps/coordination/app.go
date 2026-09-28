@@ -127,16 +127,24 @@ func New(cfg Config) (*App, error) {
 	return a, nil
 }
 
-// Handler returns the application's HTTP surface — the /key fetch, the
+// Run is the application's place in the node's start walk: every surface
+// it serves is mounted on the node's HTTPS server, so the loop holds the
+// context and ends with it.
+func (a *App) Run(ctx context.Context) error {
+	<-ctx.Done()
+	return nil
+}
+
+// Close retires the application: the served noise conversations and the
+// relay with its connected clients.
+func (a *App) Close() {
+	a.wg.Wait()
+	_ = a.derp.close()
+}
+
+// HTTPSHandler is the application's HTTP surface — the /key fetch, the
 // /ts2021 upgrade into the noise channel, and the /derp relay — for the
 // assembly's mux to mount. The serving server, the listener, and the TLS
 // identity are the assembly's; the keys, the state, and the conversations
 // stay the application's.
-func (a *App) Handler() http.Handler { return a.handler }
-
-// Close retires the application: the served noise conversations and the
-// relay with its connected clients.
-func (a *App) Close() error {
-	a.wg.Wait()
-	return a.derp.close()
-}
+func (a *App) HTTPSHandler() http.Handler { return a.handler }

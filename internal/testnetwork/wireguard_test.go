@@ -15,7 +15,7 @@ import (
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/header"
 
-	"github.com/fancl20/cion/internal/services"
+	"github.com/fancl20/cion/pkg/apps"
 	"github.com/fancl20/cion/pkg/apps/wireguard"
 )
 
@@ -118,12 +118,12 @@ func startWireguardNodes(t *testing.T, ipA, ipB netip.Addr) (*Node, *Node) {
 	a := StartNode(t, NodeConfig{
 		IA: wireguardA, Host: ipA, Core: true, WPKI: wpki,
 		Links:     []Link{{Local: extA, Remote: extB, Neighbor: wireguardB}},
-		Wireguard: &WireguardOptions{ListenPort: services.DefaultHostPort},
+		Wireguard: &WireguardOptions{ListenPort: apps.DefaultHostPort},
 	})
 	b := StartNode(t, NodeConfig{
 		IA: wireguardB, Host: ipB, WPKI: wpki,
 		Links:     []Link{{Local: extB, Remote: extA, Neighbor: wireguardA}},
-		Wireguard: &WireguardOptions{ListenPort: services.DefaultHostPort},
+		Wireguard: &WireguardOptions{ListenPort: apps.DefaultHostPort},
 	})
 	Poll(t, "A's mesh peer", func() bool { return hasMeshPeer(a.Wireguard, wireguardB) })
 	Poll(t, "B's mesh peer", func() bool { return hasMeshPeer(b.Wireguard, wireguardA) })

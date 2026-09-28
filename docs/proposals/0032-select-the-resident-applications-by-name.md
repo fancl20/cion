@@ -387,3 +387,71 @@ nothing beyond the one flag composes the two.
     withheld exit dying unroutable at the node that withholds it.
 
 ## Implementation history
+
+*   The table and its pieces landed at the applications roof's root: the
+    entry with its five facts, the environment, the seam the concrete
+    applications satisfy without importing the roof, and the selection
+    over the closed list in borrow order
+    ([apps.go](/pkg/apps/apps.go), [table.go](/pkg/apps/table.go));
+    each entry beside its constructor, the store opening and the relay
+    derivations moving home with them
+    ([wireguard.go](/pkg/apps/wireguard.go),
+    [coordination.go](/pkg/apps/coordination.go),
+    [socks.go](/pkg/apps/socks.go)). The SOCKS application gained the
+    serving form that waits for the assignment itself
+    ([server.go](/pkg/apps/socks/server.go)), and the coordination
+    application the start-walk place and the handler under the seam's
+    name
+    ([app.go](/pkg/apps/coordination/app.go)).
+*   The list argument registers beside the placement three on both run
+    commands and ping, and the commands register the entries' own
+    arguments by walking the table — `--wireguard.host-port` keeping its
+    spelling, default, help, and part-block place — the wireguard helper
+    and the node configuration's host-port field retiring for the
+    arguments' new home
+    ([run.go](/cmd/cion/run.go), [run_core.go](/cmd/cion/run_core.go),
+    [run_local.go](/cmd/cion/run_local.go), [ping.go](/cmd/cion/ping.go),
+    [config.go](/internal/services/config.go)).
+*   The refusals sit where Validate checks the provider mixture, before
+    any assembly runs, over the same resolution the assembly's walk
+    selects
+    ([config.go](/internal/services/config.go),
+    [table.go](/pkg/apps/table.go)).
+*   The assembly's four touches became walks over the loaded: the
+    applications phase after the node's, the HTTPS mount over whichever
+    residents contribute a handler, the starts under runBackground, and
+    the reverse release — setupWireguard, setupCoordination, serveSocks,
+    the coordination branch, the starts block, and the hand-ordered
+    closes deleting with the node struct's per-application fields, the
+    booted application's typed accessor retiring for the by-name reach
+    ([applications.go](/internal/services/applications.go),
+    [node.go](/internal/services/node.go),
+    [https.go](/internal/services/https.go),
+    [app.go](/internal/services/app.go)).
+*   The roof's check holds on the pattern the modules roof set: the walk
+    reading the tree against the table's names with the ping application
+    exempt by name, and the import rule reading the package graph for the
+    one-way direction — both proven against fixtures built to fail
+    ([walk_test.go](/pkg/apps/walk_test.go)).
+*   The episodes: the table's regimes and refusals at Select and at
+    Validate, the surfaces parsing on all three commands with the
+    nil-against-empty distinction held, the WireGuard configuration
+    episodes moved home with the constructor, and the help's frame,
+    composition, part-block order
+    ([table_test.go](/pkg/apps/table_test.go),
+    [wireguard_test.go](/pkg/apps/wireguard_test.go),
+    [config_test.go](/internal/services/config_test.go),
+    [run_test.go](/cmd/cion/run_test.go)); the standing labs pass with
+    the harness renamed by one field and asserting the concrete
+    application where it watches host peers, and two shapes gained their
+    first episodes — the deliberate core enrolling a joiner over the
+    control endpoint with an empty list, and the withheld offer's flow
+    dying unroutable at the node that withholds it
+    ([coordination_test.go](/internal/testnetwork/coordination_test.go),
+    [join_test.go](/internal/testnetwork/join_test.go),
+    [socks_test.go](/internal/testnetwork/socks_test.go)).
+*   ADR-0014 stands accepted, its five points the episodes above map;
+    the architecture overview names the closed table and the list's
+    three regimes, and its endhost section's offer earns its by default
+    ([0014-select-resident-applications-by-name.md](/docs/adrs/0014-select-resident-applications-by-name.md),
+    [architecture.md](/docs/design/architecture.md)).

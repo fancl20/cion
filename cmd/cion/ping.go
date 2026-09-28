@@ -43,7 +43,7 @@ func newPingCommand() *cobra.Command {
 	cmd.Flags().SortFlags = false
 	addSharedNodeFlags(cmd.Flags(), opts)
 	addLocalNodeFlags(cmd.Flags(), opts)
-	addWireguardFlags(cmd.Flags(), opts)
+	addApplicationFlags(cmd.Flags(), opts)
 	cmd.Flags().IntVar(&pingOpts.count, "count", 4, "number of requests")
 	cmd.Flags().DurationVar(&pingOpts.interval, "interval", time.Second, "time between requests")
 	cmd.Flags().DurationVar(&pingOpts.wait, "wait", 2*time.Second, "wait per reply")

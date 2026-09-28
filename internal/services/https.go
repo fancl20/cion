@@ -14,13 +14,13 @@ import (
 // internet HTTPS's port, presents the core's WebPKI identity, and answers the
 // ACME TLS-ALPN challenge beside whatever protocols the mounted apps speak.
 // The identity is every core's already; here, after the applications assemble,
-// the node knows the handlers it carries and binds the address it names. The
-// ACME-managed identity binds for the challenge alone when no app contributes
-// handlers, and a static-file identity on a core whose apps mount nothing
-// leaves the port unbound, as the tree behaves today. The listener is held
-// here, before start launches the serving loop and the certificate
-// maintenance, so a first issuance's probe finds the port answered by
-// structure rather than by retry.
+// the node knows the handlers it carries and binds the address it names —
+// whichever loaded residents contribute one. The ACME-managed identity binds
+// for the challenge alone when no app contributes handlers, and a static-file
+// identity on a core whose apps mount nothing leaves the port unbound, as the
+// tree behaves today. The listener is held here, before start launches the
+// serving loop and the certificate maintenance, so a first issuance's probe
+// finds the port answered by structure rather than by retry.
 func (n *node) assembleHTTPS() error {
 	if n.certMgr == nil {
 		// A non-core holds no WebPKI identity to serve.
@@ -28,9 +28,11 @@ func (n *node) assembleHTTPS() error {
 	}
 	mux := http.NewServeMux()
 	mounted := false
-	if n.coordination != nil {
-		mux.Handle("/", n.coordination.Handler())
-		mounted = true
+	for _, l := range n.apps {
+		if h := l.App.HTTPSHandler(); h != nil {
+			mux.Handle("/", h)
+			mounted = true
+		}
 	}
 	if !mounted && !n.certMgr.ACMEManaged() {
 		// Static files with nothing to serve bind nothing — the offline

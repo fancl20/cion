@@ -196,7 +196,7 @@ func testApp(t *testing.T, cfg Config) *App {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = a.Close() })
+	t.Cleanup(a.Close)
 	return a
 }
 

@@ -43,7 +43,7 @@ func serveCoordination(t *testing.T, a *App, tlsCfg *tls.Config) string {
 		t.Fatal(err)
 	}
 	srv := &http.Server{
-		Handler:           a.Handler(),
+		Handler:           a.HTTPSHandler(),
 		ReadHeaderTimeout: 30 * time.Second,
 	}
 	ctx, cancel := context.WithCancel(context.Background())

@@ -9,9 +9,9 @@
 // coordination allocator never issues — stands delivered to the application's
 // inbound path exactly while the application runs, and the packets the
 // netstack produces route back to whatever device the destination claims. It
-// carries no selection semantics of its own: it assembles whenever the
-// WireGuard application does, every node offering by default, a unit the
-// applications architecture record to come can select.
+// carries no selection semantics of its own: the applications table
+// selects it, and it loads beside the WireGuard application wherever that
+// loads — every node offering by default.
 package socks
 
 import (
