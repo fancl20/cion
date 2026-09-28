@@ -58,7 +58,7 @@ func (n *node) setupControlPlane(ctx context.Context) error {
 // the state directory. A node may start with zero links: the store is empty
 // until a neighbor joins, the selection loop promotes one, or the loaded
 // provider seeds it — the first-start neighbor requirement being the
-// provider's to satisfy, by a --neighbor or a non-empty link-set.
+// provider's to satisfy, by a --topology.neighbor or a non-empty link-set.
 func (n *node) openState(ctx context.Context) error {
 	trustDB, err := bbolt.New(filepath.Join(n.cfg.State, "trust.db"), nil)
 	if err != nil {

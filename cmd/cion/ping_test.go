@@ -14,14 +14,14 @@ import (
 func TestPingArgumentsParse(t *testing.T) {
 	cmd := newPingCommand()
 	if err := cmd.Flags().Parse([]string{
-		"--domain", "core.example.org",
-		"--neighbor", "192.0.2.7:30043",
+		"--trust.domain", "core.example.org",
+		"--topology.neighbor", "192.0.2.7:30043",
 		"--state", "/var/lib/cion",
 	}); err != nil {
 		t.Fatalf("parsing the local surface: %v", err)
 	}
-	if err := cmd.Flags().Parse([]string{"--acme-email", "admin@example.org"}); err == nil {
-		t.Error("--acme-email parsed under ping, want the unknown-flag refusal")
+	if err := cmd.Flags().Parse([]string{"--trust.acme-email", "admin@example.org"}); err == nil {
+		t.Error("--trust.acme-email parsed under ping, want the unknown-flag refusal")
 	} else if !strings.Contains(err.Error(), "acme-email") {
 		t.Errorf("the refusal = %v, want it to name the flag", err)
 	}

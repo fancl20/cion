@@ -7,15 +7,15 @@ import (
 	"github.com/fancl20/cion/internal/services"
 )
 
-// addLocalNodeFlags registers the joining node's arguments: the network's
-// core domain and the bootstrap neighbor. The local role is the
+// addLocalNodeFlags registers the joining node's arguments: the bootstrap
+// neighbor and the network's core domain. The local role is the
 // configuration's zero value.
 func addLocalNodeFlags(flags *pflag.FlagSet, opts *services.NodeConfig) {
-	flags.StringVar(&opts.Domain, "domain", "",
+	flags.StringSliceVar(&opts.Neighbors, "topology.neighbor", nil,
+		"an existing node's rendezvous underlay address; repeatable")
+	flags.StringVar(&opts.Domain, "trust.domain", "",
 		"the network's core domain, the WebPKI identity of the enrollment and TRC fetch "+
 			"(required)")
-	flags.StringSliceVar(&opts.Neighbors, "neighbor", nil,
-		"an existing node's rendezvous underlay address; repeatable")
 }
 
 // newRunLocalCommand builds `cion run local`: a node joining an existing
@@ -28,15 +28,18 @@ func newRunLocalCommand() *cobra.Command {
 		Short: "Run a local node, joining an existing network through its core",
 		Long: "Run a local node, joining an existing network through its core: enrollment " +
 			"and the measured join. Identity and links come from the state directory; " +
-			"a first start needs a bootstrap --neighbor — or a --link-set file under " +
-			"the static provider — and the network's core --domain.",
+			"a first start needs a bootstrap --topology.neighbor — or a " +
+			"--topology.link-set file under the static provider — and the network's " +
+			"core --trust.domain.",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runDaemon(cmd.Context(), *opts, tuning)
 		},
 	}
+	cmd.Flags().SortFlags = false
 	addSharedNodeFlags(cmd.Flags(), opts)
 	addLocalNodeFlags(cmd.Flags(), opts)
+	addWireguardFlags(cmd.Flags(), opts)
 	addTuningFlags(cmd.Flags(), tuning)
 	return cmd
 }

@@ -1,6 +1,6 @@
 // Package file is the topology source's static implementation: a link-set
 // file the operator vouches for, reconciled into the store. The node's
-// assembly loads it when --link-set names a link-set.
+// assembly loads it when --topology.link-set names a link-set.
 package file
 
 import (
@@ -173,7 +173,7 @@ func (f *Provider) CompleteIdentity(_ context.Context, ia addr.IA) (addr.IA, err
 	}
 	if len(f.entries) == 0 {
 		return ia, fmt.Errorf(
-			"a non-core's first start needs a non-empty --link-set: the neighbor requirement")
+			"a non-core's first start needs a non-empty --topology.link-set: the neighbor requirement")
 	}
 	completed, err := addr.IAFrom(f.entries[0].ia.ISD(), ia.AS())
 	if err != nil {

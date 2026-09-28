@@ -24,6 +24,7 @@ func parseNodeArgs(t *testing.T, use string, args ...string) (*services.NodeConf
 	} else {
 		addLocalNodeFlags(flags, opts)
 	}
+	addWireguardFlags(flags, opts)
 	addTuningFlags(flags, tuning)
 	err := flags.Parse(args)
 	return opts, err
@@ -35,13 +36,13 @@ func parseNodeArgs(t *testing.T, use string, args ...string) (*services.NodeConf
 // commands themselves register the partitions.
 func TestRunArgumentsParse(t *testing.T) {
 	opts, err := parseNodeArgs(t, "core",
-		"--domain", "core.example.org",
-		"--acme-email", "admin@example.org",
-		"--cert-file", "/tmp/cert.pem",
-		"--key-file", "/tmp/key.pem",
-		"--enroll-auth", "cidrs=192.0.2.0/24",
-		"--host-port", "51820",
-		"--processors", "2",
+		"--trust.domain", "core.example.org",
+		"--trust.acme-email", "admin@example.org",
+		"--trust.cert-file", "/tmp/cert.pem",
+		"--trust.key-file", "/tmp/key.pem",
+		"--trust.enroll-auth", "cidrs=192.0.2.0/24",
+		"--wireguard.host-port", "51820",
+		"--dataplane.processors", "2",
 	)
 	if err != nil {
 		t.Fatalf("parsing the core's arguments: %v", err)
@@ -50,27 +51,27 @@ func TestRunArgumentsParse(t *testing.T) {
 		t.Error("the core's registration left the role unset")
 	}
 	if opts.Domain != "core.example.org" {
-		t.Errorf("--domain = %q", opts.Domain)
+		t.Errorf("--trust.domain = %q", opts.Domain)
 	}
 	if opts.AcmeEmail != "admin@example.org" {
-		t.Errorf("--acme-email = %q", opts.AcmeEmail)
+		t.Errorf("--trust.acme-email = %q", opts.AcmeEmail)
 	}
 	if opts.CertFile != "/tmp/cert.pem" || opts.KeyFile != "/tmp/key.pem" {
 		t.Errorf("the certificate pair = %q, %q", opts.CertFile, opts.KeyFile)
 	}
 	if opts.EnrollAuth != "cidrs=192.0.2.0/24" {
-		t.Errorf("--enroll-auth = %q", opts.EnrollAuth)
+		t.Errorf("--trust.enroll-auth = %q", opts.EnrollAuth)
 	}
 	if opts.HostPort != 51820 {
-		t.Errorf("--host-port = %d", opts.HostPort)
+		t.Errorf("--wireguard.host-port = %d", opts.HostPort)
 	}
 	if opts.State != services.DefaultState {
 		t.Errorf("--state = %q, want the default %q", opts.State, services.DefaultState)
 	}
 
 	opts, err = parseNodeArgs(t, "local",
-		"--domain", "core.example.org",
-		"--neighbor", "192.0.2.7:30043",
+		"--trust.domain", "core.example.org",
+		"--topology.neighbor", "192.0.2.7:30043",
 		"--state", "/var/lib/cion2",
 	)
 	if err != nil {
@@ -80,10 +81,10 @@ func TestRunArgumentsParse(t *testing.T) {
 		t.Error("the local registration preset the core role")
 	}
 	if opts.Domain != "core.example.org" {
-		t.Errorf("--domain = %q", opts.Domain)
+		t.Errorf("--trust.domain = %q", opts.Domain)
 	}
 	if len(opts.Neighbors) != 1 || opts.Neighbors[0] != "192.0.2.7:30043" {
-		t.Errorf("--neighbor = %v", opts.Neighbors)
+		t.Errorf("--topology.neighbor = %v", opts.Neighbors)
 	}
 	if opts.State != "/var/lib/cion2" {
 		t.Errorf("--state = %q", opts.State)
@@ -98,26 +99,71 @@ func TestRunArgumentsParse(t *testing.T) {
 	}
 
 	// Zero is the explicit refusal of the host-serving applications.
-	opts, err = parseNodeArgs(t, "local", "--host-port=0")
+	opts, err = parseNodeArgs(t, "local", "--wireguard.host-port=0")
 	if err != nil {
 		t.Fatalf("parsing the refused host port: %v", err)
 	}
 	if opts.HostPort != 0 {
-		t.Errorf("--host-port=0 = %d, want the refusal", opts.HostPort)
+		t.Errorf("--wireguard.host-port=0 = %d, want the refusal", opts.HostPort)
 	}
 
 	// The commands themselves carry their role's partition.
 	if err := newRunCoreCommand().Flags().Parse([]string{
-		"--domain", "core.example.org",
-		"--enroll-auth", "cidrs=192.0.2.0/24",
+		"--trust.domain", "core.example.org",
+		"--trust.enroll-auth", "cidrs=192.0.2.0/24",
 	}); err != nil {
 		t.Errorf("parsing run core's own surface: %v", err)
 	}
 	if err := newRunLocalCommand().Flags().Parse([]string{
-		"--domain", "core.example.org",
-		"--neighbor", "192.0.2.7:30043",
+		"--trust.domain", "core.example.org",
+		"--topology.neighbor", "192.0.2.7:30043",
 	}); err != nil {
 		t.Errorf("parsing run local's own surface: %v", err)
+	}
+}
+
+// TestRunCommandsHelpReadsInParts checks the surface each command's help
+// reads: the placement flags print first, then each part's block, in the
+// registration order the commands compose.
+func TestRunCommandsHelpReadsInParts(t *testing.T) {
+	for _, command := range []struct {
+		name string
+		cmd  *cobra.Command
+		want []string
+	}{
+		{"run core", newRunCoreCommand(), []string{
+			"--state", "--internal", "--control",
+			"--topology.link-set",
+			"--trust.domain", "--trust.acme-email", "--trust.cert-file",
+			"--trust.key-file", "--trust.enroll-auth",
+			"--wireguard.host-port",
+			"--dataplane.processors", "--dataplane.batch-size",
+			"--dataplane.queue-size",
+		}},
+		{"run local", newRunLocalCommand(), []string{
+			"--state", "--internal", "--control",
+			"--topology.link-set", "--topology.neighbor",
+			"--trust.domain",
+			"--wireguard.host-port",
+			"--dataplane.processors", "--dataplane.batch-size",
+			"--dataplane.queue-size",
+		}},
+		{"ping", newPingCommand(), []string{
+			"--state", "--internal", "--control",
+			"--topology.link-set", "--topology.neighbor",
+			"--trust.domain",
+			"--wireguard.host-port",
+		}},
+	} {
+		rest := command.cmd.Flags().FlagUsages()
+		for _, flag := range command.want {
+			i := strings.Index(rest, flag)
+			if i < 0 {
+				t.Errorf("%s's help omits %s", command.name, flag)
+				break
+			}
+			rest = rest[i:]
+		}
 	}
 }
 
@@ -136,8 +182,9 @@ func refuse(t *testing.T, command, flag string, flags *pflag.FlagSet) {
 
 // TestRunCommandsRefuseForeignArguments checks the partition's bookkeeping
 // the parse performs: each command refuses the other role's arguments as
-// unknown flags naming the argument, and the retired --core,
-// --wireguard-config, --behind-nat, and --slice are refused everywhere.
+// unknown flags naming the argument, the unprefixed spelling of every
+// renamed argument beside the retired --core, --wireguard-config,
+// --behind-nat, and --slice.
 func TestRunCommandsRefuseForeignArguments(t *testing.T) {
 	for _, command := range []struct {
 		name string
@@ -149,29 +196,35 @@ func TestRunCommandsRefuseForeignArguments(t *testing.T) {
 	} {
 		for _, flag := range []string{
 			"--core", "--wireguard-config", "--behind-nat", "--slice",
+			"--link-set", "--neighbor", "--domain", "--acme-email",
+			"--cert-file", "--key-file", "--enroll-auth", "--host-port",
+			"--processors", "--batch-size", "--queue-size",
 		} {
 			refuse(t, command.name, flag, command.cmd.Flags())
 		}
 	}
-	for _, flag := range []string{"--neighbor"} {
+	for _, flag := range []string{"--topology.neighbor"} {
 		refuse(t, "run core", flag, newRunCoreCommand().Flags())
 	}
-	for _, flag := range []string{"--acme-email", "--cert-file", "--key-file", "--enroll-auth"} {
+	for _, flag := range []string{
+		"--trust.acme-email", "--trust.cert-file",
+		"--trust.key-file", "--trust.enroll-auth",
+	} {
 		refuse(t, "run local", flag, newRunLocalCommand().Flags())
 	}
 }
 
 // TestRunCommandsPresetRole checks the role each command presets in the
 // node configuration it assembles: run bare of a domain, each fails on its
-// role's missing-domain meaning — the core's own on the core, the network's
+// role's missing-domain refusal — the core's own on the core, the network's
 // core domain on the local node.
 func TestRunCommandsPresetRole(t *testing.T) {
 	for _, tc := range []struct {
 		cmd  *cobra.Command
 		want string
 	}{
-		{newRunCoreCommand(), "the core's own"},
-		{newRunLocalCommand(), "the network's core domain"},
+		{newRunCoreCommand(), "--trust.domain is required: the core's own"},
+		{newRunLocalCommand(), "--trust.domain is required: the network's core domain"},
 	} {
 		tc.cmd.SilenceUsage = true
 		tc.cmd.SilenceErrors = true
@@ -182,8 +235,50 @@ func TestRunCommandsPresetRole(t *testing.T) {
 			continue
 		}
 		if !strings.Contains(err.Error(), tc.want) {
-			t.Errorf("%s's missing-domain error = %q, want the meaning %q",
+			t.Errorf("%s's missing-domain error = %q, want the refusal %q",
 				tc.cmd.Name(), err, tc.want)
+		}
+	}
+}
+
+// TestRunCommandsRefuseTheProviderMixture checks the exclusivity the
+// namespace carries: one topology provider per process, the refusal naming
+// both namespaced forms.
+func TestRunCommandsRefuseTheProviderMixture(t *testing.T) {
+	cmd := newRunLocalCommand()
+	cmd.SilenceUsage = true
+	cmd.SilenceErrors = true
+	cmd.SetArgs([]string{
+		"--trust.domain", "core.example.org",
+		"--topology.link-set", "/tmp/link-set.json",
+		"--topology.neighbor", "192.0.2.7:30043",
+	})
+	err := cmd.ExecuteContext(context.Background())
+	if err == nil || !strings.Contains(err.Error(),
+		"--topology.link-set refuses --topology.neighbor") {
+		t.Errorf("the provider mixture's refusal = %v, want both namespaced forms", err)
+	}
+}
+
+// TestRunTuningChecksNameTheSurface checks the tuning sanity checks' error
+// texts: each names the namespaced spelling it refuses, before any assembly
+// runs.
+func TestRunTuningChecksNameTheSurface(t *testing.T) {
+	for _, tc := range []struct {
+		value string
+		want  string
+	}{
+		{"--dataplane.processors=0", "--dataplane.processors must be at least 1"},
+		{"--dataplane.batch-size=0", "--dataplane.batch-size must be at least 1"},
+		{"--dataplane.queue-size=0", "--dataplane.queue-size must be at least 1"},
+	} {
+		cmd := newRunLocalCommand()
+		cmd.SilenceUsage = true
+		cmd.SilenceErrors = true
+		cmd.SetArgs([]string{tc.value})
+		err := cmd.ExecuteContext(context.Background())
+		if err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("the tuning check's refusal of %s = %v, want %q", tc.value, err, tc.want)
 		}
 	}
 }

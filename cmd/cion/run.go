@@ -11,12 +11,10 @@ import (
 )
 
 // addSharedNodeFlags registers the node arguments every assembling command
-// takes — the arguments the retiring configuration file carried, with
-// defaults so a restart needs none of them.
+// takes: the bare three that place the daemon and the static topology
+// provider's selection — the arguments the retiring configuration file
+// carried, with defaults so a restart needs none of them.
 func addSharedNodeFlags(flags *pflag.FlagSet, opts *services.NodeConfig) {
-	flags.StringVar(&opts.LinkSet, "link-set", "",
-		"path to a JSON link-set file naming the static topology: "+
-			"neighbor ISD-ASes with each link's two underlay addresses")
 	flags.StringVar(&opts.State, "state", services.DefaultState,
 		"the state directory, where the first start generates the identity")
 	flags.StringVar(&opts.Internal, "internal", services.DefaultInternal,
@@ -24,7 +22,15 @@ func addSharedNodeFlags(flags *pflag.FlagSet, opts *services.NodeConfig) {
 	flags.StringVar(&opts.Control, "control", services.DefaultControl,
 		"the UDP address of the control service; its host carries the control, "+
 			"rendezvous, and directory sockets")
-	flags.Uint16Var(&opts.HostPort, "host-port", services.DefaultHostPort,
+	flags.StringVar(&opts.LinkSet, "topology.link-set", "",
+		"path to a JSON link-set file naming the static topology: "+
+			"neighbor ISD-ASes with each link's two underlay addresses")
+}
+
+// addWireguardFlags registers the host-serving application's loading
+// argument.
+func addWireguardFlags(flags *pflag.FlagSet, opts *services.NodeConfig) {
+	flags.Uint16Var(&opts.HostPort, "wireguard.host-port", services.DefaultHostPort,
 		"the shared host-facing UDP port every host dials; the directory assigns "+
 			"the node's slice of the tailnet range at its first publication "+
 			"(zero runs no WireGuard or SOCKS application)")
@@ -41,11 +47,11 @@ type runOptions struct {
 // carry, from the dataplane defaults.
 func addTuningFlags(flags *pflag.FlagSet, tuning *runOptions) {
 	defaults := services.DefaultDataplaneOptions()
-	flags.IntVar(&tuning.processors, "processors", defaults.Processors,
+	flags.IntVar(&tuning.processors, "dataplane.processors", defaults.Processors,
 		"number of fast-path packet processors")
-	flags.IntVar(&tuning.batchSize, "batch-size", defaults.BatchSize,
+	flags.IntVar(&tuning.batchSize, "dataplane.batch-size", defaults.BatchSize,
 		"receive batch size per underlay socket")
-	flags.IntVar(&tuning.queueSize, "queue-size", defaults.QueueSize,
+	flags.IntVar(&tuning.queueSize, "dataplane.queue-size", defaults.QueueSize,
 		"queue depth of the internal and external links")
 }
 
@@ -59,9 +65,9 @@ func runDaemon(ctx context.Context, cfg services.NodeConfig, tuning *runOptions)
 		name  string
 		value int
 	}{
-		{"processors", tuning.processors},
-		{"batch-size", tuning.batchSize},
-		{"queue-size", tuning.queueSize},
+		{"dataplane.processors", tuning.processors},
+		{"dataplane.batch-size", tuning.batchSize},
+		{"dataplane.queue-size", tuning.queueSize},
 	} {
 		if check.value < 1 {
 			return fmt.Errorf("--%s must be at least 1", check.name)

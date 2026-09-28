@@ -36,9 +36,9 @@ type Config struct {
 	// Core marks the founding core: its draw is its network's name already,
 	// and it serves the node directory from its own store.
 	Core bool
-	// Neighbors are the --neighbor rendezvous addresses; a non-core's first
-	// start needs at least one, later starts seed additional entries,
-	// idempotent by remote address.
+	// Neighbors are the --topology.neighbor rendezvous addresses; a
+	// non-core's first start needs at least one, later starts seed
+	// additional entries, idempotent by remote address.
 	Neighbors []string
 	// Domain is the founding core's own domain, the name its published host
 	// resolves from; the non-cores learn theirs from the rendezvous
@@ -177,7 +177,7 @@ func (z *Provider) CompleteIdentity(ctx context.Context, ia addr.IA) (addr.IA, e
 	}
 	if len(z.cfg.Neighbors) == 0 {
 		// Unreachable: a non-core's first start carries a neighbor.
-		return ia, fmt.Errorf("a non-core's first start needs at least one --neighbor")
+		return ia, fmt.Errorf("a non-core's first start needs at least one --topology.neighbor")
 	}
 	local, err := AllocateLinkAddr(z.cfg.ControlHost)
 	if err != nil {
@@ -186,7 +186,7 @@ func (z *Provider) CompleteIdentity(ctx context.Context, ia addr.IA) (addr.IA, e
 	for _, s := range z.cfg.Neighbors {
 		target, err := netip.ParseAddrPort(s)
 		if err != nil {
-			return ia, fmt.Errorf("parsing --neighbor %q: %w", s, err)
+			return ia, fmt.Errorf("parsing --topology.neighbor %q: %w", s, err)
 		}
 		reply, _, err := RendezvousEcho(ctx, z.cfg.ControlHost, target,
 			addr.IA(0), local)
@@ -225,8 +225,8 @@ func (z *Provider) Wire(pcs topology.Pieces) {
 	z.pcs = pcs
 }
 
-// Seed seeds the store with an entry per --neighbor, aimed at the given
-// rendezvous address and idempotent by it: the joiner's dial loop retargets
+// Seed seeds the store with an entry per --topology.neighbor, aimed at
+// the given rendezvous address and idempotent by it: the joiner's dial loop retargets
 // the entry when the reply arrives. A non-core that holds no entry and names
 // no neighbor could never link; it refuses to start.
 func (z *Provider) Seed(ctx context.Context) error {
@@ -235,7 +235,7 @@ func (z *Provider) Seed(ctx context.Context) error {
 		return err
 	}
 	if !z.cfg.Core && len(z.cfg.Neighbors) == 0 && len(entries) == 0 {
-		return fmt.Errorf("a non-core's first start needs at least one --neighbor")
+		return fmt.Errorf("a non-core's first start needs at least one --topology.neighbor")
 	}
 	if len(z.cfg.Neighbors) == 0 {
 		return nil
@@ -243,7 +243,7 @@ func (z *Provider) Seed(ctx context.Context) error {
 	for _, s := range z.cfg.Neighbors {
 		rendezvous, err := netip.ParseAddrPort(s)
 		if err != nil {
-			return fmt.Errorf("parsing --neighbor %q: %w", s, err)
+			return fmt.Errorf("parsing --topology.neighbor %q: %w", s, err)
 		}
 		existing, err := z.pcs.Store.ByRemote(ctx, rendezvous)
 		if err != nil {

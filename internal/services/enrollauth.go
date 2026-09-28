@@ -11,7 +11,7 @@ import (
 	"github.com/fancl20/cion/pkg/modules/enrollauth/impl/telegram"
 )
 
-// loadEnrollAuth builds the authorizer a --enroll-auth spec names —
+// loadEnrollAuth builds the authorizer a --trust.enroll-auth spec names —
 // "method=spec": "cidrs" with a comma-separated prefix list, "telegram"
 // with <chat>:<token>, the split on the first colon so the token's own
 // colon survives intact. The assembly imports the implementation the spec

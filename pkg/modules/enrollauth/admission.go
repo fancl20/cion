@@ -4,12 +4,12 @@
 // authorizer admitting joiners by addressing, nodes and hosts alike, and
 // the Telegram one admitting them one by one from an operator's phone —
 // and a shared contract suite in impl/authtest every implementation
-// runs. The --enroll-auth run argument selects exactly one method, the
+// runs. The --trust.enroll-auth run argument selects exactly one method, the
 // caller importing the implementation it names; unset is open
 // enrollment, the zero-conf default.
 //
 // Kind: policy — who is admitted, joiner node or host; selected by the
-// operator's --enroll-auth spec, exactly one method.
+// operator's --trust.enroll-auth spec, exactly one method.
 package enrollauth
 
 import (

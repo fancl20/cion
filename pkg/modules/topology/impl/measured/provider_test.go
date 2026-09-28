@@ -87,15 +87,16 @@ func TestZeroconfCoreDrawIsFinal(t *testing.T) {
 }
 
 // TestZeroconfFirstStartNeedsNeighbor checks the measured provider's half of
-// the first-start neighbor requirement: a non-core with no --neighbor and an
-// empty store refuses to start, one with a neighbor does not.
+// the first-start neighbor requirement: a non-core with no
+// --topology.neighbor and an empty store refuses to start, one with
+// a neighbor does not.
 func TestZeroconfFirstStartNeedsNeighbor(t *testing.T) {
 	z, err := New(Config{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err := z.CompleteIdentity(context.Background(), zeroconfDraw); err == nil {
-		t.Error("a non-core's first start without a --neighbor completed")
+		t.Error("a non-core's first start without a --topology.neighbor completed")
 	}
 	z, err = New(Config{Neighbors: []string{"127.0.0.1:1"}})
 	if err != nil {
@@ -167,7 +168,7 @@ func TestZeroconfMounts(t *testing.T) {
 }
 
 // TestContract runs the module's shared contract suite: a founding core
-// whose draw is final, seeding an entry per --neighbor, idempotent by
+// whose draw is final, seeding an entry per --topology.neighbor, idempotent by
 // rendezvous address.
 func TestContract(t *testing.T) {
 	providertest.Run(t, providertest.Suite{

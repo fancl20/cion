@@ -17,9 +17,9 @@ import (
 	"github.com/fancl20/cion/pkg/trust"
 )
 
-// operatorChatToken is the telegram spec the labs pass as --enroll-auth: the
-// operator's chat and the bot's token, the split on the first colon keeping
-// the token's own intact.
+// operatorChatToken is the telegram spec the labs pass as
+// --trust.enroll-auth: the operator's chat and the bot's token, the
+// split on the first colon keeping the token's own intact.
 const operatorChatToken = "-1002147483647:7:test"
 
 // operatorBot is a local Bot API double the Telegram labs point their core

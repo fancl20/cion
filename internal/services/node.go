@@ -42,7 +42,7 @@ type node struct {
 	opts  DataplaneOptions
 
 	// topology is the loaded source module: the measured provider by
-	// default, the file provider when --link-set names a link-set. It
+	// default, the file provider when --topology.link-set names a link-set. It
 	// completes a first start's identity, seeds the store, mounts its
 	// services on the endpoint, and runs its loops under start.
 	topology topology.Provider
@@ -168,7 +168,7 @@ func loadIdentity(cfg NodeConfig) (identity, bool, error) {
 
 // selectProvider loads the source module the run arguments name: the
 // measured implementation by default — loading it is what makes a node
-// zero-conf — the file one when --link-set names a link-set. The
+// zero-conf — the file one when --topology.link-set names a link-set. The
 // provider completes a first start's identity before the phases
 // assemble, Wire delivers the phases' products to it, and Seed, Mounts,
 // and Run follow.
@@ -217,9 +217,9 @@ func (n *node) selectProvider() error {
 	return nil
 }
 
-// setupEnrollAuth loads the --enroll-auth selection: the authorizer the trust
-// service asks at first issuance and, for a method with loops of its own, the
-// run that serves them. Unset is open enrollment; Validate already refused the
+// setupEnrollAuth loads the --trust.enroll-auth selection: the
+// authorizer the trust service asks at first issuance and, for a
+// method with loops of its own, the run that serves them. Unset is open enrollment; Validate already refused the
 // argument off the core, so a selected method loads on the issuing node
 // alone. The spec parses here once, so a malformed one fails the boot, not the
 // first joiner.
@@ -230,7 +230,7 @@ func (n *node) setupEnrollAuth() error {
 	auth, run, err := loadEnrollAuth(n.cfg.EnrollAuth,
 		n.cfg.TelegramAPI, n.cfg.State)
 	if err != nil {
-		return fmt.Errorf("parsing --enroll-auth: %w", err)
+		return fmt.Errorf("parsing --trust.enroll-auth: %w", err)
 	}
 	n.enrollAuth = auth
 	n.enrollRun = run
