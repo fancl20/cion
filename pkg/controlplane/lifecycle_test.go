@@ -10,13 +10,16 @@ import (
 	"errors"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"testing/synctest"
 	"time"
 
 	"github.com/google/go-cmp/cmp"
+	"github.com/scionproto/scion/pkg/addr"
 	"github.com/scionproto/scion/pkg/scrypto/cppki"
 
+	"github.com/fancl20/cion/pkg/modules/pathdb"
 	"github.com/fancl20/cion/pkg/modules/trustdb"
 	"github.com/fancl20/cion/pkg/modules/trustdb/impl/bbolt"
 	"github.com/fancl20/cion/pkg/trust"
@@ -275,6 +278,77 @@ func TestChainSweepLoop(t *testing.T) {
 		}
 		if len(chains) != 0 {
 			t.Errorf("chains after the sweep's ticker fired = %d, want 0", len(chains))
+		}
+	})
+}
+
+// panickingDB delegates to the wrapped database except on the first
+// expired-segment sweep, which it panics instead — the seeded round.
+type panickingDB struct {
+	pathdb.DB
+	swept atomic.Bool
+}
+
+func (d *panickingDB) DeleteExpired(ctx context.Context, now time.Time) (int, error) {
+	if !d.swept.Swap(true) {
+		panic("a round meets its panic")
+	}
+	return d.DB.DeleteExpired(ctx, now)
+}
+
+// TestBeaconingLoopAbsorbsPanics checks Run's own containment: a panicking
+// round is absorbed and logged by the loop that ran it — the process
+// intact, the sibling loops stepping on, and Run still returning once
+// every loop has exited — on the bubble-and-cancel shape the sweep loop's
+// episode set.
+func TestBeaconingLoopAbsorbsPanics(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		f := newBeaconFixture(t)
+		db := &panickingDB{DB: f.pathDB}
+		var rounds atomic.Int32
+		links := func() map[uint16]addr.IA {
+			rounds.Add(1)
+			return map[uint16]addr.IA{}
+		}
+		b, err := NewBeaconer(BeaconerConfig{
+			IA:                   coreIATest,
+			Engine:               f.engines[coreIATest],
+			MACKey:               []byte(testMACKey),
+			Store:                f.store,
+			DB:                   db,
+			Links:                links,
+			Sender:               f.sender,
+			Core:                 true,
+			PropagationInterval:  time.Millisecond,
+			RegistrationInterval: 2 * time.Millisecond,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			b.Run(ctx)
+		}()
+
+		// The sweep's first round panics and its loop dies on it — one sweep
+		// ever — while the origination loop steps past it the whole while.
+		time.Sleep(10 * time.Millisecond)
+		if !db.swept.Load() {
+			t.Fatal("the seeded round never ran")
+		}
+		if got := rounds.Load(); got < 3 {
+			t.Fatalf("origination rounds = %d, want the loop stepping past the sibling's panicked round", got)
+		}
+
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Fatal("Run did not return after cancellation")
 		}
 	})
 }

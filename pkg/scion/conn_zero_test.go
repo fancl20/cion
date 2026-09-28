@@ -7,9 +7,9 @@ import (
 	"github.com/scionproto/scion/pkg/addr"
 )
 
-// TestConnZeroLinkStart checks the library's zero-link start (proposal
-// 0008): a connection without a link table builds — a node may start before
-// any link exists — and resolves no one-hop egress through a nil source.
+// TestConnZeroLinkStart checks the library's zero-link start: a connection
+// without a link table builds — a node may start before any link exists —
+// and resolves no one-hop egress through a nil source.
 func TestConnZeroLinkStart(t *testing.T) {
 	conn, err := NewConn(ConnConfig{
 		IA:           addr.MustIAFrom(20, 0xfd0000000001),

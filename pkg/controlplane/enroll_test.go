@@ -10,6 +10,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/pem"
 	"errors"
+	"log/slog"
 	"math/big"
 	"os"
 	"path/filepath"
@@ -119,13 +120,23 @@ func serveCore(t *testing.T, n *testNode, wpki *webPKI) *trustFixture {
 	}
 	tlsConf := certMgr.TLSConfig()
 	svc := &TrustService{DB: f.db, Issuer: f.issuer}
+	// The server outlives the test's own thread — it serves until its socket
+	// closes at cleanup — so it reports through the package logger and its
+	// cleanup waits for the exit.
+	done := make(chan error, 1)
 	go func() {
-		if err := ServeHTTP3(n.newConn(t, EndpointPort), NewServer(svc).Handler,
-			tlsConf); err != nil {
-
-			t.Logf("control endpoint exited: %v", err)
-		}
+		done <- ServeHTTP3(n.newConn(t, EndpointPort), NewServer(svc).Handler, tlsConf)
 	}()
+	t.Cleanup(func() {
+		select {
+		case err := <-done:
+			if err != nil {
+				slog.Debug("control endpoint exited", "err", err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Error("the control endpoint did not stop with its socket")
+		}
+	})
 	return f
 }
 

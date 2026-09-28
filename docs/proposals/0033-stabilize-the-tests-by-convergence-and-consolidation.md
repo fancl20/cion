@@ -320,3 +320,22 @@ comment citing a proposal restate to what the code does.
     episode that moved to a helper passes unchanged.
 
 ## Implementation history
+
+*   Landed test-only, one deviation from the proposal's text and one
+    constraint it did not anticipate. The deviation: the beaconing loop's
+    absorbed-panic episode pins the behavior commit ad36987 actually
+    established — a panicking pass takes its own loop down, the process,
+    the sibling loops, and Run's join surviving — not "the next round
+    stepping" in the panicked loop itself, which per-round recovery would
+    require and which the no-production-change non-goal forbids introducing.
+    The constraint: the directory-store double folds into the contract
+    suite's package for every consumer except the WireGuard application's
+    own internal tests, which that package's import cycle locks out; their
+    in-package mirror stays, its dead error knob gone. Beside those, the
+    waits, joins, ports, markers, pins, and helpers landed as proposed, the
+    harness's daemons logging through the package logger with the data
+    plane's serve loop joined at cleanup — and, found in a `-count=10`
+    goroutine dump after the landing, the harness's control-plane clients
+    and their conns close at cleanup too: their QUIC transports spawn
+    lazily on first dial, so the join-everything rule had missed them while
+    they parked a goroutine pair and an open socket per node per pass.

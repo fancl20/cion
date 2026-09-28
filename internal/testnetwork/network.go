@@ -15,6 +15,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"io"
 	"log/slog"
 	"math/big"
 	"net"
@@ -362,8 +363,27 @@ func StartNode(t *testing.T, cfg NodeConfig) *Node {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
+	// The data plane's serve loop joins the node's cleanup: a hung loop is a
+	// test failure with a stack, not a silent tenant past the test.
+	serveDone := make(chan error, 1)
+	// The control-plane clients and the conns they dial through close with
+	// the node too, each client before its conn: their QUIC transports
+	// otherwise park a goroutine pair and an open socket past every lab
+	// that spawned them.
+	var closers []io.Closer
 	t.Cleanup(func() {
 		cancel()
+		select {
+		case err := <-serveDone:
+			if err != nil {
+				t.Errorf("the data plane's Serve returned %v, want nil", err)
+			}
+		case <-time.After(TestTimeout):
+			t.Error("the data plane's Serve did not return after cancellation")
+		}
+		for _, c := range closers {
+			_ = c.Close()
+		}
 		provider.Stop()
 	})
 	// The link store's file lock releases with the node's cancellation, so
@@ -373,7 +393,7 @@ func StartNode(t *testing.T, cfg NodeConfig) *Node {
 		<-ctx.Done()
 		_ = linkStore.Close()
 	}()
-	go func() { _ = d.Serve(ctx) }()
+	go func() { serveDone <- d.Serve(ctx) }()
 	go func() {
 		defer handlePanic()
 		monitor.Run(ctx)
@@ -433,6 +453,7 @@ func StartNode(t *testing.T, cfg NodeConfig) *Node {
 		if err != nil {
 			t.Fatal(err)
 		}
+		closers = append(closers, coreClt, coreConn, resolutionConn)
 	}
 
 	remote := trust.Remote(nil)
@@ -491,6 +512,7 @@ func StartNode(t *testing.T, cfg NodeConfig) *Node {
 			return path
 		},
 	})
+	closers = append(closers, peerClt, peerConn)
 
 	lookup := controlplane.NewLookupService()
 	lookup.IA = ia
@@ -546,6 +568,9 @@ func StartNode(t *testing.T, cfg NodeConfig) *Node {
 			Lookup:   lookup,
 		},
 	}
+	// The endpoint serves until its socket closes at cleanup — a daemon
+	// whose goroutine can outlive the test — so it reports through the
+	// package logger, never `t`.
 	go func() {
 		defer handlePanic()
 		if err := controlplane.ServeHTTP3(endpointConn, controlplane.NewServer(svc).Handler,
@@ -554,7 +579,7 @@ func StartNode(t *testing.T, cfg NodeConfig) *Node {
 				WebPKI: webPKIConf,
 				Engine: engine,
 			})); err != nil {
-			t.Logf("control endpoint exited: %v", err)
+			slog.Debug("control endpoint exited", "err", err)
 		}
 	}()
 
@@ -713,10 +738,12 @@ func (n *Node) startWireguard(
 	if wgCfg.Store != nil {
 		n.WireguardStore = wgCfg.Store
 	}
+	// The application's loop reports through the package logger like the
+	// endpoint's: both outlive the test's own thread.
 	go func() {
 		defer handlePanic()
 		if err := app.Run(ctx); err != nil {
-			t.Logf("wireguard exited: %v", err)
+			slog.Debug("wireguard application exited", "err", err)
 		}
 	}()
 }

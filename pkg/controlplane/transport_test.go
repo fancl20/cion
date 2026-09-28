@@ -114,11 +114,20 @@ func startTestNode(t *testing.T, ia, neighbor addr.IA, extLocal, extRemote strin
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
+	serveDone := make(chan error, 1)
 	t.Cleanup(func() {
 		cancel()
+		select {
+		case err := <-serveDone:
+			if err != nil {
+				t.Errorf("Serve returned %v, want nil", err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Error("Serve did not return after cancellation")
+		}
 		provider.Stop()
 	})
-	go func() { _ = d.Serve(ctx) }()
+	go func() { serveDone <- d.Serve(ctx) }()
 
 	return &testNode{
 		ia:        ia,

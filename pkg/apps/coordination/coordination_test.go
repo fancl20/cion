@@ -23,50 +23,6 @@ import (
 	"github.com/fancl20/cion/pkg/modules/enrollauth"
 )
 
-// memStore is an in-memory registry.
-type memStore struct {
-	mtx   sync.Mutex
-	nodes []wireguard.Entry
-	hosts []wireguard.HostEntry
-}
-
-func (s *memStore) Publish(_ context.Context, entry wireguard.Entry) error {
-	s.mtx.Lock()
-	defer s.mtx.Unlock()
-	for i := range s.nodes {
-		if s.nodes[i].IA.Equal(entry.IA) {
-			s.nodes[i] = entry
-			return nil
-		}
-	}
-	s.nodes = append(s.nodes, entry)
-	return nil
-}
-
-func (s *memStore) PublishHost(_ context.Context, entry wireguard.HostEntry) error {
-	s.mtx.Lock()
-	defer s.mtx.Unlock()
-	for i := range s.hosts {
-		if s.hosts[i].PublicKey == entry.PublicKey {
-			s.hosts[i] = entry
-			return nil
-		}
-	}
-	s.hosts = append(s.hosts, entry)
-	return nil
-}
-
-func (s *memStore) List(context.Context) (wireguard.Directory, error) {
-	s.mtx.Lock()
-	defer s.mtx.Unlock()
-	return wireguard.Directory{
-		Nodes: append([]wireguard.Entry(nil), s.nodes...),
-		Hosts: append([]wireguard.HostEntry(nil), s.hosts...),
-	}, nil
-}
-
-func (s *memStore) Close() error { return nil }
-
 // askAuthorizer records the facts it is asked with and answers as told.
 type askAuthorizer struct {
 	mtx    sync.Mutex
@@ -162,15 +118,6 @@ func testNode(ia addr.IA, subnet string, endpoint string) wireguard.Entry {
 		Overlay:      netip.MustParsePrefix(subnet),
 		HostEndpoint: netip.MustParseAddrPort(endpoint),
 	}
-}
-
-// testHostKey derives one host's registry key from a byte.
-func testHostKey(b byte) wireguard.PublicKey {
-	var key wireguard.PublicKey
-	for i := range key {
-		key[i] = b
-	}
-	return key
 }
 
 // registeredHost is one host the registry holds, owned by 1-ff00:0:1.

@@ -5,6 +5,7 @@ package dbtest
 import (
 	"context"
 	"net/netip"
+	"sync"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -13,6 +14,86 @@ import (
 
 	"github.com/fancl20/cion/pkg/apps/wireguard"
 )
+
+// MemStore is the in-memory directory-store double the suites share: publish
+// assigns slices the store's way, host entries record keyed by their public
+// key, and Seed records a node entry verbatim — the fixture form that names
+// its own slice.
+type MemStore struct {
+	mtx   sync.Mutex
+	nodes []wireguard.Entry
+	hosts []wireguard.HostEntry
+}
+
+// Publish records the entry, keyed by its ISD-AS, assigning its slice the
+// store's way.
+func (s *MemStore) Publish(_ context.Context, entry wireguard.Entry) (wireguard.Entry, error) {
+	s.mtx.Lock()
+	defer s.mtx.Unlock()
+	overlay, err := wireguard.AssignSlice(entry.IA, s.nodes)
+	if err != nil {
+		return wireguard.Entry{}, err
+	}
+	entry.Overlay = overlay
+	for i := range s.nodes {
+		if s.nodes[i].IA.Equal(entry.IA) {
+			s.nodes[i] = entry
+			return entry, nil
+		}
+	}
+	s.nodes = append(s.nodes, entry)
+	return entry, nil
+}
+
+// Seed records a node entry verbatim, no assignment run.
+func (s *MemStore) Seed(entry wireguard.Entry) {
+	s.mtx.Lock()
+	defer s.mtx.Unlock()
+	for i := range s.nodes {
+		if s.nodes[i].IA.Equal(entry.IA) {
+			s.nodes[i] = entry
+			return
+		}
+	}
+	s.nodes = append(s.nodes, entry)
+}
+
+// PublishHost records the host entry, keyed by its public key.
+func (s *MemStore) PublishHost(_ context.Context, entry wireguard.HostEntry) error {
+	s.mtx.Lock()
+	defer s.mtx.Unlock()
+	for i := range s.hosts {
+		if s.hosts[i].PublicKey == entry.PublicKey {
+			s.hosts[i] = entry
+			return nil
+		}
+	}
+	s.hosts = append(s.hosts, entry)
+	return nil
+}
+
+// List returns a snapshot of everything recorded.
+func (s *MemStore) List(context.Context) (wireguard.Directory, error) {
+	s.mtx.Lock()
+	defer s.mtx.Unlock()
+	return wireguard.Directory{
+		Nodes: append([]wireguard.Entry(nil), s.nodes...),
+		Hosts: append([]wireguard.HostEntry(nil), s.hosts...),
+	}, nil
+}
+
+// Close retires nothing; the double holds no resource.
+func (s *MemStore) Close() error { return nil }
+
+// MustKey returns the public key whose every byte is fill — the suites'
+// stand-in for a real one.
+func MustKey(fill byte) wireguard.PublicKey {
+	var key wireguard.PublicKey
+	for i := range key {
+		key[i] = fill
+	}
+	return key
+}
 
 // TestDirectoryStore runs the contract every directory store keeps: the
 // store assigns each publisher the first free /24 of the tailnet range by
@@ -29,13 +110,13 @@ func TestDirectoryStore(t *testing.T, open func(t *testing.T) wireguard.Director
 	entries := []wireguard.Entry{
 		{
 			IA:           mustIA(t, "20-ff00:0:1"),
-			PublicKey:    mustKey(t, 0x01),
+			PublicKey:    MustKey(0x01),
 			Overlay:      mustPrefix(t, "100.64.200.0/24"),
 			HostEndpoint: mustAddrPort(t, "198.51.100.10:51820"),
 		},
 		{
 			IA:        mustIA(t, "20-ff00:0:2"),
-			PublicKey: mustKey(t, 0x02),
+			PublicKey: MustKey(0x02),
 			Overlay:   mustPrefix(t, "100.64.200.0/24"),
 		},
 	}
@@ -54,13 +135,13 @@ func TestDirectoryStore(t *testing.T, open func(t *testing.T) wireguard.Director
 	}
 	hosts := []wireguard.HostEntry{
 		{
-			PublicKey: mustKey(t, 0x81),
+			PublicKey: MustKey(0x81),
 			Addr:      netip.MustParseAddr("100.64.0.4"),
 			IA:        mustIA(t, "20-ff00:0:1"),
 			Note:      "telegram operator",
 		},
 		{
-			PublicKey: mustKey(t, 0x82),
+			PublicKey: MustKey(0x82),
 			Addr:      netip.MustParseAddr("100.64.1.5"),
 			IA:        mustIA(t, "20-ff00:0:2"),
 		},
@@ -85,7 +166,7 @@ func TestDirectoryStore(t *testing.T, open func(t *testing.T) wireguard.Director
 	// slice — stable per ISD-AS — and ignores whatever overlay it claims;
 	// no one else's entry moves.
 	updated := entries[0]
-	updated.PublicKey = mustKey(t, 0x03)
+	updated.PublicKey = MustKey(0x03)
 	updated.Overlay = mustPrefix(t, "100.64.9.0/24")
 	updated.HostEndpoint = mustAddrPort(t, "198.51.100.11:51820")
 	recorded, err := store.Publish(ctx, updated)
@@ -140,15 +221,6 @@ func mustIA(t *testing.T, s string) addr.IA {
 		t.Fatal(err)
 	}
 	return ia
-}
-
-func mustKey(t *testing.T, fill byte) wireguard.PublicKey {
-	t.Helper()
-	var key wireguard.PublicKey
-	for i := range key {
-		key[i] = fill
-	}
-	return key
 }
 
 func mustPrefix(t *testing.T, s string) netip.Prefix {

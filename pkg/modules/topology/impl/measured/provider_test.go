@@ -126,11 +126,11 @@ func TestZeroconfFirstStartNeedsNeighbor(t *testing.T) {
 
 // TestZeroconfMounts checks the mounts: the measured provider mounts the
 // in-band link service on every node and the node directory's service
-// beside it on the core, at the patterns the handlers name.
+// beside it on the core, at the patterns the handlers name. The conventional
+// rendezvous port is part of what mounts, so each join takes a loopback
+// host of this package's own — the shared first host's fixed slot is not
+// this suite's to hold.
 func TestZeroconfMounts(t *testing.T) {
-	// Each join takes its own loopback host so the two rendezvous ports
-	// do not clash; the connections are absent, the mounts being the test's
-	// subject.
 	joined := func(t *testing.T, host string, core bool) []string {
 		t.Helper()
 		z, err := New(Config{
@@ -158,10 +158,12 @@ func TestZeroconfMounts(t *testing.T) {
 	}
 	linkPath := "/" + nodev1connect.LinkServiceName + "/"
 	directoryPath := "/" + nodev1connect.DirectoryServiceName + "/"
-	if got := joined(t, "127.0.0.1", false); len(got) != 1 || got[0] != linkPath {
+	// Hosts no integration lab takes: the testnetwork slots stop at 0x76,
+	// so the package-parallel run holds no rendezvous collision.
+	if got := joined(t, "127.0.0.119", false); len(got) != 1 || got[0] != linkPath {
 		t.Errorf("a non-core's mounts = %v, want the link service's alone", got)
 	}
-	got := joined(t, "127.0.0.2", true)
+	got := joined(t, "127.0.0.120", true)
 	if len(got) != 2 || got[0] != linkPath || got[1] != directoryPath {
 		t.Errorf("the core's mounts = %v, want the link and directory services'", got)
 	}

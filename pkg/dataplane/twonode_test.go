@@ -10,7 +10,6 @@ import (
 	"github.com/gopacket/gopacket"
 	"github.com/scionproto/scion/pkg/addr"
 	"github.com/scionproto/scion/pkg/private/util"
-	"github.com/scionproto/scion/pkg/scrypto"
 	"github.com/scionproto/scion/pkg/slayers"
 	"github.com/scionproto/scion/pkg/slayers/path"
 	"github.com/scionproto/scion/pkg/slayers/path/scion"
@@ -84,10 +83,21 @@ func startTwoNodes(t *testing.T) (a, b *node) {
 	a = newNode(addr.MustIAFrom(1, 0xff0000000001), intA, extA, extB)
 	b = newNode(addr.MustIAFrom(1, 0xff0000000002), intB, extB, extA)
 
-	go func() { _ = a.d.Serve(ctx) }()
-	go func() { _ = b.d.Serve(ctx) }()
+	serveA, serveB := make(chan error, 1), make(chan error, 1)
+	go func() { serveA <- a.d.Serve(ctx) }()
+	go func() { serveB <- b.d.Serve(ctx) }()
 	t.Cleanup(func() {
 		cancel()
+		for _, done := range []chan error{serveA, serveB} {
+			select {
+			case err := <-done:
+				if err != nil {
+					t.Errorf("Serve returned %v, want nil", err)
+				}
+			case <-time.After(testTimeout):
+				t.Error("Serve did not return after cancellation")
+			}
+		}
 		a.provider.Stop()
 		b.provider.Stop()
 	})
@@ -105,13 +115,13 @@ func directPath(t *testing.T, key []byte, segID uint16) *scion.Decoded {
 	info := path.InfoField{SegID: segID, ConsDir: true, Timestamp: now}
 
 	egressHop := path.HopField{ConsIngress: 0, ConsEgress: 1, ExpTime: 63}
-	egressHop.Mac = computeMAC(t, key, info, egressHop)
+	egressHop.Mac = benchMAC(t, key, info, egressHop)
 
 	// The ingress router sees the SegID after the egress router's update.
 	infoAfter := info
 	infoAfter.UpdateSegID(egressHop.Mac)
 	ingressHop := path.HopField{ConsIngress: 1, ConsEgress: 0, ExpTime: 63}
-	ingressHop.Mac = computeMAC(t, key, infoAfter, ingressHop)
+	ingressHop.Mac = benchMAC(t, key, infoAfter, ingressHop)
 
 	p := &scion.Decoded{
 		InfoFields: []path.InfoField{info},
@@ -121,15 +131,6 @@ func directPath(t *testing.T, key []byte, segID uint16) *scion.Decoded {
 	p.NumHops = 2
 	p.PathMeta = scion.MetaHdr{SegLen: [3]uint8{2, 0, 0}}
 	return p
-}
-
-func computeMAC(t *testing.T, key []byte, info path.InfoField, hf path.HopField) [path.MacLen]byte {
-	t.Helper()
-	mac, err := scrypto.InitMac(key)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return path.MAC(mac, info, hf, nil)
 }
 
 // scmpPacket returns a serialized SCION packet carrying an SCMP echo

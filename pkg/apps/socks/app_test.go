@@ -110,10 +110,12 @@ func newLab(t *testing.T, mutate func(*Config)) (*App, *stack.Stack) {
 		t.Fatal(err)
 	}
 	// Client → service: every packet the client stack writes enters the
-	// service's inbound path.
+	// service's inbound path. The pump closes with the lab — its context
+	// cancels at cleanup, or it would outlive every episode a silent tenant.
+	pumpCtx, stopPump := context.WithCancel(context.Background())
 	go func() {
 		for {
-			pkt := link.ReadContext(context.Background())
+			pkt := link.ReadContext(pumpCtx)
 			if pkt == nil {
 				return
 			}
@@ -127,6 +129,7 @@ func newLab(t *testing.T, mutate func(*Config)) (*App, *stack.Stack) {
 	t.Cleanup(func() {
 		cancel()
 		app.Close()
+		stopPump()
 	})
 	return app, client
 }
@@ -385,12 +388,11 @@ func TestFragmentedDatagramRefused(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// The refusal is a drop: nothing relays, the counter tells it, and no
-	// outbound socket appears.
-	time.Sleep(100 * time.Millisecond)
-	if dropped := app.cnt.droppedPackets.Load(); dropped != 1 {
-		t.Errorf("dropped = %d after the fragmented datagram, want 1", dropped)
-	}
+	// The refusal is a drop: nothing relays, the counter tells it — read to
+	// the drop, not to an instant — and no outbound socket appears.
+	waitFor(t, "the fragmented datagram's drop", func() bool {
+		return app.cnt.droppedPackets.Load() >= 1
+	})
 	if got := app.flowCount(); got != 1 {
 		t.Errorf("flows held = %d, want the association alone", got)
 	}
@@ -538,7 +540,7 @@ func TestFlowBoundRefuses(t *testing.T) {
 // survive the sweep at their touch, and silent ones — a CONNECT leg, an
 // association, and its outbound sockets — close and leave the tables.
 func TestIdleSweepExpiresSilentFlows(t *testing.T) {
-	app, client := newLab(t, func(cfg *Config) { cfg.Idle = 100 * time.Millisecond })
+	app, client := newLab(t, func(cfg *Config) { cfg.Idle = time.Hour })
 	tcpNet := tcpEcho(t)
 	udpNet := udpEcho(t)
 
@@ -570,17 +572,19 @@ func TestIdleSweepExpiresSilentFlows(t *testing.T) {
 	}
 
 	// Three flows — the CONNECT leg, the association, its outbound socket —
-	// all touched, all surviving a sweep at now.
+	// all touched, all surviving the sweep a synthetic ten minutes on: the
+	// bound an hour away, no real-elapsed race decides it.
 	if want := 3; app.flowCount() != want {
 		t.Fatalf("flows held = %d, want %d", app.flowCount(), want)
 	}
-	app.expireIdle(time.Now())
+	app.expireIdle(time.Now().Add(10 * time.Minute))
 	if got := app.flowCount(); got != 3 {
 		t.Fatalf("flows with traffic swept: %d remain, want 3", got)
 	}
 
-	// Silent past the bound, the same sweep closes them all.
-	app.expireIdle(time.Now().Add(time.Second))
+	// Silent past the bound — a synthetic two hours — the same sweep closes
+	// them all.
+	app.expireIdle(time.Now().Add(2 * time.Hour))
 	if got := app.flowCount(); got != 0 {
 		t.Errorf("flows held after the idle bound = %d, want 0", got)
 	}

@@ -20,18 +20,15 @@ import (
 	wireguardv1 "github.com/fancl20/cion/proto/wireguard/v1"
 )
 
-// fakeStore is an in-memory directory store, assigning slices the store's
-// way: the first free /24 of the tailnet range, kept per ISD-AS.
+// fakeStore is the in-package directory-store double: the shared one lives
+// in the contract suite's package, which imports this one — an internal
+// test cannot import it back. It assigns slices the store's way.
 type fakeStore struct {
-	entries    []Entry
-	hosts      []HostEntry
-	publishErr error
+	entries []Entry
+	hosts   []HostEntry
 }
 
 func (s *fakeStore) Publish(_ context.Context, entry Entry) (Entry, error) {
-	if s.publishErr != nil {
-		return Entry{}, s.publishErr
-	}
 	overlay, err := AssignSlice(entry.IA, s.entries)
 	if err != nil {
 		return Entry{}, err
@@ -62,6 +59,16 @@ func (s *fakeStore) List(context.Context) (Directory, error) {
 	return Directory{Nodes: s.entries, Hosts: s.hosts}, nil
 }
 func (s *fakeStore) Close() error { return nil }
+
+// mustPubKey is the local key-minting helper, the shared one out of reach
+// behind the same import cycle.
+func mustPubKey(b byte) PublicKey {
+	var key PublicKey
+	for i := range key {
+		key[i] = b
+	}
+	return key
+}
 
 // requestWithIA builds a request context carrying the authenticated
 // publisher the middleware would have peered in.
@@ -170,14 +177,6 @@ func TestDirectoryListServesEntries(t *testing.T) {
 	if gotHost != host {
 		t.Errorf("host entry = %+v, want %+v", gotHost, host)
 	}
-}
-
-func mustPubKey(b byte) PublicKey {
-	var key PublicKey
-	for i := range key {
-		key[i] = b
-	}
-	return key
 }
 
 // iaSubjectCert builds a certificate whose subject names the ISD-AS the way

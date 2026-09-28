@@ -25,6 +25,7 @@ import (
 	"tailscale.com/util/zstdframe"
 
 	"github.com/fancl20/cion/pkg/apps/wireguard"
+	"github.com/fancl20/cion/pkg/apps/wireguard/impl/dbtest"
 	"github.com/fancl20/cion/pkg/modules/enrollauth"
 )
 
@@ -199,12 +200,10 @@ func fetchMap(t *testing.T, client *http.Client,
 // the tailnet-holding netmap — the same conversation a tailnet client
 // runs at login.
 func TestProtocolRegisterAndMap(t *testing.T) {
-	store := &memStore{}
+	store := &dbtest.MemStore{}
 	nodeEntry := testNode(mustIA("1-ff00:0:1"), "100.64.1.0/24", "198.51.100.10:51820")
-	nodeEntry.PublicKey = testHostKey(0x11)
-	if err := store.Publish(context.Background(), nodeEntry); err != nil {
-		t.Fatal(err)
-	}
+	nodeEntry.PublicKey = dbtest.MustKey(0x11)
+	store.Seed(nodeEntry)
 	roots, tlsCfg := testCert(t)
 	a := testApp(t, Config{Store: store})
 	addr := serveCoordination(t, a, tlsCfg)
@@ -262,12 +261,13 @@ func TestProtocolRegisterAndMap(t *testing.T) {
 // refuses it for good, and allow issues the entry — each with exactly the
 // facts the exchange established.
 func TestProtocolRegistrationVerdicts(t *testing.T) {
-	store := &memStore{}
-	if err := store.Publish(context.Background(),
-		testNode(mustIA("1-ff00:0:1"), "100.64.1.0/24", "198.51.100.10:51820")); err != nil {
-
+	store := &dbtest.MemStore{}
+	if err := func() error {
+		return nil
+	}(); err != nil {
 		t.Fatal(err)
 	}
+	store.Seed(testNode(mustIA("1-ff00:0:1"), "100.64.1.0/24", "198.51.100.10:51820"))
 	auth := &askAuthorizer{}
 	roots, tlsCfg := testCert(t)
 	a := testApp(t, Config{Store: store, Authorizer: auth})
@@ -338,7 +338,7 @@ func TestProtocolRegistrationVerdicts(t *testing.T) {
 // TestProtocolMapRequiresRegistration checks the map refuses a key the
 // registry holds no registration for.
 func TestProtocolMapRequiresRegistration(t *testing.T) {
-	store := &memStore{}
+	store := &dbtest.MemStore{}
 	roots, tlsCfg := testCert(t)
 	a := testApp(t, Config{Store: store})
 	addr := serveCoordination(t, a, tlsCfg)
@@ -349,7 +349,7 @@ func TestProtocolMapRequiresRegistration(t *testing.T) {
 }
 
 // storeHosts reads the registry's hosts.
-func storeHosts(t *testing.T, store *memStore) []wireguard.HostEntry {
+func storeHosts(t *testing.T, store *dbtest.MemStore) []wireguard.HostEntry {
 	t.Helper()
 	directory, err := store.List(context.Background())
 	if err != nil {

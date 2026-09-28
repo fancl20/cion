@@ -54,11 +54,20 @@ func startDownNode(t *testing.T) (n *node, key []byte) {
 	d.RunConfig = RunConfig{NumProcessors: 2, NumSlowPathProcessors: 1, BatchSize: 64}
 
 	ctx, cancel := context.WithCancel(context.Background())
+	serveDone := make(chan error, 1)
 	t.Cleanup(func() {
 		cancel()
+		select {
+		case err := <-serveDone:
+			if err != nil {
+				t.Errorf("Serve returned %v, want nil", err)
+			}
+		case <-time.After(testTimeout):
+			t.Error("Serve did not return after cancellation")
+		}
 		provider.Stop()
 	})
-	go func() { _ = d.Serve(ctx) }()
+	go func() { serveDone <- d.Serve(ctx) }()
 	return &node{d: d, provider: provider, ia: ia, internal: internal}, key
 }
 
@@ -127,6 +136,7 @@ func TestEgressDownAnswersInterfaceDown(t *testing.T) {
 // of packets into the down link earns no more than the cap's notifications
 // per second — exceeded ones dropped with the packet.
 func TestEgressDownNotificationCap(t *testing.T) {
+	reader := newTestReader(t)
 	a, key := startDownNode(t)
 	bia := addr.MustIAFrom(1, 0xff0000000002)
 
@@ -137,45 +147,45 @@ func TestEgressDownNotificationCap(t *testing.T) {
 	defer func() { _ = app.Close() }()
 	ident := uint16(app.LocalAddr().(*net.UDPAddr).Port)
 
-	// Start the burst early in a wall-clock second, so it cannot straddle
-	// the cap's window boundary.
-	for time.Now().Nanosecond() > 50_000_000 {
-		time.Sleep(5 * time.Millisecond)
-	}
+	// The burst starts at a second boundary the episode chooses, so it
+	// cannot straddle the cap's one-second window.
+	time.Sleep(time.Until(time.Now().Truncate(time.Second).Add(time.Second)))
 	burst := 5 * notifyCapPerSecond
+	tmpl := scmpPacket(t, a.ia, bia, directPath(t, key, 0x111),
+		slayers.SCMPTypeEchoRequest, ident)
+	sc := ClassOfSize(len(tmpl)).String()
 	for range burst {
-		request := scmpPacket(t, a.ia, bia, directPath(t, key, 0x111),
-			slayers.SCMPTypeEchoRequest, ident)
-		if _, err := app.WriteToUDP(request, mustUDPAddr(t, a.internal)); err != nil {
+		if _, err := app.WriteToUDP(tmpl, mustUDPAddr(t, a.internal)); err != nil {
 			t.Fatal(err)
 		}
 	}
 
+	// Every packet of the burst is read and processed — counted — before
+	// the answers are collected, so the read runs to completion instead of
+	// guessing at the quiet after the burst.
+	settleSums(t, reader, map[metricKey]int64{
+		{"dataplane.input_packets_total", "0", sc, ""}: int64(burst),
+		{"dataplane.processed_packets", "0", sc, ""}:   int64(burst),
+	})
+
 	notifications := 0
 	buf := make([]byte, bufSize)
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
+	for {
 		_ = app.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
 		n, err := app.Read(buf)
 		if err != nil {
-			if notifications > 0 {
-				break // the quiet after the capped burst
-			}
-			continue
+			break // everything the burst answered has arrived
 		}
 		pkt := gopacket.NewPacket(buf[:n], slayers.LayerTypeSCION, gopacket.NoCopy)
 		if pkt.Layer(slayers.LayerTypeSCMPExternalInterfaceDown) != nil {
 			notifications++
 		}
-		if notifications > notifyCapPerSecond {
-			t.Fatalf("notifications = %d, exceeding the per-interface cap %d",
-				notifications, notifyCapPerSecond)
-		}
 	}
 	if notifications == 0 {
 		t.Fatal("the burst earned no notification at all")
 	}
-	if notifications != notifyCapPerSecond {
-		t.Errorf("notifications = %d, want the cap's %d", notifications, notifyCapPerSecond)
+	if notifications > notifyCapPerSecond {
+		t.Fatalf("notifications = %d, exceeding the per-interface cap %d",
+			notifications, notifyCapPerSecond)
 	}
 }

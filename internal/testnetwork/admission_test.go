@@ -40,6 +40,7 @@ func mintedInvitation(t *testing.T, bot *operatorBot) string {
 // presenting the minted key approving on the plugin's own records, the
 // note it answers recorded with the entry.
 func TestCoordinationInvitationJoin(t *testing.T) {
+	t.Parallel()
 	wpki := packageWebPKI
 	place := placeCoordination(t)
 	bot := newOperatorBot(t)
@@ -71,6 +72,7 @@ func TestCoordinationInvitationJoin(t *testing.T) {
 // operator presses approve, the login completing on the client's own
 // retry.
 func TestCoordinationTelegramPromptJoin(t *testing.T) {
+	t.Parallel()
 	wpki := packageWebPKI
 	place := placeCoordination(t)
 	bot := newOperatorBot(t)
@@ -116,6 +118,7 @@ func TestCoordinationTelegramPromptJoin(t *testing.T) {
 // TestCoordinationCIDRGate is the addressing posture's negative: a
 // registration whose source falls outside the listed prefixes never joins.
 func TestCoordinationCIDRGate(t *testing.T) {
+	t.Parallel()
 	wpki := packageWebPKI
 	place := placeCoordination(t)
 	a := coordCore(t, wpki, addrIP(0x47), place, func(cfg *services.NodeConfig) {

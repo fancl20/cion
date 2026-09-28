@@ -26,11 +26,13 @@ func TestMain(m *testing.M) {
 	// out the container's eth0 instead. A process embedding the client
 	// disables the wrapper; the harness is one.
 	netns.SetEnabled(false)
+	// The CA's directory lives for the process's lifetime: the fixture's own
+	// choice — os.Exit at the run's end skips any cleanup beside it, and the
+	// three certificate files are the operating system's to reap.
 	dir, err := os.MkdirTemp("", "cion-test-ca")
 	if err != nil {
 		panic(err)
 	}
-	defer func() { _ = os.RemoveAll(dir) }()
 	wpki, err := mintWebPKI(dir)
 	if err != nil {
 		panic(err)

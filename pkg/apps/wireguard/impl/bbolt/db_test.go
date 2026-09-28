@@ -35,7 +35,7 @@ func TestDirectoryStoreIgnoresRetiredFields(t *testing.T) {
 		t.Fatal(err)
 	}
 	db := store.(*directoryDB).db
-	key := mustKey()
+	key := dbtest.MustKey(0x01)
 	// An entry in the older stored shape: gatewayPort and underlay beside
 	// the fields that remain.
 	old := `{"publicKey":"` + hex.EncodeToString(key[:]) + `",` +
@@ -82,14 +82,6 @@ func TestDirectoryStoreIgnoresRetiredFields(t *testing.T) {
 
 func mustIA() addr.IA {
 	return addr.MustIAFrom(20, 0xff0000000001)
-}
-
-func mustKey() wireguard.PublicKey {
-	var key wireguard.PublicKey
-	for i := range key {
-		key[i] = byte(i + 1)
-	}
-	return key
 }
 
 func mustPrefix() netip.Prefix {

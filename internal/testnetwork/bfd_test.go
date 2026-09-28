@@ -27,29 +27,7 @@ func TestBFDLivenessEpisode(t *testing.T) {
 	t.Parallel()
 	wpki := NewWebPKI(t)
 	ipA, ipB, ipC := addrIP(0x74), addrIP(0x75), addrIP(0x76)
-
-	a := bootAssembly(t, func(cfg *services.NodeConfig) {
-		cfg.Core = true
-		cfg.State = t.TempDir()
-		cfg.Internal = FreeUDPAddrOn(t, ipA)
-		cfg.Control = FreeUDPAddrOn(t, ipA)
-		cfg.CertFile = wpki.certFile
-		cfg.KeyFile = wpki.keyFile
-	})
-	b := bootAssembly(t, func(cfg *services.NodeConfig) {
-		cfg.State = t.TempDir()
-		cfg.Internal = FreeUDPAddrOn(t, ipB)
-		cfg.Control = FreeUDPAddrOn(t, ipB)
-		cfg.Neighbors = []string{a.rendezvousOf()}
-		cfg.RootCAs = wpki.pool
-	})
-	c := bootAssembly(t, func(cfg *services.NodeConfig) {
-		cfg.State = t.TempDir()
-		cfg.Internal = FreeUDPAddrOn(t, ipC)
-		cfg.Control = FreeUDPAddrOn(t, ipC)
-		cfg.Neighbors = []string{b.rendezvousOf()}
-		cfg.RootCAs = wpki.pool
-	})
+	a, b, c := bootRendezvousLine(t, wpki, ipA, ipB, ipC)
 	ctx := context.Background()
 
 	// The line stands: A–B and B–C established, everyone enrolled and
@@ -140,52 +118,10 @@ func TestBFDLivenessEpisode(t *testing.T) {
 func TestBFDStaticLabEpisode(t *testing.T) {
 	t.Parallel()
 	wpki := NewWebPKI(t)
-	ipA, ipB, ipC := addrIP(0x71), addrIP(0x72), addrIP(0x73)
-
-	abA, abB := FreeUDPAddrOn(t, ipA), FreeUDPAddrOn(t, ipB)
-	bcB, bcC := FreeUDPAddrOn(t, ipB), FreeUDPAddrOn(t, ipC)
-	newLinkSet := func(t *testing.T) string {
-		path := linkSetPath(t)
-		writeStaticSet(t, path)
-		return path
-	}
-	bootStatic := func(t *testing.T, ip netip.Addr, core bool, state, linkSet string) *staticNode {
-		t.Helper()
-		n := &staticNode{linkSet: linkSet}
-		n.assemblyNode = bootAssembly(t, func(cfg *services.NodeConfig) {
-			cfg.Core = core
-			cfg.LinkSet = linkSet
-			cfg.State = state
-			cfg.Internal = FreeUDPAddrOn(t, ip)
-			cfg.Control = FreeUDPAddrOn(t, ip)
-			if core {
-				cfg.CertFile = wpki.certFile
-				cfg.KeyFile = wpki.keyFile
-			} else {
-				cfg.RootCAs = wpki.pool
-			}
-		})
-		return n
-	}
-
-	aState := t.TempDir()
-	aSet := newLinkSet(t)
-	a := bootStatic(t, ipA, true, aState, aSet)
-	bState := t.TempDir()
-	bSet := newLinkSet(t)
-	writeStaticSet(t, bSet, staticLink{IA: a.app.IA().String(), Local: abB, Remote: abA})
-	b := bootStatic(t, ipB, false, bState, bSet)
-	cState := t.TempDir()
-	cSet := newLinkSet(t)
-	writeStaticSet(t, cSet, staticLink{IA: b.app.IA().String(), Local: bcC, Remote: bcB})
-	c := bootStatic(t, ipC, false, cState, cSet)
-
+	ipB := addrIP(0x72)
+	a, b, c := bootStaticLine(t, wpki, addrIP(0x71), ipB, addrIP(0x73))
+	// The interface the core's file named its link to B.
 	ifID := uint16(1)
-	writeStaticSet(t, aSet, staticLink{IA: b.app.IA().String(), Local: abA, Remote: abB,
-		Interface: &ifID})
-	writeStaticSet(t, bSet,
-		staticLink{IA: a.app.IA().String(), Local: abB, Remote: abA},
-		staticLink{IA: c.app.IA().String(), Local: bcB, Remote: bcC})
 
 	ctx := context.Background()
 	Poll(t, "the static line to stand", func() bool {
@@ -211,7 +147,7 @@ func TestBFDStaticLabEpisode(t *testing.T) {
 	})
 
 	// Lift the blackhole: B restarted from its link-set returns the link up.
-	b2 := bootStatic(t, ipB, false, bState, bSet)
+	b2 := bootStaticNode(t, wpki, ipB, false, b.stateDir, b.linkSet, nil)
 	_ = b2
 	Poll(t, "A's static link to B to return up", func() bool {
 		return a.app.Monitor().Up(ifID)

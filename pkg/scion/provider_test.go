@@ -492,6 +492,76 @@ func TestProviderFilterCountsTraversedHopsOnly(t *testing.T) {
 	}
 }
 
+// TestProviderBootstrapRoute checks the enrollment fallback: before any up
+// segment is verified, the reversed unverified beacon — the node's own hop
+// already extended — serves the core route in both resolution variants,
+// with no fetch, and a verified up segment takes over the moment one
+// exists.
+func TestProviderBootstrapRoute(t *testing.T) {
+	beacon := linePCB(t, time.Now(), iaCore, iaLeaf)
+	route := beacon.ReversePath()
+	fetched := false
+	db := &fakePathDB{}
+	p := &PathProvider{
+		IA: iaLeaf,
+		DB: db,
+		Lookup: func(context.Context, addr.IA) []*pathdb.Segment {
+			fetched = true
+			return nil
+		},
+		Bootstrap: func(core addr.IA) *spath.Decoded {
+			if !core.Equal(iaCore) {
+				return nil
+			}
+			return route
+		},
+	}
+
+	for _, resolve := range []struct {
+		name string
+		call func() (*spath.Decoded, error)
+	}{
+		{"LocalPath", func() (*spath.Decoded, error) { return p.LocalPath(iaCore) }},
+		{"Path", func() (*spath.Decoded, error) {
+			return p.Path(context.Background(), iaCore)
+		}},
+	} {
+		path, err := resolve.call()
+		if err != nil {
+			t.Fatalf("%s over the bootstrap route: %v", resolve.name, err)
+		}
+		if len(path.HopFields) != 2 || len(path.InfoFields) != 1 {
+			t.Errorf("%s = %d hops / %d segments, want the beacon's 2/1",
+				resolve.name, len(path.HopFields), len(path.InfoFields))
+		}
+		if path.InfoFields[0].ConsDir {
+			t.Errorf("%s is forward, want the reversed beacon", resolve.name)
+		}
+	}
+	if fetched {
+		t.Error("the bootstrap route fetched down segments, want local state only")
+	}
+
+	// A verified up segment takes over the moment one exists: the route
+	// grows the middle hop the stored segment carries.
+	up := linePCB(t, time.Now(), iaCore, iaMid, iaLeaf)
+	if _, err := db.Insert(context.Background(), &pathdb.Segment{
+		Type: pathdb.SegmentTypeUp,
+		PCB:  up,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	path, err := p.LocalPath(iaCore)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(path.HopFields) != 3 {
+		t.Fatalf("route with a stored up segment = %d hops, want its 3",
+			len(path.HopFields))
+	}
+	checkHops(t, path, up.Entries[2], up.Entries[1], up.Entries[0])
+}
+
 // TestProviderNoPath checks that a destination nothing resolves to is an
 // error, not a hang.
 func TestProviderNoPath(t *testing.T) {

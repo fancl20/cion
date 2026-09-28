@@ -70,11 +70,20 @@ func startTestNode(t *testing.T, ia, neighbor addr.IA, extLocal, extRemote strin
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
+	serveDone := make(chan error, 1)
 	t.Cleanup(func() {
 		cancel()
+		select {
+		case err := <-serveDone:
+			if err != nil {
+				t.Errorf("Serve returned %v, want nil", err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Error("Serve did not return after cancellation")
+		}
 		provider.Stop()
 	})
-	go func() { _ = d.Serve(ctx) }()
+	go func() { serveDone <- d.Serve(ctx) }()
 
 	return &testNode{
 		ia:        ia,
@@ -190,7 +199,7 @@ func TestConnWriteWithoutLink(t *testing.T) {
 	extA, extB := freeUDPAddr(t), freeUDPAddr(t)
 	a := startTestNode(t, iaA, iaB, extA, extB)
 
-	connA := a.newConn(t, 30044)
+	connA := a.newConn(t, 0)
 	stranger := &Addr{
 		IA:   addr.MustIAFrom(20, 0xff0000000009),
 		Addr: netip.MustParseAddrPort("127.0.0.1:1234"),

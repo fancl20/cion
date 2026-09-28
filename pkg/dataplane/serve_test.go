@@ -59,25 +59,8 @@ func TestServeDrainsOnCancellation(t *testing.T) {
 		}
 	}
 
-	// The flushes are asynchronous; poll until the sums settle.
-	deadline := time.Now().Add(testTimeout)
-	for {
-		sums := collectSums(t, reader)
-		settled := true
-		for k, v := range want {
-			if sums[k] != v {
-				settled = false
-				break
-			}
-		}
-		if settled {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("counters did not settle; got %v, want %v", sums, want)
-		}
-		time.Sleep(2 * time.Millisecond)
-	}
+	// The flushes are asynchronous; the sums are read to completion.
+	settleSums(t, reader, want)
 
 	cancel()
 	select {

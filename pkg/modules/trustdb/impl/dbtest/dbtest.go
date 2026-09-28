@@ -591,6 +591,16 @@ func loadTRCFile(t *testing.T, file string, cfg Config) cppki.SignedTRC {
 	return trc
 }
 
+// ChainFixture reads a chain fixture from the suite's shared test data: the
+// AS certificate of the given version under the CP CA certificate — the one
+// loader every trust-database episode reads fixtures through.
+func ChainFixture(t *testing.T, org string, asVersion int) []*x509.Certificate {
+	t.Helper()
+	var cfg Config
+	cfg.InitDefaults()
+	return loadChainFiles(t, org, asVersion, cfg)
+}
+
 func loadChainFiles(t *testing.T, org string, asVersion int, cfg Config) []*x509.Certificate {
 	return []*x509.Certificate{
 		loadCertFile(t, filepath.Join(org, fmt.Sprintf("cp-as%d.crt", asVersion)), cfg),
