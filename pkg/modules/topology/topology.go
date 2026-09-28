@@ -18,7 +18,7 @@
 //
 // Kind: source — where topology decisions come from, selected by the run
 // arguments of its own: the measured provider by default, the file
-// provider when --link-set names a link-set, the two refused together.
+// provider when --topology.link-set names a link-set, the two refused together.
 package topology
 
 import (
@@ -51,7 +51,7 @@ type Provider interface {
 	// completed and before Seed, Mounts, and Run.
 	Wire(Pieces)
 	// Seed lands the links the provider vouches for in the store — the
-	// measured provider an entry per --neighbor, the file provider the
+	// measured provider an entry per --topology.neighbor, the file provider the
 	// link-set's entries — before the first data plane generation builds.
 	// Idempotent: an entry already recorded is left alone.
 	Seed(ctx context.Context) error

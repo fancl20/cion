@@ -225,3 +225,35 @@ spelling.
     builds the node configuration directly.
 
 ## Implementation history
+
+*   The registrations: [run.go](/cmd/cion/run.go) carries the placement
+    three and the static selection under `addSharedNodeFlags`, the
+    `dataplane.` three under `addTuningFlags`, and the one new helper
+    `addWireguardFlags` — the host port leaving the shared registration so
+    the wireguard block prints after the role's trust block — while the
+    role registrations carry their `trust.` blocks and the local one's
+    `topology.neighbor`
+    ([run_core.go](/cmd/cion/run_core.go),
+    [run_local.go](/cmd/cion/run_local.go)). The three commands turn
+    their flag sets' sorting off, so each `--help` prints the frame, then
+    the part blocks, in registration order — ping's bare request flags
+    last.
+*   The messages: the validator's refusals name the namespaced spellings
+    ([config.go](/internal/services/config.go)), and so do the tuning
+    checks' and the two providers' first-start errors
+    ([run.go](/cmd/cion/run.go),
+    [measured/provider.go](/pkg/modules/topology/impl/measured/provider.go),
+    [file/provider.go](/pkg/modules/topology/impl/file/provider.go)); the
+    unprefixed spellings refuse as unknown flags beside the standing
+    retirements, and the commands' long descriptions and the comments
+    naming an argument follow the rename.
+*   The proofs: proposal 0030 landed first, so its 51820 default rides
+    under the new spelling with no accommodation; the command tests check
+    the surfaces parse into the same fields, the help's part order, the
+    unknown-flag refusals of the role arguments and of every unprefixed
+    spelling, and the restated refusal texts
+    ([run_test.go](/cmd/cion/run_test.go),
+    [ping_test.go](/cmd/cion/ping_test.go)); the integration labs pass
+    unmodified, the harness building the node configuration directly. The
+    architecture's two module mentions follow the rename
+    ([architecture.md](/docs/design/architecture.md)).

@@ -64,8 +64,9 @@ func TestWireguardConfigFromArguments(t *testing.T) {
 	}
 }
 
-// TestNodeConfigHostPortAlone checks the port's pairing: --host-port alone
-// decides whether a node serves hosts, and no argument pairs with it.
+// TestNodeConfigHostPortAlone checks the port's pairing:
+// --wireguard.host-port alone decides whether a node serves hosts,
+// and no argument pairs with it.
 func TestNodeConfigHostPortAlone(t *testing.T) {
 	cfg := wireguardNodeConfig(t, t.TempDir())
 	if err := cfg.Validate(); err != nil {

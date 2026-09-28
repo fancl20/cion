@@ -51,7 +51,7 @@ type NodeConfig struct {
 	Neighbors []string
 	// LinkSet points at the file provider's link-set: neighbor ISD-ASes with the
 	// links' two underlay addresses, reconciled into the store as the operator's
-	// vouch. It refuses to combine with --neighbor, and it never carries
+	// vouch. It refuses to combine with --topology.neighbor, and it never carries
 	// identity, keys, or bind addresses — those stay run arguments and state.
 	LinkSet string
 	// State is the state directory; Internal and Control are the bind
@@ -135,17 +135,17 @@ type NodePacing struct {
 func (c NodeConfig) Validate() error {
 	if c.Domain == "" {
 		if c.Core {
-			return fmt.Errorf("--domain is required: the core's own, " +
+			return fmt.Errorf("--trust.domain is required: the core's own, " +
 				"the WebPKI identity of its certificate")
 		}
-		return fmt.Errorf("--domain is required: the network's core domain, " +
+		return fmt.Errorf("--trust.domain is required: the network's core domain, " +
 			"the WebPKI identity of the enrollment and TRC fetch")
 	}
 	if c.Core && len(c.Neighbors) > 0 {
-		return fmt.Errorf("the founding core takes no --neighbor: nodes join it")
+		return fmt.Errorf("the founding core takes no --topology.neighbor: nodes join it")
 	}
 	if c.LinkSet != "" && len(c.Neighbors) > 0 {
-		return fmt.Errorf("--link-set refuses --neighbor: " +
+		return fmt.Errorf("--topology.link-set refuses --topology.neighbor: " +
 			"one topology provider per process, the static and the measured")
 	}
 	if c.State == "" || c.Internal == "" || c.Control == "" {
@@ -153,7 +153,7 @@ func (c NodeConfig) Validate() error {
 	}
 	for _, s := range c.Neighbors {
 		if _, err := netip.ParseAddrPort(s); err != nil {
-			return fmt.Errorf("parsing --neighbor %q: %w", s, err)
+			return fmt.Errorf("parsing --topology.neighbor %q: %w", s, err)
 		}
 	}
 	if c.EnrollAuth != "" {
@@ -161,11 +161,11 @@ func (c NodeConfig) Validate() error {
 		// role-aware checks exist to refuse: only the core issues chains,
 		// so only the core's gate means anything.
 		if !c.Core {
-			return fmt.Errorf("--enroll-auth requires the core role: " +
+			return fmt.Errorf("--trust.enroll-auth requires the core role: " +
 				"the core is the only node that issues chains")
 		}
 		if _, _, err := loadEnrollAuth(c.EnrollAuth, c.TelegramAPI, c.State); err != nil {
-			return fmt.Errorf("parsing --enroll-auth: %w", err)
+			return fmt.Errorf("parsing --trust.enroll-auth: %w", err)
 		}
 	}
 	return nil

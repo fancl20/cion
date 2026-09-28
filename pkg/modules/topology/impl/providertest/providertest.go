@@ -16,7 +16,7 @@ import (
 // Suite describes one implementation's run of the contract tests.
 type Suite struct {
 	// New builds the provider as a founding core, carrying the seed facts
-	// of its own — a --neighbor for the measured provider, a link-set
+	// of its own — a --topology.neighbor for the measured provider, a link-set
 	// entry for the file one.
 	New func(t *testing.T) topology.Provider
 	// Store is the fresh store the provider is wired to and seeds.

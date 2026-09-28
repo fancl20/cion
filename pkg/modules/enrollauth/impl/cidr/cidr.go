@@ -26,7 +26,7 @@ type Authorizer struct {
 }
 
 // New parses a comma-separated prefix list — the cidrs spec of
-// --enroll-auth — once, so a malformed entry fails the boot, not the first
+// --trust.enroll-auth — once, so a malformed entry fails the boot, not the first
 // joiner.
 func New(spec string) (*Authorizer, error) {
 	parts := strings.Split(spec, ",")
