@@ -11,7 +11,7 @@ import (
 
 	"github.com/fancl20/cion/pkg/controlplane"
 	"github.com/fancl20/cion/pkg/dataplane"
-	"github.com/fancl20/cion/pkg/links"
+	"github.com/fancl20/cion/pkg/modules/links"
 )
 
 // buffer sizes of the underlay sockets. They are fixed, not run flags: the

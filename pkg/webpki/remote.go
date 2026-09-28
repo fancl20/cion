@@ -29,6 +29,7 @@ import (
 	"github.com/scionproto/scion/pkg/scrypto/cppki"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
+	"github.com/fancl20/cion/pkg/modules/trustdb"
 	"github.com/fancl20/cion/pkg/scion"
 	"github.com/fancl20/cion/pkg/trust"
 )
@@ -199,7 +200,7 @@ func (c *CoreClient) TRC(ctx context.Context, id cppki.TRCID) (cppki.SignedTRC, 
 // Chains fetches the chains matching the query.
 func (c *CoreClient) Chains(
 	ctx context.Context,
-	q trust.ChainQuery,
+	q trustdb.ChainQuery,
 ) ([][]*x509.Certificate, error) {
 
 	if c.coreAddr() == nil {

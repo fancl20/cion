@@ -8,8 +8,8 @@ import (
 	"github.com/scionproto/scion/pkg/addr"
 	"github.com/scionproto/scion/pkg/scrypto/cppki"
 
-	"github.com/fancl20/cion/pkg/pathdb"
-	"github.com/fancl20/cion/pkg/trust"
+	"github.com/fancl20/cion/pkg/modules/pathdb"
+	"github.com/fancl20/cion/pkg/modules/trustdb"
 )
 
 // TestLineTopology is the integration test of proposal 0004: a three-node
@@ -46,7 +46,7 @@ func TestLineTopology(t *testing.T) {
 	// C enrolls through the reversed beacon over B: no direct A–C link
 	// exists, so the enrollment fetch rides the bootstrap route.
 	Poll(t, "C enrolled through B", func() bool {
-		chains, err := c.TrustDB.Chains(ctx, trust.ChainQuery{IA: lineCIA})
+		chains, err := c.TrustDB.Chains(ctx, trustdb.ChainQuery{IA: lineCIA})
 		return err == nil && len(chains) > 0
 	})
 	trc, err := c.TrustDB.SignedTRC(ctx, cppki.TRCID{ISD: coreIA.ISD(), Base: 1, Serial: 1})

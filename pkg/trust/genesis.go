@@ -8,6 +8,8 @@ import (
 
 	"github.com/scionproto/scion/pkg/addr"
 	"github.com/scionproto/scion/pkg/scrypto/cms/protocol"
+
+	"github.com/fancl20/cion/pkg/modules/trustdb"
 	"github.com/scionproto/scion/pkg/scrypto/cppki"
 )
 
@@ -20,7 +22,7 @@ import (
 // valid only because the single core holds one sensitive and one regular
 // voting certificate. The TRC is CMS-signed by both voting keys, as cppki's
 // base-TRC verification requires a signature for every voting certificate.
-func Genesis(ctx context.Context, db DB, ia addr.IA, keys CoreKeys) (cppki.SignedTRC, error) {
+func Genesis(ctx context.Context, db trustdb.DB, ia addr.IA, keys CoreKeys) (cppki.SignedTRC, error) {
 	if err := validateISD(ia); err != nil {
 		return cppki.SignedTRC{}, err
 	}

@@ -12,6 +12,7 @@ import (
 	"github.com/scionproto/scion/pkg/addr"
 	"github.com/scionproto/scion/pkg/scrypto/cppki"
 
+	"github.com/fancl20/cion/pkg/modules/trustdb"
 	"github.com/fancl20/cion/pkg/scion"
 	"github.com/fancl20/cion/pkg/trust"
 )
@@ -47,7 +48,7 @@ type flippableTrustDB struct {
 	chain [][]*x509.Certificate
 }
 
-func (d *flippableTrustDB) Chains(context.Context, trust.ChainQuery) ([][]*x509.Certificate, error) {
+func (d *flippableTrustDB) Chains(context.Context, trustdb.ChainQuery) ([][]*x509.Certificate, error) {
 	d.mtx.Lock()
 	defer d.mtx.Unlock()
 	return d.chain, nil

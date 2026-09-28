@@ -17,8 +17,9 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"github.com/scionproto/scion/pkg/scrypto/cppki"
 
+	"github.com/fancl20/cion/pkg/modules/trustdb"
+	"github.com/fancl20/cion/pkg/modules/trustdb/impl/bbolt"
 	"github.com/fancl20/cion/pkg/trust"
-	"github.com/fancl20/cion/pkg/trust/impl/bbolt"
 )
 
 // fakeCore implements trust.Remote: it serves the TRC and issues chains
@@ -41,7 +42,7 @@ func (c *fakeCore) TRC(ctx context.Context, id cppki.TRCID) (cppki.SignedTRC, er
 }
 
 func (c *fakeCore) Chains(
-	ctx context.Context, q trust.ChainQuery) ([][]*x509.Certificate, error) {
+	ctx context.Context, q trustdb.ChainQuery) ([][]*x509.Certificate, error) {
 
 	return nil, errFakeCoreUnavailable
 }
@@ -67,7 +68,7 @@ func (c *fakeCore) renewals() int {
 
 // lifecycleFixture is a node's enrollment state against a fake core.
 type lifecycleFixture struct {
-	db   trust.DB
+	db   trustdb.DB
 	key  crypto.Signer
 	core *fakeCore
 	cfg  EnrollmentConfig
@@ -151,7 +152,7 @@ func TestEnrollmentPasses(t *testing.T) {
 		}
 		// The renewal is a second chain; the old one stays verifiable while it
 		// overlaps.
-		chains, err := lf.db.Chains(ctx, trust.ChainQuery{IA: nodeIATest})
+		chains, err := lf.db.Chains(ctx, trustdb.ChainQuery{IA: nodeIATest})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -211,7 +212,7 @@ func TestChainSweepPass(t *testing.T) {
 		for range 3 {
 			lf.cfg.sweepOnce(ctx)
 		}
-		chains, err := lf.db.Chains(ctx, trust.ChainQuery{})
+		chains, err := lf.db.Chains(ctx, trustdb.ChainQuery{})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -224,7 +225,7 @@ func TestChainSweepPass(t *testing.T) {
 		// for good — an unfiltered read is what changes, and nothing else.
 		time.Sleep(trust.ASValidity + trust.ChainRetention + time.Minute)
 		now := time.Now()
-		chains, err = lf.db.Chains(ctx, trust.ChainQuery{
+		chains, err = lf.db.Chains(ctx, trustdb.ChainQuery{
 			Validity: cppki.Validity{NotBefore: now, NotAfter: now},
 		})
 		if err != nil {
@@ -234,7 +235,7 @@ func TestChainSweepPass(t *testing.T) {
 			t.Fatalf("valid query past expiry = %d chains, want 0", len(chains))
 		}
 		lf.cfg.sweepOnce(ctx)
-		chains, err = lf.db.Chains(ctx, trust.ChainQuery{})
+		chains, err = lf.db.Chains(ctx, trustdb.ChainQuery{})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -269,7 +270,7 @@ func TestChainSweepLoop(t *testing.T) {
 		// next fire sweeps it.
 		time.Sleep(trust.ASValidity + trust.ChainRetention + 2*ChainSweepInterval)
 		synctest.Wait()
-		chains, err := lf.db.Chains(ctx, trust.ChainQuery{})
+		chains, err := lf.db.Chains(ctx, trustdb.ChainQuery{})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -312,7 +313,7 @@ func TestCoreEnrollmentPass(t *testing.T) {
 		if got := cfg.corePass(context.Background()); got != time.Millisecond {
 			t.Errorf("pass interval = %v, want the retry interval below the threshold", got)
 		}
-		chains, err := lf.db.Chains(context.Background(), trust.ChainQuery{IA: nodeIATest})
+		chains, err := lf.db.Chains(context.Background(), trustdb.ChainQuery{IA: nodeIATest})
 		if err != nil {
 			t.Fatal(err)
 		}

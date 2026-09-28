@@ -32,13 +32,14 @@ import (
 	wireguardbbolt "github.com/fancl20/cion/pkg/apps/wireguard/impl/bbolt"
 	"github.com/fancl20/cion/pkg/controlplane"
 	"github.com/fancl20/cion/pkg/dataplane"
-	"github.com/fancl20/cion/pkg/links"
-	linkbbolt "github.com/fancl20/cion/pkg/links/impl/bbolt"
-	"github.com/fancl20/cion/pkg/pathdb"
-	pathdbbbolt "github.com/fancl20/cion/pkg/pathdb/impl/bbolt"
+	"github.com/fancl20/cion/pkg/modules/links"
+	linkbbolt "github.com/fancl20/cion/pkg/modules/links/impl/bbolt"
+	"github.com/fancl20/cion/pkg/modules/pathdb"
+	pathdbbbolt "github.com/fancl20/cion/pkg/modules/pathdb/impl/bbolt"
+	"github.com/fancl20/cion/pkg/modules/trustdb"
+	trustbbolt "github.com/fancl20/cion/pkg/modules/trustdb/impl/bbolt"
 	"github.com/fancl20/cion/pkg/scion"
 	"github.com/fancl20/cion/pkg/trust"
-	trustbbolt "github.com/fancl20/cion/pkg/trust/impl/bbolt"
 	"github.com/fancl20/cion/pkg/webpki"
 )
 
@@ -77,7 +78,7 @@ type Node struct {
 	Store     links.DB
 	MACKey    []byte
 	Monitor   *controlplane.HealthMonitor
-	TrustDB   trust.DB
+	TrustDB   trustdb.DB
 	PathDB    pathdb.DB
 	Engine    *trust.Engine
 	Beaconer  *controlplane.Beaconer
@@ -754,7 +755,7 @@ func FreeUDPAddrOn(t *testing.T, ip netip.Addr) string {
 }
 
 func selfEnroll(
-	ctx context.Context, db trust.DB, issuer *trust.Issuer,
+	ctx context.Context, db trustdb.DB, issuer *trust.Issuer,
 	ia addr.IA, key crypto.Signer) error {
 
 	csr, err := trust.CreateCSR(ia, key)

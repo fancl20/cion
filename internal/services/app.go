@@ -14,10 +14,10 @@ import (
 
 	"github.com/fancl20/cion/pkg/apps/wireguard"
 	"github.com/fancl20/cion/pkg/controlplane"
-	"github.com/fancl20/cion/pkg/links"
-	"github.com/fancl20/cion/pkg/pathdb"
+	"github.com/fancl20/cion/pkg/modules/links"
+	"github.com/fancl20/cion/pkg/modules/pathdb"
+	"github.com/fancl20/cion/pkg/modules/trustdb"
 	"github.com/fancl20/cion/pkg/scion"
-	"github.com/fancl20/cion/pkg/trust"
 )
 
 // Run assembles the node the run arguments and state directory describe,
@@ -95,7 +95,7 @@ func (a *App) Monitor() *controlplane.HealthMonitor { return a.node.monitor }
 func (a *App) InterfaceDown() *scion.InterfaceDownCache { return a.node.ifDown }
 
 // TrustDB returns the node's trust database.
-func (a *App) TrustDB() trust.DB { return a.node.trustDB }
+func (a *App) TrustDB() trustdb.DB { return a.node.trustDB }
 
 // PathDB returns the node's path database.
 func (a *App) PathDB() pathdb.DB { return a.node.pathDB }

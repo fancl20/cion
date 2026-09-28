@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"github.com/fancl20/cion/internal/services"
-	"github.com/fancl20/cion/pkg/links"
+	"github.com/fancl20/cion/pkg/modules/links"
 )
 
 // staticNode is a node of the static lab: the run command's own assembly

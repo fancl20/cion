@@ -10,7 +10,6 @@ import (
 
 	"github.com/fancl20/cion/pkg/apps/wireguard"
 	"github.com/fancl20/cion/pkg/dataplane"
-	"github.com/fancl20/cion/pkg/enrollauth"
 )
 
 // Default run arguments: a restart needs none of them (ADR-0008).
@@ -164,8 +163,7 @@ func (c NodeConfig) Validate() error {
 			return fmt.Errorf("--enroll-auth requires --core: " +
 				"the core is the only node that issues chains")
 		}
-		if _, _, err := enrollauth.Load(c.EnrollAuth,
-			enrollauth.LoadOptions{State: c.State}); err != nil {
+		if _, _, err := loadEnrollAuth(c.EnrollAuth, c.TelegramAPI, c.State); err != nil {
 			return fmt.Errorf("parsing --enroll-auth: %w", err)
 		}
 	}

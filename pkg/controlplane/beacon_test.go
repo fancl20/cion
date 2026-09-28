@@ -16,12 +16,13 @@ import (
 	cppb "github.com/scionproto/scion/pkg/proto/control_plane"
 	"github.com/scionproto/scion/pkg/scrypto"
 
-	"github.com/fancl20/cion/pkg/pathdb"
-	pathdbbbolt "github.com/fancl20/cion/pkg/pathdb/impl/bbolt"
+	"github.com/fancl20/cion/pkg/modules/pathdb"
+	pathdbbbolt "github.com/fancl20/cion/pkg/modules/pathdb/impl/bbolt"
+	"github.com/fancl20/cion/pkg/modules/trustdb"
+	"github.com/fancl20/cion/pkg/modules/trustdb/impl/bbolt"
 	"github.com/fancl20/cion/pkg/scion"
 	"github.com/fancl20/cion/pkg/segment"
 	"github.com/fancl20/cion/pkg/trust"
-	"github.com/fancl20/cion/pkg/trust/impl/bbolt"
 )
 
 // macFactory builds forwarding-key MAC hashers, as the data plane does.
@@ -68,7 +69,7 @@ func (s *fakeSender) RegisterSegments(
 // beaconFixture is a three-AS line — the core A, the middle B under test,
 // and C below — with engines anchored in one TRC and a path database.
 type beaconFixture struct {
-	db       trust.DB
+	db       trustdb.DB
 	pathDB   pathdb.DB
 	engines  map[addr.IA]*trust.Engine
 	store    *BeaconStore

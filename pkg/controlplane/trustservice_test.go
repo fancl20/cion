@@ -20,9 +20,11 @@ import (
 	cppb "github.com/scionproto/scion/pkg/proto/control_plane"
 	"github.com/scionproto/scion/pkg/scrypto/cppki"
 
+	"github.com/fancl20/cion/pkg/modules/enrollauth"
+	"github.com/fancl20/cion/pkg/modules/trustdb"
+	"github.com/fancl20/cion/pkg/modules/trustdb/impl/bbolt"
 	"github.com/fancl20/cion/pkg/scion"
 	"github.com/fancl20/cion/pkg/trust"
-	"github.com/fancl20/cion/pkg/trust/impl/bbolt"
 )
 
 var (
@@ -36,7 +38,7 @@ var (
 // trustFixture is a serving-side trust stack: DB with a genesis TRC and an
 // issuer.
 type trustFixture struct {
-	db     trust.DB
+	db     trustdb.DB
 	issuer *trust.Issuer
 	trc    cppki.SignedTRC
 }
@@ -163,7 +165,7 @@ func TestTrustServiceChainRenewal(t *testing.T) {
 			t.Fatalf("renewed chain does not verify: %v", err)
 		}
 		// The issued chain is also in the core's DB.
-		chains, err := f.db.Chains(context.Background(), trust.ChainQuery{IA: nodeIATest})
+		chains, err := f.db.Chains(context.Background(), trustdb.ChainQuery{IA: nodeIATest})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -260,15 +262,15 @@ func TestTrustServiceChainRenewal(t *testing.T) {
 // askAuthorizer records the facts the trust service asked with and answers
 // the verdict it was told to.
 type askAuthorizer struct {
-	asked   []AdmissionFacts
-	verdict AdmissionVerdict
+	asked   []enrollauth.AdmissionFacts
+	verdict enrollauth.AdmissionVerdict
 }
 
 func (a *askAuthorizer) Authorize(
-	_ context.Context, f AdmissionFacts) AdmissionAnswer {
+	_ context.Context, f enrollauth.AdmissionFacts) enrollauth.AdmissionAnswer {
 
 	a.asked = append(a.asked, f)
-	return AdmissionAnswer{Admission: a.verdict}
+	return enrollauth.AdmissionAnswer{Admission: a.verdict}
 }
 
 // askContext carries a SCION source address the way the QUIC transport puts
@@ -308,7 +310,7 @@ func TestTrustServiceEnrollmentAuthorizer(t *testing.T) {
 
 	t.Run("allow issues with the request's facts", func(t *testing.T) {
 		f := newTrustFixture(t)
-		auth := &askAuthorizer{verdict: AdmissionAllow}
+		auth := &askAuthorizer{verdict: enrollauth.AdmissionAllow}
 		svc := &TrustService{DB: f.db, Issuer: f.issuer, Authorizer: auth}
 		csr, key := newCSR(t, nodeIATest)
 
@@ -319,7 +321,7 @@ func TestTrustServiceEnrollmentAuthorizer(t *testing.T) {
 			t.Fatalf("the authorizer was asked %d times, want 1", len(auth.asked))
 		}
 		got := auth.asked[0]
-		if got.Boundary != BoundaryEnrollment {
+		if got.Boundary != enrollauth.BoundaryEnrollment {
 			t.Errorf("asked boundary = %v, want enrollment", got.Boundary)
 		}
 		if got.Claim != nodeIATest {
@@ -343,7 +345,7 @@ func TestTrustServiceEnrollmentAuthorizer(t *testing.T) {
 
 	t.Run("no address in the context is a zero fact", func(t *testing.T) {
 		f := newTrustFixture(t)
-		auth := &askAuthorizer{verdict: AdmissionAllow}
+		auth := &askAuthorizer{verdict: enrollauth.AdmissionAllow}
 		svc := &TrustService{DB: f.db, Issuer: f.issuer, Authorizer: auth}
 		csr, key := newCSR(t, nodeIATest)
 		if err := ask(t, svc, context.Background(), csr, key); err != nil {
@@ -357,14 +359,14 @@ func TestTrustServiceEnrollmentAuthorizer(t *testing.T) {
 	t.Run("deny is PermissionDenied", func(t *testing.T) {
 		f := newTrustFixture(t)
 		svc := &TrustService{DB: f.db, Issuer: f.issuer,
-			Authorizer: &askAuthorizer{verdict: AdmissionDeny}}
+			Authorizer: &askAuthorizer{verdict: enrollauth.AdmissionDeny}}
 		csr, key := newCSR(t, nodeIATest)
 		err := ask(t, svc, context.Background(), csr, key)
 		if connect.CodeOf(err) != connect.CodePermissionDenied {
 			t.Errorf("deny error code = %v, want PermissionDenied", connect.CodeOf(err))
 		}
 		// Nothing was issued or stored.
-		chains, err := f.db.Chains(context.Background(), trust.ChainQuery{IA: nodeIATest})
+		chains, err := f.db.Chains(context.Background(), trustdb.ChainQuery{IA: nodeIATest})
 		if err != nil || len(chains) != 0 {
 			t.Errorf("chains after a denial = %d (%v), want none", len(chains), err)
 		}
@@ -373,7 +375,7 @@ func TestTrustServiceEnrollmentAuthorizer(t *testing.T) {
 	t.Run("pending is Unavailable", func(t *testing.T) {
 		f := newTrustFixture(t)
 		svc := &TrustService{DB: f.db, Issuer: f.issuer,
-			Authorizer: &askAuthorizer{verdict: AdmissionPending}}
+			Authorizer: &askAuthorizer{verdict: enrollauth.AdmissionPending}}
 		csr, key := newCSR(t, nodeIATest)
 		err := ask(t, svc, context.Background(), csr, key)
 		if connect.CodeOf(err) != connect.CodeUnavailable {
@@ -383,7 +385,7 @@ func TestTrustServiceEnrollmentAuthorizer(t *testing.T) {
 
 	t.Run("the holder's renewal is never asked", func(t *testing.T) {
 		f := newTrustFixture(t)
-		auth := &askAuthorizer{verdict: AdmissionAllow}
+		auth := &askAuthorizer{verdict: enrollauth.AdmissionAllow}
 		svc := &TrustService{DB: f.db, Issuer: f.issuer, Authorizer: auth,
 			MinInterval: time.Microsecond}
 		csr, key := newCSR(t, nodeIATest)
@@ -401,7 +403,7 @@ func TestTrustServiceEnrollmentAuthorizer(t *testing.T) {
 
 	t.Run("a taken name is never asked", func(t *testing.T) {
 		f := newTrustFixture(t)
-		auth := &askAuthorizer{verdict: AdmissionAllow}
+		auth := &askAuthorizer{verdict: enrollauth.AdmissionAllow}
 		svc := &TrustService{DB: f.db, Issuer: f.issuer, Authorizer: auth,
 			MinInterval: time.Microsecond}
 		csr, key := newCSR(t, nodeIATest)
@@ -428,7 +430,7 @@ func TestTrustServiceEnrollmentAuthorizer(t *testing.T) {
 // free name allows.
 func TestChainRenewalExtendingName(t *testing.T) {
 	f := newTrustFixture(t)
-	auth := &askAuthorizer{verdict: AdmissionAllow}
+	auth := &askAuthorizer{verdict: enrollauth.AdmissionAllow}
 	svc := &TrustService{DB: f.db, Issuer: f.issuer, Authorizer: auth}
 	ctx := context.Background()
 
@@ -459,7 +461,7 @@ func TestChainRenewalExtendingName(t *testing.T) {
 		t.Errorf("the authorizer was asked %d times, want the one of the free name",
 			len(auth.asked))
 	}
-	chains, err := f.db.Chains(ctx, trust.ChainQuery{IA: coreIATest})
+	chains, err := f.db.Chains(ctx, trustdb.ChainQuery{IA: coreIATest})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -474,16 +476,16 @@ func TestChainRenewalExtendingName(t *testing.T) {
 // blockingAuthorizer holds every ask until released, then allows — the
 // Telegram prompt's network send in miniature.
 type blockingAuthorizer struct {
-	asked   chan AdmissionFacts
+	asked   chan enrollauth.AdmissionFacts
 	release chan struct{}
 }
 
 func (a *blockingAuthorizer) Authorize(
-	_ context.Context, f AdmissionFacts) AdmissionAnswer {
+	_ context.Context, f enrollauth.AdmissionFacts) enrollauth.AdmissionAnswer {
 
 	a.asked <- f
 	<-a.release
-	return AdmissionAnswer{Admission: AdmissionAllow}
+	return enrollauth.AdmissionAnswer{Admission: enrollauth.AdmissionAllow}
 }
 
 // sourceContext carries a SCION source address the way the QUIC transport
@@ -501,7 +503,7 @@ func sourceContext(port string) context.Context {
 func TestChainRenewalSerialized(t *testing.T) {
 	f := newTrustFixture(t)
 	auth := &blockingAuthorizer{
-		asked:   make(chan AdmissionFacts),
+		asked:   make(chan enrollauth.AdmissionFacts),
 		release: make(chan struct{}),
 	}
 	svc := &TrustService{DB: f.db, Issuer: f.issuer, Authorizer: auth}
@@ -556,7 +558,7 @@ func TestChainRenewalSerialized(t *testing.T) {
 	if issued != 1 || refused != 1 {
 		t.Fatalf("issued = %d, refused = %d, want one of each", issued, refused)
 	}
-	chains, err := f.db.Chains(context.Background(), trust.ChainQuery{IA: nodeIATest})
+	chains, err := f.db.Chains(context.Background(), trustdb.ChainQuery{IA: nodeIATest})
 	if err != nil {
 		t.Fatal(err)
 	}

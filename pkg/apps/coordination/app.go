@@ -10,7 +10,7 @@ import (
 	"tailscale.com/types/key"
 
 	"github.com/fancl20/cion/pkg/apps/wireguard"
-	"github.com/fancl20/cion/pkg/controlplane"
+	"github.com/fancl20/cion/pkg/modules/enrollauth"
 )
 
 // Store is the registry the coordination application works on: the core's
@@ -50,7 +50,7 @@ type Config struct {
 	// Authorizer gates registrations — the same seam the trust service
 	// asks at first issuance, asked here with the registration boundary's
 	// facts. Nil is open admission, the zero-conf default.
-	Authorizer controlplane.AdmissionAuthorizer
+	Authorizer enrollauth.AdmissionAuthorizer
 	// DERP names the relay the netmap advertises beside the coordination
 	// endpoint's own identity.
 	DERP DERPConfig

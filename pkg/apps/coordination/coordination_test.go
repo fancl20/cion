@@ -20,7 +20,7 @@ import (
 	"tailscale.com/types/key"
 
 	"github.com/fancl20/cion/pkg/apps/wireguard"
-	"github.com/fancl20/cion/pkg/controlplane"
+	"github.com/fancl20/cion/pkg/modules/enrollauth"
 )
 
 // memStore is an in-memory registry.
@@ -70,12 +70,12 @@ func (s *memStore) Close() error { return nil }
 // askAuthorizer records the facts it is asked with and answers as told.
 type askAuthorizer struct {
 	mtx    sync.Mutex
-	asked  []controlplane.AdmissionFacts
-	answer controlplane.AdmissionAnswer
+	asked  []enrollauth.AdmissionFacts
+	answer enrollauth.AdmissionAnswer
 }
 
 func (a *askAuthorizer) Authorize(
-	_ context.Context, f controlplane.AdmissionFacts) controlplane.AdmissionAnswer {
+	_ context.Context, f enrollauth.AdmissionFacts) enrollauth.AdmissionAnswer {
 
 	a.mtx.Lock()
 	defer a.mtx.Unlock()
@@ -83,10 +83,10 @@ func (a *askAuthorizer) Authorize(
 	return a.answer
 }
 
-func (a *askAuthorizer) asks() []controlplane.AdmissionFacts {
+func (a *askAuthorizer) asks() []enrollauth.AdmissionFacts {
 	a.mtx.Lock()
 	defer a.mtx.Unlock()
-	return append([]controlplane.AdmissionFacts(nil), a.asked...)
+	return append([]enrollauth.AdmissionFacts(nil), a.asked...)
 }
 
 // testCert mints a self-signed certificate for 127.0.0.1, the harness's

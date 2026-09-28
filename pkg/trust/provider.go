@@ -6,6 +6,8 @@ import (
 	"net"
 
 	"github.com/scionproto/scion/pkg/scrypto/cppki"
+
+	"github.com/fancl20/cion/pkg/modules/trustdb"
 )
 
 // Provider provides crypto material. A crypto provider can spawn network
@@ -20,7 +22,7 @@ type Provider interface {
 	// network. By default, the provider only returns certificate chains that
 	// are verifiable with the currently active TRCs. To configure the behavior,
 	// options can be provided.
-	GetChains(context.Context, ChainQuery, ...Option) ([][]*x509.Certificate, error)
+	GetChains(context.Context, trustdb.ChainQuery, ...Option) ([][]*x509.Certificate, error)
 	// GetSignedTRC returns the TRC with the given ID. If the TRC is not
 	// available, the provider can resolve it over the network.
 	GetSignedTRC(context.Context, cppki.TRCID, ...Option) (cppki.SignedTRC, error)

@@ -12,14 +12,15 @@ import (
 	"github.com/scionproto/scion/pkg/addr"
 	"github.com/scionproto/scion/pkg/scrypto/cppki"
 
+	"github.com/fancl20/cion/pkg/modules/trustdb"
+	"github.com/fancl20/cion/pkg/modules/trustdb/impl/bbolt"
 	"github.com/fancl20/cion/pkg/trust"
-	"github.com/fancl20/cion/pkg/trust/impl/bbolt"
 )
 
 // mtlsFixture is a core with a TRC and two enrolled nodes: the local node
 // whose engine serves the endpoint, and a peer.
 type mtlsFixture struct {
-	db     trust.DB
+	db     trustdb.DB
 	engine *trust.Engine
 	peer   *trust.Engine
 }

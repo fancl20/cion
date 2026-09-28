@@ -16,9 +16,10 @@ import (
 	"github.com/scionproto/scion/pkg/slayers/path"
 	spath "github.com/scionproto/scion/pkg/slayers/path/scion"
 
+	"github.com/fancl20/cion/pkg/modules/trustdb"
+	"github.com/fancl20/cion/pkg/modules/trustdb/impl/bbolt"
 	"github.com/fancl20/cion/pkg/segment"
 	"github.com/fancl20/cion/pkg/trust"
-	"github.com/fancl20/cion/pkg/trust/impl/bbolt"
 )
 
 var (
@@ -41,7 +42,7 @@ func macFactory() func() hash.Hash {
 // segFixture holds engines for a three-AS line: the core A and the enrolled
 // B and C, all anchored in one TRC.
 type segFixture struct {
-	db      trust.DB
+	db      trustdb.DB
 	engines map[addr.IA]*trust.Engine
 	keys    map[addr.IA]*ecdsa.PrivateKey
 }

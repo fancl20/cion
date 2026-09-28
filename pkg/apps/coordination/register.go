@@ -12,7 +12,7 @@ import (
 	"tailscale.com/types/key"
 
 	"github.com/fancl20/cion/pkg/apps/wireguard"
-	"github.com/fancl20/cion/pkg/controlplane"
+	"github.com/fancl20/cion/pkg/modules/enrollauth"
 )
 
 // maxRegisterBody bounds one registration request: the hostinfo a client
@@ -78,8 +78,8 @@ func (a *App) handleRegister(w http.ResponseWriter, r *http.Request,
 		}
 	}
 
-	facts := controlplane.AdmissionFacts{
-		Boundary: controlplane.BoundaryRegistration,
+	facts := enrollauth.AdmissionFacts{
+		Boundary: enrollauth.BoundaryRegistration,
 		Keys: []string{
 			machine.String(),
 			req.NodeKey.String(),
@@ -87,16 +87,16 @@ func (a *App) handleRegister(w http.ResponseWriter, r *http.Request,
 		Source:     source,
 		Credential: credential,
 	}
-	var answer controlplane.AdmissionAnswer
+	var answer enrollauth.AdmissionAnswer
 	if a.cfg.Authorizer == nil {
 		// No authorizer selected keeps registration open — the zero-conf
 		// default.
-		answer.Admission = controlplane.AdmissionAllow
+		answer.Admission = enrollauth.AdmissionAllow
 	} else {
 		answer = a.cfg.Authorizer.Authorize(r.Context(), facts)
 	}
 	switch answer.Admission {
-	case controlplane.AdmissionAllow:
+	case enrollauth.AdmissionAllow:
 		// Approve allocates the next free address in the owning node's
 		// slice and records the one registry entry: the key, the address,
 		// the owning node, and the approving plugin's note.
@@ -118,7 +118,7 @@ func (a *App) handleRegister(w http.ResponseWriter, r *http.Request,
 			"node_key", req.NodeKey.ShortString(),
 			"addr", host.Addr, "node", host.IA, "note", host.Note)
 		writeRegisterResponse(w, req.NodeKey)
-	case controlplane.AdmissionPending:
+	case enrollauth.AdmissionPending:
 		// Pending leaves the request refused-and-retried: the client's own
 		// polling carries the wait, exactly as enrollment's retry does.
 		http.Error(w, "registration pending a decision", http.StatusServiceUnavailable)

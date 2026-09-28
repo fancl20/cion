@@ -15,8 +15,9 @@ import (
 	"github.com/scionproto/scion/pkg/scrypto/cppki"
 	"github.com/scionproto/scion/pkg/scrypto/signed"
 
+	"github.com/fancl20/cion/pkg/modules/trustdb"
+	"github.com/fancl20/cion/pkg/modules/trustdb/impl/bbolt"
 	"github.com/fancl20/cion/pkg/trust"
-	"github.com/fancl20/cion/pkg/trust/impl/bbolt"
 )
 
 var (
@@ -26,7 +27,7 @@ var (
 
 // engineFixture is a trust engine with a genesis TRC and an issued chain.
 type engineFixture struct {
-	db     trust.DB
+	db     trustdb.DB
 	issuer *trust.Issuer
 	trc    cppki.SignedTRC
 	engine *trust.Engine
@@ -345,7 +346,7 @@ type countingProvider struct {
 	notifies int
 }
 
-func (p *countingProvider) GetChains(ctx context.Context, q trust.ChainQuery,
+func (p *countingProvider) GetChains(ctx context.Context, q trustdb.ChainQuery,
 	opts ...trust.Option) ([][]*x509.Certificate, error) {
 
 	p.chains++
