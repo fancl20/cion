@@ -2,14 +2,19 @@
 
 ### Coding style
 
-Go coding style should follow `/doc/styles/styleguide/go`, as well as any
+Go coding style should follow `/docs/styles/styleguide/go`, as well as any
 guidelines provided in this section. If not specified, maintain consistent
 style across the codebase.
 
-When adding comments, consider whether they provide additional context to the
-surrounding code or if similar information can be extracted from function
-names, variable names, or other context. Evaluate the cognitive cost of the
-added comment.
+Prefer fail-fast over defensive programming: validate external input once,
+where it enters, and never re-check internal or already-validated values.
+Let internal failures surface through the nearest error return; reserve
+`panic` for code paths that have no error to return.
+
+A comment states what the code does plus the facts a reader cannot derive
+from it — no citations of proposals or ADRs, no history of how the code came
+to be. Edit comments in place so the result reads as written fresh for the
+current design, not as an accumulation of past edits.
 
 ### Writing tests
 
@@ -61,3 +66,5 @@ When working in the `/docs` directory, follow the guidelines in this section:
 - Use a neutral and calm tone for all messages and keep text concise.
 - If something is unclear or ambiguous, seek confirmation or clarification from
   the user before making changes based on assumptions.
+- Edit toward the intended end state instead of appending, and drop
+  statements that exist only to negate what was there before.
