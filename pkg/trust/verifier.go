@@ -17,6 +17,8 @@ import (
 	"github.com/scionproto/scion/pkg/scrypto"
 	"github.com/scionproto/scion/pkg/scrypto/cppki"
 	"github.com/scionproto/scion/pkg/scrypto/signed"
+
+	"github.com/fancl20/cion/pkg/modules/trustdb"
 )
 
 const defaultCacheExpiration = time.Minute
@@ -80,7 +82,7 @@ func (v Verifier) Verify(ctx context.Context, signedMsg *cryptopb.SignedMessage,
 	if err := v.notifyTRC(ctx, id); err != nil {
 		return nil, serrors.Wrap("reporting TRC", err, "id", id)
 	}
-	query := ChainQuery{
+	query := trustdb.ChainQuery{
 		IA:           ia,
 		SubjectKeyID: keyID.SubjectKeyId,
 		Validity:     v.BoundValidity,
@@ -118,7 +120,7 @@ func (v *Verifier) notifyTRC(ctx context.Context, id cppki.TRCID) error {
 	return nil
 }
 
-func (v *Verifier) getChains(ctx context.Context, q ChainQuery) ([][]*x509.Certificate, error) {
+func (v *Verifier) getChains(ctx context.Context, q trustdb.ChainQuery) ([][]*x509.Certificate, error) {
 	key := fmt.Sprintf("chain-%s-%x", q.IA, q.SubjectKeyID)
 
 	if chains, ok := v.chains.get(key); ok {

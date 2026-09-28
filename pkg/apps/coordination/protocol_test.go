@@ -25,7 +25,7 @@ import (
 	"tailscale.com/util/zstdframe"
 
 	"github.com/fancl20/cion/pkg/apps/wireguard"
-	"github.com/fancl20/cion/pkg/controlplane"
+	"github.com/fancl20/cion/pkg/modules/enrollauth"
 )
 
 // serveCoordination serves the application's handler on an externally
@@ -276,7 +276,7 @@ func TestProtocolRegistrationVerdicts(t *testing.T) {
 
 	// Pending: refused, nothing recorded, and the client's own polling
 	// carries the wait.
-	auth.answer = controlplane.AdmissionAnswer{Admission: controlplane.AdmissionPending}
+	auth.answer = enrollauth.AdmissionAnswer{Admission: enrollauth.AdmissionPending}
 	if _, status := register(t, client, key.NewNode(), ""); status != http.StatusServiceUnavailable {
 		t.Errorf("pending status = %d, want %d", status, http.StatusServiceUnavailable)
 	}
@@ -285,7 +285,7 @@ func TestProtocolRegistrationVerdicts(t *testing.T) {
 	}
 
 	// Deny: refused for good, nothing recorded.
-	auth.answer = controlplane.AdmissionAnswer{Admission: controlplane.AdmissionDeny}
+	auth.answer = enrollauth.AdmissionAnswer{Admission: enrollauth.AdmissionDeny}
 	if _, status := register(t, client, key.NewNode(), ""); status != http.StatusForbidden {
 		t.Errorf("deny status = %d, want %d", status, http.StatusForbidden)
 	}
@@ -296,8 +296,8 @@ func TestProtocolRegistrationVerdicts(t *testing.T) {
 	// Allow with a credential and a note: the facts carry the machine and
 	// node keys, the source the TLS connection named, and the credential
 	// the joiner presented; the entry records the note.
-	auth.answer = controlplane.AdmissionAnswer{
-		Admission: controlplane.AdmissionAllow,
+	auth.answer = enrollauth.AdmissionAnswer{
+		Admission: enrollauth.AdmissionAllow,
 		Note:      "telegram invitation",
 	}
 	invited := key.NewNode()
@@ -318,7 +318,7 @@ func TestProtocolRegistrationVerdicts(t *testing.T) {
 		t.Fatalf("the seam was asked %d times, want 3", len(asks))
 	}
 	last := asks[2]
-	if last.Boundary != controlplane.BoundaryRegistration {
+	if last.Boundary != enrollauth.BoundaryRegistration {
 		t.Errorf("the boundary = %v, want registration", last.Boundary)
 	}
 	if last.Credential != "cion-0123456789abcdef" {

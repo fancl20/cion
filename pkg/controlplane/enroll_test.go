@@ -19,9 +19,10 @@ import (
 	"github.com/scionproto/scion/pkg/addr"
 	"github.com/scionproto/scion/pkg/scrypto/cppki"
 
+	"github.com/fancl20/cion/pkg/modules/trustdb"
+	"github.com/fancl20/cion/pkg/modules/trustdb/impl/bbolt"
 	"github.com/fancl20/cion/pkg/scion"
 	"github.com/fancl20/cion/pkg/trust"
-	"github.com/fancl20/cion/pkg/trust/impl/bbolt"
 	"github.com/fancl20/cion/pkg/webpki"
 )
 
@@ -138,7 +139,7 @@ func enrollNode(
 	n *testNode,
 	domain string,
 	rootCAs *x509.CertPool,
-	db trust.DB,
+	db trustdb.DB,
 	key crypto.Signer,
 ) error {
 
@@ -201,14 +202,14 @@ func TestEnrollmentTwoNodes(t *testing.T) {
 	if trc.TRC.ID != f.trc.TRC.ID {
 		t.Errorf("node TRC %v, core TRC %v", trc.TRC.ID, f.trc.TRC.ID)
 	}
-	nodeChains, err := nodeDB.Chains(ctx, trust.ChainQuery{IA: iaNode})
+	nodeChains, err := nodeDB.Chains(ctx, trustdb.ChainQuery{IA: iaNode})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(nodeChains) != 1 {
 		t.Fatalf("node chains = %d, want 1", len(nodeChains))
 	}
-	coreChains, err := f.db.Chains(ctx, trust.ChainQuery{IA: iaNode})
+	coreChains, err := f.db.Chains(ctx, trustdb.ChainQuery{IA: iaNode})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -223,7 +224,7 @@ func TestEnrollmentTwoNodes(t *testing.T) {
 
 	// The network-backed provider serves the fetched material from the DB.
 	provider := &trust.NetworkProvider{DB: nodeDB, Remote: nilRemote{}}
-	chains, err := provider.GetChains(ctx, trust.ChainQuery{IA: iaNode})
+	chains, err := provider.GetChains(ctx, trustdb.ChainQuery{IA: iaNode})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -264,7 +265,7 @@ func TestEnrollmentWrongDomain(t *testing.T) {
 		t.Fatal("enrollment against endpoint with wrong-domain certificate succeeded")
 	}
 	// Nothing was stored.
-	chains, err := nodeDB.Chains(ctx, trust.ChainQuery{IA: iaNode})
+	chains, err := nodeDB.Chains(ctx, trustdb.ChainQuery{IA: iaNode})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -282,7 +283,7 @@ func (nilRemote) TRC(ctx context.Context, id cppki.TRCID) (cppki.SignedTRC, erro
 	return cppki.SignedTRC{}, errNilRemote
 }
 
-func (nilRemote) Chains(ctx context.Context, q trust.ChainQuery) ([][]*x509.Certificate, error) {
+func (nilRemote) Chains(ctx context.Context, q trustdb.ChainQuery) ([][]*x509.Certificate, error) {
 	return nil, errNilRemote
 }
 

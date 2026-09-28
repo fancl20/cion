@@ -8,8 +8,8 @@ import (
 
 	"github.com/scionproto/scion/pkg/addr"
 
-	"github.com/fancl20/cion/pkg/links"
-	"github.com/fancl20/cion/pkg/links/impl/memory"
+	"github.com/fancl20/cion/pkg/modules/links"
+	"github.com/fancl20/cion/pkg/modules/links/impl/memory"
 )
 
 // newTestMonitor returns a monitor over a memory store at the production

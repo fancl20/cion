@@ -12,8 +12,8 @@ import (
 	"github.com/scionproto/scion/pkg/addr"
 
 	"github.com/fancl20/cion/pkg/dataplane"
-	"github.com/fancl20/cion/pkg/links"
-	"github.com/fancl20/cion/pkg/links/impl/memory"
+	"github.com/fancl20/cion/pkg/modules/links"
+	"github.com/fancl20/cion/pkg/modules/links/impl/memory"
 	"github.com/fancl20/cion/pkg/scion"
 )
 

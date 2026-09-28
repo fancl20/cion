@@ -8,6 +8,8 @@ import (
 	"testing"
 
 	"github.com/scionproto/scion/pkg/scrypto/cppki"
+
+	"github.com/fancl20/cion/pkg/modules/trustdb"
 )
 
 // fakeRemote serves trust material from memory and counts fetches.
@@ -30,7 +32,7 @@ func (r *fakeRemote) TRC(ctx context.Context, id cppki.TRCID) (cppki.SignedTRC, 
 	return r.trc, nil
 }
 
-func (r *fakeRemote) Chains(ctx context.Context, q ChainQuery) ([][]*x509.Certificate, error) {
+func (r *fakeRemote) Chains(ctx context.Context, q trustdb.ChainQuery) ([][]*x509.Certificate, error) {
 	r.chainFetches++
 	if r.failFollowing {
 		return nil, errors.New("remote gone")
@@ -112,7 +114,7 @@ func TestEnroll(t *testing.T) {
 	if err := trc.Verify(nil); err != nil {
 		t.Errorf("stored TRC does not verify: %v", err)
 	}
-	chains, err := db.Chains(context.Background(), ChainQuery{IA: nodeIA})
+	chains, err := db.Chains(context.Background(), trustdb.ChainQuery{IA: nodeIA})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -150,7 +152,7 @@ func TestEnrollRejectsUnanchoredChain(t *testing.T) {
 		t.Error("enrollment with unanchored chain succeeded, want rejection")
 	}
 	// The bogus chain must not be stored.
-	chains, err := db.Chains(context.Background(), ChainQuery{IA: nodeIA})
+	chains, err := db.Chains(context.Background(), trustdb.ChainQuery{IA: nodeIA})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/fancl20/cion/pkg/modules/trustdb"
 	"github.com/scionproto/scion/pkg/addr"
 	"github.com/scionproto/scion/pkg/scrypto/cppki"
 )
@@ -27,14 +28,14 @@ func newTestCoreKeys(t *testing.T, dir string) CoreKeys {
 	return keys
 }
 
-func newTestDB(t *testing.T) DB {
+func newTestDB(t *testing.T) trustdb.DB {
 	t.Helper()
 	return newMemDB()
 }
 
 // genesisFixture is a DB and key material with a genesis TRC in place.
 type genesisFixture struct {
-	db   DB
+	db   trustdb.DB
 	keys CoreKeys
 	trc  cppki.SignedTRC
 }
@@ -209,7 +210,7 @@ func newMemDB() *memDB {
 	return &memDB{trcs: make(map[cppki.TRCID]cppki.SignedTRC)}
 }
 
-func (d *memDB) Chains(ctx context.Context, q ChainQuery) ([][]*x509.Certificate, error) {
+func (d *memDB) Chains(ctx context.Context, q trustdb.ChainQuery) ([][]*x509.Certificate, error) {
 	d.mtx.Lock()
 	defer d.mtx.Unlock()
 	var out [][]*x509.Certificate

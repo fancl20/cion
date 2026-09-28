@@ -10,6 +10,7 @@ import (
 	"github.com/scionproto/scion/pkg/addr"
 	"github.com/scionproto/scion/pkg/scrypto/cppki"
 
+	"github.com/fancl20/cion/pkg/modules/trustdb"
 	"github.com/fancl20/cion/pkg/trust"
 )
 
@@ -38,7 +39,7 @@ type EnrollmentConfig struct {
 	// IA is the node's ISD-AS.
 	IA addr.IA
 	// DB holds the node's chains and the pinned TRC.
-	DB trust.DB
+	DB trustdb.DB
 	// Key is the node's AS key.
 	Key crypto.Signer
 	// Remote enrolls against the core's endpoint; nil on the founding

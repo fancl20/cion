@@ -337,3 +337,62 @@ of its own.
     the standing argument tests pass with moved imports alone.
 
 ## Implementation history
+
+*   The roof: `pkg/modules`, holding one test package alone —
+    [walk_test.go](/pkg/modules/walk_test.go), the walk and the import
+    rule. The walk reads the tree (kind line, `impl/` alone beneath a
+    root, one package per implementation, suites exempt by name); the
+    import rule reads `go list` (production importers of an
+    implementation: `internal/services` and `internal/testnetwork`
+    alone). Both prove themselves against fixtures built to fail beside
+    the run on the roof as landed; the checks read the tree at run time,
+    so a change elsewhere in the roof can be served from `go test`'s
+    cache — the repo's `-count` discipline defeats it.
+*   The storage modules: `links` and `pathdb` moved whole to
+    [pkg/modules/links](/pkg/modules/links/links.go) and
+    [pkg/modules/pathdb](/pkg/modules/pathdb/pathdb.go); the trust
+    surgery split `pkg/trust` — the contract to
+    [pkg/modules/trustdb](/pkg/modules/trustdb/trustdb.go) with the
+    bbolt store and the suite beneath it, the engine whole in `pkg/trust`
+    taking `trustdb.DB` where it took `trust.DB`. `openState` binds the
+    three unchanged but for import paths.
+*   The policy module's selector: **a divergence.** The plan kept `Load`
+    and its grammar at the module's root, beside implementations filed
+    one package each beneath — a shape Go forbids, for a root-level
+    `Load` must import the implementations to construct them while they
+    must import the root for `AdmissionFacts` and `AdmissionAnswer`: an
+    import cycle. Per review, the grammar moved to the assembly —
+    `loadEnrollAuth` in
+    [internal/services/enrollauth.go](/internal/services/enrollauth.go),
+    called by `Validate` and `setupEnrollAuth` — and the caller imports
+    the implementation the spec names directly, `impl/cidr` and
+    `impl/telegram`: the databases' own pattern, and the import rule's
+    letter. The implementations are
+    [cidr.Authorizer](/pkg/modules/enrollauth/impl/cidr/cidr.go) and
+    [telegram.Authorizer](/pkg/modules/enrollauth/impl/telegram/telegram.go);
+    the contract is
+    [pkg/modules/enrollauth](/pkg/modules/enrollauth/admission.go), and
+    the coordination application's import of the control plane is gone.
+*   The suites: the policy module's contract suite is
+    [impl/authtest](/pkg/modules/enrollauth/impl/authtest/authtest.go) —
+    the zero verdict denying, the fail-closed rule under facts each
+    implementation cannot decide. The source module gained its own,
+    [impl/providertest](/pkg/modules/topology/impl/providertest/providertest.go),
+    the walk's "every implementation runs the suite" made real: the
+    founding core's draw returning unchanged, seeding idempotent before
+    the first generation.
+*   The source module: the contract at
+    [pkg/modules/topology](/pkg/modules/topology/topology.go); the
+    measured provider and its machinery in
+    [impl/measured](/pkg/modules/topology/impl/measured/provider.go)
+    (`measured.Provider`, `measured.Config`); the file provider in
+    [impl/file](/pkg/modules/topology/impl/file/provider.go)
+    (`file.Provider`, `file.Config`, `file.WatchInterval`).
+    `selectProvider` in the assembly selects as before, importing both
+    implementations directly.
+*   The records: ADR-0013 accepted; the architecture overview split — a
+    modules section carrying the five with their kinds, the neighbor
+    table and the path database named as modules the core consumes, the
+    topology and enrollment-policy bullets leaving the applications
+    list, the topology section speaking the source. The security model
+    unchanged.

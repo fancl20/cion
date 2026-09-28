@@ -12,7 +12,8 @@ import (
 	"time"
 
 	"github.com/fancl20/cion/internal/services"
-	"github.com/fancl20/cion/pkg/links"
+	"github.com/fancl20/cion/pkg/modules/links"
+	"github.com/fancl20/cion/pkg/modules/trustdb"
 	"github.com/fancl20/cion/pkg/trust"
 )
 
@@ -160,7 +161,7 @@ func holdsChain(n *assemblyNode) bool {
 // holdsNoChainFor reports whether the core holds no chain naming the joiner.
 func holdsNoChainFor(core, joiner *assemblyNode) bool {
 	chains, err := core.app.TrustDB().Chains(context.Background(),
-		trust.ChainQuery{IA: joiner.app.IA()})
+		trustdb.ChainQuery{IA: joiner.app.IA()})
 	return err == nil && len(chains) == 0
 }
 

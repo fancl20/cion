@@ -8,7 +8,7 @@ import (
 	"github.com/scionproto/scion/pkg/private/serrors"
 	spath "github.com/scionproto/scion/pkg/slayers/path/scion"
 
-	"github.com/fancl20/cion/pkg/pathdb"
+	"github.com/fancl20/cion/pkg/modules/pathdb"
 	"github.com/fancl20/cion/pkg/segment"
 )
 

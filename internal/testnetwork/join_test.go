@@ -10,9 +10,9 @@ import (
 
 	"github.com/fancl20/cion/internal/services"
 	"github.com/fancl20/cion/pkg/apps/ping"
-	"github.com/fancl20/cion/pkg/apps/topology"
-	"github.com/fancl20/cion/pkg/links"
-	"github.com/fancl20/cion/pkg/pathdb"
+	"github.com/fancl20/cion/pkg/modules/links"
+	"github.com/fancl20/cion/pkg/modules/pathdb"
+	"github.com/fancl20/cion/pkg/modules/topology/impl/measured"
 	"github.com/fancl20/cion/pkg/trust"
 )
 
@@ -40,7 +40,7 @@ type assemblyNode struct {
 // rendezvousOf returns the node's advertised rendezvous address: the
 // control address's host on the fixed rendezvous port.
 func (n *assemblyNode) rendezvousOf() string {
-	return netip.AddrPortFrom(n.host, topology.RendezvousPort).String()
+	return netip.AddrPortFrom(n.host, measured.RendezvousPort).String()
 }
 
 // bootAssembly boots a full node assembly — the run command's own wiring —

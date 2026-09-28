@@ -11,7 +11,7 @@ import (
 	"github.com/scionproto/scion/pkg/scrypto"
 	spath "github.com/scionproto/scion/pkg/slayers/path/scion"
 
-	"github.com/fancl20/cion/pkg/pathdb"
+	"github.com/fancl20/cion/pkg/modules/pathdb"
 	"github.com/fancl20/cion/pkg/segment"
 )
 
@@ -323,8 +323,8 @@ func TestProviderMeetingAtLocalNode(t *testing.T) {
 func TestProviderCorePath(t *testing.T) {
 	down := linePCB(t, time.Now(), iaCore, iaMid, iaLeaf)
 	p := &PathProvider{
-		IA:   iaCore,
-		DB:   &fakePathDB{},
+		IA: iaCore,
+		DB: &fakePathDB{},
 		Lookup: func(context.Context, addr.IA) []*pathdb.Segment {
 			return []*pathdb.Segment{{Type: pathdb.SegmentTypeDown, PCB: down}}
 		},
@@ -438,8 +438,8 @@ func TestProviderFilterCountsTraversedHopsOnly(t *testing.T) {
 			}
 		}
 		return &PathProvider{
-			IA: iaLeaf,
-			DB: db,
+			IA:            iaLeaf,
+			DB:            db,
 			InterfaceDown: NewInterfaceDownCache(),
 			Lookup: func(context.Context, addr.IA) []*pathdb.Segment {
 				return []*pathdb.Segment{

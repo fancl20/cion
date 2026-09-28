@@ -11,7 +11,7 @@ import (
 	"github.com/scionproto/scion/pkg/addr"
 
 	"github.com/fancl20/cion/pkg/dataplane"
-	"github.com/fancl20/cion/pkg/links"
+	"github.com/fancl20/cion/pkg/modules/links"
 )
 
 // HealthMonitor owns a BFD session per serving link and reduces the

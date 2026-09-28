@@ -38,15 +38,17 @@ internet scale
 *   **Spec-native mechanisms** — where the SCION drafts define an
     instrument, the node speaks it
     ([ADR-0008](/docs/adrs/0008-form-topology-with-measured-neighbor-selection.md)).
-*   **Mechanism in the core, policy in apps** — what the network depends on
-    whatever the node's own policy is core, a service owed; what deployments
-    could differ on is policy under an application
-    ([ADR-0009](/docs/adrs/0009-keep-a-minimal-node-core-and-move-everything-else-to-apps.md)).
+*   **Mechanism in the core, seams in modules, services in apps** — what the
+    network depends on whatever the node's own policy is core, a service
+    owed; where an implementation could differ is a module; what a node
+    offers beyond itself is an application
+    ([ADR-0009](/docs/adrs/0009-keep-a-minimal-node-core-and-move-everything-else-to-apps.md),
+    [ADR-0013](/docs/adrs/0013-file-the-nodes-seams-as-modules.md)).
 
 ## The components
 
-The dependency direction is one-way: applications and policy import the
-core, never the reverse.
+The dependency direction is one-way: modules and applications import the
+core and the libraries, never the reverse.
 
 ### The node core
 
@@ -63,9 +65,6 @@ policy chooses.
     turns their verdicts.
 *   **Trust engine** — holds and issues the network's trust material: the
     TRC, certificate chains, and their renewal.
-*   **Neighbor table** — the one source of truth about links; every data
-    plane generation is built from its snapshot.
-*   **Path database** — the registered path segments a node keeps.
 
 ### Shared libraries
 
@@ -81,12 +80,28 @@ run no loops of their own and hold no policy.
 *   **Peer identity** — the verified chain's identity, shared as middleware
     by every authenticated channel.
 
-### Applications and policy
+### Modules
 
-*   **Topology application** — owns the node's link policy: rendezvous, the
-    node directory, and the selection loop. It loads by default; a static
-    file-driven alternative exists for deliberate deployments
-    ([ADR-0009](/docs/adrs/0009-keep-a-minimal-node-core-and-move-everything-else-to-apps.md)).
+Modules are the parts of the node where an implementation could differ —
+its pluggable surface
+([ADR-0013](/docs/adrs/0013-file-the-nodes-seams-as-modules.md)). Each
+declares a kind, and the kind fixes the selection: storage is bound by the
+composition root, policy and the source by the operator's run arguments.
+
+*   **Trust database** — storage: where trust material persists.
+*   **Path database** — storage: where registered segments persist.
+*   **Neighbor table** — storage: where the one source of truth about
+    links persists; every data plane generation is built from its
+    snapshot.
+*   **Enrollment authorizer** — policy: who is admitted, joiner node or
+    host; `--enroll-auth` selects exactly one method
+    ([ADR-0010](/docs/adrs/0010-gate-enrollment-with-a-pluggable-authorizer.md)).
+*   **Topology source** — source: where topology decisions come from; the
+    measured provider by default — loading it is what makes a node
+    zero-conf — the file provider when `--link-set` names a link-set.
+
+### Applications
+
 *   **WireGuard** — carries host and mesh traffic over SCION paths between
     nodes ([ADR-0005](/docs/adrs/0005-serve-endhosts-with-a-wireguard-gateway.md)).
 *   **SOCKS** — internet egress as a service on the overlay: every node
@@ -100,9 +115,6 @@ run no loops of their own and hold no policy.
     ([ADR-0011](/docs/adrs/0011-serve-hosts-with-a-tailscale-coordination-service.md)).
 *   **Ping** — the network's probe, and the selection loop's measuring
     instrument.
-*   **Enrollment policy** — the authorizers a core can gate a joiner's first
-    issuance with
-    ([ADR-0010](/docs/adrs/0010-gate-enrollment-with-a-pluggable-authorizer.md)).
 
 ## How the components interact
 
@@ -133,7 +145,7 @@ SCION library's socket.
 
 ### Topology and liveness
 
-The topology application meets candidate peers at the rendezvous exchange —
+The topology source meets candidate peers at the rendezvous exchange —
 first contact, admission probe, and a joiner's establishment in one — and
 learns of them from the core-served node directory. Admitted links enter the
 neighbor table; the selection loop then measures every peer and keeps a
@@ -141,7 +153,7 @@ direct link only while it beats the composed-path alternative, holding a
 resilience floor and changing slowly, because every change reshapes paths
 network-wide. Membership changes land as generation swaps: the new data
 plane is built from the neighbor table's snapshot and the old one retires.
-Liveness runs beside the policy: a session per link feeds the monitor, whose
+Liveness runs beside the source: a session per link feeds the monitor, whose
 verdict stops forwarding on a dead link and resumes it on recovery — a state
 flip within the same generation, faster and reversible where membership
 changes are damped.

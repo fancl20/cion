@@ -12,6 +12,8 @@ import (
 	"github.com/scionproto/scion/pkg/addr"
 	"github.com/scionproto/scion/pkg/private/serrors"
 	"github.com/scionproto/scion/pkg/scrypto/cppki"
+
+	"github.com/fancl20/cion/pkg/modules/trustdb"
 )
 
 // Remote resolves trust material over the network, typically from the core's
@@ -20,7 +22,7 @@ type Remote interface {
 	// TRC fetches the signed TRC with the given ID.
 	TRC(ctx context.Context, id cppki.TRCID) (cppki.SignedTRC, error)
 	// Chains fetches the chains matching the query.
-	Chains(ctx context.Context, q ChainQuery) ([][]*x509.Certificate, error)
+	Chains(ctx context.Context, q trustdb.ChainQuery) ([][]*x509.Certificate, error)
 	// RenewChain requests a certificate chain for the CSR, proving possession
 	// of the subject key with the given signer. It returns the chain carried
 	// by the verified renewal response.
@@ -34,7 +36,7 @@ type Remote interface {
 // and a nil Remote resolves to "not found", never a panic.
 type NetworkProvider struct {
 	// DB is the local trust database.
-	DB DB
+	DB trustdb.DB
 	// Remote resolves missing trust material over the network. Nil means the
 	// provider is local-only.
 	Remote Remote
@@ -50,7 +52,7 @@ func (p *NetworkProvider) LocalTRC(id cppki.TRCID) (cppki.SignedTRC, error) {
 
 // LocalChains looks up chains in the local database only.
 func (p *NetworkProvider) LocalChains(
-	ctx context.Context, q ChainQuery) ([][]*x509.Certificate, error) {
+	ctx context.Context, q trustdb.ChainQuery) ([][]*x509.Certificate, error) {
 
 	return p.DB.Chains(ctx, q)
 }
@@ -82,7 +84,7 @@ func (p *NetworkProvider) GetSignedTRC(
 // returned and cached.
 func (p *NetworkProvider) GetChains(
 	ctx context.Context,
-	q ChainQuery,
+	q trustdb.ChainQuery,
 	opts ...Option,
 ) ([][]*x509.Certificate, error) {
 
@@ -136,7 +138,7 @@ func (p *NetworkProvider) NotifyTRC(ctx context.Context, id cppki.TRCID, opts ..
 // before it is stored.
 func Enroll(
 	ctx context.Context,
-	db DB,
+	db trustdb.DB,
 	remote Remote,
 	ia addr.IA,
 	key crypto.Signer,
@@ -146,7 +148,7 @@ func Enroll(
 		return nil, err
 	}
 	now := time.Now()
-	if chains, err := db.Chains(ctx, ChainQuery{
+	if chains, err := db.Chains(ctx, trustdb.ChainQuery{
 		IA:       ia,
 		Validity: cppki.Validity{NotBefore: now, NotAfter: now},
 	}); err != nil {
@@ -163,7 +165,7 @@ func Enroll(
 // threshold.
 func RenewChain(
 	ctx context.Context,
-	db DB,
+	db trustdb.DB,
 	remote Remote,
 	ia addr.IA,
 	key crypto.Signer,
@@ -203,7 +205,7 @@ func RenewChain(
 // and signature, and caches it in the DB.
 func fetchTRC(
 	ctx context.Context,
-	db DB,
+	db trustdb.DB,
 	remote Remote,
 	id cppki.TRCID,
 ) (cppki.SignedTRC, error) {

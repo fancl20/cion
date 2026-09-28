@@ -14,8 +14,8 @@ import (
 	cppb "github.com/scionproto/scion/pkg/proto/control_plane"
 	spath "github.com/scionproto/scion/pkg/slayers/path/scion"
 
-	"github.com/fancl20/cion/pkg/pathdb"
-	pathdbbbolt "github.com/fancl20/cion/pkg/pathdb/impl/bbolt"
+	"github.com/fancl20/cion/pkg/modules/pathdb"
+	pathdbbbolt "github.com/fancl20/cion/pkg/modules/pathdb/impl/bbolt"
 	"github.com/fancl20/cion/pkg/scion"
 	"github.com/fancl20/cion/pkg/segment"
 )

@@ -11,7 +11,7 @@ import (
 	"github.com/scionproto/scion/pkg/private/serrors"
 	cppb "github.com/scionproto/scion/pkg/proto/control_plane"
 
-	"github.com/fancl20/cion/pkg/pathdb"
+	"github.com/fancl20/cion/pkg/modules/pathdb"
 	"github.com/fancl20/cion/pkg/scion"
 )
 

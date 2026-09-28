@@ -11,14 +11,14 @@ import (
 	"github.com/scionproto/scion/pkg/addr"
 	spath "github.com/scionproto/scion/pkg/slayers/path/scion"
 
-	"github.com/fancl20/cion/pkg/apps/topology"
 	"github.com/fancl20/cion/pkg/controlplane"
-	linkbbolt "github.com/fancl20/cion/pkg/links/impl/bbolt"
-	"github.com/fancl20/cion/pkg/pathdb"
-	pathdbbbolt "github.com/fancl20/cion/pkg/pathdb/impl/bbolt"
+	linkbbolt "github.com/fancl20/cion/pkg/modules/links/impl/bbolt"
+	"github.com/fancl20/cion/pkg/modules/pathdb"
+	pathdbbbolt "github.com/fancl20/cion/pkg/modules/pathdb/impl/bbolt"
+	"github.com/fancl20/cion/pkg/modules/topology"
+	"github.com/fancl20/cion/pkg/modules/trustdb/impl/bbolt"
 	"github.com/fancl20/cion/pkg/scion"
 	"github.com/fancl20/cion/pkg/trust"
-	"github.com/fancl20/cion/pkg/trust/impl/bbolt"
 	"github.com/fancl20/cion/pkg/webpki"
 )
 

@@ -11,10 +11,10 @@ import (
 	"github.com/scionproto/scion/pkg/scrypto"
 	"github.com/scionproto/scion/pkg/scrypto/cppki"
 
-	"github.com/fancl20/cion/pkg/pathdb"
+	"github.com/fancl20/cion/pkg/modules/pathdb"
+	"github.com/fancl20/cion/pkg/modules/trustdb"
 	"github.com/fancl20/cion/pkg/scion"
 	"github.com/fancl20/cion/pkg/segment"
-	"github.com/fancl20/cion/pkg/trust"
 )
 
 // TestFabricatingNeighbor is proposal 0015's fabrication lab: an enrolled
@@ -114,7 +114,7 @@ func TestFabricatingNeighbor(t *testing.T) {
 // chain for the given ISD-AS.
 func holdsChainOf(n *Node, ia addr.IA) bool {
 	now := time.Now()
-	chains, err := n.TrustDB.Chains(context.Background(), trust.ChainQuery{
+	chains, err := n.TrustDB.Chains(context.Background(), trustdb.ChainQuery{
 		IA:       ia,
 		Validity: cppki.Validity{NotBefore: now, NotAfter: now},
 	})

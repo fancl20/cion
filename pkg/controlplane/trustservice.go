@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"connectrpc.com/connect"
+	"github.com/quic-go/quic-go/http3"
 	"github.com/scionproto/scion/pkg/addr"
 	"github.com/scionproto/scion/pkg/private/serrors"
 	cppb "github.com/scionproto/scion/pkg/proto/control_plane"
@@ -20,6 +21,9 @@ import (
 	"github.com/scionproto/scion/pkg/scrypto/cppki"
 	"google.golang.org/protobuf/proto"
 
+	"github.com/fancl20/cion/pkg/modules/enrollauth"
+	"github.com/fancl20/cion/pkg/modules/trustdb"
+	"github.com/fancl20/cion/pkg/scion"
 	"github.com/fancl20/cion/pkg/trust"
 )
 
@@ -41,7 +45,7 @@ type TrustService struct {
 	control_planeconnect.UnimplementedSegmentLookupServiceHandler
 
 	// DB serves trust material from the local trust database.
-	DB trust.DB
+	DB trustdb.DB
 	// Issuer signs certificate chains. It is nil on nodes that do not issue
 	// chains — everything but the founding core, in this milestone.
 	Issuer *trust.Issuer
@@ -50,7 +54,7 @@ type TrustService struct {
 	// same-key renewal. The same seam answers host registration on the
 	// coordination application. Nil is open admission — the zero-conf
 	// default.
-	Authorizer AdmissionAuthorizer
+	Authorizer enrollauth.AdmissionAuthorizer
 	// MinInterval is the least pause between admissions of one source at the
 	// renewal door; zero uses the default.
 	MinInterval time.Duration
@@ -114,7 +118,7 @@ func (s *TrustService) checkNameTaken(
 	now time.Time,
 ) (bool, error) {
 
-	chains, err := s.DB.Chains(ctx, trust.ChainQuery{
+	chains, err := s.DB.Chains(ctx, trustdb.ChainQuery{
 		IA:       ia,
 		Validity: cppki.Validity{NotBefore: now, NotAfter: now},
 	})
@@ -162,8 +166,8 @@ func (s *TrustService) authorizeFirstIssuance(
 		return connect.NewError(connect.CodeInvalidArgument,
 			serrors.Wrap("computing the CSR subject key", err))
 	}
-	facts := AdmissionFacts{
-		Boundary: BoundaryEnrollment,
+	facts := enrollauth.AdmissionFacts{
+		Boundary: enrollauth.BoundaryEnrollment,
 		Keys:     []string{hex.EncodeToString(skid)},
 		Source:   remoteUnderlay(ctx),
 		Claim:    ia,
@@ -172,9 +176,9 @@ func (s *TrustService) authorizeFirstIssuance(
 	logFacts := []any{
 		"isd_as", ia, "key", facts.Keys[0], "source", facts.Source}
 	switch answer.Admission {
-	case AdmissionAllow:
+	case enrollauth.AdmissionAllow:
 		return nil
-	case AdmissionPending:
+	case enrollauth.AdmissionPending:
 		slog.Info("Enrollment pending a decision", logFacts...)
 		return connect.NewError(connect.CodeUnavailable,
 			serrors.New("enrollment pending", "isd_as", ia, "source", facts.Source))
@@ -216,7 +220,7 @@ func (s *TrustService) Chains(
 	now := time.Now()
 	// The request may pin a validity window; unset bounds default to "valid
 	// now" on that side.
-	query := trust.ChainQuery{
+	query := trustdb.ChainQuery{
 		IA:           addr.IA(r.IsdAs),
 		SubjectKeyID: r.SubjectKeyId,
 		Validity:     cppki.Validity{NotBefore: now, NotAfter: now},
@@ -371,4 +375,16 @@ func (l *sourceLimiter[K]) admit(key K) bool {
 	}
 	l.last[key] = now
 	return true
+}
+
+// remoteUnderlay returns the SCION source address the request context's
+// connection carries — the *scion.Addr the QUIC transport named the peer by,
+// the pattern arrivalInterface reads — and the zero AddrPort when the
+// context carries none.
+func remoteUnderlay(ctx context.Context) netip.AddrPort {
+	remote, ok := ctx.Value(http3.RemoteAddrContextKey).(*scion.Addr)
+	if !ok || remote == nil {
+		return netip.AddrPort{}
+	}
+	return remote.Addr
 }

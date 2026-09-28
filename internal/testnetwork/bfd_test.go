@@ -11,7 +11,7 @@ import (
 
 	"github.com/fancl20/cion/internal/services"
 	"github.com/fancl20/cion/pkg/apps/ping"
-	"github.com/fancl20/cion/pkg/links"
+	"github.com/fancl20/cion/pkg/modules/links"
 )
 
 // TestBFDLivenessEpisode is proposal 0012's integration proof: a three-node

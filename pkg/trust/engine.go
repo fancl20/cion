@@ -12,6 +12,8 @@ import (
 	cryptopb "github.com/scionproto/scion/pkg/proto/crypto"
 	"github.com/scionproto/scion/pkg/scrypto/cppki"
 	"github.com/scionproto/scion/pkg/scrypto/signed"
+
+	"github.com/fancl20/cion/pkg/modules/trustdb"
 )
 
 // ChainRenewalThreshold is the remaining validity below which the enrollment
@@ -54,7 +56,7 @@ func NewEngine(ia addr.IA, key crypto.Signer, provider Provider) *Engine {
 // TRC, and validity and subject from the chain (proposal 0004).
 func (e *Engine) Signer(ctx context.Context) (Signer, error) {
 	now := time.Now()
-	chains, err := e.Provider.GetChains(ctx, ChainQuery{
+	chains, err := e.Provider.GetChains(ctx, trustdb.ChainQuery{
 		IA:       e.IA,
 		Validity: cppki.Validity{NotBefore: now, NotAfter: now},
 	})
@@ -138,7 +140,7 @@ func (e *Engine) VerifyBound(
 // not spawn trust fetches, and an un-enrolled node simply has none.
 func (e *Engine) Chain(ctx context.Context) ([]*x509.Certificate, error) {
 	now := time.Now()
-	q := ChainQuery{IA: e.IA, Validity: cppki.Validity{NotBefore: now, NotAfter: now}}
+	q := trustdb.ChainQuery{IA: e.IA, Validity: cppki.Validity{NotBefore: now, NotAfter: now}}
 	var chains [][]*x509.Certificate
 	var err error
 	if db, ok := e.Provider.(DBProvider); ok {
@@ -166,7 +168,7 @@ func (e *Engine) BaseTRC() (cppki.SignedTRC, error) {
 // DBProvider is implemented by providers that hold a local trust database.
 type DBProvider interface {
 	LocalTRC(id cppki.TRCID) (cppki.SignedTRC, error)
-	LocalChains(ctx context.Context, q ChainQuery) ([][]*x509.Certificate, error)
+	LocalChains(ctx context.Context, q trustdb.ChainQuery) ([][]*x509.Certificate, error)
 }
 
 // baseTRC fetches the ISD's base TRC through the provider.
@@ -203,12 +205,12 @@ func (e *Engine) CoreASes(isd addr.ISD) ([]addr.IA, error) {
 // chains valid at now, or nil when none is valid.
 func NewestChain(
 	ctx context.Context,
-	db DB,
+	db trustdb.DB,
 	ia addr.IA,
 	now time.Time,
 ) ([]*x509.Certificate, error) {
 
-	chains, err := db.Chains(ctx, ChainQuery{
+	chains, err := db.Chains(ctx, trustdb.ChainQuery{
 		IA:       ia,
 		Validity: cppki.Validity{NotBefore: now, NotAfter: now},
 	})

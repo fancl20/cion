@@ -1,6 +1,6 @@
 # File the Node's Seams as Modules
 
-*   Status: proposed
+*   Status: accepted
 *   Date: 2026-09-27
 
 [TOC]

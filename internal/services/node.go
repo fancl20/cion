@@ -18,13 +18,16 @@ import (
 
 	"github.com/fancl20/cion/pkg/apps/coordination"
 	"github.com/fancl20/cion/pkg/apps/socks"
-	"github.com/fancl20/cion/pkg/apps/topology"
 	"github.com/fancl20/cion/pkg/apps/wireguard"
 	"github.com/fancl20/cion/pkg/controlplane"
 	"github.com/fancl20/cion/pkg/dataplane"
-	"github.com/fancl20/cion/pkg/enrollauth"
-	"github.com/fancl20/cion/pkg/links"
-	"github.com/fancl20/cion/pkg/pathdb"
+	"github.com/fancl20/cion/pkg/modules/enrollauth"
+	"github.com/fancl20/cion/pkg/modules/links"
+	"github.com/fancl20/cion/pkg/modules/pathdb"
+	"github.com/fancl20/cion/pkg/modules/topology"
+	filesource "github.com/fancl20/cion/pkg/modules/topology/impl/file"
+	measured "github.com/fancl20/cion/pkg/modules/topology/impl/measured"
+	"github.com/fancl20/cion/pkg/modules/trustdb"
 	"github.com/fancl20/cion/pkg/scion"
 	"github.com/fancl20/cion/pkg/trust"
 	"github.com/fancl20/cion/pkg/webpki"
@@ -40,10 +43,10 @@ type node struct {
 	ident identity
 	opts  DataplaneOptions
 
-	// topology is the loaded provider: the measured machinery by default,
-	// the file provider when --link-set names a link-set (ADR-0009). It
-	// completes a first start's identity, seeds the store, mounts its
-	// services on the endpoint, and runs its loops under start.
+	// topology is the loaded source module (ADR-0013): the measured
+	// provider by default, the file provider when --link-set names a
+	// link-set. It completes a first start's identity, seeds the store,
+	// mounts its services on the endpoint, and runs its loops under start.
 	topology topology.Provider
 
 	// Link state: the neighbor table as the one source of truth, and the
@@ -68,7 +71,7 @@ type node struct {
 	tableSnapshot map[uint16]addr.IA
 
 	// Control plane, assembled by setupControlPlane's phases.
-	trustDB      trust.DB
+	trustDB      trustdb.DB
 	pathDB       pathdb.DB
 	asKey        crypto.Signer
 	issuer       *trust.Issuer      // core only
@@ -117,7 +120,7 @@ type node struct {
 	// is open admission. enrollRun launches the selected method's own
 	// loops — the Telegram authorizer's poll — nil when the method has
 	// none.
-	enrollAuth controlplane.AdmissionAuthorizer
+	enrollAuth enrollauth.AdmissionAuthorizer
 	enrollRun  func(context.Context)
 }
 
@@ -166,9 +169,10 @@ func loadIdentity(cfg NodeConfig) (identity, bool, error) {
 	return identity{ia: ia, asType: asType, key: key, localHost: localHost}, created, nil
 }
 
-// selectProvider loads the topology provider the run arguments name
-// (ADR-0009): the measured one by default — loading it is what makes a node
-// zero-conf — the file one when --link-set names a link-set. The provider
+// selectProvider loads the source module the run arguments name
+// (ADR-0013): the measured implementation by default — loading it is what
+// makes a node zero-conf — the file one when --link-set names a link-set.
+// The provider
 // completes a first start's identity before the phases assemble, Wire
 // delivers the phases' products to it, and Seed, Mounts, and Run follow.
 func (n *node) selectProvider() error {
@@ -177,7 +181,7 @@ func (n *node) selectProvider() error {
 		return err
 	}
 	if n.cfg.LinkSet != "" {
-		n.topology = topology.NewFile(topology.FileConfig{
+		n.topology = filesource.New(filesource.Config{
 			Core:          n.cfg.Core,
 			Path:          n.cfg.LinkSet,
 			Notify:        n.notifyLinkChange,
@@ -185,7 +189,7 @@ func (n *node) selectProvider() error {
 		})
 		return nil
 	}
-	n.topology = topology.NewZeroconf(topology.ZeroconfConfig{
+	n.topology = measured.New(measured.Config{
 		Core:        n.cfg.Core,
 		Neighbors:   n.cfg.Neighbors,
 		BehindNAT:   n.cfg.BehindNAT,
@@ -196,7 +200,7 @@ func (n *node) selectProvider() error {
 		Evidence:  n.linkEvidence,
 		CoreRoute: n.coreRoute,
 		Notify:    n.notifyLinkChange,
-		Pacing: topology.Pacing{
+		Pacing: measured.Pacing{
 			RendezvousRate:  n.cfg.Pacing.RendezvousRate,
 			Directory:       n.cfg.Pacing.Directory,
 			Selection:       n.cfg.Pacing.Selection,
@@ -216,10 +220,8 @@ func (n *node) setupEnrollAuth() error {
 	if n.cfg.EnrollAuth == "" {
 		return nil
 	}
-	auth, run, err := enrollauth.Load(n.cfg.EnrollAuth, enrollauth.LoadOptions{
-		TelegramAPI: n.cfg.TelegramAPI,
-		State:       n.cfg.State,
-	})
+	auth, run, err := loadEnrollAuth(n.cfg.EnrollAuth,
+		n.cfg.TelegramAPI, n.cfg.State)
 	if err != nil {
 		return fmt.Errorf("parsing --enroll-auth: %w", err)
 	}
@@ -454,7 +456,7 @@ func (n *node) linkEvidence(l *links.Link) bool {
 		return false
 	}
 	now := time.Now()
-	chains, err := n.trustDB.Chains(context.Background(), trust.ChainQuery{
+	chains, err := n.trustDB.Chains(context.Background(), trustdb.ChainQuery{
 		IA:       l.NeighborIA,
 		Validity: cppki.Validity{NotBefore: now, NotAfter: now},
 	})
@@ -465,7 +467,7 @@ func (n *node) linkEvidence(l *links.Link) bool {
 // same issuer that serves enrollment requests.
 func selfEnroll(
 	ctx context.Context,
-	db trust.DB,
+	db trustdb.DB,
 	issuer *trust.Issuer,
 	ia addr.IA,
 	asKey crypto.Signer,
