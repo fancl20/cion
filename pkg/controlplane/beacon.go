@@ -185,12 +185,20 @@ func (b *Beaconer) linkTable() map[uint16]addr.IA {
 // on the core or propagation elsewhere, registration, and the expired-
 // segment sweep of the path database. It returns once every loop has exited,
 // so a caller that waits for Run closes no store beneath an in-flight pass.
+// Each loop absorbs its own panic: a caller's recover covers Run's frame,
+// not the goroutines Run spawns beneath it, and a pass that meets a closing
+// store takes its loop down, not the process.
 func (b *Beaconer) Run(ctx context.Context) {
 	var wg sync.WaitGroup
 	loop := func(interval time.Duration, f func(context.Context)) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			defer func() {
+				if r := recover(); r != nil {
+					slog.Error("Panic in beaconing loop", "panic", r)
+				}
+			}()
 			b.loop(ctx, interval, f)
 		}()
 	}
