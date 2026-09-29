@@ -13,18 +13,32 @@ import (
 	"github.com/scionproto/scion/pkg/scrypto/cppki"
 )
 
-// Genesis creates the ISD's base TRC for the founding core and persists it in
-// the trust DB. Genesis is idempotent: if the base TRC is already in the DB,
-// it is returned unchanged and never silently replaced.
+// Genesis creates the ISD's base TRC for the founding core and persists it
+// in the trust DB, listing the given fellow cores of the same ISD beside it
+// — without voting certificates, the founder alone forming the quorum.
+// Genesis is idempotent: if the base TRC is already in the DB, it is
+// returned unchanged and never silently replaced.
 //
 // The base TRC follows the PKI draft's genesis rules: the ID is
 // ISDx-B1-S1, gracePeriod is zero, votes is empty, and votingQuorum is 1 —
 // valid only because the single core holds one sensitive and one regular
 // voting certificate. The TRC is CMS-signed by both voting keys, as cppki's
 // base-TRC verification requires a signature for every voting certificate.
-func Genesis(ctx context.Context, db trustdb.DB, ia addr.IA, keys CoreKeys) (cppki.SignedTRC, error) {
+func Genesis(
+	ctx context.Context, db trustdb.DB, ia addr.IA, keys CoreKeys, cores ...addr.IA,
+) (cppki.SignedTRC, error) {
+
 	if err := validateISD(ia); err != nil {
 		return cppki.SignedTRC{}, err
+	}
+	coreASes := make([]addr.AS, 0, len(cores)+1)
+	coreASes = append(coreASes, ia.AS())
+	for _, core := range cores {
+		if core.ISD() != ia.ISD() {
+			return cppki.SignedTRC{}, fmt.Errorf(
+				"fellow core %v outside the founding core's ISD %d", core, ia.ISD())
+		}
+		coreASes = append(coreASes, core.AS())
 	}
 	id := cppki.TRCID{ISD: ia.ISD(), Base: 1, Serial: 1}
 	if existing, err := db.SignedTRC(ctx, id); err != nil {
@@ -56,7 +70,7 @@ func Genesis(ctx context.Context, db trustdb.DB, ia addr.IA, keys CoreKeys) (cpp
 		// Base-TRC rules: no grace period, no votes; the single core alone
 		// forms the quorum of one.
 		Quorum:            1,
-		CoreASes:          []addr.AS{ia.AS()},
+		CoreASes:          coreASes,
 		AuthoritativeASes: []addr.AS{ia.AS()},
 		Description:       fmt.Sprintf("CION genesis TRC for ISD %d", ia.ISD()),
 		// Nothing but voting and CP root certificates may appear in the TRC
