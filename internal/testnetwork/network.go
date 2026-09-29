@@ -242,6 +242,9 @@ type NodeConfig struct {
 	Links []Link
 	// Core marks the founding core node.
 	Core bool
+	// GenesisCores lists fellow core ISD-ASes the founding core's genesis
+	// TRC names beside itself. Nil founds a single-core ISD.
+	GenesisCores []addr.IA
 	// WPKI anchors the bootstrap channel's certificate.
 	WPKI *WebPKI
 	// Wireguard starts the WireGuard application when set.
@@ -426,7 +429,7 @@ func StartNode(t *testing.T, cfg NodeConfig) *Node {
 		if err != nil {
 			t.Fatal(err)
 		}
-		trc, err := trust.Genesis(ctx, trustDB, ia, keys)
+		trc, err := trust.Genesis(ctx, trustDB, ia, keys, cfg.GenesisCores...)
 		if err != nil {
 			t.Fatal(err)
 		}

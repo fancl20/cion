@@ -91,6 +91,35 @@ func TestGenesis(t *testing.T) {
 	}
 }
 
+// TestGenesisFellowCores checks the fellow cores a founding core can name:
+// they land in the TRC's core list beside the founder, the founder's voting
+// keys alone still carry the base TRC's verification, and a fellow core
+// outside the founder's ISD is rejected.
+func TestGenesisFellowCores(t *testing.T) {
+	dir := t.TempDir()
+	keys := newTestCoreKeys(t, dir)
+	fellow := addr.MustIAFrom(coreIA.ISD(), 0xff0000000f01)
+	trc, err := Genesis(context.Background(), newTestDB(t), coreIA, keys, fellow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := trc.Verify(nil); err != nil {
+		t.Fatalf("TRC naming a fellow core does not verify: %v", err)
+	}
+	got := make(map[addr.AS]bool)
+	for _, as := range trc.TRC.CoreASes {
+		got[as] = true
+	}
+	if len(got) != 2 || !got[coreIA.AS()] || !got[fellow.AS()] {
+		t.Errorf("core ASes = %v, want the founder and the fellow core", trc.TRC.CoreASes)
+	}
+
+	outside := addr.MustIAFrom(coreIA.ISD()+1, fellow.AS())
+	if _, err := Genesis(context.Background(), newTestDB(t), coreIA, keys, outside); err == nil {
+		t.Error("genesis named a fellow core outside the founding core's ISD")
+	}
+}
+
 // TestGenesisIdempotent checks that a second genesis run returns the stored
 // TRC instead of replacing it.
 func TestGenesisIdempotent(t *testing.T) {

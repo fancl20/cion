@@ -162,3 +162,44 @@ destinations no longer outlives its usefulness.
     slots; a beacon of another origin never replaces its namesake.
 
 ## Implementation history
+
+*   The keys and the bound landed as proposed. `beaconKey` grew the
+    originating ISD-AS, `Insert` reading it from the beacon's first entry —
+    the identity reception verified — with the replacement rule, `evictStale`,
+    and `BestSet` untouched
+    ([beaconstore.go](/pkg/controlplane/beaconstore.go)). The lookup cache's
+    key became the pair beside the segment type it fetched, and the write in
+    `fetchCached` — under the lock it already holds — deletes the map's
+    entries whose expiry has passed, the Telegram authorizer's shape; no
+    background sweeper, no TTL change, and an empty answer still enters no
+    entry ([lookup.go](/pkg/controlplane/lookup.go)).
+*   The episodes landed beside the beaconer's existing store use and the
+    cache's own: two origins over one ingress and one ID both stored and
+    returned, one origin's fresher re-origination holding its single slot
+    past a staler write, and the per-interface cap bounding the widened keys
+    of alternating origins as one set
+    ([beacon_test.go](/pkg/controlplane/beacon_test.go)); one pair fetched
+    under two types answering each kind from its own entry, an expired entry
+    leaving on the next write, and a live one surviving another kind's
+    landing writes ([lookup_test.go](/pkg/controlplane/lookup_test.go)).
+*   The lab needed one capability the proposal's text did not spell out: a
+    TRC naming a second core, without which reception drops the fellow
+    origin's beacons before any key is read. `Genesis` lists fellow cores of
+    the founding core's ISD beside it — without voting certificates, the
+    founder alone forming the quorum, cppki's base verification still
+    carrying — and the harness passes them through `NodeConfig.GenesisCores`
+    ([genesis.go](/pkg/trust/genesis.go),
+    [network.go](/internal/testnetwork/network.go)); a foreign-ISD fellow is
+    refused at genesis
+    ([genesis_test.go](/pkg/trust/genesis_test.go)).
+*   The lab itself is the diamond of the test plan — the founding core and
+    the fellow core, both linked into one shared child with a node below: the
+    fellow core runs the non-core assembly and enrolls against the founder
+    over their link, and the lab stands in for both cores' origination loops,
+    pinning the shared ID at origination with `PCBWithID` and delivering each
+    origin's beacon from the core's own peer client over its own link. Both
+    candidates live at the bottom node under one ingress and one ID, both
+    register as up segments, and the provider composes a three-hop path to
+    each core; under the ingress-and-ID key the lab times out waiting for
+    both origins at the bottom node
+    ([origins_test.go](/internal/testnetwork/origins_test.go)).

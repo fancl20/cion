@@ -29,11 +29,13 @@ type lookupFixture struct {
 	now    time.Time
 }
 
-// recordingFetch records fetches and answers with canned segments.
+// recordingFetch records fetches and answers with canned segments of each
+// type.
 type recordingFetch struct {
 	mtx      sync.Mutex
 	requests [][2]addr.IA
 	down     []*cppb.PathSegment
+	core     []*cppb.PathSegment
 }
 
 func (f *recordingFetch) Fetch(
@@ -44,10 +46,12 @@ func (f *recordingFetch) Fetch(
 	f.requests = append(f.requests, [2]addr.IA{src, dst})
 	resp := &cppb.SegmentsResponse{Segments: map[int32]*cppb.SegmentsResponse_Segments{}}
 	// The core answers only with segments that reach the requested
-	// destination; the canned segment reaches iaLineC.
+	// destination; the canned segments reach iaLineC.
 	if dst.Equal(iaLineC) {
 		resp.Segments[int32(cppb.SegmentType_SEGMENT_TYPE_DOWN)] =
 			&cppb.SegmentsResponse_Segments{Segments: f.down}
+		resp.Segments[int32(cppb.SegmentType_SEGMENT_TYPE_CORE)] =
+			&cppb.SegmentsResponse_Segments{Segments: f.core}
 	}
 	return resp, nil
 }
@@ -64,9 +68,14 @@ func newLookupFixture(t *testing.T) *lookupFixture {
 	if _, err := db.Insert(context.Background(), up); err != nil {
 		t.Fatal(err)
 	}
-	fetch := &recordingFetch{down: []*cppb.PathSegment{
-		terminatedSegment(t, coreIATest, iaLineC, 2, now).PCB.PB,
-	}}
+	fetch := &recordingFetch{
+		down: []*cppb.PathSegment{
+			terminatedSegment(t, coreIATest, iaLineC, 2, now).PCB.PB,
+		},
+		core: []*cppb.PathSegment{
+			terminatedSegment(t, coreIATest, iaLineC, 3, now).PCB.PB,
+		},
+	}
 	lookup := NewLookupService()
 	lookup.IA = nodeIATest
 	lookup.DB = db
@@ -175,6 +184,89 @@ func TestLookupCacheUntilExpiry(t *testing.T) {
 		fx.fetch.mtx.Lock()
 		if got := len(fx.fetch.requests); got != 2 {
 			t.Errorf("fetches after TTL = %d, want 2", got)
+		}
+		fx.fetch.mtx.Unlock()
+	})
+}
+
+// TestLookupCacheKeysByType checks the cache's key widened by the segment
+// type: one core-and-destination pair fetched under two types answers each
+// kind from its own entry, never the other's.
+func TestLookupCacheKeysByType(t *testing.T) {
+	fx := newLookupFixture(t)
+	ctx := context.Background()
+
+	downs := fx.lookup.fetchCached(ctx, coreIATest, iaLineC, pathdb.SegmentTypeDown)
+	cores := fx.lookup.fetchCached(ctx, coreIATest, iaLineC, pathdb.SegmentTypeCore)
+	if len(downs) != 1 || downs[0].PCB.ID() != 2 {
+		t.Fatalf("down segments = %v, want the canned down segment", downs)
+	}
+	if len(cores) != 1 || cores[0].PCB.ID() != 3 {
+		t.Fatalf("core segments = %v, want the canned core segment", cores)
+	}
+	fx.lookup.mtx.Lock()
+	if got := len(fx.lookup.cache); got != 2 {
+		t.Errorf("cache entries = %d, want one per type under the one pair", got)
+	}
+	fx.lookup.mtx.Unlock()
+
+	// Both kinds serve from their own entries: no further fetch.
+	fx.lookup.fetchCached(ctx, coreIATest, iaLineC, pathdb.SegmentTypeDown)
+	fx.lookup.fetchCached(ctx, coreIATest, iaLineC, pathdb.SegmentTypeCore)
+	fx.fetch.mtx.Lock()
+	defer fx.fetch.mtx.Unlock()
+	if got := len(fx.fetch.requests); got != 2 {
+		t.Errorf("fetches = %d, want 2 (each kind answered from its own entry)", got)
+	}
+}
+
+// TestLookupCacheForgets checks the cache's bound: an entry past its expiry
+// leaves on the next write, an entry still within its expiry survives
+// another's write however many pass, and neither kind ever answers the
+// other's question. The TTL's passage is a fake-time sleep in the bubble.
+func TestLookupCacheForgets(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		fx := newLookupFixture(t)
+		ctx := context.Background()
+		fetch := func(t pathdb.SegmentType) []*pathdb.Segment {
+			return fx.lookup.fetchCached(ctx, coreIATest, iaLineC, t)
+		}
+		cacheLen := func() int {
+			fx.lookup.mtx.Lock()
+			defer fx.lookup.mtx.Unlock()
+			return len(fx.lookup.cache)
+		}
+
+		fetch(pathdb.SegmentTypeDown)
+		fetch(pathdb.SegmentTypeCore)
+		if got := cacheLen(); got != 2 {
+			t.Fatalf("cache entries = %d, want both kinds within their expiry", got)
+		}
+
+		// The TTL passes; the next write empties the map of the expired
+		// entries and holds the one it wrote.
+		time.Sleep(2 * lookupCacheTTL)
+		if downs := fetch(pathdb.SegmentTypeDown); len(downs) != 1 || downs[0].PCB.ID() != 2 {
+			t.Fatalf("down segments after the TTL = %v, want the canned segment re-fetched", downs)
+		}
+		if got := cacheLen(); got != 1 {
+			t.Errorf("cache entries after the TTL = %d, want 1 (the expired kinds left on the write)", got)
+		}
+
+		// The live entry survives another kind's landing write, and however
+		// many reads pass, both kinds answer from the cache alone.
+		for range 5 {
+			fetch(pathdb.SegmentTypeCore)
+			if downs := fetch(pathdb.SegmentTypeDown); len(downs) != 1 || downs[0].PCB.ID() != 2 {
+				t.Fatalf("down segments = %v, want the entry the write left standing", downs)
+			}
+		}
+		if got := cacheLen(); got != 2 {
+			t.Errorf("cache entries = %d, want 2 (a live entry survives another's writes)", got)
+		}
+		fx.fetch.mtx.Lock()
+		if got := len(fx.fetch.requests); got != 4 {
+			t.Errorf("fetches = %d, want 4 (one per kind per expiry)", got)
 		}
 		fx.fetch.mtx.Unlock()
 	})

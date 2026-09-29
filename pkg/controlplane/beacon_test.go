@@ -199,6 +199,101 @@ func TestHandleBeaconAccepts(t *testing.T) {
 	}
 }
 
+// originatedSegment builds a one-entry beacon of the given origin with the
+// given segment ID: the store's episodes read the origin, the ID, and the
+// timestamps, and one signed entry carries all three.
+func originatedSegment(
+	t *testing.T, f *beaconFixture, origin addr.IA, id uint16, now time.Time) *segment.PCB {
+
+	t.Helper()
+	pcb, err := segment.PCBWithID(now, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := pcb.AppendEntry(context.Background(), origin, segment.EntryOptions{
+		EgressIfID: 1,
+	}, macFactory(), f.engines[origin]); err != nil {
+		t.Fatal(err)
+	}
+	return pcb
+}
+
+// TestBeaconStoreKeysByOrigin checks the store's key widened by the origin:
+// two candidates of distinct origins over one ingress and one segment ID are
+// two candidates — both stored, both returned by BestSet — while one origin's
+// re-origination of its own segment holds a single slot whatever its
+// freshness, and a beacon of another origin never replaces its namesake.
+func TestBeaconStoreKeysByOrigin(t *testing.T) {
+	f := newBeaconFixture(t)
+	now := time.Now()
+
+	fromCore := originatedSegment(t, f, coreIATest, 7, now)
+	fromNode := originatedSegment(t, f, nodeIATest, 7, now.Add(time.Second))
+	f.store.Insert(1, fromCore)
+	f.store.Insert(1, fromNode)
+	if got := f.store.Len(); got != 2 {
+		t.Fatalf("store length = %d, want 2: distinct origins are distinct candidates", got)
+	}
+	stored := map[addr.IA]time.Time{}
+	for _, cand := range f.store.BestSet(2) {
+		stored[cand.PCB.FirstIA()] = cand.PCB.Timestamp()
+	}
+	if len(stored) != 2 {
+		t.Fatalf("BestSet origins = %v, want both", stored)
+	}
+
+	// One origin's fresher re-origination replaces its own entry alone.
+	fresher := originatedSegment(t, f, nodeIATest, 7, now.Add(2*time.Second))
+	f.store.Insert(1, fresher)
+	if got := f.store.Len(); got != 2 {
+		t.Fatalf("store length after re-origination = %d, want 2: one segment, one slot", got)
+	}
+	stored = map[addr.IA]time.Time{}
+	for _, cand := range f.store.BestSet(2) {
+		stored[cand.PCB.FirstIA()] = cand.PCB.Timestamp()
+	}
+	if !stored[nodeIATest].Equal(fresher.Timestamp()) {
+		t.Errorf("node's entry = %v, want the fresher re-origination %v",
+			stored[nodeIATest], fresher.Timestamp())
+	}
+
+	// A staler re-origination never replaces the fresher entry.
+	f.store.Insert(1, originatedSegment(t, f, nodeIATest, 7, now))
+	stored = map[addr.IA]time.Time{}
+	for _, cand := range f.store.BestSet(2) {
+		stored[cand.PCB.FirstIA()] = cand.PCB.Timestamp()
+	}
+	if !stored[nodeIATest].Equal(fresher.Timestamp()) {
+		t.Errorf("node's entry = %v, want the fresher to stand past the staler write",
+			stored[nodeIATest])
+	}
+}
+
+// TestBeaconStoreCapBoundsWidenedKeys checks that the per-interface cap
+// bounds the origin-widened keys as one set: candidates of alternating
+// origins over one ingress count together against the bound, and the stalest
+// leave first.
+func TestBeaconStoreCapBoundsWidenedKeys(t *testing.T) {
+	f := newBeaconFixture(t)
+	now := time.Now()
+	origins := []addr.IA{coreIATest, nodeIATest}
+	for i := range storePerInterface + 2 {
+		f.store.Insert(1, originatedSegment(t, f, origins[i%len(origins)],
+			uint16(i), now.Add(time.Duration(i)*time.Second)))
+	}
+	if got := f.store.Len(); got != storePerInterface {
+		t.Fatalf("store length = %d, want the per-interface bound %d over both origins together",
+			got, storePerInterface)
+	}
+	ids := map[uint16]bool{}
+	for _, cand := range f.store.BestSet(storePerInterface) {
+		ids[cand.PCB.ID()] = true
+	}
+	if ids[0] || ids[1] {
+		t.Errorf("the stalest candidates (ids 0, 1) survived the bound: %v", ids)
+	}
+}
+
 // fabricatedBeacon builds the beacon of a fabricating neighbor: the entry
 // claims the core's name but C's key signs it — a signature valid against
 // C's TRC-anchored chain, a claim it has no right to make — followed by an

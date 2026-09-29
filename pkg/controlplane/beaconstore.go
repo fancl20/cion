@@ -5,6 +5,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/scionproto/scion/pkg/addr"
+
 	"github.com/fancl20/cion/pkg/segment"
 )
 
@@ -13,16 +15,20 @@ import (
 // freshest candidates are enough.
 const storePerInterface = 64
 
-// beaconKey identifies a candidate by its ingress interface and segment ID.
+// beaconKey identifies a candidate by its ingress interface, originating
+// ISD-AS, and segment ID: the identity the rest of the system already reads
+// from a segment, so two origins sharing an ingress and an ID are two
+// candidates, not one slot the fresher takes.
 type beaconKey struct {
 	ingress uint16
+	origin  addr.IA
 	id      uint16
 }
 
 // BeaconStore holds candidate PCBs in memory (draft Section 2.3.2): keyed by
-// ingress interface and segment ID, keeping the latest origination per key,
-// expiring entries with their hops. A restarted node is rebuilt by the next
-// period's beacons.
+// ingress interface, originating ISD-AS, and segment ID, keeping the latest
+// origination per key, expiring entries with their hops. A restarted node is
+// rebuilt by the next period's beacons.
 type BeaconStore struct {
 	mtx     sync.Mutex
 	beacons map[beaconKey]candidate
@@ -46,13 +52,15 @@ type candidate struct {
 	timestamp time.Time
 }
 
-// Insert stores the beacon, replacing the entry with the same key when the
-// new origination is fresher, and keeping per-interface capacity bounded by
-// evicting the stalest candidates.
+// Insert stores the beacon, replacing the entry with the same key — one
+// origin's re-origination of one segment over one ingress — when the new
+// origination is fresher, and keeping per-interface capacity bounded by
+// evicting the stalest candidates. The origin is the beacon's first entry,
+// the identity reception verified against the TRC's core list.
 func (s *BeaconStore) Insert(ingress uint16, pcb *segment.PCB) {
 	s.mtx.Lock()
 	defer s.mtx.Unlock()
-	key := beaconKey{ingress: ingress, id: pcb.ID()}
+	key := beaconKey{ingress: ingress, origin: pcb.FirstIA(), id: pcb.ID()}
 	if existing, ok := s.beacons[key]; ok && !pcb.Timestamp().After(existing.timestamp) {
 		return
 	}

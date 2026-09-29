@@ -40,7 +40,17 @@ type LookupService struct {
 	CoreRoute func() *scion.Addr
 
 	mtx   sync.Mutex
-	cache map[[2]addr.IA]cachedSegments
+	cache map[lookupKey]cachedSegments
+}
+
+// lookupKey names the question a cached answer serves: the core fetched
+// from, the destination asked about, and the segment type fetched — a
+// core-segment fetch and a down-segment fetch for one destination are
+// different questions and answer from different entries.
+type lookupKey struct {
+	core    addr.IA
+	dst     addr.IA
+	segType pathdb.SegmentType
 }
 
 // cachedSegments holds fetched segments until the earliest of their
@@ -52,7 +62,7 @@ type cachedSegments struct {
 
 // NewLookupService returns a lookup service with an empty cache.
 func NewLookupService() *LookupService {
-	return &LookupService{cache: make(map[[2]addr.IA]cachedSegments)}
+	return &LookupService{cache: make(map[lookupKey]cachedSegments)}
 }
 
 // Segments serves a segment request (draft Section 5).
@@ -190,7 +200,7 @@ func (s *LookupService) fetchCached(
 ) []*pathdb.Segment {
 
 	now := time.Now()
-	key := [2]addr.IA{core, dst}
+	key := lookupKey{core: core, dst: dst, segType: t}
 	s.mtx.Lock()
 	if cached, ok := s.cache[key]; ok && now.Before(cached.expiry) {
 		s.mtx.Unlock()
@@ -231,6 +241,18 @@ func (s *LookupService) fetchCached(
 		return nil
 	}
 	s.mtx.Lock()
+	// The write owns the map's bound: entries whose expiry has passed leave
+	// on the write that follows — the Telegram authorizer's shape for its
+	// decision map — so the map holds what the TTL still covers, a peer's
+	// spray of destinations costing a minute of memory and no more. No
+	// background sweeper: a goroutine that wakes on its own keeps the
+	// service from sitting whole inside a fake-time bubble.
+	now = time.Now()
+	for k, cached := range s.cache {
+		if !now.Before(cached.expiry) {
+			delete(s.cache, k)
+		}
+	}
 	s.cache[key] = cachedSegments{segments: segs, expiry: expiry}
 	s.mtx.Unlock()
 	return segs
