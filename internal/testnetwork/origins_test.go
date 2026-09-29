@@ -37,7 +37,7 @@ const bestSetScan = 64
 func TestTwoOriginsShareOneSegmentID(t *testing.T) {
 	t.Parallel()
 	wpki := NewWebPKI(t)
-	ipA1, ipA2, ipS, ipL := addrIP(0x81), addrIP(0x82), addrIP(0x83), addrIP(0x84)
+	ipA1, ipA2, ipS, ipL := hostSlot(t), hostSlot(t), hostSlot(t), hostSlot(t)
 	a1S, sA1 := FreeUDPAddrOn(t, ipA1), FreeUDPAddrOn(t, ipS)
 	a2S, sA2 := FreeUDPAddrOn(t, ipA2), FreeUDPAddrOn(t, ipS)
 	a1A2, a2A1 := FreeUDPAddrOn(t, ipA1), FreeUDPAddrOn(t, ipA2)

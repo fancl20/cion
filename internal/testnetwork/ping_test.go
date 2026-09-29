@@ -25,11 +25,9 @@ import (
 func TestPingForkTopology(t *testing.T) {
 	t.Parallel()
 	wpki := NewWebPKI(t)
-	// Loopback addresses of this test's own; earlier tests' endpoints keep
-	// theirs.
-	ipA := addrIP(8)
-	ipB := addrIP(9)
-	ipC := addrIP(10)
+	ipA := hostSlot(t)
+	ipB := hostSlot(t)
+	ipC := hostSlot(t)
 	extA1, extB := FreeUDPAddrOn(t, ipA), FreeUDPAddrOn(t, ipB)
 	extA2, extC := FreeUDPAddrOn(t, ipA), FreeUDPAddrOn(t, ipC)
 
@@ -132,7 +130,7 @@ func TestPingForkTopology(t *testing.T) {
 func TestPingLineMiddleNode(t *testing.T) {
 	t.Parallel()
 	wpki := NewWebPKI(t)
-	a, b, c := startLine(t, wpki, addrIP(0x23), addrIP(0x24), addrIP(0x25))
+	a, b, c := startLine(t, wpki, hostSlot(t), hostSlot(t), hostSlot(t))
 	ctx := context.Background()
 	StartPingResponder(t, a)
 	StartPingResponder(t, b)
@@ -199,8 +197,8 @@ func TestPingSiblingNodes(t *testing.T) {
 	t.Parallel()
 	iaD := addr.MustIAFrom(20, 0xff0000000004)
 	wpki := NewWebPKI(t)
-	ipA, ipB := addrIP(0x26), addrIP(0x27)
-	ipC, ipD := addrIP(0x28), addrIP(0x29)
+	ipA, ipB := hostSlot(t), hostSlot(t)
+	ipC, ipD := hostSlot(t), hostSlot(t)
 	extA, extB1 := FreeUDPAddrOn(t, ipA), FreeUDPAddrOn(t, ipB)
 	extB2, extC := FreeUDPAddrOn(t, ipB), FreeUDPAddrOn(t, ipC)
 	extB3, extD := FreeUDPAddrOn(t, ipB), FreeUDPAddrOn(t, ipD)
@@ -262,7 +260,7 @@ func TestPingReresolvesExpiredPath(t *testing.T) {
 	t.Parallel()
 	iaP := addr.MustIAFrom(20, 0xff0000000021)
 	iaR := addr.MustIAFrom(20, 0xff0000000022)
-	ipP, ipR := addrIP(0x11), addrIP(0x12)
+	ipP, ipR := hostSlot(t), hostSlot(t)
 	extP, extR := FreeUDPAddrOn(t, ipP), FreeUDPAddrOn(t, ipR)
 
 	p := StartNode(t, NodeConfig{IA: iaP, Host: ipP, Links: []Link{
@@ -372,7 +370,7 @@ func TestPingUnreachable(t *testing.T) {
 	t.Parallel()
 	iaP := addr.MustIAFrom(20, 0xff0000000031)
 	iaR := addr.MustIAFrom(20, 0xff0000000032)
-	ipP, ipR := addrIP(0x13), addrIP(0x14)
+	ipP, ipR := hostSlot(t), hostSlot(t)
 	extP, extR := FreeUDPAddrOn(t, ipP), FreeUDPAddrOn(t, ipR)
 
 	p := StartNode(t, NodeConfig{IA: iaP, Host: ipP, Links: []Link{
@@ -413,7 +411,7 @@ func TestPingLossSummary(t *testing.T) {
 	t.Parallel()
 	iaP := addr.MustIAFrom(20, 0xff0000000041)
 	iaR := addr.MustIAFrom(20, 0xff0000000042)
-	ipP, ipR := addrIP(0x15), addrIP(0x16)
+	ipP, ipR := hostSlot(t), hostSlot(t)
 	extP, extR := FreeUDPAddrOn(t, ipP), FreeUDPAddrOn(t, ipR)
 
 	// The provider resolves over a crafted up segment, so the requests are

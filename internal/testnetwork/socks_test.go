@@ -117,12 +117,8 @@ func TestEgressSocksService(t *testing.T) {
 	// every node offering the service by default.
 	wpki := packageWebPKI
 	place := placeCoordination(t)
-	// The lab takes its own loopback hosts: every node binds the fixed
-	// control-endpoint, rendezvous, and shared host ports on its host, so a
-	// host shared with another lab is a bind collision whenever the two run
-	// concurrently.
-	a := coordCore(t, wpki, addrIP(0x57), place, nil)
-	b := coordLeaf(t, wpki, addrIP(0x58), a, place, nil)
+	a := coordCore(t, wpki, hostSlot(t), place, nil)
+	b := coordLeaf(t, wpki, hostSlot(t), a, place, nil)
 	t.Cleanup(func() {
 		t.Logf("node A counters: %v", wireguardOf(a).Counters())
 		t.Logf("node B counters: %v", wireguardOf(b).Counters())
@@ -251,8 +247,8 @@ func TestWithheldExitOffer(t *testing.T) {
 	// hosts with no SOCKS offer, on the suite's own loopback hosts.
 	wpki := packageWebPKI
 	place := placeCoordination(t)
-	a := coordCore(t, wpki, addrIP(0x59), place, nil)
-	b := coordLeaf(t, wpki, addrIP(0x5a), a, place, func(cfg *services.NodeConfig) {
+	a := coordCore(t, wpki, hostSlot(t), place, nil)
+	b := coordLeaf(t, wpki, hostSlot(t), a, place, func(cfg *services.NodeConfig) {
 		cfg.Applications = []string{"wireguard"}
 	})
 	if got := b.app.Application("socks"); got != nil {

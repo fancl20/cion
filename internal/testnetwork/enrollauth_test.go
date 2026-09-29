@@ -202,7 +202,7 @@ func bootTelegramJoiner(t *testing.T, wpki *WebPKI, ip netip.Addr,
 func TestJoinByEnrollAuthCIDR(t *testing.T) {
 	t.Parallel()
 	wpki := NewWebPKI(t)
-	ipA, ipB := addrIP(0x61), addrIP(0x62)
+	ipA, ipB := hostSlot(t), hostSlot(t)
 	a := enrollAuthCore(t, wpki, ipA, "cidrs=127.0.0.0/8", "")
 	b := bootTelegramJoiner(t, wpki, ipB, a)
 
@@ -228,7 +228,7 @@ func TestJoinByEnrollAuthTelegram(t *testing.T) {
 	t.Parallel()
 	wpki := NewWebPKI(t)
 	bot := newOperatorBot(t)
-	ipA, ipB := addrIP(0x64), addrIP(0x65)
+	ipA, ipB := hostSlot(t), hostSlot(t)
 	a := enrollAuthCore(t, wpki, ipA,
 		"telegram="+operatorChatToken, bot.url)
 	b := bootTelegramJoiner(t, wpki, ipB, a)
@@ -265,7 +265,7 @@ func TestJoinByEnrollAuthTelegramRestart(t *testing.T) {
 	t.Parallel()
 	wpki := NewWebPKI(t)
 	bot := newOperatorBot(t)
-	ipA, ipB := addrIP(0x67), addrIP(0x68)
+	ipA, ipB := hostSlot(t), hostSlot(t)
 	a := enrollAuthCore(t, wpki, ipA, "telegram="+operatorChatToken, bot.url)
 	b := bootTelegramJoiner(t, wpki, ipB, a)
 	Poll(t, "the operator's first prompt", func() bool { return bot.promptCount() == 1 })
@@ -311,7 +311,7 @@ func TestJoinByEnrollAuthTelegramRestart(t *testing.T) {
 func TestJoinDeniedByEnrollAuth(t *testing.T) {
 	t.Parallel()
 	wpki := NewWebPKI(t)
-	ipA, ipB := addrIP(0x6a), addrIP(0x6b)
+	ipA, ipB := hostSlot(t), hostSlot(t)
 	// A prefix list that admits nothing on the lab's loopback addressing.
 	a := enrollAuthCore(t, wpki, ipA, "cidrs=10.0.0.0/8", "")
 	b := bootTelegramJoiner(t, wpki, ipB, a)
@@ -354,7 +354,7 @@ func TestJoinPendingNeverCompletes(t *testing.T) {
 	t.Parallel()
 	wpki := NewWebPKI(t)
 	bot := newOperatorBot(t)
-	ipA, ipB := addrIP(0x6c), addrIP(0x6d)
+	ipA, ipB := hostSlot(t), hostSlot(t)
 	a := enrollAuthCore(t, wpki, ipA, "telegram="+operatorChatToken, bot.url)
 	b := bootTelegramJoiner(t, wpki, ipB, a)
 
