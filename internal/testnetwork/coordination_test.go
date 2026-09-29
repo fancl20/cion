@@ -314,8 +314,8 @@ func TestCoordinationOpenJoin(t *testing.T) {
 	// clients' root store trusts.
 	wpki := packageWebPKI
 	place := placeCoordination(t)
-	a := coordCore(t, wpki, addrIP(0x41), place, nil)
-	b := coordLeaf(t, wpki, addrIP(0x42), a, place, nil)
+	a := coordCore(t, wpki, hostSlot(t), place, nil)
+	b := coordLeaf(t, wpki, hostSlot(t), a, place, nil)
 	// The nodes' counters, printed at the test's end: the overlay's own
 	// tooling, where the operating system's cannot see.
 	t.Cleanup(func() {

@@ -5,7 +5,6 @@ import (
 	"net"
 	"net/netip"
 	"strings"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -163,7 +162,7 @@ func bootRendezvousLine(t *testing.T, wpki *WebPKI,
 func TestJoinByRendezvous(t *testing.T) {
 	t.Parallel()
 	wpki := NewWebPKI(t)
-	ipA, ipB, ipC := addrIP(0x31), addrIP(0x32), addrIP(0x33)
+	ipA, ipB, ipC := hostSlot(t), hostSlot(t), hostSlot(t)
 	a, b, c := bootRendezvousLine(t, wpki, ipA, ipB, ipC)
 	ctx := context.Background()
 
@@ -274,7 +273,7 @@ func TestJoinByRendezvous(t *testing.T) {
 func TestBootstrapWithoutAnswer(t *testing.T) {
 	t.Parallel()
 	wpki := NewWebPKI(t)
-	ipA, ipD := addrIP(0x35), addrIP(0x36)
+	ipA, ipD := hostSlot(t), hostSlot(t)
 	dead := FreeUDPAddrOn(t, ipA) // reserved, then released: nothing answers
 	state := t.TempDir()
 
@@ -325,13 +324,6 @@ func TestBootstrapWithoutAnswer(t *testing.T) {
 	}
 }
 
-// heldHostSlot hands out the loopback hosts above the labs' static slots,
-// one per run: the failed boot's proof leaks its node's endpoint socket —
-// the loops' own sockets release with the process, not the failed setup —
-// so a repeated run's copy on the same host would find that port held and
-// fail for the wrong reason.
-var heldHostSlot atomic.Uint32
-
 // TestHeldHostPortRefusesBoot checks the default's failure mode: a boot
 // against a shared port another socket already holds — the machine's
 // existing WireGuard interface — fails loudly at the bind, the argument's
@@ -339,7 +331,7 @@ var heldHostSlot atomic.Uint32
 func TestHeldHostPortRefusesBoot(t *testing.T) {
 	t.Parallel()
 	wpki := NewWebPKI(t)
-	ip := addrIP(byte(0x80 + heldHostSlot.Add(1)))
+	ip := hostSlot(t)
 	held, err := net.ListenUDP("udp",
 		net.UDPAddrFromAddrPort(netip.AddrPortFrom(ip, apps.DefaultHostPort)))
 	if err != nil {
@@ -377,7 +369,7 @@ func TestHeldHostPortRefusesBoot(t *testing.T) {
 func TestDeliberateCore(t *testing.T) {
 	t.Parallel()
 	wpki := NewWebPKI(t)
-	ipA, ipB := addrIP(0x37), addrIP(0x38)
+	ipA, ipB := hostSlot(t), hostSlot(t)
 
 	a := bootAssembly(t, func(cfg *services.NodeConfig) {
 		cfg.Core = true

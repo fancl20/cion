@@ -181,3 +181,18 @@ differently run.
     converge as before.
 
 ## Implementation history
+
+*   The allocator lives where `addrIP` did
+    ([network_test.go](/internal/testnetwork/network_test.go)): one atomic
+    counter walking the 255 × 254 hosts of `127.0.X.Y` from `127.0.1.1`,
+    the reserved-/24 boundary and the never-reissued-in-a-process property
+    stated beside it, and the pool's own proof walking every draw —
+    distinct, above the boundary, the end refusing.
+*   The held-host counter deleted with its comment folded into the pool
+    counter's ([join_test.go](/internal/testnetwork/join_test.go)); the
+    labs' slot-discipline notes, the socks lab's incident comment the
+    first, retired with the literals they explained.
+*   The hand-wired restart lab still draws a second host for its re-boot:
+    the first node's endpoint socket lives to the test's cleanup, its
+    fixed port held against the reboot
+    ([network_test.go](/internal/testnetwork/network_test.go)).

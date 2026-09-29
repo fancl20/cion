@@ -28,7 +28,7 @@ import (
 func TestFabricatingNeighbor(t *testing.T) {
 	t.Parallel()
 	wpki := NewWebPKI(t)
-	a, b, c := startLine(t, wpki, addrIP(0x44), addrIP(0x45), addrIP(0x46))
+	a, b, c := startLine(t, wpki, hostSlot(t), hostSlot(t), hostSlot(t))
 	ctx := context.Background()
 
 	// The honest line stands: B enrolled, C terminates verified up segments

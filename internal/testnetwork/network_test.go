@@ -3,6 +3,7 @@ package testnetwork
 import (
 	"context"
 	"net/netip"
+	"sync/atomic"
 	"testing"
 
 	"github.com/scionproto/scion/pkg/addr"
@@ -40,7 +41,7 @@ func startLine(t *testing.T, wpki *WebPKI, ipA, ipB, ipC netip.Addr) (*Node, *No
 func TestLineTopology(t *testing.T) {
 	t.Parallel()
 	wpki := NewWebPKI(t)
-	a, b, c := startLine(t, wpki, addrIP(2), addrIP(3), addrIP(4))
+	a, b, c := startLine(t, wpki, hostSlot(t), hostSlot(t), hostSlot(t))
 	ctx := context.Background()
 
 	// Beacons propagate A→B→C with signatures verified at each hop: the
@@ -115,11 +116,9 @@ func TestLineTopology(t *testing.T) {
 func TestRestartedNodeServesUpSegments(t *testing.T) {
 	t.Parallel()
 	wpki := NewWebPKI(t)
-	// Loopback addresses of its own, so the still-running endpoints of
-	// earlier tests keep their fixed ports.
-	ipA := addrIP(5)
-	ipB1 := addrIP(6)
-	ipB2 := addrIP(7)
+	// B's restart takes a fresh host: the first B's endpoint socket lives
+	// to the test's cleanup, its fixed port held against the reboot.
+	ipA, ipB1, ipB2 := hostSlot(t), hostSlot(t), hostSlot(t)
 	dir := t.TempDir()
 	extA, extB1 := FreeUDPAddrOn(t, ipA), FreeUDPAddrOn(t, ipB1)
 
@@ -175,6 +174,56 @@ func TestRestartedNodeServesUpSegments(t *testing.T) {
 	}
 }
 
+// TestHostSlotPool is the pool's own proof: the draws name pairwise
+// distinct hosts, none inside the reserved /24 below the pool, and the
+// pool's end refuses at the draw instead of wrapping.
+func TestHostSlotPool(t *testing.T) {
+	t.Parallel()
+	reserved := netip.MustParsePrefix("127.0.0.0/24")
+
+	// Live draws from the shared counter, each a host no earlier draw named.
+	drawn := make(map[netip.Addr]bool, 32)
+	for range 32 {
+		ip := hostSlot(t)
+		if reserved.Contains(ip) {
+			t.Errorf("the draw %s names a host inside the reserved %s", ip, reserved)
+		}
+		if drawn[ip] {
+			t.Errorf("the draw %s repeats a host the pool already handed out", ip)
+		}
+		drawn[ip] = true
+	}
+
+	// The whole pool, one host per draw: the first above the boundary, the
+	// last below the space's end, every one distinct, none reserved.
+	if first, ok := poolHost(1); !ok || first != netip.MustParseAddr("127.0.1.1") {
+		t.Errorf("the pool's first host = %v (%v), want 127.0.1.1", first, ok)
+	}
+	seen := make(map[netip.Addr]bool, poolSize)
+	for n := 1; n <= poolSize; n++ {
+		ip, ok := poolHost(n)
+		if !ok {
+			t.Fatalf("draw %d of the pool's %d refused", n, poolSize)
+		}
+		if reserved.Contains(ip) {
+			t.Fatalf("draw %d names %s inside the reserved %s", n, ip, reserved)
+		}
+		if seen[ip] {
+			t.Fatalf("draw %d repeats the host of an earlier draw", n)
+		}
+		seen[ip] = true
+	}
+	if last, ok := poolHost(poolSize); !ok || last != netip.MustParseAddr("127.0.255.254") {
+		t.Errorf("the pool's last host = %v (%v), want 127.0.255.254", last, ok)
+	}
+	// The end refuses: a wrapped hand-out would name a host the counter
+	// already issued — the first draw past the end truncates to 127.0.0.1,
+	// inside the reserved /24 itself.
+	if _, ok := poolHost(poolSize + 1); ok {
+		t.Error("a draw past the pool's end returned a host, want the refusal")
+	}
+}
+
 // The test topologies' ISD-ASes, matching pkg/controlplane's.
 var (
 	coreIA  = addr.MustIAFrom(20, 0xff0000000001)
@@ -182,7 +231,40 @@ var (
 	lineCIA = addr.MustIAFrom(20, 0xff0000000003)
 )
 
-// addrIP returns the n-th 127.0.0.x loopback address.
-func addrIP(last byte) netip.Addr {
-	return netip.AddrFrom4([4]byte{127, 0, 0, last})
+// poolSize is the pool's size: the 127.0.X.Y loopback space above the
+// reserved /24, X from 1, Y skipping the all-zero and all-one bytes that
+// read as network and broadcast.
+const poolSize = 255 * 254
+
+// hostDraws counts the pool's draws; the counter never resets and never
+// wraps, so a host is never reissued within a process. A node's sockets can
+// outlive its test — the failed-boot proof's endpoint socket, which
+// releases with the process rather than the failed setup, the standing
+// example — so a repeated run must draw fresh hosts rather than find its
+// fixed ports held for the wrong reason.
+var hostDraws atomic.Uint32
+
+// hostSlot draws the next loopback host of the pool the package's labs
+// share, so two labs overlap freely, a repeated run draws fresh hosts, and
+// no two draws name one host. The pool starts at 127.0.1.1, above
+// 127.0.0.0/24 — that /24 belongs to the other packages' fixed loopback
+// mounts, and go test runs the packages' processes in parallel — and a draw
+// past the pool's end refuses instead of wrapping.
+func hostSlot(t *testing.T) netip.Addr {
+	t.Helper()
+	ip, ok := poolHost(int(hostDraws.Add(1)))
+	if !ok {
+		t.Fatalf("the pool of %d loopback hosts is drawn dry", poolSize)
+	}
+	return ip
+}
+
+// poolHost returns the n-th draw's host of the pool, n counted from one,
+// and whether the pool holds it.
+func poolHost(n int) (netip.Addr, bool) {
+	if n > poolSize {
+		return netip.Addr{}, false
+	}
+	n--
+	return netip.AddrFrom4([4]byte{127, 0, byte(n/254 + 1), byte(n%254 + 1)}), true
 }

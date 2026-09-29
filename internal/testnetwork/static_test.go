@@ -121,7 +121,7 @@ func bootStaticLine(t *testing.T, wpki *WebPKI,
 func TestStaticLabByLinkSet(t *testing.T) {
 	t.Parallel()
 	wpki := NewWebPKI(t)
-	a, b, c := bootStaticLine(t, wpki, addrIP(0x51), addrIP(0x52), addrIP(0x53))
+	a, b, c := bootStaticLine(t, wpki, hostSlot(t), hostSlot(t), hostSlot(t))
 
 	// The identity completed from the files: one ISD, each AS its own draw.
 	for _, n := range []*staticNode{b, c} {
@@ -181,7 +181,7 @@ func TestStaticLabByLinkSet(t *testing.T) {
 func TestStaticEnrollmentByAuthorizer(t *testing.T) {
 	t.Parallel()
 	wpki := NewWebPKI(t)
-	ipA, ipB := addrIP(0x55), addrIP(0x56)
+	ipA, ipB := hostSlot(t), hostSlot(t)
 	abA, abB := FreeUDPAddrOn(t, ipA), FreeUDPAddrOn(t, ipB)
 
 	// A prefix list that admits nothing on the lab's loopback addressing:

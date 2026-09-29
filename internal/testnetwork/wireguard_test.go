@@ -173,7 +173,7 @@ func TestWireguardMeshExchange(t *testing.T) {
 	hostAKey, hostAPub := newHostKey(t)
 	hostBKey, hostBPub := newHostKey(t)
 
-	a, b := startWireguardNodes(t, addrIP(0x21), addrIP(0x22))
+	a, b := startWireguardNodes(t, hostSlot(t), hostSlot(t))
 	// The two placements are distinct — unique by construction — and the
 	// hosts' addresses come from them.
 	sliceA, sliceB := assignedSlice(t, a), assignedSlice(t, b)

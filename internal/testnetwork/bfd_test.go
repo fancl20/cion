@@ -26,7 +26,7 @@ import (
 func TestBFDLivenessEpisode(t *testing.T) {
 	t.Parallel()
 	wpki := NewWebPKI(t)
-	ipA, ipB, ipC := addrIP(0x74), addrIP(0x75), addrIP(0x76)
+	ipA, ipB, ipC := hostSlot(t), hostSlot(t), hostSlot(t)
 	a, b, c := bootRendezvousLine(t, wpki, ipA, ipB, ipC)
 	ctx := context.Background()
 
@@ -118,8 +118,8 @@ func TestBFDLivenessEpisode(t *testing.T) {
 func TestBFDStaticLabEpisode(t *testing.T) {
 	t.Parallel()
 	wpki := NewWebPKI(t)
-	ipB := addrIP(0x72)
-	a, b, c := bootStaticLine(t, wpki, addrIP(0x71), ipB, addrIP(0x73))
+	ipB := hostSlot(t)
+	a, b, c := bootStaticLine(t, wpki, hostSlot(t), ipB, hostSlot(t))
 	// The interface the core's file named its link to B.
 	ifID := uint16(1)
 

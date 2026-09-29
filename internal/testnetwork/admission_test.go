@@ -44,11 +44,11 @@ func TestCoordinationInvitationJoin(t *testing.T) {
 	wpki := packageWebPKI
 	place := placeCoordination(t)
 	bot := newOperatorBot(t)
-	a := coordCore(t, wpki, addrIP(0x49), place, func(cfg *services.NodeConfig) {
+	a := coordCore(t, wpki, hostSlot(t), place, func(cfg *services.NodeConfig) {
 		cfg.EnrollAuth = "telegram=" + operatorChatToken
 		cfg.TelegramAPI = bot.url
 	})
-	_ = coordLeaf(t, wpki, addrIP(0x4a), a, place, nil)
+	_ = coordLeaf(t, wpki, hostSlot(t), a, place, nil)
 
 	key := mintedInvitation(t, bot)
 
@@ -76,11 +76,11 @@ func TestCoordinationTelegramPromptJoin(t *testing.T) {
 	wpki := packageWebPKI
 	place := placeCoordination(t)
 	bot := newOperatorBot(t)
-	a := coordCore(t, wpki, addrIP(0x4b), place, func(cfg *services.NodeConfig) {
+	a := coordCore(t, wpki, hostSlot(t), place, func(cfg *services.NodeConfig) {
 		cfg.EnrollAuth = "telegram=" + operatorChatToken
 		cfg.TelegramAPI = bot.url
 	})
-	_ = coordLeaf(t, wpki, addrIP(0x4c), a, place, nil)
+	_ = coordLeaf(t, wpki, hostSlot(t), a, place, nil)
 
 	host := tailnetHost(t, "prompted", place.controlURL, "")
 	type result struct {
@@ -121,12 +121,12 @@ func TestCoordinationCIDRGate(t *testing.T) {
 	t.Parallel()
 	wpki := packageWebPKI
 	place := placeCoordination(t)
-	a := coordCore(t, wpki, addrIP(0x47), place, func(cfg *services.NodeConfig) {
+	a := coordCore(t, wpki, hostSlot(t), place, func(cfg *services.NodeConfig) {
 		// The harness's hosts dial from 127.0.0.1; the prefix refuses all
 		// loopback.
 		cfg.EnrollAuth = "cidrs=192.0.2.0/24"
 	})
-	_ = coordLeaf(t, wpki, addrIP(0x48), a, place, nil)
+	_ = coordLeaf(t, wpki, hostSlot(t), a, place, nil)
 
 	host := tailnetHost(t, "gated", place.controlURL, "")
 	// The gate's budget: a denied registration the client keeps retrying
