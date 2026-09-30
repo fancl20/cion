@@ -80,7 +80,7 @@ func coordCore(t *testing.T, wpki *WebPKI, host netip.Addr,
 	return bootAssembly(t, func(cfg *services.NodeConfig) {
 		cfg.Core = true
 		cfg.State = t.TempDir()
-		cfg.Internal = FreeUDPAddrOn(t, host)
+		cfg.Internal = PinnedUDPAddrOn(t, host)
 		cfg.Control = FreeUDPAddrOn(t, host)
 		cfg.CertFile = wpki.certFile
 		cfg.KeyFile = wpki.keyFile
@@ -106,7 +106,7 @@ func coordLeaf(t *testing.T, wpki *WebPKI, host netip.Addr, core *assemblyNode,
 	t.Helper()
 	return bootAssembly(t, func(cfg *services.NodeConfig) {
 		cfg.State = t.TempDir()
-		cfg.Internal = FreeUDPAddrOn(t, host)
+		cfg.Internal = PinnedUDPAddrOn(t, host)
 		cfg.Control = FreeUDPAddrOn(t, host)
 		cfg.Neighbors = []string{core.rendezvousOf()}
 		cfg.RootCAs = wpki.pool

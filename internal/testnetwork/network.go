@@ -15,6 +15,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"errors"
 	"io"
 	"log/slog"
 	"math/big"
@@ -22,6 +23,8 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -92,6 +95,16 @@ type Node struct {
 	// coordination application writes host entries into. Nil on non-cores.
 	WireguardStore wireguard.DirectoryStore
 	cancel         context.CancelFunc
+	// underlayDone closes when the data plane's Serve returned — its
+	// underlay sockets released with it.
+	underlayDone chan struct{}
+}
+
+// WaitUnderlayReleased waits the node's data plane out: Serve returned, the
+// underlay addresses released — a restarted node rebinds the recorded link
+// addresses against no holder of its previous incarnation.
+func (n *Node) WaitUnderlayReleased() {
+	<-n.underlayDone
 }
 
 // NewConn returns a SCION connection of the node, bound to the control
@@ -265,8 +278,9 @@ func StartNode(t *testing.T, cfg NodeConfig) *Node {
 	}
 	provider := dataplane.NewUDPProvider(64, 0, 0)
 	// Every address of the node sits on its own loopback address, so several
-	// nodes share one test host even with the fixed endpoint port.
-	internal, control := FreeUDPAddrOn(t, host), FreeUDPAddrOn(t, host)
+	// nodes share one test host even with the fixed endpoint port. The
+	// internal link's address is rebound, so it comes from the pinned band.
+	internal, control := PinnedUDPAddrOn(t, host), FreeUDPAddrOn(t, host)
 	controlAddr, err := netip.ParseAddrPort(control)
 	if err != nil {
 		t.Fatal(err)
@@ -396,7 +410,11 @@ func StartNode(t *testing.T, cfg NodeConfig) *Node {
 		<-ctx.Done()
 		_ = linkStore.Close()
 	}()
-	go func() { serveDone <- d.Serve(ctx) }()
+	underlayDone := make(chan struct{})
+	go func() {
+		serveDone <- d.Serve(ctx)
+		close(underlayDone)
+	}()
 	go func() {
 		defer handlePanic()
 		monitor.Run(ctx)
@@ -626,6 +644,8 @@ func StartNode(t *testing.T, cfg NodeConfig) *Node {
 		Provider:  pathProvider,
 		Lookup:    lookup,
 		cancel:    cancel,
+
+		underlayDone: underlayDone,
 	}
 
 	if cfg.Wireguard != nil {
@@ -772,6 +792,42 @@ func FreeUDPAddrOn(t *testing.T, ip netip.Addr) string {
 	}
 	defer func() { _ = c.Close() }()
 	return c.LocalAddr().String()
+}
+
+// The pinned port band: the addresses a node rebinds — a link-set's pinned
+// locals, the internal link — are drawn from below the kernel's ephemeral
+// range, where no bind(:0), the node's own control conns included, ever
+// lands. A rebound address drawn from the ephemeral range instead is free
+// at the draw yet any later bind(:0) can take it, and the node's own
+// rebind then fails.
+const (
+	pinnedPortBase = 20000
+	pinnedPortSpan = 5000
+)
+
+// pinnedPortDraws names the band's next port, so concurrent draws differ.
+var pinnedPortDraws atomic.Uint32
+
+// PinnedUDPAddrOn returns a UDP address on the given host for the node to
+// rebind: the band's next free port, probed by binding it and released for
+// the node's own bind. The release is safe — nothing that binds :0 draws
+// from the band.
+func PinnedUDPAddrOn(t *testing.T, ip netip.Addr) string {
+	t.Helper()
+	for range pinnedPortSpan {
+		addr := netip.AddrPortFrom(ip, pinnedPortBase+uint16(pinnedPortDraws.Add(1)%pinnedPortSpan))
+		c, err := net.ListenUDP("udp4", net.UDPAddrFromAddrPort(addr))
+		if errors.Is(err, syscall.EADDRINUSE) {
+			continue
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = c.Close()
+		return addr.String()
+	}
+	t.Fatalf("the pinned port band on %v is drawn dry", ip)
+	return ""
 }
 
 func selfEnroll(

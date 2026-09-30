@@ -114,7 +114,7 @@ func registerHost(t *testing.T, core *Node, host wireguard.HostEntry) {
 func startWireguardNodes(t *testing.T, ipA, ipB netip.Addr) (*Node, *Node) {
 	t.Helper()
 	wpki := NewWebPKI(t)
-	extA, extB := FreeUDPAddrOn(t, ipA), FreeUDPAddrOn(t, ipB)
+	extA, extB := PinnedUDPAddrOn(t, ipA), PinnedUDPAddrOn(t, ipB)
 	a := StartNode(t, NodeConfig{
 		IA: wireguardA, Host: ipA, Core: true, WPKI: wpki,
 		Links:     []Link{{Local: extA, Remote: extB, Neighbor: wireguardB}},

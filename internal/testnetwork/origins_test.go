@@ -38,10 +38,10 @@ func TestTwoOriginsShareOneSegmentID(t *testing.T) {
 	t.Parallel()
 	wpki := NewWebPKI(t)
 	ipA1, ipA2, ipS, ipL := hostSlot(t), hostSlot(t), hostSlot(t), hostSlot(t)
-	a1S, sA1 := FreeUDPAddrOn(t, ipA1), FreeUDPAddrOn(t, ipS)
-	a2S, sA2 := FreeUDPAddrOn(t, ipA2), FreeUDPAddrOn(t, ipS)
-	a1A2, a2A1 := FreeUDPAddrOn(t, ipA1), FreeUDPAddrOn(t, ipA2)
-	sL, lS := FreeUDPAddrOn(t, ipS), FreeUDPAddrOn(t, ipL)
+	a1S, sA1 := PinnedUDPAddrOn(t, ipA1), PinnedUDPAddrOn(t, ipS)
+	a2S, sA2 := PinnedUDPAddrOn(t, ipA2), PinnedUDPAddrOn(t, ipS)
+	a1A2, a2A1 := PinnedUDPAddrOn(t, ipA1), PinnedUDPAddrOn(t, ipA2)
+	sL, lS := PinnedUDPAddrOn(t, ipS), PinnedUDPAddrOn(t, ipL)
 
 	// The founding core names the fellow core in the genesis TRC, so every
 	// node that pins it accepts the fellow core's beacons as core-originated.

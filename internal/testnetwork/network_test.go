@@ -18,8 +18,8 @@ import (
 // links the placement every line episode builds on.
 func startLine(t *testing.T, wpki *WebPKI, ipA, ipB, ipC netip.Addr) (*Node, *Node, *Node) {
 	t.Helper()
-	extA, extB1 := FreeUDPAddrOn(t, ipA), FreeUDPAddrOn(t, ipB)
-	extB2, extC := FreeUDPAddrOn(t, ipB), FreeUDPAddrOn(t, ipC)
+	extA, extB1 := PinnedUDPAddrOn(t, ipA), PinnedUDPAddrOn(t, ipB)
+	extB2, extC := PinnedUDPAddrOn(t, ipB), PinnedUDPAddrOn(t, ipC)
 	a := StartNode(t, NodeConfig{IA: coreIA, Host: ipA, Links: []Link{
 		{Local: extA, Remote: extB1, Neighbor: nodeIA},
 	}, Core: true, WPKI: wpki})
@@ -120,7 +120,7 @@ func TestRestartedNodeServesUpSegments(t *testing.T) {
 	// to the test's cleanup, its fixed port held against the reboot.
 	ipA, ipB1, ipB2 := hostSlot(t), hostSlot(t), hostSlot(t)
 	dir := t.TempDir()
-	extA, extB1 := FreeUDPAddrOn(t, ipA), FreeUDPAddrOn(t, ipB1)
+	extA, extB1 := PinnedUDPAddrOn(t, ipA), PinnedUDPAddrOn(t, ipB1)
 
 	StartNode(t, NodeConfig{IA: coreIA, Host: ipA, Links: []Link{
 		{Local: extA, Remote: extB1, Neighbor: nodeIA},
@@ -137,8 +137,11 @@ func TestRestartedNodeServesUpSegments(t *testing.T) {
 
 	// Stop B's loops and release its databases; a restarted node — the same
 	// state directory, a fresh underlay presence — serves the up segments
-	// before the next beaconing period.
+	// before the next beaconing period. The underlay waits out too: the
+	// restart re-serves B's recorded link address, and the previous
+	// incarnation's socket releases only with Serve's return.
 	b.cancel()
+	b.WaitUnderlayReleased()
 	if err := b.PeerClt.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -154,7 +157,7 @@ func TestRestartedNodeServesUpSegments(t *testing.T) {
 		_, err := b.Store.All(context.Background())
 		return err != nil
 	})
-	extB2 := FreeUDPAddrOn(t, ipB2)
+	extB2 := PinnedUDPAddrOn(t, ipB2)
 	b2 := StartNode(t, NodeConfig{IA: nodeIA, Host: ipB2, StateDir: dir, Links: []Link{
 		{Local: extB2, Remote: extA, Neighbor: coreIA},
 	}, WPKI: wpki})

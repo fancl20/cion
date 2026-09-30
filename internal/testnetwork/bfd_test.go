@@ -91,7 +91,7 @@ func TestBFDLivenessEpisode(t *testing.T) {
 	// same session, no generation swap.
 	b2 := bootAssembly(t, func(cfg *services.NodeConfig) {
 		cfg.State = b.stateDir
-		cfg.Internal = FreeUDPAddrOn(t, ipB)
+		cfg.Internal = PinnedUDPAddrOn(t, ipB)
 		cfg.Control = FreeUDPAddrOn(t, ipB)
 		cfg.RootCAs = wpki.pool
 	})
