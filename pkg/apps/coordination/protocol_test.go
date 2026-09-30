@@ -15,7 +15,6 @@ import (
 	"testing"
 	"time"
 
-	"golang.org/x/net/http2"
 	"tailscale.com/control/controlhttp"
 	"tailscale.com/net/netmon"
 	"tailscale.com/tailcfg"
@@ -117,8 +116,11 @@ func noiseHTTP(t *testing.T, addr string, roots *x509.CertPool,
 		t.Fatalf("dialing the noise channel: %v", err)
 	}
 	t.Cleanup(func() { _ = conn.Close() })
-	transport := &http2.Transport{
-		DialTLSContext: func(context.Context, string, string, *tls.Config) (
+	var protocols http.Protocols
+	protocols.SetUnencryptedHTTP2(true)
+	transport := &http.Transport{
+		Protocols: &protocols,
+		DialContext: func(context.Context, string, string) (
 			net.Conn, error) {
 
 			return conn, nil
@@ -142,7 +144,7 @@ func register(t *testing.T, client *http.Client,
 	if err != nil {
 		t.Fatal(err)
 	}
-	resp, err := client.Post("https://"+TestDomain+"/machine/register",
+	resp, err := client.Post("http://"+TestDomain+"/machine/register",
 		"application/json", bytes.NewReader(raw))
 	if err != nil {
 		t.Fatalf("the registration request: %v", err)
@@ -174,7 +176,7 @@ func fetchMap(t *testing.T, client *http.Client,
 	if err != nil {
 		t.Fatal(err)
 	}
-	resp, err := client.Post("https://"+TestDomain+"/machine/map",
+	resp, err := client.Post("http://"+TestDomain+"/machine/map",
 		"application/json", bytes.NewReader(raw))
 	if err != nil {
 		t.Fatalf("the map request: %v", err)
