@@ -54,11 +54,11 @@ func collectSums(t *testing.T, reader *sdkmetric.ManualReader) map[metricKey]int
 				for _, kv := range dp.Attributes.ToSlice() {
 					switch string(kv.Key) {
 					case "interface":
-						ifc = kv.Value.Emit()
+						ifc = kv.Value.String()
 					case "sizeclass":
-						sc = kv.Value.Emit()
+						sc = kv.Value.String()
 					case "reason":
-						reason = kv.Value.Emit()
+						reason = kv.Value.String()
 					}
 				}
 				sums[metricKey{m.Name, ifc, sc, reason}] += dp.Value

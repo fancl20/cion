@@ -32,7 +32,7 @@ func streamMap(t *testing.T, client *http.Client,
 	if err != nil {
 		t.Fatal(err)
 	}
-	resp, err := client.Post("https://"+TestDomain+"/machine/map",
+	resp, err := client.Post("http://"+TestDomain+"/machine/map",
 		"application/json", bytes.NewReader(raw))
 	if err != nil {
 		t.Fatalf("the streaming map request: %v", err)

@@ -3,9 +3,10 @@ package coordination
 import (
 	"encoding/json/v2"
 	"log/slog"
+	"net"
 	"net/http"
+	"sync"
 
-	"golang.org/x/net/http2"
 	"tailscale.com/control/controlhttp/controlhttpserver"
 	"tailscale.com/tailcfg"
 	"tailscale.com/types/key"
@@ -35,15 +36,63 @@ func (a *App) handleNoise(w http.ResponseWriter, r *http.Request) {
 		slog.Warn("Coordination noise handshake", "remote", r.RemoteAddr, "err", err)
 		return
 	}
-	a.wg.Add(1)
-	go func() {
-		defer a.wg.Done()
+	a.wg.Go(func() {
 		defer a.conversations.Add(-1)
-		defer func() { _ = conn.Close() }()
-		(&http2.Server{}).ServeConn(conn,
-			&http2.ServeConnOpts{Handler: &machineHandler{app: a, machine: conn.Peer()}})
-	}()
+		conv := newConversationConn(conn)
+		defer func() { _ = conv.Close() }()
+		var protocols http.Protocols
+		protocols.SetUnencryptedHTTP2(true)
+		_ = (&http.Server{
+			Handler:   &machineHandler{app: a, machine: conn.Peer()},
+			Protocols: &protocols,
+		}).Serve(newSingleListener(conv))
+		<-conv.ended()
+	})
 }
+
+// conversationConn reports the conversation's end: the server closes the
+// connection it accepted once it finishes serving it, and the conversation's
+// holder waits on that close — Serve returns while the accepted connection
+// is still being served.
+type conversationConn struct {
+	net.Conn
+	once sync.Once
+	done chan struct{}
+}
+
+func newConversationConn(conn net.Conn) *conversationConn {
+	return &conversationConn{Conn: conn, done: make(chan struct{})}
+}
+
+func (c *conversationConn) ended() <-chan struct{} { return c.done }
+
+func (c *conversationConn) Close() error {
+	c.once.Do(func() { close(c.done) })
+	return c.Conn.Close()
+}
+
+// singleListener hands the one conversation connection to http.Server.Serve,
+// whose accepting loop takes a listener rather than a bare connection.
+type singleListener struct {
+	conn net.Conn
+	addr net.Addr
+}
+
+func newSingleListener(conn net.Conn) *singleListener {
+	return &singleListener{conn: conn, addr: conn.RemoteAddr()}
+}
+
+func (l *singleListener) Accept() (net.Conn, error) {
+	conn := l.conn
+	l.conn = nil
+	if conn == nil {
+		return nil, net.ErrClosed
+	}
+	return conn, nil
+}
+
+func (l *singleListener) Close() error   { return nil }
+func (l *singleListener) Addr() net.Addr { return l.addr }
 
 // machineHandler serves one noise conversation's machine endpoints, the
 // handshake-authenticated machine key beside them: the one fact the
