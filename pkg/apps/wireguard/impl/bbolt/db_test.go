@@ -80,6 +80,57 @@ func TestDirectoryStoreIgnoresRetiredFields(t *testing.T) {
 	}
 }
 
+// TestDirectoryStoreHostWithoutMachineKey checks the store's leniency toward
+// the older host shape: a stored host entry carrying no machine key decodes
+// with none — the record from before the machine claim, which the
+// coordination application binds at the first presentation after the
+// upgrade — and the bound record round-trips.
+func TestDirectoryStoreHostWithoutMachineKey(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "directory.db")
+	store, err := New(path, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	db := store.(*directoryDB).db
+	key := dbtest.MustKey(0x01)
+	// A host entry in the older stored shape: no machine key beside the
+	// fields that remain.
+	old := `{"addr":"100.64.1.2","ia":"20-ff00:0:1","note":"telegram operator"}`
+	if err := db.Update(func(tx *bbolt.Tx) error {
+		return tx.Bucket(hostsBucket).Put([]byte(key.String()), []byte(old))
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	directory, err := store.List(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(directory.Hosts) != 1 {
+		t.Fatalf("list served %d hosts, want 1", len(directory.Hosts))
+	}
+	if directory.Hosts[0].MachineKey != (wireguard.PublicKey{}) {
+		t.Errorf("decoded machine key = %s, want none", directory.Hosts[0].MachineKey)
+	}
+
+	// The presentation's binding lands, and the record round-trips.
+	bound := directory.Hosts[0]
+	bound.MachineKey = dbtest.MustKey(0x71)
+	if err := store.PublishHost(context.Background(), bound); err != nil {
+		t.Fatal(err)
+	}
+	directory, err = store.List(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(directory.Hosts) != 1 || directory.Hosts[0] != bound {
+		t.Errorf("re-published host = %+v, want %+v", directory.Hosts[0], bound)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func mustIA() addr.IA {
 	return addr.MustIAFrom(20, 0xff0000000001)
 }

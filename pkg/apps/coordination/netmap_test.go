@@ -35,7 +35,7 @@ func TestNetmapHoldsOnePeer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	resp, err := a.netmap(nodePublicOf(hostKey), machineZero(), directory,
+	resp, err := a.netmap(context.Background(), nodePublicOf(hostKey), machineZero(), directory,
 		key.DiscoPublic{}, tailcfg.HostinfoView{})
 	if err != nil {
 		t.Fatal(err)
@@ -128,7 +128,7 @@ func TestNetmapRequiresRegistration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := a.netmap(nodePublicOf(dbtest.MustKey(1)), machineZero(), directory,
+	if _, err := a.netmap(context.Background(), nodePublicOf(dbtest.MustKey(1)), machineZero(), directory,
 		key.DiscoPublic{}, tailcfg.HostinfoView{}); err == nil {
 		t.Error("an unregistered key mapped, want refusal")
 	}
@@ -136,7 +136,7 @@ func TestNetmapRequiresRegistration(t *testing.T) {
 		t.Fatal(err)
 	}
 	directory, _ = store.List(context.Background())
-	if _, err := a.netmap(nodePublicOf(dbtest.MustKey(1)), machineZero(), directory,
+	if _, err := a.netmap(context.Background(), nodePublicOf(dbtest.MustKey(1)), machineZero(), directory,
 		key.DiscoPublic{}, tailcfg.HostinfoView{}); err == nil {
 		t.Error("a host with no owning node entry mapped, want refusal")
 	}
@@ -166,7 +166,7 @@ func TestNetmapCarriesEveryNodesAddress(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	resp, err := a.netmap(nodePublicOf(dbtest.MustKey(0x21)), machineZero(),
+	resp, err := a.netmap(context.Background(), nodePublicOf(dbtest.MustKey(0x21)), machineZero(),
 		directory, key.DiscoPublic{}, tailcfg.HostinfoView{})
 	if err != nil {
 		t.Fatal(err)
@@ -185,6 +185,49 @@ func TestNetmapCarriesEveryNodesAddress(t *testing.T) {
 		if aip.Bits() != 32 {
 			t.Errorf("the address %s is a covering prefix, want single-IP routes alone", aip)
 		}
+	}
+}
+
+// TestNetmapBindsAndRefusesMachines checks the map's machine claim at the
+// builder: a record holding no machine key binds the first machine to
+// present it — the registry keeps the binding — and a machine the record
+// does not name maps nothing.
+func TestNetmapBindsAndRefusesMachines(t *testing.T) {
+	store := &dbtest.MemStore{}
+	nodeEntry := testNode(mustIA("1-ff00:0:1"), "100.64.1.0/24", "198.51.100.10:51820")
+	nodeEntry.PublicKey = dbtest.MustKey(0x11)
+	store.Seed(nodeEntry)
+	if err := store.PublishHost(context.Background(),
+		registeredHost(dbtest.MustKey(0x22))); err != nil {
+		t.Fatal(err)
+	}
+	a := testApp(t, Config{Store: store})
+
+	// The first presentation binds: the record answers the machine and
+	// keeps the binding.
+	member := key.NewMachine()
+	directory, err := store.List(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.netmap(context.Background(), nodePublicOf(dbtest.MustKey(0x22)),
+		member.Public(), directory, key.DiscoPublic{}, tailcfg.HostinfoView{}); err != nil {
+		t.Fatalf("the first presentation mapped no answer: %v", err)
+	}
+	directory, err = store.List(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(directory.Hosts) != 1 ||
+		directory.Hosts[0].MachineKey != machineKeyOf(member.Public()) {
+		t.Fatalf("the registry holds %+v, want the record bound to the first presenter",
+			directory.Hosts)
+	}
+
+	// A machine the record does not name maps nothing.
+	if _, err := a.netmap(context.Background(), nodePublicOf(dbtest.MustKey(0x22)),
+		key.NewMachine().Public(), directory, key.DiscoPublic{}, tailcfg.HostinfoView{}); err == nil {
+		t.Error("a machine the record does not name mapped, want refusal")
 	}
 }
 
@@ -207,7 +250,7 @@ func TestNetmapResendFollowsNodes(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		resp, err := a.netmap(nodePublicOf(dbtest.MustKey(0x31)), machineZero(),
+		resp, err := a.netmap(context.Background(), nodePublicOf(dbtest.MustKey(0x31)), machineZero(),
 			directory, key.DiscoPublic{}, tailcfg.HostinfoView{})
 		if err != nil {
 			t.Fatal(err)
