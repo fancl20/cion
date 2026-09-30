@@ -183,7 +183,7 @@ func (n *node) supervise(ctx context.Context, gen *generation) error {
 			n.setGeneration(nil)
 			var next *generation
 			var err error
-			for attempt := 0; attempt < bindAttempts; attempt++ {
+			for attempt := range bindAttempts {
 				next, err = n.startGeneration(ctx)
 				if err == nil {
 					break

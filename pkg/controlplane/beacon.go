@@ -191,16 +191,14 @@ func (b *Beaconer) linkTable() map[uint16]addr.IA {
 func (b *Beaconer) Run(ctx context.Context) {
 	var wg sync.WaitGroup
 	loop := func(interval time.Duration, f func(context.Context)) {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			defer func() {
 				if r := recover(); r != nil {
 					slog.Error("Panic in beaconing loop", "panic", r)
 				}
 			}()
 			b.loop(ctx, interval, f)
-		}()
+		})
 	}
 	if b.core {
 		loop(b.propagation, b.originateOnce)

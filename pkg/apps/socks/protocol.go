@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/netip"
 	"os"
+	"slices"
 	"strconv"
 	"syscall"
 )
@@ -119,11 +120,9 @@ func negotiate(conn net.Conn) error {
 	if _, err := io.ReadFull(conn, methods); err != nil {
 		return err
 	}
-	for _, m := range methods {
-		if m == methodNone {
-			_, err := conn.Write([]byte{version, methodNone})
-			return err
-		}
+	if slices.Contains(methods, methodNone) {
+		_, err := conn.Write([]byte{version, methodNone})
+		return err
 	}
 	_, err := conn.Write([]byte{version, methodNoAcceptable})
 	if err != nil {

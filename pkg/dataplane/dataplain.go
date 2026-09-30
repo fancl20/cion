@@ -229,7 +229,7 @@ func (d *DataPlane) initPacketPool(processorQueueSize int) {
 	d.packetPool = makePacketPool(poolSize, headroom)
 	pktBuffers := make([][bufSize]byte, poolSize)
 	pktStructs := make([]Packet, poolSize)
-	for i := 0; i < poolSize; i++ {
+	for i := range poolSize {
 		d.packetPool.Put(pktStructs[i].init(&pktBuffers[i]))
 	}
 }

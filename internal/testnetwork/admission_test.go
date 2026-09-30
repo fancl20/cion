@@ -22,7 +22,7 @@ func mintedInvitation(t *testing.T, bot *operatorBot) string {
 		bot.mtx.Unlock()
 		for _, m := range prompts {
 			text, _ := m["text"].(string)
-			for _, line := range strings.Split(text, "\n") {
+			for line := range strings.SplitSeq(text, "\n") {
 				if strings.HasPrefix(line, "cion-") {
 					return line
 				}

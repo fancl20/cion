@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -304,8 +305,7 @@ func (a *App) register(svc addr.SVC, port uint16) error {
 
 // deregisterAll undoes the recorded registrations, most recent first.
 func (a *App) deregisterAll() {
-	for i := len(a.regs) - 1; i >= 0; i-- {
-		reg := a.regs[i]
+	for _, reg := range slices.Backward(a.regs) {
 		if err := a.cfg.UnregisterSvc(reg.svc, reg.port); err != nil {
 			slog.Warn("WireGuard service deregistration", "service", reg.svc, "err", err)
 		}

@@ -339,8 +339,7 @@ func TestHeldHostPortRefusesBoot(t *testing.T) {
 	}
 	defer func() { _ = held.Close() }()
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	_, err = services.BootApp(ctx, services.NodeConfig{
 		Core:     true,
 		Domain:   TestDomain,

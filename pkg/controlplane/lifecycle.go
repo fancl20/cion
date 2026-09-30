@@ -84,11 +84,9 @@ func (cfg EnrollmentConfig) enroll(ctx context.Context) {
 // own interval.
 func RunEnrollment(ctx context.Context, cfg EnrollmentConfig) {
 	var sweep sync.WaitGroup
-	sweep.Add(1)
-	go func() {
-		defer sweep.Done()
+	sweep.Go(func() {
 		cfg.sweepChains(ctx)
-	}()
+	})
 	defer sweep.Wait()
 	for {
 		select {
@@ -106,11 +104,9 @@ func RunEnrollment(ctx context.Context, cfg EnrollmentConfig) {
 // chain valid for the node's lifetime.
 func RunCoreEnrollment(ctx context.Context, cfg EnrollmentConfig) {
 	var sweep sync.WaitGroup
-	sweep.Add(1)
-	go func() {
-		defer sweep.Done()
+	sweep.Go(func() {
 		cfg.sweepChains(ctx)
-	}()
+	})
 	defer sweep.Wait()
 	for {
 		select {

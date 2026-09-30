@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"slices"
 	"sync"
 	"time"
 
@@ -302,8 +303,8 @@ func (n *node) Close() {
 	}
 	// The applications release in reverse table order — the borrowers
 	// before the WireGuard application whose machinery they borrow.
-	for i := len(n.apps) - 1; i >= 0; i-- {
-		n.apps[i].App.Close()
+	for _, v := range slices.Backward(n.apps) {
+		v.App.Close()
 	}
 	n.backendsMtx.Lock()
 	gen := n.gen

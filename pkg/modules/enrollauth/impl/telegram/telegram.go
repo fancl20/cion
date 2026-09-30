@@ -608,8 +608,7 @@ func call[T any](t *Authorizer, ctx context.Context, method string, req any) (T,
 // renders the whole request line, and the request line carries the bot's
 // token.
 func botAPIError(method string, err error) error {
-	var urlErr *url.Error
-	if errors.As(err, &urlErr) {
+	if urlErr, ok := errors.AsType[*url.Error](err); ok {
 		err = urlErr.Err
 	}
 	return fmt.Errorf("%s failed: %w", method, err)
@@ -656,11 +655,12 @@ type tgSent struct {
 	MessageID int64 `json:"message_id"`
 }
 
-// tgSendMessage is one prompted or plain message.
+// tgSendMessage is one prompted or plain message; the markup omits on a
+// plain reply, which carries no keyboard.
 type tgSendMessage struct {
 	ChatID      int64         `json:"chat_id"`
 	Text        string        `json:"text"`
-	ReplyMarkup tgReplyMarkup `json:"reply_markup,omitempty"`
+	ReplyMarkup tgReplyMarkup `json:"reply_markup,omitzero"`
 }
 
 // tgReplyMarkup carries a message's inline keyboard; empty on a plain

@@ -143,7 +143,7 @@ func PathExpiry(p *spath.Decoded) time.Time {
 	hop := 0
 	for i, info := range p.InfoFields {
 		segLen := int(p.PathMeta.SegLen[i])
-		for h := 0; h < segLen; h++ {
+		for h := range segLen {
 			expiry := util.SecsToTime(info.Timestamp).
 				Add(path.ExpTimeToDuration(p.HopFields[hop+h].ExpTime))
 			if earliest.IsZero() || expiry.Before(earliest) {

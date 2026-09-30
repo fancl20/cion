@@ -217,7 +217,7 @@ func (p *PCB) Expiration() time.Time {
 func (p *PCB) AssociatedData(i int) [][]byte {
 	ad := make([][]byte, 0, 1+2*i)
 	ad = append(ad, p.PB.SegmentInfo)
-	for j := 0; j < i; j++ {
+	for j := range i {
 		ad = append(ad, p.Entries[j].Signed.HeaderAndBody, p.Entries[j].Signed.Signature)
 	}
 	return ad
@@ -395,7 +395,7 @@ func (p *PCB) ForwardPathFrom(i int) (*scion.Decoded, error) {
 		ConsDir:   true,
 		Timestamp: util.TimeToSecs(p.Info.Timestamp),
 	}
-	for j := 0; j < i; j++ {
+	for j := range i {
 		info.UpdateSegID(p.Entries[j].Hop.Mac)
 	}
 	hops := make([]path.HopField, len(p.Entries)-i)

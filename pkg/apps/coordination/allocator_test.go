@@ -93,7 +93,7 @@ func TestAllocateRefusals(t *testing.T) {
 	full := wireguard.Directory{Nodes: []wireguard.Entry{
 		testNode(mustIA("1-ff00:0:1"), "100.64.1.0/29", "198.51.100.10:51820"),
 	}}
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		full.Hosts = append(full.Hosts, wireguard.HostEntry{
 			PublicKey: dbtest.MustKey(byte(i + 1)),
 			Addr:      ipMasked("100.64.1.", byte(2+i)),

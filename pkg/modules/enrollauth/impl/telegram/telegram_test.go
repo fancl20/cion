@@ -573,7 +573,7 @@ func lastInvitation(t *testing.T, d *botDouble) string {
 		}
 		return strings.Contains(d.prompt(d.promptCount()-1).Text, invitePrefix)
 	})
-	for _, line := range strings.Split(d.prompt(d.promptCount()-1).Text, "\n") {
+	for line := range strings.SplitSeq(d.prompt(d.promptCount()-1).Text, "\n") {
 		if strings.HasPrefix(line, invitePrefix) {
 			return line
 		}
