@@ -30,7 +30,8 @@ methods to wait system ready.
 ### Before commit
 
 Review changes to ensure they conform to all style requirements. For code
-changes, run tests with `go test -race -count=2` first, then `golangci-lint`.
+changes, run tests with `go test -race -count=2` first, then `golangci-lint`,
+then `go fmt` and `go fix`.
 
 Pause and wait for human review before committing changes to the codebase.
 It's acceptable to amend a local commit if a later commit is a refinement of
