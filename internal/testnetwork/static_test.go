@@ -59,7 +59,7 @@ func bootStaticNode(t *testing.T, wpki *WebPKI, ip netip.Addr, core bool,
 		cfg.Core = core
 		cfg.LinkSet = linkSet
 		cfg.State = state
-		cfg.Internal = FreeUDPAddrOn(t, ip)
+		cfg.Internal = PinnedUDPAddrOn(t, ip)
 		cfg.Control = FreeUDPAddrOn(t, ip)
 		if core {
 			cfg.CertFile = wpki.certFile
@@ -83,8 +83,8 @@ func bootStaticLine(t *testing.T, wpki *WebPKI,
 	ipA, ipB, ipC netip.Addr) (a, b, c *staticNode) {
 
 	t.Helper()
-	abA, abB := FreeUDPAddrOn(t, ipA), FreeUDPAddrOn(t, ipB)
-	bcB, bcC := FreeUDPAddrOn(t, ipB), FreeUDPAddrOn(t, ipC)
+	abA, abB := PinnedUDPAddrOn(t, ipA), PinnedUDPAddrOn(t, ipB)
+	bcB, bcC := PinnedUDPAddrOn(t, ipB), PinnedUDPAddrOn(t, ipC)
 
 	// The founding core starts first, its link-set empty: its draw names
 	// the ISD the other files' entries complete with. B's file names the
@@ -182,7 +182,7 @@ func TestStaticEnrollmentByAuthorizer(t *testing.T) {
 	t.Parallel()
 	wpki := NewWebPKI(t)
 	ipA, ipB := hostSlot(t), hostSlot(t)
-	abA, abB := FreeUDPAddrOn(t, ipA), FreeUDPAddrOn(t, ipB)
+	abA, abB := PinnedUDPAddrOn(t, ipA), PinnedUDPAddrOn(t, ipB)
 
 	// A prefix list that admits nothing on the lab's loopback addressing:
 	// the vouch below still admits the link, the authorizer still bounds

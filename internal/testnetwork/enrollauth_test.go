@@ -173,7 +173,7 @@ func enrollAuthCore(t *testing.T, wpki *WebPKI, ip netip.Addr,
 	return bootAssembly(t, func(cfg *services.NodeConfig) {
 		cfg.Core = true
 		cfg.State = t.TempDir()
-		cfg.Internal = FreeUDPAddrOn(t, ip)
+		cfg.Internal = PinnedUDPAddrOn(t, ip)
 		cfg.Control = FreeUDPAddrOn(t, ip)
 		cfg.CertFile = wpki.certFile
 		cfg.KeyFile = wpki.keyFile
@@ -188,7 +188,7 @@ func bootTelegramJoiner(t *testing.T, wpki *WebPKI, ip netip.Addr,
 	t.Helper()
 	return bootAssembly(t, func(cfg *services.NodeConfig) {
 		cfg.State = t.TempDir()
-		cfg.Internal = FreeUDPAddrOn(t, ip)
+		cfg.Internal = PinnedUDPAddrOn(t, ip)
 		cfg.Control = FreeUDPAddrOn(t, ip)
 		cfg.Neighbors = []string{core.rendezvousOf()}
 		cfg.RootCAs = wpki.pool
@@ -279,7 +279,7 @@ func TestJoinByEnrollAuthTelegramRestart(t *testing.T) {
 	bootAssembly(t, func(cfg *services.NodeConfig) {
 		cfg.Core = true
 		cfg.State = state
-		cfg.Internal = FreeUDPAddrOn(t, ipA)
+		cfg.Internal = PinnedUDPAddrOn(t, ipA)
 		cfg.Control = FreeUDPAddrOn(t, ipA)
 		cfg.CertFile = wpki.certFile
 		cfg.KeyFile = wpki.keyFile

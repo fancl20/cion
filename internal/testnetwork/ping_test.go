@@ -28,8 +28,8 @@ func TestPingForkTopology(t *testing.T) {
 	ipA := hostSlot(t)
 	ipB := hostSlot(t)
 	ipC := hostSlot(t)
-	extA1, extB := FreeUDPAddrOn(t, ipA), FreeUDPAddrOn(t, ipB)
-	extA2, extC := FreeUDPAddrOn(t, ipA), FreeUDPAddrOn(t, ipC)
+	extA1, extB := PinnedUDPAddrOn(t, ipA), PinnedUDPAddrOn(t, ipB)
+	extA2, extC := PinnedUDPAddrOn(t, ipA), PinnedUDPAddrOn(t, ipC)
 
 	a := StartNode(t, NodeConfig{IA: coreIA, Host: ipA, Links: []Link{
 		{Local: extA1, Remote: extB, Neighbor: nodeIA},
@@ -199,9 +199,9 @@ func TestPingSiblingNodes(t *testing.T) {
 	wpki := NewWebPKI(t)
 	ipA, ipB := hostSlot(t), hostSlot(t)
 	ipC, ipD := hostSlot(t), hostSlot(t)
-	extA, extB1 := FreeUDPAddrOn(t, ipA), FreeUDPAddrOn(t, ipB)
-	extB2, extC := FreeUDPAddrOn(t, ipB), FreeUDPAddrOn(t, ipC)
-	extB3, extD := FreeUDPAddrOn(t, ipB), FreeUDPAddrOn(t, ipD)
+	extA, extB1 := PinnedUDPAddrOn(t, ipA), PinnedUDPAddrOn(t, ipB)
+	extB2, extC := PinnedUDPAddrOn(t, ipB), PinnedUDPAddrOn(t, ipC)
+	extB3, extD := PinnedUDPAddrOn(t, ipB), PinnedUDPAddrOn(t, ipD)
 
 	// The core and the parent run unattended: the episode reads only the
 	// siblings' ends.
@@ -261,7 +261,7 @@ func TestPingReresolvesExpiredPath(t *testing.T) {
 	iaP := addr.MustIAFrom(20, 0xff0000000021)
 	iaR := addr.MustIAFrom(20, 0xff0000000022)
 	ipP, ipR := hostSlot(t), hostSlot(t)
-	extP, extR := FreeUDPAddrOn(t, ipP), FreeUDPAddrOn(t, ipR)
+	extP, extR := PinnedUDPAddrOn(t, ipP), PinnedUDPAddrOn(t, ipR)
 
 	p := StartNode(t, NodeConfig{IA: iaP, Host: ipP, Links: []Link{
 		{Local: extP, Remote: extR, Neighbor: iaR},
@@ -371,7 +371,7 @@ func TestPingUnreachable(t *testing.T) {
 	iaP := addr.MustIAFrom(20, 0xff0000000031)
 	iaR := addr.MustIAFrom(20, 0xff0000000032)
 	ipP, ipR := hostSlot(t), hostSlot(t)
-	extP, extR := FreeUDPAddrOn(t, ipP), FreeUDPAddrOn(t, ipR)
+	extP, extR := PinnedUDPAddrOn(t, ipP), PinnedUDPAddrOn(t, ipR)
 
 	p := StartNode(t, NodeConfig{IA: iaP, Host: ipP, Links: []Link{
 		{Local: extP, Remote: extR, Neighbor: iaR},
@@ -412,7 +412,7 @@ func TestPingLossSummary(t *testing.T) {
 	iaP := addr.MustIAFrom(20, 0xff0000000041)
 	iaR := addr.MustIAFrom(20, 0xff0000000042)
 	ipP, ipR := hostSlot(t), hostSlot(t)
-	extP, extR := FreeUDPAddrOn(t, ipP), FreeUDPAddrOn(t, ipR)
+	extP, extR := PinnedUDPAddrOn(t, ipP), PinnedUDPAddrOn(t, ipR)
 
 	// The provider resolves over a crafted up segment, so the requests are
 	// delivered; no responder answers them.
