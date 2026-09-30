@@ -44,7 +44,7 @@ func ResolveService(ctx context.Context, conn *scion.Conn, peer *scion.Addr) (ne
 		return netip.AddrPort{}, err
 	}
 	buf := make([]byte, 1024)
-	for attempt := 0; attempt < ResolutionAttempts; attempt++ {
+	for range ResolutionAttempts {
 		if err := ctx.Err(); err != nil {
 			return netip.AddrPort{}, err
 		}

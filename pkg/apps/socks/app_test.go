@@ -518,8 +518,7 @@ func TestFlowBoundRefuses(t *testing.T) {
 	if _, err := socksclient.Connect(dialClient(t, client), internet.String()); err == nil {
 		t.Error("a CONNECT at the bound succeeded, want the told refusal")
 	} else {
-		var refused *socksclient.Refused
-		if !errors.As(err, &refused) {
+		if _, ok := errors.AsType[*socksclient.Refused](err); !ok {
 			t.Errorf("the CONNECT at the bound = %v, want the told refusal", err)
 		}
 	}
@@ -529,8 +528,7 @@ func TestFlowBoundRefuses(t *testing.T) {
 	if _, err := socksclient.Associate(conn, clientUDP(t, client)); err == nil {
 		t.Error("an association at the bound succeeded, want the told refusal")
 	} else {
-		var refused *socksclient.Refused
-		if !errors.As(err, &refused) {
+		if _, ok := errors.AsType[*socksclient.Refused](err); !ok {
 			t.Errorf("the association at the bound = %v, want the told refusal", err)
 		}
 	}

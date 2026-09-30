@@ -272,8 +272,7 @@ func TestHTTP01ChallengeSolves(t *testing.T) {
 		Identifier:       acme.Identifier{Type: "dns", Value: domain},
 	})
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	if err := serveHTTP01(ctx, issuer); err != nil {
 		t.Fatalf("serving the HTTP-01 challenge: %v", err)
 	}

@@ -38,14 +38,12 @@ func pipelineCases() []struct {
 					RunConfig
 					flows int
 				}{
-					RunConfig: RunConfig{
-						NumProcessors:         procs,
-						NumSlowPathProcessors: 1,
-						BatchSize:             batch,
-						ReceiveBufferSize:     1 << 20,
-						SendBufferSize:        1 << 20,
-					},
-					flows: flows,
+					NumProcessors:         procs,
+					NumSlowPathProcessors: 1,
+					BatchSize:             batch,
+					ReceiveBufferSize:     1 << 20,
+					SendBufferSize:        1 << 20,
+					flows:                 flows,
 				})
 			}
 		}

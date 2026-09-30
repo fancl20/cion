@@ -91,11 +91,11 @@ func TestMapStreamBound(t *testing.T) {
 	}
 
 	// Past the bound the map answers one full map and closes the stream.
-	for i := 0; i < maxMapStreams; i++ {
+	for range maxMapStreams {
 		a.mapStreams <- struct{}{}
 	}
 	t.Cleanup(func() {
-		for i := 0; i < maxMapStreams; i++ {
+		for range maxMapStreams {
 			<-a.mapStreams
 		}
 	})

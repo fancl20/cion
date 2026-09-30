@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"math"
 	"net/netip"
+	"slices"
 	"sort"
 	"time"
 
@@ -438,7 +439,7 @@ func (s *selection) echoRTT(dst *scion.Addr) time.Duration {
 		return 0
 	}
 	var rtts []time.Duration
-	for seq := uint16(0); seq < ProbeRuns; seq++ {
+	for seq := range uint16(ProbeRuns) {
 		sent := time.Now()
 		if err := s.cfg.Conn.WriteEchoRequestTo(dst, seq, nil); err != nil {
 			continue
@@ -785,6 +786,6 @@ func median(xs []time.Duration) time.Duration {
 	if len(xs) == 0 {
 		return 0
 	}
-	sort.Slice(xs, func(i, j int) bool { return xs[i] < xs[j] })
+	slices.Sort(xs)
 	return xs[len(xs)/2]
 }

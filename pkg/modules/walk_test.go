@@ -13,10 +13,12 @@ import (
 	"encoding/json"
 	"go/parser"
 	"go/token"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -239,9 +241,7 @@ func TestWalkFixtures(t *testing.T) {
 			name: "a stray package beneath a root",
 			files: func() map[string]string {
 				f := map[string]string{}
-				for k, v := range good {
-					f[k] = v
-				}
+				maps.Copy(f, good)
 				f["m/util/util.go"] = "package util"
 				return f
 			}(),
@@ -251,9 +251,7 @@ func TestWalkFixtures(t *testing.T) {
 			name: "an implementation outside the implementations' place",
 			files: func() map[string]string {
 				f := map[string]string{}
-				for k, v := range good {
-					f[k] = v
-				}
+				maps.Copy(f, good)
 				f["m/impl/bbolt/inner/inner.go"] = "package inner"
 				return f
 			}(),
@@ -318,7 +316,7 @@ func declaredKind(mod string) (string, bool) {
 		if err != nil || f.Doc == nil {
 			continue
 		}
-		for _, line := range strings.Split(f.Doc.Text(), "\n") {
+		for line := range strings.SplitSeq(f.Doc.Text(), "\n") {
 			line = strings.TrimSpace(line)
 			if rest, ok := strings.CutPrefix(line, "Kind:"); ok {
 				words := strings.Fields(rest)
@@ -439,10 +437,5 @@ func importPath(t *testing.T, dir string) string {
 
 // contains reports whether the list holds the string.
 func contains(list []string, s string) bool {
-	for _, v := range list {
-		if v == s {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(list, s)
 }

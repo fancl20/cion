@@ -123,7 +123,7 @@ func TestMeshSocketCachesPath(t *testing.T) {
 		IA:   core,
 		Addr: netip.MustParseAddrPort("127.0.0.1:40001"),
 	}}
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		if err := socket.send(peer, [][]byte{[]byte("datagram")}); err != nil {
 			t.Fatalf("send %d: %v", i, err)
 		}

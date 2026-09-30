@@ -65,7 +65,7 @@ func (s *BeaconStore) Insert(ingress uint16, pcb *segment.PCB) {
 		return
 	}
 	s.beacons[key] = candidate{
-		Candidate: Candidate{Ingress: ingress, PCB: pcb},
+		Ingress: ingress, PCB: pcb,
 		timestamp: pcb.Timestamp(),
 	}
 	s.evictStale(ingress)

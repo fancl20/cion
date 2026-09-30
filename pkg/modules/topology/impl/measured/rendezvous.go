@@ -481,7 +481,7 @@ func RendezvousEcho(
 	// The reply carries two addresses beside the fixed fields; the buffer
 	// holds the longest form an IPv6 reply takes.
 	buf := make([]byte, 192)
-	for attempt := 0; attempt < RendezvousAttempts; attempt++ {
+	for range RendezvousAttempts {
 		if err := ctx.Err(); err != nil {
 			return RendezvousReply{}, 0, err
 		}

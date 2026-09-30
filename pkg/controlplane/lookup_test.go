@@ -166,7 +166,7 @@ func TestLookupCacheUntilExpiry(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		fx := newLookupFixture(t)
 		ctx := context.Background()
-		for i := 0; i < 2; i++ {
+		for range 2 {
 			if segs := fx.lookup.Down(ctx, iaLineC); len(segs) != 1 {
 				t.Fatalf("down segments = %d, want 1", len(segs))
 			}

@@ -89,9 +89,7 @@ func TestTTLCacheConcurrent(t *testing.T) {
 	c := newTTLCache[int]()
 	var wg sync.WaitGroup
 	for g := range 4 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			for i := range 50 {
 				c.add("live", i, time.Duration(g+1)*time.Minute)
 				c.add("dead", i, -time.Minute)
@@ -99,7 +97,7 @@ func TestTTLCacheConcurrent(t *testing.T) {
 				c.get("dead")
 				c.get("absent")
 			}
-		}()
+		})
 	}
 	wg.Wait()
 	if _, ok := c.get("live"); !ok {

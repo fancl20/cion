@@ -101,7 +101,7 @@ func UpdateOutputMetrics(ctx context.Context, metrics *InterfaceMetrics, packets
 		writtenPkts[tt][sc]++
 		writtenBytes[tt][sc] += s
 	}
-	for t := ttOther; t < ttMax; t++ {
+	for t := range ttMax {
 		for sc := minSizeClass; sc < maxSizeClass; sc++ {
 			if writtenPkts[t][sc] > 0 {
 				metrics[sc].Output[t].OutputPacketsTotal.Add(ctx, int64(writtenPkts[t][sc]))
@@ -272,7 +272,7 @@ func (m *Metrics) NewInterfaceMetrics(ifID uint16, localIA, neighbor addr.IA) *I
 		tm.DroppedPacketsBusyForwarder =
 			m.bind(m.droppedPackets, labels, "reason", "busy_forwarder")
 		tm.DroppedPacketsBusySlowPath = m.bind(m.droppedPackets, labels, "reason", "busy_slow_path")
-		for t := ttOther; t < ttMax; t++ {
+		for t := range ttMax {
 			tm.Output[t] = outputMetrics{
 				OutputBytesTotal:   m.bind(m.outputBytes, labels, "type", t.String()),
 				OutputPacketsTotal: m.bind(m.outputPackets, labels, "type", t.String()),
