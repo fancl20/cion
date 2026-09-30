@@ -54,9 +54,10 @@ type wireEntry struct {
 
 // wireHostEntry is one host's registry entry beside its key.
 type wireHostEntry struct {
-	Addr string `json:"addr"`
-	IA   string `json:"ia"`
-	Note string `json:"note,omitempty"`
+	Addr       string `json:"addr"`
+	IA         string `json:"ia"`
+	MachineKey string `json:"machineKey,omitempty"`
+	Note       string `json:"note,omitempty"`
 }
 
 // Publish records the entry, keyed by its ISD-AS: a publisher's later entry
@@ -128,9 +129,10 @@ func heldEntries(tx *bbolt.Tx) ([]wireguard.Entry, error) {
 func (b *directoryDB) PublishHost(ctx context.Context, entry wireguard.HostEntry) error {
 	return b.db.Update(func(tx *bbolt.Tx) error {
 		raw, err := json.Marshal(wireHostEntry{
-			Addr: entry.Addr.String(),
-			IA:   entry.IA.String(),
-			Note: entry.Note,
+			Addr:       entry.Addr.String(),
+			IA:         entry.IA.String(),
+			MachineKey: entry.MachineKey.String(),
+			Note:       entry.Note,
 		})
 		if err != nil {
 			return err
@@ -188,6 +190,13 @@ func (b *directoryDB) List(ctx context.Context) (wireguard.Directory, error) {
 				return fmt.Errorf("decoding the host key %s: %w", k, err)
 			}
 			entry := wireguard.HostEntry{PublicKey: key}
+			if wire.MachineKey != "" {
+				machine, err := wireguard.ParsePublicKey(wire.MachineKey)
+				if err != nil {
+					return fmt.Errorf("decoding the host entry for %s: %w", k, err)
+				}
+				entry.MachineKey = machine
+			}
 			if entry.Addr, err = netip.ParseAddr(wire.Addr); err != nil {
 				return fmt.Errorf("decoding the host entry for %s: %w", k, err)
 			}

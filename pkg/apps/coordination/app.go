@@ -5,8 +5,10 @@ import (
 	"errors"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 
+	"golang.org/x/time/rate"
 	"tailscale.com/types/key"
 
 	"github.com/fancl20/cion/pkg/apps/wireguard"
@@ -84,6 +86,28 @@ type App struct {
 	// protocol, one handler.
 	handler http.Handler
 
+	// admissionMtx serializes the admission transaction — the registry read,
+	// the idempotency check, the seam's ask, the allocation, and the record
+	// hold it together, whatever the seam's latency — so concurrent
+	// admissions read in order and allocate distinct addresses, and a key
+	// racing itself converges on its record. A Telegram prompt's send holds
+	// a later registration behind it for as long as its timeout;
+	// registration is rare enough that the queue is the honest price of one
+	// key, one address.
+	admissionMtx sync.Mutex
+	// bySource and overall pace the seam's asks — one admission per interval
+	// per source address beside one per interval at the door — the bounds
+	// the security model's caps name. Both are one-token buckets at the
+	// interval, golang.org/x/time/rate's own limiter.
+	bySource sourceLimiter
+	overall  *rate.Limiter
+	// mapStreams is the bounded set an open map stream holds one of: past
+	// the bound the map answers one full map and closes the stream.
+	mapStreams chan struct{}
+	// conversations counts the served noise conversations: past the bound
+	// the upgrade refuses before the handshake begins.
+	conversations atomic.Int64
+
 	// wg waits for the served noise conversations, so Close waits for what
 	// the mounting began.
 	wg sync.WaitGroup
@@ -116,6 +140,9 @@ func New(cfg Config) (*App, error) {
 		cfg:        cfg,
 		machineKey: machineKey,
 		derp:       newDERPServer(derpKey),
+		bySource:   newSourceLimiter(admissionMinInterval),
+		overall:    rate.NewLimiter(rate.Every(admissionMinInterval), 1),
+		mapStreams: make(chan struct{}, maxMapStreams),
 	}
 	mux := http.NewServeMux()
 	mux.Handle("/ts2021", http.HandlerFunc(a.handleNoise))

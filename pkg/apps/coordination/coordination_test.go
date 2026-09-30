@@ -23,19 +23,24 @@ import (
 	"github.com/fancl20/cion/pkg/modules/enrollauth"
 )
 
-// askAuthorizer records the facts it is asked with and answers as told.
+// askAuthorizer records the facts it is asked with and answers as told,
+// after the delay a slow seam answers in.
 type askAuthorizer struct {
 	mtx    sync.Mutex
 	asked  []enrollauth.AdmissionFacts
 	answer enrollauth.AdmissionAnswer
+	delay  time.Duration
 }
 
 func (a *askAuthorizer) Authorize(
 	_ context.Context, f enrollauth.AdmissionFacts) enrollauth.AdmissionAnswer {
 
 	a.mtx.Lock()
-	defer a.mtx.Unlock()
 	a.asked = append(a.asked, f)
+	a.mtx.Unlock()
+	if a.delay > 0 {
+		time.Sleep(a.delay)
+	}
 	return a.answer
 }
 

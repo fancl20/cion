@@ -1,6 +1,7 @@
 package coordination
 
 import (
+	"context"
 	"encoding/binary"
 	"encoding/json/v2"
 	"errors"
@@ -40,6 +41,12 @@ const (
 	// mapKeepAlive paces an idle stream's keepalive frames — well inside
 	// the client protocol's two-minute watchdog.
 	mapKeepAlive = 60 * time.Second
+	// maxMapStreams bounds the open map streams the application serves:
+	// past the bound the map answers one full map and closes the stream —
+	// the protocol's own degradation, no error, the client's polling
+	// carrying the rest. One stream per connected host; CION is
+	// non-scalable by design.
+	maxMapStreams = 128
 
 	// maxMapBody bounds one map request.
 	maxMapBody = 1 << 20
@@ -55,12 +62,15 @@ const servedCapabilityVersion = tailcfg.CurrentCapabilityVersion
 // handleMap answers one netmap request. Each host's map names exactly its
 // node — the node's WireGuard public key, the host-facing endpoint from its
 // directory entry, and allowed IPs covering the tailnet and nothing else —
-// beside the host's own allocated address and the relay. No delta
-// compression, no peer change machinery: the tailnet holds one peer per
-// host, CION is non-scalable by design, and a full map is the smallest
-// correct answer. The first map goes out at once; a streaming request's
-// body stays open, keepalives holding it and a re-read registry resending
-// the map when what it names changed.
+// beside the host's own allocated address and the relay, and the record
+// names the machine: the channel's authenticated machine is what the
+// request owes beside the node key. No delta compression, no peer change
+// machinery: the tailnet holds one peer per host, CION is non-scalable by
+// design, and a full map is the smallest correct answer. The first map goes
+// out at once; a streaming request's body stays open, keepalives holding it
+// and a re-read registry resending the map when what it names changed — and
+// an open stream holds one of a bounded set, past which the map answers
+// once and closes.
 func (a *App) handleMap(w http.ResponseWriter, r *http.Request,
 	machine key.MachinePublic) {
 
@@ -84,11 +94,12 @@ func (a *App) handleMap(w http.ResponseWriter, r *http.Request,
 	if req.Hostinfo != nil {
 		hostinfo = req.Hostinfo.View()
 	}
-	resp, err := a.netmap(req.NodeKey, machine, directory,
+	resp, err := a.netmap(r.Context(), req.NodeKey, machine, directory,
 		req.DiscoKey, hostinfo)
 	if err != nil {
-		// A key the registry does not hold maps nothing: the client
-		// retries, and the refusal names the register it must complete.
+		// A key the registry does not hold maps nothing — nor does a
+		// machine the record does not name: the client retries, and the
+		// refusal names the register it must complete.
 		http.Error(w, "no registration for the key", http.StatusForbidden)
 		return
 	}
@@ -102,6 +113,16 @@ func (a *App) handleMap(w http.ResponseWriter, r *http.Request,
 		flusher.Flush()
 	}
 	if !req.Stream {
+		return
+	}
+
+	// An open stream holds one of a bounded set: past the bound the map has
+	// just answered one full map, and the stream closes — no error, the
+	// client's own polling carrying the rest.
+	select {
+	case a.mapStreams <- struct{}{}:
+		defer func() { <-a.mapStreams }()
+	default:
 		return
 	}
 
@@ -130,7 +151,7 @@ func (a *App) handleMap(w http.ResponseWriter, r *http.Request,
 				slog.Warn("Coordination re-reading the registry", "err", err)
 				continue
 			}
-			updated, err := a.netmap(req.NodeKey, machine, directory,
+			updated, err := a.netmap(r.Context(), req.NodeKey, machine, directory,
 				req.DiscoKey, hostinfo)
 			if err != nil {
 				// The registration vanished beneath an open stream;
@@ -151,9 +172,13 @@ func (a *App) handleMap(w http.ResponseWriter, r *http.Request,
 	}
 }
 
-// netmap builds one host's full map from the registry. The peer carries no
-// disco key: the node is a wireguard-only peer with a static endpoint, the
-// model the client lines already serve for third-party exits. The peer's
+// netmap builds one host's full map from the registry, for the machine the
+// record names: the node key alone maps nothing, the channel's authenticated
+// machine is what the request owes beside it, and a record from before the
+// machine claim binds the first machine to present it. The peer carries no
+// disco key — a wireguard-only peer with a static endpoint, the model the
+// client lines already serve for third-party exits — and that is the served
+// form, a fact of the code with no runtime switch anywhere. The peer's
 // allowed IPs are the registry's whole occupied space — every allocated host
 // /32 beside every node's own address, the slice's first, each an offered
 // exit's serving address — covering the tailnet and nothing else, no default
@@ -163,8 +188,9 @@ func (a *App) handleMap(w http.ResponseWriter, r *http.Request,
 // which no host of this network is asked to hold. The packet filter is a
 // single rule admitting the member's traffic: membership is the tailnet's one
 // policy, and no engine stands behind the rule to configure.
-func (a *App) netmap(node key.NodePublic, machine key.MachinePublic,
-	directory wireguard.Directory, reqDisco key.DiscoPublic,
+func (a *App) netmap(ctx context.Context, node key.NodePublic,
+	machine key.MachinePublic, directory wireguard.Directory,
+	reqDisco key.DiscoPublic,
 	reqHostinfo tailcfg.HostinfoView) (*tailcfg.MapResponse, error) {
 
 	var self *wireguard.HostEntry
@@ -175,6 +201,13 @@ func (a *App) netmap(node key.NodePublic, machine key.MachinePublic,
 		}
 	}
 	if self == nil {
+		return nil, errors.New("no registration for the key")
+	}
+	bound, err := a.bindMachine(ctx, self, machine)
+	if err != nil {
+		return nil, fmt.Errorf("binding the record's machine: %w", err)
+	}
+	if !bound {
 		return nil, errors.New("no registration for the key")
 	}
 	var owner *wireguard.Entry
@@ -194,9 +227,6 @@ func (a *App) netmap(node key.NodePublic, machine key.MachinePublic,
 	routed := routedAddresses(directory)
 	now := time.Now()
 	online := true
-	if debugCfgControl {
-		debugDiscoKey = key.NewDisco().Public()
-	}
 	peer := &tailcfg.Node{
 		ID:                2,
 		User:              registerUserID,
@@ -205,8 +235,7 @@ func (a *App) netmap(node key.NodePublic, machine key.MachinePublic,
 		Addresses:         routed,
 		Endpoints:         []netip.AddrPort{owner.HostEndpoint},
 		HomeDERP:          derpRegionID,
-		IsWireGuardOnly:   !debugCfgControl, // control experiment knob
-		DiscoKey:          debugDiscoKey,
+		IsWireGuardOnly:   true,
 		MachineAuthorized: true,
 		Online:            &online,
 		LastSeen:          &now,
@@ -244,18 +273,6 @@ func (a *App) netmap(node key.NodePublic, machine key.MachinePublic,
 		Domain: a.cfg.Domain,
 	}, nil
 }
-
-// debugDiscoKey is the control experiment's stand-in disco key, used only
-// when debugDiscoPeer is set.
-var debugDiscoKey = key.DiscoPublic{}
-
-// debugCfgControl runs the control experiment: serve the peer as a
-// standard disco peer instead of a wireguard-only one.
-var debugCfgControl bool
-
-// SetDebugDiscoPeer runs the control experiment: serve the peer as a
-// standard disco peer instead of a wireguard-only one.
-func SetDebugDiscoPeer(v bool) { debugCfgControl = v }
 
 // routedAddresses lists every routed address as a /32, sorted: the registry's
 // whole occupied space — each allocated host beside each node's own, the

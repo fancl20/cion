@@ -70,11 +70,11 @@ func serveCoordination(t *testing.T, a *App, tlsCfg *tls.Config) string {
 	return listener.Addr().String()
 }
 
-// noiseHTTP dials the vendored client transport — the same controlhttp the
-// vendor's client rides — and wraps it in an HTTP client speaking HTTP/2
-// over the noise channel, the protocol's own grammar.
-func noiseHTTP(t *testing.T, addr string, roots *x509.CertPool,
-	control key.MachinePublic) *http.Client {
+// dialNoise dials the vendored client transport — the same controlhttp the
+// vendor's client rides — into one noise conversation on the coordination
+// endpoint.
+func dialNoise(t *testing.T, addr string, roots *x509.CertPool,
+	control key.MachinePublic) (*controlhttp.ClientConn, error) {
 
 	t.Helper()
 	_, port, err := net.SplitHostPort(addr)
@@ -103,7 +103,16 @@ func noiseHTTP(t *testing.T, addr string, roots *x509.CertPool,
 			return d.DialContext(ctx, network, addr)
 		},
 	}
-	conn, err := dialer.Dial(context.Background())
+	return dialer.Dial(context.Background())
+}
+
+// noiseHTTP dials the noise channel and wraps it in an HTTP client speaking
+// HTTP/2 over it, the protocol's own grammar.
+func noiseHTTP(t *testing.T, addr string, roots *x509.CertPool,
+	control key.MachinePublic) *http.Client {
+
+	t.Helper()
+	conn, err := dialNoise(t, addr, roots, control)
 	if err != nil {
 		t.Fatalf("dialing the noise channel: %v", err)
 	}
@@ -284,6 +293,10 @@ func TestProtocolRegistrationVerdicts(t *testing.T) {
 		t.Fatalf("a pending registration recorded %d hosts, want none", len(hosts))
 	}
 
+	// The door paces the seam's asks one per interval, so the verdicts ride
+	// asks spaced by it — the client's own retry cadence.
+	time.Sleep(admissionMinInterval)
+
 	// Deny: refused for good, nothing recorded.
 	auth.answer = enrollauth.AdmissionAnswer{Admission: enrollauth.AdmissionDeny}
 	if _, status := register(t, client, key.NewNode(), ""); status != http.StatusForbidden {
@@ -292,6 +305,8 @@ func TestProtocolRegistrationVerdicts(t *testing.T) {
 	if hosts := storeHosts(t, store); len(hosts) != 0 {
 		t.Fatalf("a denied registration recorded %d hosts, want none", len(hosts))
 	}
+
+	time.Sleep(admissionMinInterval)
 
 	// Allow with a credential and a note: the facts carry the machine and
 	// node keys, the source the TLS connection named, and the credential
@@ -345,6 +360,86 @@ func TestProtocolMapRequiresRegistration(t *testing.T) {
 	client := noiseHTTP(t, addr, roots, a.machineKey.Public())
 	if _, err := fetchMap(t, client, key.NewNode()); err == nil {
 		t.Error("an unregistered key mapped, want refusal")
+	}
+}
+
+// TestProtocolMachineBinding is the probe's episode held as a regression: a
+// host registered from one machine has its map and its register answer
+// refused from a second machine — the node key alone maps nothing, the
+// channel's authenticated machine is what the request owes — while the
+// first machine still answers and maps.
+func TestProtocolMachineBinding(t *testing.T) {
+	store := &dbtest.MemStore{}
+	store.Seed(testNode(mustIA("1-ff00:0:1"), "100.64.1.0/24", "198.51.100.10:51820"))
+	roots, tlsCfg := testCert(t)
+	a := testApp(t, Config{Store: store})
+	addr := serveCoordination(t, a, tlsCfg)
+
+	member := noiseHTTP(t, addr, roots, a.machineKey.Public())
+	stranger := noiseHTTP(t, addr, roots, a.machineKey.Public())
+	host := key.NewNode()
+
+	// The member registers, and the record names its machine.
+	if _, status := register(t, member, host, ""); status != http.StatusOK {
+		t.Fatalf("the member's registration status = %d, want 200", status)
+	}
+	hosts := storeHosts(t, store)
+	if len(hosts) != 1 || hosts[0].MachineKey == (wireguard.PublicKey{}) {
+		t.Fatalf("the registry holds %+v, want the one record bound to a machine", hosts)
+	}
+
+	// The stranger presenting the member's node key: the register answer and
+	// the map both refuse it, and the registry does not move.
+	if _, status := register(t, stranger, host, ""); status != http.StatusForbidden {
+		t.Errorf("the stranger's registration status = %d, want %d",
+			status, http.StatusForbidden)
+	}
+	if _, err := fetchMap(t, stranger, host); err == nil {
+		t.Error("the stranger mapped the member's key, want refusal")
+	}
+	if _, err := fetchMap(t, member, host); err != nil {
+		t.Errorf("the member no longer maps: %v", err)
+	}
+	if hosts := storeHosts(t, store); len(hosts) != 1 {
+		t.Fatalf("the registry grew to %d hosts on a refused machine", len(hosts))
+	}
+}
+
+// TestProtocolLegacyRecordBindsFirstPresenter checks the migration: a record
+// holding no machine key binds the first machine that presents it and
+// refuses the second.
+func TestProtocolLegacyRecordBindsFirstPresenter(t *testing.T) {
+	store := &dbtest.MemStore{}
+	store.Seed(testNode(mustIA("1-ff00:0:1"), "100.64.1.0/24", "198.51.100.10:51820"))
+	// A record from before the machine claim: the address and the owning
+	// node held, no machine named.
+	host := key.NewNode()
+	if err := store.PublishHost(context.Background(),
+		registeredHost(nodeKeyOf(host.Public()))); err != nil {
+		t.Fatal(err)
+	}
+	roots, tlsCfg := testCert(t)
+	a := testApp(t, Config{Store: store})
+	addr := serveCoordination(t, a, tlsCfg)
+
+	first := noiseHTTP(t, addr, roots, a.machineKey.Public())
+	second := noiseHTTP(t, addr, roots, a.machineKey.Public())
+
+	// The first presentation binds: the record answers, and from then on it
+	// names the machine.
+	if _, status := register(t, first, host, ""); status != http.StatusOK {
+		t.Fatalf("the first presentation's status = %d, want 200", status)
+	}
+	hosts := storeHosts(t, store)
+	if len(hosts) != 1 || hosts[0].MachineKey == (wireguard.PublicKey{}) {
+		t.Fatalf("the registry holds %+v, want the record bound to the first machine", hosts)
+	}
+	if _, status := register(t, second, host, ""); status != http.StatusForbidden {
+		t.Errorf("the second presentation's status = %d, want %d",
+			status, http.StatusForbidden)
+	}
+	if _, err := fetchMap(t, first, host); err != nil {
+		t.Errorf("the first presenter no longer maps: %v", err)
 	}
 }
 

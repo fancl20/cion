@@ -54,10 +54,17 @@ type Entry struct {
 // HostEntry is one host's registry entry: the record the coordination
 // service's gate allocates and the directory distributes. The host's key is
 // its identity — the same key re-registering meets the same entry — and the
-// address, the owning node, and the approving plugin's note ride beside it.
+// address, the owning node, the presenting machine, and the approving
+// plugin's note ride beside it.
 type HostEntry struct {
 	// PublicKey is the host's WireGuard public key.
 	PublicKey PublicKey
+	// MachineKey is the machine key the noise channel authenticated when the
+	// registration arrived: the record names the machine its node key
+	// belongs to, and the register answer and the map refuse any other.
+	// Zero on a record from before the fact — the first machine to present
+	// such a record binds it.
+	MachineKey PublicKey
 	// Addr is the tailnet address the coordination service allocated.
 	Addr netip.Addr
 	// IA is the owning node, whose slice of the tailnet range the address

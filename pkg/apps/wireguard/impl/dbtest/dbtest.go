@@ -135,15 +135,17 @@ func TestDirectoryStore(t *testing.T, open func(t *testing.T) wireguard.Director
 	}
 	hosts := []wireguard.HostEntry{
 		{
-			PublicKey: MustKey(0x81),
-			Addr:      netip.MustParseAddr("100.64.0.4"),
-			IA:        mustIA(t, "20-ff00:0:1"),
-			Note:      "telegram operator",
+			PublicKey:  MustKey(0x81),
+			MachineKey: MustKey(0x91),
+			Addr:       netip.MustParseAddr("100.64.0.4"),
+			IA:         mustIA(t, "20-ff00:0:1"),
+			Note:       "telegram operator",
 		},
 		{
-			PublicKey: MustKey(0x82),
-			Addr:      netip.MustParseAddr("100.64.1.5"),
-			IA:        mustIA(t, "20-ff00:0:2"),
+			PublicKey:  MustKey(0x82),
+			MachineKey: MustKey(0x92),
+			Addr:       netip.MustParseAddr("100.64.1.5"),
+			IA:         mustIA(t, "20-ff00:0:2"),
 		},
 	}
 	for _, h := range hosts {

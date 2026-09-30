@@ -240,3 +240,69 @@ presented; the standing coordination and admission labs pass unchanged.
     presenting and the same record answering.
 
 ## Implementation history
+
+*   The binding: `HostEntry` grows `MachineKey`
+    ([directory.go](/pkg/apps/wireguard/directory.go)) — the machine key
+    the noise channel authenticated, carried beside the node key — and the
+    bbolt wire format grows the field with it
+    ([db.go](/pkg/apps/wireguard/impl/bbolt/db.go)); an older record
+    decodes with no machine key. `bindMachine`
+    ([register.go](/pkg/apps/coordination/register.go)) settles the claim
+    for both answers: a record naming no machine binds the first presenter
+    — one write on the answer path, logged — a record naming another
+    machine does not answer, and the register answer refuses it with the
+    denied registration's own refusal while the map refuses it with the
+    unregistered key's
+    ([netmap.go](/pkg/apps/coordination/netmap.go) checks before it
+    builds). The store suite covers the older shape's decode and the bound
+    record's round-trip; the netmap suite covers the builder's bind and
+    refusal; the protocol suite holds the probe's episode as a regression —
+    the member registers and maps, the stranger presenting the member's
+    node key refused at both — and the migration's — a record holding no
+    machine key binding the first presenter and refusing the second.
+*   The serialization: `App` grew `admissionMtx`
+    ([app.go](/pkg/apps/coordination/app.go)), held by `handleRegister`
+    across the registry read, the idempotency check, the seam's ask, the
+    allocation, and the record — the renewal transaction's own shape. The
+    admission suite holds the collision episode as a regression — four
+    registrations of distinct keys fired concurrently, the seam answering
+    an interval and a tenth late, all admitted with distinct addresses —
+    and the racing key's convergence — four concurrent registrations of
+    one key answering one address, one record, one ask.
+*   The caps: the ask passes `bySource` — one one-token bucket per source
+    address, `golang.org/x/time/rate`'s own limiter at the interval and
+    keyed by the connection's source address alone, a full bucket naming a
+    source gone silent and so forgotten — beside `overall`, the door's own
+    pace as one bucket, both at `admissionMinInterval` (one second), both
+    constants of the application
+    ([register.go](/pkg/apps/coordination/register.go)); the module was
+    already vendored and moves to the direct set. The refusal rides
+    the pending refusal's own path and status — `503` naming the rate —
+    for the vendored client answers the rate's own status, `429`, by
+    failing a headless host's login outright instead of retrying it, the
+    one wire-visible behavior the compatibility section refuses; the
+    client's own backoff carries the paced retries and the prompted lab
+    converges about an interval later. The record's idempotent answer
+    passes uncapped, and the binding makes it a refusal when the asker is
+    not the member. The admission suite covers the caps: a second ask
+    inside the source interval refused without the seam being asked — the
+    ask recorder proving the door — the overall interval refusing across
+    distinct sources, the idempotent answer passing uncapped inside both,
+    and the asks passing again past the interval. An open map stream holds
+    one of `maxMapStreams` (128) — past the bound the map answers one full
+    map and closes the stream — and the noise upgrade holds one of
+    `maxConversations` (128), past which the handshake refuses before it
+    begins ([noise.go](/pkg/apps/coordination/noise.go)); the bounds suite
+    covers the stream's hold and release, the degraded answer's one map
+    and closed body, the served conversations' count, and the refused
+    upgrade.
+*   The map's fixed shape: `SetDebugDiscoPeer`, `debugCfgControl`, and
+    `debugDiscoKey` delete; the peer states its shape where it is built —
+    a wireguard-only peer carrying no disco key, `IsWireGuardOnly` a fact
+    of the code — and the netmap's own episode already holds the served
+    form, with no exported surface remaining that could flip it.
+*   The standing labs pass unchanged — the open, invited, prompted, and
+    gated joins beside the SOCKS egress labs — the binding checked on
+    every answer: the client regenerates its node key on each login
+    retry while the machine stays itself, the record the allowed retry
+    writes answering every later one.
