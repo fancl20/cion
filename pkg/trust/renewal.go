@@ -22,16 +22,21 @@ import (
 // wrapper carries a self-signed certificate minted on the spot for the
 // subject key; it is never trusted or used beyond binding the signature to
 // the CSR.
-func BuildRenewalRequest(csr *x509.CertificateRequest, key crypto.Signer) ([]byte, error) {
+func BuildRenewalRequest(
+	csr *x509.CertificateRequest,
+	key crypto.Signer,
+) ([]byte, error) {
+
 	wrapper, err := enrollmentWrapperCert(key, time.Now())
 	if err != nil {
 		return nil, fmt.Errorf("minting wrapper certificate: %w", err)
 	}
-	body, err := proto.Marshal(&cppb.ChainRenewalRequestBody{Csr: csr.Raw})
+	body := &cppb.ChainRenewalRequestBody{Csr: csr.Raw}
+	raw, err := proto.Marshal(body)
 	if err != nil {
 		return nil, err
 	}
-	return SignCMS(body, []*x509.Certificate{wrapper}, key)
+	return SignCMS(raw, []*x509.Certificate{wrapper}, key)
 }
 
 // ParseRenewalResponse extracts the certificate chain from the CMS-signed

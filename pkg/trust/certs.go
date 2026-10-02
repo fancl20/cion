@@ -75,6 +75,10 @@ func createCertificate(
 // key usage. Voting certificates carry id-kp-timeStamping alongside their
 // voting usage, like the reference tooling; voting keys sign TRC updates,
 // never certificates or messages, so the key usage extension stays empty.
+// The common name names the holder, for cppki reads a TRC's voting
+// certificates' subjects as the parsed name's standard attributes alone —
+// the ISD-AS rides an RDN it cannot see — and refuses a TRC whose voters
+// share one.
 func createVotingCert(
 	ia addr.IA,
 	key crypto.Signer,
@@ -83,10 +87,10 @@ func createVotingCert(
 ) (*x509.Certificate, error) {
 
 	usage := cppki.OIDExtKeyUsageRegular
-	cn := "regular voting"
+	cn := ia.String() + " regular voting"
 	if sensitive {
 		usage = cppki.OIDExtKeyUsageSensitive
-		cn = "sensitive voting"
+		cn = ia.String() + " sensitive voting"
 	}
 	skid, err := cppki.SubjectKeyID(key.Public())
 	if err != nil {

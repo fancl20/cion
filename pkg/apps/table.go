@@ -45,6 +45,7 @@ var Table = []Entry{
 	wireguardEntry,
 	coordinationEntry,
 	socksEntry,
+	votingEntry,
 }
 
 // Loaded is one constructed application: its name beside what its entry's
@@ -134,8 +135,7 @@ func exact(list []string, core bool, args Arguments) ([]Entry, error) {
 		}
 		if e.CoreOnly && !core {
 			return nil, fmt.Errorf("--applications names %s, which requires "+
-				"the core role: the core is the only node that holds the "+
-				"directory store", e.Name)
+				"the core role", e.Name)
 		}
 		if why := missingArg(e, &args); why != "" {
 			return nil, fmt.Errorf("--applications names %s, whose loading "+

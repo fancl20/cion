@@ -1,0 +1,35 @@
+syntax = "proto3";
+
+package voting.v1;
+
+option go_package = "github.com/fancl20/cion/proto/voting/v1;votingv1";
+
+// SubmitRequest carries the TRC update a core seeking voting power signed
+// with its regular voting key — the proof of possession over the certificate
+// the successor carries — for the core's control plane to decide on.
+message SubmitRequest {
+  // trc is the DER-encoded CMS-signed TRC, partially signed: the submitter's
+  // signer info over the assembled successor, the founder's vote still
+  // missing.
+  bytes trc = 1;
+}
+
+// SubmitResponse answers with the completed TRC: the submitted successor
+// carrying the founder's sensitive vote beside the submitter's proof of
+// possession, verified and pinned — or, when the newest TRC already names
+// the submitter, that TRC as pinned.
+message SubmitResponse {
+  // trc is the DER-encoded CMS-signed TRC.
+  bytes trc = 1;
+}
+
+// VotingService is the voting application's surface: the resident
+// application a founding core hosts for the cores of its ISD seeking voting
+// power. Every submission is handed to the control plane's decision, which
+// casts the founder's sensitive vote itself; the application decides
+// nothing.
+service VotingService {
+  // Submit hands the partially signed successor to the control plane's
+  // decision and answers with the TRC it completed and pinned.
+  rpc Submit(SubmitRequest) returns (SubmitResponse);
+}

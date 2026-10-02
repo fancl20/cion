@@ -85,12 +85,27 @@ func (n *node) openState(ctx context.Context) error {
 
 // setupTrustRole establishes the node's trust role: the founding core
 // originates its TRC, issuer, and first chain synchronously — the chain
-// lifecycle's first pass — while every other node builds the client for
-// enrolling with its core over the WebPKI-verified channel, the core's
-// control service resolved through the drafts' exchange when the dial wants
-// an underlay address.
+// lifecycle's first pass — and holds the decision on submitted TRC updates
+// the voting application hands each submission to, while every other node
+// builds the client for enrolling with its core over the WebPKI-verified
+// channel, the core's control service resolved through the drafts'
+// exchange when the dial wants an underlay address. The joining core loads
+// its voting material on the way: the regular voting key alone, and the
+// self-signed certificate over it naming the completed ISD-AS.
 func (n *node) setupTrustRole(ctx context.Context) error {
 	if n.ident.asType != trust.ASTypeCore {
+		if n.ident.asType == trust.ASTypeAuthoritative {
+			votingKey, err := trust.LoadOrCreateVotingKey(n.cfg.State)
+			if err != nil {
+				return fmt.Errorf("loading voting key: %w", err)
+			}
+			votingCert, err := trust.LoadOrCreateVotingCert(n.cfg.State, n.ident.ia, votingKey)
+			if err != nil {
+				return fmt.Errorf("loading voting certificate: %w", err)
+			}
+			n.votingKey = votingKey
+			n.votingCert = votingCert
+		}
 		// The client socket takes an ephemeral port on the control address;
 		// the local router delivers the core's replies to it. The resolution
 		// exchange takes its own beside it: the exchange reads its conn for
@@ -132,6 +147,12 @@ func (n *node) setupTrustRole(ctx context.Context) error {
 		return fmt.Errorf("creating issuer: %w", err)
 	}
 	n.issuer = issuer
+	n.decider = &controlplane.TRCDecider{
+		DB:         n.trustDB,
+		IA:         n.ident.ia,
+		Sensitive:  keys.Sensitive,
+		Authorizer: n.enrollAuth,
+	}
 	if _, err := selfEnroll(ctx, n.trustDB, issuer, n.ident.ia, n.asKey); err != nil {
 		return fmt.Errorf("self-enrolling core: %w", err)
 	}
@@ -339,28 +360,31 @@ func (n *node) scionConn(port uint16) (*scion.Conn, error) {
 }
 
 // coreRoute returns the route to the core this node enrolls with — the drafts'
-// own way of reaching one: the one-hop path when a core the pinned TRC names
-// is a direct neighbor with its verdict up, addressed to the core's control
-// service; else the reversed freshest up segment — or, before any is verified,
-// the bootstrap beacon's route — addressed to the core's control service the
-// same way. The endpoint address is
-// resolved, not remembered: the drafts' service resolution answers it at dial
-// time. Local state only: resolving a route inside a dial must not spawn RPCs
-// over the transport being dialed.
+// own way of reaching one, routed to the issuers: the one-hop path when a
+// core whose root certificate the newest TRC carries is a direct neighbor
+// with its verdict up, addressed to the core's control service; else the
+// reversed freshest up segment — or, before any is verified, the bootstrap
+// beacon's route — addressed to the core's control service the same way. A
+// core named by the TRC that holds no root certificate — the on-boarded
+// authoritative, which issues nothing — is skipped: a renewal landing there
+// would answer Unimplemented, so the route falls through to a core that
+// serves it. The endpoint address is resolved, not remembered: the drafts'
+// service resolution answers it at dial time. Local state only: resolving a
+// route inside a dial must not spawn RPCs over the transport being dialed.
 func (n *node) coreRoute() *scion.Addr {
-	// The one-hop shortcut: a core the TRC names, a direct neighbor, its
-	// verdict up — a link the monitor marked down falls through to the
-	// composed route.
+	// The one-hop shortcut: an issuer core, a direct neighbor, its verdict
+	// up — a link the monitor marked down falls through to the composed
+	// route.
 	table := n.linkTable()
 	for ifID, neighborIA := range table {
-		if neighborIA.IsZero() || !n.coreASes()[neighborIA] {
+		if neighborIA.IsZero() || !n.issuerASes()[neighborIA] {
 			continue
 		}
 		if n.monitor.Up(ifID) {
 			return &scion.Addr{IA: neighborIA, Service: addr.SvcCS, IfID: ifID}
 		}
 	}
-	// At distance: the core the node's own beaconing stands behind — the
+	// At distance: the issuer the node's own beaconing stands behind — the
 	// freshest up segment's origin, or the bootstrap beacon's before any is
 	// verified — over the reversed segment.
 	for _, core := range []func() addr.IA{n.freshestUpCore, n.beaconer.BootstrapCore} {
@@ -373,11 +397,13 @@ func (n *node) coreRoute() *scion.Addr {
 	return nil
 }
 
-// coreASes returns the core ASes the pinned TRC names, as a set.
-func (n *node) coreASes() map[addr.IA]bool {
-	ias, err := n.engine.CoreASes(n.ident.ia.ISD())
+// issuerASes returns the cores whose root certificate the newest pinned TRC
+// carries — the ASes a root certificate names as its subject, exactly the
+// nodes that can serve a chain renewal — as a set.
+func (n *node) issuerASes() map[addr.IA]bool {
+	ias, err := n.engine.IssuerASes(n.ident.ia.ISD())
 	if err != nil {
-		slog.Error("Enumerating the core ASes", "err", err)
+		slog.Error("Enumerating the issuer cores", "err", err)
 		return nil
 	}
 	set := make(map[addr.IA]bool, len(ias))
@@ -388,7 +414,8 @@ func (n *node) coreASes() map[addr.IA]bool {
 }
 
 // freshestUpCore returns the origin of the freshest up segment the node has
-// verified — the core its own termination stands behind; zero when none is
+// verified that ends at an issuer — the core its own termination stands
+// behind, among the cores that can serve a renewal; zero when none is
 // stored.
 func (n *node) freshestUpCore() addr.IA {
 	segs, err := n.pathDB.Get(context.Background(), pathdb.Query{Type: pathdb.SegmentTypeUp})
@@ -396,9 +423,13 @@ func (n *node) freshestUpCore() addr.IA {
 		slog.Error("Reading the path database", "err", err)
 		return 0
 	}
+	issuers := n.issuerASes()
 	var core addr.IA
 	var best time.Time
 	for _, seg := range segs {
+		if !issuers[seg.FirstIA()] {
+			continue
+		}
 		if core.IsZero() || seg.PCB.Timestamp().After(best) {
 			core, best = seg.FirstIA(), seg.PCB.Timestamp()
 		}

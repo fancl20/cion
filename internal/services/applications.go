@@ -2,8 +2,10 @@ package services
 
 import (
 	"fmt"
+	"net/http"
 
 	"github.com/fancl20/cion/pkg/apps"
+	"github.com/fancl20/cion/pkg/controlplane"
 	"github.com/fancl20/cion/pkg/scion"
 )
 
@@ -34,8 +36,10 @@ func (n *node) setupApplications() error {
 // the trust engine and path provider, the sending conn and the
 // interface-down cache, the service-socket registration, the admission
 // authorizer, the core route the joiner's directory fetch rides, the
-// relay derivation's inputs with the harness's placement among them, and
-// the directory pacing.
+// relay derivation's inputs with the harness's placement among them, the
+// directory pacing, the control plane's TRC decision the voting application
+// hands its submissions to, and the control-endpoint mounting behind the
+// peer-identity middleware.
 func (n *node) appEnvironment() *apps.Environment {
 	env := &apps.Environment{
 		Arguments:       n.cfg.AppArguments,
@@ -53,7 +57,22 @@ func (n *node) appEnvironment() *apps.Environment {
 		Authorizer:      n.enrollAuth,
 		CoreRoute:       n.coreRoute,
 		DirectoryPacing: n.cfg.Pacing.Directory,
+		MountControlEndpoint: func(pattern string, handler http.Handler) error {
+			if n.services == nil {
+				return fmt.Errorf("the control endpoint is not assembled")
+			}
+			n.services.Mounts = append(n.services.Mounts, controlplane.Mount{
+				Pattern: pattern, Handler: handler,
+			})
+			return nil
+		},
 	}
+	// The typed-nil guard: a nil decider must read as no decision wired,
+	// not as a decision that would panic under the application's nil check.
+	if n.decider != nil {
+		env.TRCDecision = n.decider
+	}
+
 	if o := n.cfg.Coordination; o != nil {
 		env.Relay = apps.RelayPlacement{
 			URL:       o.DERP.URL,

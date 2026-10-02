@@ -4,12 +4,14 @@ import (
 	"context"
 	"crypto"
 	"crypto/x509"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
 	"time"
 
 	"github.com/scionproto/scion/pkg/addr"
+	"github.com/scionproto/scion/pkg/scrypto"
 	"github.com/scionproto/scion/pkg/scrypto/cppki"
 
 	"github.com/fancl20/cion/pkg/modules/trustdb"
@@ -35,6 +37,9 @@ const (
 // EnrollmentConfig configures the lifetime chain lifecycle of a node: every
 // node keeps a valid chain — the founding core included — by re-enrolling
 // before expiry, with warnings as expiry approaches and errors once it passes.
+// A joining core carries its voting material beside the chain: once enrolled,
+// the loop casts the sensitive update that onboards it, and a joiner the
+// newest pinned TRC already names casts nothing.
 type EnrollmentConfig struct {
 	// IA is the node's ISD-AS.
 	IA addr.IA
@@ -47,6 +52,19 @@ type EnrollmentConfig struct {
 	Remote trust.Remote
 	// Issuer self-issues the core's chains.
 	Issuer *trust.Issuer
+	// VotingKey is the joining core's regular voting key; nil on the nodes
+	// that hold none.
+	VotingKey crypto.Signer
+	// VotingCert is the certificate over VotingKey, carried by the
+	// successor TRC the cast builds.
+	VotingCert *x509.Certificate
+	// Caster submits the onboarding update to the core's voting
+	// application; the joining core's own client, nil on every other node.
+	Caster trust.TRCCaster
+	// Fatal is the loop's terminal failure: the reason recorded and the
+	// node stopped, for an onboarding nothing the node does can advance.
+	// Nil keeps the node serving, the failure logged.
+	Fatal func(error)
 	// RetryInterval and InspectInterval override the defaults; zero keeps
 	// them.
 	RetryInterval   time.Duration
@@ -69,19 +87,66 @@ func (cfg EnrollmentConfig) enroll(ctx context.Context) {
 	}
 	attemptCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	if _, err := trust.RenewChain(attemptCtx, cfg.DB, cfg.Remote, cfg.IA, cfg.Key); err != nil {
+	if _, err := trust.RenewChain(attemptCtx, cfg.DB, cfg.Remote, cfg.IA,
+		cfg.Key); err != nil {
+
 		slog.Warn("Renewing chain", "isd_as", cfg.IA, "err", err)
 		return
 	}
 	slog.Info("Renewed chain", "isd_as", cfg.IA)
 }
 
+// onboarded reports whether the newest pinned TRC names the node a core of
+// its ISD; a node that has pinned no TRC yet is not onboarded.
+func (cfg EnrollmentConfig) onboarded(ctx context.Context) bool {
+	trc, err := cfg.DB.SignedTRC(ctx, cppki.TRCID{
+		ISD:    cfg.IA.ISD(),
+		Base:   scrypto.LatestVer,
+		Serial: scrypto.LatestVer,
+	})
+	if err != nil {
+		slog.Error("Reading the newest pinned TRC", "isd_as", cfg.IA, "err", err)
+		return false
+	}
+	return trust.CoreNamed(trc.TRC, cfg.IA)
+}
+
+// cast performs one onboarding attempt: the submission's round trip,
+// bounded like an enrollment attempt. A core that hosts no voting
+// application is terminal: nothing the node does obtains voting power
+// through the founder, so the node stops itself — the network it leaves
+// behind keeps serving everything else, the application none of it depends
+// on.
+func (cfg EnrollmentConfig) cast(ctx context.Context) {
+	timeout := cfg.Timeout
+	if timeout == 0 {
+		timeout = EnrollmentTimeout
+	}
+	attemptCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	err := trust.JoinCore(attemptCtx, cfg.DB, cfg.Remote, cfg.Caster,
+		cfg.IA, cfg.VotingKey, cfg.VotingCert)
+	switch {
+	case err == nil:
+		slog.Info("Onboarded as an authoritative core", "isd_as", cfg.IA)
+	case errors.Is(err, trust.ErrNoVotingApp):
+		slog.Error("The core hosts no voting application; stopping the node",
+			"isd_as", cfg.IA, "err", err)
+		if cfg.Fatal != nil {
+			cfg.Fatal(err)
+		}
+	default:
+		slog.Warn("Submitting the onboarding update", "isd_as", cfg.IA, "err", err)
+	}
+}
+
 // RunEnrollment runs the chain lifecycle of a non-core node: each pass reads
 // the newest chain's remaining validity, re-enrolls when it drops below the
-// renewal threshold or when no valid chain exists, and watches the pinned
-// TRC's validity the same way — log only, since a new base TRC means
-// redeploying. It also runs the trust database's expired-chain sweep on its
-// own interval.
+// renewal threshold or when no valid chain exists, casts the onboarding
+// update a joining core still owes, and watches the newest pinned TRC's
+// validity the same way — log only, for the update that extends it is the
+// founder's to cast. It also runs the trust database's expired-chain sweep
+// on its own interval.
 func RunEnrollment(ctx context.Context, cfg EnrollmentConfig) {
 	var sweep sync.WaitGroup
 	sweep.Go(func() {
@@ -118,8 +183,9 @@ func RunCoreEnrollment(ctx context.Context, cfg EnrollmentConfig) {
 }
 
 // enrollPass runs one non-core inspection: it returns how long to wait
-// before the next one — the fast retry cadence while unenrolled or renewing,
-// the calm inspection interval with a valid chain.
+// before the next one — the fast retry cadence while unenrolled, renewing,
+// or onboarding, the calm inspection interval with a valid chain and, for a
+// joining core, a pinned TRC that names it.
 func (cfg EnrollmentConfig) enrollPass(ctx context.Context) time.Duration {
 	chain, remaining := newestChain(ctx, cfg)
 	logTRCValidity(ctx, cfg)
@@ -135,6 +201,10 @@ func (cfg EnrollmentConfig) enrollPass(ctx context.Context) time.Duration {
 		slog.Warn("Chain approaching expiry; re-enrolling",
 			"isd_as", cfg.IA, "remaining", remaining)
 		cfg.enroll(ctx)
+	case cfg.VotingKey != nil && cfg.Caster != nil && !cfg.onboarded(ctx):
+		// The enrolled core's onboarding: the cast asks the founder, and a
+		// joiner the newest TRC already names casts nothing.
+		cfg.cast(ctx)
 	default:
 		return cfg.interval(cfg.InspectInterval, ChainInspectInterval)
 	}
@@ -192,21 +262,25 @@ func selfIssue(ctx context.Context, cfg EnrollmentConfig) error {
 	return nil
 }
 
-// logTRCValidity logs the pinned TRC's validity once it approaches expiry; log
-// only, since a new base TRC means redeploying.
+// logTRCValidity logs the newest pinned TRC's validity once it approaches
+// expiry; log only, for the cast that extends it is the founder's to make.
 func logTRCValidity(ctx context.Context, cfg EnrollmentConfig) {
 	now := time.Now()
-	trc, err := cfg.DB.SignedTRC(ctx, cppki.TRCID{ISD: cfg.IA.ISD(), Base: 1, Serial: 1})
+	trc, err := cfg.DB.SignedTRC(ctx, cppki.TRCID{
+		ISD:    cfg.IA.ISD(),
+		Base:   scrypto.LatestVer,
+		Serial: scrypto.LatestVer,
+	})
 	if err != nil || trc.IsZero() {
 		return
 	}
 	remaining := trc.TRC.Validity.NotAfter.Sub(now)
 	switch {
 	case remaining <= 0:
-		slog.Error("Pinned TRC expired; a new base TRC means redeploying",
+		slog.Error("Pinned TRC expired",
 			"isd_as", cfg.IA, "expired_for", -remaining)
 	case remaining < trust.ChainRenewalThreshold:
-		slog.Warn("Pinned TRC approaching expiry; a new base TRC means redeploying",
+		slog.Warn("Pinned TRC approaching expiry",
 			"isd_as", cfg.IA, "remaining", remaining)
 	}
 }

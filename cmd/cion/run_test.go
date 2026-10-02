@@ -69,6 +69,9 @@ func TestRunArgumentsParse(t *testing.T) {
 	if opts.State != services.DefaultState {
 		t.Errorf("--state = %q, want the default %q", opts.State, services.DefaultState)
 	}
+	if len(opts.Neighbors) != 0 {
+		t.Errorf("the core's --topology.neighbor = %v, want none passed", opts.Neighbors)
+	}
 
 	opts, err = parseNodeArgs(t, "local",
 		"--trust.domain", "core.example.org",
@@ -128,6 +131,7 @@ func TestRunCommandsHelpReadsInParts(t *testing.T) {
 			"--state", "--internal", "--control",
 			"--topology.link-set",
 			"--applications",
+			"--topology.neighbor",
 			"--trust.domain", "--trust.acme-email", "--trust.cert-file",
 			"--trust.key-file", "--trust.enroll-auth",
 			"--wireguard.host-port",
@@ -201,9 +205,6 @@ func TestRunCommandsRefuseForeignArguments(t *testing.T) {
 			refuse(t, command.name, flag, command.cmd.Flags())
 		}
 	}
-	for _, flag := range []string{"--topology.neighbor"} {
-		refuse(t, "run core", flag, newRunCoreCommand().Flags())
-	}
 	for _, flag := range []string{
 		"--trust.acme-email", "--trust.cert-file",
 		"--trust.key-file", "--trust.enroll-auth",
@@ -221,7 +222,7 @@ func TestRunCommandsPresetRole(t *testing.T) {
 		cmd  *cobra.Command
 		want string
 	}{
-		{newRunCoreCommand(), "--trust.domain is required: the core's own"},
+		{newRunCoreCommand(), "--trust.domain is required: the founding core's own"},
 		{newRunLocalCommand(), "--trust.domain is required: the network's core domain"},
 	} {
 		tc.cmd.SilenceUsage = true

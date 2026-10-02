@@ -39,6 +39,7 @@ var (
 // issuer.
 type trustFixture struct {
 	db     trustdb.DB
+	keys   trust.CoreKeys
 	issuer *trust.Issuer
 	trc    cppki.SignedTRC
 }
@@ -63,7 +64,7 @@ func newTrustFixture(t *testing.T) *trustFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return &trustFixture{db: db, issuer: issuer, trc: trc}
+	return &trustFixture{db: db, keys: keys, issuer: issuer, trc: trc}
 }
 
 // newCSR returns a CSR for a freshly generated AS key.

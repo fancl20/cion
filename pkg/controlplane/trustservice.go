@@ -98,11 +98,8 @@ func (s *TrustService) TRC(
 		return nil, connect.NewError(connect.CodeNotFound,
 			serrors.New("TRC not found", "id", id))
 	}
-	raw, err := trc.Encode()
-	if err != nil {
-		return nil, connect.NewError(connect.CodeInternal, err)
-	}
-	return connect.NewResponse(&cppb.TRCResponse{Trc: raw}), nil
+	// The stored bytes, so every holder of one TRC ID holds the same DER.
+	return connect.NewResponse(&cppb.TRCResponse{Trc: trc.Raw}), nil
 }
 
 // checkNameTaken rejects a renewal for an ISD-AS that already holds an

@@ -31,7 +31,7 @@ func addSharedNodeFlags(flags *pflag.FlagSet, opts *services.NodeConfig) {
 		"the resident applications the node runs, comma-separated and "+
 			"repeatable: unset loads what the arguments imply, the empty value "+
 			"loads none — the deliberate core — and a list loads exactly the "+
-			"named (wireguard, coordination, socks)")
+			"named (wireguard, coordination, socks, voting)")
 }
 
 // addApplicationFlags registers the resident applications' own run

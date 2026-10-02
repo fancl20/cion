@@ -67,6 +67,13 @@ How a second core joins:
 *   **Sensitive-vote onboarding:** the second core joins as a node, and
     the founder casts a sensitive update that adds it.
 
+How the joiner's role is gated:
+
+*   **At enrollment:** the joiner presents its voting certificate with
+    the chain request, and the authorizer is asked what to admit it as.
+*   **At the cast:** the joiner enrolls as any node, and the authorizer
+    is asked when the successor is submitted.
+
 How enrollment finds a core that issues chains:
 
 *   **Proxy renewals:** a non-issuing core forwards chain renewals to the
@@ -86,9 +93,9 @@ How trust material rotates:
 
 ## Decision outcome
 
-Chosen options: **sensitive-vote onboarding**, enrollment routed by **the
-root-certificate signal**, and rotation by **sensitive update** — realized
-as follows:
+Chosen options: **sensitive-vote onboarding**, the role gated **at the
+cast**, enrollment routed by **the root-certificate signal**, and rotation
+by **sensitive update** — realized as follows:
 
 1.  **Joining decides the role.** `cion run core` without a neighbor
     founds, exactly as today; with `--topology.neighbor` it joins the
@@ -98,21 +105,28 @@ as follows:
     (`/internal/services/config.go`) — neighbor presence becomes what
     distinguishes a joining core from a founding one, and no new command
     appears.
-2.  **Enrollment admits the role.** The enrollment authorizer's question
-    grows from whether to admit the node to what to admit it as — the same
-    seam
+2.  **The cast admits the role.** The joining core generates its regular
+    voting key at first start — a role-shaped loader beside the founder's
+    all-or-nothing one (`/pkg/trust/keys.go`) — and enrolls exactly as a
+    node does: the enrollment seam stays the one
     [ADR-0010](/docs/adrs/0010-gate-enrollment-with-a-pluggable-authorizer.md)
-    established. The joining core generates its regular voting key at
-    first start — a role-shaped loader beside the founder's all-or-nothing
-    one (`/pkg/trust/keys.go`) — and hands its self-signed regular voting
-    certificate to the founder over the verified enrollment channel.
-3.  **The founder casts the update.** The founder assembles the successor
-    TRC: serial incremented, the joiner's AS added to the core and
-    authoritative AS lists, its regular voting certificate added to the
-    certificate set. It signs with its sensitive voting key — the vote —
-    and the joiner signs with its regular key, the proof of possession the
-    draft requires of every new voter (Section 3.5.6) and `cppki` enforces.
-    One online round trip; genesis itself stays the founder's local call.
+    established, its wire forms the drafts' own, asked nothing about the
+    role. The certificate first travels inside the successor TRC the
+    joiner submits, and the question — whether the submitter gains voting
+    power — is asked there, of the same authorizer, by the founder's
+    decision before the sensitive key signs. The gate stands where the
+    power is granted: any chain-holder can assemble and submit an
+    onboarding successor, so a question asked only of enrollments that
+    present a certificate binds the honest alone.
+3.  **The founder casts the update.** The joiner assembles the successor
+    TRC from the founder's newest — serial incremented, its AS added to
+    the core and authoritative AS lists, its regular voting certificate
+    added to the certificate set — and signs it with its regular key, the
+    proof of possession the draft requires of every new voter
+    (Section 3.5.6) and `cppki` enforces. The founder's sensitive voting
+    key signs beside it — the vote — and the completed artifact is
+    verified against the pinned predecessor before anything pins. One
+    online round trip; genesis itself stays the founder's local call.
 4.  **Verification follows the chain.** A fetched update verifies against
     the pinned predecessor — `ValidateUpdate` wired into the fetch that
     today rejects every non-base TRC. Distribution rides what exists:
@@ -182,6 +196,8 @@ first removals.
     prerequisite.
 *   One mechanism serves onboarding and rotation, and it is the drafts'
     own: the wire artifacts remain stock CP-PKI.
+*   The voting-power gate is load-bearing: asked of every submission,
+    whatever its submitter enrolled as.
 *   Verification stays fail-closed — a TRC no predecessor vouches for
     never enters the database.
 
@@ -196,6 +212,9 @@ first removals.
     newest-TRC discovery, and the anchoring move from base to newest.
 *   Onboarding a second core requires the update path to exist first;
     until it does, the ISD stays single-core as today.
+*   A pending answer from the authorizer parks voting power on an
+    operator: the joiner's submission retries ask again, so onboarding
+    waits on the reply.
 
 ## Pros and cons of the options
 
@@ -228,6 +247,25 @@ first removals.
     before the first core can join.
 *   Bad, because onboarding is founder-unilateral; there is no second
     opinion by design.
+
+### Role gated at enrollment
+
+*   Good, because the operator refuses a core joiner before any chain is
+    issued.
+*   Bad, because the drafts' renewal body must grow a CION field to carry
+    the certificate.
+*   Bad, because the gate binds only honest presentations — a node
+    enrolled without the certificate reaches the cast ungated, and any
+    chain-holder may submit.
+
+### Role gated at the cast
+
+*   Good, because the drafts' wire forms stay untouched: the certificate
+    rides inside the successor, where the draft already requires it.
+*   Good, because the question stands where the power is granted — every
+    submission is asked, whatever its submitter enrolled as.
+*   Bad, because the role is invisible at enrollment; the audit that
+    would flag a core joiner early arrives only with the cast.
 
 ### Proxy renewals
 

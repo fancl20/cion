@@ -1,7 +1,14 @@
 package trust
 
 import (
+	"bytes"
+	"crypto/x509"
+	"encoding/pem"
+	"os"
+	"path/filepath"
 	"testing"
+
+	"github.com/scionproto/scion/pkg/scrypto/cppki"
 )
 
 // TestIdentityPersistence checks the generated identity's lifecycle: a fresh
@@ -64,4 +71,76 @@ func TestGenerateIADraws(t *testing.T) {
 		}
 	}
 	t.Error("repeated draws named the same ISD-AS")
+}
+
+// TestLoadOrCreateVotingMaterial checks the authoritative core's voting
+// material: the loader creates the regular voting key alone — no sensitive,
+// root, or CA key beside it — and the self-signed certificate over it names
+// the completed ISD-AS and persists, so retries and restarts see the same
+// bytes.
+func TestLoadOrCreateVotingMaterial(t *testing.T) {
+	dir := t.TempDir()
+
+	key, err := LoadOrCreateVotingKey(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entries, err := os.ReadDir(filepath.Join(dir, "keys"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Name() != RegularKeyFile {
+		t.Fatalf("the keys directory holds %v, want %s alone", entries, RegularKeyFile)
+	}
+	reloaded, err := LoadOrCreateVotingKey(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, err := x509.MarshalPKIXPublicKey(key.Public())
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := x509.MarshalPKIXPublicKey(reloaded.Public())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(a, b) {
+		t.Error("the voting key changed across reloads")
+	}
+
+	cert, err := LoadOrCreateVotingCert(dir, joinerIA, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := cppki.ExtractIA(cert.Subject); err != nil || !got.Equal(joinerIA) {
+		t.Fatalf("certificate subject names %v (%v), want %v", cert.Subject, err, joinerIA)
+	}
+	again, err := LoadOrCreateVotingCert(dir, joinerIA, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !again.Equal(cert) {
+		t.Error("the voting certificate changed across reloads")
+	}
+
+	// A persisted certificate that does not match the key or the identity is
+	// refused, not silently replaced.
+	if _, err := LoadOrCreateVotingCert(dir, coreIA, key); err == nil {
+		t.Error("a certificate naming another ISD-AS loaded")
+	}
+	other := t.TempDir()
+	otherKey, err := LoadOrCreateVotingKey(other)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(other, "keys"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(other, "keys", RegularVotingCertFile),
+		pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: cert.Raw}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadOrCreateVotingCert(other, joinerIA, otherKey); err == nil {
+		t.Error("a certificate over another key loaded")
+	}
 }

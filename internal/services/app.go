@@ -22,17 +22,25 @@ import (
 
 // Run assembles the node the run arguments and state directory describe,
 // starts its loops, and serves the data plane generations until the context
-// is canceled — the run command's daemon.
+// is canceled — the run command's daemon. A loop's terminal failure stops
+// the node from inside, and Run returns the failure as its own.
 func Run(ctx context.Context, cfg NodeConfig, opts DataplaneOptions) error {
 	n, err := setupNode(ctx, cfg, opts)
 	if err != nil {
 		return err
 	}
 	defer n.Close()
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	n.stop = cancel
 	n.start(ctx)
 	slog.Info("Starting CION", "ia", n.ident.ia, "asType", n.ident.asType,
 		"core", cfg.Core, "internal", cfg.Internal, "control", cfg.Control)
-	return n.superviseDataplanes(ctx)
+	err = n.superviseDataplanes(ctx)
+	if n.fatalErr != nil {
+		return n.fatalErr
+	}
+	return err
 }
 
 // App is a fully assembled node booted for an application: the node's loops
@@ -41,20 +49,25 @@ func Run(ctx context.Context, cfg NodeConfig, opts DataplaneOptions) error {
 // 0005's in-process entry, the form tests and embedded use share with the
 // subcommand.
 type App struct {
-	node *node
+	node   *node
+	cancel context.CancelFunc
 }
 
 // BootApp assembles the node and starts it serving underneath the
 // application; Close releases it when the application is done. The first
 // data plane generation builds synchronously, so a bind failure surfaces
-// here instead of as a lost packet.
+// here instead of as a lost packet. A loop's terminal failure stops the
+// node's loops from inside; FatalErr reports it.
 func BootApp(ctx context.Context, cfg NodeConfig) (*App, error) {
 	n, err := setupNode(ctx, cfg, DefaultDataplaneOptions())
 	if err != nil {
 		return nil, err
 	}
+	ctx, cancel := context.WithCancel(ctx)
+	n.stop = cancel
 	gen, err := n.startGeneration(ctx)
 	if err != nil {
+		cancel()
 		n.Close()
 		return nil, err
 	}
@@ -63,7 +76,13 @@ func BootApp(ctx context.Context, cfg NodeConfig) (*App, error) {
 	runBackground(ctx, "dataplane", func(ctx context.Context) error {
 		return n.supervise(ctx, gen)
 	})
-	return &App{node: n}, nil
+	return &App{node: n, cancel: cancel}, nil
+}
+
+// FatalErr returns the terminal failure a loop stopped the node on, nil
+// while none occurred.
+func (a *App) FatalErr() error {
+	return a.node.fatalErr
 }
 
 // IA returns the node's ISD-AS.
@@ -109,5 +128,6 @@ func (a *App) Application(name string) apps.Application {
 
 // Close releases the node's resources.
 func (a *App) Close() {
+	a.cancel()
 	a.node.Close()
 }

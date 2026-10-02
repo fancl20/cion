@@ -17,6 +17,7 @@ import (
 	"github.com/scionproto/scion/pkg/scrypto/cppki"
 
 	"github.com/fancl20/cion/pkg/apps"
+	"github.com/fancl20/cion/pkg/apps/voting"
 	"github.com/fancl20/cion/pkg/controlplane"
 	"github.com/fancl20/cion/pkg/dataplane"
 	"github.com/fancl20/cion/pkg/modules/enrollauth"
@@ -71,8 +72,11 @@ type node struct {
 	trustDB      trustdb.DB
 	pathDB       pathdb.DB
 	asKey        crypto.Signer
-	issuer       *trust.Issuer      // core only
-	coreClt      *webpki.CoreClient // non-core only
+	issuer       *trust.Issuer            // founding core only
+	decider      *controlplane.TRCDecider // the founding core's decision on submitted TRC updates
+	coreClt      *webpki.CoreClient       // non-core only
+	votingKey    crypto.Signer            // authoritative core only
+	votingCert   *x509.Certificate        // authoritative core only
 	engine       *trust.Engine
 	peerClt      *controlplane.PeerClient
 	lookup       *controlplane.LookupService
@@ -105,12 +109,19 @@ type node struct {
 	// before the machinery they borrow.
 	apps []apps.Loaded
 
-	// enrollAuth gates the trust service's first issuance and the coordination
-	// application's registrations; nil is open admission. enrollRun launches the
-	// selected method's own loops — the Telegram authorizer's poll — nil when the
-	// method has none.
+	// enrollAuth gates the trust service's first issuance, the coordination
+	// application's registrations, and the TRC decision's voting question;
+	// nil is open admission. enrollRun launches the selected method's own
+	// loops — the Telegram authorizer's poll — nil when the method has none.
 	enrollAuth enrollauth.AdmissionAuthorizer
 	enrollRun  func(context.Context)
+
+	// stop cancels the context the node's loops run under; fatal records a
+	// terminal failure and stops the node, the reason kept for the caller of
+	// Run to return. Set before start launches any loop.
+	stop      context.CancelFunc
+	fatalErr  error
+	fatalOnce sync.Once
 }
 
 // identity is the node's decoded self: what every assembly phase needs from
@@ -126,7 +137,10 @@ type identity struct {
 // generating it on first start: the ISD-AS drawn randomly from the private
 // ranges, the forwarding key beside the AS keys. The ISD-AS is the node's
 // name for its lifetime, logged loudly at creation. A first start's ISD is
-// a provisional draw the loaded provider completes with the network's.
+// a provisional draw the loaded provider completes with the network's. The
+// tier derives from the run arguments — the core flag without a neighbor
+// founds, with one it joins as an authoritative core — so a restart of
+// either tier derives the same tier from the same arguments.
 func loadIdentity(cfg NodeConfig) (identity, bool, error) {
 	ia, err := trust.LoadIA(cfg.State)
 	if err != nil {
@@ -150,6 +164,9 @@ func loadIdentity(cfg NodeConfig) (identity, bool, error) {
 	asType := trust.ASTypeNormal
 	if cfg.Core {
 		asType = trust.ASTypeCore
+		if len(cfg.Neighbors) > 0 {
+			asType = trust.ASTypeAuthoritative
+		}
 	}
 	localHost, err := parseInternalHost(cfg.Internal)
 	if err != nil {
@@ -163,15 +180,18 @@ func loadIdentity(cfg NodeConfig) (identity, bool, error) {
 // zero-conf — the file one when --topology.link-set names a link-set. The
 // provider completes a first start's identity before the phases
 // assemble, Wire delivers the phases' products to it, and Seed, Mounts,
-// and Run follow.
+// and Run follow. The provider's core flag marks the founding tier alone:
+// a joining core takes the joiner's path — its neighbor's rendezvous, its
+// learned host — like any local node.
 func (n *node) selectProvider() error {
 	host, err := parseControlHost(n.cfg.Control)
 	if err != nil {
 		return err
 	}
+	founding := n.ident.asType == trust.ASTypeCore
 	if n.cfg.LinkSet != "" {
 		n.topology = filesource.New(filesource.Config{
-			Core:          n.cfg.Core,
+			Core:          founding,
 			Path:          n.cfg.LinkSet,
 			Notify:        n.notifyLinkChange,
 			WatchInterval: n.cfg.Pacing.LinkSetPoll,
@@ -179,7 +199,7 @@ func (n *node) selectProvider() error {
 		return nil
 	}
 	cfg := measured.Config{
-		Core:        n.cfg.Core,
+		Core:        founding,
 		Neighbors:   n.cfg.Neighbors,
 		StateDir:    n.cfg.State,
 		ControlHost: host,
@@ -196,9 +216,10 @@ func (n *node) selectProvider() error {
 			CandidateWindow: n.cfg.Pacing.CandidateWindow,
 		},
 	}
-	if n.cfg.Core {
-		// The core's published host derives from its own domain; a
-		// non-core's is what the rendezvous exchange teaches it.
+	if founding {
+		// The founding core's published host derives from its own domain; a
+		// joiner's — the joining core included — is what the rendezvous
+		// exchange teaches it.
 		cfg.Domain = n.cfg.Domain
 	}
 	provider, err := measured.New(cfg)
@@ -212,8 +233,8 @@ func (n *node) selectProvider() error {
 // setupEnrollAuth loads the --trust.enroll-auth selection: the
 // authorizer the trust service asks at first issuance and, for a
 // method with loops of its own, the run that serves them. Unset is open enrollment; Validate already refused the
-// argument off the core, so a selected method loads on the issuing node
-// alone. The spec parses here once, so a malformed one fails the boot, not the
+// argument off the founding core, so a selected method loads on the issuing
+// node alone. The spec parses here once, so a malformed one fails the boot, not the
 // first joiner.
 func (n *node) setupEnrollAuth() error {
 	if n.cfg.EnrollAuth == "" {
@@ -330,6 +351,18 @@ func (n *node) Close() {
 	}
 }
 
+// fatal stops the node from a loop that cannot proceed: the reason recorded
+// for Run to return — the loops unwinding behind the cancellation — so an
+// operator sees the node leave with the cause, not a process spinning on a
+// condition nothing it does can advance.
+func (n *node) fatal(err error) {
+	n.fatalOnce.Do(func() {
+		n.fatalErr = err
+		slog.Error("Stopping the node", "err", err)
+		n.stop()
+	})
+}
+
 // start launches the node's background loops: the BFD health monitor,
 // beaconing, the control endpoint, the SCMP echo responder, the loaded
 // topology provider's — the rendezvous acceptor, the joiner's dials, the
@@ -382,14 +415,25 @@ func (n *node) start(ctx context.Context) {
 			return nil
 		})
 	} else {
+		enrollment := controlplane.EnrollmentConfig{
+			IA:            n.ident.ia,
+			DB:            n.trustDB,
+			Key:           n.asKey,
+			Remote:        n.coreClt,
+			RetryInterval: n.cfg.Pacing.Enrollment,
+		}
+		if n.votingKey != nil {
+			// The joining core's loop casts its voting material: once the
+			// chain is issued, it submits the onboarding update to the
+			// core's voting application — over the verified peer channel,
+			// the submission identified by the node's chain.
+			enrollment.VotingKey = n.votingKey
+			enrollment.VotingCert = n.votingCert
+			enrollment.Caster = voting.NewSubmitter(n.peerClt.VerifiedClient(), n.coreRoute)
+			enrollment.Fatal = n.fatal
+		}
 		runBackground(ctx, "enrollment", func(ctx context.Context) error {
-			controlplane.RunEnrollment(ctx, controlplane.EnrollmentConfig{
-				IA:            n.ident.ia,
-				DB:            n.trustDB,
-				Key:           n.asKey,
-				Remote:        n.coreClt,
-				RetryInterval: n.cfg.Pacing.Enrollment,
-			})
+			controlplane.RunEnrollment(ctx, enrollment)
 			return nil
 		})
 	}

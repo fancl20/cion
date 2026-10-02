@@ -51,14 +51,18 @@ handler maps it to the latest version
 answers it with its last key
 ([db.go](/pkg/modules/trustdb/impl/bbolt/db.go)). No code asks it.
 
-The enrollment seam asks whether, not what.
+The enrollment seam stays as
 [ADR-0010](/docs/adrs/0010-gate-enrollment-with-a-pluggable-authorizer.md)
-built the authorizer's question on the facts one exchange proves —
-keys, source, claim — and a joiner presenting a voting certificate is
-a fact that seam has no field for
-([admission.go](/pkg/modules/enrollauth/admission.go)). And the route
-enrollment takes would misfire the moment the successor TRC spreads:
-the one-hop shortcut returns any core the pinned TRC names that is a
+built it — the authorizer's question the facts one exchange proves,
+keys, source, claim
+([admission.go](/pkg/modules/enrollauth/admission.go)) — and the
+joiner's role is invisible there by decision: the voting question
+belongs at the cast, where it is load-bearing, for any chain-holder
+can assemble and submit an onboarding successor, and a gate asked only
+of joiners that present a certificate at enrollment binds the honest
+alone. And the route enrollment takes would misfire the moment the
+successor TRC spreads: the one-hop shortcut returns any core the pinned
+TRC names that is a
 direct neighbor with its verdict up
 ([controlplane.go](/internal/services/controlplane.go)), while a core
 that issues nothing answers a chain renewal with Unimplemented
@@ -97,18 +101,21 @@ decides it.
     regular voting certificate is created once the provisional
     identity completes and persists beside the key, so retries,
     restarts, and operators all see the same bytes.
-*   The enrollment request carries the certificate, and the
-    authorizer's facts carry what the joiner asks to be admitted as.
-    Open enrollment admits a core joiner exactly as it admits any
-    node; the gate stays opt-in.
+*   The joiner enrolls exactly as a node does — the drafts' renewal
+    body untouched, no role visible at enrollment — and the admission
+    authorizer is asked the voting question at the submission, beside
+    the mechanical gates: every successor a founder might cast is
+    asked, whatever its submitter enrolled as. Open enrollment answers
+    it as it answers any ask; the gate stays opt-in.
 *   The founder casts the sensitive update: serial incremented on the
     same base, the joiner's AS added to the core and authoritative AS
     lists, its regular voting certificate added to the set, quorum and
-    `noTrustReset` untouched. The founder's sensitive key casts the
-    vote; the joiner's regular key signs the proof of possession the
-    draft requires of every new voter (PKI draft, Section 3.5.6); the
-    completed TRC is verified with cppki against the pinned
-    predecessor before anything pins or serves it.
+    `noTrustReset` untouched. The node's admission policy answers the
+    voting question before the sensitive key signs; the founder's
+    sensitive key casts the vote; the joiner's regular key signs the
+    proof of possession the draft requires of every new voter (PKI
+    draft, Section 3.5.6); the completed TRC is verified with cppki
+    against the pinned predecessor before anything pins or serves it.
 *   A fetched non-base TRC verifies against its pinned predecessor —
     fail-closed, the posture the base fetch already holds.
 *   The newest pinned TRC becomes the one nodes use: signers cite it,
@@ -125,6 +132,9 @@ decides it.
     carried into the successor unchanged, so the successor's validity
     is bounded by the earliest expiry among them — and rolling any of
     them arrives in its own proposal, on the path this one builds.
+*   No renewal-body extension: the enrollment request keeps the
+    reference form the drafts define, and the joiner's voting
+    certificate travels only inside the successor it submits.
 *   No path-layer core behavior: the authoritative originates no
     beacons, terminates no core beacons into core segments, serves no
     core lookup, and registers its down segments no differently than a
@@ -167,28 +177,18 @@ both. The self-signed certificate over it — `createVotingCert`'s
 regular shape, the construction genesis already uses
 ([certs.go](/pkg/trust/certs.go)) — is created after the provider
 completes the provisional ISD draw, for the certificate names the
-completed ISD-AS, and persists beside the key.
+completed ISD-AS, and persists beside the key. It is presented to no
+one at enrollment — the joiner enrolls as any node — and first
+travels inside the successor it submits.
 
-### Enrollment admits the role
+### The joiner submits, the founder decides
 
-The CMS-signed renewal body grows the voting certificate beside the
-CSR — a CION extension of the reference body, which carries the CSR
-alone, and the same liberty ADR-0003 took when it automated first
-enrollment against the draft's formality. The wrapper's possession
-proof still covers the AS key it always covered; the voting key's
-possession is proved later, by the co-signature on the TRC that
-carries the certificate. The authorizer's facts grow the presented
-certificate — the question becomes what to admit the joiner as, on the
-same seam ADR-0010 established
-([admission.go](/pkg/modules/enrollauth/admission.go)) — and the CIDR
-and Telegram methods answer it as they answer any ask.
-
-### The founder casts, the joiner co-signs
-
-The founder assembles the successor from its newest pinned TRC and the
-admitted joiner: serial incremented by one on the same base number;
-the joiner's AS appended to the core and authoritative AS lists; its
-regular voting certificate appended to the certificate set; the quorum,
+The joiner assembles the successor from the founder's newest TRC —
+resolved with the numbers-less ask the drafts' trust service already
+answers, verified against the pinned chain, and pinned — and itself:
+serial incremented by one on the same base number; the joiner's AS
+appended to the core and authoritative AS lists; its regular voting
+certificate appended to the certificate set; the quorum,
 `noTrustReset`, and the sensitive voting certificates untouched — a
 sensitive update, as cppki's classification will read it. The votes
 field carries the predecessor's index of the founder's sensitive
@@ -199,18 +199,40 @@ fresh certificate never rules that window; the founder's carried ones
 do.
 
 The draft leaves the casting procedure to the ISD (Section 3.5.6);
-CION's is one request-response pair on the control endpoints the
-enrollment channel already connects. The founder sends the successor
-carrying its sensitive vote; the joiner adds the signer info its
-regular key makes — the proof of possession — verifies the whole
-against the base TRC it pinned at enrollment, and returns the
-completed TRC. The founder verifies the same way and pins. The
-artifact carries exactly two
-signatures, the vote and the possession proof, and the founder's
-assembly is what keeps it at two. The cast is serialized on the
-founder, so serials stay monotone under concurrent joins, and
-idempotent: a joiner whose AS the newest TRC already names is issued
-its chain and casts nothing.
+CION's rides the voting application, a resident application the
+founding core hosts — the extension point the applications roof
+exists for, keeping the drafts' control endpoint free of CION's own
+APIs. The joiner signs the assembled successor with its regular key —
+the proof of possession — and submits the partially signed artifact
+to the application over the verified peer channel, identified by its
+certificate chain; the application decides nothing, handing each
+submission to the control plane's decision with the channel's
+verified fact. The decision is the founder's alone: the update must
+classify against its newest pinned TRC, onboard exactly its
+presenter, and be backed by an enrolled chain; the node's admission
+policy then answers the voting question — the seam ADR-0010
+established, asked as a boundary beside enrollment and registration,
+its facts the verified presenter and the voting certificate the
+successor carries
+([admission.go](/pkg/modules/enrollauth/admission.go)) — and only
+then does the sensitive key sign beside the possession proof, the
+completed artifact verify against the newest pin, and it pin. The
+question rides the serialized transaction with the mechanical gates —
+the ask returns promptly whatever the operator's eventual answer, a
+pending among them. A deny or pending refuses the submission and pins
+nothing; the joiner's retry asks again, building on the founder's
+newest TRC. The artifact carries exactly two
+signatures, the vote and the possession proof. The decision is
+serialized on the founder, so serials stay monotone under concurrent
+submissions, and idempotent: a joiner whose AS the newest TRC already
+names is answered with that TRC and casts nothing, asked nothing.
+
+Nothing else depends on the application: the network serves the
+drafts' control plane, enrollment, and paths with or without it, and
+the core role loads it by inference with the empty applications list
+— the deliberate core — the operator's opt-out. A joining core whose
+founder hosts no application stops itself with the reason, for no
+voting power can be obtained that way.
 
 ### Verification follows the chain
 
@@ -292,20 +314,103 @@ record.
     derives `ASTypeAuthoritative`; the loader creates exactly the
     regular voting key; the certificate persists across restarts and
     names the completed ISD-AS.
-*   **Unit, the seam and the route:** the authorizer's facts carry the
-    presented certificate; the shortcut skips a named core without a
+*   **Unit, the seam and the route:** the decision asks the authorizer
+    the voting question — its facts the verified presenter and the
+    certificate the successor carries — and a deny pins nothing while
+    open admission allows; the shortcut skips a named core without a
     root certificate and lands on the founder; the composed path
     selects the same set.
 *   **Integration, the join lab:** a founder and a joining core, the
-    joiner completing its ISD from the neighbor's reply, enrolling
-    with its certificate presented, the founder casting, the joiner
-    co-signing, and both pinning the successor; a third node
-    discovering the successor from the founder's signed messages and
-    enumerating two core ASes; a node neighboring the joiner enrolling
-    through the founder's endpoint.
+    joiner completing its ISD from the neighbor's reply, enrolling as
+    any node, submitting its partially signed
+    successor to the founder's voting application, and both pinning
+    the completed TRC; a third node discovering the successor from the
+    founder's signed messages and enumerating two core ASes; a node
+    neighboring the joiner enrolling through the founder's endpoint.
 *   **Negative and interruption:** a forged successor pins nowhere; a
-    re-presented joiner casts nothing; a join interrupted between vote
-    and co-signature retries from the newest pinned TRC and leaves
-    nothing partial pinned.
+    re-presented joiner casts nothing; a submission the founder
+    refuses — a malformed update, or the authorizer's deny — leaves
+    nothing pinned on either side, and the retry builds
+    on the founder's newest TRC; a founder hosting no voting
+    application keeps serving the network while the joining core stops
+    itself.
 
 ## Implementation history
+
+*   The update machinery landed as proposed. `AssembleOnboarding` builds
+    the successor from the newest TRC and the joiner — serial
+    incremented, both AS lists and the certificate set grown, quorum and
+    `noTrustReset` untouched, validity the window every carried
+    certificate still covers — `SignUpdate` signs the joiner's proof of
+    possession over it, and `CoSign` adds a signature beside the ones the
+    artifact carries
+    ([update.go](/pkg/trust/update.go)); `fetchTRC` resolves a fetched
+    update's predecessor before it verifies, fetching missing ones first,
+    so a node holding only the base chains its way to any successor, and
+    the signer, the chain verification, and the core lists read the newest
+    pinned TRC while the numbers-less ask pulls it
+    ([network.go](/pkg/trust/network.go),
+    [engine.go](/pkg/trust/engine.go)). The voting certificates' common
+    names grew the holder's ISD-AS, for cppki reads a parsed subject's
+    standard attributes alone and refuses a TRC whose voters share one
+    ([certs.go](/pkg/trust/certs.go)).
+*   The join landed on the run command's own path: `cion run core` takes
+    `--topology.neighbor`, `Validate` keeps only the founding-tier checks,
+    `loadIdentity` derives `ASTypeAuthoritative` from the pair, and the
+    joining core loads the regular voting key alone with its self-signed
+    certificate persisted after the identity completes
+    ([run_core.go](/cmd/cion/run_core.go),
+    [config.go](/internal/services/config.go),
+    [node.go](/internal/services/node.go),
+    [keys.go](/pkg/trust/keys.go)). The joiner enrolls as any node —
+    the renewal body keeps the reference form the drafts define, and
+    the authorizer's facts carry no role
+    ([trustservice.go](/pkg/controlplane/trustservice.go)) — for the
+    certificate first travels inside the successor the joiner submits.
+*   The casting exchange landed in the voting application, not the
+    control plane: the drafts' endpoint serves the drafts' services alone,
+    and the resident application — core-bounded, loaded by inference, the
+    empty applications list the opt-out — mounts its submission RPC on the
+    control endpoint behind the peer-identity middleware and hands each
+    submission, with the channel's verified presenter, to
+    `TRCDecider`, the control plane's decision: the update must classify
+    against the newest pin, onboard exactly its presenter, and be backed
+    by an enrolled chain; the admission authorizer then answers the
+    voting question — a boundary beside enrollment and registration,
+    its facts the verified presenter and the certificate the successor
+    carries ([admission.go](/pkg/modules/enrollauth/admission.go)) —
+    and only then does the sensitive key vote, the completed TRC
+    verify, and it pin
+    ([voting.go](/pkg/apps/voting/voting.go),
+    [trccast.go](/pkg/controlplane/trccast.go)). The joiner's
+    `JoinCore` resolves the founder's newest TRC, assembles, signs, and
+    submits through the application over the verified peer channel
+    ([submitter.go](/pkg/apps/voting/submitter.go),
+    [lifecycle.go](/pkg/controlplane/lifecycle.go)); a founder hosting no
+    application is terminal for the joiner — the node stops itself with
+    the reason, the network serving on — and both core-route paths select
+    the cores a root certificate names
+    ([controlplane.go](/internal/services/controlplane.go),
+    [app.go](/internal/services/app.go)).
+*   The tests landed as the plan spells them: the assembly, the signatures
+    and their order, `JoinCore`'s idempotent, refused, caught-up, and
+    forged joins, the predecessor-aware fetch with its forgeries, the
+    newest reads, the voting material's persistence, the tier's
+    derivation, the authorizer's question and its refusals, the
+    decision's gates and refusals, and the application's doors and the
+    submitter's terminal
+    mapping
+    ([update_test.go](/pkg/trust/update_test.go),
+    [network_test.go](/pkg/trust/network_test.go),
+    [engine_test.go](/pkg/trust/engine_test.go),
+    [identity_test.go](/pkg/trust/identity_test.go),
+    [trccast_test.go](/pkg/controlplane/trccast_test.go),
+    [voting_test.go](/pkg/apps/voting/voting_test.go)); the join lab runs
+    the four nodes of the plan through the run command's own assembly —
+    the founder, the joiner that enrolls, submits, and pins beside it,
+    the third node that discovers the successor from the founder's signed
+    messages, and the node below the joiner that enrolls through the
+    founder's endpoint — and its second episode proves the application's
+    absence: the deliberate core serves on while the joining core stops
+    itself and a plain node keeps enrolling
+    ([corejoin_test.go](/internal/testnetwork/corejoin_test.go)).
