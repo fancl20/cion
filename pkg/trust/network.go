@@ -59,7 +59,10 @@ func (p *NetworkProvider) LocalChains(
 
 // GetSignedTRC returns the TRC with the given ID, fetching and validating it
 // from the Remote if it is not in the DB. A base TRC is verified with its
-// own voting certificates; updates are not supported yet.
+// own voting certificates; an update is verified against its pinned
+// predecessor — fetched first when it is missing, so a node holding only the
+// base can chain its way to any successor. The numbers-less ID asks the
+// ISD's newest TRC.
 func (p *NetworkProvider) GetSignedTRC(
 	ctx context.Context,
 	id cppki.TRCID,
@@ -80,8 +83,8 @@ func (p *NetworkProvider) GetSignedTRC(
 }
 
 // GetChains returns the chains matching the query, fetching them from the
-// Remote on a DB miss. Only chains that verify against the ISD's TRC are
-// returned and cached.
+// Remote on a DB miss. Only chains that verify against the newest pinned
+// TRC's root pool are returned and cached.
 func (p *NetworkProvider) GetChains(
 	ctx context.Context,
 	q trustdb.ChainQuery,
@@ -105,7 +108,7 @@ func (p *NetworkProvider) GetChains(
 	if len(chains) == 0 {
 		return nil, nil
 	}
-	trc, err := p.GetSignedTRC(ctx, cppki.TRCID{ISD: q.IA.ISD(), Base: 1, Serial: 1})
+	trc, err := p.GetSignedTRC(ctx, newestTRCID(q.IA.ISD()))
 	if err != nil {
 		return nil, serrors.Wrap("fetching TRC to verify chains", err)
 	}
@@ -133,7 +136,7 @@ func (p *NetworkProvider) NotifyTRC(ctx context.Context, id cppki.TRCID, opts ..
 
 // Enroll obtains an AS certificate chain for the node's key from the core
 // via the Remote and stores it in the DB. A chain that is still valid in the
-// DB short-circuits the round trip. The ISD's base TRC is fetched and
+// DB short-circuits the round trip. The ISD's newest TRC is fetched and
 // verified if not yet known, and the issued chain is verified against it
 // before it is stored.
 func Enroll(
@@ -185,7 +188,7 @@ func RenewChain(
 	if certIA, err := cppki.ExtractIA(chain[0].Subject); err != nil || !certIA.Equal(ia) {
 		return nil, serrors.New("issued chain is for another ISD-AS", "expected", ia)
 	}
-	trc, err := fetchTRC(ctx, db, remote, cppki.TRCID{ISD: ia.ISD(), Base: 1, Serial: 1})
+	trc, err := fetchTRC(ctx, db, remote, newestTRCID(ia.ISD()))
 	if err != nil {
 		return nil, err
 	}
@@ -198,8 +201,9 @@ func RenewChain(
 	return chain, nil
 }
 
-// fetchTRC fetches the TRC with the given ID from the Remote, checks its ID
-// and signature, and caches it in the DB.
+// fetchTRC returns the TRC with the given ID — the newest of the ISD when the
+// ID is numbers-less — from the DB or the Remote, verifying what it fetches
+// and caching it in the DB.
 func fetchTRC(
 	ctx context.Context,
 	db trustdb.DB,
@@ -216,12 +220,42 @@ func fetchTRC(
 	if err != nil {
 		return cppki.SignedTRC{}, serrors.Wrap("fetching TRC from remote", err, "id", id)
 	}
-	if trc.TRC.ID != id {
+	if id.Base.IsLatest() {
+		if trc.TRC.ID.ISD != id.ISD {
+			return cppki.SignedTRC{}, serrors.New("fetched TRC is for another ISD",
+				"expected", id.ISD, "actual", trc.TRC.ID.ISD)
+		}
+	} else if trc.TRC.ID != id {
 		return cppki.SignedTRC{}, serrors.New("fetched TRC has unexpected ID",
 			"expected", id, "actual", trc.TRC.ID)
 	}
-	if err := trc.Verify(nil); err != nil {
-		return cppki.SignedTRC{}, serrors.Wrap("verifying fetched TRC", err, "id", id)
+	return verifyAndPinTRC(ctx, db, remote, trc)
+}
+
+// verifyAndPinTRC verifies the TRC — a base TRC with its own voting
+// certificates, an update against the resolved predecessor — and pins it in
+// the DB. The posture is fail-closed: a TRC no pinned predecessor vouches
+// for never enters the database.
+func verifyAndPinTRC(
+	ctx context.Context,
+	db trustdb.DB,
+	remote Remote,
+	trc cppki.SignedTRC,
+) (cppki.SignedTRC, error) {
+
+	if trc.TRC.ID.IsBase() {
+		if err := trc.Verify(nil); err != nil {
+			return cppki.SignedTRC{}, serrors.Wrap("verifying fetched TRC", err, "id", trc.TRC.ID)
+		}
+	} else {
+		pred, err := fetchTRC(ctx, db, remote, predecessorID(trc.TRC.ID))
+		if err != nil {
+			return cppki.SignedTRC{}, err
+		}
+		if err := trc.Verify(&pred.TRC); err != nil {
+			return cppki.SignedTRC{}, serrors.Wrap("verifying fetched TRC against its predecessor",
+				err, "id", trc.TRC.ID, "predecessor", pred.TRC.ID)
+		}
 	}
 	if _, err := db.InsertTRC(ctx, trc); err != nil {
 		return cppki.SignedTRC{}, fmt.Errorf("caching fetched TRC: %w", err)

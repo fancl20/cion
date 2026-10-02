@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/fancl20/cion/pkg/apps"
+	"github.com/fancl20/cion/pkg/trust"
 )
 
 // nodeConfig builds a minimal valid run-argument set for the validation and
@@ -20,8 +21,8 @@ func nodeConfig() NodeConfig {
 }
 
 // TestNodeConfigValidate checks the role-aware argument validation: the
-// domain is always required, the core takes no neighbor, and the addresses
-// parse.
+// domain is always required, the joining core takes its neighbor, and the
+// addresses parse.
 func TestNodeConfigValidate(t *testing.T) {
 	if err := nodeConfig().Validate(); err != nil {
 		t.Fatalf("validating the minimal core: %v", err)
@@ -32,6 +33,13 @@ func TestNodeConfigValidate(t *testing.T) {
 	cfg.Neighbors = []string{"192.0.2.7:30043"}
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("validating a joiner: %v", err)
+	}
+
+	// The core role with a neighbor joins: the founding refusal is gone.
+	joining := nodeConfig()
+	joining.Neighbors = []string{"192.0.2.7:30043"}
+	if err := joining.Validate(); err != nil {
+		t.Fatalf("validating a joining core: %v", err)
 	}
 
 	// Both methods of the selector parse.
@@ -47,13 +55,11 @@ func TestNodeConfigValidate(t *testing.T) {
 	}
 
 	bad := map[string]func(*NodeConfig){
-		"missing domain":     func(c *NodeConfig) { c.Domain = "" },
-		"missing state":      func(c *NodeConfig) { c.State = "" },
-		"core with neighbor": func(c *NodeConfig) { c.Neighbors = []string{"192.0.2.7:30043"} },
-		"bad neighbor":       func(c *NodeConfig) { c.Core = false; c.Neighbors = []string{"nope"} },
-		"missing internal":   func(c *NodeConfig) { c.Internal = "" },
-		"enroll-auth without core": func(c *NodeConfig) {
-			c.Core = false
+		"missing domain":   func(c *NodeConfig) { c.Domain = "" },
+		"missing state":    func(c *NodeConfig) { c.State = "" },
+		"bad neighbor":     func(c *NodeConfig) { c.Core = false; c.Neighbors = []string{"nope"} },
+		"missing internal": func(c *NodeConfig) { c.Internal = "" },
+		"enroll-auth without the founding core": func(c *NodeConfig) {
 			c.Neighbors = []string{"192.0.2.7:30043"}
 			c.EnrollAuth = "cidrs=192.0.2.0/24"
 		},
@@ -153,5 +159,69 @@ func TestNodeConfigValidateApplications(t *testing.T) {
 				t.Errorf("the refusal = %q, want it to carry %q", err, tc.want)
 			}
 		})
+	}
+}
+
+// TestLoadIdentityDerivesTier checks the tier derives from the pair the run
+// arguments spell: the core flag without a neighbor founds, with one it joins
+// as an authoritative core, the flag alone leaves the normal node, and a
+// restart derives the same tier from the same arguments.
+func TestLoadIdentityDerivesTier(t *testing.T) {
+	cfg := func(mutate func(*NodeConfig)) NodeConfig {
+		c := NodeConfig{
+			Domain:   "core.example.org",
+			State:    t.TempDir(),
+			Internal: DefaultInternal,
+			Control:  DefaultControl,
+		}
+		mutate(&c)
+		return c
+	}
+
+	founding := cfg(func(c *NodeConfig) { c.Core = true })
+	ident, created, err := loadIdentity(founding)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !created || ident.asType != trust.ASTypeCore {
+		t.Errorf("the core without a neighbor = %v (created %v), want a founding first start",
+			ident.asType, created)
+	}
+
+	joining := cfg(func(c *NodeConfig) {
+		c.Core = true
+		c.Neighbors = []string{"192.0.2.7:30043"}
+	})
+	ident, created, err = loadIdentity(joining)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !created || ident.asType != trust.ASTypeAuthoritative {
+		t.Errorf("the core with a neighbor = %v (created %v), want an authoritative first start",
+			ident.asType, created)
+	}
+	if err := trust.PersistIA(joining.State, ident.ia); err != nil {
+		t.Fatal(err)
+	}
+	// The restart of the same arguments derives the same tier, the persisted
+	// identity untouched by it.
+	ident, created, err = loadIdentity(joining)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created || ident.asType != trust.ASTypeAuthoritative {
+		t.Errorf("the authoritative restart = %v (created %v), want the same tier unpersisted",
+			ident.asType, created)
+	}
+
+	local := cfg(func(c *NodeConfig) {
+		c.Neighbors = []string{"192.0.2.7:30043"}
+	})
+	ident, _, err = loadIdentity(local)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ident.asType != trust.ASTypeNormal {
+		t.Errorf("the node without the core flag = %v, want the normal tier", ident.asType)
 	}
 }

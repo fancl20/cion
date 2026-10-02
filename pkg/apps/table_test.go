@@ -26,7 +26,7 @@ func TestSelectInfers(t *testing.T) {
 		t.Fatal(err)
 	}
 	if got, want := strings.Join(namesOf(core), ","),
-		"wireguard,coordination,socks"; got != want {
+		"wireguard,coordination,socks,voting"; got != want {
 		t.Errorf("the serving core's inference = %s, want %s", got, want)
 	}
 
@@ -43,8 +43,11 @@ func TestSelectInfers(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(refused) != 0 {
-		t.Errorf("the refused port's inference = %v, want none", namesOf(refused))
+	// The refused host port refuses every application that needs it; the
+	// voting application needs none, so the core still infers it — the
+	// network onboards cores whatever it serves hosts.
+	if got, want := strings.Join(namesOf(refused), ","), "voting"; got != want {
+		t.Errorf("the refused port's inference = %s, want %s alone", got, want)
 	}
 }
 
@@ -98,12 +101,17 @@ func TestSelectRefuses(t *testing.T) {
 		{
 			"an unknown name",
 			[]string{"middlebox"}, true, serving,
-			"the residents are wireguard, coordination, socks",
+			"the residents are wireguard, coordination, socks, voting",
 		},
 		{
 			"a role violation",
 			[]string{"coordination", "wireguard"}, false, serving,
 			"coordination, which requires the core role",
+		},
+		{
+			"voting on a leaf",
+			[]string{"voting"}, false, serving,
+			"voting, which requires the core role",
 		},
 		{
 			"socks without its owner",

@@ -2,15 +2,15 @@ package trust
 
 import (
 	"context"
+	"crypto"
 	"crypto/x509"
 	"fmt"
 	"time"
 
 	"github.com/scionproto/scion/pkg/addr"
-	"github.com/scionproto/scion/pkg/scrypto/cms/protocol"
+	"github.com/scionproto/scion/pkg/scrypto/cppki"
 
 	"github.com/fancl20/cion/pkg/modules/trustdb"
-	"github.com/scionproto/scion/pkg/scrypto/cppki"
 )
 
 // Genesis creates the ISD's base TRC for the founding core and persists it
@@ -92,41 +92,19 @@ func Genesis(
 // result with cppki, including the check that every voting certificate has
 // signed.
 func signTRC(trc cppki.TRC, keys CoreKeys) (cppki.SignedTRC, error) {
-	payload, err := trc.Encode()
-	if err != nil {
-		return cppki.SignedTRC{}, fmt.Errorf("encoding TRC: %w", err)
-	}
-	eci, err := protocol.NewDataEncapsulatedContentInfo(payload)
-	if err != nil {
-		return cppki.SignedTRC{}, err
-	}
-	sd, err := protocol.NewSignedData(eci)
-	if err != nil {
-		return cppki.SignedTRC{}, err
-	}
 	// Order matters for verification error messages only; both voting
 	// certificates must sign.
 	sensitive, err := signerCert(trc, cppki.Sensitive)
 	if err != nil {
 		return cppki.SignedTRC{}, err
 	}
-	if err := sd.AddSignerInfo([]*x509.Certificate{sensitive},
-		keys.Sensitive); err != nil {
-		return cppki.SignedTRC{}, fmt.Errorf("signing with sensitive voting key: %w", err)
-	}
 	regular, err := signerCert(trc, cppki.Regular)
 	if err != nil {
 		return cppki.SignedTRC{}, err
 	}
-	if err := sd.AddSignerInfo([]*x509.Certificate{regular},
-		keys.Regular); err != nil {
-		return cppki.SignedTRC{}, fmt.Errorf("signing with regular voting key: %w", err)
-	}
-	raw, err := sd.ContentInfoDER()
-	if err != nil {
-		return cppki.SignedTRC{}, err
-	}
-	signed, err := cppki.DecodeSignedTRC(raw)
+	signed, err := signTRCPayload(trc,
+		[]*x509.Certificate{sensitive, regular},
+		[]crypto.Signer{keys.Sensitive, keys.Regular})
 	if err != nil {
 		return cppki.SignedTRC{}, err
 	}

@@ -15,9 +15,10 @@ const (
 	// ASTypeNormal is a non-core AS. It holds no voting or CA key material
 	// and obtains its certificate chain by enrollment.
 	ASTypeNormal ASType = iota
-	// ASTypeAuthoritative is a standard core AS. In this milestone it
-	// behaves like a normal node: only the founding core issues trust
-	// material, and multi-core ISDs are a non-goal.
+	// ASTypeAuthoritative is a core AS that joined its ISD over the network:
+	// it holds a regular voting certificate beside the AS key, enrolls and
+	// renews its chain like any node, and issues no trust material of its
+	// own — the founding core stays the ISD's sensitive voter and CA.
 	ASTypeAuthoritative
 	// ASTypeCore is the founding core of an ISD. It self-issues the base
 	// TRC and signs certificate chains for the ISD.

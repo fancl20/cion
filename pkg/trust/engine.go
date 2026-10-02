@@ -52,8 +52,8 @@ func NewEngine(ia addr.IA, key crypto.Signer, provider Provider) *Engine {
 }
 
 // Signer returns a signer backed by the node's newest chain valid now: the
-// algorithm is selected for the AS key, the TRC ID comes from the ISD's base
-// TRC, and validity and subject from the chain.
+// algorithm is selected for the AS key, the TRC ID cites the newest TRC held
+// locally, and validity and subject come from the chain.
 func (e *Engine) Signer(ctx context.Context) (Signer, error) {
 	now := time.Now()
 	chains, err := e.Provider.GetChains(ctx, trustdb.ChainQuery{
@@ -67,7 +67,7 @@ func (e *Engine) Signer(ctx context.Context) (Signer, error) {
 		return Signer{}, serrors.New("no valid chain for signing; enrollment required",
 			"isd_as", e.IA)
 	}
-	trc, err := e.baseTRC(ctx)
+	trc, err := e.newestTRC(ctx)
 	if err != nil {
 		return Signer{}, err
 	}
@@ -171,23 +171,33 @@ type DBProvider interface {
 	LocalChains(ctx context.Context, q trustdb.ChainQuery) ([][]*x509.Certificate, error)
 }
 
-// baseTRC fetches the ISD's base TRC through the provider.
-func (e *Engine) baseTRC(ctx context.Context) (cppki.SignedTRC, error) {
-	trc, err := e.Provider.GetSignedTRC(ctx,
-		cppki.TRCID{ISD: e.IA.ISD(), Base: 1, Serial: 1})
+// newestTRC resolves the ISD's newest TRC through the provider: the newest
+// pinned one, fetched when nothing is pinned at all.
+func (e *Engine) newestTRC(ctx context.Context) (cppki.SignedTRC, error) {
+	trc, err := e.Provider.GetSignedTRC(ctx, newestTRCID(e.IA.ISD()))
 	if err != nil {
-		return cppki.SignedTRC{}, serrors.Wrap("resolving base TRC", err)
+		return cppki.SignedTRC{}, serrors.Wrap("resolving newest TRC", err)
 	}
 	if trc.IsZero() {
-		return cppki.SignedTRC{}, serrors.New("base TRC not available", "isd", e.IA.ISD())
+		return cppki.SignedTRC{}, serrors.New("no TRC of the ISD is available", "isd", e.IA.ISD())
 	}
 	return trc, nil
 }
 
-// CoreASes returns the core ASes of the given ISD named by the pinned base
+// newestLocalTRC returns the newest TRC pinned in the provider, without
+// fetching over the network. The zero TRC means none is pinned.
+func (e *Engine) newestLocalTRC() (cppki.SignedTRC, error) {
+	db, ok := e.Provider.(DBProvider)
+	if !ok {
+		return cppki.SignedTRC{}, serrors.New("provider holds no local database")
+	}
+	return db.LocalTRC(newestTRCID(e.IA.ISD()))
+}
+
+// CoreASes returns the core ASes of the given ISD named by the newest pinned
 // TRC, with the ISD substituted. An empty result means the TRC is not pinned.
 func (e *Engine) CoreASes(isd addr.ISD) ([]addr.IA, error) {
-	trc, err := e.BaseTRC()
+	trc, err := e.newestLocalTRC()
 	if err != nil {
 		return nil, err
 	}
@@ -199,6 +209,33 @@ func (e *Engine) CoreASes(isd addr.ISD) ([]addr.IA, error) {
 		cores = append(cores, addr.MustIAFrom(isd, as))
 	}
 	return cores, nil
+}
+
+// IssuerASes returns the ASes of the given ISD a root certificate in the
+// newest pinned TRC names as its subject — exactly the nodes that can serve
+// a chain renewal, the signal enrollment's core route selects by. An empty
+// result means the TRC is not pinned.
+func (e *Engine) IssuerASes(isd addr.ISD) ([]addr.IA, error) {
+	trc, err := e.newestLocalTRC()
+	if err != nil {
+		return nil, err
+	}
+	if trc.IsZero() {
+		return nil, nil
+	}
+	roots, err := trc.TRC.RootCerts()
+	if err != nil {
+		return nil, err
+	}
+	issuers := make([]addr.IA, 0, len(roots))
+	for _, root := range roots {
+		ia, err := cppki.ExtractIA(root.Subject)
+		if err != nil {
+			return nil, serrors.Wrap("extracting the root certificate's ISD-AS", err)
+		}
+		issuers = append(issuers, addr.MustIAFrom(isd, ia.AS()))
+	}
+	return issuers, nil
 }
 
 // NewestChain returns the chain for ia with the latest expiration among the

@@ -30,13 +30,14 @@ const (
 // the forwarding key come from the state directory, where the first start
 // generates them.
 type NodeConfig struct {
-	// Core marks the founding core: TRC genesis, issuer, self-enrollment. It
-	// takes no neighbor.
+	// Core marks the core role: founding without a neighbor — TRC genesis,
+	// issuer, self-enrollment — and joining with one, as an authoritative
+	// core the founder onboards by sensitive TRC update.
 	Core bool
-	// Domain is the core's domain — the core's own when Core is set (with
-	// AcmeEmail optional and the certificate files as the offline fallback),
-	// the network's core domain otherwise: the WebPKI identity of the
-	// enrollment and TRC fetch.
+	// Domain is the core's domain — the founding core's own when Core is set
+	// without a neighbor (with AcmeEmail optional and the certificate files
+	// as the offline fallback), the network's core domain otherwise: the
+	// WebPKI identity of the enrollment and TRC fetch.
 	Domain    string
 	AcmeEmail string
 	CertFile  string
@@ -44,7 +45,9 @@ type NodeConfig struct {
 	// Neighbors are existing nodes' rendezvous underlay addresses; the first
 	// start of a non-core requires at least one, later starts seed
 	// additional entries, idempotent by remote address. They select the
-	// measured topology provider, which loads by default.
+	// measured topology provider, which loads by default. On the core role
+	// they decide the tier: a core with a neighbor joins the neighbor's ISD
+	// as an authoritative core instead of founding its own.
 	Neighbors []string
 	// LinkSet points at the file provider's link-set: neighbor ISD-ASes with the
 	// links' two underlay addresses, reconciled into the store as the operator's
@@ -59,7 +62,8 @@ type NodeConfig struct {
 	// EnrollAuth selects the enrollment authorizer that gates first issuance,
 	// "method=spec": "cidrs" with a comma-separated prefix list, "telegram" with
 	// <chat>:<token>. Empty is open enrollment — the zero-conf default — and the
-	// argument refuses to load off the core, the only node that issues chains.
+	// argument refuses to load off the founding core, the only node that
+	// issues chains.
 	EnrollAuth string
 	// TelegramAPI overrides the Telegram Bot API's base URL for the
 	// telegram method of EnrollAuth; empty uses the public one. The
@@ -134,18 +138,16 @@ type NodePacing struct {
 }
 
 // Validate applies the role-aware argument checks: the domain is always
-// required; the core takes no neighbor.
+// required, the founding core is the core without a neighbor, and the gate
+// loads on the issuing node alone.
 func (c NodeConfig) Validate() error {
 	if c.Domain == "" {
-		if c.Core {
-			return fmt.Errorf("--trust.domain is required: the core's own, " +
+		if c.Core && len(c.Neighbors) == 0 {
+			return fmt.Errorf("--trust.domain is required: the founding core's own, " +
 				"the WebPKI identity of its certificate")
 		}
 		return fmt.Errorf("--trust.domain is required: the network's core domain, " +
 			"the WebPKI identity of the enrollment and TRC fetch")
-	}
-	if c.Core && len(c.Neighbors) > 0 {
-		return fmt.Errorf("the founding core takes no --topology.neighbor: nodes join it")
 	}
 	if c.LinkSet != "" && len(c.Neighbors) > 0 {
 		return fmt.Errorf("--topology.link-set refuses --topology.neighbor: " +
@@ -161,11 +163,11 @@ func (c NodeConfig) Validate() error {
 	}
 	if c.EnrollAuth != "" {
 		// A silently inert gate is the misleading configuration the
-		// role-aware checks exist to refuse: only the core issues chains,
-		// so only the core's gate means anything.
-		if !c.Core {
-			return fmt.Errorf("--trust.enroll-auth requires the core role: " +
-				"the core is the only node that issues chains")
+		// role-aware checks exist to refuse: only the founding core issues
+		// chains, so only the founding core's gate means anything.
+		if !c.Core || len(c.Neighbors) > 0 {
+			return fmt.Errorf("--trust.enroll-auth requires the founding core: " +
+				"the founding core is the only node that issues chains")
 		}
 		if _, _, err := loadEnrollAuth(c.EnrollAuth, c.TelegramAPI, c.State); err != nil {
 			return fmt.Errorf("parsing --trust.enroll-auth: %w", err)

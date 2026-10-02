@@ -21,13 +21,15 @@ import (
 )
 
 var (
-	iaCore = addr.MustIAFrom(20, 0xff0000000001)
-	iaNode = addr.MustIAFrom(20, 0xff0000000002)
+	iaCore       = addr.MustIAFrom(20, 0xff0000000001)
+	iaNode       = addr.MustIAFrom(20, 0xff0000000002)
+	joinerCoreIA = addr.MustIAFrom(20, 0xff0000000f01)
 )
 
 // engineFixture is a trust engine with a genesis TRC and an issued chain.
 type engineFixture struct {
 	db     trustdb.DB
+	keys   trust.CoreKeys
 	issuer *trust.Issuer
 	trc    cppki.SignedTRC
 	engine *trust.Engine
@@ -72,7 +74,8 @@ func newEngineFixture(t *testing.T) *engineFixture {
 	}
 	engine := trust.NewEngine(iaNode, asKey, &trust.NetworkProvider{DB: db})
 	return &engineFixture{
-		db: db, issuer: issuer, trc: trc, engine: engine, asKey: asKey, chain: chain,
+		db: db, keys: keys, issuer: issuer, trc: trc, engine: engine,
+		asKey: asKey, chain: chain,
 	}
 }
 
@@ -409,5 +412,104 @@ func TestVerifierUncached(t *testing.T) {
 	if provider.notifies != 2 {
 		t.Errorf("provider notified of the TRC %d times, want once per verification",
 			provider.notifies)
+	}
+}
+
+// newOnboardedFixture is an engine fixture whose ISD has onboarding behind
+// it: the successor TRC naming a second core is pinned beside the base, and
+// the node's chain still verifies against the successor's carried root.
+func newOnboardedFixture(t *testing.T) *engineFixture {
+	t.Helper()
+	f := newEngineFixture(t)
+	joinerKey, err := trust.LoadOrCreateVotingKey(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cert, err := trust.LoadOrCreateVotingCert(t.TempDir(), joinerCoreIA, joinerKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pred := f.trc
+	trc, err := trust.AssembleOnboarding(pred, joinerCoreIA, cert)
+	if err != nil {
+		t.Fatal(err)
+	}
+	partial, err := trust.SignUpdate(trc, joinerKey, cert)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sensitiveCert, err := trust.SignerCert(pred.TRC, cppki.Sensitive)
+	if err != nil {
+		t.Fatal(err)
+	}
+	completed, err := trust.CoSign(partial, f.keys.Sensitive, sensitiveCert)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.InsertTRC(context.Background(), completed); err != nil {
+		t.Fatal(err)
+	}
+	return f
+}
+
+// TestEngineSignerCitesNewest checks that the signer cites the newest pinned
+// TRC, not the base: a node that discovered the successor signs under its ID.
+func TestEngineSignerCitesNewest(t *testing.T) {
+	f := newOnboardedFixture(t)
+
+	s, err := f.engine.Signer(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := cppki.TRCID{ISD: iaCore.ISD(), Base: 1, Serial: 2}
+	if s.TRCID != want {
+		t.Errorf("signer cites TRC %v, want the successor %v", s.TRCID, want)
+	}
+}
+
+// TestEngineCoreASesReadNewest checks that the core lists read the newest
+// pinned TRC: onboarding is where the enumeration becomes visible.
+func TestEngineCoreASesReadNewest(t *testing.T) {
+	f := newOnboardedFixture(t)
+
+	cores, err := f.engine.CoreASes(iaCore.ISD())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cores) != 2 {
+		t.Fatalf("core ASes = %v, want the founder and the on-boarded core", cores)
+	}
+	set := map[addr.IA]bool{}
+	for _, ia := range cores {
+		set[ia] = true
+	}
+	if !set[iaCore] || !set[joinerCoreIA] {
+		t.Errorf("core ASes = %v, want %v and %v among them", cores, iaCore, joinerCoreIA)
+	}
+}
+
+// TestEngineIssuerASes checks the issuer signal: the ASes a root certificate
+// in the newest pinned TRC names as its subject — the founder alone, for the
+// on-boarded core holds no root certificate of its own.
+func TestEngineIssuerASes(t *testing.T) {
+	f := newOnboardedFixture(t)
+
+	issuers, err := f.engine.IssuerASes(iaCore.ISD())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(issuers) != 1 || !issuers[0].Equal(iaCore) {
+		t.Errorf("issuer ASes = %v, want the founder %v alone", issuers, iaCore)
+	}
+
+	// Without a pinned TRC there is no signal at all.
+	fresh, err := bbolt.New(filepath.Join(t.TempDir(), "trust.db"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = fresh.Close() })
+	engine := trust.NewEngine(iaNode, f.asKey, &trust.NetworkProvider{DB: fresh})
+	if issuers, err := engine.IssuerASes(iaCore.ISD()); err != nil || len(issuers) != 0 {
+		t.Errorf("issuer ASes without a pinned TRC = %v (%v), want none", issuers, err)
 	}
 }

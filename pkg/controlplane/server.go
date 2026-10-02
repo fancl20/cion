@@ -40,8 +40,9 @@ type Mount struct {
 // Services composes the trust and segment services into one ControlPlane;
 // the segment service's methods take precedence over the trust service's
 // unimplemented embeds. Mounts are the handlers a loaded application — the
-// topology provider foremost — serves behind the peer-authenticating
-// middleware, mounted beside the drafts' services; empty when none loads.
+// topology provider and the voting application among them — serves behind
+// the peer-authenticating middleware, mounted beside the drafts' services;
+// empty when none loads.
 type Services struct {
 	*TrustService
 	*SegmentService

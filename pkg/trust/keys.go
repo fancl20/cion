@@ -1,6 +1,7 @@
 package trust
 
 import (
+	"bytes"
 	"crypto"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -14,8 +15,10 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/scionproto/scion/pkg/addr"
+	"github.com/scionproto/scion/pkg/scrypto/cppki"
 )
 
 // Names of the key files inside the state directory's keys folder. All keys
@@ -25,8 +28,14 @@ const (
 	ASKeyFile = "cp-as.key"
 	// SensitiveKeyFile holds the sensitive voting key of the founding core.
 	SensitiveKeyFile = "sensitive-voting.key"
-	// RegularKeyFile holds the regular voting key of the founding core.
+	// RegularKeyFile holds the regular voting key of the founding core, and
+	// of an authoritative core beside it — a node is one tier or the other
+	// for its lifetime, never both.
 	RegularKeyFile = "regular-voting.key"
+	// RegularVotingCertFile holds the self-signed regular voting certificate
+	// of an authoritative core, created once its provisional identity
+	// completes so retries, restarts, and operators all see the same bytes.
+	RegularVotingCertFile = "regular-voting.crt"
 	// RootKeyFile holds the CP root key of the founding core. It signs CP
 	// CA certificates and is part of the TRC's anchor set.
 	RootKeyFile = "cp-root.key"
@@ -151,6 +160,79 @@ func LoadOrCreateCoreKeys(stateDir string) (CoreKeys, error) {
 		return CoreKeys{}, fmt.Errorf("CP CA key: %w", err)
 	}
 	return CoreKeys{Sensitive: sensitive, Regular: regular, Root: root, CA: ca}, nil
+}
+
+// LoadOrCreateVotingKey returns the authoritative core's regular voting key,
+// generating and persisting it on first start. It occupies the file the
+// founder's regular voting key occupies — the tiers never share a state
+// directory — and nothing else is created: no sensitive, root, or CA key.
+func LoadOrCreateVotingKey(stateDir string) (crypto.Signer, error) {
+	return loadOrCreateKey(keyDir(stateDir), RegularKeyFile)
+}
+
+// LoadOrCreateVotingCert returns the authoritative core's self-signed regular
+// voting certificate, minting and persisting it beside the key when none is
+// persisted yet. The certificate names the completed ISD-AS, so it is created
+// only after the provisional identity completes; a persisted certificate that
+// does not match the key or name the ISD-AS is refused, not silently replaced.
+func LoadOrCreateVotingCert(
+	stateDir string,
+	ia addr.IA,
+	key crypto.Signer,
+) (*x509.Certificate, error) {
+
+	path := filepath.Join(keyDir(stateDir), RegularVotingCertFile)
+	if raw, err := os.ReadFile(path); err == nil {
+		block, _ := pem.Decode(raw)
+		if block == nil {
+			return nil, fmt.Errorf("%s: no PEM block", path)
+		}
+		cert, err := x509.ParseCertificate(block.Bytes)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", path, err)
+		}
+		if err := checkVotingCert(cert, ia, key); err != nil {
+			return nil, fmt.Errorf("%s: %w", path, err)
+		}
+		return cert, nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return nil, err
+	}
+	// Whole seconds and the signing backdate, the genesis certificates'
+	// own shape, so the certificate covers the successor TRC's validity from
+	// its first second.
+	now := time.Now().UTC().Add(signingBackdate).Truncate(time.Second)
+	cert, err := createVotingCert(ia, key, false, now)
+	if err != nil {
+		return nil, err
+	}
+	if err := os.MkdirAll(keyDir(stateDir), 0o700); err != nil {
+		return nil, err
+	}
+	if err := writeFile(path, pem.EncodeToMemory(
+		&pem.Block{Type: "CERTIFICATE", Bytes: cert.Raw})); err != nil {
+		return nil, err
+	}
+	return cert, nil
+}
+
+// checkVotingCert checks that the persisted voting certificate is the regular
+// shape naming the ISD-AS over the key's public half.
+func checkVotingCert(cert *x509.Certificate, ia addr.IA, key crypto.Signer) error {
+	if ct, err := cppki.ValidateCert(cert); err != nil || ct != cppki.Regular {
+		return fmt.Errorf("not a regular voting certificate")
+	}
+	if certIA, err := cppki.ExtractIA(cert.Subject); err != nil || !certIA.Equal(ia) {
+		return fmt.Errorf("certificate names %s, want %s", cert.Subject, ia)
+	}
+	skid, err := cppki.SubjectKeyID(key.Public())
+	if err != nil {
+		return err
+	}
+	if !bytes.Equal(cert.SubjectKeyId, skid) {
+		return fmt.Errorf("certificate does not cover the voting key")
+	}
+	return nil
 }
 
 func keyDir(stateDir string) string {

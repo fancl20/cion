@@ -489,16 +489,31 @@ func StartNode(t *testing.T, cfg NodeConfig) *Node {
 		}
 		return ias
 	}
+	// issuers enumerates the cores a root certificate in the pinned TRC
+	// names — the nodes that can serve a chain renewal — the assembly's own
+	// enrollment route selects by.
+	issuers := func(isd addr.ISD) map[addr.IA]bool {
+		ias, err := engine.IssuerASes(isd)
+		if err != nil {
+			return nil
+		}
+		set := make(map[addr.IA]bool, len(ias))
+		for _, ia := range ias {
+			set[ia] = true
+		}
+		return set
+	}
 
 	var pathProvider *scion.PathProvider
 	var beaconer *controlplane.Beaconer
-	// coreRoute returns the drafts' route to the core: the one-hop shortcut when
-	// a TRC-named core is a neighbor with its verdict up, else the reversed
-	// freshest up segment — or the bootstrap beacon's route, before any is
-	// verified — addressed to the core's control service.
+	// coreRoute returns the drafts' route to the core, routed to the issuers:
+	// the one-hop shortcut when an issuer core is a neighbor with its verdict
+	// up, else the reversed freshest up segment ending at one — or the
+	// bootstrap beacon's route, before any is verified — addressed to the
+	// core's control service.
 	coreRoute := func() *scion.Addr {
 		for ifID, neighborIA := range linkTableOf(linkStore)() {
-			if neighborIA.IsZero() || !isCore(cores, neighborIA) {
+			if neighborIA.IsZero() || !issuers(neighborIA.ISD())[neighborIA] {
 				continue
 			}
 			if monitor.Up(ifID) {
@@ -506,7 +521,7 @@ func StartNode(t *testing.T, cfg NodeConfig) *Node {
 			}
 		}
 		for _, core := range []func() addr.IA{
-			func() addr.IA { return freshestUpCore(pathDB) },
+			func() addr.IA { return freshestUpCore(pathDB, issuers) },
 			beaconer.BootstrapCore,
 		} {
 			if coreIA := core(); !coreIA.IsZero() {
@@ -654,19 +669,9 @@ func StartNode(t *testing.T, cfg NodeConfig) *Node {
 	return node
 }
 
-// isCore reports whether the IA names a core AS its ISD's TRC lists.
-func isCore(cores func(addr.ISD) []addr.IA, ia addr.IA) bool {
-	for _, core := range cores(ia.ISD()) {
-		if core.Equal(ia) {
-			return true
-		}
-	}
-	return false
-}
-
 // freshestUpCore returns the origin of the freshest up segment the node has
-// verified; zero when none is stored.
-func freshestUpCore(db pathdb.DB) addr.IA {
+// verified that ends at an issuer core; zero when none is stored.
+func freshestUpCore(db pathdb.DB, issuers func(addr.ISD) map[addr.IA]bool) addr.IA {
 	segs, err := db.Get(context.Background(), pathdb.Query{Type: pathdb.SegmentTypeUp})
 	if err != nil {
 		return 0
@@ -674,6 +679,9 @@ func freshestUpCore(db pathdb.DB) addr.IA {
 	var core addr.IA
 	var best time.Time
 	for _, seg := range segs {
+		if !issuers(seg.FirstIA().ISD())[seg.FirstIA()] {
+			continue
+		}
 		if core.IsZero() || seg.PCB.Timestamp().After(best) {
 			core, best = seg.FirstIA(), seg.PCB.Timestamp()
 		}

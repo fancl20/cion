@@ -109,7 +109,7 @@ type Authorizer struct {
 	invites map[string]struct{}
 }
 
-// askKey names one identity: the boundary asking, the enrollment's claim,
+// askKey names one identity: the boundary asking, the exchange's claim,
 // and a digest of the presented keys' fingerprints, so two strangers
 // claiming one name present two asks and the operator approves at most one
 // — the name-taken check settles the loser on its next retry. The digest
@@ -482,12 +482,15 @@ func identityOf(f enrollauth.AdmissionFacts) string {
 }
 
 // promptText renders one prompt: the enrollment's claimed name, the
-// registration's offered keys, the source beside them.
+// registration's offered keys, the voting submission's certificate, the
+// source beside them.
 func promptText(f enrollauth.AdmissionFacts) string {
 	var b strings.Builder
 	switch f.Boundary {
 	case enrollauth.BoundaryRegistration:
 		b.WriteString("CION registration request")
+	case enrollauth.BoundaryVoting:
+		b.WriteString("CION voting power request")
 	default:
 		b.WriteString("CION enrollment request")
 	}

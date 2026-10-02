@@ -18,6 +18,7 @@ import (
 
 	"github.com/scionproto/scion/pkg/addr"
 
+	"github.com/fancl20/cion/pkg/apps/voting"
 	"github.com/fancl20/cion/pkg/modules/enrollauth"
 	"github.com/fancl20/cion/pkg/scion"
 	"github.com/fancl20/cion/pkg/trust"
@@ -74,9 +75,20 @@ type Environment struct {
 	// data plane generation and on every one to come.
 	RegisterSvc   func(svc addr.SVC, port uint16) error
 	UnregisterSvc func(svc addr.SVC, port uint16) error
-	// Authorizer gates the coordination application's registrations — nil
-	// is open admission.
+	// Authorizer is the selected admission policy the applications ask —
+	// open where none loads. The coordination application's registrations
+	// ask its verdict.
 	Authorizer enrollauth.AdmissionAuthorizer
+	// TRCDecision is the control plane's decision on TRC updates a core
+	// submitted seeking voting power: the founder's own gates and its
+	// admission policy's answer, the sensitive vote it casts over them. Nil
+	// where the node decides none — every node but the founding core — and
+	// the voting application answers each submission with its refusal.
+	TRCDecision voting.Decider
+	// MountControlEndpoint mounts one of the application's handlers on the
+	// node's control endpoint, behind the peer-identity middleware, beside
+	// the drafts' services; nil when the node assembles no endpoint.
+	MountControlEndpoint func(pattern string, handler http.Handler) error
 	// CoreRoute resolves the route to the core the joiner's directory
 	// fetch rides; the core needs none, serving the directory itself.
 	CoreRoute func() *scion.Addr
