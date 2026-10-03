@@ -5,6 +5,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"errors"
 	"hash"
 	"path/filepath"
 	"strings"
@@ -33,11 +34,13 @@ func macFactory() func() hash.Hash {
 	}
 }
 
-// fakeSender records the beacon and registration RPCs the beaconer sends.
+// fakeSender records the beacon and registration RPCs the beaconer sends; a
+// peer in failFor answers with a dial's failure.
 type fakeSender struct {
 	mtx           sync.Mutex
 	beacons       []sentBeacon
 	registrations []sentRegistration
+	failFor       map[addr.IA]error
 }
 
 type sentBeacon struct {
@@ -62,6 +65,9 @@ func (s *fakeSender) RegisterSegments(
 
 	s.mtx.Lock()
 	defer s.mtx.Unlock()
+	if err := s.failFor[peer.IA]; err != nil {
+		return err
+	}
 	s.registrations = append(s.registrations, sentRegistration{peer: peer, segments: segments})
 	return nil
 }
@@ -80,6 +86,9 @@ type beaconFixture struct {
 var (
 	iaLineC = addr.MustIAFrom(20, 0xff0000000003)
 	iaLineD = addr.MustIAFrom(20, 0xff0000000004)
+	// iaCore2Test is the fellow core the fixture's genesis TRC names beside
+	// the founder: the second origin whose beacons the store keys apart.
+	iaCore2Test = addr.MustIAFrom(20, 0xff0000000005)
 )
 
 func newBeaconFixture(t *testing.T) *beaconFixture {
@@ -100,7 +109,7 @@ func newBeaconFixture(t *testing.T) *beaconFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	trc, err := trust.Genesis(context.Background(), db, coreIATest, keys)
+	trc, err := trust.Genesis(context.Background(), db, coreIATest, keys, iaCore2Test)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -110,7 +119,7 @@ func newBeaconFixture(t *testing.T) *beaconFixture {
 	}
 	provider := &trust.NetworkProvider{DB: db}
 	engines := make(map[addr.IA]*trust.Engine)
-	for _, ia := range []addr.IA{coreIATest, nodeIATest, iaLineC} {
+	for _, ia := range []addr.IA{coreIATest, iaCore2Test, nodeIATest, iaLineC} {
 		key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 		if err != nil {
 			t.Fatal(err)
@@ -129,24 +138,21 @@ func newBeaconFixture(t *testing.T) *beaconFixture {
 		engines[ia] = trust.NewEngine(ia, key, provider)
 	}
 
-	// B's two links: interface 1 to the core A, interface 2 to C.
+	// B's three links: interface 1 to the core A, interface 2 to C,
+	// interface 3 to the fellow core A2.
 	links := func() map[uint16]addr.IA {
-		return map[uint16]addr.IA{1: coreIATest, 2: iaLineC}
+		return map[uint16]addr.IA{1: coreIATest, 2: iaLineC, 3: iaCore2Test}
 	}
 	store := NewBeaconStore()
 	sender := &fakeSender{}
-	coreRoute := func() *scion.Addr {
-		return &scion.Addr{IA: coreIATest, Service: addr.SvcCS}
-	}
 	beaconer, err := NewBeaconer(BeaconerConfig{
-		IA:        nodeIATest,
-		Engine:    engines[nodeIATest],
-		MACKey:    []byte(testMACKey),
-		Store:     store,
-		DB:        pathDB,
-		Links:     links,
-		Sender:    sender,
-		CoreRoute: coreRoute,
+		IA:     nodeIATest,
+		Engine: engines[nodeIATest],
+		MACKey: []byte(testMACKey),
+		Store:  store,
+		DB:     pathDB,
+		Links:  links,
+		Sender: sender,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -168,6 +174,23 @@ func lineBeacon(t *testing.T, f *beaconFixture, now time.Time) *segment.PCB {
 		Next:       nodeIATest,
 		EgressIfID: 1,
 	}, macFactory(), f.engines[coreIATest]); err != nil {
+		t.Fatal(err)
+	}
+	return pcb
+}
+
+// core2Beacon builds the beacon the fellow core A2 sends to B: [A2] with
+// next B, arriving over B's link 3.
+func core2Beacon(t *testing.T, f *beaconFixture, now time.Time) *segment.PCB {
+	t.Helper()
+	pcb, err := segment.NewPCB(now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := pcb.AppendEntry(context.Background(), iaCore2Test, segment.EntryOptions{
+		Next:       nodeIATest,
+		EgressIfID: 1,
+	}, macFactory(), f.engines[iaCore2Test]); err != nil {
 		t.Fatal(err)
 	}
 	return pcb
@@ -589,6 +612,69 @@ func TestHandleBeaconWithoutTRC(t *testing.T) {
 	}
 }
 
+// TestBootstrapAlternatesOrigins checks the bootstrap slot's per-origin
+// keeping and alternation: a node that has not pinned the TRC records each
+// origin's freshest unverified beacon, BootstrapCore alternates across the
+// origins with the freshest first, and BootstrapRoute serves each origin
+// its own route — one origin's fresher beacons cannot starve the other's.
+func TestBootstrapAlternatesOrigins(t *testing.T) {
+	f := newBeaconFixture(t)
+	ctx := context.Background()
+
+	// A fresh node's engine: no TRC pinned, no chains.
+	freshDB, err := bbolt.New(filepath.Join(t.TempDir(), "trust.db"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = freshDB.Close() }()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fresh := trust.NewEngine(nodeIATest, key, &trust.NetworkProvider{DB: freshDB})
+	beaconer, err := NewBeaconer(BeaconerConfig{
+		IA:     nodeIATest,
+		Engine: fresh,
+		MACKey: []byte(testMACKey),
+		Store:  f.store,
+		DB:     f.pathDB,
+		Links: func() map[uint16]addr.IA {
+			return map[uint16]addr.IA{1: coreIATest, 3: iaCore2Test}
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The two cores' beacons, the fellow core's the fresher.
+	now := time.Now()
+	if err := beaconer.HandleBeacon(ctx, lineBeacon(t, f, now), 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := beaconer.HandleBeacon(ctx, core2Beacon(t, f, now.Add(time.Second)), 3); err != nil {
+		t.Fatal(err)
+	}
+
+	// The fresher origin leads and the calls alternate, so a retrying
+	// enrollment reaches every origin the beacons name.
+	for i, want := range []addr.IA{iaCore2Test, coreIATest, iaCore2Test} {
+		if got := beaconer.BootstrapCore(); !got.Equal(want) {
+			t.Errorf("bootstrap core %d = %v, want %v", i, got, want)
+		}
+	}
+
+	// Each origin's route serves its own beacon alone.
+	if beaconer.BootstrapRoute(coreIATest) == nil {
+		t.Error("the founder's bootstrap route missing")
+	}
+	if beaconer.BootstrapRoute(iaCore2Test) == nil {
+		t.Error("the fellow core's bootstrap route missing")
+	}
+	if beaconer.BootstrapRoute(iaLineC) != nil {
+		t.Error("a bootstrap route served an origin no beacon named")
+	}
+}
+
 // TestPropagateOnce checks the propagation rule: every external
 // interface except the one the beacon arrived on, and except interfaces
 // whose neighbor the TRC names as a core.
@@ -681,6 +767,218 @@ func TestRegisterOnce(t *testing.T) {
 	}
 	if len(reg.segments) != 1 {
 		t.Fatalf("registered segments = %d, want 1", len(reg.segments))
+	}
+}
+
+// TestCoreTierBeaconerRunsTheCoreLoops checks the core tier's loops on the
+// beaconer the widened selection builds: it originates on every link — the
+// core link included — propagates its stored candidates to non-core
+// neighbors alone, and terminates the beacons received over core links into
+// core segments, registering none. A normal node's loops are
+// TestPropagateOnce's and TestRegisterOnce's, unchanged.
+func TestCoreTierBeaconerRunsTheCoreLoops(t *testing.T) {
+	f := newBeaconFixture(t)
+	ctx := context.Background()
+
+	// The core A under test: the child B on link 1, the fellow core A2 on
+	// link 2.
+	links := func() map[uint16]addr.IA {
+		return map[uint16]addr.IA{1: nodeIATest, 2: iaCore2Test}
+	}
+	core, err := NewBeaconer(BeaconerConfig{
+		IA:     coreIATest,
+		Engine: f.engines[coreIATest],
+		MACKey: []byte(testMACKey),
+		Store:  f.store,
+		DB:     f.pathDB,
+		Links:  links,
+		Sender: f.sender,
+		Core:   true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Origination reaches every link, the core link included: the drafts'
+	// own sentence for cores, which originate over core and parent-child
+	// links alike.
+	core.originateOnce(ctx)
+	originated := snapshotBeacons(t, f)
+	peers := make(map[addr.IA]bool)
+	for _, sent := range originated {
+		peers[sent.peer.IA] = true
+		if sent.peer.Service != addr.SvcCS {
+			t.Errorf("beacon to %v = service %#x, want the CS service",
+				sent.peer.IA, uint16(sent.peer.Service))
+		}
+		parsed, err := segment.ParsePCB(sent.pcb)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(parsed.Entries) != 1 || !parsed.FirstIA().Equal(coreIATest) {
+			t.Errorf("originated beacon = %v, want the core's own single entry", parsed.Entries)
+		}
+	}
+	if !peers[nodeIATest] || !peers[iaCore2Test] {
+		t.Fatalf("origination reached %v, want the child and the core link alike", peers)
+	}
+
+	// The fellow core's beacon arrives over the core link and propagates to
+	// the non-core neighbor alone — beacons never travel toward a core.
+	fromCore2, err := segment.NewPCB(time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := fromCore2.AppendEntry(ctx, iaCore2Test, segment.EntryOptions{
+		Next:       coreIATest,
+		EgressIfID: 1,
+	}, macFactory(), f.engines[iaCore2Test]); err != nil {
+		t.Fatal(err)
+	}
+	if err := core.HandleBeacon(ctx, fromCore2, 2); err != nil {
+		t.Fatalf("handle core beacon: %v", err)
+	}
+	core.propagateOnce(ctx)
+	propagated := snapshotBeacons(t, f)[len(originated):]
+	if len(propagated) != 1 {
+		t.Fatalf("propagated %d beacons, want 1 to the non-core neighbor alone", len(propagated))
+	}
+	if !propagated[0].peer.IA.Equal(nodeIATest) {
+		t.Errorf("propagated to %v, want the non-core neighbor", propagated[0].peer.IA)
+	}
+	parsed, err := segment.ParsePCB(propagated[0].pcb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(parsed.Entries) != 2 || !parsed.FirstIA().Equal(iaCore2Test) ||
+		!parsed.LastIA().Equal(coreIATest) {
+
+		t.Errorf("propagated beacon = %v, want [A2, A]", parsed.Entries)
+	}
+
+	// Termination: the core-link beacon becomes a core segment in the core's
+	// own database, and no up segment or registration leaves the core.
+	core.registerCoreOnce(ctx)
+	segs, err := f.pathDB.Get(ctx, pathdb.Query{Type: pathdb.SegmentTypeCore})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(segs) != 1 || !segs[0].FirstIA().Equal(iaCore2Test) ||
+		!segs[0].LastIA().Equal(coreIATest) {
+
+		t.Fatalf("core segments = %v, want [A2, A] alone", segs)
+	}
+	if ups, err := f.pathDB.Get(ctx, pathdb.Query{Type: pathdb.SegmentTypeUp}); err != nil {
+		t.Fatal(err)
+	} else if len(ups) != 0 {
+		t.Errorf("up segments = %d, want 0: the core registers none", len(ups))
+	}
+	f.sender.mtx.Lock()
+	regs := len(f.sender.registrations)
+	f.sender.mtx.Unlock()
+	if regs != 0 {
+		t.Errorf("registrations = %d, want 0: core segments stay local", regs)
+	}
+}
+
+// snapshotBeacons returns the sender's recorded beacons under the lock.
+func snapshotBeacons(t *testing.T, f *beaconFixture) []sentBeacon {
+	t.Helper()
+	f.sender.mtx.Lock()
+	defer f.sender.mtx.Unlock()
+	return append([]sentBeacon(nil), f.sender.beacons...)
+}
+
+// TestRegisterOnceRegistersPerOrigin checks the registration's per-origin
+// send: candidates of two origins terminate and store as up segments, then
+// each origin's down segments register at that core's own address — the peer
+// client's dial resolving the route per destination — and one origin's
+// failed dial leaves the other's registration delivered, the next pass
+// retrying the failed one.
+func TestRegisterOnceRegistersPerOrigin(t *testing.T) {
+	f := newBeaconFixture(t)
+	ctx := context.Background()
+
+	// B stands under two cores: [A] over link 1, [A2] over link 3.
+	if err := f.beaconer.HandleBeacon(ctx, lineBeacon(t, f, time.Now()), 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.beaconer.HandleBeacon(ctx, core2Beacon(t, f, time.Now()), 3); err != nil {
+		t.Fatal(err)
+	}
+	f.beaconer.registerOnce(ctx)
+
+	// The up segments store inside the same pass: both origins stand in the
+	// database the registrations dial through.
+	ups, err := f.pathDB.Get(ctx, pathdb.Query{Type: pathdb.SegmentTypeUp})
+	if err != nil {
+		t.Fatal(err)
+	}
+	origins := make(map[addr.IA]bool)
+	for _, up := range ups {
+		origins[up.FirstIA()] = true
+	}
+	if len(origins) != 2 || !origins[coreIATest] || !origins[iaCore2Test] {
+		t.Fatalf("up segment origins = %v, want both cores'", origins)
+	}
+
+	// Each origin's down segments register at that core's own address.
+	f.sender.mtx.Lock()
+	regs := append([]sentRegistration(nil), f.sender.registrations...)
+	f.sender.mtx.Unlock()
+	if len(regs) != 2 {
+		t.Fatalf("registrations = %d, want one per origin", len(regs))
+	}
+	sent := make(map[addr.IA]*cppb.PathSegment)
+	for _, reg := range regs {
+		if !reg.peer.IA.Equal(coreIATest) && !reg.peer.IA.Equal(iaCore2Test) {
+			t.Errorf("registered with %v, want a core", reg.peer.IA)
+			continue
+		}
+		if reg.peer.Service != addr.SvcCS {
+			t.Errorf("registered with %v = service %#x, want the CS service",
+				reg.peer.IA, uint16(reg.peer.Service))
+		}
+		if len(reg.segments) != 1 {
+			t.Fatalf("registration to %v = %d segments, want 1", reg.peer.IA, len(reg.segments))
+		}
+		sent[reg.peer.IA] = reg.segments[0]
+	}
+	for origin, pb := range sent {
+		parsed, err := segment.ParsePCB(pb)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !parsed.FirstIA().Equal(origin) {
+			t.Errorf("registration to %v = segment of %v, want its own origin's",
+				origin, parsed.FirstIA())
+		}
+	}
+
+	// One origin's dial fails — a core the node holds no route to; the
+	// other's registration is delivered regardless, and the next pass
+	// retries the failed one.
+	f.sender.mtx.Lock()
+	f.sender.failFor = map[addr.IA]error{iaCore2Test: errors.New("no route")}
+	f.sender.mtx.Unlock()
+	f.sender.mtx.Lock()
+	f.sender.registrations = nil
+	f.sender.mtx.Unlock()
+	f.beaconer.registerOnce(ctx)
+	f.sender.mtx.Lock()
+	regs = append([]sentRegistration(nil), f.sender.registrations...)
+	f.sender.failFor = nil
+	f.sender.registrations = nil
+	f.sender.mtx.Unlock()
+	if len(regs) != 1 || !regs[0].peer.IA.Equal(coreIATest) {
+		t.Fatalf("registrations under one failed dial = %v, want the other core's alone", regs)
+	}
+	f.beaconer.registerOnce(ctx)
+	f.sender.mtx.Lock()
+	regs = append([]sentRegistration(nil), f.sender.registrations...)
+	f.sender.mtx.Unlock()
+	if len(regs) != 2 {
+		t.Fatalf("registrations after the retry = %d, want both origins' again", len(regs))
 	}
 }
 
@@ -820,16 +1118,15 @@ func TestBeaconerPausesOnDownInterface(t *testing.T) {
 
 	// The core's origination pauses the same way.
 	core, err := NewBeaconer(BeaconerConfig{
-		IA:        coreIATest,
-		Engine:    f.engines[coreIATest],
-		MACKey:    []byte(testMACKey),
-		Store:     NewBeaconStore(),
-		DB:        f.pathDB,
-		Links:     func() map[uint16]addr.IA { return map[uint16]addr.IA{1: nodeIATest} },
-		Verdicts:  func() map[uint16]bool { return map[uint16]bool{1: false} },
-		Sender:    f.sender,
-		CoreRoute: func() *scion.Addr { return nil },
-		Core:      true,
+		IA:       coreIATest,
+		Engine:   f.engines[coreIATest],
+		MACKey:   []byte(testMACKey),
+		Store:    NewBeaconStore(),
+		DB:       f.pathDB,
+		Links:    func() map[uint16]addr.IA { return map[uint16]addr.IA{1: nodeIATest} },
+		Verdicts: func() map[uint16]bool { return map[uint16]bool{1: false} },
+		Sender:   f.sender,
+		Core:     true,
 	})
 	if err != nil {
 		t.Fatal(err)

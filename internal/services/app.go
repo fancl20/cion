@@ -119,6 +119,10 @@ func (a *App) TrustDB() trustdb.DB { return a.node.trustDB }
 // PathDB returns the node's path database.
 func (a *App) PathDB() pathdb.DB { return a.node.pathDB }
 
+// Lookup returns the node's segment lookup service — the handler the control
+// endpoint serves and the fetcher the provider resolves through.
+func (a *App) Lookup() *controlplane.LookupService { return a.node.lookup }
+
 // Application returns the loaded application the name names, nil when it
 // did not load. The labs assert the concrete application where they watch
 // host peers — the same assertion the borrowing entries make.

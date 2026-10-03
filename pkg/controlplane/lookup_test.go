@@ -2,7 +2,7 @@ package controlplane
 
 import (
 	"context"
-	"net/netip"
+	"errors"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -29,13 +29,22 @@ type lookupFixture struct {
 	now    time.Time
 }
 
+// fetchCall records one fetch: the peer it dialed and the question asked.
+type fetchCall struct {
+	peer *scion.Addr
+	src  addr.IA
+	dst  addr.IA
+}
+
 // recordingFetch records fetches and answers with canned segments of each
-// type.
+// type; a peer in errFor answers with a dial's failure — a core the node
+// holds no route to.
 type recordingFetch struct {
-	mtx      sync.Mutex
-	requests [][2]addr.IA
-	down     []*cppb.PathSegment
-	core     []*cppb.PathSegment
+	mtx    sync.Mutex
+	calls  []fetchCall
+	errFor map[addr.IA]error
+	down   []*cppb.PathSegment
+	core   []*cppb.PathSegment
 }
 
 func (f *recordingFetch) Fetch(
@@ -43,7 +52,10 @@ func (f *recordingFetch) Fetch(
 
 	f.mtx.Lock()
 	defer f.mtx.Unlock()
-	f.requests = append(f.requests, [2]addr.IA{src, dst})
+	f.calls = append(f.calls, fetchCall{peer: peer, src: src, dst: dst})
+	if err := f.errFor[peer.IA]; err != nil {
+		return nil, err
+	}
 	resp := &cppb.SegmentsResponse{Segments: map[int32]*cppb.SegmentsResponse_Segments{}}
 	// The core answers only with segments that reach the requested
 	// destination; the canned segments reach iaLineC.
@@ -69,6 +81,7 @@ func newLookupFixture(t *testing.T) *lookupFixture {
 		t.Fatal(err)
 	}
 	fetch := &recordingFetch{
+		errFor: make(map[addr.IA]error),
 		down: []*cppb.PathSegment{
 			terminatedSegment(t, coreIATest, iaLineC, 2, now).PCB.PB,
 		},
@@ -81,13 +94,8 @@ func newLookupFixture(t *testing.T) *lookupFixture {
 	lookup.DB = db
 	lookup.Cores = func(isd addr.ISD) []addr.IA { return []addr.IA{coreIATest} }
 	lookup.Fetch = fetch.Fetch
-	lookup.CoreRoute = func() *scion.Addr {
-		return &scion.Addr{IA: coreIATest, Addr: fakeCoreEndpoint}
-	}
 	return &lookupFixture{db: db, lookup: lookup, fetch: fetch, now: now}
 }
-
-var fakeCoreEndpoint = netip.MustParseAddrPort("192.0.2.10:30042")
 
 // terminatedSegment builds a signed [core, end] segment fixture.
 func terminatedSegment(
@@ -135,7 +143,7 @@ func TestLookupSourceHandler(t *testing.T) {
 	if ups == nil || len(ups.Segments) != 1 {
 		t.Fatalf("up segments = %v, want one from the local database", ups)
 	}
-	if got := len(fx.fetch.requests); got != 0 {
+	if got := len(fx.fetch.calls); got != 0 {
 		t.Errorf("fetches = %d, want 0 for up segments", got)
 	}
 
@@ -153,8 +161,8 @@ func TestLookupSourceHandler(t *testing.T) {
 		t.Fatalf("down segments = %v, want one fetched from the core", downs)
 	}
 	fx.fetch.mtx.Lock()
-	if len(fx.fetch.requests) != 1 || !fx.fetch.requests[0][0].Equal(coreIATest) {
-		t.Errorf("fetch requests = %v, want one expanded to the core", fx.fetch.requests)
+	if len(fx.fetch.calls) != 1 || !fx.fetch.calls[0].src.Equal(coreIATest) {
+		t.Errorf("fetch calls = %v, want one expanded to the core", fx.fetch.calls)
 	}
 	fx.fetch.mtx.Unlock()
 }
@@ -172,7 +180,7 @@ func TestLookupCacheUntilExpiry(t *testing.T) {
 			}
 		}
 		fx.fetch.mtx.Lock()
-		if got := len(fx.fetch.requests); got != 1 {
+		if got := len(fx.fetch.calls); got != 1 {
 			t.Errorf("fetches inside TTL = %d, want 1", got)
 		}
 		fx.fetch.mtx.Unlock()
@@ -182,7 +190,7 @@ func TestLookupCacheUntilExpiry(t *testing.T) {
 			t.Fatalf("down segments after TTL = %d, want 1", len(segs))
 		}
 		fx.fetch.mtx.Lock()
-		if got := len(fx.fetch.requests); got != 2 {
+		if got := len(fx.fetch.calls); got != 2 {
 			t.Errorf("fetches after TTL = %d, want 2", got)
 		}
 		fx.fetch.mtx.Unlock()
@@ -215,7 +223,7 @@ func TestLookupCacheKeysByType(t *testing.T) {
 	fx.lookup.fetchCached(ctx, coreIATest, iaLineC, pathdb.SegmentTypeCore)
 	fx.fetch.mtx.Lock()
 	defer fx.fetch.mtx.Unlock()
-	if got := len(fx.fetch.requests); got != 2 {
+	if got := len(fx.fetch.calls); got != 2 {
 		t.Errorf("fetches = %d, want 2 (each kind answered from its own entry)", got)
 	}
 }
@@ -265,7 +273,7 @@ func TestLookupCacheForgets(t *testing.T) {
 			t.Errorf("cache entries = %d, want 2 (a live entry survives another's writes)", got)
 		}
 		fx.fetch.mtx.Lock()
-		if got := len(fx.fetch.requests); got != 4 {
+		if got := len(fx.fetch.calls); got != 4 {
 			t.Errorf("fetches = %d, want 4 (one per kind per expiry)", got)
 		}
 		fx.fetch.mtx.Unlock()
@@ -290,7 +298,7 @@ func TestLookupEmptyAnswerNotCached(t *testing.T) {
 		}
 	}
 	fx.fetch.mtx.Lock()
-	if got := len(fx.fetch.requests); got != 2 {
+	if got := len(fx.fetch.calls); got != 2 {
 		t.Errorf("fetches after empty answers = %d, want 2 (an empty answer is not cached)", got)
 	}
 	fx.fetch.mtx.Unlock()
@@ -301,6 +309,134 @@ func TestLookupEmptyAnswerNotCached(t *testing.T) {
 	fx.fetch.mtx.Unlock()
 	if segs := fx.lookup.Down(ctx, iaLineC); len(segs) != 1 {
 		t.Fatalf("down segments after the registration = %d, want 1", len(segs))
+	}
+}
+
+// TestLookupFetchesAskTheCoreTheyName checks the fetch's per-core send: the
+// down expansion asks each core of the destination ISD at that core's own
+// address with itself as the source, the core expansion each reachable
+// core, and a core whose dial fails — no route to it — answers nothing while
+// the other core's segments are still served, the failed ask left uncached.
+func TestLookupFetchesAskTheCoreTheyName(t *testing.T) {
+	fx := newLookupFixture(t)
+	fx.lookup.Cores = func(isd addr.ISD) []addr.IA {
+		return []addr.IA{coreIATest, iaCore2Test}
+	}
+	// A second origin's up segment makes the second core reachable too —
+	// the core expansion's source set.
+	up2 := terminatedSegment(t, iaCore2Test, nodeIATest, 4, fx.now)
+	if _, err := fx.db.Insert(context.Background(), up2); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+
+	// One core's dial fails; the other's answer is served regardless.
+	fx.fetch.mtx.Lock()
+	fx.fetch.errFor[iaCore2Test] = errors.New("no route to the asked core")
+	fx.fetch.mtx.Unlock()
+	if downs := fx.lookup.Down(ctx, iaLineC); len(downs) != 1 {
+		t.Fatalf("down segments under one failed dial = %d, want the other core's 1", len(downs))
+	}
+	fx.fetch.mtx.Lock()
+	fx.fetch.errFor[iaCore2Test] = nil
+	fx.fetch.mtx.Unlock()
+
+	// The down expansion: one request per core of the destination ISD, each
+	// at its own address and with itself as the source — the handler's
+	// check that the source be this core matches everywhere they land. The
+	// failed ask is not cached: the next request asks that core again.
+	if downs := fx.lookup.Down(ctx, iaLineC); len(downs) != 2 {
+		t.Fatalf("down segments = %d, want both cores' after the retry", len(downs))
+	}
+	fx.fetch.mtx.Lock()
+	calls := append([]fetchCall(nil), fx.fetch.calls...)
+	fx.fetch.mtx.Unlock()
+	if len(calls) != 3 {
+		t.Fatalf("fetch calls = %d, want 3 (two of the failed core, one cached)", len(calls))
+	}
+	asked := make(map[addr.IA]bool)
+	for _, call := range calls {
+		if !call.peer.IA.Equal(call.src) {
+			t.Errorf("fetch to %v = source %v, want the asked core", call.peer.IA, call.src)
+		}
+		if !call.peer.IA.Equal(coreIATest) && !call.peer.IA.Equal(iaCore2Test) {
+			t.Errorf("fetch to %v, want a core of the destination ISD", call.peer.IA)
+		}
+		if call.peer.Service != addr.SvcCS {
+			t.Errorf("fetch to %v = service %#x, want the CS service",
+				call.peer.IA, uint16(call.peer.Service))
+		}
+		asked[call.peer.IA] = true
+	}
+	if !asked[coreIATest] || !asked[iaCore2Test] {
+		t.Fatalf("cores asked = %v, want each core of the destination ISD", asked)
+	}
+
+	// The core expansion: each reachable core asked the same way.
+	fx.fetch.mtx.Lock()
+	fx.fetch.calls = nil
+	fx.fetch.mtx.Unlock()
+	if _, err := fx.lookup.Segments(ctx, connect.NewRequest(&cppb.SegmentsRequest{
+		DstIsdAs: uint64(coreIATest),
+	})); err != nil {
+		t.Fatal(err)
+	}
+	fx.fetch.mtx.Lock()
+	calls = append([]fetchCall(nil), fx.fetch.calls...)
+	fx.fetch.mtx.Unlock()
+	reached := make(map[addr.IA]bool)
+	for _, call := range calls {
+		if !call.dst.Equal(coreIATest) {
+			t.Errorf("core-expansion fetch = dst %v, want the core destination", call.dst)
+		}
+		if !call.peer.IA.Equal(call.src) {
+			t.Errorf("fetch to %v = source %v, want the asked core", call.peer.IA, call.src)
+		}
+		reached[call.peer.IA] = true
+	}
+	if !reached[coreIATest] || !reached[iaCore2Test] {
+		t.Fatalf("cores asked by the core expansion = %v, want each reachable core", reached)
+	}
+}
+
+// TestLookupAuthoritativeServesCoreHandler checks the widened selection's
+// other side: the authoritative tier serves the core handler from its own
+// database and refuses a request whose source names the founder — the check
+// that keeps the per-core fetch honest.
+func TestLookupAuthoritativeServesCoreHandler(t *testing.T) {
+	fx := newLookupFixture(t)
+	fx.lookup.IsCore = true
+	fx.lookup.IA = iaCore2Test
+	ctx := context.Background()
+
+	// A request whose source names the founder is refused empty.
+	resp, err := fx.lookup.Segments(ctx, connect.NewRequest(&cppb.SegmentsRequest{
+		SrcIsdAs: uint64(coreIATest),
+		DstIsdAs: uint64(coreIATest),
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.Msg.Segments) != 0 {
+		t.Errorf("segments = %v, want none for the founder's source", resp.Msg.Segments)
+	}
+
+	// The authoritative's own source is served from the local database.
+	seg := terminatedSegment(t, iaCore2Test, nodeIATest, 8, time.Now())
+	seg.Type = pathdb.SegmentTypeCore
+	if _, err := fx.db.Insert(ctx, seg); err != nil {
+		t.Fatal(err)
+	}
+	resp, err = fx.lookup.Segments(ctx, connect.NewRequest(&cppb.SegmentsRequest{
+		SrcIsdAs: uint64(iaCore2Test),
+		DstIsdAs: uint64(coreIATest),
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cores := resp.Msg.Segments[int32(cppb.SegmentType_SEGMENT_TYPE_CORE)]
+	if cores == nil || len(cores.Segments) != 1 {
+		t.Fatalf("core segments = %v, want one from the local database", cores)
 	}
 }
 
