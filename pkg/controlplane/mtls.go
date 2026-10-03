@@ -97,9 +97,11 @@ func nativeClientTLS(peer addr.IA, engine *trust.Engine, verifyServer bool) *tls
 }
 
 // verifyChainAgainstTRC returns a VerifyPeerCertificate callback checking
-// that the presented chain verifies against the pinned TRC's root pool and,
-// when expected is non-nil, that its subject names the expected IA. Without
-// a pinned TRC every chain is accepted — the bootstrap window.
+// that the presented chain verifies against the anchor pool — the pinned
+// newest TRC's roots, the predecessor's beside them while the newest is
+// within its grace period — and, when expected is non-nil, that its subject
+// names the expected IA. Without a pinned TRC every chain is accepted — the
+// bootstrap window.
 func verifyChainAgainstTRC(engine *trust.Engine, expected *addr.IA) func([][]byte, [][]*x509.Certificate) error {
 	return func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
 		if len(rawCerts) == 0 {
@@ -113,19 +115,19 @@ func verifyChainAgainstTRC(engine *trust.Engine, expected *addr.IA) func([][]byt
 			}
 			chain[i] = cert
 		}
-		trc, err := engine.BaseTRC()
+		pool, err := engine.AnchorPool()
 		if err != nil {
 			return err
 		}
-		if trc.IsZero() {
+		if len(pool) == 0 {
 			slog.Warn("SCION-native handshake without a pinned TRC; peer not authenticated",
 				"peer", chainSubjectIA(chain))
 			return nil
 		}
 		if err := cppki.VerifyChain(chain, cppki.VerifyOptions{
-			TRC: []*cppki.TRC{&trc.TRC},
+			TRC: pool,
 		}); err != nil {
-			return fmt.Errorf("chain does not verify against pinned TRC: %w", err)
+			return fmt.Errorf("chain does not verify against the anchor pool: %w", err)
 		}
 		if expected != nil {
 			ia, err := cppki.ExtractIA(chain[0].Subject)

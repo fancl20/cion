@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/scionproto/scion/pkg/addr"
+	"github.com/scionproto/scion/pkg/scrypto"
+	"github.com/scionproto/scion/pkg/scrypto/cppki"
 	spath "github.com/scionproto/scion/pkg/slayers/path/scion"
 
 	"github.com/fancl20/cion/pkg/controlplane"
@@ -141,6 +143,20 @@ func (n *node) setupTrustRole(ctx context.Context) error {
 	trc, err := trust.Genesis(ctx, n.trustDB, n.ident.ia, keys)
 	if err != nil {
 		return fmt.Errorf("TRC genesis: %w", err)
+	}
+	// The issuer anchors in the newest pinned TRC, not the base: a restart
+	// after a rotation finds the successor whose root certificate the
+	// persisted keys hold, and the chains issue under it from the boot on.
+	newest, err := n.trustDB.SignedTRC(ctx, cppki.TRCID{
+		ISD:    n.ident.ia.ISD(),
+		Base:   scrypto.LatestVer,
+		Serial: scrypto.LatestVer,
+	})
+	if err != nil {
+		return fmt.Errorf("reading the newest pinned TRC: %w", err)
+	}
+	if !newest.IsZero() {
+		trc = newest
 	}
 	issuer, err := trust.NewIssuer(n.ident.ia, keys, trc)
 	if err != nil {

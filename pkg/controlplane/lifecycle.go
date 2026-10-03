@@ -143,10 +143,11 @@ func (cfg EnrollmentConfig) cast(ctx context.Context) {
 // RunEnrollment runs the chain lifecycle of a non-core node: each pass reads
 // the newest chain's remaining validity, re-enrolls when it drops below the
 // renewal threshold or when no valid chain exists, casts the onboarding
-// update a joining core still owes, and watches the newest pinned TRC's
-// validity the same way — log only, for the update that extends it is the
-// founder's to cast. It also runs the trust database's expired-chain sweep
-// on its own interval.
+// update a joining core still owes, and — on the nodes that roll nothing —
+// watches the newest pinned TRC's validity the same way, log only, for the
+// update that extends it is the founder's to cast. A core's rotation watch
+// carries that report instead. It also runs the trust database's
+// expired-chain sweep on its own interval.
 func RunEnrollment(ctx context.Context, cfg EnrollmentConfig) {
 	var sweep sync.WaitGroup
 	sweep.Go(func() {
@@ -165,8 +166,9 @@ func RunEnrollment(ctx context.Context, cfg EnrollmentConfig) {
 // RunCoreEnrollment runs the founding core's chain lifecycle: the same loop
 // with a local action — self-issuing through the core's issuer whenever the
 // renewal threshold demands it, and the same expired-chain sweep. The
-// synchronous startup self-enrollment is the first pass; this loop keeps the
-// chain valid for the node's lifetime.
+// founding core's rotation watch reports the trust material's validity
+// beside this loop. The synchronous startup self-enrollment is the first
+// pass; this loop keeps the chain valid for the node's lifetime.
 func RunCoreEnrollment(ctx context.Context, cfg EnrollmentConfig) {
 	var sweep sync.WaitGroup
 	sweep.Go(func() {
@@ -188,7 +190,11 @@ func RunCoreEnrollment(ctx context.Context, cfg EnrollmentConfig) {
 // joining core, a pinned TRC that names it.
 func (cfg EnrollmentConfig) enrollPass(ctx context.Context) time.Duration {
 	chain, remaining := newestChain(ctx, cfg)
-	logTRCValidity(ctx, cfg)
+	if cfg.VotingKey == nil {
+		// The normal node's report; a core's rotation watch carries it
+		// instead, with the roll the report's escalation asks for.
+		logTRCValidity(ctx, cfg)
+	}
 	switch {
 	case chain == nil:
 		slog.Warn("No valid chain; enrolling", "isd_as", cfg.IA)
@@ -215,7 +221,6 @@ func (cfg EnrollmentConfig) enrollPass(ctx context.Context) time.Duration {
 // threshold demands it.
 func (cfg EnrollmentConfig) corePass(ctx context.Context) time.Duration {
 	chain, remaining := newestChain(ctx, cfg)
-	logTRCValidity(ctx, cfg)
 	switch {
 	case chain == nil || remaining < trust.ChainRenewalThreshold:
 		if chain != nil && remaining > 0 {
@@ -264,6 +269,8 @@ func selfIssue(ctx context.Context, cfg EnrollmentConfig) error {
 
 // logTRCValidity logs the newest pinned TRC's validity once it approaches
 // expiry; log only, for the cast that extends it is the founder's to make.
+// The nodes that hold voting material run the rotation watch beside this
+// report instead.
 func logTRCValidity(ctx context.Context, cfg EnrollmentConfig) {
 	now := time.Now()
 	trc, err := cfg.DB.SignedTRC(ctx, cppki.TRCID{

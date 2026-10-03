@@ -126,15 +126,16 @@ type DERPOptions struct {
 
 // NodePacing carries the test pacing of the node's loops.
 type NodePacing struct {
-	Propagation     time.Duration // beacon origination and propagation
-	Registration    time.Duration // segment registration
-	Enrollment      time.Duration // enrollment retry
-	Selection       time.Duration // selection evaluation window
-	CandidateWindow time.Duration // unproven candidate lifetime
-	Directory       time.Duration // directory publish and fetch
-	RendezvousRate  time.Duration // admission rate caps (rendezvous, link, and enrollment doors)
-	LinkSetPoll     time.Duration // the file provider's link-set poll
-	BFD             time.Duration // BFD transmission interval
+	Propagation       time.Duration // beacon origination and propagation
+	Registration      time.Duration // segment registration
+	Enrollment        time.Duration // enrollment retry
+	Selection         time.Duration // selection evaluation window
+	CandidateWindow   time.Duration // unproven candidate lifetime
+	Directory         time.Duration // directory publish and fetch
+	RendezvousRate    time.Duration // admission rate caps (rendezvous, link, and enrollment doors)
+	LinkSetPoll       time.Duration // the file provider's link-set poll
+	BFD               time.Duration // BFD transmission interval
+	RotationThreshold time.Duration // remaining validity below which the rotation watch rolls
 }
 
 // Validate applies the role-aware argument checks: the domain is always

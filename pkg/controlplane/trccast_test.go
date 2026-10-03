@@ -362,3 +362,146 @@ func TestTRCDeciderWithoutSensitiveKey(t *testing.T) {
 		t.Error("a submission without a verified presenter was decided")
 	}
 }
+
+// rollFixture is a founder whose decision has onboarded the joiner — the
+// pinned successor the joiner's roll replaces its own certificate on.
+type rollFixture struct {
+	deciderFixture
+	// rolled is the pinned successor naming the joiner a core.
+	rolled cppki.SignedTRC
+}
+
+func newRollFixture(t *testing.T) *rollFixture {
+	t.Helper()
+	c := newDeciderFixture(t, true)
+	completed, err := c.decider.DecideTRC(context.Background(), c.joiner.ia,
+		c.submission(t, c.pred, func() (crypto.Signer, *x509.Certificate) {
+			return c.joiner.key, c.joiner.cert
+		}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &rollFixture{deciderFixture: *c, rolled: completed}
+}
+
+// rollSubmission returns the joiner's partially signed roll over the given
+// predecessor: a fresh voting pair replacing the certificate the predecessor
+// names for it.
+func (c *rollFixture) rollSubmission(
+	t *testing.T,
+	pred cppki.SignedTRC,
+) (cppki.SignedTRC, crypto.Signer, *x509.Certificate) {
+
+	t.Helper()
+	key, cert := votingMaterial(t, c.joiner.ia)
+	trc, err := trust.AssembleRotation(pred, []*x509.Certificate{cert})
+	if err != nil {
+		t.Fatal(err)
+	}
+	partial, err := trust.SignUpdate(trc, key, cert)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return partial, key, cert
+}
+
+// TestTRCDeciderRolls checks the decision on a rolling presenter: the
+// submission replacing exactly the presenter's own certificate asks no
+// authorizer question — a roll grants no power the presenter lacked — pins
+// with the vote, and the re-presentation of the landed roll is answered with
+// the pin, casting nothing.
+func TestTRCDeciderRolls(t *testing.T) {
+	c := newRollFixture(t)
+	auth := &askAuthorizer{verdict: enrollauth.AdmissionDeny}
+	c.decider.Authorizer = auth
+	ctx := context.Background()
+
+	partial, _, freshCert := c.rollSubmission(t, c.rolled)
+	completed, err := c.decider.DecideTRC(askContext(), c.joiner.ia, partial)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := (cppki.TRCID{ISD: coreIATest.ISD(), Base: 1, Serial: 3}); completed.TRC.ID != want {
+		t.Fatalf("the decided roll = %v, want the successor %v", completed.TRC.ID, want)
+	}
+	if err := completed.Verify(&c.rolled.TRC); err != nil {
+		t.Errorf("the decided roll does not verify against the predecessor: %v", err)
+	}
+	if !trust.CertsOf(completed.TRC, c.joiner.ia)[0].Equal(freshCert) {
+		t.Error("the decided roll does not carry the presenter's fresh certificate")
+	}
+	if len(auth.asked) != 0 {
+		t.Errorf("the authorizer was asked %d times, want none behind a roll", len(auth.asked))
+	}
+	pinned, err := c.db.SignedTRC(ctx, completed.TRC.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pinned.IsZero() || string(pinned.Raw) != string(completed.Raw) {
+		t.Error("the decided roll did not pin as completed")
+	}
+
+	// The re-presentation of the landed roll is answered with the pin.
+	again, err := c.decider.DecideTRC(askContext(), c.joiner.ia, partial)
+	if err != nil {
+		t.Fatalf("the re-presented roll was refused: %v", err)
+	}
+	if again.TRC.ID != pinned.TRC.ID || string(again.Raw) != string(pinned.Raw) {
+		t.Errorf("the re-presented roll returned %v, want the pinned TRC unchanged",
+			again.TRC.ID)
+	}
+	if pinned, err := c.db.SignedTRC(ctx,
+		cppki.TRCID{ISD: coreIATest.ISD(), Base: 1, Serial: 4}); err != nil || !pinned.IsZero() {
+		t.Errorf("the re-presented roll cast a second successor (%v)", err)
+	}
+}
+
+// TestTRCDeciderRollRefusals checks the roll's narrower shape: a submission
+// replacing another core's certificate and one touching the core AS list are
+// refused, pinning nothing. The quorum gate stands beside them in the code,
+// unreachable by an encodable artifact while the ISD's single sensitive
+// voter pins the quorum at one.
+func TestTRCDeciderRollRefusals(t *testing.T) {
+	c := newRollFixture(t)
+	ctx := context.Background()
+	serial3 := cppki.TRCID{ISD: coreIATest.ISD(), Base: 1, Serial: 3}
+
+	// Another core's certificate: the joiner presents a rotation of the
+	// founder's own voting material.
+	founderKey, founderCert := votingMaterial(t, coreIATest)
+	trc, err := trust.AssembleRotation(c.rolled, []*x509.Certificate{founderCert})
+	if err != nil {
+		t.Fatal(err)
+	}
+	forged, err := trust.SignUpdate(trc, founderKey, founderCert)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.decider.DecideTRC(ctx, c.joiner.ia, forged); err == nil {
+		t.Error("a roll of another core's certificate was decided")
+	}
+
+	// The core AS list touched: a successor that admits a new AS beside the
+	// rolled certificate.
+	_, freshKey, freshCert := c.rollSubmission(t, c.rolled)
+	grown, err := trust.AssembleRotation(c.rolled, []*x509.Certificate{freshCert})
+	if err != nil {
+		t.Fatal(err)
+	}
+	grown.CoreASes = append(grown.CoreASes, joinerIATest.AS()+1)
+	grownPartial, err := trust.SignUpdate(grown, freshKey, freshCert)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.decider.DecideTRC(ctx, c.joiner.ia, grownPartial); err == nil {
+		t.Error("a roll admitting a core was decided")
+	}
+
+	pinned, err := c.db.SignedTRC(ctx, serial3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !pinned.IsZero() {
+		t.Error("a refused roll pinned something anyway")
+	}
+}
