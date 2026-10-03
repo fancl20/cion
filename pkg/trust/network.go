@@ -83,8 +83,9 @@ func (p *NetworkProvider) GetSignedTRC(
 }
 
 // GetChains returns the chains matching the query, fetching them from the
-// Remote on a DB miss. Only chains that verify against the newest pinned
-// TRC's root pool are returned and cached.
+// Remote on a DB miss. Only chains that verify against the anchor pool — the
+// newest pinned TRC's roots, the predecessor's beside them while the newest
+// is within its grace period — are returned and cached.
 func (p *NetworkProvider) GetChains(
 	ctx context.Context,
 	q trustdb.ChainQuery,
@@ -108,14 +109,14 @@ func (p *NetworkProvider) GetChains(
 	if len(chains) == 0 {
 		return nil, nil
 	}
-	trc, err := p.GetSignedTRC(ctx, newestTRCID(q.IA.ISD()))
+	pool, err := anchorPool(ctx, p.DB, p.Remote, q.IA.ISD())
 	if err != nil {
-		return nil, serrors.Wrap("fetching TRC to verify chains", err)
+		return nil, serrors.Wrap("fetching TRCs to verify chains", err)
 	}
 	var verified [][]*x509.Certificate
 	for _, chain := range chains {
 		if err := cppki.VerifyChain(chain,
-			cppki.VerifyOptions{TRC: []*cppki.TRC{&trc.TRC}}); err != nil {
+			cppki.VerifyOptions{TRC: pool}); err != nil {
 
 			slog.Warn("Dropping fetched chain that does not verify against TRC", "err", err)
 			continue
@@ -188,17 +189,57 @@ func RenewChain(
 	if certIA, err := cppki.ExtractIA(chain[0].Subject); err != nil || !certIA.Equal(ia) {
 		return nil, serrors.New("issued chain is for another ISD-AS", "expected", ia)
 	}
-	trc, err := fetchTRC(ctx, db, remote, newestTRCID(ia.ISD()))
+	// The newest TRC is pulled before the issued chain verifies, so a chain
+	// under a fresh root verifies against the successor and not the
+	// predecessor the node still holds; the pool carries the predecessor
+	// beside it while the successor's grace window runs.
+	pool, err := anchorPool(ctx, db, remote, ia.ISD())
 	if err != nil {
 		return nil, err
 	}
-	if err := cppki.VerifyChain(chain, cppki.VerifyOptions{TRC: []*cppki.TRC{&trc.TRC}}); err != nil {
+	if err := cppki.VerifyChain(chain, cppki.VerifyOptions{TRC: pool}); err != nil {
 		return nil, serrors.Wrap("issued chain does not verify against TRC", err)
 	}
 	if _, err := db.InsertChain(ctx, chain); err != nil {
 		return nil, fmt.Errorf("storing chain: %w", err)
 	}
 	return chain, nil
+}
+
+// anchorPool resolves the TRCs whose root pools anchor chain verification:
+// the ISD's newest, plus the predecessors it carries — each successor
+// holding its own inside its grace period, the window the draft's Section
+// 3.2.4 defines for updates, in which a chain issued under the replaced
+// material keeps verifying. The walk compounds while one rung's window still
+// covers the present, so a ladder whose rungs landed close together carries
+// every root still anchoring unexpired chains.
+func anchorPool(
+	ctx context.Context,
+	db trustdb.DB,
+	remote Remote,
+	isd addr.ISD,
+) ([]*cppki.TRC, error) {
+
+	newest, err := fetchTRC(ctx, db, remote, newestTRCID(isd))
+	if err != nil {
+		return nil, err
+	}
+	pool := []*cppki.TRC{&newest.TRC}
+	// The walk holds its own copy, so the pointer the pool keeps into the
+	// newest is not overwritten by the predecessors it moves through.
+	cur := newest
+	for !cur.TRC.ID.IsBase() && cur.TRC.InGracePeriod(time.Now()) {
+		pred, err := fetchTRC(ctx, db, remote, predecessorID(cur.TRC.ID))
+		if err != nil {
+			return nil, err
+		}
+		if pred.IsZero() {
+			break
+		}
+		pool = append(pool, &pred.TRC)
+		cur = pred
+	}
+	return pool, nil
 }
 
 // fetchTRC returns the TRC with the given ID — the newest of the ISD when the

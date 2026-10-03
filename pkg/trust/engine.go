@@ -21,6 +21,13 @@ import (
 // crossing it still holds a valid chain while the renewal round trip runs.
 const ChainRenewalThreshold = 24 * time.Hour
 
+// RotationThreshold is the remaining validity below which a core's rotation
+// watch rolls the trust material it holds: thirty days, the counterpart of
+// the chain renewal threshold's one day against the three-day chain validity.
+// Long enough to tolerate a month of failed casts, short enough that the
+// successor's validity stays comfortable.
+const RotationThreshold = 30 * 24 * time.Hour
+
 // Engine composes the signer, verifier, and provider into the node's trust
 // interface: it signs control-plane messages with a signer backed by the
 // node's own chains, and verifies signatures against TRC-anchored chains
@@ -163,6 +170,43 @@ func (e *Engine) BaseTRC() (cppki.SignedTRC, error) {
 		return cppki.SignedTRC{}, serrors.New("provider holds no local database")
 	}
 	return db.LocalTRC(cppki.TRCID{ISD: e.IA.ISD(), Base: 1, Serial: 1})
+}
+
+// AnchorPool returns the TRCs whose root pools anchor chain verification:
+// the newest pinned TRC, plus the predecessors it carries — each successor
+// holding its own inside its grace period, the window the draft's Section
+// 3.2.4 defines for updates, in which a chain issued under the replaced
+// material keeps verifying. Local state only, like BaseTRC: a TLS handshake
+// must not spawn trust fetches. An empty pool means the node has not pinned
+// the TRC yet.
+func (e *Engine) AnchorPool() ([]*cppki.TRC, error) {
+	db, ok := e.Provider.(DBProvider)
+	if !ok {
+		return nil, serrors.New("provider holds no local database")
+	}
+	newest, err := db.LocalTRC(newestTRCID(e.IA.ISD()))
+	if err != nil {
+		return nil, err
+	}
+	if newest.IsZero() {
+		return nil, nil
+	}
+	pool := []*cppki.TRC{&newest.TRC}
+	// The walk holds its own copy, so the pointer the pool keeps into the
+	// newest is not overwritten by the predecessors it moves through.
+	cur := newest
+	for !cur.TRC.ID.IsBase() && cur.TRC.InGracePeriod(time.Now()) {
+		pred, err := db.LocalTRC(predecessorID(cur.TRC.ID))
+		if err != nil {
+			return nil, err
+		}
+		if pred.IsZero() {
+			break
+		}
+		pool = append(pool, &pred.TRC)
+		cur = pred
+	}
+	return pool, nil
 }
 
 // DBProvider is implemented by providers that hold a local trust database.

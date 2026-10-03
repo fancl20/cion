@@ -15,8 +15,10 @@ import (
 )
 
 // Recommended validity periods of the trust material (PKI draft,
-// Section 2.5). There is no automated renewal yet: an expired node
-// re-runs enrollment, and a new base TRC means redeploying.
+// Section 2.5). Chains rotate on the enrollment clock, and the cores'
+// voting and root certificates roll inside the sensitive updates their
+// holders cast; the base TRC alone never rolls — outliving it means
+// redeploying.
 const (
 	TRCValidity     = 365 * 24 * time.Hour
 	VotingValidity  = 365 * 24 * time.Hour

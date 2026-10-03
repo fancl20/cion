@@ -248,24 +248,104 @@ func loadOrCreateKey(dir, name string) (crypto.Signer, error) {
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return nil, err
 	}
-
-	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		return nil, fmt.Errorf("generating key: %w", err)
-	}
-	der, err := x509.MarshalPKCS8PrivateKey(key)
+	key, err := generateKey()
 	if err != nil {
 		return nil, err
 	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, err
 	}
-	if err := writeFile(path, pem.EncodeToMemory(
-		&pem.Block{Type: "PRIVATE KEY", Bytes: der},
-	)); err != nil {
+	if err := persistKey(path, key); err != nil {
 		return nil, err
 	}
 	return key, nil
+}
+
+// generateKey mints a fresh ECDSA P-256 signing key, the curve all SCION
+// signature algorithms build on.
+func generateKey() (crypto.Signer, error) {
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return nil, fmt.Errorf("generating key: %w", err)
+	}
+	return key, nil
+}
+
+// generateCoreKeys mints the founding core's four fresh keys in memory alone:
+// the rotation's staged set, persisted only once the successor carrying its
+// certificates is pinned.
+func generateCoreKeys() (CoreKeys, error) {
+	sensitive, err := generateKey()
+	if err != nil {
+		return CoreKeys{}, err
+	}
+	regular, err := generateKey()
+	if err != nil {
+		return CoreKeys{}, err
+	}
+	root, err := generateKey()
+	if err != nil {
+		return CoreKeys{}, err
+	}
+	ca, err := generateKey()
+	if err != nil {
+		return CoreKeys{}, err
+	}
+	return CoreKeys{Sensitive: sensitive, Regular: regular, Root: root, CA: ca}, nil
+}
+
+// persistKey writes the key under path, replacing whatever file held the
+// predecessor.
+func persistKey(path string, key crypto.Signer) error {
+	der, err := x509.MarshalPKCS8PrivateKey(key)
+	if err != nil {
+		return err
+	}
+	return writeFile(path, pem.EncodeToMemory(
+		&pem.Block{Type: "PRIVATE KEY", Bytes: der},
+	))
+}
+
+// PersistCoreKeys replaces the founding core's persisted key material as a
+// set — the rotation's completed pin landing on disk, the fresh voting and
+// root keys beside the CA key rotating with them. A crash ahead of the
+// replacement leaves the predecessor's keys serving, and the next pass rolls
+// again; nothing references the fresh keys until the TRC carrying their
+// certificates is pinned.
+func PersistCoreKeys(stateDir string, keys CoreKeys) error {
+	dir := keyDir(stateDir)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	for _, entry := range []struct {
+		file string
+		key  crypto.Signer
+	}{
+		{SensitiveKeyFile, keys.Sensitive},
+		{RegularKeyFile, keys.Regular},
+		{RootKeyFile, keys.Root},
+		{CAKeyFile, keys.CA},
+	} {
+		if err := persistKey(filepath.Join(dir, entry.file), entry.key); err != nil {
+			return fmt.Errorf("%s: %w", entry.file, err)
+		}
+	}
+	return nil
+}
+
+// PersistVotingPair replaces the authoritative core's persisted voting pair,
+// the fresh certificate beside the fresh key exactly as the joiner's first
+// pair persisted.
+func PersistVotingPair(stateDir string, key crypto.Signer, cert *x509.Certificate) error {
+	dir := keyDir(stateDir)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	if err := persistKey(filepath.Join(dir, RegularKeyFile), key); err != nil {
+		return err
+	}
+	return writeFile(votingCertPath(stateDir), pem.EncodeToMemory(
+		&pem.Block{Type: "CERTIFICATE", Bytes: cert.Raw}))
 }
 
 func parseKey(raw []byte, path string) (crypto.Signer, error) {

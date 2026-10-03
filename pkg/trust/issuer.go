@@ -71,14 +71,14 @@ func (i *Issuer) IssueChain(csr *x509.CertificateRequest) ([]*x509.Certificate, 
 	if err := validateISD(ia); err != nil {
 		return nil, err
 	}
-	caCert, err := i.ensureCACert()
+	caCert, caKey, trc, err := i.caMaterial()
 	if err != nil {
 		return nil, err
 	}
 	policy := cppki.CAPolicy{
 		Validity:    ASValidity,
 		Certificate: caCert,
-		Signer:      i.CAKey,
+		Signer:      caKey,
 		CurrentTime: i.signingTime(),
 	}
 	chain, err := policy.CreateChain(csr)
@@ -88,12 +88,25 @@ func (i *Issuer) IssueChain(csr *x509.CertificateRequest) ([]*x509.Certificate, 
 	// Verify at signing time, not wall-clock time: the CA certificate is
 	// valid from the (possibly backdated) signing time.
 	if err := cppki.VerifyChain(chain, cppki.VerifyOptions{
-		TRC:         []*cppki.TRC{&i.TRC.TRC},
+		TRC:         []*cppki.TRC{&trc.TRC},
 		CurrentTime: time.Now(),
 	}); err != nil {
 		return nil, serrors.Wrap("generated chain does not verify against TRC", err)
 	}
 	return chain, nil
+}
+
+// caMaterial returns the CA certificate, the key signing with it, and the TRC
+// anchoring the issued chains, snapshotted under the mutex — the rotation's
+// rekey swaps all three as a set.
+func (i *Issuer) caMaterial() (*x509.Certificate, crypto.Signer, cppki.SignedTRC, error) {
+	i.mtx.Lock()
+	defer i.mtx.Unlock()
+	caCert, err := i.ensureCACertLocked()
+	if err != nil {
+		return nil, nil, cppki.SignedTRC{}, err
+	}
+	return caCert, i.CAKey, i.TRC, nil
 }
 
 // ensureCACert returns a CP CA certificate whose validity covers a full AS
@@ -105,6 +118,11 @@ func (i *Issuer) IssueChain(csr *x509.CertificateRequest) ([]*x509.Certificate, 
 func (i *Issuer) ensureCACert() (*x509.Certificate, error) {
 	i.mtx.Lock()
 	defer i.mtx.Unlock()
+	return i.ensureCACertLocked()
+}
+
+// ensureCACertLocked is ensureCACert under a held mutex.
+func (i *Issuer) ensureCACertLocked() (*x509.Certificate, error) {
 	minExpiration := time.Now().Add(ASValidity)
 	if i.caCert.NotAfter.After(minExpiration) {
 		return i.caCert, nil
@@ -119,6 +137,26 @@ func (i *Issuer) ensureCACert() (*x509.Certificate, error) {
 	}
 	i.caCert = caCert
 	return caCert, nil
+}
+
+// Rekey rekeys the issuer under the successor a rotation pinned: the fresh
+// root and CA keys taking the place of the persisted ones, the CA certificate
+// minted afresh under the successor's root certificate, the chains issuing
+// under it from the pin on. The rotation's pin step — the completed successor
+// already verified, the staged set already persisted.
+func (i *Issuer) Rekey(keys CoreKeys, trc cppki.SignedTRC) error {
+	i.mtx.Lock()
+	defer i.mtx.Unlock()
+	rootCert, err := rootCertificate(trc)
+	if err != nil {
+		return err
+	}
+	caCert, err := createCACert(i.IA, keys.CA, rootCert, keys.Root, i.signingTime())
+	if err != nil {
+		return err
+	}
+	i.RootKey, i.CAKey, i.TRC, i.caCert = keys.Root, keys.CA, trc, caCert
+	return nil
 }
 
 // CACert returns the currently active CP CA certificate.

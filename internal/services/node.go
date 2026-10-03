@@ -414,6 +414,22 @@ func (n *node) start(ctx context.Context) {
 			})
 			return nil
 		})
+		// The founder's rotation watch: its own three certificates roll
+		// inside the cast it signs itself, serialized on the decision the
+		// submissions take too.
+		runBackground(ctx, "rotation watch", func(ctx context.Context) error {
+			controlplane.RunRotation(ctx, controlplane.RotationConfig{
+				IA:              n.ident.ia,
+				DB:              n.trustDB,
+				State:           n.cfg.State,
+				Decider:         n.decider,
+				Issuer:          n.issuer,
+				Threshold:       n.cfg.Pacing.RotationThreshold,
+				RetryInterval:   n.cfg.Pacing.Enrollment,
+				InspectInterval: n.cfg.Pacing.Enrollment,
+			})
+			return nil
+		})
 	} else {
 		enrollment := controlplane.EnrollmentConfig{
 			IA:            n.ident.ia,
@@ -427,10 +443,27 @@ func (n *node) start(ctx context.Context) {
 			// chain is issued, it submits the onboarding update to the
 			// core's voting application — over the verified peer channel,
 			// the submission identified by the node's chain.
+			caster := voting.NewSubmitter(n.peerClt.VerifiedClient(), n.coreRoute)
 			enrollment.VotingKey = n.votingKey
 			enrollment.VotingCert = n.votingCert
-			enrollment.Caster = voting.NewSubmitter(n.peerClt.VerifiedClient(), n.coreRoute)
+			enrollment.Caster = caster
 			enrollment.Fatal = n.fatal
+			// The authoritative core's rotation watch: its certificate rolls
+			// through the same channel its join used, the founder's vote
+			// completing the successor.
+			runBackground(ctx, "rotation watch", func(ctx context.Context) error {
+				controlplane.RunRotation(ctx, controlplane.RotationConfig{
+					IA:              n.ident.ia,
+					DB:              n.trustDB,
+					State:           n.cfg.State,
+					Remote:          n.coreClt,
+					Caster:          caster,
+					Threshold:       n.cfg.Pacing.RotationThreshold,
+					RetryInterval:   n.cfg.Pacing.Enrollment,
+					InspectInterval: n.cfg.Pacing.Enrollment,
+				})
+				return nil
+			})
 		}
 		runBackground(ctx, "enrollment", func(ctx context.Context) error {
 			controlplane.RunEnrollment(ctx, enrollment)
