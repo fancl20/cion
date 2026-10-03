@@ -35,7 +35,6 @@ type PeerClient struct {
 	conn   *scion.Conn
 	qclt   *quic.Transport
 	engine *trust.Engine
-	pathTo func(dst addr.IA) *spath.Decoded
 	// beaconHCLT pools connections for beacon sends; verifiedHCLT for the
 	// mutually verified RPCs. Both ride the same QUIC transport.
 	beaconHCLT   *http.Client
@@ -63,13 +62,18 @@ func NewPeerClient(cfg PeerClientConfig) *PeerClient {
 		conn:        cfg.Conn,
 		qclt:        &quic.Transport{Conn: cfg.Conn},
 		engine:      cfg.Engine,
-		pathTo:      cfg.PathTo,
 		beaconClt:   make(map[string]*Client),
 		verifiedClt: make(map[string]*Client),
 	}
 	// Beacons ride the client-authenticated channel; registrations and
-	// lookups the mutually verified one. Both ride the same QUIC transport.
-	c.beaconHCLT = NewSCIONClient(cfg, c.qclt, false)
+	// lookups the mutually verified one. Both ride the same QUIC transport,
+	// but the beacon channel dials one-hop alone: beacons terminate on each
+	// neighbor's control service, whose handler reads the arrival interface
+	// off the one-hop path — a provider path to the neighbor would leave it
+	// unknown, and one exists whenever two cores beacon each other.
+	beaconCfg := cfg
+	beaconCfg.PathTo = nil
+	c.beaconHCLT = NewSCIONClient(beaconCfg, c.qclt, false)
 	c.verifiedHCLT = NewSCIONClient(cfg, c.qclt, true)
 	return c
 }

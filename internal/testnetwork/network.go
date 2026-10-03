@@ -556,7 +556,6 @@ func StartNode(t *testing.T, cfg NodeConfig) *Node {
 	lookup.IsCore = core
 	lookup.Cores = cores
 	lookup.Fetch = peerClt.Segments
-	lookup.CoreRoute = coreRoute
 
 	store := controlplane.NewBeaconStore()
 	beaconer, err = controlplane.NewBeaconer(controlplane.BeaconerConfig{
@@ -568,7 +567,6 @@ func StartNode(t *testing.T, cfg NodeConfig) *Node {
 		Links:                linkTableOf(linkStore),
 		Verdicts:             monitor.Verdicts,
 		Sender:               peerClt,
-		CoreRoute:            coreRoute,
 		Core:                 core,
 		PropagationInterval:  Propagation,
 		RegistrationInterval: Registration,

@@ -232,3 +232,47 @@ key keeps the asked core it already carries.
     route to the asked core logs and answers nothing.
 
 ## Implementation history
+
+*   The selections widened as proposed: `buildBeaconing` derives both from
+    the tier — `ASTypeAuthoritative` beside `ASTypeCore` — the beaconer's
+    `Run` runs propagation on every tier with origination and core-beacon
+    termination added on the core tiers, and the lookup's core handler
+    answers from the node's own database on either
+    ([controlplane.go](/internal/services/controlplane.go),
+    [beacon.go](/pkg/controlplane/beacon.go),
+    [lookup.go](/pkg/controlplane/lookup.go)). The comments the selections
+    carry updated with them — the `Beaconer` doc's founding-core sentence,
+    the `Core` field's, `registerCoreOnce`'s single-core remark, `IsCore`'s.
+*   The registration and the fetch name their peer per core: the
+    registration loop sends each origin's segments to that core's control
+    service and each fetch goes to the core the question names, both by
+    ISD-AS and service alone — the peer client's dial resolving the route
+    per destination — and `CoreRoute` left both configs, staying what the
+    trust role resolves enrollment by. The beacon channel dials one-hop
+    alone beside them: the beacon handler reads the arrival interface off
+    the one-hop path, and a provider route to a neighboring core — the
+    bootstrap route a joined core holds — would leave it unknown
+    ([peerclient.go](/pkg/controlplane/peerclient.go)).
+*   The bootstrap slot learned its per-origin keeping: each origin's
+    freshest unverified beacon stands in its own place, and `BootstrapCore`
+    alternates across the origins, freshest first — the alternation the
+    plan's last episode rides, for a single freshest slot starves the
+    issuer's route when a non-issuing neighbor's originated beacons
+    systematically outrun the founder's propagated ones
+    ([beacon.go](/pkg/controlplane/beacon.go)).
+*   The tests landed as the plan spells them: the core tier's loops, the
+    per-origin registration with its failed dial and retry, and the
+    bootstrap slot's alternation
+    ([beacon_test.go](/pkg/controlplane/beacon_test.go)), the fetch that
+    asks the core it names with the failed ask left uncached, and the
+    authoritative's handler refusing the founder's source
+    ([lookup_test.go](/pkg/controlplane/lookup_test.go)); the path lab runs
+    the five nodes of the plan through the run command's own assembly —
+    both cores originating a core segment of the other, the node under the
+    authoritative holding both origins' up segments over its one ingress
+    and registering its down segments with both cores, the third node
+    fetching down segments of either child from each core and composing
+    paths that cross both, the node first started under the authoritative
+    alone enrolling through the founder's fresher beacon and pinning the
+    successor
+    ([corepath_test.go](/internal/testnetwork/corepath_test.go)).

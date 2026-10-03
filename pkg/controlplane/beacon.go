@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"hash"
 	"log/slog"
+	"sort"
 	"sync"
 	"time"
 
@@ -55,14 +56,16 @@ type SegmentSender interface {
 		segments []*control_plane.PathSegment) error
 }
 
-// Beaconer runs beacon exploration: the founding core originates signed
-// path-segment beacons on its links, every node verifies the accumulated
-// signatures against the TRC before storing or propagating them, propagation
-// floods outward with the TRC naming the cores whose interfaces are pruned,
-// and non-cores terminate accepted beacons into registered segments. Link
-// roles are not configured: the interface a beacon arrives on is the node's
-// parent side, the interfaces beacons are propagated to are child sides, and
-// a link whose neighbor the TRC names as a core is a core link.
+// Beaconer runs beacon exploration: the core tiers — founding and
+// authoritative alike — originate signed path-segment beacons on their links
+// and terminate core beacons into core segments, every node verifies the
+// accumulated signatures against the TRC before storing or propagating them,
+// propagation floods outward with the TRC naming the cores whose interfaces
+// are pruned, and non-cores terminate accepted beacons into registered
+// segments. Link roles are not configured: the interface a beacon arrives on
+// is the node's parent side, the interfaces beacons are propagated to are
+// child sides, and a link whose neighbor the TRC names as a core is a core
+// link.
 type Beaconer struct {
 	ia           addr.IA
 	engine       *trust.Engine
@@ -72,19 +75,23 @@ type Beaconer struct {
 	links        func() map[uint16]addr.IA
 	verdicts     func() map[uint16]bool
 	sender       SegmentSender
-	coreRoute    func() *scion.Addr
 	core         bool
 	propagation  time.Duration
 	registration time.Duration
 	sendTimeout  time.Duration
 
-	// bootstrap keeps the freshest unverified beacon and the interface it arrived
-	// on: a fresh node receives beacons before it has pinned the TRC and may use
-	// their reversed path — extended with its own hop — as the route for its
-	// enrollment fetch; never for storing, propagating, or registering.
+	// bootstrap keeps each origin's freshest unverified beacon and the
+	// interface it arrived on: a fresh node receives beacons before it has
+	// pinned the TRC and may use their reversed path — extended with its
+	// own hop — as the route for its enrollment fetch; never for storing,
+	// propagating, or registering. BootstrapCore alternates across the
+	// origins, freshest first, so a retrying enrollment reaches every
+	// origin the beacons name — one core's fresher beacons cannot starve
+	// another's route.
 	bootstrapMtx     sync.Mutex
-	bootstrap        *segment.PCB
-	bootstrapIngress uint16
+	bootstraps       map[addr.IA]*segment.PCB
+	bootstrapIngress map[addr.IA]uint16
+	bootstrapTurn    int
 }
 
 // BeaconerConfig configures a Beaconer.
@@ -112,10 +119,9 @@ type BeaconerConfig struct {
 	// Sender sends beacon and registration RPCs over the SCION-native
 	// channel.
 	Sender SegmentSender
-	// CoreRoute resolves the core's endpoint — the one-hop path when the
-	// core is a neighbor, else the provider's route.
-	CoreRoute func() *scion.Addr
-	// Core marks the founding core, which originates beacons.
+	// Core marks the core tiers — the founding and the authoritative —
+	// which originate beacons beside propagating them and terminate core
+	// beacons into core segments.
 	Core bool
 	// PropagationInterval and RegistrationInterval override the defaults;
 	// zero keeps them.
@@ -147,19 +153,20 @@ func NewBeaconer(cfg BeaconerConfig) (*Beaconer, error) {
 		sendTimeout = SendTimeout
 	}
 	return &Beaconer{
-		ia:           cfg.IA,
-		engine:       cfg.Engine,
-		macFactory:   macFactory,
-		store:        cfg.Store,
-		db:           cfg.DB,
-		links:        cfg.Links,
-		verdicts:     cfg.Verdicts,
-		sender:       cfg.Sender,
-		coreRoute:    cfg.CoreRoute,
-		core:         cfg.Core,
-		propagation:  propagation,
-		registration: registration,
-		sendTimeout:  sendTimeout,
+		ia:               cfg.IA,
+		engine:           cfg.Engine,
+		macFactory:       macFactory,
+		store:            cfg.Store,
+		db:               cfg.DB,
+		links:            cfg.Links,
+		verdicts:         cfg.Verdicts,
+		sender:           cfg.Sender,
+		core:             cfg.Core,
+		propagation:      propagation,
+		registration:     registration,
+		sendTimeout:      sendTimeout,
+		bootstraps:       make(map[addr.IA]*segment.PCB),
+		bootstrapIngress: make(map[addr.IA]uint16),
 	}, nil
 }
 
@@ -181,8 +188,9 @@ func (b *Beaconer) linkTable() map[uint16]addr.IA {
 	return b.links()
 }
 
-// Run executes the beaconing loops until the context is canceled: origination
-// on the core or propagation elsewhere, registration, and the expired-
+// Run executes the beaconing loops until the context is canceled:
+// propagation on every tier, origination and core-beacon termination on the
+// core tiers, down-segment registration on the others, and the expired-
 // segment sweep of the path database. It returns once every loop has exited,
 // so a caller that waits for Run closes no store beneath an in-flight pass.
 // Each loop absorbs its own panic: a caller's recover covers Run's frame,
@@ -200,11 +208,11 @@ func (b *Beaconer) Run(ctx context.Context) {
 			b.loop(ctx, interval, f)
 		})
 	}
+	loop(b.propagation, b.propagateOnce)
 	if b.core {
 		loop(b.propagation, b.originateOnce)
 		loop(b.registration, b.registerCoreOnce)
 	} else {
-		loop(b.propagation, b.propagateOnce)
 		loop(b.registration, b.registerOnce)
 	}
 	loop(b.registration, b.sweepOnce)
@@ -286,18 +294,16 @@ func (b *Beaconer) HandleRegistration(
 func (b *Beaconer) BootstrapRoute(dst addr.IA) *spath.Decoded {
 	b.bootstrapMtx.Lock()
 	defer b.bootstrapMtx.Unlock()
-	if b.bootstrap == nil || !b.bootstrap.Expiration().After(time.Now()) {
+	pcb, ok := b.bootstraps[dst]
+	if !ok || !pcb.Expiration().After(time.Now()) {
 		return nil
 	}
-	if !b.bootstrap.FirstIA().Equal(dst) {
-		return nil
-	}
-	route, err := b.bootstrap.Clone()
+	route, err := pcb.Clone()
 	if err != nil {
 		panic(fmt.Sprintf("cloning the bootstrap beacon: %v", err))
 	}
 	if _, err := route.AppendRouteHop(b.ia, segment.EntryOptions{
-		IngressIfID: b.bootstrapIngress,
+		IngressIfID: b.bootstrapIngress[dst],
 	}, b.macFactory); err != nil {
 		panic(fmt.Sprintf("extending the bootstrap beacon: %v", err))
 	}
@@ -307,22 +313,39 @@ func (b *Beaconer) BootstrapRoute(dst addr.IA) *spath.Decoded {
 func (b *Beaconer) recordBootstrap(ingress uint16, pcb *segment.PCB) {
 	b.bootstrapMtx.Lock()
 	defer b.bootstrapMtx.Unlock()
-	if b.bootstrap == nil || pcb.Timestamp().After(b.bootstrap.Timestamp()) {
-		b.bootstrap = pcb
-		b.bootstrapIngress = ingress
+	origin := pcb.FirstIA()
+	if existing, ok := b.bootstraps[origin]; ok &&
+		!pcb.Timestamp().After(existing.Timestamp()) {
+
+		return
 	}
+	b.bootstraps[origin] = pcb
+	b.bootstrapIngress[origin] = ingress
 }
 
-// BootstrapCore returns the ISD-AS of the core the freshest unverified beacon
-// originated — the destination a node that has not pinned the TRC aims its
-// core route at, beacons originating only at cores.
+// BootstrapCore returns the ISD-AS a freshest unverified beacon originated —
+// the freshest origin first, alternating across calls, so the destination a
+// node that has not pinned the TRC aims its core route at reaches every
+// origin the beacons name: one origin's fresher beacons cannot starve
+// another's route, and the issuer's is the one a retrying enrollment
+// completes against. Beacons originate only at cores.
 func (b *Beaconer) BootstrapCore() addr.IA {
 	b.bootstrapMtx.Lock()
 	defer b.bootstrapMtx.Unlock()
-	if b.bootstrap == nil {
+	if len(b.bootstraps) == 0 {
 		return 0
 	}
-	return b.bootstrap.FirstIA()
+	origins := make([]addr.IA, 0, len(b.bootstraps))
+	for origin := range b.bootstraps {
+		origins = append(origins, origin)
+	}
+	sort.Slice(origins, func(i, j int) bool {
+		return b.bootstraps[origins[i]].Timestamp().
+			After(b.bootstraps[origins[j]].Timestamp())
+	})
+	origin := origins[b.bootstrapTurn%len(origins)]
+	b.bootstrapTurn++
+	return origin
 }
 
 // checkBeacon applies the structural reception checks of Section 2.3.1: PCB
@@ -531,9 +554,13 @@ func (b *Beaconer) propagateOnce(ctx context.Context) {
 
 // registerOnce terminates the freshest candidates per Section 3.1.1 — a
 // final AS entry with unset next AS and egress interface, signed — storing
-// the resulting up segments in the local path database and registering the
-// down segments with the control service of the core that originated the
-// PCB, riding the reversed up segment (Sections 3.1.2, 3.1.3, and 3.3).
+// the resulting up segments in the local path database and registering each
+// origin's down segments with the control service of the core that
+// originated the PCBs (Sections 3.1.2, 3.1.3, and 3.3). The peer is named by
+// ISD-AS and service alone: the peer client's dial resolves the route per
+// destination — one hop over the link to a neighboring core, else the
+// freshest up segment's reversal, stored by this same pass. A dial that
+// fails logs and the next pass retries.
 func (b *Beaconer) registerOnce(ctx context.Context) {
 	peers := make(map[addr.IA][]*control_plane.PathSegment)
 	for _, cand := range b.store.BestSet(BestSetSize) {
@@ -552,30 +579,18 @@ func (b *Beaconer) registerOnce(ctx context.Context) {
 		}
 		peers[terminated.FirstIA()] = append(peers[terminated.FirstIA()], terminated.PB)
 	}
-	if len(peers) == 0 {
-		return
-	}
-	route := b.coreRoute()
-	if route == nil {
-		slog.Debug("No route to a core yet; down segments not registered")
-		return
-	}
 	for origin, segments := range peers {
-		if !origin.Equal(route.IA) {
-			slog.Warn("No route to the originating core; segment not registered",
-				"origin", origin, "route", route.IA)
-			continue
-		}
-		if err := b.sendRegistration(ctx, route, segments); err != nil {
+		peer := &scion.Addr{IA: origin, Service: addr.SvcCS}
+		if err := b.sendRegistration(ctx, peer, segments); err != nil {
 			slog.Warn("Registering down segments", "core", origin, "err", err)
 		}
 	}
 }
 
 // registerCoreOnce terminates core beacons — those received over core links
-// — into core segments in the core's own path database (Section 3.2). No
-// core beacons exist while the ISD has a single core; the path is exercised
-// by the same termination code.
+// — into core segments in the core's own path database (Section 3.2): each
+// core terminates what it receives, and core segments stay local, none
+// registered with another core.
 func (b *Beaconer) registerCoreOnce(ctx context.Context) {
 	cores := b.coreASes()
 	for _, cand := range b.store.BestSet(BestSetSize) {

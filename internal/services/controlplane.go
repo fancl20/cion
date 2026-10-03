@@ -223,13 +223,16 @@ func (n *node) buildBeaconing() error {
 		return ias
 	}
 
+	// Both core selections take the tier: the founding and the authoritative
+	// core alike originate beacons, terminate core beacons, and serve the
+	// core's segment-lookup handler.
+	coreTier := n.ident.asType != trust.ASTypeNormal
 	lookup := controlplane.NewLookupService()
 	lookup.IA = n.ident.ia
 	lookup.DB = n.pathDB
-	lookup.IsCore = n.ident.asType == trust.ASTypeCore
+	lookup.IsCore = coreTier
 	lookup.Cores = cores
 	lookup.Fetch = n.peerClt.Segments
-	lookup.CoreRoute = n.coreRoute
 	n.lookup = lookup
 
 	beacons := controlplane.NewBeaconStore()
@@ -243,8 +246,7 @@ func (n *node) buildBeaconing() error {
 		Links:                n.linkTable,
 		Verdicts:             n.monitor.Verdicts,
 		Sender:               n.peerClt,
-		CoreRoute:            n.coreRoute,
-		Core:                 n.ident.asType == trust.ASTypeCore,
+		Core:                 coreTier,
 		PropagationInterval:  n.cfg.Pacing.Propagation,
 		RegistrationInterval: n.cfg.Pacing.Registration,
 	})

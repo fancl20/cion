@@ -29,15 +29,16 @@ type LookupService struct {
 	IA addr.IA
 	// DB is the local path database.
 	DB pathdb.DB
-	// IsCore selects the core's handler behavior.
+	// IsCore selects the core handler's behavior: the core tiers — founding
+	// and authoritative alike — serve from the local database.
 	IsCore bool
 	// Cores enumerates the core ASes of an ISD named by the pinned TRC; nil
 	// cores mean the TRC is not pinned.
 	Cores func(isd addr.ISD) []addr.IA
-	// Fetch requests segments from a core's control service.
+	// Fetch requests segments from a core's control service; the peer names
+	// the core the question is addressed to, and the source of the question
+	// is that core.
 	Fetch func(ctx context.Context, peer *scion.Addr, src, dst addr.IA) (*cppb.SegmentsResponse, error)
-	// CoreRoute resolves the core's endpoint to fetch through.
-	CoreRoute func() *scion.Addr
 
 	mtx   sync.Mutex
 	cache map[lookupKey]cachedSegments
@@ -191,8 +192,9 @@ func (s *LookupService) Down(ctx context.Context, dst addr.IA) []*pathdb.Segment
 }
 
 // fetchCached returns segments of the given type from the cache, or fetches
-// them from the core and caches them until their earliest expiration, capped
-// by the cache TTL.
+// them from the core the question names — the peer client's dial routing it,
+// a core the node holds no route to failing the dial — and caches them until
+// their earliest expiration, capped by the cache TTL.
 func (s *LookupService) fetchCached(
 	ctx context.Context,
 	core, dst addr.IA,
@@ -208,11 +210,8 @@ func (s *LookupService) fetchCached(
 	}
 	s.mtx.Unlock()
 
-	route := s.CoreRoute()
-	if route == nil {
-		return nil
-	}
-	resp, err := s.Fetch(ctx, route, core, dst)
+	peer := &scion.Addr{IA: core, Service: addr.SvcCS}
+	resp, err := s.Fetch(ctx, peer, core, dst)
 	if err != nil {
 		slog.Warn("Fetching segments from core", "core", core, "dst", dst, "err", err)
 		return nil
