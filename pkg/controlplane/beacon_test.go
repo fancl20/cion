@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/go-cmp/cmp"
 	"github.com/scionproto/scion/pkg/addr"
 	cppb "github.com/scionproto/scion/pkg/proto/control_plane"
 	"github.com/scionproto/scion/pkg/scrypto"
@@ -723,6 +724,76 @@ func TestPropagateOnce(t *testing.T) {
 			parsed.Entries[i].Signed, parsed.AssociatedData(i)...); err != nil {
 			t.Fatalf("propagated entry %d does not verify: %v", i, err)
 		}
+	}
+}
+
+// TestPropagateOnceDeclaresLatency checks the entry's declaration: the
+// propagated entry declares the egress link's latest one-way sample — the
+// window's echo round trip halved — and an unsampled egress declares
+// nothing. The declaration sits in the signed body the signature covers.
+func TestPropagateOnceDeclaresLatency(t *testing.T) {
+	f := newBeaconFixture(t)
+	ctx := context.Background()
+	f.beaconer.latencies = NewLinkLatency()
+	f.beaconer.latencies.Record(2, 4*time.Millisecond)
+
+	pcb := lineBeacon(t, f, time.Now())
+	if err := f.beaconer.HandleBeacon(ctx, pcb, 1); err != nil {
+		t.Fatal(err)
+	}
+	f.beaconer.propagateOnce(ctx)
+
+	// sentBeacons snapshots the sent beacons.
+	sentBeacons := func() []*cppb.PathSegment {
+		f.sender.mtx.Lock()
+		defer f.sender.mtx.Unlock()
+		out := make([]*cppb.PathSegment, len(f.sender.beacons))
+		for i, b := range f.sender.beacons {
+			out[i] = b.pcb
+		}
+		return out
+	}
+	sent := sentBeacons()
+	if len(sent) != 1 {
+		t.Fatalf("sent beacons = %d, want 1", len(sent))
+	}
+	parsed, err := segment.ParsePCB(sent[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[segment.LinkID]time.Duration{
+		{IA: nodeIATest, IfID: 2}: 4 * time.Millisecond,
+	}
+	if diff := cmp.Diff(want, parsed.Entries[1].Latency); diff != "" {
+		t.Errorf("propagated declaration (-want +got):\n%s", diff)
+	}
+	// The upstream entry carries no declaration of its own here, and the
+	// signature of the declaring entry verifies over what it declared.
+	if parsed.Entries[0].Latency != nil {
+		t.Errorf("upstream entry declares %v, want nothing", parsed.Entries[0].Latency)
+	}
+	if _, err := f.engines[iaLineC].Verify(ctx,
+		parsed.Entries[1].Signed, parsed.AssociatedData(1)...); err != nil {
+		t.Fatalf("declaring entry does not verify: %v", err)
+	}
+
+	// An unsampled egress — the sample table's zero — declares nothing.
+	f.beaconer.latencies.Record(2, 0)
+	f.sender.mtx.Lock()
+	f.sender.beacons = nil
+	f.sender.mtx.Unlock()
+	f.beaconer.propagateOnce(ctx)
+	sent = sentBeacons()
+	if len(sent) != 1 {
+		t.Fatalf("sent beacons = %d, want 1", len(sent))
+	}
+	parsed, err = segment.ParsePCB(sent[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsed.Entries[1].Latency != nil {
+		t.Errorf("entry without a sample declares %v, want nothing",
+			parsed.Entries[1].Latency)
 	}
 }
 

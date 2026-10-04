@@ -9,6 +9,7 @@ import (
 
 	"github.com/scionproto/scion/pkg/addr"
 
+	"github.com/fancl20/cion/pkg/controlplane"
 	"github.com/fancl20/cion/pkg/modules/links"
 	"github.com/fancl20/cion/pkg/modules/links/impl/memory"
 )
@@ -185,6 +186,47 @@ func (f *selFixture) hasEntry(t *testing.T, ia addr.IA) bool {
 func (f *selFixture) candidate(ia addr.IA, direct, path time.Duration) {
 	f.directory = append(f.directory, entryOf(ia))
 	f.samples[ia] = measurement{direct: direct, path: path}
+}
+
+// TestSelectionDeclaresLatency checks the window's declarations: each
+// neighbor's echo round trip halved lands in the shared table the
+// beaconer's entries read, and a link the next window does not measure
+// declares nothing again.
+func TestSelectionDeclaresLatency(t *testing.T) {
+	f := newSelFixture(t, selPeer)
+	latencies := controlplane.NewLinkLatency()
+	f.sel.cfg.Latencies = latencies
+	ifID := f.ifID(t, selPeer)
+
+	f.samples[selPeer] = measurement{direct: 10 * time.Millisecond, path: 20 * time.Millisecond}
+	f.pass(t)
+	if got := latencies.Sample(ifID); got != 5*time.Millisecond {
+		t.Errorf("declared one-way delay = %v, want the halved round trip 5ms", got)
+	}
+
+	// A window the link goes unanswered declares nothing: the next entries
+	// carry no stale sample.
+	f.samples[selPeer] = measurement{}
+	f.pass(t)
+	if got := latencies.Sample(ifID); got != 0 {
+		t.Errorf("declared one-way delay past an unanswered window = %v, want 0", got)
+	}
+}
+
+// ifID returns the neighbor's entry's interface ID.
+func (f *selFixture) ifID(t *testing.T, ia addr.IA) uint16 {
+	t.Helper()
+	entries, err := f.store.All(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, l := range entries {
+		if l.NeighborIA.Equal(ia) {
+			return l.IfID
+		}
+	}
+	t.Fatalf("no entry for %s", ia)
+	return 0
 }
 
 // TestSelectionFloorPromotion checks the redundancy floor: below it, any

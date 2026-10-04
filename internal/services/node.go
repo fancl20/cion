@@ -83,6 +83,9 @@ type node struct {
 	beaconer     *controlplane.Beaconer
 	beaconStore  *controlplane.BeaconStore
 	pathProvider *scion.PathProvider
+	// linkLatency carries the selection loop's per-link one-way delay
+	// samples to the beaconer's entries; both sides hold this one table.
+	linkLatency *controlplane.LinkLatency
 	// monitor owns the BFD sessions and their verdicts; ifDown is the
 	// node's shared negative cache of interface-down signals its conns
 	// record and its path composition consults.

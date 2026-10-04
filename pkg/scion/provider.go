@@ -70,14 +70,11 @@ func (p *PathProvider) LocalPath(dst addr.IA) (*spath.Decoded, error) {
 }
 
 // Path returns a data-plane path from the local AS to dst. What LocalPath
-// resolves from local state comes from it; anything else joins a fetched
-// down segment to the stored up segments at their deepest common AS entry —
-// the shared core the same-origin rule composed at, a common ancestor below
-// it, or an endpoint one segment already contains — each part truncated at
-// the meeting so the joined path travels no hop beyond it. Among the joins
-// fewest hops wins, ties go to the fresher pair, then to the one with fewer
-// entries. A joined path whose traversed hops cross a signaled interface is
-// skipped while the cache entry lives; a crossing path stays a last resort.
+// resolves from local state comes from it; anything else is the first clean
+// candidate Enumerate composes, ordered by the carried rank — fewest joined
+// hops, ties to the fresher pair, then to the one with fewer entries. A
+// candidate crossing a signaled interface stays the last resort: the first
+// of them in emission order, never the best-ranked one.
 func (p *PathProvider) Path(ctx context.Context, dst addr.IA) (*spath.Decoded, error) {
 	if dst.Equal(p.IA) {
 		return nil, serrors.New("destination is the local ISD-AS", "isd_as", dst)
@@ -85,57 +82,106 @@ func (p *PathProvider) Path(ctx context.Context, dst addr.IA) (*spath.Decoded, e
 	if path, err := p.LocalPath(dst); err == nil {
 		return path, nil
 	}
+	candidates, err := p.Enumerate(ctx, dst)
+	if err != nil {
+		return nil, err
+	}
+	var best, crossing *Candidate
+	for i := range candidates {
+		c := &candidates[i]
+		if c.Crossing {
+			if crossing == nil {
+				crossing = c
+			}
+			continue
+		}
+		if best == nil || c.Before(best) {
+			best = c
+		}
+	}
+	if best != nil {
+		return best.Path, nil
+	}
+	if crossing != nil {
+		return crossing.Path, nil
+	}
+	return nil, serrors.New("no path to destination", "isd_as", dst)
+}
+
+// Candidate is one composed path beside the facts composition holds on its
+// way to ranking it.
+type Candidate struct {
+	// Path is the composed data-plane path.
+	Path *spath.Decoded
+	// Links are the (ISD-AS, interface ID) pairs of the traversed stretch —
+	// both interface IDs of each entry — the identity the interface-down
+	// cache keys on. Entries dropped by truncation contribute nothing.
+	Links []segment.LinkID
+	// Hops is the joined hop count.
+	Hops int
+	// Fresh is the staler piece's creation timestamp: a join is only as
+	// fresh as the piece that expires first.
+	Fresh time.Time
+	// Entries is the joined pieces' total segment entries.
+	Entries int
+	// Crossing reports whether the traversed stretch crosses a signaled
+	// interface — the flag a consumer honors as last resort.
+	Crossing bool
+	// Latency is the traversed inter-AS edges' declared one-way delays
+	// summed, the path's one-way estimate; nil when any traversed edge is
+	// declared by neither end: an undeclared edge is unknown, not free.
+	Latency *time.Duration
+}
+
+// Before reports whether c outranks o: fewest joined hops first, then the
+// fresher candidate by the staler piece's creation timestamp, then the one
+// with fewer entries — the order Path returns and a consumer sorting the
+// candidates reproduces.
+func (c *Candidate) Before(o *Candidate) bool {
+	if c.Hops != o.Hops {
+		return c.Hops < o.Hops
+	}
+	if !c.Fresh.Equal(o.Fresh) {
+		return c.Fresh.After(o.Fresh)
+	}
+	return c.Entries < o.Entries
+}
+
+// Enumerate returns every composed candidate path to dst with its facts, in
+// the composition loop's own order: the down-only meeting per fetched down
+// segment, then each (up, down) meeting at their deepest common AS entry —
+// each part truncated at the meeting so the joined path travels no hop
+// beyond it — with one candidate per up segment containing the destination,
+// its truncated reversal, beside them: the branch LocalPath short-circuits,
+// enumerated so the peers its own up segments hold join the candidate space.
+// exclude hard-filters before composition: a candidate whose traversed
+// stretch names an excluded link — either of a hop's two interface IDs
+// sufficing — never composes, for a survivor crossing the excluded link
+// would answer the excluded baseline's question falsely; a signaled
+// interface keeps its demote-to-last-resort semantics, a flagged candidate.
+// The local ISD-AS is the one error, a caller mistake failed fast at entry;
+// an unreachable destination is the empty answer.
+func (p *PathProvider) Enumerate(
+	ctx context.Context, dst addr.IA, exclude ...segment.LinkID,
+) ([]Candidate, error) {
+
+	if dst.Equal(p.IA) {
+		return nil, serrors.New("destination is the local ISD-AS", "isd_as", dst)
+	}
+	excluded := make(map[segment.LinkID]bool, len(exclude))
+	for _, link := range exclude {
+		excluded[link] = true
+	}
 	downs := p.Lookup(ctx, dst)
 	ups := p.upSegments()
-	var best *spath.Decoded
-	var bestRank joinRank
-	var crossing *spath.Decoded
-	consider := func(up *pathdb.Segment, mUp int, down *pathdb.Segment, mDown int) error {
-		var parts []*spath.Decoded
-		clean := true
-		// A meeting at the local node carries no up part: the reversed up
-		// segment truncated there is the empty travel.
-		if up != nil && mUp < len(up.PCB.Entries)-1 {
-			part, err := up.PCB.ReversePathTo(mUp)
-			if err != nil {
-				return fmt.Errorf("reversing the up segment: %w", err)
-			}
-			parts = append(parts, part)
-			clean = !p.crossesFrom(up, mUp)
-		}
-		// A meeting at the destination carries no down part, the same
-		// arithmetic on the far end.
-		if mDown < len(down.PCB.Entries)-1 {
-			part, err := down.PCB.ForwardPathFrom(mDown)
-			if err != nil {
-				return fmt.Errorf("forwarding the down segment: %w", err)
-			}
-			parts = append(parts, part)
-			clean = clean && !p.crossesFrom(down, mDown)
-		}
-		path, err := segment.Compose(parts...)
+	var out []Candidate
+	emit := func(up *pathdb.Segment, mUp int, down *pathdb.Segment, mDown int) error {
+		c, err := p.compose(up, mUp, down, mDown, excluded)
 		if err != nil {
-			return fmt.Errorf("composing the joined path: %w", err)
+			return err
 		}
-		if !clean {
-			if crossing == nil {
-				crossing = path
-			}
-			return nil
-		}
-		rank := joinRank{
-			hops:    len(path.HopFields),
-			fresh:   down.PCB.Timestamp(),
-			entries: len(down.PCB.Entries),
-		}
-		if up != nil {
-			if t := up.PCB.Timestamp(); t.Before(rank.fresh) {
-				rank.fresh = t
-			}
-			rank.entries += len(up.PCB.Entries)
-		}
-		if best == nil || rank.before(bestRank) {
-			best, bestRank = path, rank
+		if c != nil {
+			out = append(out, *c)
 		}
 		return nil
 	}
@@ -144,7 +190,7 @@ func (p *PathProvider) Path(ctx context.Context, dst addr.IA) (*spath.Decoded, e
 		// segment names — the core the segment starts at, or an AS below it
 		// the node happens to be.
 		if mDown := down.PCB.IndexOfIA(p.IA); mDown >= 0 {
-			if err := consider(nil, -1, down, mDown); err != nil {
+			if err := emit(nil, -1, down, mDown); err != nil {
 				return nil, err
 			}
 		}
@@ -153,18 +199,147 @@ func (p *PathProvider) Path(ctx context.Context, dst addr.IA) (*spath.Decoded, e
 			if !ok {
 				continue
 			}
-			if err := consider(up, mUp, down, mDown); err != nil {
+			if err := emit(up, mUp, down, mDown); err != nil {
 				return nil, err
 			}
 		}
 	}
-	if best != nil {
-		return best, nil
+	for _, up := range ups {
+		// The destination's entry on a containing up segment is never the
+		// segment's own terminator — that is the local node — so the
+		// truncation a reversal needs always stands.
+		m := up.PCB.IndexOfIA(dst)
+		if m < 0 || m > len(up.PCB.Entries)-2 {
+			continue
+		}
+		if err := emit(up, m, nil, -1); err != nil {
+			return nil, err
+		}
 	}
-	if crossing != nil {
-		return crossing, nil
+	return out, nil
+}
+
+// compose builds the candidate of one meeting — the up segment truncated at
+// its entry mUp, the down segment at its entry mDown, either side optional —
+// or nil when an excluded link names a hop of either traversed stretch: the
+// exclusion hard-filters before composition, never a flagged survivor.
+func (p *PathProvider) compose(
+	up *pathdb.Segment, mUp int,
+	down *pathdb.Segment, mDown int,
+	excluded map[segment.LinkID]bool,
+) (*Candidate, error) {
+
+	// A meeting at the local node carries no up part: the reversed up
+	// segment truncated there is the empty travel. A meeting at the
+	// destination carries no down part, the same arithmetic on the far end.
+	upTravel := up != nil && mUp < len(up.PCB.Entries)-1
+	downTravel := down != nil && mDown < len(down.PCB.Entries)-1
+	var links []segment.LinkID
+	latency, known := time.Duration(0), true
+	crossing := false
+	if upTravel {
+		upLinks, sum, upKnown := stretch(up, mUp)
+		links = append(links, upLinks...)
+		latency += sum
+		known = known && upKnown
+		crossing = p.crossesFrom(up, mUp)
 	}
-	return nil, serrors.New("no path to destination", "isd_as", dst)
+	if downTravel {
+		downLinks, sum, downKnown := stretch(down, mDown)
+		links = append(links, downLinks...)
+		latency += sum
+		known = known && downKnown
+		crossing = crossing || p.crossesFrom(down, mDown)
+	}
+	for _, link := range links {
+		if excluded[link] {
+			return nil, nil
+		}
+	}
+	var parts []*spath.Decoded
+	if upTravel {
+		part, err := up.PCB.ReversePathTo(mUp)
+		if err != nil {
+			return nil, fmt.Errorf("reversing the up segment: %w", err)
+		}
+		parts = append(parts, part)
+	}
+	if downTravel {
+		part, err := down.PCB.ForwardPathFrom(mDown)
+		if err != nil {
+			return nil, fmt.Errorf("forwarding the down segment: %w", err)
+		}
+		parts = append(parts, part)
+	}
+	path, err := segment.Compose(parts...)
+	if err != nil {
+		return nil, fmt.Errorf("composing the joined path: %w", err)
+	}
+	// The rank's timestamp and entry count read the joined pieces as a pair:
+	// a join is only as fresh as the piece that expires first, and an
+	// empty-travel side still beaconed.
+	var pieces []*pathdb.Segment
+	if up != nil {
+		pieces = append(pieces, up)
+	}
+	if down != nil {
+		pieces = append(pieces, down)
+	}
+	fresh, entries := pieces[0].PCB.Timestamp(), len(pieces[0].PCB.Entries)
+	for _, seg := range pieces[1:] {
+		if t := seg.PCB.Timestamp(); t.Before(fresh) {
+			fresh = t
+		}
+		entries += len(seg.PCB.Entries)
+	}
+	c := &Candidate{
+		Path:     path,
+		Links:    links,
+		Hops:     len(path.HopFields),
+		Fresh:    fresh,
+		Entries:  entries,
+		Crossing: crossing,
+	}
+	if known {
+		c.Latency = &latency
+	}
+	return c, nil
+}
+
+// stretch walks a segment's traversed stretch — the entries from index from
+// to the segment's end — returning its link pairs and its declared one-way
+// sum. Consecutive entries i and i+1 cross the link between AS i's egress
+// interface and AS i+1's ingress interface whichever direction travel runs,
+// so each edge is priced by lookup on the edge, never on the hop field: an
+// up part traversed against construction finds the link's declaration on
+// the adjacent upstream entry. Where both ends of an edge declare, the
+// higher value wins; where neither declares, the sum is unknown.
+func stretch(seg *pathdb.Segment, from int) (links []segment.LinkID, latency time.Duration, known bool) {
+	for _, e := range seg.PCB.Entries[from:] {
+		if e.Hop.ConsIngress != 0 {
+			links = append(links, segment.LinkID{IA: e.IA, IfID: e.Hop.ConsIngress})
+		}
+		if e.Hop.ConsEgress != 0 {
+			links = append(links, segment.LinkID{IA: e.IA, IfID: e.Hop.ConsEgress})
+		}
+	}
+	known = true
+	for i := from; i+1 < len(seg.PCB.Entries); i++ {
+		e, next := seg.PCB.Entries[i], seg.PCB.Entries[i+1]
+		egress, fromUpstream := e.Latency[segment.LinkID{IA: e.IA, IfID: e.Hop.ConsEgress}]
+		ingress, fromDownstream := next.Latency[segment.LinkID{IA: next.IA, IfID: next.Hop.ConsIngress}]
+		switch {
+		case fromUpstream && fromDownstream:
+			latency += max(egress, ingress)
+		case fromUpstream:
+			latency += egress
+		case fromDownstream:
+			latency += ingress
+		default:
+			known = false // an undeclared edge is unknown, not free
+		}
+	}
+	return links, latency, known
 }
 
 // meeting returns the deepest AS entry common to an up and a down segment —
@@ -183,27 +358,6 @@ func meeting(up, down *pathdb.Segment) (mUp, mDown int, ok bool) {
 		}
 	}
 	return mUp, mDown, ok
-}
-
-// joinRank orders the joins of Path's composition loop: fewest joined hops
-// first, then the fresher pair by the staler piece's creation timestamp — a
-// join is only as fresh as the piece that expires first — then the pair with
-// fewer entries.
-type joinRank struct {
-	hops    int
-	fresh   time.Time
-	entries int
-}
-
-// before reports whether r outranks o.
-func (r joinRank) before(o joinRank) bool {
-	if r.hops != o.hops {
-		return r.hops < o.hops
-	}
-	if !r.fresh.Equal(o.fresh) {
-		return r.fresh.After(o.fresh)
-	}
-	return r.entries < o.entries
 }
 
 // crossesFrom reports whether the segment's entries from index from — the
