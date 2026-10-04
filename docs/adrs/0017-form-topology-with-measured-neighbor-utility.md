@@ -81,7 +81,8 @@ for itself — is the companion decision of
     earned by evidence — the posture beaconing took for paths, applied
     to the topology itself.
 *   **Spec-Native Instruments:** Where the drafts define an instrument
-    — BFD for liveness, SCMP echo for measurement, service resolution
+    — BFD for liveness, SCMP echo for measurement, the
+    StaticInfoExtension for declared link latency, service resolution
     for endpoint discovery — the node speaks the drafts' instrument.
     CION designs its own where the drafts hand the question to
     out-of-band configuration.
@@ -197,7 +198,13 @@ follows:
     link exists, so promotion decides on the tier-relative estimate
     and retirement corrects on the link's own windows — the two rules
     form a feedback loop, which is why precision in each matters less
-    than agreement between them.
+    than agreement between them. The estimate reads two prices: the
+    measured tier baseline the loop's echoes take, and the declared
+    one-way delays the beacons carry — each AS attesting its own links
+    in the entries it signs, the drafts' StaticInfoExtension — so
+    every composed route into the tier prices the candidate, not the
+    freshest probed path alone. Declarations inform the estimate; the
+    echoes stay the authority.
 3.  **Tiers are derived every window from the sample map.** A tier is
     a latency class of the peers the window measured: walking them
     sorted by direct round trip, a peer opens a new tier when its
@@ -317,7 +324,9 @@ follows:
     cadence, the ping machinery as an internal service, and the
     comparator reads the two round trips against each other.
     Measurement cadence belongs to the selector alone, free of the
-    liveness timers.
+    liveness timers. The declared delays the estimate reads are
+    attestations, not the node's measurements; they price only what
+    the loop has not probed.
 15. **Membership changes ride generational replacement.** Interface
     IDs are allocated at establishment, unique among live links, and
     held back after retirement while unexpired segments elsewhere may
@@ -379,10 +388,13 @@ follows:
     member of the stranded tier — the stranded-tier promotion rides
     the rendezvous establishment that bypasses paths.
 *   Promotion and retirement share one utility test, so displacement
-    cannot evict a link the policy must immediately re-recruit, and
-    the path database's hop identity informs policy through the walk
-    the interface-down skip already makes — no new wire exchange and
-    no new state.
+    cannot evict a link the policy must immediately re-recruit. The
+    path database's hop identity informs policy through the walk the
+    interface-down skip already makes, and the estimate's declared
+    prices ride the beacons the network already sends — the drafts'
+    optional, signed StaticInfoExtension — so no new message or
+    exchange arrives, and the one new state is the latest per-link
+    sample the loop's own measurement already produces.
 *   Zero config is intact: tiers derive from measurements the loop
     already takes, and no constant becomes an argument.
 
@@ -414,6 +426,9 @@ follows:
 *   Promotion decides on an estimate it can verify only after
     establishment, so a link whose measured utility disappoints costs
     its establishment and a damped retirement.
+*   The declared prices are attestations an AS can misstate, each
+    stale by a beacon interval; the estimate trusts them only where
+    the loop has not probed, and the echoes replace them where it has.
 
 ## Pros and cons of the options
 
