@@ -3,11 +3,13 @@ package scion
 import (
 	"context"
 	"hash"
+	"slices"
 	"testing"
 	"time"
 
 	"github.com/scionproto/scion/pkg/addr"
 	"github.com/scionproto/scion/pkg/private/util"
+	cryptopb "github.com/scionproto/scion/pkg/proto/crypto"
 	"github.com/scionproto/scion/pkg/scrypto"
 	spath "github.com/scionproto/scion/pkg/slayers/path/scion"
 
@@ -607,4 +609,477 @@ func TestPathExpiry(t *testing.T) {
 	if got := PathExpiry(path); !got.Equal(want) {
 		t.Errorf("path expiry = %v, want the older segment's %v", got, want)
 	}
+}
+
+// testSigner signs by wrapping the body unsigned — the enumeration tests
+// read entries, never verify them.
+type testSigner struct{}
+
+func (testSigner) Sign(
+	_ context.Context, msg []byte, _ ...[]byte,
+) (*cryptopb.SignedMessage, error) {
+
+	return &cryptopb.SignedMessage{HeaderAndBody: msg}, nil
+}
+
+// linkHop names one AS entry of a test segment: the AS, its construction
+// ingress and egress interface IDs — distinct, so a link-set reading can
+// drop no pair unnoticed — and its egress link's declared one-way delay.
+type linkHop struct {
+	ia      addr.IA
+	in, eg  uint16
+	latency time.Duration
+}
+
+// signedLine builds a signed-entry segment crossing the given hops.
+func signedLine(t *testing.T, now time.Time, hops ...linkHop) *segment.PCB {
+	t.Helper()
+	pcb, err := segment.PCBWithID(now, 0x111)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, h := range hops {
+		if err := pcb.AppendEntry(context.Background(), h.ia, segment.EntryOptions{
+			IngressIfID:   h.in,
+			EgressIfID:    h.eg,
+			EgressLatency: h.latency,
+		}, testMACHasher, testSigner{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return pcb
+}
+
+// TestEnumerateFacts checks the candidate's facts against hand-computed
+// values: the link pairs of the traversed stretch alone — both interface
+// IDs of each entry — the staler piece's timestamp as Fresh, and the rank
+// fields the wrapper sorts by.
+func TestEnumerateFacts(t *testing.T) {
+	up := signedLine(t, time.Now(),
+		linkHop{ia: iaCore, eg: 11},
+		linkHop{ia: iaMid, in: 12, eg: 13},
+		linkHop{ia: iaLeaf, in: 14},
+	)
+	stale := time.Now().Add(-time.Hour)
+	down := signedLine(t, stale,
+		linkHop{ia: iaCore, eg: 21},
+		linkHop{ia: iaDest, in: 22},
+	)
+	db := &fakePathDB{}
+	if _, err := db.Insert(context.Background(), &pathdb.Segment{
+		Type: pathdb.SegmentTypeUp,
+		PCB:  up,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	p := &PathProvider{
+		IA: iaLeaf,
+		DB: db,
+		Lookup: func(context.Context, addr.IA) []*pathdb.Segment {
+			return []*pathdb.Segment{{Type: pathdb.SegmentTypeDown, PCB: down}}
+		},
+	}
+
+	candidates, err := p.Enumerate(context.Background(), iaDest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(candidates) != 1 {
+		t.Fatalf("candidates = %d, want the single join", len(candidates))
+	}
+	c := candidates[0]
+	if c.Hops != 5 || len(c.Path.HopFields) != 5 || len(c.Path.InfoFields) != 2 {
+		t.Fatalf("candidate = %d hops / %d segments, want the join's 5/2",
+			c.Hops, len(c.Path.InfoFields))
+	}
+	if !c.Fresh.Equal(down.Timestamp()) {
+		t.Errorf("candidate freshness = %v, want the staler down piece's %v",
+			c.Fresh, down.Timestamp())
+	}
+	if c.Entries != 5 {
+		t.Errorf("candidate entries = %d, want the pair's 5", c.Entries)
+	}
+	if c.Crossing {
+		t.Error("candidate crosses a signaled interface, want clean")
+	}
+	// The traversed stretch alone: both of the middle entry's interface IDs
+	// present, the zero interfaces of the segment ends absent, the dropped
+	// core-ward stretch of the up segment contributing nothing (there is
+	// none here — the meeting is the core — so the down core's egress
+	// beside the up's own).
+	want := []segment.LinkID{
+		{IA: iaCore, IfID: 11},
+		{IA: iaMid, IfID: 12},
+		{IA: iaMid, IfID: 13},
+		{IA: iaLeaf, IfID: 14},
+		{IA: iaCore, IfID: 21},
+		{IA: iaDest, IfID: 22},
+	}
+	if !slices.Equal(c.Links, want) {
+		t.Errorf("candidate links = %v, want %v", c.Links, want)
+	}
+}
+
+// TestEnumerateTruncatedFacts checks truncation against the facts: entries
+// above the meeting on the up side and beyond it on the down side cross
+// nothing the candidate travels, and Fresh still reads the staler piece.
+func TestEnumerateTruncatedFacts(t *testing.T) {
+	up := signedLine(t, time.Now(),
+		linkHop{ia: iaCore, eg: 11},
+		linkHop{ia: iaMid, in: 12, eg: 13},
+		linkHop{ia: iaLeaf, in: 14},
+	)
+	stale := time.Now().Add(-time.Hour)
+	down := signedLine(t, stale,
+		linkHop{ia: iaCore, eg: 21},
+		linkHop{ia: iaMid, in: 22, eg: 23},
+		linkHop{ia: iaDest, in: 24},
+	)
+	db := &fakePathDB{}
+	if _, err := db.Insert(context.Background(), &pathdb.Segment{
+		Type: pathdb.SegmentTypeUp,
+		PCB:  up,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	p := &PathProvider{
+		IA: iaLeaf,
+		DB: db,
+		Lookup: func(context.Context, addr.IA) []*pathdb.Segment {
+			return []*pathdb.Segment{{Type: pathdb.SegmentTypeDown, PCB: down}}
+		},
+	}
+
+	candidates, err := p.Enumerate(context.Background(), iaDest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(candidates) != 1 {
+		t.Fatalf("candidates = %d, want the single join at the middle", len(candidates))
+	}
+	c := candidates[0]
+	if c.Hops != 4 {
+		t.Fatalf("candidate = %d hops, want the truncated join's 4", c.Hops)
+	}
+	// The core's entries — the up's origin above the meeting, the down's
+	// origin beyond it — cross nothing the candidate travels; the meeting
+	// contributes its entry on each side, both interface IDs of each.
+	want := []segment.LinkID{
+		{IA: iaMid, IfID: 12},
+		{IA: iaMid, IfID: 13},
+		{IA: iaLeaf, IfID: 14},
+		{IA: iaMid, IfID: 22},
+		{IA: iaMid, IfID: 23},
+		{IA: iaDest, IfID: 24},
+	}
+	if !slices.Equal(c.Links, want) {
+		t.Errorf("candidate links = %v, want %v", c.Links, want)
+	}
+	if !c.Fresh.Equal(down.Timestamp()) {
+		t.Errorf("candidate freshness = %v, want the staler down piece's %v",
+			c.Fresh, down.Timestamp())
+	}
+}
+
+// TestEnumerateCoverage checks the containing branch beside the joins: a
+// destination both serve yields the joins and one candidate per containing
+// up segment, exclusion filtering both kinds identically.
+func TestEnumerateCoverage(t *testing.T) {
+	up := linePCB(t, time.Now(), iaCore, iaMid, iaLeaf)
+	down := linePCB(t, time.Now(), iaCore, iaMid)
+	db := &fakePathDB{}
+	if _, err := db.Insert(context.Background(), &pathdb.Segment{
+		Type: pathdb.SegmentTypeUp,
+		PCB:  up,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	newProvider := func() *PathProvider {
+		return &PathProvider{
+			IA: iaLeaf,
+			DB: db,
+			Lookup: func(context.Context, addr.IA) []*pathdb.Segment {
+				return []*pathdb.Segment{{Type: pathdb.SegmentTypeDown, PCB: down}}
+			},
+		}
+	}
+
+	// The join at the middle and the containing up segment's truncated
+	// reversal beside it.
+	candidates, err := newProvider().Enumerate(context.Background(), iaMid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(candidates) != 2 {
+		t.Fatalf("candidates = %d, want the join and the containing reversal", len(candidates))
+	}
+	for i, c := range candidates {
+		if c.Hops != 2 || len(c.Path.HopFields) != 2 {
+			t.Errorf("candidate %d = %d hops, want the truncated 2", i, c.Hops)
+		}
+	}
+
+	// Excluding the middle's interface drops both kinds; excluding an
+	// interface no traversed hop names drops neither.
+	mid := segment.LinkID{IA: iaMid, IfID: testIfID}
+	candidates, err = newProvider().Enumerate(context.Background(), iaMid, mid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(candidates) != 0 {
+		t.Errorf("candidates past the exclusion = %d, want 0", len(candidates))
+	}
+	candidates, err = newProvider().Enumerate(context.Background(), iaMid,
+		segment.LinkID{IA: iaMid, IfID: testIfID + 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(candidates) != 2 {
+		t.Errorf("candidates past the absent exclusion = %d, want 2", len(candidates))
+	}
+}
+
+// TestEnumerateExclusion checks the exclusion's semantics against the
+// signaled-down skip's: an excluded link never yields a candidate — no last
+// resort — while a signaled interface still yields a flagged one; either of
+// a hop's two interface IDs suffices; the local ISD-AS errors and the
+// unreachable destination enumerates empty.
+func TestEnumerateExclusion(t *testing.T) {
+	up := linePCB(t, time.Now(), iaCore, iaMid, iaLeaf)
+	down := linePCB(t, time.Now(), iaCore, iaDest)
+	db := &fakePathDB{}
+	if _, err := db.Insert(context.Background(), &pathdb.Segment{
+		Type: pathdb.SegmentTypeUp,
+		PCB:  up,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	newProvider := func() *PathProvider {
+		return &PathProvider{
+			IA:            iaLeaf,
+			DB:            db,
+			InterfaceDown: NewInterfaceDownCache(),
+			Lookup: func(context.Context, addr.IA) []*pathdb.Segment {
+				return []*pathdb.Segment{{Type: pathdb.SegmentTypeDown, PCB: down}}
+			},
+		}
+	}
+
+	// A signaled interface on the traversed stretch yields a flagged
+	// candidate, never a filtered one.
+	p := newProvider()
+	p.InterfaceDown.Record(InterfaceDownSignal{IA: iaMid, IfID: testIfID})
+	candidates, err := p.Enumerate(context.Background(), iaDest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(candidates) != 1 || !candidates[0].Crossing {
+		t.Fatalf("candidates past the signal = %d (crossing %v), want one flagged",
+			len(candidates), len(candidates) == 1 && candidates[0].Crossing)
+	}
+
+	// Excluding the signaled link drops the candidate outright: exclusion
+	// hard-filters, no last resort. Excluding by the destination's ingress
+	// end — the other interface ID of the same hop — drops it too.
+	for _, link := range []segment.LinkID{
+		{IA: iaMid, IfID: testIfID},
+		{IA: iaDest, IfID: testIfID},
+	} {
+		candidates, err = p.Enumerate(context.Background(), iaDest, link)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(candidates) != 0 {
+			t.Errorf("candidates past excluding %v = %d, want 0", link, len(candidates))
+		}
+	}
+
+	// The local ISD-AS errors; an unreachable destination is empty.
+	if _, err := newProvider().Enumerate(context.Background(), iaLeaf); err == nil {
+		t.Error("enumerating to the local ISD-AS succeeded, want error")
+	}
+	empty := &PathProvider{
+		IA:     iaLeaf,
+		DB:     &fakePathDB{},
+		Lookup: func(context.Context, addr.IA) []*pathdb.Segment { return nil },
+	}
+	candidates, err = empty.Enumerate(context.Background(), iaDest)
+	if err != nil || len(candidates) != 0 {
+		t.Errorf("enumerating an unreachable destination = %d, %v, want empty", len(candidates), err)
+	}
+}
+
+// TestEnumerateDeclaredLatency checks the one-way sum: the traversed
+// inter-AS edges' declarations added, an up part's edges priced from the
+// upstream entries' declarations — a per-hop-field reading keys the wrong
+// entry's map there — both ends of an edge declaring resolving to the
+// higher, and one undeclared edge making the fact absent.
+func TestEnumerateDeclaredLatency(t *testing.T) {
+	up := signedLine(t, time.Now(),
+		linkHop{ia: iaCore, eg: 11, latency: 5 * time.Millisecond},
+		linkHop{ia: iaMid, in: 12, eg: 13, latency: 7 * time.Millisecond},
+		linkHop{ia: iaLeaf, in: 14},
+	)
+	down := signedLine(t, time.Now(),
+		linkHop{ia: iaCore, eg: 21, latency: 11 * time.Millisecond},
+		linkHop{ia: iaDest, in: 22},
+	)
+	db := &fakePathDB{}
+	if _, err := db.Insert(context.Background(), &pathdb.Segment{
+		Type: pathdb.SegmentTypeUp,
+		PCB:  up,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	p := &PathProvider{
+		IA: iaLeaf,
+		DB: db,
+		Lookup: func(context.Context, addr.IA) []*pathdb.Segment {
+			return []*pathdb.Segment{{Type: pathdb.SegmentTypeDown, PCB: down}}
+		},
+	}
+
+	candidates, err := p.Enumerate(context.Background(), iaDest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(candidates) != 1 || candidates[0].Latency == nil {
+		t.Fatalf("candidates = %d, want one with a declared sum", len(candidates))
+	}
+	// The up part's core-to-middle edge is declared on the core entry's
+	// egress — the adjacent upstream entry — which a reading keyed on the
+	// hop field at hand would miss.
+	if got := *candidates[0].Latency; got != 23*time.Millisecond {
+		t.Errorf("declared sum = %v, want the traversed edges' 23ms", got)
+	}
+
+	// The destination declaring its ingress end of the same edge — the
+	// richer instance another implementation speaks — loses to the core's
+	// higher declaration and displaces a lower one.
+	down.Entries[1].Latency = map[segment.LinkID]time.Duration{
+		{IA: iaDest, IfID: 22}: 4 * time.Millisecond,
+	}
+	candidates, err = p.Enumerate(context.Background(), iaDest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := *candidates[0].Latency; got != 23*time.Millisecond {
+		t.Errorf("declared sum with the lower conflict = %v, want 23ms", got)
+	}
+	down.Entries[1].Latency = map[segment.LinkID]time.Duration{
+		{IA: iaDest, IfID: 22}: 20 * time.Millisecond,
+	}
+	candidates, err = p.Enumerate(context.Background(), iaDest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := *candidates[0].Latency; got != 32*time.Millisecond {
+		t.Errorf("declared sum with the higher conflict = %v, want 32ms", got)
+	}
+
+	// One undeclared edge makes the fact absent: unknown, not free.
+	undeclared := signedLine(t, time.Now(),
+		linkHop{ia: iaCore, eg: 11, latency: 5 * time.Millisecond},
+		linkHop{ia: iaMid, in: 12, eg: 13},
+		linkHop{ia: iaLeaf, in: 14},
+	)
+	db = &fakePathDB{}
+	if _, err := db.Insert(context.Background(), &pathdb.Segment{
+		Type: pathdb.SegmentTypeUp,
+		PCB:  undeclared,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	p.DB = db
+	candidates, err = p.Enumerate(context.Background(), iaDest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(candidates) != 1 || candidates[0].Latency != nil {
+		t.Errorf("declared sum over an undeclared edge = %v, want absent",
+			candidates[0].Latency)
+	}
+}
+
+// TestProviderEntriesTiebreak checks the rank's third tiebreak: two joins
+// tied on hops and timestamp resolve to the pair with fewer entries.
+func TestProviderEntriesTiebreak(t *testing.T) {
+	ts := time.Now()
+	upShort := linePCB(t, ts, iaCore, iaLeaf)
+	downShort := linePCB(t, ts, iaCore, iaDest)
+	upLong := linePCB(t, ts, iaCore2, iaMid, iaLeaf)
+	downLong := linePCB(t, ts, iaCore2, iaMid, iaDest)
+	db := &fakePathDB{}
+	for _, up := range []*segment.PCB{upShort, upLong} {
+		if _, err := db.Insert(context.Background(), &pathdb.Segment{
+			Type: pathdb.SegmentTypeUp,
+			PCB:  up,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	p := &PathProvider{
+		IA: iaLeaf,
+		DB: db,
+		Lookup: func(context.Context, addr.IA) []*pathdb.Segment {
+			return []*pathdb.Segment{
+				{Type: pathdb.SegmentTypeDown, PCB: downShort},
+				{Type: pathdb.SegmentTypeDown, PCB: downLong},
+			}
+		},
+	}
+
+	path, err := p.Path(context.Background(), iaDest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Both joins tie on four hops and one timestamp; the shorter pair's
+	// four entries beat the deeper meeting's six.
+	if len(path.HopFields) != 4 {
+		t.Fatalf("joined path = %d hops, want either tie's 4", len(path.HopFields))
+	}
+	checkHops(t, path, upShort.Entries[1], upShort.Entries[0],
+		downShort.Entries[0], downShort.Entries[1])
+}
+
+// TestProviderLastResortFirstCrossing checks the last resort's own rule:
+// with nothing clean, the first crossing candidate in emission order
+// serves, not the best-ranked crossing one.
+func TestProviderLastResortFirstCrossing(t *testing.T) {
+	up := linePCB(t, time.Now(), iaCore, iaLeaf)
+	downLong := linePCB(t, time.Now(), iaCore, iaMid, iaDest)
+	downShort := linePCB(t, time.Now(), iaCore, iaDest)
+	db := &fakePathDB{}
+	if _, err := db.Insert(context.Background(), &pathdb.Segment{
+		Type: pathdb.SegmentTypeUp,
+		PCB:  up,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	p := &PathProvider{
+		IA:            iaLeaf,
+		DB:            db,
+		InterfaceDown: NewInterfaceDownCache(),
+		Lookup: func(context.Context, addr.IA) []*pathdb.Segment {
+			return []*pathdb.Segment{
+				{Type: pathdb.SegmentTypeDown, PCB: downLong},
+				{Type: pathdb.SegmentTypeDown, PCB: downShort},
+			}
+		},
+	}
+	// Every join leaves through the signaled core interface, so every
+	// candidate crosses; the shorter join would win a rank the last resort
+	// never holds.
+	p.InterfaceDown.Record(InterfaceDownSignal{IA: iaCore, IfID: testIfID})
+
+	path, err := p.Path(context.Background(), iaDest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(path.HopFields) != 5 {
+		t.Fatalf("last-resort path = %d hops, want the emitted-first join's 5",
+			len(path.HopFields))
+	}
+	checkHops(t, path, up.Entries[1], up.Entries[0],
+		downLong.Entries[0], downLong.Entries[1], downLong.Entries[2])
 }

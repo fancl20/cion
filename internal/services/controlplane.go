@@ -237,6 +237,7 @@ func (n *node) buildBeaconing() error {
 
 	beacons := controlplane.NewBeaconStore()
 	n.beaconStore = beacons
+	n.linkLatency = controlplane.NewLinkLatency()
 	beaconer, err := controlplane.NewBeaconer(controlplane.BeaconerConfig{
 		IA:                   n.ident.ia,
 		Engine:               n.engine,
@@ -245,6 +246,7 @@ func (n *node) buildBeaconing() error {
 		DB:                   n.pathDB,
 		Links:                n.linkTable,
 		Verdicts:             n.monitor.Verdicts,
+		Latencies:            n.linkLatency,
 		Sender:               n.peerClt,
 		Core:                 coreTier,
 		PropagationInterval:  n.cfg.Pacing.Propagation,
@@ -275,12 +277,13 @@ func (n *node) buildBeaconing() error {
 // imports the core and the shared libraries, never the reverse.
 func (n *node) wireTopology() {
 	n.topology.Wire(topology.Pieces{
-		IA:       n.ident.ia,
-		Store:    n.linkStore,
-		Peer:     n.peerClt,
-		Provider: n.pathProvider,
-		Engine:   n.engine,
-		Verdicts: n.monitor.Verdicts,
+		IA:        n.ident.ia,
+		Store:     n.linkStore,
+		Peer:      n.peerClt,
+		Provider:  n.pathProvider,
+		Engine:    n.engine,
+		Verdicts:  n.monitor.Verdicts,
+		Latencies: n.linkLatency,
 	})
 }
 

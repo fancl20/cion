@@ -56,6 +56,16 @@ type Info struct {
 	ID        uint16
 }
 
+// LinkID identifies one link by an ISD-AS and one of its interface IDs —
+// either end names the link — the identity the interface-down cache keys on
+// and composed paths' link sets carry.
+type LinkID struct {
+	// IA is the ISD-AS of the interface's end.
+	IA addr.IA
+	// IfID is the interface ID at that end.
+	IfID uint16
+}
+
 // ASEntry is one decoded AS entry: the signed body's fields together with the
 // raw signed component they were extracted from.
 type ASEntry struct {
@@ -68,6 +78,11 @@ type ASEntry struct {
 	IngressMTU uint32
 	// Hop is the data-plane hop field of this entry.
 	Hop path.HopField
+	// Latency holds the one-way delays the entry's signed extension declares
+	// (the StaticInfoExtension the drafts name for segment latency), keyed by
+	// the declaring ISD-AS and interface. Each AS attests its own links
+	// alone; nil when the entry declares none.
+	Latency map[LinkID]time.Duration
 	// Signed is the raw signed component, the input to signature
 	// verification.
 	Signed *cryptopb.SignedMessage
@@ -153,11 +168,26 @@ func parseASEntry(signed *cryptopb.SignedMessage) (ASEntry, error) {
 		ConsEgress:  uint16(hf.Egress),
 	}
 	copy(hop.Mac[:], hf.Mac)
+	var latency map[LinkID]time.Duration
+	if inter := body.Extensions.GetStaticInfo().GetLatency().GetInter(); len(inter) > 0 {
+		latency = make(map[LinkID]time.Duration, len(inter))
+		for ifID, raw := range inter {
+			if ifID > 0xffff {
+				return ASEntry{}, serrors.New("declared latency names an interface beyond 16 bits",
+					"interface", ifID)
+			}
+			// The extension's definitions give the delay in microseconds;
+			// this seam converts once and every consumer reads a duration.
+			latency[LinkID{IA: addr.IA(body.IsdAs), IfID: uint16(ifID)}] =
+				time.Duration(raw) * time.Microsecond
+		}
+	}
 	return ASEntry{
 		IA:         addr.IA(body.IsdAs),
 		Next:       addr.IA(body.NextIsdAs),
 		IngressMTU: body.HopEntry.IngressMtu,
 		Hop:        hop,
+		Latency:    latency,
 		Signed:     signed,
 	}, nil
 }
@@ -234,6 +264,11 @@ type EntryOptions struct {
 	// EgressIfID is the interface the beacon leaves on; zero on a
 	// terminating entry.
 	EgressIfID uint16
+	// EgressLatency is the egress link's declared one-way delay, carried in
+	// the signed extension the drafts define — the node's latest measured
+	// echo round trip halved. Zero declares nothing: a link without a sample
+	// declares none.
+	EgressLatency time.Duration
 }
 
 // AppendEntry appends this AS's signed entry to the segment and MACs the hop
@@ -260,6 +295,21 @@ func (p *PCB) AppendEntry(
 				ExpTime: uint32(HopExpTime),
 			},
 		},
+	}
+	var declared map[LinkID]time.Duration
+	if opts.EgressLatency > 0 {
+		declared = map[LinkID]time.Duration{{IA: ia, IfID: opts.EgressIfID}: opts.EgressLatency}
+		// The declaration rides the signed extension in its own unit of
+		// microseconds; the parse seam converts back exactly once.
+		body.Extensions = &cppb.PathSegmentExtensions{
+			StaticInfo: &cppb.StaticInfoExtension{
+				Latency: &cppb.LatencyInfo{
+					Inter: map[uint64]uint32{
+						uint64(opts.EgressIfID): uint32(opts.EgressLatency / time.Microsecond),
+					},
+				},
+			},
+		}
 	}
 	hop := path.HopField{
 		ExpTime:     HopExpTime,
@@ -289,6 +339,7 @@ func (p *PCB) AppendEntry(
 		Next:       opts.Next,
 		IngressMTU: MTU,
 		Hop:        hop,
+		Latency:    declared,
 		Signed:     signedMsg,
 	})
 	return nil

@@ -76,6 +76,10 @@ type SelectionConfig struct {
 	// slow for the window whatever its last sample said, and the redundancy
 	// floor counts up links only. Nil treats every link as up.
 	Verdicts func() map[uint16]bool
+	// Latencies receives the window's per-link one-way delay estimates —
+	// each neighbor's echo round trip halved — for the beaconer's entries
+	// to declare; nil discards them.
+	Latencies *controlplane.LinkLatency
 	// Provider resolves the freshest path to a candidate — the baseline.
 	Provider *scion.PathProvider
 	// Conn carries the SCMP echo probes; its port is the reply address.
@@ -201,6 +205,7 @@ func (s *selection) pass(ctx context.Context) {
 		candidates = append(candidates, e)
 		samples[e.IA] = s.measure(ctx, e, nil)
 	}
+	s.declare(neighbors, samples)
 	// Damp the promotions: a candidate is promoted on sustained evidence
 	// only, a flapping one never.
 	for _, e := range candidates {
@@ -403,11 +408,12 @@ func (s *selection) establish(ctx context.Context, e DirectoryEntry, why string)
 // one-hop write does, the responder in the peer's core answering on the
 // reversed arrival path — and a candidate's (a demoted neighbor included)
 // by the rendezvous echo that reaches where no path and no interface exist.
-// The baseline is the same SCMP echo instrument over the freshest resolved
-// path: one destination, two routes, the same median-of-runs discipline.
-// The echo claims the zero ISD-AS — a probe mints no entry a candidate
-// sweep could mistake for a peer, and no identity the acceptor would admit
-// against an allowlist — deduplicated by the control address it claims.
+// The baseline is the same SCMP echo instrument over the freshest composed
+// route the enumeration holds: one destination, two routes, the same
+// median-of-runs discipline. The echo claims the zero ISD-AS — a probe
+// mints no entry a candidate sweep could mistake for a peer, and no
+// identity the acceptor would admit against an allowlist — deduplicated by
+// the control address it claims.
 func (s *selection) probe(ctx context.Context, e DirectoryEntry, l *links.Link) measurement {
 	var m measurement
 	if l != nil {
@@ -421,14 +427,30 @@ func (s *selection) probe(ctx context.Context, e DirectoryEntry, l *links.Link) 
 	}
 	probeCtx, cancel := context.WithTimeout(ctx, ProbeWait*ProbeRuns+time.Second)
 	defer cancel()
-	if path, err := s.cfg.Provider.Path(probeCtx, e.IA); err == nil {
+	// Freshness picks the baseline's route and the echo measures it: the
+	// comparator reads the two round trips against each other.
+	if c := s.freshest(probeCtx, e.IA); c != nil {
 		m.path = s.echoRTT(&scion.Addr{
 			IA:   e.IA,
 			Addr: netip.AddrPortFrom(e.ControlAddr.Addr(), dataplane.EndhostPort),
-			Path: path,
+			Path: c.Path,
 		})
 	}
 	return m
+}
+
+// declare lands the window's per-link one-way estimates in the shared table
+// the beaconer's entries declare: each neighbor's echo round trip halved —
+// half a round trip is the node's estimate of the one-way delay the
+// extension defines. A link the window did not measure declares nothing
+// again.
+func (s *selection) declare(neighbors map[addr.IA]*links.Link, samples map[addr.IA]measurement) {
+	if s.cfg.Latencies == nil {
+		return
+	}
+	for ia, l := range neighbors {
+		s.cfg.Latencies.Record(l.IfID, samples[ia].direct/2)
+	}
 }
 
 // echoRTT takes the median SCMP echo round trip to the destination — over

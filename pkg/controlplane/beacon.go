@@ -74,6 +74,7 @@ type Beaconer struct {
 	db           pathdb.DB
 	links        func() map[uint16]addr.IA
 	verdicts     func() map[uint16]bool
+	latencies    *LinkLatency
 	sender       SegmentSender
 	core         bool
 	propagation  time.Duration
@@ -116,6 +117,9 @@ type BeaconerConfig struct {
 	// a down interface originates and propagates nothing, resuming with the
 	// verdict's up edge. Nil treats every link as up.
 	Verdicts func() map[uint16]bool
+	// Latencies holds the node's latest per-link one-way delay samples; the
+	// entries the beaconer signs declare them. Nil declares nothing.
+	Latencies *LinkLatency
 	// Sender sends beacon and registration RPCs over the SCION-native
 	// channel.
 	Sender SegmentSender
@@ -160,6 +164,7 @@ func NewBeaconer(cfg BeaconerConfig) (*Beaconer, error) {
 		db:               cfg.DB,
 		links:            cfg.Links,
 		verdicts:         cfg.Verdicts,
+		latencies:        cfg.Latencies,
 		sender:           cfg.Sender,
 		core:             cfg.Core,
 		propagation:      propagation,
@@ -178,6 +183,16 @@ func (b *Beaconer) linkUp(ifID uint16) bool {
 	}
 	up, ok := b.verdicts()[ifID]
 	return !ok || up
+}
+
+// egressLatency returns the egress link's latest one-way delay sample — the
+// declaration the entry carries; a nil table and an unsampled link declare
+// nothing.
+func (b *Beaconer) egressLatency(ifID uint16) time.Duration {
+	if b.latencies == nil {
+		return 0
+	}
+	return b.latencies.Sample(ifID)
 }
 
 // linkTable snapshots the links; a nil source serves none.
@@ -496,8 +511,9 @@ func (b *Beaconer) originateOnce(ctx context.Context) {
 			continue
 		}
 		if err := pcb.AppendEntry(ctx, b.ia, segment.EntryOptions{
-			Next:       neighborIA,
-			EgressIfID: ifID,
+			Next:          neighborIA,
+			EgressIfID:    ifID,
+			EgressLatency: b.egressLatency(ifID),
 		}, b.macFactory, b.engine); err != nil {
 			slog.Error("Signing origin beacon", "interface", ifID, "err", err)
 			continue
@@ -537,9 +553,10 @@ func (b *Beaconer) propagateOnce(ctx context.Context) {
 				continue
 			}
 			if err := extended.AppendEntry(ctx, b.ia, segment.EntryOptions{
-				Next:        neighborIA,
-				IngressIfID: cand.Ingress,
-				EgressIfID:  egress,
+				Next:          neighborIA,
+				IngressIfID:   cand.Ingress,
+				EgressIfID:    egress,
+				EgressLatency: b.egressLatency(egress),
 			}, b.macFactory, b.engine); err != nil {
 				slog.Error("Extending beacon", "interface", egress, "err", err)
 				continue

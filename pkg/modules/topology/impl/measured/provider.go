@@ -414,6 +414,7 @@ func (z *Provider) selectionConfig() SelectionConfig {
 		Store:       z.pcs.Store,
 		Directory:   z.directory.Entries,
 		Verdicts:    z.pcs.Verdicts,
+		Latencies:   z.pcs.Latencies,
 		Provider:    z.pcs.Provider,
 		Conn:        z.probeConn,
 		ControlAddr: netip.AddrPortFrom(z.cfg.ControlHost, controlplane.EndpointPort),

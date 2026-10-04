@@ -10,11 +10,15 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/go-cmp/cmp"
 	"github.com/scionproto/scion/pkg/addr"
 	"github.com/scionproto/scion/pkg/private/util"
+	cppb "github.com/scionproto/scion/pkg/proto/control_plane"
+	cryptopb "github.com/scionproto/scion/pkg/proto/crypto"
 	"github.com/scionproto/scion/pkg/scrypto"
 	"github.com/scionproto/scion/pkg/slayers/path"
 	spath "github.com/scionproto/scion/pkg/slayers/path/scion"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/fancl20/cion/pkg/modules/trustdb"
 	"github.com/fancl20/cion/pkg/modules/trustdb/impl/bbolt"
@@ -466,5 +470,135 @@ func TestParseRoundTrip(t *testing.T) {
 		if clone.Entries[i].Hop != pcb.Entries[i].Hop {
 			t.Errorf("clone entry %d hop differs", i)
 		}
+	}
+}
+
+// declaringBeacon builds the beacon a core A would originate and B would
+// propagate, A declaring its egress link's one-way delay and B none: a link
+// without a sample declares nothing.
+func declaringBeacon(t *testing.T, f *segFixture, now time.Time) *segment.PCB {
+	t.Helper()
+	pcb, err := segment.NewPCB(now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := pcb.AppendEntry(context.Background(), iaA, segment.EntryOptions{
+		Next:          iaB,
+		EgressIfID:    1,
+		EgressLatency: 5 * time.Millisecond,
+	}, macFactory(), f.engines[iaA]); err != nil {
+		t.Fatal(err)
+	}
+	if err := pcb.AppendEntry(context.Background(), iaB, segment.EntryOptions{
+		Next:        iaC,
+		IngressIfID: 1,
+		EgressIfID:  2,
+	}, macFactory(), f.engines[iaB]); err != nil {
+		t.Fatal(err)
+	}
+	return pcb
+}
+
+// TestAppendEntryDeclaresLatency checks the extension's both ends: an entry
+// with a sample declares its egress link's one-way delay — the extension's
+// own microseconds on the wire, the parse seam's duration beside — its
+// signature covering the declaration, and an entry without a sample
+// declares nothing. The wire round trip and the clone propagation performs
+// keep the declaring entry byte-for-byte.
+func TestAppendEntryDeclaresLatency(t *testing.T) {
+	f := newSegFixture(t, iaA, iaB, iaC)
+	pcb := declaringBeacon(t, f, time.Now())
+
+	// The wire form carries the declaration keyed by the egress interface,
+	// in the extension's own unit of microseconds.
+	var hb cryptopb.HeaderAndBody
+	if err := proto.Unmarshal(pcb.Entries[0].Signed.HeaderAndBody, &hb); err != nil {
+		t.Fatal(err)
+	}
+	var body cppb.ASEntrySignedBody
+	if err := proto.Unmarshal(hb.Body, &body); err != nil {
+		t.Fatal(err)
+	}
+	if inter := body.Extensions.GetStaticInfo().GetLatency().GetInter(); len(inter) != 1 ||
+		inter[1] != 5000 {
+
+		t.Errorf("declared inter latency = %v, want {interface 1: 5000μs}", inter)
+	}
+
+	// The parsed entry surfaces the declaration keyed by its link identity.
+	want := map[segment.LinkID]time.Duration{{IA: iaA, IfID: 1}: 5 * time.Millisecond}
+	if diff := cmp.Diff(want, pcb.Entries[0].Latency); diff != "" {
+		t.Errorf("declared latency (-want +got):\n%s", diff)
+	}
+	if pcb.Entries[1].Latency != nil {
+		t.Errorf("entry without a sample declares %v", pcb.Entries[1].Latency)
+	}
+
+	// The signature verifies over the declaration: it covers the whole
+	// signed body the extension rides in.
+	verifier := f.engines[iaC]
+	if _, err := verifier.Verify(context.Background(),
+		pcb.Entries[0].Signed, pcb.AssociatedData(0)...); err != nil {
+		t.Fatalf("entry signature over the declaration: %v", err)
+	}
+
+	raw, err := proto.Marshal(pcb.PB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var pb cppb.PathSegment
+	if err := proto.Unmarshal(raw, &pb); err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := segment.ParsePCB(&pb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if diff := cmp.Diff(want, parsed.Entries[0].Latency); diff != "" {
+		t.Errorf("reparsed declared latency (-want +got):\n%s", diff)
+	}
+	if string(parsed.Entries[0].Signed.HeaderAndBody) !=
+		string(pcb.Entries[0].Signed.HeaderAndBody) {
+
+		t.Error("the declaring entry did not survive the round trip byte-for-byte")
+	}
+
+	// The clone a propagation extends keeps the declaration: upstream
+	// entries forward verbatim.
+	cloned, err := pcb.Clone()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if diff := cmp.Diff(want, cloned.Entries[0].Latency); diff != "" {
+		t.Errorf("cloned declared latency (-want +got):\n%s", diff)
+	}
+}
+
+// TestParseDeclaredLatencyRange checks the parse seam's one validation: a
+// declaration naming an interface no hop field could carry is malformed
+// input, rejected where it enters.
+func TestParseDeclaredLatencyRange(t *testing.T) {
+	body, err := proto.Marshal(&cppb.ASEntrySignedBody{
+		IsdAs: uint64(iaA),
+		HopEntry: &cppb.HopEntry{
+			HopField: &cppb.HopField{},
+		},
+		Extensions: &cppb.PathSegmentExtensions{
+			StaticInfo: &cppb.StaticInfoExtension{
+				Latency: &cppb.LatencyInfo{
+					Inter: map[uint64]uint32{1 << 20: 100},
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := segment.ParsePCB(&cppb.PathSegment{
+		AsEntries: []*cppb.ASEntry{{
+			Signed: &cryptopb.SignedMessage{HeaderAndBody: body},
+		}},
+	}); err == nil {
+		t.Error("parsing an out-of-range declared interface succeeded, want error")
 	}
 }

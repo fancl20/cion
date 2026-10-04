@@ -91,4 +91,7 @@ type Pieces struct {
 	// down entries satisfy no floor and a down neighbor counts as
 	// infinitely slow.
 	Verdicts func() map[uint16]bool
+	// Latencies receives the selection loop's per-link one-way delay
+	// estimates; the beaconer's entries declare them.
+	Latencies *controlplane.LinkLatency
 }
