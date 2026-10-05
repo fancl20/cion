@@ -253,3 +253,63 @@ func TestPublishedHostFollowsLearning(t *testing.T) {
 		t.Errorf("the core's fallback host = %v, want the control host %v", got, control)
 	}
 }
+
+// TestStrandedRedial checks the stranded dialer: an unstranded node's dial
+// pass skips the retired entries, and a stranded one — the selection loop's
+// window found no reachable candidate from the directory — re-dials the
+// rendezvous addresses the table already holds, an answered re-dial reviving
+// the entry as a candidate with the recorded sides for the sweep to settle
+// by the peer's evidence.
+func TestStrandedRedial(t *testing.T) {
+	f := newRendezvousFixture(t, func(cfg *RendezvousConfig) {
+		cfg.IA = rendezvousIA
+	})
+	z, err := New(Config{ControlHost: netip.MustParseAddr("127.0.0.1")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := memory.New()
+	z.Wire(topology.Pieces{IA: zeroconfDraw, Store: store})
+	retired := &links.Link{
+		NeighborIA: rendezvousIA,
+		Local:      netip.MustParseAddrPort("127.0.0.1:40001"),
+		Remote:     netip.MustParseAddrPort("127.0.0.1:40002"),
+		Rendezvous: f.addr,
+		State:      links.StateRetired,
+	}
+	if err := store.Insert(context.Background(), retired); err != nil {
+		t.Fatal(err)
+	}
+	entryOf := func() *links.Link {
+		entries, err := store.All(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, l := range entries {
+			if l.IfID == retired.IfID {
+				return l
+			}
+		}
+		t.Fatal("the retired entry vanished")
+		return nil
+	}
+
+	// Not stranded: the retired entry keeps its state.
+	z.dialJoins(context.Background())
+	if entry := entryOf(); entry.State != links.StateRetired {
+		t.Fatalf("an unstranded dial pass revived the retired entry to %v", entry.State)
+	}
+
+	// Stranded: the re-dial revives it as a candidate, the reply's sides
+	// recorded.
+	z.stranded.Store(true)
+	z.dialJoins(context.Background())
+	entry := entryOf()
+	if entry.State != links.StateCandidate {
+		t.Errorf("the revived entry's state = %v, want a candidate", entry.State)
+	}
+	if !entry.Remote.IsValid() || entry.RemoteIfID == 0 {
+		t.Errorf("the revived entry's remote = %v, interface %d, want the reply's side",
+			entry.Remote, entry.RemoteIfID)
+	}
+}

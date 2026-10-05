@@ -11,6 +11,7 @@ import (
 	"net/netip"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"connectrpc.com/connect"
@@ -93,6 +94,13 @@ type Provider struct {
 	// bootstrap is the first start's completed rendezvous, the seed it
 	// taught both sides landing complete.
 	bootstrap *bootstrapped
+
+	// stranded records the selection loop's finding that no directory
+	// candidate answered the window's probe: the joiner's dial loop then
+	// re-dials the rendezvous addresses the table already holds, retired
+	// entries included — the one address a stranded node independently
+	// holds is worth more than an empty or expired directory snapshot.
+	stranded atomic.Bool
 
 	// mtx guards the one-time assembly of the serving machinery.
 	mtx sync.Mutex
@@ -423,6 +431,7 @@ func (z *Provider) selectionConfig() SelectionConfig {
 		Learn:       z.learn,
 		Evidence:    z.cfg.Evidence,
 		Changed:     z.cfg.Notify,
+		Stranded:    &z.stranded,
 		Interval:    z.cfg.Pacing.Selection,
 		Window:      z.cfg.Pacing.CandidateWindow,
 	}
@@ -450,15 +459,28 @@ func (z *Provider) runJoinDials(ctx context.Context) {
 
 // dialJoins runs one pass of the joiner's dials. The reply names the
 // joiner's own entry — the acceptor's ISD-AS — beside retargeting it, so
-// both sides of the establishment are named before the link serves.
+// both sides of the establishment are named before the link serves. A
+// stranded node — the selection loop's window found no reachable candidate
+// from the directory — dials what it knows: the retired entries re-dial
+// their rendezvous addresses too, and an answered re-dial revives the entry
+// as a candidate, the state flip and the recorded sides, for the sweep to
+// settle by the peer's evidence, exactly as it settles a joiner's. An
+// unanswered one costs a UDP round trip and changes nothing.
 func (z *Provider) dialJoins(ctx context.Context) {
 	entries, err := z.pcs.Store.All(ctx)
 	if err != nil {
 		slog.Error("Reading the link store", "err", err)
 		return
 	}
+	stranded := z.stranded.Load()
 	for _, l := range entries {
-		if !l.Live() || !l.Rendezvous.IsValid() || l.Remote.IsValid() {
+		if !l.Rendezvous.IsValid() {
+			continue
+		}
+		if l.Live() && l.Remote.IsValid() {
+			continue // retargeted already: waiting on the peer's evidence
+		}
+		if !l.Live() && !stranded {
 			continue
 		}
 		reply, _, err := RendezvousEcho(ctx, z.cfg.ControlHost,
@@ -471,6 +493,9 @@ func (z *Provider) dialJoins(ctx context.Context) {
 		l.NeighborIA = reply.IA
 		l.Remote = reply.LinkAddr
 		l.RemoteIfID = reply.IfID
+		if !l.Live() {
+			l.State = links.StateCandidate
+		}
 		if err := z.pcs.Store.Update(ctx, l); err != nil {
 			slog.Error("Retargeting a seeded neighbor", "err", err)
 			continue

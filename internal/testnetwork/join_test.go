@@ -116,6 +116,22 @@ func entryOf(n *assemblyNode, ia addr.IA) *links.Link {
 	return nil
 }
 
+// establishedTo reports whether the node holds an established entry of the
+// neighbor: re-establishment past a retirement mints a second entry beside
+// the retired first, so the live one is what the polls want.
+func establishedTo(n *assemblyNode, ia addr.IA) bool {
+	entries, err := n.app.Links().All(context.Background())
+	if err != nil {
+		return false
+	}
+	for _, l := range entries {
+		if l.NeighborIA.Equal(ia) && l.State == links.StateEstablished {
+			return true
+		}
+	}
+	return false
+}
+
 // bootRendezvousLine brings up the assembly's three-node line — the
 // founding core A, the middle B joined to it by rendezvous, and C below
 // joined to B — on the given loopback hosts.
@@ -263,6 +279,76 @@ func TestJoinByRendezvous(t *testing.T) {
 	})
 	Poll(t, "the restarted B reaches A", func() bool {
 		return pingFrom(ctx, b2, a.app.IA(), a.host)
+	})
+}
+
+// TestLineCutHeals is the cut's integration proof: the three-node line —
+// the core A, the middle B, and C below — where killing B leaves C with
+// every route to A crossing the dead link. C, below the floor of up links,
+// promotes A outright, the establishment riding the rendezvous exchange —
+// for no composed path resolves — and the dead link retires once the new
+// segments serve the tier.
+func TestLineCutHeals(t *testing.T) {
+	t.Parallel()
+	wpki := NewWebPKI(t)
+	ipA, ipB, ipC := hostSlot(t), hostSlot(t), hostSlot(t)
+	a, b, c := bootRendezvousLine(t, wpki, ipA, ipB, ipC)
+	ctx := context.Background()
+
+	// The joins land and C enrolls through the line.
+	Poll(t, "B's link to A", func() bool {
+		e := entryOf(b, a.app.IA())
+		return e != nil && e.State == links.StateEstablished
+	})
+	Poll(t, "C's link to B", func() bool {
+		e := entryOf(c, b.app.IA())
+		return e != nil && e.State == links.StateEstablished
+	})
+	Poll(t, "C enrolled through B", func() bool { return pingFrom(ctx, c, a.app.IA(), a.host) })
+	// The cut's precondition: C's directory holds A — proven by C's probe of
+	// A landing on A's acceptor — for the snapshot is the last one C fetches
+	// through B, and without it the cut leaves C nothing to promote.
+	Poll(t, "C's directory to hold A", func() bool {
+		entries, err := a.app.Links().All(ctx)
+		if err != nil {
+			return false
+		}
+		for _, l := range entries {
+			if l.Live() && l.Remote.Addr() == c.host {
+				return true
+			}
+		}
+		return false
+	})
+
+	// Killing B strands C: every route from C to A crossed the dead link.
+	b.cancel()
+	b.app.Close()
+	cbEntry := entryOf(c, b.app.IA())
+	Poll(t, "C to mark the C–B link down", func() bool {
+		return !c.app.Monitor().Up(cbEntry.IfID)
+	})
+
+	// C promotes A below the floor of up links — reachability outranking
+	// latency — and the establishment rides the rendezvous exchange, for no
+	// composed path resolves into the stranded tier.
+	Poll(t, "C's direct link to A", func() bool { return establishedTo(c, a.app.IA()) })
+	Poll(t, "A's link to C", func() bool { return establishedTo(a, c.app.IA()) })
+
+	// The traffic of the generation swaps survives.
+	deadline := time.Now().Add(10 * time.Second)
+	for !pingFrom(ctx, c, a.app.IA(), a.host) {
+		if time.Now().After(deadline) {
+			t.Fatal("C's echo to A never answered after the cut healed")
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	// The dead link retires once the new segments serve the tier: the
+	// verdict stayed down across the sustained window.
+	Poll(t, "the dead link to retire", func() bool {
+		e := entryOf(c, b.app.IA())
+		return e != nil && e.State == links.StateRetired
 	})
 }
 
