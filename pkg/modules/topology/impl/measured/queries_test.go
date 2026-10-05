@@ -2,12 +2,10 @@ package measured
 
 import (
 	"context"
-	"hash"
 	"testing"
 	"time"
 
 	"github.com/scionproto/scion/pkg/addr"
-	"github.com/scionproto/scion/pkg/scrypto"
 
 	"github.com/fancl20/cion/pkg/modules/pathdb"
 	"github.com/fancl20/cion/pkg/scion"
@@ -19,119 +17,82 @@ var (
 	selX    = addr.MustIAFrom(20, 0xfd0000000031)
 )
 
-// queriesMACHasher builds the test forwarding key's MAC hashers the line
-// segments below hop with.
-func queriesMACHasher() hash.Hash {
-	h, _ := scrypto.InitMac([]byte("0123456789abcdef"))
-	return h
-}
-
-// lineSegment builds an unsigned route-form segment crossing the given ASes
-// in order, every hop on the one test interface.
-func lineSegment(
-	t *testing.T,
-	segType pathdb.SegmentType,
-	now time.Time,
-	ias ...addr.IA,
-) *pathdb.Segment {
-
+// lineSegments builds the enumeration fixtures' up and down segments: an up
+// segment the local node terminates and two downs to the peer, the fresh one
+// a hop longer, every hop on the one test interface.
+func lineSegments(t *testing.T, now time.Time) (up, freshDown, staleDown *pathdb.Segment) {
 	t.Helper()
-	pcb, err := segment.PCBWithID(now, 0x111)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for i, ia := range ias {
-		opts := segment.EntryOptions{}
-		if i > 0 {
-			opts.IngressIfID = 1
-		}
-		if i < len(ias)-1 {
-			opts.EgressIfID = 1
-		}
-		if _, err := pcb.AppendRouteHop(ia, opts, queriesMACHasher); err != nil {
-			t.Fatal(err)
-		}
-	}
-	return &pathdb.Segment{Type: segType, PCB: pcb}
-}
-
-// enumPathDB is an in-memory path database for the enumeration fixtures.
-type enumPathDB struct{ segs []*pathdb.Segment }
-
-func (d *enumPathDB) Insert(_ context.Context, seg *pathdb.Segment) (bool, error) {
-	d.segs = append(d.segs, seg)
-	return true, nil
-}
-
-func (d *enumPathDB) Get(_ context.Context, q pathdb.Query) ([]*pathdb.Segment, error) {
-	var out []*pathdb.Segment
-	for _, s := range d.segs {
-		if q.Type != pathdb.SegmentTypeUnspecified && q.Type != s.Type {
-			continue
-		}
-		out = append(out, s)
-	}
-	return out, nil
-}
-
-func (d *enumPathDB) DeleteExpired(context.Context, time.Time) (int, error) { return 0, nil }
-func (d *enumPathDB) Close() error                                          { return nil }
-
-// enumSelection builds a selection whose provider serves the given up and
-// down segments.
-func enumSelection(ups, downs []*pathdb.Segment) *selection {
-	db := &enumPathDB{segs: ups}
-	return &selection{cfg: SelectionConfig{
-		IA: selIA,
-		Provider: &scion.PathProvider{
-			IA:     selIA,
-			DB:     db,
-			Lookup: func(context.Context, addr.IA) []*pathdb.Segment { return downs },
-		},
-	}}
-}
-
-// TestFreshestBaseline checks the baseline carrier and the excluded
-// baseline: freshness picks the route the echo measures, the exclusion
-// takes the freshest survivor, and excluding what every route crosses
-// leaves none — the cut-critical reading.
-func TestFreshestBaseline(t *testing.T) {
-	now := time.Now()
-	up := lineSegment(t, pathdb.SegmentTypeUp, now, selCore, selIA)
-	freshDown := lineSegment(t, pathdb.SegmentTypeDown, now, selCore, selX, selPeer)
-	staleDown := lineSegment(t, pathdb.SegmentTypeDown,
+	up = lineSegment(t, pathdb.SegmentTypeUp, now, selCore, selIA)
+	freshDown = lineSegment(t, pathdb.SegmentTypeDown, now, selCore, selX, selPeer)
+	staleDown = lineSegment(t, pathdb.SegmentTypeDown,
 		now.Add(-time.Hour), selCore, selPeer)
+	return
+}
+
+// TestFreshestClean checks the baseline's carrier: the freshest clean
+// candidate carries it, a crossing candidate — the wrapper's last resort —
+// never, and a candidate over one of the node's own verdict-down links
+// neither. All dirty leaves it unmeasured rather than served over a route
+// the network would not.
+func TestFreshestClean(t *testing.T) {
+	verdicts := map[uint16]bool{7: false} // the node's own dead interface
+	s := &selection{cfg: SelectionConfig{
+		IA:       selIA,
+		Verdicts: func() map[uint16]bool { return verdicts },
+	}}
+	now := time.Now()
+	dirty := []scion.Candidate{
+		{Fresh: now, Crossing: true},                                // flagged
+		{Fresh: now, Links: []segment.LinkID{{IA: selIA, IfID: 7}}}, // over the dead interface
+	}
+	if c := s.freshest(dirty); c != nil {
+		t.Errorf("freshest over the dirty pair = %v, want none", c.Fresh)
+	}
+	// The dirty pair beside one clean candidate however stale: the clean
+	// one carries the baseline.
+	stale := append(dirty, scion.Candidate{
+		Fresh: now.Add(-time.Hour), Links: []segment.LinkID{link(selX)},
+	})
+	if c := s.freshest(stale); c == nil || !c.Fresh.Equal(now.Add(-time.Hour)) {
+		t.Errorf("freshest = %v, want the stale clean one", c)
+	}
+	// A clean candidate at the head outranks them all.
+	fresh := append(stale, scion.Candidate{Fresh: now})
+	if c := s.freshest(fresh); c == nil || !c.Fresh.Equal(now) {
+		t.Errorf("freshest over the clean set = %v, want the fresh clean one", c)
+	}
+}
+
+// TestMeasureExcluded checks the excluded measurement: the enumeration to
+// the tier's members with the link excluded takes the freshest clean
+// survivor, and excluding what every route crosses leaves none — the
+// cut-critical reading. No probe conn resolves a survivor the echo cannot
+// answer: unmeasured, never cut-critical.
+func TestMeasureExcluded(t *testing.T) {
+	now := time.Now()
+	up, freshDown, staleDown := lineSegments(t, now)
 	s := enumSelection([]*pathdb.Segment{up},
 		[]*pathdb.Segment{freshDown, staleDown})
+	entries := map[addr.IA]DirectoryEntry{selPeer: entryOf(selPeer)}
+	tr := &tier{members: []member{{ia: selPeer}}}
 
-	// The freshest candidate carries the baseline, the longer route
-	// included: freshness decides, not hops.
-	c := s.freshest(context.Background(), selPeer)
-	if c == nil {
-		t.Fatal("freshest = nil, want the fresh join")
+	// The excluded enumeration takes the freshest survivor: the fresh route
+	// crosses the excluded link, the stale one carries it.
+	ex := s.measureExcluded(context.Background(), tr, entries,
+		segment.LinkID{IA: selX, IfID: 1})
+	if !ex.survived {
+		t.Error("excluded measurement = none, want the stale survivor")
 	}
-	if !c.Fresh.Equal(freshDown.PCB.Timestamp()) {
-		t.Errorf("freshest = %v, want the fresh down's %v",
-			c.Fresh, freshDown.PCB.Timestamp())
-	}
-
-	// The excluded baseline enumerates minus the link: the fresh route
-	// crosses it, so the stale survivor carries the excluded baseline.
-	c = s.freshest(context.Background(), selPeer, segment.LinkID{IA: selX, IfID: 1})
-	if c == nil {
-		t.Fatal("excluded baseline = nil, want the stale survivor")
-	}
-	if !c.Fresh.Equal(staleDown.PCB.Timestamp()) {
-		t.Errorf("excluded baseline = %v, want the stale down's %v",
-			c.Fresh, staleDown.PCB.Timestamp())
+	if ex.echo != 0 {
+		t.Errorf("excluded echo without a probe conn = %v, want the unanswered 0", ex.echo)
 	}
 
 	// Excluding a link every route crosses — the up's core egress — leaves
 	// no route into the tier: the link is cut-critical.
-	if c := s.freshest(context.Background(), selPeer,
-		segment.LinkID{IA: selCore, IfID: 1}); c != nil {
-
-		t.Errorf("excluded baseline over a cut-critical link = %v, want none", c.Fresh)
+	ex = s.measureExcluded(context.Background(), tr, entries,
+		segment.LinkID{IA: selCore, IfID: 1})
+	if ex.survived {
+		t.Error("excluded measurement over a cut-critical link survived")
 	}
 }
 
@@ -141,6 +102,11 @@ func cand(links ...segment.LinkID) scion.Candidate {
 }
 
 func link(ia addr.IA) segment.LinkID { return segment.LinkID{IA: ia, IfID: 1} }
+
+// declared builds an enumerated route declaring its one-way latency.
+func declared(oneWay time.Duration) scion.Candidate {
+	return scion.Candidate{Latency: &oneWay}
+}
 
 // TestRouteCount checks the tier's route count: the up links beside the
 // composed paths traversing none of them, the second path counting only
@@ -195,9 +161,11 @@ func TestRouteCount(t *testing.T) {
 	}
 }
 
-// TestTierPrice checks the promotion estimate's pricing: the declared
-// one-way sums doubled to meet the round trips they are judged against,
-// the measured baseline beside them, an undeclared route pricing nothing.
+// TestTierPrice checks the promotion estimate's pricing: the measured
+// baseline is the authority wherever an echo exists — a misstated
+// declaration moves no measured baseline — the declared one-way sums
+// doubled to meet the round trips they are judged against where none does,
+// and an undeclared edge prices nothing.
 func TestTierPrice(t *testing.T) {
 	declared := 8 * time.Millisecond
 	pricier := 20 * time.Millisecond
@@ -212,8 +180,8 @@ func TestTierPrice(t *testing.T) {
 	if got := tierPrice(12*time.Millisecond, routes); got != 12*time.Millisecond {
 		t.Errorf("tier price beside the measured baseline = %v, want 12ms", got)
 	}
-	if got := tierPrice(30*time.Millisecond, routes); got != 16*time.Millisecond {
-		t.Errorf("tier price past the measured baseline = %v, want 16ms", got)
+	if got := tierPrice(30*time.Millisecond, routes); got != 30*time.Millisecond {
+		t.Errorf("tier price past a misstated declaration = %v, want the measured 30ms", got)
 	}
 	if got := tierPrice(0, routes[1:2]); got != 0 {
 		t.Errorf("tier price of undeclared routes = %v, want 0", got)

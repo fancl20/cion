@@ -3,6 +3,7 @@ package measured
 import (
 	"context"
 	"net/netip"
+	"sync/atomic"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -12,25 +13,31 @@ import (
 	"github.com/fancl20/cion/pkg/controlplane"
 	"github.com/fancl20/cion/pkg/modules/links"
 	"github.com/fancl20/cion/pkg/modules/links/impl/memory"
+	"github.com/fancl20/cion/pkg/scion"
+	"github.com/fancl20/cion/pkg/segment"
 )
 
 // selFixture is the selection loop's test harness: a memory link store, a
-// directory snapshot, the monitor's verdicts, injected measurements, and
-// injected candidate-grace probes. The establishment is recorded rather than
-// performed; the promotion and demotion rules are what the tests assert.
+// directory snapshot, the monitor's verdicts, injected measurements and
+// excluded measurements, and injected candidate-grace probes. The
+// establishment is recorded rather than performed; the promotion and
+// retirement rules are what the tests assert.
 type selFixture struct {
 	store     *memory.DB
 	directory []DirectoryEntry
-	samples   map[addr.IA]measurement
+	samples   map[addr.IA]sample
 	verdicts  map[uint16]bool
-	silent    map[addr.IA]bool // neighbors whose probes went unanswered
 	down      map[addr.IA]bool // neighbors whose verdict is down
 	// alive holds the candidates whose rendezvous socket answers the
 	// sweep's probe, keyed by neighbor ISD-AS.
 	alive map[addr.IA]bool
 	// probed holds the directory entries the last pass measured, the scope
 	// filter's own record.
-	probed      map[addr.IA]bool
+	probed map[addr.IA]bool
+	// excluded holds the injected excluded measurements by the questioned
+	// link's interface ID; an unset one resolves a survivor that answers
+	// nothing — unmeasured, never cut-critical.
+	excluded    map[uint16]*excludedSample
 	established []addr.IA // the promoted candidates, in order
 	changed     int
 	sel         *selection
@@ -68,12 +75,12 @@ func newSelFixture(t *testing.T, neighbors ...addr.IA) *selFixture {
 	t.Helper()
 	f := &selFixture{
 		store:    memory.New(),
-		samples:  make(map[addr.IA]measurement),
+		samples:  make(map[addr.IA]sample),
 		verdicts: make(map[uint16]bool),
-		silent:   make(map[addr.IA]bool),
 		down:     make(map[addr.IA]bool),
 		alive:    make(map[addr.IA]bool),
 		probed:   make(map[addr.IA]bool),
+		excluded: make(map[uint16]*excludedSample),
 	}
 	for _, ia := range neighbors {
 		if err := f.store.Insert(context.Background(), &links.Link{
@@ -87,7 +94,7 @@ func newSelFixture(t *testing.T, neighbors ...addr.IA) *selFixture {
 	}
 	for _, ia := range neighbors {
 		f.directory = append(f.directory, entryOf(ia))
-		f.samples[ia] = measurement{direct: 10 * time.Millisecond, path: 20 * time.Millisecond}
+		f.samples[ia] = sm(10*time.Millisecond, 20*time.Millisecond)
 	}
 	f.sel = &selection{
 		cfg: SelectionConfig{
@@ -100,9 +107,15 @@ func newSelFixture(t *testing.T, neighbors ...addr.IA) *selFixture {
 			ControlAddr: netip.MustParseAddrPort("127.0.0.1:30042"),
 		},
 		streaks: make(map[addr.IA]*peerStreak),
-		probeFn: func(_ context.Context, e DirectoryEntry, _ *links.Link) measurement {
+		probeFn: func(_ context.Context, e DirectoryEntry, _ *links.Link) sample {
 			f.probed[e.IA] = true
 			return f.samples[e.IA]
+		},
+		excludedFn: func(_ context.Context, _ []addr.IA, exclude segment.LinkID) excludedSample {
+			if ex := f.excluded[exclude.IfID]; ex != nil {
+				return *ex
+			}
+			return excludedSample{survived: true}
 		},
 		establishFn: func(_ context.Context, e DirectoryEntry, _ string) bool {
 			if err := f.store.Insert(context.Background(), &links.Link{
@@ -183,34 +196,15 @@ func (f *selFixture) hasEntry(t *testing.T, ia addr.IA) bool {
 }
 
 // candidate adds a directory candidate with the given sample.
-func (f *selFixture) candidate(ia addr.IA, direct, path time.Duration) {
+func (f *selFixture) candidate(ia addr.IA, direct, path time.Duration, routes ...scion.Candidate) {
 	f.directory = append(f.directory, entryOf(ia))
-	f.samples[ia] = measurement{direct: direct, path: path}
+	f.samples[ia] = sample{m: measurement{direct: direct, path: path}, candidates: routes}
 }
 
-// TestSelectionDeclaresLatency checks the window's declarations: each
-// neighbor's echo round trip halved lands in the shared table the
-// beaconer's entries read, and a link the next window does not measure
-// declares nothing again.
-func TestSelectionDeclaresLatency(t *testing.T) {
-	f := newSelFixture(t, selPeer)
-	latencies := controlplane.NewLinkLatency()
-	f.sel.cfg.Latencies = latencies
-	ifID := f.ifID(t, selPeer)
-
-	f.samples[selPeer] = measurement{direct: 10 * time.Millisecond, path: 20 * time.Millisecond}
-	f.pass(t)
-	if got := latencies.Sample(ifID); got != 5*time.Millisecond {
-		t.Errorf("declared one-way delay = %v, want the halved round trip 5ms", got)
-	}
-
-	// A window the link goes unanswered declares nothing: the next entries
-	// carry no stale sample.
-	f.samples[selPeer] = measurement{}
-	f.pass(t)
-	if got := latencies.Sample(ifID); got != 0 {
-		t.Errorf("declared one-way delay past an unanswered window = %v, want 0", got)
-	}
+// setExcluded injects the excluded measurement of the neighbor's link.
+func (f *selFixture) setExcluded(t *testing.T, ia addr.IA, ex excludedSample) {
+	t.Helper()
+	f.excluded[f.ifID(t, ia)] = &ex
 }
 
 // ifID returns the neighbor's entry's interface ID.
@@ -227,6 +221,31 @@ func (f *selFixture) ifID(t *testing.T, ia addr.IA) uint16 {
 	}
 	t.Fatalf("no entry for %s", ia)
 	return 0
+}
+
+// TestSelectionDeclaresLatency checks the window's declarations: each
+// neighbor's echo round trip halved lands in the shared table the
+// beaconer's entries read, and a link the next window does not measure
+// declares nothing again.
+func TestSelectionDeclaresLatency(t *testing.T) {
+	f := newSelFixture(t, selPeer)
+	latencies := controlplane.NewLinkLatency()
+	f.sel.cfg.Latencies = latencies
+	ifID := f.ifID(t, selPeer)
+
+	f.samples[selPeer] = sm(10*time.Millisecond, 20*time.Millisecond)
+	f.pass(t)
+	if got := latencies.Sample(ifID); got != 5*time.Millisecond {
+		t.Errorf("declared one-way delay = %v, want the halved round trip 5ms", got)
+	}
+
+	// A window the link goes unanswered declares nothing: the next entries
+	// carry no stale sample.
+	f.samples[selPeer] = sm(0, 0)
+	f.pass(t)
+	if got := latencies.Sample(ifID); got != 0 {
+		t.Errorf("declared one-way delay past an unanswered window = %v, want 0", got)
+	}
 }
 
 // TestSelectionFloorPromotion checks the redundancy floor: below it, any
@@ -249,13 +268,32 @@ func TestSelectionFloorPromotion(t *testing.T) {
 	}
 }
 
-// TestSelectionRatioPromotion checks the sustained-evidence rule: a
-// candidate whose direct link beats its path baseline by the promotion ratio
-// is promoted on the second consecutive good window, never on the first,
-// and a candidate that does not beat the baseline never is.
-func TestSelectionRatioPromotion(t *testing.T) {
+// TestSelectionStrandedPromotion checks the stranded clause: a tier no live
+// route resolves into admits its fastest reachable member at once, no
+// streak — the establishment riding the rendezvous path — and an
+// unreachable member of the same tier is not that member.
+func TestSelectionStrandedPromotion(t *testing.T) {
+	f := newSelFixture(t, selPeer, selA) // at the floor
+	// A slow tier of two: one member reachable over the rendezvous echo,
+	// one silent. No up links and no clean candidates reach into it.
+	f.candidate(selB, 22*time.Millisecond, 0)
+	f.candidate(selC, 30*time.Millisecond, 0)
+
+	f.pass(t) // the first window establishes: no streak for the stranded
+	if len(f.established) != 1 || !f.established[0].Equal(selB) {
+		t.Fatalf("promoted %v on the first window, want the stranded tier's fastest %v",
+			f.established, selB)
+	}
+}
+
+// TestSelectionPricedPromotion checks the beaten-baseline case: a candidate
+// whose direct round trip beats its tier's price by the promotion ratio is
+// promoted on the second consecutive good window, never on the first, and a
+// candidate that beats no price never is — however cheap the declarations
+// its unreachable self would price.
+func TestSelectionPricedPromotion(t *testing.T) {
 	f := newSelFixture(t, selPeer, selA)                        // at the floor
-	f.candidate(selB, 8*time.Millisecond, 20*time.Millisecond)  // beats 0.8
+	f.candidate(selB, 8*time.Millisecond, 20*time.Millisecond)  // beats 0.8 of the 20ms price
 	f.candidate(selC, 18*time.Millisecond, 20*time.Millisecond) // does not
 
 	f.pass(t)
@@ -267,7 +305,56 @@ func TestSelectionRatioPromotion(t *testing.T) {
 		t.Fatalf("promoted %v, want the sustained winner %v", f.established, selB)
 	}
 	if f.hasEntry(t, selC) {
-		t.Error("a candidate that does not beat its baseline was promoted")
+		t.Error("a candidate that beats no price was promoted")
+	}
+
+	// A candidate that answers no probe is never promoted, however
+	// favorable its tier's declared prices.
+	f.candidate(selD, 0, 0, declared(1*time.Millisecond))
+	for range 3 {
+		f.pass(t)
+	}
+	if f.hasEntry(t, selD) {
+		t.Error("an unreachable candidate was promoted")
+	}
+}
+
+// TestSelectionSingleRoutePromotion checks the redundancy purchase: a
+// single-route tier admits a second member within the demotion ratio of the
+// price, sustained, and rejects one outside it.
+func TestSelectionSingleRoutePromotion(t *testing.T) {
+	f := newSelFixture(t, selPeer, selA) // at the floor
+	// A slow tier of one member, its single route the clean path to it:
+	// 22ms is within the demotion ratio of the 20ms price.
+	f.candidate(selB, 22*time.Millisecond, 20*time.Millisecond, cand(link(selX)))
+	f.candidate(selC, 26*time.Millisecond, 20*time.Millisecond, cand(link(selX)))
+
+	f.pass(t)
+	if len(f.established) != 0 {
+		t.Fatal("the second route was purchased on a single window")
+	}
+	f.pass(t)
+	if len(f.established) != 1 || !f.established[0].Equal(selB) {
+		t.Fatalf("promoted %v, want the member within the ratio %v", f.established, selB)
+	}
+	if f.hasEntry(t, selC) {
+		t.Error("a member outside the demotion ratio of the price was admitted")
+	}
+}
+
+// TestSelectionUnpricedTier checks the unpriced reading: a tier nothing
+// prices — no echo answered and no edge declares — promotes nothing,
+// however many windows pass.
+func TestSelectionUnpricedTier(t *testing.T) {
+	f := newSelFixture(t, selPeer, selA)
+	// A slow tier of one member whose single route is clean but undeclared.
+	f.candidate(selB, 22*time.Millisecond, 0, cand(link(selX)))
+
+	for range 4 {
+		f.pass(t)
+	}
+	if len(f.established) != 0 {
+		t.Fatal("an unpriced tier promoted a candidate")
 	}
 }
 
@@ -279,9 +366,9 @@ func TestSelectionFlappingCandidate(t *testing.T) {
 	f.candidate(selB, 8*time.Millisecond, 20*time.Millisecond)
 
 	f.pass(t) // good: streak 1
-	f.samples[selB] = measurement{direct: 18 * time.Millisecond, path: 20 * time.Millisecond}
+	f.samples[selB] = sm(18*time.Millisecond, 20*time.Millisecond)
 	f.pass(t) // bad: streak reset
-	f.samples[selB] = measurement{direct: 8 * time.Millisecond, path: 20 * time.Millisecond}
+	f.samples[selB] = sm(8*time.Millisecond, 20*time.Millisecond)
 	f.pass(t) // good again: streak 1
 	f.pass(t) // good: streak 2 — promoted now, four windows in
 	if len(f.established) != 1 || !f.established[0].Equal(selB) {
@@ -289,128 +376,195 @@ func TestSelectionFlappingCandidate(t *testing.T) {
 	}
 }
 
-// TestSelectionDemotion checks the demotion rule: a neighbor whose direct
-// link durably loses to its path baseline retires on the third consecutive
-// bad window, and never below the floor.
-func TestSelectionDemotion(t *testing.T) {
+// TestSelectionOneEstablishment checks the window's budget: two stranded
+// tiers' cases running together still establish one link, the fastest
+// member of the strandedest the winner.
+func TestSelectionOneEstablishment(t *testing.T) {
+	f := newSelFixture(t, selPeer, selA) // at the floor
+	// Two slow tiers, both stranded: the fastest reachable member of the
+	// first wins the one establishment.
+	f.candidate(selB, 22*time.Millisecond, 0)
+	f.candidate(selC, 30*time.Millisecond, 0)
+	f.candidate(selD, 80*time.Millisecond, 0)
+
+	f.pass(t)
+	if len(f.established) != 1 || !f.established[0].Equal(selB) {
+		t.Fatalf("established %v, want the single fastest stranded member %v",
+			f.established, selB)
+	}
+}
+
+// TestSelectionUselessRetirement checks the useless rule: a link whose
+// excluded baseline serves its tier no worse than the demotion ratio above
+// the price retires on the third consecutive bad window, the survivor is
+// measured each window — an unanswered one extends no streak, a useful one
+// resets it — and never below the floor of up links.
+func TestSelectionUselessRetirement(t *testing.T) {
 	f := newSelFixture(t, selPeer, selA, selB) // above the floor of two
-	f.samples[selA] = measurement{direct: 30 * time.Millisecond, path: 20 * time.Millisecond}
+	// A's exclusion leaves the tier served at the price — useless — and its
+	// own direct round trip earns nothing: the retirement sticks.
+	f.samples[selA] = sm(18*time.Millisecond, 20*time.Millisecond)
+	f.setExcluded(t, selA, excludedSample{survived: true, echo: 20 * time.Millisecond})
 
 	f.pass(t)
 	f.pass(t)
 	if f.state(t, selA) != links.StateEstablished {
-		t.Fatal("a neighbor was demoted before three bad windows")
+		t.Fatal("a neighbor was retired before three bad windows")
 	}
 	f.pass(t)
 	if f.state(t, selA) != links.StateRetired {
-		t.Fatal("a durably slow neighbor was not demoted")
-	}
-	if f.state(t, selPeer) != links.StateEstablished || f.state(t, selB) != links.StateEstablished {
-		t.Error("demotion took neighbors other than the slow one")
+		t.Fatal("a durably useless neighbor was not retired")
 	}
 
-	// At the floor, the same bad evidence retires nothing.
-	f.samples[selPeer] = measurement{direct: 30 * time.Millisecond, path: 20 * time.Millisecond}
+	// At the floor, the same useless evidence retires nothing.
+	f.setExcluded(t, selPeer, excludedSample{survived: true, echo: 20 * time.Millisecond})
 	for range 5 {
 		f.pass(t)
 	}
 	if f.state(t, selPeer) != links.StateEstablished || f.state(t, selB) != links.StateEstablished {
-		t.Error("a demotion below the redundancy floor happened")
+		t.Error("an up link retired at the floor")
 	}
 }
 
-// TestSelectionVerdictDownDemotion checks the liveness rule: a neighbor
-// whose verdict is down counts as infinitely slow — however recent its last
-// sample — and retires on the third window, never below the floor.
-func TestSelectionVerdictDownDemotion(t *testing.T) {
+// TestSelectionUselessStreak checks the measurement's own rules: a window
+// the excluded enumeration resolves a survivor the echo cannot answer
+// leaves the streak intact but unextended — no evidence, no retirement —
+// and a window the survivor serves the tier usefully resets it.
+func TestSelectionUselessStreak(t *testing.T) {
+	// Unanswered: the streak survives a quiet window unextended.
 	f := newSelFixture(t, selPeer, selA, selB)
-	// B is verdict-down with the freshest of samples; the verdict outranks
-	// the sample.
+	f.samples[selA] = sm(18*time.Millisecond, 20*time.Millisecond)
+	f.setExcluded(t, selA, excludedSample{survived: true, echo: 20 * time.Millisecond})
+	f.pass(t)                                              // bad: streak 1
+	f.pass(t)                                              // bad: streak 2
+	f.setExcluded(t, selA, excludedSample{survived: true}) // the echo went unanswered
+	f.pass(t)                                              // unmeasured: streak 2 still
+	f.setExcluded(t, selA, excludedSample{survived: true, echo: 20 * time.Millisecond})
+	f.pass(t) // bad: streak 3 — retired now
+	if f.state(t, selA) != links.StateRetired {
+		t.Fatal("the unmeasured window extended the streak")
+	}
+
+	// Useful: the streak resets.
+	f = newSelFixture(t, selPeer, selA, selB)
+	f.samples[selA] = sm(18*time.Millisecond, 20*time.Millisecond)
+	f.setExcluded(t, selA, excludedSample{survived: true, echo: 20 * time.Millisecond})
+	f.pass(t) // bad: streak 1
+	f.pass(t) // bad: streak 2
+	f.setExcluded(t, selA, excludedSample{survived: true, echo: 40 * time.Millisecond})
+	f.pass(t) // useful: reset
+	f.setExcluded(t, selA, excludedSample{survived: true, echo: 20 * time.Millisecond})
+	f.pass(t) // bad: streak 1
+	if f.state(t, selA) != links.StateEstablished {
+		t.Fatal("a neighbor was retired without three consecutive bad windows")
+	}
+}
+
+// TestSelectionVerdictDownRetirement checks the liveness rule: a neighbor
+// whose verdict stays down retires on the third window — its recovery path
+// re-establishment, the peer remaining a candidate the window measures.
+func TestSelectionVerdictDownRetirement(t *testing.T) {
+	f := newSelFixture(t, selPeer, selA, selB)
 	f.down[selB] = true
 
 	f.pass(t)
 	f.pass(t)
 	if f.state(t, selB) != links.StateEstablished {
-		t.Fatal("a down neighbor was demoted before three windows")
+		t.Fatal("a down neighbor was retired before three windows")
 	}
 	f.pass(t)
 	if f.state(t, selB) != links.StateRetired {
-		t.Fatal("a durably down neighbor was not demoted")
+		t.Fatal("a durably down neighbor was not retired")
 	}
 	for _, ia := range []addr.IA{selPeer, selA} {
 		if f.state(t, ia) != links.StateEstablished {
-			t.Errorf("demotion took the up neighbor %s", ia)
+			t.Errorf("retirement took the up neighbor %s", ia)
 		}
 	}
 }
 
-// TestSelectionFloorCountsDownLinks checks the two floors' arithmetic: the
-// promotion floor counts up links only — a node whose every neighbor went
-// down promotes from the directory rather than resting on verdicts — while
-// the demotion floor counts established entries, so a peer whose BFD never
-// arrives keeps its link established with the floor counting it.
-func TestSelectionFloorCountsDownLinks(t *testing.T) {
-	// At the established floor, a verdict-down neighbor is kept: its
-	// verdict is reversible, and a bad link is still a link.
+// TestSelectionFloorCountsUpLinks checks the floor's arithmetic: it counts
+// up links only, so a link the verdict marks down retires where the old
+// established-entry floor would have held it, and never blocks another's
+// retirement — while an up link never retires at the floor.
+func TestSelectionFloorCountsUpLinks(t *testing.T) {
+	// The down link retires at the up-link floor: it is no redundancy and
+	// holds no floor of its own.
 	f := newSelFixture(t, selPeer, selA)
 	f.down[selPeer] = true
-	for range 5 {
+	for range DemoteWindows {
 		f.pass(t)
 	}
-	for _, ia := range []addr.IA{selPeer, selA} {
-		if f.state(t, ia) != links.StateEstablished {
-			t.Fatalf("the down neighbor %s was demoted at the floor", ia)
-		}
+	if f.state(t, selPeer) != links.StateRetired {
+		t.Fatal("the verdict-down link was held at the floor it does not count in")
+	}
+	if f.state(t, selA) != links.StateEstablished {
+		t.Error("retirement took the up link beside it")
 	}
 
 	// The same node's promotion floor counts up links only: below it, a
 	// reachable candidate is promoted outright.
+	f = newSelFixture(t, selPeer, selA)
+	f.down[selPeer] = true
 	f.candidate(selB, 30*time.Millisecond, 10*time.Millisecond)
 	f.pass(t)
 	if len(f.established) != 1 || !f.established[0].Equal(selB) {
 		t.Fatalf("promoted %v, want the reachable candidate below the up-link floor",
 			f.established)
 	}
+}
 
-	// Above the floor, every neighbor going down retires them down to it —
-	// the floor holds at every instant.
-	f = newSelFixture(t, selPeer, selA, selB)
-	f.down[selPeer] = true
-	f.down[selA] = true
+// TestSelectionCutCritical checks the guard: a link whose exclusion leaves
+// its tier without a live route never retires, however slow its verdict or
+// useless its exclusion — the bridge survives on measured merit, healing is
+// promotion's work.
+func TestSelectionCutCritical(t *testing.T) {
+	f := newSelFixture(t, selPeer, selA, selB, selC)
+	// B is the slow tier's only link, and its exclusion strands the tier:
+	// no survivor, no other up link.
+	f.samples[selB] = sm(50*time.Millisecond, 60*time.Millisecond)
+	f.setExcluded(t, selB, excludedSample{})
 	f.down[selB] = true
-	for range DemoteWindows {
+	// A is useless in the fast tier, its exclusion serving it no worse.
+	f.samples[selA] = sm(18*time.Millisecond, 20*time.Millisecond)
+	f.setExcluded(t, selA, excludedSample{survived: true, echo: 20 * time.Millisecond})
+
+	for range 5 {
 		f.pass(t)
 	}
-	retired := 0
-	for _, ia := range []addr.IA{selPeer, selA, selB} {
-		if f.state(t, ia) == links.StateRetired {
-			retired++
-		}
+	if f.state(t, selB) != links.StateEstablished {
+		t.Fatal("the cut-critical bridge was retired")
 	}
-	if retired != 1 {
-		t.Fatalf("retired %d of three down neighbors, want the one the floor allows", retired)
+	if f.state(t, selA) != links.StateRetired {
+		t.Error("the useless link beside it kept its entry")
 	}
 }
 
-// TestSelectionCapDisplacement checks the cap: at it, a candidate that beats
-// the worst neighbor by the promotion ratio with sustained evidence
-// displaces it; one that does not beat it changes nothing.
-func TestSelectionCapDisplacement(t *testing.T) {
+// TestSelectionCapEviction checks the cap: at it, an admission evicts the
+// retirement-qualified neighbor whose exclusion moves its tier's baseline
+// least, ties to the slower direct sample; none qualifying means no
+// promotion; and a bridge whose exclusion strands its tier is not eligible
+// and blocks the promotion.
+func TestSelectionCapEviction(t *testing.T) {
 	neighbors := []addr.IA{selPeer, selA, selB, selC}
 	f := newSelFixture(t, neighbors...)
 	f.sel.cfg.MaxLinks = len(neighbors)
-	// B is the worst neighbor: slowest direct link.
-	f.samples[selB] = measurement{direct: 40 * time.Millisecond, path: 10 * time.Millisecond}
-	// The candidate beats B by the ratio, but not the others.
-	f.candidate(selD, 25*time.Millisecond, 40*time.Millisecond)
+	// B is the slower direct sample of the two least-harm evictions; the
+	// other two exclusions serve their tiers too well to qualify.
+	f.setExcluded(t, selA, excludedSample{survived: true, echo: 20 * time.Millisecond})
+	f.setExcluded(t, selB, excludedSample{survived: true, echo: 20 * time.Millisecond})
+	f.setExcluded(t, selPeer, excludedSample{survived: true, echo: 40 * time.Millisecond})
+	f.setExcluded(t, selC, excludedSample{survived: true, echo: 40 * time.Millisecond})
+	f.samples[selB] = sm(12*time.Millisecond, 20*time.Millisecond)
+	f.candidate(selD, 8*time.Millisecond, 20*time.Millisecond)
 
 	f.pass(t) // streak 1
-	f.pass(t) // streak 2: displaces B
+	f.pass(t) // streak 2: evicts B and admits D
 	if len(f.established) != 1 || !f.established[0].Equal(selD) {
 		t.Fatalf("promoted %v, want the displacing candidate", f.established)
 	}
 	if f.state(t, selB) != links.StateRetired {
-		t.Error("the worst neighbor was not displaced")
+		t.Error("the slower of the least-harm pair was not displaced")
 	}
 	for _, ia := range []addr.IA{selPeer, selA, selC} {
 		if f.state(t, ia) != links.StateEstablished {
@@ -418,12 +572,64 @@ func TestSelectionCapDisplacement(t *testing.T) {
 		}
 	}
 
-	// A candidate that does not beat the worst neighbor changes nothing.
-	f.candidate(selIA, 39*time.Millisecond, 40*time.Millisecond)
+	// None qualifying means no promotion: the cap stands.
+	f = newSelFixture(t, neighbors...)
+	f.sel.cfg.MaxLinks = len(neighbors)
+	for _, ia := range neighbors {
+		f.setExcluded(t, ia, excludedSample{survived: true, echo: 40 * time.Millisecond})
+	}
+	f.candidate(selD, 8*time.Millisecond, 20*time.Millisecond)
 	f.pass(t)
 	f.pass(t)
-	if len(f.established) != 1 {
-		t.Error("a candidate that beats no neighbor displaced one")
+	if len(f.established) != 0 {
+		t.Error("a candidate displaced a neighbor no retirement rule qualified")
+	}
+
+	// The bridge is not eligible: its exclusion strands its tier, so the
+	// promotion it alone could serve is blocked.
+	f = newSelFixture(t, neighbors...)
+	f.sel.cfg.MaxLinks = len(neighbors)
+	f.samples[selB] = sm(50*time.Millisecond, 60*time.Millisecond)
+	f.setExcluded(t, selB, excludedSample{})
+	f.down[selB] = true
+	for _, ia := range []addr.IA{selPeer, selA, selC} {
+		f.setExcluded(t, ia, excludedSample{survived: true, echo: 40 * time.Millisecond})
+	}
+	// Three windows build the dead bridge's sustained-down streak — the
+	// retirement test it would qualify under — while the candidate earns
+	// none; then the candidate turns fast.
+	f.candidate(selD, 18*time.Millisecond, 20*time.Millisecond)
+	for range 3 {
+		f.pass(t)
+	}
+	f.samples[selD] = sm(8*time.Millisecond, 20*time.Millisecond)
+	f.pass(t) // streak 1
+	f.pass(t) // streak 2: the eviction finds no eligible neighbor
+	if len(f.established) != 0 {
+		t.Fatal("the promotion evicted the bridge its exclusion strands")
+	}
+	if f.state(t, selB) != links.StateEstablished {
+		t.Error("the bridge was retired at the cap")
+	}
+}
+
+// TestSelectionStrandedFlag checks the dialer's trigger: the window records
+// whether any directory candidate answered its probe — the flag the
+// joiner's dial loop reads to re-dial what the table holds.
+func TestSelectionStrandedFlag(t *testing.T) {
+	f := newSelFixture(t, selPeer)
+	var stranded atomic.Bool
+	f.sel.cfg.Stranded = &stranded
+
+	f.candidate(selA, 30*time.Millisecond, 0)
+	f.pass(t)
+	if stranded.Load() {
+		t.Error("a window with a reachable candidate recorded the node stranded")
+	}
+	f.samples[selA] = sm(0, 0)
+	f.pass(t)
+	if !stranded.Load() {
+		t.Error("a window no candidate answered recorded the node unstranded")
 	}
 }
 
@@ -479,10 +685,11 @@ func TestSelectionSweepCandidateWindow(t *testing.T) {
 }
 
 // TestSelectionNoAction checks the comparator's quiet case: neutral
-// evidence — a direct link within the ratios — moves nothing.
+// evidence — no verdict edges, no streak thresholds met, no cap pressure —
+// moves nothing.
 func TestSelectionNoAction(t *testing.T) {
 	f := newSelFixture(t, selPeer, selA)
-	f.samples[selPeer] = measurement{direct: 20 * time.Millisecond, path: 20 * time.Millisecond}
+	f.samples[selPeer] = sm(20*time.Millisecond, 20*time.Millisecond)
 	f.candidate(selB, 20*time.Millisecond, 20*time.Millisecond)
 
 	for range 4 {
@@ -586,7 +793,7 @@ func TestSelectionScopeFilter(t *testing.T) {
 	ias, rendezvous := newDirectory()
 	for _, ia := range ias {
 		f.directory = append(f.directory, scopedEntry(ia, rendezvous[ia]))
-		f.samples[ia] = measurement{path: 10 * time.Millisecond}
+		f.samples[ia] = sm(0, 10*time.Millisecond)
 	}
 	f.pass(t)
 	for _, ia := range []addr.IA{selA, selB} {
@@ -608,7 +815,7 @@ func TestSelectionScopeFilter(t *testing.T) {
 	ias, rendezvous = newDirectory()
 	for _, ia := range ias {
 		f.directory = append(f.directory, scopedEntry(ia, rendezvous[ia]))
-		f.samples[ia] = measurement{path: 10 * time.Millisecond}
+		f.samples[ia] = sm(0, 10*time.Millisecond)
 	}
 	f.pass(t)
 	if !f.probed[selA] {
