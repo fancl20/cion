@@ -55,12 +55,23 @@ func seedFounder(
 	persistKeyFile(t, state, trust.RootKeyFile, keys.Root)
 	persistKeyFile(t, state, trust.CAKeyFile, keys.CA)
 
-	// Whole seconds and a backdate, the genesis certificates' own shape.
-	now := time.Now().UTC().Add(-time.Minute).Truncate(time.Second)
+	// The validity every seeded certificate covers, the latest start to the
+	// earliest end: each mint takes its own truncated clock, and the TRC's
+	// window must sit inside each certificate's own whatever second a mint
+	// fell on.
+	validity := cppki.Validity{NotBefore: authCert.NotBefore, NotAfter: authCert.NotAfter}
+	for _, cert := range []*x509.Certificate{sensitive, regular, root} {
+		if cert.NotBefore.After(validity.NotBefore) {
+			validity.NotBefore = cert.NotBefore
+		}
+		if cert.NotAfter.Before(validity.NotAfter) {
+			validity.NotAfter = cert.NotAfter
+		}
+	}
 	trc := cppki.TRC{
 		Version:  1,
 		ID:       cppki.TRCID{ISD: founderIA.ISD(), Base: 1, Serial: 1},
-		Validity: cppki.Validity{NotBefore: now, NotAfter: now.Add(seedValidity)},
+		Validity: validity,
 		Quorum:   1,
 		CoreASes: []addr.AS{founderIA.AS(), authIA.AS()},
 		AuthoritativeASes: []addr.AS{
@@ -192,6 +203,7 @@ func mintVotingCert(t *testing.T, ia addr.IA, key crypto.Signer, sensitive bool)
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Whole seconds and a backdate, the genesis certificates' own shape.
 	now := time.Now().UTC().Add(-time.Minute).Truncate(time.Second)
 	serial := make([]byte, 20)
 	if _, err := rand.Read(serial); err != nil {
@@ -218,6 +230,7 @@ func mintRootCert(t *testing.T, ia addr.IA, key crypto.Signer) *x509.Certificate
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Whole seconds and a backdate, the genesis certificates' own shape.
 	now := time.Now().UTC().Add(-time.Minute).Truncate(time.Second)
 	serial := make([]byte, 20)
 	if _, err := rand.Read(serial); err != nil {
@@ -384,25 +397,30 @@ func TestCoresRotateBySensitiveUpdate(t *testing.T) {
 		}
 	}
 	// The staged sets persisted: each holder's disk holds the keys its
-	// successor's certificates cover.
-	persistedFounder, err := trust.LoadOrCreateCoreKeys(founderState)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, cert := range trust.CertsOf(founderRolled.TRC, founderIA) {
-		if !covers(persistedFounder, cert) {
-			t.Error("the founder's persisted keys do not cover its rolled certificates")
+	// successor's certificates cover. A roll pins the TRC before it persists
+	// the pair, so the poll waits the persist out — which is also what keeps
+	// the stranger pair below overwriting the settled pair, not one a landing
+	// roll is still writing.
+	Poll(t, "the founder's staged keys to persist", func() bool {
+		keys, err := trust.LoadOrCreateCoreKeys(founderState)
+		if err != nil {
+			t.Fatal(err)
 		}
-	}
-	persistedAuth, err := trust.LoadOrCreateVotingKey(authState)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if authCerts := trust.CertsOf(authRolled.TRC, authIA); len(authCerts) != 1 ||
-		!trust.KeyMatchesCert(persistedAuth, authCerts[0]) {
-
-		t.Error("the authoritative's persisted key does not cover its rolled certificate")
-	}
+		for _, cert := range trust.CertsOf(founderRolled.TRC, founderIA) {
+			if !covers(keys, cert) {
+				return false
+			}
+		}
+		return true
+	})
+	Poll(t, "the authoritative's staged pair to persist", func() bool {
+		key, err := trust.LoadOrCreateVotingKey(authState)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cert := trust.CertsOf(authRolled.TRC, authIA)
+		return len(cert) == 1 && trust.KeyMatchesCert(key, cert[0])
+	})
 
 	// The third node discovers the successors from the founder's signed
 	// messages — the cited TRC the verifier reports — and the grace carries
@@ -440,16 +458,7 @@ func TestCoresRotateBySensitiveUpdate(t *testing.T) {
 	}
 
 	// Replacing the authoritative's persisted voting pair fires the mismatch
-	// roll at the next pass, whatever the calendar says. The replacement
-	// waits the roll's persist out, so it is not itself overwritten by the
-	// pair the landing roll writes.
-	Poll(t, "the authoritative's rolled pair to persist", func() bool {
-		key, err := trust.LoadOrCreateVotingKey(authState)
-		if err != nil {
-			t.Fatal(err)
-		}
-		return trust.KeyMatchesCert(key, trust.CertsOf(authRolled.TRC, authIA)[0])
-	})
+	// roll at the next pass, whatever the calendar says.
 	stranger := mintKey(t)
 	strangerCert := mintVotingCert(t, authIA, stranger, false)
 	persistKeyFile(t, authState, trust.RegularKeyFile, stranger)

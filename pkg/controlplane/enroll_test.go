@@ -122,11 +122,10 @@ func serveCore(t *testing.T, n *testNode, wpki *webPKI) *trustFixture {
 	svc := &TrustService{DB: f.db, Issuer: f.issuer}
 	// The server outlives the test's own thread — it serves until its socket
 	// closes at cleanup — so it reports through the package logger and its
-	// cleanup waits for the exit.
+	// cleanup waits for the exit. The wait registers before the endpoint's
+	// own close, so the reverse unwind closes the socket first and the exit
+	// it prompts is already waiting when the wait's turn comes.
 	done := make(chan error, 1)
-	go func() {
-		done <- ServeHTTP3(n.newConn(t, EndpointPort), NewServer(svc).Handler, tlsConf)
-	}()
 	t.Cleanup(func() {
 		select {
 		case err := <-done:
@@ -137,6 +136,10 @@ func serveCore(t *testing.T, n *testNode, wpki *webPKI) *trustFixture {
 			t.Error("the control endpoint did not stop with its socket")
 		}
 	})
+	endpoint := n.newConn(t, EndpointPort)
+	go func() {
+		done <- ServeHTTP3(endpoint, NewServer(svc).Handler, tlsConf)
+	}()
 	return f
 }
 
