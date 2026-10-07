@@ -292,19 +292,33 @@ func (a *App) runSync(ctx context.Context) {
 	}
 }
 
-// warmMeshPaths resolves each mesh peer's route in the background, where a
+// warmMeshPaths picks each mesh peer's route in the background, where a
 // fetch belongs: sends only ever read the cache, but a leaf-to-leaf route
-// composes up and down segments and needs the lookup. A peer without a
-// reachable path queues the next refresh and logs rather than erroring the
-// application.
+// composes up and down segments and needs the lookup. Each refresh
+// enumerates the peer's candidates and hands them to the socket's landing,
+// which ranks them by their declared one-way sums and lands the pick behind
+// the switch hysteresis. An empty answer or an error keeps the cache and
+// warns — before enrollment, the enumeration composes nothing, and the sends
+// the loop would serve keep working through the bootstrap fallback.
 func (a *App) warmMeshPaths(ctx context.Context) {
 	for _, ia := range a.meshPeerIAs() {
-		path, err := a.cfg.Provider.Path(ctx, ia)
+		candidates, err := a.cfg.Provider.Enumerate(ctx, ia)
 		if err != nil {
 			slog.Warn("WireGuard mesh route", "peer", ia, "err", err)
 			continue
 		}
-		a.mesh.warmPath(ia, path)
+		if len(candidates) == 0 {
+			slog.Warn("WireGuard mesh route composed no candidate", "peer", ia)
+			continue
+		}
+		pick, switched := a.mesh.landRoute(ia, candidates)
+		if switched {
+			attrs := []any{"peer", ia, "hops", pick.Hops}
+			if pick.Latency != nil {
+				attrs = append(attrs, "latency", *pick.Latency)
+			}
+			slog.Info("WireGuard mesh route switched", attrs...)
+		}
 	}
 }
 
