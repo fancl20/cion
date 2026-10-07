@@ -59,6 +59,10 @@ type meshSocket struct {
 	paths map[addr.IA]*spath.Decoded
 	// expiry caches each path's hop expiry, beside the path itself.
 	expiry map[addr.IA]time.Time
+	// routes holds the warm loop's route choice per peer, beside the cached
+	// path: the incumbent route's links and the challenger streak, read and
+	// landed in the same critical section as the pick they govern.
+	routes map[addr.IA]routeChoice
 	closed bool
 	done   chan struct{}
 }
@@ -71,6 +75,7 @@ func newMeshSocket(c *scion.Conn, provider *scion.PathProvider, cnt *counters) *
 		subs:     make(map[*meshBind]chan datagram),
 		paths:    make(map[addr.IA]*spath.Decoded),
 		expiry:   make(map[addr.IA]time.Time),
+		routes:   make(map[addr.IA]routeChoice),
 		done:     make(chan struct{}),
 	}
 }
@@ -185,6 +190,7 @@ func (s *meshSocket) send(ep *meshEndpoint, bufs [][]byte) error {
 		}
 		s.mtx.Lock()
 		delete(s.paths, dst.IA)
+		delete(s.routes, dst.IA)
 		s.mtx.Unlock()
 		// The endpoint's carried path is the one that just failed; the retry
 		// resolves fresh instead of reusing it.
@@ -197,7 +203,9 @@ func (s *meshSocket) send(ep *meshEndpoint, bufs [][]byte) error {
 }
 
 // setPath caches the freshest path for a peer, counting the refresh when it
-// replaces one the margin refused.
+// replaces one the margin refused. A path a send resolved is never one the
+// warm loop chose, so the route entry clears with the cache entry it evicts:
+// the next warm window finds no incumbent and picks best at once.
 func (s *meshSocket) setPath(ia addr.IA, path *spath.Decoded) {
 	s.mtx.Lock()
 	defer s.mtx.Unlock()
@@ -207,19 +215,7 @@ func (s *meshSocket) setPath(ia addr.IA, path *spath.Decoded) {
 	}
 	s.paths[ia] = path
 	s.expiry[ia] = scion.PathExpiry(path)
-}
-
-// warmPath caches a route resolved outside a send — the sync loop's place,
-// where a fetch belongs. Leaf-to-leaf routes compose up and down segments
-// and need the lookup; sends only ever read the cache.
-func (s *meshSocket) warmPath(ia addr.IA, path *spath.Decoded) {
-	if path == nil {
-		return
-	}
-	s.mtx.Lock()
-	defer s.mtx.Unlock()
-	s.paths[ia] = path
-	s.expiry[ia] = scion.PathExpiry(path)
+	delete(s.routes, ia)
 }
 
 // dropPathOf releases the cached path of the destination an interface-down
@@ -238,6 +234,7 @@ func (s *meshSocket) dropPathOf(sig scion.InterfaceDownSignal) {
 		s.cnt.pathRefreshes.Add(1)
 		delete(s.paths, sig.Dst)
 		delete(s.expiry, sig.Dst)
+		delete(s.routes, sig.Dst)
 	}
 }
 

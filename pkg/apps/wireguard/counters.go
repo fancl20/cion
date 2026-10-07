@@ -19,6 +19,9 @@ type counters struct {
 	// pathRefreshes counts mid-stream path re-resolutions: expiry, near
 	// expiry, or a failed send.
 	pathRefreshes atomic.Int64
+	// routeSwitches counts the warm loop's route replacements: a pick that
+	// displaced an incumbent route.
+	routeSwitches atomic.Int64
 	// published counts accepted directory publications the core served.
 	published atomic.Int64
 	// hostDatagrams counts datagrams the shared host port received.
@@ -33,6 +36,7 @@ func (c *counters) snapshot() []any {
 		"sent_datagrams", c.sentDatagrams.Load(),
 		"send_failures", c.sendFailures.Load(),
 		"path_refreshes", c.pathRefreshes.Load(),
+		"route_switches", c.routeSwitches.Load(),
 		"published", c.published.Load(),
 		"host_datagrams", c.hostDatagrams.Load(),
 	}
