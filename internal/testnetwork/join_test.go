@@ -446,6 +446,41 @@ func TestHeldHostPortRefusesBoot(t *testing.T) {
 	}
 }
 
+// TestHeldStateRefusesBoot checks a second boot on the state directory a
+// running node holds — `cion ping` beside the daemon — fails at the store
+// lock's bound with the directory named, instead of waiting on the lock.
+func TestHeldStateRefusesBoot(t *testing.T) {
+	t.Parallel()
+	wpki := NewWebPKI(t)
+	ip := hostSlot(t)
+	running := bootAssembly(t, func(cfg *services.NodeConfig) {
+		cfg.Core = true
+		cfg.Applications = []string{}
+		cfg.Internal = PinnedUDPAddrOn(t, ip)
+		cfg.Control = FreeUDPAddrOn(t, ip)
+		cfg.CertFile = wpki.certFile
+		cfg.KeyFile = wpki.keyFile
+	})
+
+	app, err := services.BootApp(t.Context(), services.NodeConfig{
+		Core:         true,
+		Applications: []string{},
+		Domain:       TestDomain,
+		State:        running.stateDir,
+		Internal:     PinnedUDPAddrOn(t, ip),
+		Control:      FreeUDPAddrOn(t, ip),
+		CertFile:     wpki.certFile,
+		KeyFile:      wpki.keyFile,
+	})
+	if err == nil {
+		app.Close()
+		t.Fatal("a second boot on the held state directory succeeded")
+	}
+	if want := "the state directory " + running.stateDir + " is in use"; !strings.Contains(err.Error(), want) {
+		t.Errorf("the boot's refusal = %v, want it to name %q", err, want)
+	}
+}
+
 // TestDeliberateCore is the empty list's proof: a core and a joiner that
 // name --applications empty — the deliberate core, no application loaded
 // — join and enroll over the control endpoint's own services, and neither

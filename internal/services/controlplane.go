@@ -2,6 +2,7 @@ package services
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/netip"
@@ -12,13 +13,15 @@ import (
 	"github.com/scionproto/scion/pkg/scrypto"
 	"github.com/scionproto/scion/pkg/scrypto/cppki"
 	spath "github.com/scionproto/scion/pkg/slayers/path/scion"
+	"go.etcd.io/bbolt"
+	bolterrors "go.etcd.io/bbolt/errors"
 
 	"github.com/fancl20/cion/pkg/controlplane"
 	linkbbolt "github.com/fancl20/cion/pkg/modules/links/impl/bbolt"
 	"github.com/fancl20/cion/pkg/modules/pathdb"
 	pathdbbbolt "github.com/fancl20/cion/pkg/modules/pathdb/impl/bbolt"
 	"github.com/fancl20/cion/pkg/modules/topology"
-	"github.com/fancl20/cion/pkg/modules/trustdb/impl/bbolt"
+	trustbbolt "github.com/fancl20/cion/pkg/modules/trustdb/impl/bbolt"
 	"github.com/fancl20/cion/pkg/scion"
 	"github.com/fancl20/cion/pkg/trust"
 	"github.com/fancl20/cion/pkg/webpki"
@@ -56,13 +59,18 @@ func (n *node) setupControlPlane(ctx context.Context) error {
 	return n.assembleResponder()
 }
 
+// storeLockTimeout bounds the wait on a database's file lock. A node holds
+// its databases for its lifetime, so a lock still held at the bound is
+// another process serving from the same state directory.
+const storeLockTimeout = time.Second
+
 // openState opens the trust, path, and link databases and the AS key under
 // the state directory. A node may start with zero links: the store is empty
 // until a neighbor joins, the selection loop promotes one, or the loaded
 // provider seeds it — the first-start neighbor requirement being the
 // provider's to satisfy, by a --topology.neighbor or a non-empty link-set.
 func (n *node) openState(ctx context.Context) error {
-	trustDB, err := bbolt.New(filepath.Join(n.cfg.State, "trust.db"), nil)
+	trustDB, err := openStore(n.cfg.State, "trust.db", trustbbolt.New)
 	if err != nil {
 		return fmt.Errorf("opening trust DB: %w", err)
 	}
@@ -72,17 +80,28 @@ func (n *node) openState(ctx context.Context) error {
 		return fmt.Errorf("loading AS key: %w", err)
 	}
 	n.asKey = asKey
-	pathDB, err := pathdbbbolt.New(filepath.Join(n.cfg.State, "path.db"), nil)
+	pathDB, err := openStore(n.cfg.State, "path.db", pathdbbbolt.New)
 	if err != nil {
 		return fmt.Errorf("opening path DB: %w", err)
 	}
 	n.pathDB = pathDB
-	linkStore, err := linkbbolt.New(filepath.Join(n.cfg.State, "links.db"), nil)
+	linkStore, err := openStore(n.cfg.State, "links.db", linkbbolt.New)
 	if err != nil {
 		return fmt.Errorf("opening link DB: %w", err)
 	}
 	n.linkStore = linkStore
 	return nil
+}
+
+// openStore opens the named database under the state directory, a lock
+// still held at storeLockTimeout refused as the directory in use.
+func openStore[DB any](state, name string, open func(string, *bbolt.Options) (DB, error)) (DB, error) {
+	db, err := open(filepath.Join(state, name), &bbolt.Options{Timeout: storeLockTimeout})
+	if errors.Is(err, bolterrors.ErrTimeout) {
+		err = fmt.Errorf("the state directory %s is in use: another process holds %s",
+			state, name)
+	}
+	return db, err
 }
 
 // setupTrustRole establishes the node's trust role: the founding core

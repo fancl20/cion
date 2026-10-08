@@ -34,7 +34,7 @@ func newPingCommand() *cobra.Command {
 		Long: "Ping a destination ISD-AS over the node's own assembled data and control plane: " +
 			"boots a local node in place of serving from the state directory and the " +
 			"same node arguments as 'cion run local', prints one line per reply plus a " +
-			"loss summary, and exits.",
+			"loss summary, and exits. It refuses a state directory a running node holds.",
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runPing(cmd.Context(), *opts, args[0], pingOpts)
