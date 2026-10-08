@@ -363,6 +363,48 @@ func TestTRCDeciderWithoutSensitiveKey(t *testing.T) {
 	}
 }
 
+// TestTRCDeciderSignerSwapUnderCast checks a decision arriving while the
+// founder's cast holds the mutex and reassigns the sensitive signer: the
+// decision waits for the cast and decides with the signer it left. The
+// decision's one ordering with the cast's write is the mutex, so the race
+// detector reports a read of the signer outside it however the goroutines
+// are scheduled.
+func TestTRCDeciderSignerSwapUnderCast(t *testing.T) {
+	c := newDeciderFixture(t, true)
+	ctx := context.Background()
+	partial := c.submission(t, c.pred, func() (crypto.Signer, *x509.Certificate) {
+		return c.joiner.key, c.joiner.cert
+	})
+
+	held, release := make(chan struct{}), make(chan struct{})
+	cast := make(chan error, 1)
+	go func() {
+		cast <- c.decider.CastLocal(ctx, func(cppki.SignedTRC) error {
+			close(held)
+			<-release
+			c.decider.Sensitive = c.tf.keys.Sensitive
+			return nil
+		})
+	}()
+	select {
+	case <-held:
+	case err := <-cast:
+		t.Fatalf("the cast returned before it ran: %v", err)
+	}
+	decided := make(chan error, 1)
+	go func() {
+		_, err := c.decider.DecideTRC(ctx, c.joiner.ia, partial)
+		decided <- err
+	}()
+	close(release)
+	if err := <-cast; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-decided; err != nil {
+		t.Fatalf("the decision overlapping the cast was refused: %v", err)
+	}
+}
+
 // rollFixture is a founder whose decision has onboarded the joiner — the
 // pinned successor the joiner's roll replaces its own certificate on.
 type rollFixture struct {

@@ -165,13 +165,15 @@ func (i *Issuer) CACert() (*x509.Certificate, error) {
 }
 
 // SignResponse wraps msg in a CMS SignedData signed with the CP CA
-// certificate, as the chain renewal response requires.
+// certificate, as the chain renewal response requires. The certificate and
+// its key come from one snapshot, so a concurrent rekey never pairs one
+// set's certificate with the other's key.
 func (i *Issuer) SignResponse(msg []byte) ([]byte, error) {
-	caCert, err := i.ensureCACert()
+	caCert, caKey, _, err := i.caMaterial()
 	if err != nil {
 		return nil, err
 	}
-	return SignCMS(msg, []*x509.Certificate{caCert}, i.CAKey)
+	return SignCMS(msg, []*x509.Certificate{caCert}, caKey)
 }
 
 // rootCertificate extracts the CP root certificate from the TRC, which must

@@ -6,6 +6,7 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/x509"
+	"sync"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -154,4 +155,41 @@ func TestIssuerReissuesCACert(t *testing.T) {
 			t.Fatalf("chain under reissued CA does not verify: %v", err)
 		}
 	})
+}
+
+// TestSignResponseConcurrentRekey runs renewal-response signing beside
+// rekeys for the race detector: every response verifies against the CA
+// certificate it carries, the certificate and its key read as one set.
+func TestSignResponseConcurrentRekey(t *testing.T) {
+	f := newGenesisFixture(t)
+	issuer, err := NewIssuer(coreIA, f.keys, f.trc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wg sync.WaitGroup
+	defer wg.Wait()
+	wg.Go(func() {
+		for range 20 {
+			ca, err := generateKey()
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			keys := f.keys
+			keys.CA = ca
+			if err := issuer.Rekey(keys, f.trc); err != nil {
+				t.Error(err)
+				return
+			}
+		}
+	})
+	for range 20 {
+		res, err := issuer.SignResponse([]byte("renewal"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := ParseCMS(res); err != nil {
+			t.Fatalf("a response does not verify against the certificate it carries: %v", err)
+		}
+	}
 }

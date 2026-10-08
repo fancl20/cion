@@ -45,9 +45,10 @@ type TRCDecider struct {
 	// open admission, the gate the run arguments leave unset.
 	Authorizer enrollauth.AdmissionAuthorizer
 
-	// mtx serializes the decision: each one reads the newest pinned TRC
-	// under it, so serials stay monotone under concurrent submissions and
-	// only a completed update ever advances the pin.
+	// mtx serializes the decision: each one reads the sensitive signer and
+	// the newest pinned TRC under it, so serials stay monotone under
+	// concurrent submissions, only a completed update ever advances the pin,
+	// and a roll's reassignment of Sensitive lands between decisions.
 	mtx sync.Mutex
 }
 
@@ -69,6 +70,8 @@ func (c *TRCDecider) DecideTRC(
 	trc cppki.SignedTRC,
 ) (cppki.SignedTRC, error) {
 
+	c.mtx.Lock()
+	defer c.mtx.Unlock()
 	if c.Sensitive == nil {
 		return cppki.SignedTRC{}, errors.New("this control plane casts no TRC updates: " +
 			"the founding core alone holds the sensitive key")
@@ -76,9 +79,6 @@ func (c *TRCDecider) DecideTRC(
 	if presenter.IsZero() {
 		return cppki.SignedTRC{}, serrors.New("the submission carries no verified presenter")
 	}
-
-	c.mtx.Lock()
-	defer c.mtx.Unlock()
 	newest, err := c.newestTRC(ctx)
 	if err != nil {
 		return cppki.SignedTRC{}, err
@@ -303,12 +303,12 @@ func (c *TRCDecider) CastLocal(
 	cast func(newest cppki.SignedTRC) error,
 ) error {
 
+	c.mtx.Lock()
+	defer c.mtx.Unlock()
 	if c.Sensitive == nil {
 		return errors.New("this control plane casts no TRC updates: " +
 			"the founding core alone holds the sensitive key")
 	}
-	c.mtx.Lock()
-	defer c.mtx.Unlock()
 	newest, err := c.newestTRC(ctx)
 	if err != nil {
 		return err
