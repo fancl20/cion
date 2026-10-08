@@ -47,6 +47,11 @@ type botDouble struct {
 	waiting chan struct{}
 	// fail makes every send fail.
 	fail bool
+	// onSend, if set, runs after a send is recorded and before it is
+	// replied to: the prompt shows while its sender still waits.
+	onSend func(tgSendMessage)
+	// acks, if set, receives the answered callbacks it has room for.
+	acks chan tgAnswer
 }
 
 func newBotDouble(t *testing.T) *botDouble {
@@ -81,7 +86,11 @@ func (d *botDouble) handle(w http.ResponseWriter, r *http.Request) {
 		}
 		d.mtx.Lock()
 		d.prompts = append(d.prompts, m)
+		onSend := d.onSend
 		d.mtx.Unlock()
+		if onSend != nil {
+			onSend(m)
+		}
 		writeJSON(w, tgSent{MessageID: 1})
 	case "/bot7:test/getUpdates":
 		// Long-poll semantics: hold until a press lands or a short wait
@@ -108,7 +117,12 @@ func (d *botDouble) handle(w http.ResponseWriter, r *http.Request) {
 		}
 		d.mtx.Lock()
 		d.answers = append(d.answers, a)
+		acks := d.acks
 		d.mtx.Unlock()
+		select {
+		case acks <- a:
+		default:
+		}
 		writeJSON(w, true)
 	default:
 		http.Error(w, "unknown method", http.StatusNotFound)
@@ -414,9 +428,41 @@ func TestTelegramRegistrationPrompts(t *testing.T) {
 	}
 }
 
+// TestTelegramPressDuringSend checks that an answer pressed while its prompt
+// is still being sent — shown in the chat, its sender not yet answered —
+// decides the ask.
+func TestTelegramPressDuringSend(t *testing.T) {
+	d := newBotDouble(t)
+	tg := runTelegram(t, d, nil)
+
+	// The double presses approve as soon as the prompt shows and replies to
+	// the send only once the authorizer has answered that press.
+	acks := make(chan tgAnswer, 1)
+	d.mtx.Lock()
+	d.acks = acks
+	d.onSend = func(m tgSendMessage) {
+		d.press(testChat, m.ReplyMarkup.InlineKeyboard[0][0].CallbackData)
+		select {
+		case <-acks:
+		case <-time.After(5 * time.Second):
+			t.Error("the press during the send was never answered")
+		}
+	}
+	d.mtx.Unlock()
+
+	facts := registerFactsOf(t, newKey(t), newKey(t), "")
+	if got := pendingOf(tg, context.Background(), facts); got != enrollauth.AdmissionPending {
+		t.Fatalf("first ask verdict = %v, want pending", got)
+	}
+	if got := pendingOf(tg, context.Background(), facts); got != enrollauth.AdmissionAllow {
+		t.Fatalf("verdict after an approve pressed during the send = %v, want allow", got)
+	}
+}
+
 // TestTelegramSendFailureDenies checks the fail-closed rule: with the API
 // unreachable, a prompt that cannot be sent denies — safe, but unavailable
-// until the API returns.
+// until the API returns — and leaves no pending ask behind, so the first ask
+// after the API returns prompts.
 func TestTelegramSendFailureDenies(t *testing.T) {
 	d := newBotDouble(t)
 	tg := runTelegram(t, d, nil)
@@ -425,6 +471,13 @@ func TestTelegramSendFailureDenies(t *testing.T) {
 	facts := enrollFactsOf(t, newKey(t))
 	if got := pendingOf(tg, context.Background(), facts); got != enrollauth.AdmissionDeny {
 		t.Errorf("verdict with the API down = %v, want deny", got)
+	}
+	d.setFail(false)
+	if got := pendingOf(tg, context.Background(), facts); got != enrollauth.AdmissionPending {
+		t.Errorf("verdict once the API returns = %v, want pending", got)
+	}
+	if got := d.promptCount(); got != 1 {
+		t.Errorf("prompts once the API returns = %d, want 1", got)
 	}
 }
 

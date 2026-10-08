@@ -190,19 +190,27 @@ func (t *Authorizer) Authorize(
 		t.mtx.Unlock()
 		return answer
 	}
-	t.mtx.Unlock()
-	if err := t.sendPrompt(ctx, f); err != nil {
-		slog.Warn("Sending the admission prompt; denying",
-			"boundary", f.Boundary, "claim", f.Claim, "source", f.Source, "err", err)
-		return enrollauth.AdmissionAnswer{Admission: enrollauth.AdmissionDeny}
-	}
-	t.mtx.Lock()
-	t.asks[key] = &decision{
+	// The ask pends before its prompt goes out: the chat shows the prompt
+	// before the send returns, and a press must find the ask it answers.
+	pending := &decision{
 		admission: enrollauth.AdmissionPending,
 		label:     strings.Join(f.Keys, ","),
 		expires:   now.Add(t.window),
 	}
+	t.asks[key] = pending
 	t.mtx.Unlock()
+	if err := t.sendPrompt(ctx, f); err != nil {
+		slog.Warn("Sending the admission prompt; denying",
+			"boundary", f.Boundary, "claim", f.Claim, "source", f.Source, "err", err)
+		// The failed send withdraws the ask, so the next one prompts again,
+		// unless the operator already answered a prompt that did show.
+		t.mtx.Lock()
+		if t.asks[key] == pending && pending.admission == enrollauth.AdmissionPending {
+			delete(t.asks, key)
+		}
+		t.mtx.Unlock()
+		return enrollauth.AdmissionAnswer{Admission: enrollauth.AdmissionDeny}
+	}
 	return enrollauth.AdmissionAnswer{Admission: enrollauth.AdmissionPending}
 }
 
