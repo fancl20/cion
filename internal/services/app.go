@@ -57,7 +57,7 @@ type App struct {
 // application; Close releases it when the application is done. The first
 // data plane generation builds synchronously, so a bind failure surfaces
 // here instead of as a lost packet. A loop's terminal failure stops the
-// node's loops from inside; FatalErr reports it.
+// node's loops from inside.
 func BootApp(ctx context.Context, cfg NodeConfig) (*App, error) {
 	n, err := setupNode(ctx, cfg, DefaultDataplaneOptions())
 	if err != nil {
@@ -77,12 +77,6 @@ func BootApp(ctx context.Context, cfg NodeConfig) (*App, error) {
 		return n.supervise(ctx, gen)
 	})
 	return &App{node: n, cancel: cancel}, nil
-}
-
-// FatalErr returns the terminal failure a loop stopped the node on, nil
-// while none occurred.
-func (a *App) FatalErr() error {
-	return a.node.fatalErr
 }
 
 // IA returns the node's ISD-AS.
