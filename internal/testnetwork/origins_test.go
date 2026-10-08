@@ -3,6 +3,7 @@ package testnetwork
 import (
 	"context"
 	"hash"
+	"slices"
 	"testing"
 	"time"
 
@@ -118,16 +119,19 @@ func TestTwoOriginsShareOneSegmentID(t *testing.T) {
 		return err == nil && origins[coreIA] && origins[core2IA]
 	})
 
-	// Both compose paths: the provider resolves a route to each core over
-	// its own reversed up segment.
+	// Both compose paths: among the bottom node's candidates to each core is
+	// the three-hop reversed segment. Path alone answers with the freshest
+	// segment containing the core, which for the founding core may be its
+	// four-hop beacon over the fellow core.
 	for _, core := range []addr.IA{coreIA, core2IA} {
-		path, err := l.Provider.Path(ctx, core)
+		candidates, err := l.Provider.Enumerate(ctx, core)
 		if err != nil {
-			t.Fatalf("path from the bottom node to %v: %v", core, err)
+			t.Fatalf("candidates from the bottom node to %v: %v", core, err)
 		}
-		if len(path.HopFields) != 3 {
-			t.Errorf("path to %v = %d hops, want the three-hop reversed segment",
-				core, len(path.HopFields))
+		if !slices.ContainsFunc(candidates, func(c scion.Candidate) bool {
+			return len(c.Path.HopFields) == 3
+		}) {
+			t.Errorf("candidates to %v hold no three-hop reversed segment", core)
 		}
 	}
 
