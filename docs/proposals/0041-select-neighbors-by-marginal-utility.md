@@ -374,3 +374,38 @@ swap they trigger unchanged.
     declaration moves no measured baseline and strands no tier the
     enumerations serve; the quiet window — no verdict edges, no streak
     thresholds met, no cap pressure — changes nothing.
+
+## Implementation history
+
+*   Landed in d9dd4ac. `deriveTiers`, `windowTiers`, and
+    `measureExcluded` derive the tiers, their facts, and the excluded
+    measurements in a new file
+    ([tiers.go](/pkg/modules/topology/impl/measured/tiers.go)); `promote`,
+    `admit`, `evict`, and `prune` hold the cases, the cap's eviction, and
+    the retirement rules
+    ([selection.go](/pkg/modules/topology/impl/measured/selection.go)).
+    The probe enumerates once and hands the list to `freshest`, which
+    keeps the freshest candidate `clean` passes
+    ([queries.go](/pkg/modules/topology/impl/measured/queries.go)), and
+    the stranded finding reaches `dialJoins` through
+    `SelectionConfig.Stranded`
+    ([provider.go](/pkg/modules/topology/impl/measured/provider.go)).
+*   `tierPrice` was rewritten to the plan's reading — the measured
+    baseline whenever the tier has one, the cheapest doubled declared sum
+    only when it has none — for the helper proposal 0040 landed let a
+    declaration undercut an echo.
+*   One demotion streak serves both retirement rules: a down window and a
+    useless one each extend it, and only a window whose useless test is
+    measured and unmet resets it. A link back up in unmeasured windows —
+    a bridge has no clean survivor — keeps its down streak, so later down
+    windows retire it short of `DemoteWindows` consecutive ones.
+*   The stranded flag is raised whenever no directory candidate answers,
+    at any up-link count, where the plan's summary places the dialer
+    below the floor.
+*   The line lab, `TestLineCutHeals`
+    ([join_test.go](/internal/testnetwork/join_test.go)), does not isolate
+    the cut: C sits below the floor from its join, so the floor case can
+    promote A before B dies — the promotion `TestJoinByRendezvous`
+    asserts on the same line. The stranded clause is proven by unit tests
+    alone, the equilibrium lab did not land, and no test covers a down
+    streak's reset on recovery.

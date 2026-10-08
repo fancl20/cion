@@ -364,3 +364,36 @@ that ADR-0017's owner split already houses:
     misses and saturates at two; the excluded baseline empties exactly
     when every candidate crosses the excluded link, and the cut-critical
     reading follows.
+
+## Implementation history
+
+*   Landed in a779e17. The seam lives in
+    [provider.go](/pkg/scion/provider.go): `Enumerate` also returns the
+    error of a part that fails to compose and emits the containing-up
+    candidates after every join, `Candidate.Before` replaced `joinRank`,
+    and a new walk, `stretch`, reads each candidate's link set and
+    declared sum while `crossesFrom` keeps the crossing flag. `LinkID`,
+    `ASEntry.Latency`, and `EntryOptions.EgressLatency` live in
+    [segment.go](/pkg/segment/segment.go), whose parser refuses a segment
+    declaring latency for an interface ID beyond 16 bits.
+*   The window's samples live in a new shared table, `LinkLatency`
+    ([linklatency.go](/pkg/controlplane/linklatency.go)), not on the link
+    entry: the selection loop's `declare` records each echo round trip
+    halved, the beaconer's `egressLatency` reads it into the entries it
+    signs, and the node hands the one table to both through
+    `BeaconerConfig.Latencies` and `Pieces.Latencies`
+    ([controlplane.go](/internal/services/controlplane.go)).
+*   The queries are helpers in
+    [queries.go](/pkg/modules/topology/impl/measured/queries.go): `probe`
+    echoes over the candidate `freshest` returns, `freshest` took an
+    exclusion for the excluded baseline, and `routeCount` takes the
+    tier's up links as an argument. `tierPrice` took the lowest of the
+    measured baseline and every doubled declared sum, so a declaration
+    could undercut the echo the plan keeps the authority. No probe
+    ranking landed.
+*   The existing `Path` tests, unchanged, stand in for golden output, and
+    hand-computed values for `joinRank`'s rank fields
+    ([provider_test.go](/pkg/scion/provider_test.go)).
+    `TestProviderEntriesTiebreak` emits the fewer-entries pair first, so
+    it passes without the tiebreak; `TestEnumerateCoverage` holds one
+    containing segment and asserts no emission order.

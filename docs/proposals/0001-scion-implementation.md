@@ -78,3 +78,9 @@ realization.
     the Data Plane can correctly utilize the `slayers` library.
 
 ## Implementation history
+
+*   18618eb: a data plane processor decoding SCION packets with `slayers`
+    (`pkg/dataplane/dataplane.go`), and the Control Plane and CP-PKI
+    interfaces (`pkg/controlplane/interfaces.go`, `pkg/pki/interfaces.go`).
+*   9b98da6: forwarding, a router that validates each packet's path in place
+    of the processor (`pkg/dataplane/router.go`).

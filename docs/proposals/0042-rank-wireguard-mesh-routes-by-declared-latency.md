@@ -230,3 +230,29 @@ the loop's honesty, accepted.
 *   **Unit, the loop:** a peer with an empty enumeration keeps the
     cache and warns; a peer with declared candidates gets the pick in
     its cache.
+
+## Implementation history
+
+*   Landed in dfb6913. `pickRoute` decides and `outranks` ranks
+    ([route.go](/pkg/apps/wireguard/route.go)); `landRoute` is the
+    critical section `warmMeshPaths` hands each peer's candidates to
+    ([directory.go](/pkg/apps/wireguard/directory.go)). The route state,
+    `routeChoice`, sits in the socket's `routes` map
+    ([bind.go](/pkg/apps/wireguard/bind.go)), `route_switches` in
+    [counters.go](/pkg/apps/wireguard/counters.go), and the tests in
+    [route_test.go](/pkg/apps/wireguard/route_test.go).
+*   A lapse of the incumbent's declaration does not reset the streak: the
+    incumbent falls to the streak-alone rule and the window still counts
+    toward the same declared challenger, so one that led a window past
+    the ratio switches in the window the incumbent's sum lapses. A lapse
+    on the challenger's side resets, the rank keeping the declared
+    incumbent ahead. No test covers a lapse mid-streak.
+*   The incumbent is the first candidate carrying its links. The store
+    keeps a segment per beacon until it expires, so a window can hold
+    several candidates over the same links; the kept route lands the
+    first of them and the ratio reads its declaration, neither
+    necessarily the freshest.
+*   For a peer a stored up segment contains, a network without
+    declarations does not keep `Path`'s answer: `Path` short-circuits to
+    the freshest containing segment, while the pick ranks the containing
+    reversals beside the joins, fewest hops first.

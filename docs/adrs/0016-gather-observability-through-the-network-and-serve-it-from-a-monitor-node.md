@@ -1,6 +1,6 @@
 # Gather Observability Through the Network and Serve It from a Monitor Node
 
-*   Status: draft
+*   Status: proposed
 *   Date: 2026-09-30
 
 [TOC]
