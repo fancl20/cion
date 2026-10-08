@@ -62,8 +62,8 @@ func newWireguard(env *Environment, _ []Loaded) (Application, error) {
 // wireguardConfig builds the application's configuration from the node's
 // facts: the shared port the entry's arguments name, the relay presence
 // derived from the domain, the application's own state directory, the
-// core's directory store or the joiner's core route, and the pacing
-// riders.
+// founding core's directory store or every other node's core route, and
+// the pacing riders.
 func wireguardConfig(env *Environment) (wireguard.Config, error) {
 	listenHost, err := dataplane.ResolveAddrPort(env.ControlHost)
 	if err != nil {
@@ -90,8 +90,10 @@ func wireguardConfig(env *Environment) (wireguard.Config, error) {
 		cfg.RefreshInterval = d
 	}
 	if env.Core {
-		// The core serves the directory from its own store, following the
-		// trust DB's bbolt pattern.
+		// The founding core serves the directory from its own store,
+		// following the trust DB's bbolt pattern; every other node, a
+		// joining core among them, publishes to and fetches from it over
+		// the core route.
 		if err := os.MkdirAll(cfg.StateDir, 0o700); err != nil {
 			return wireguard.Config{}, fmt.Errorf(
 				"creating the application's state: %w", err)

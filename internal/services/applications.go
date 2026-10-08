@@ -7,6 +7,7 @@ import (
 	"github.com/fancl20/cion/pkg/apps"
 	"github.com/fancl20/cion/pkg/controlplane"
 	"github.com/fancl20/cion/pkg/scion"
+	"github.com/fancl20/cion/pkg/trust"
 )
 
 // setupApplications resolves the applications the run arguments select
@@ -16,11 +17,11 @@ import (
 // borrower finds the owner's exported surface beside it. Validate already
 // refused the miscombinations; whatever loads here was named or implied.
 func (n *node) setupApplications() error {
-	selected, err := apps.Select(n.cfg.Applications, n.cfg.Core, n.cfg.AppArguments)
+	env := n.appEnvironment()
+	selected, err := apps.Select(n.cfg.Applications, env.Core, n.cfg.AppArguments)
 	if err != nil {
 		return err
 	}
-	env := n.appEnvironment()
 	for _, e := range selected {
 		app, err := e.New(env, n.apps)
 		if err != nil {
@@ -39,12 +40,15 @@ func (n *node) setupApplications() error {
 // relay derivation's inputs with the harness's placement among them, the
 // directory pacing, the control plane's TRC decision the voting application
 // hands its submissions to, and the control-endpoint mounting behind the
-// peer-identity middleware.
+// peer-identity middleware. The environment's core flag marks the founding
+// tier alone: a joining core runs the applications a local node runs, its
+// WireGuard application publishing to and fetching from the founder's
+// directory.
 func (n *node) appEnvironment() *apps.Environment {
 	env := &apps.Environment{
 		Arguments:       n.cfg.AppArguments,
 		IA:              n.ident.ia,
-		Core:            n.cfg.Core,
+		Core:            n.ident.asType == trust.ASTypeCore,
 		StateRoot:       n.cfg.State,
 		ControlHost:     n.cfg.Control,
 		Domain:          n.cfg.Domain,

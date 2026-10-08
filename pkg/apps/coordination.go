@@ -13,7 +13,7 @@ import (
 // coordinationEntry is the coordination application: the network's
 // headscale, minimal by decision — registration behind the admission
 // seam, the netmap, the relay — whose surfaces mount on the node's HTTPS
-// server. The core alone loads it, and it requires the WireGuard
+// server. The founding core alone loads it, and it requires the WireGuard
 // application whose registry it borrows.
 var coordinationEntry = Entry{
 	Name:     "coordination",

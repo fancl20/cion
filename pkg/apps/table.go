@@ -19,7 +19,7 @@ type Entry struct {
 	// commands' flag sets, the destinations in the entry's block of
 	// Arguments. Nil when the application takes no argument.
 	RegisterFlags func(*pflag.FlagSet, *Arguments)
-	// CoreOnly bounds the entry to the core role.
+	// CoreOnly bounds the entry to the founding core.
 	CoreOnly bool
 	// Requires names the applications the entry needs beside it: a list
 	// that names this entry without one of them refuses the boot, for
@@ -79,12 +79,13 @@ func RegisterFlags(flags *pflag.FlagSet, args *Arguments) {
 	}
 }
 
-// Select resolves the applications the list names against the table: nil
-// keeps the inference — an entry loads whose role bounds hold, whose
-// requirements load, and whose required arguments are present, the
-// zero-conf default; the empty list loads none, the deliberate core; a
-// given list loads exactly the named entries, in table order whatever
-// order the list spells. Every miscombination refuses, the fix named.
+// Select resolves the applications the list names against the table, core
+// marking the founding core: nil keeps the inference — an entry loads
+// whose role bounds hold, whose requirements load, and whose required
+// arguments are present, the zero-conf default; the empty list loads none,
+// the deliberate core; a given list loads exactly the named entries, in
+// table order whatever order the list spells. Every miscombination
+// refuses, the fix named.
 func Select(list []string, core bool, args Arguments) ([]Entry, error) {
 	if list == nil {
 		return infer(core, args), nil
@@ -135,7 +136,7 @@ func exact(list []string, core bool, args Arguments) ([]Entry, error) {
 		}
 		if e.CoreOnly && !core {
 			return nil, fmt.Errorf("--applications names %s, which requires "+
-				"the core role", e.Name)
+				"the founding core", e.Name)
 		}
 		if why := missingArg(e, &args); why != "" {
 			return nil, fmt.Errorf("--applications names %s, whose loading "+

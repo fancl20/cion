@@ -58,8 +58,8 @@ type Environment struct {
 	// ControlHost is the control address, "host:port"; its host is the
 	// underlay host the host-facing port binds.
 	ControlHost string
-	// Domain is the core's domain — the core's own when Core is set, the
-	// network's core domain otherwise.
+	// Domain is the core's domain — the founding core's own when Core is
+	// set, the network's core domain otherwise.
 	Domain string
 	// Engine provides the node's chain for the directory channel; Provider
 	// resolves the paths the mesh datagrams ride.
@@ -83,15 +83,16 @@ type Environment struct {
 	// TRCDecision is the control plane's decision on TRC updates a core
 	// submitted seeking voting power: the founder's own gates and its
 	// admission policy's answer, the sensitive vote it casts over them. Nil
-	// where the node decides none — every node but the founding core — and
-	// the voting application answers each submission with its refusal.
+	// on every node but the founding core, the one role the voting
+	// application loads on.
 	TRCDecision voting.Decider
 	// MountControlEndpoint mounts one of the application's handlers on the
 	// node's control endpoint, behind the peer-identity middleware, beside
 	// the drafts' services; nil when the node assembles no endpoint.
 	MountControlEndpoint func(pattern string, handler http.Handler) error
-	// CoreRoute resolves the route to the core the joiner's directory
-	// fetch rides; the core needs none, serving the directory itself.
+	// CoreRoute resolves the route to the founding core the directory's
+	// publish and fetch ride on every other node; the founding core needs
+	// none, serving the directory itself.
 	CoreRoute func() *scion.Addr
 	// Relay carries the relay derivation's inputs: the production form
 	// derives from the domain, and the harness's placement — its loopback

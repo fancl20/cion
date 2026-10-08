@@ -132,7 +132,14 @@ func TestNodeConfigValidateApplications(t *testing.T) {
 				c.Applications = []string{"coordination", "wireguard"}
 				c.AppArguments.Wireguard.HostPort = apps.DefaultHostPort
 			},
-			"coordination, which requires the core role",
+			"coordination, which requires the founding core",
+		},
+		"voting on a joining core": {
+			func(c *NodeConfig) {
+				c.Neighbors = []string{"192.0.2.7:30043"}
+				c.Applications = []string{"voting"}
+			},
+			"voting, which requires the founding core",
 		},
 		"socks without wireguard": {
 			func(c *NodeConfig) { c.Applications = []string{"socks"} },

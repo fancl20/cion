@@ -3,6 +3,7 @@ package testnetwork
 import (
 	"context"
 	"errors"
+	"net/netip"
 	"testing"
 	"time"
 
@@ -218,5 +219,83 @@ func TestJoinerStopsWithoutVotingApp(t *testing.T) {
 	// The network the exit leaves behind still serves enrollment.
 	Poll(t, "the plain node enrolled against the deliberate core", func() bool {
 		return holdsAssemblyChain(t, d, d.app.IA())
+	})
+}
+
+// TestJoiningCoreMeshesWithTheFounder checks the applications follow the
+// founding tier: a core joining by rendezvous under the inference runs
+// what a local node runs — its WireGuard application publishing to the
+// founder's directory instead of serving one of its own and meshing with
+// the founder, neither the coordination nor the voting application beside
+// it — while the founder serves the directory and the voting application
+// the joining core's submission needs.
+func TestJoiningCoreMeshesWithTheFounder(t *testing.T) {
+	t.Parallel()
+	wpki := NewWebPKI(t)
+	ipA, ipB := hostSlot(t), hostSlot(t)
+	// The shared host ports are drawn from the pinned band, for a WireGuard
+	// interface on the test host may hold the default. The two need not
+	// match: the mesh rides SCION, and each host dials its own node.
+	hostPort := func(ip netip.Addr) uint16 {
+		return netip.MustParseAddrPort(PinnedUDPAddrOn(t, ip)).Port()
+	}
+
+	a := bootAssembly(t, func(cfg *services.NodeConfig) {
+		cfg.Core = true
+		cfg.Applications = []string{"wireguard", "voting"}
+		cfg.AppArguments.Wireguard.HostPort = hostPort(ipA)
+		cfg.State = t.TempDir()
+		cfg.Internal = PinnedUDPAddrOn(t, ipA)
+		cfg.Control = FreeUDPAddrOn(t, ipA)
+		cfg.CertFile = wpki.certFile
+		cfg.KeyFile = wpki.keyFile
+	})
+	b := bootAssembly(t, func(cfg *services.NodeConfig) {
+		cfg.Core = true
+		cfg.AppArguments.Wireguard.HostPort = hostPort(ipB)
+		cfg.State = t.TempDir()
+		cfg.Internal = PinnedUDPAddrOn(t, ipB)
+		cfg.Control = FreeUDPAddrOn(t, ipB)
+		cfg.Neighbors = []string{a.rendezvousOf()}
+		cfg.RootCAs = wpki.pool
+	})
+
+	for _, resident := range []string{"coordination", "voting"} {
+		if b.app.Application(resident) != nil {
+			t.Errorf("the joining core loaded the %s application", resident)
+		}
+	}
+	if wireguardOf(b).Registry() != nil {
+		t.Fatal("the joining core opened a directory store of its own")
+	}
+
+	// The joining core's slice is the founder's assignment: the founder's
+	// directory lists the slice the joining core's publication was answered.
+	ctx, cancel := context.WithTimeout(context.Background(), TestTimeout)
+	defer cancel()
+	subnet, err := wireguardOf(b).Subnet(ctx)
+	if err != nil {
+		t.Fatalf("the joining core's slice: %v", err)
+	}
+	directory, err := wireguardOf(a).Directory(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var listed netip.Prefix
+	for _, entry := range directory.Nodes {
+		if entry.IA.Equal(b.app.IA()) {
+			listed = entry.Overlay
+		}
+	}
+	if listed != subnet {
+		t.Errorf("the founder's directory lists the joining core's slice as %v, want %v",
+			listed, subnet)
+	}
+
+	Poll(t, "the founder's mesh peer", func() bool {
+		return hasMeshPeer(wireguardOf(a), b.app.IA())
+	})
+	Poll(t, "the joining core's mesh peer", func() bool {
+		return hasMeshPeer(wireguardOf(b), a.app.IA())
 	})
 }

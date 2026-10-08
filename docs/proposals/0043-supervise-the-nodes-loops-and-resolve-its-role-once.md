@@ -109,7 +109,7 @@ not cancel.
 
 The role is re-derived wherever a branch needs it. `Validate`
 ([config.go](/internal/services/config.go)) spells the founding predicate
-from the flag pair twice; `loadIdentity` derives `identity.asType` from the
+from the flag pair; `loadIdentity` derives `identity.asType` from the
 same pair; `selectProvider`, `setupTrustRole`, `buildBeaconing`,
 `assembleEndpoint`, and `start` read it; and `buildMessenger` (`coreClt`),
 `start` (`votingKey`, `certMgr`), `assembleHTTPS` (`certMgr`), and

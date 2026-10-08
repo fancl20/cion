@@ -106,12 +106,12 @@ func TestSelectRefuses(t *testing.T) {
 		{
 			"a role violation",
 			[]string{"coordination", "wireguard"}, false, serving,
-			"coordination, which requires the core role",
+			"coordination, which requires the founding core",
 		},
 		{
 			"voting on a leaf",
 			[]string{"voting"}, false, serving,
-			"voting, which requires the core role",
+			"voting, which requires the founding core",
 		},
 		{
 			"socks without its owner",

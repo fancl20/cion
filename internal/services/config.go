@@ -140,10 +140,11 @@ type NodePacing struct {
 
 // Validate applies the role-aware argument checks: the domain is always
 // required, the founding core is the core without a neighbor, and the gate
-// loads on the issuing node alone.
+// and the core-bound applications load on the founding core alone.
 func (c NodeConfig) Validate() error {
+	founding := c.Core && len(c.Neighbors) == 0
 	if c.Domain == "" {
-		if c.Core && len(c.Neighbors) == 0 {
+		if founding {
 			return fmt.Errorf("--trust.domain is required: the founding core's own, " +
 				"the WebPKI identity of its certificate")
 		}
@@ -166,7 +167,7 @@ func (c NodeConfig) Validate() error {
 		// A silently inert gate is the misleading configuration the
 		// role-aware checks exist to refuse: only the founding core issues
 		// chains, so only the founding core's gate means anything.
-		if !c.Core || len(c.Neighbors) > 0 {
+		if !founding {
 			return fmt.Errorf("--trust.enroll-auth requires the founding core: " +
 				"the founding core is the only node that issues chains")
 		}
@@ -175,8 +176,9 @@ func (c NodeConfig) Validate() error {
 		}
 	}
 	// The applications list's miscombinations refuse here, before any
-	// assembly runs: the same resolution the assembly's walk selects.
-	if _, err := apps.Select(c.Applications, c.Core, c.AppArguments); err != nil {
+	// assembly runs: the same resolution the assembly's walk selects, on
+	// the same founding tier.
+	if _, err := apps.Select(c.Applications, founding, c.AppArguments); err != nil {
 		return err
 	}
 	return nil
