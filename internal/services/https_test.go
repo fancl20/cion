@@ -10,6 +10,7 @@ import (
 	"encoding/pem"
 	"math/big"
 	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -140,6 +141,39 @@ func TestAssembleHTTPSNoBind(t *testing.T) {
 	}
 	if err := (&node{}).assembleHTTPS(); err != nil {
 		t.Fatalf("assembleHTTPS() of a non-core = %v, want nil", err)
+	}
+}
+
+// rootApp is an application whose one surface is an HTTPS handler.
+type rootApp struct{}
+
+func (rootApp) Run(ctx context.Context) error { <-ctx.Done(); return nil }
+func (rootApp) Close()                        {}
+func (rootApp) HTTPSHandler() http.Handler    { return http.NotFoundHandler() }
+
+// TestAssembleHTTPSRefusesSecondHandler checks the one-handler rule: two
+// loaded applications contributing HTTPS handlers refuse the boot with both
+// named, before the port binds.
+func TestAssembleHTTPSRefusesSecondHandler(t *testing.T) {
+	n := &node{
+		cfg:     NodeConfig{Control: "127.0.0.1:30042"},
+		certMgr: staticCertMgr(t),
+		apps: []apps.Loaded{
+			{Name: "first", App: rootApp{}},
+			{Name: "second", App: rootApp{}},
+		},
+	}
+	err := n.assembleHTTPS()
+	if err == nil {
+		t.Fatal("two HTTPS handlers assembled, want refusal")
+	}
+	for _, name := range []string{"first", "second"} {
+		if !strings.Contains(err.Error(), name) {
+			t.Errorf("the refusal = %q, want it to name %q", err, name)
+		}
+	}
+	if n.httpsLn != nil {
+		t.Error("the refused assembly bound the port")
 	}
 }
 

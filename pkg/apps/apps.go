@@ -35,8 +35,9 @@ type Application interface {
 	Run(ctx context.Context) error
 	// Close releases the application.
 	Close()
-	// HTTPSHandler is the handler the node's HTTPS server mounts, nil when
-	// the application mounts nothing on it.
+	// HTTPSHandler is the handler the node's HTTPS server mounts at its
+	// root, nil when the application mounts nothing on it; at most one
+	// loaded application contributes one.
 	HTTPSHandler() http.Handler
 }
 
