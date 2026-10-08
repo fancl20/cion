@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/scionproto/scion/pkg/addr"
@@ -413,6 +414,39 @@ func TestVerifierUncached(t *testing.T) {
 		t.Errorf("provider notified of the TRC %d times, want once per verification",
 			provider.notifies)
 	}
+}
+
+// TestVerifierRefusesExpiredChain checks the verifier's validity bound: a
+// signature that verified while its chain was valid stops verifying once the
+// chain expires, though the store holds the chain until its sweep.
+func TestVerifierRefusesExpiredChain(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		f := newEngineFixture(t)
+		ctx := context.Background()
+		signedMsg, err := f.engine.Sign(ctx, []byte("ping"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		v := trust.Verifier{Engine: &trust.NetworkProvider{DB: f.db}}
+		if _, err := v.Verify(ctx, signedMsg); err != nil {
+			t.Fatalf("verify while the chain is valid: %v", err)
+		}
+
+		// A fake-time sleep in the bubble past the chain's expiry.
+		time.Sleep(time.Until(f.chain[0].NotAfter) + time.Second)
+		chains, err := f.db.Chains(ctx, trustdb.ChainQuery{IA: iaNode})
+		if err != nil || len(chains) != 1 {
+			t.Fatalf("the store holds %d chains of the signer (%v), want the expired one",
+				len(chains), err)
+		}
+		_, err = v.Verify(ctx, signedMsg)
+		if err == nil {
+			t.Fatal("a signature verified under an expired chain")
+		}
+		if want := "no chain in database can verify signature"; !strings.Contains(err.Error(), want) {
+			t.Errorf("the refusal = %q, want it to carry %q", err, want)
+		}
+	})
 }
 
 // newOnboardedFixture is an engine fixture whose ISD has onboarding behind

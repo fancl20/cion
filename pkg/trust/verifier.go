@@ -31,9 +31,6 @@ type Verifier struct {
 	BoundIA addr.IA
 	// BoundServer binds a remote server to ask for missing crypto material.
 	BoundServer net.Addr
-	// BoundValidity binds the verifier to only use certificates that are valid
-	// at the specified time.
-	BoundValidity cppki.Validity
 	// Engine provides verified certificate chains.
 	Engine Provider
 
@@ -49,7 +46,8 @@ type Verifier struct {
 	notifies *ttlCache[struct{}]
 }
 
-// Verify verifies the signature of the msg.
+// Verify verifies the signature of the msg with a chain of the signer valid
+// now.
 func (v Verifier) Verify(ctx context.Context, signedMsg *cryptopb.SignedMessage,
 	associatedData ...[]byte) (*signed.Message, error) {
 
@@ -79,10 +77,13 @@ func (v Verifier) Verify(ctx context.Context, signedMsg *cryptopb.SignedMessage,
 	if err := v.notifyTRC(ctx, id); err != nil {
 		return nil, serrors.Wrap("reporting TRC", err, "id", id)
 	}
+	// The store keeps expired chains until its sweep; the query bound to the
+	// present leaves them out.
+	now := time.Now()
 	query := trustdb.ChainQuery{
 		IA:           ia,
 		SubjectKeyID: keyID.SubjectKeyId,
-		Validity:     v.BoundValidity,
+		Validity:     cppki.Validity{NotBefore: now, NotAfter: now},
 	}
 	chains, err := v.getChains(ctx, query)
 	if err != nil {
