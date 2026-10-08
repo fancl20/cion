@@ -186,10 +186,14 @@ func RunCoreEnrollment(ctx context.Context, cfg EnrollmentConfig) {
 
 // enrollPass runs one non-core inspection: it returns how long to wait
 // before the next one — the fast retry cadence while unenrolled, renewing,
-// or onboarding, the calm inspection interval with a valid chain and, for a
-// joining core, a pinned TRC that names it.
+// onboarding, or failing to read the chain, the calm inspection interval
+// with a valid chain and, for a joining core, a pinned TRC that names it.
 func (cfg EnrollmentConfig) enrollPass(ctx context.Context) time.Duration {
-	chain, remaining := newestChain(ctx, cfg)
+	chain, remaining, err := newestChain(ctx, cfg)
+	if err != nil {
+		slog.Error("Inspecting the chain", "isd_as", cfg.IA, "err", err)
+		return cfg.interval(cfg.RetryInterval, EnrollmentRetryInterval)
+	}
 	if cfg.VotingKey == nil {
 		// The normal node's report; a core's rotation watch carries it
 		// instead, with the roll the report's escalation asks for.
@@ -218,9 +222,14 @@ func (cfg EnrollmentConfig) enrollPass(ctx context.Context) time.Duration {
 }
 
 // corePass runs one core inspection: self-issuing whenever the renewal
-// threshold demands it.
+// threshold demands it, and retrying at the fast cadence when the chain
+// cannot be read.
 func (cfg EnrollmentConfig) corePass(ctx context.Context) time.Duration {
-	chain, remaining := newestChain(ctx, cfg)
+	chain, remaining, err := newestChain(ctx, cfg)
+	if err != nil {
+		slog.Error("Inspecting the core chain", "isd_as", cfg.IA, "err", err)
+		return cfg.interval(cfg.RetryInterval, EnrollmentRetryInterval)
+	}
 	switch {
 	case chain == nil || remaining < trust.ChainRenewalThreshold:
 		if chain != nil && remaining > 0 {
@@ -238,15 +247,19 @@ func (cfg EnrollmentConfig) corePass(ctx context.Context) time.Duration {
 
 // newestChain returns the node's newest chain and its remaining validity; a
 // nil chain means none is valid.
-func newestChain(ctx context.Context, cfg EnrollmentConfig) ([]*x509.Certificate, time.Duration) {
+func newestChain(
+	ctx context.Context,
+	cfg EnrollmentConfig,
+) ([]*x509.Certificate, time.Duration, error) {
+
 	chain, err := trust.NewestChain(ctx, cfg.DB, cfg.IA, time.Now())
 	if err != nil {
-		panic(fmt.Sprintf("reading the newest chain: %v", err))
+		return nil, 0, fmt.Errorf("reading the newest chain: %w", err)
 	}
 	if chain == nil {
-		return nil, 0
+		return nil, 0, nil
 	}
-	return chain, time.Until(chain[0].NotAfter)
+	return chain, time.Until(chain[0].NotAfter), nil
 }
 
 // selfIssue self-issues the core's chain through its issuer and stores it.

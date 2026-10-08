@@ -193,6 +193,47 @@ func TestEnrollmentPassFailing(t *testing.T) {
 	})
 }
 
+// unreadableChainsDB delegates to the wrapped database except for chain
+// reads, which fail.
+type unreadableChainsDB struct {
+	trustdb.DB
+}
+
+func (unreadableChainsDB) Chains(
+	context.Context, trustdb.ChainQuery) ([][]*x509.Certificate, error) {
+
+	return nil, errors.New("the chains bucket is unreadable")
+}
+
+// TestEnrollmentPassUnreadableChains checks both loops' pass on a chain read
+// that fails: the pass asks for the retry cadence with nothing enrolled or
+// self-issued, so the loop reads again instead of ending.
+func TestEnrollmentPassUnreadableChains(t *testing.T) {
+	f := newTrustFixture(t)
+	lf := newLifecycleFixture(t, f)
+	ctx := context.Background()
+	cfg := lf.cfg
+	cfg.DB = unreadableChainsDB{DB: lf.db}
+
+	if got := cfg.enrollPass(ctx); got != time.Millisecond {
+		t.Errorf("pass interval = %v, want the retry interval", got)
+	}
+	if got := lf.core.renewals(); got != 0 {
+		t.Errorf("renewals = %d, want none without a readable chain", got)
+	}
+	cfg.Issuer = f.issuer
+	if got := cfg.corePass(ctx); got != time.Millisecond {
+		t.Errorf("core pass interval = %v, want the retry interval", got)
+	}
+	chains, err := lf.db.Chains(ctx, trustdb.ChainQuery{IA: nodeIATest})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(chains) != 0 {
+		t.Errorf("chains = %d, want none self-issued without a readable chain", len(chains))
+	}
+}
+
 // TestChainSweepPass checks one sweep pass of the enrollment loops' trust
 // database sweep in a fake-time bubble: a chain still within its validity is
 // never deleted by however many sweeps pass; past expiry and the retention
