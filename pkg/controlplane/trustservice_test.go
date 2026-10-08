@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"connectrpc.com/connect"
@@ -619,4 +620,33 @@ func TestChainRenewalRateCap(t *testing.T) {
 	if err := ask(context.Background(), iaLineC); err != nil {
 		t.Fatalf("a different name's admission: %v", err)
 	}
+}
+
+// TestSourceLimiterCap checks the limiter's bound in a fake-time bubble: it
+// admits fresh keys up to its cap and refuses the next while every held key
+// is inside its interval; once the interval passes, a sweep forgets the
+// silent keys, the refused key is admitted, and the table holds it alone.
+func TestSourceLimiterCap(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		l := newSourceLimiter[int](time.Second)
+		for k := range sourceLimiterCap {
+			if !l.admit(k) {
+				t.Fatalf("key %d refused below the cap", k)
+			}
+		}
+		if l.admit(sourceLimiterCap) {
+			t.Fatal("a fresh key was admitted past the cap")
+		}
+		if l.admit(0) {
+			t.Error("a held key was admitted inside its interval")
+		}
+		time.Sleep(time.Second)
+		if !l.admit(sourceLimiterCap) {
+			t.Fatal("the refused key was refused once the interval passed")
+		}
+		if len(l.last) != 1 {
+			t.Errorf("the limiter holds %d keys after the sweep, want the admitted one",
+				len(l.last))
+		}
+	})
 }

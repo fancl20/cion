@@ -9,6 +9,7 @@ import (
 	"net/netip"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"tailscale.com/tailcfg"
@@ -111,6 +112,38 @@ func TestRegisterRateCaps(t *testing.T) {
 	if asks := auth.asks(); len(asks) != 2 {
 		t.Fatalf("the seam was asked %d times past the interval, want 2", len(asks))
 	}
+}
+
+// TestSourceLimiterCap checks the limiter's bound in a fake-time bubble: it
+// admits fresh sources up to its cap and refuses the next while every held
+// bucket refills; once the interval passes, a sweep forgets the full
+// buckets, the refused source is admitted, and the table holds it alone.
+func TestSourceLimiterCap(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		l := newSourceLimiter(time.Second)
+		source := func(i int) netip.Addr {
+			return netip.AddrFrom4([4]byte{10, 0, byte(i >> 8), byte(i)})
+		}
+		for i := range sourceLimiterCap {
+			if !l.admit(source(i)) {
+				t.Fatalf("source %d refused below the cap", i)
+			}
+		}
+		if l.admit(source(sourceLimiterCap)) {
+			t.Fatal("a fresh source was admitted past the cap")
+		}
+		if l.admit(source(0)) {
+			t.Error("a held source was admitted inside its interval")
+		}
+		time.Sleep(time.Second)
+		if !l.admit(source(sourceLimiterCap)) {
+			t.Fatal("the refused source was refused once the interval passed")
+		}
+		if len(l.held) != 1 {
+			t.Errorf("the limiter holds %d sources after the sweep, want the admitted one",
+				len(l.held))
+		}
+	})
 }
 
 // TestRegisterSerializesAllocation is the collision episode held as a
