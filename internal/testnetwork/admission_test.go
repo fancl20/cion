@@ -102,9 +102,15 @@ func TestCoordinationTelegramPromptJoin(t *testing.T) {
 		done <- result{ips: status.TailscaleIPs}
 	}()
 
-	// The prompt lands in the configured chat; the operator approves.
-	Poll(t, "the registration prompt", func() bool { return bot.promptCount() > 0 })
-	bot.press(t, 0, 0)
+	// The prompt lands in the configured chat beside the leaf's enrollment
+	// prompt, the two in either order; the operator approves the
+	// registration.
+	prompt := -1
+	Poll(t, "the registration prompt", func() bool {
+		prompt = bot.promptHeaded("CION registration request")
+		return prompt >= 0
+	})
+	bot.press(t, prompt, 0)
 	select {
 	case got := <-done:
 		if got.err || len(got.ips) != 1 || !TailnetRange.Contains(got.ips[0]) {

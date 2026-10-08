@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -147,6 +148,19 @@ func (b *operatorBot) promptCount() int {
 	b.mtx.Lock()
 	defer b.mtx.Unlock()
 	return len(b.prompts)
+}
+
+// promptHeaded returns the number of the first prompt whose text opens with
+// the heading, or -1 while the operator's phone shows none.
+func (b *operatorBot) promptHeaded(heading string) int {
+	b.mtx.Lock()
+	defer b.mtx.Unlock()
+	for i, m := range b.prompts {
+		if text, _ := m["text"].(string); strings.HasPrefix(text, heading) {
+			return i
+		}
+	}
+	return -1
 }
 
 // holdsChain reports whether the node's trust database holds a valid chain
