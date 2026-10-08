@@ -4,25 +4,30 @@ import (
 	"context"
 	"net/netip"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 
 	"github.com/scionproto/scion/pkg/addr"
 
 	"github.com/fancl20/cion/internal/services"
-	"github.com/fancl20/cion/pkg/apps/ping"
+	"github.com/fancl20/cion/pkg/dataplane"
 	"github.com/fancl20/cion/pkg/modules/links"
+	"github.com/fancl20/cion/pkg/scion"
+	"github.com/fancl20/cion/pkg/segment"
 )
 
 // TestBFDLivenessEpisode is the BFD integration proof: a three-node
 // line — the core A, the middle B, and C below — where killing B is the
-// blackhole on the A–B link's sockets. A marks the link down within the
-// window while its BFD keeps leaving on the link's own socket; a ping from
-// A toward B's far side receives the type-5 signal and A's interface cache
-// records it; the selection loop, its neighbor now verdict-down, promotes
-// the reachable C to hold the floor; lifting the blackhole — B restarted —
+// blackhole on the A–B link's sockets. A holds the floor of up links through
+// a direct link to C and reaches C over it. A marks the A–B link down within
+// the window while its BFD keeps leaving on the link's own socket; an echo
+// from A across the dead link toward B's far side receives the type-5 signal
+// and A's interface cache records it; lifting the blackhole — B restarted —
 // returns the link up with no generation swap: the serving instance's
-// session continuous across the episode.
+// session continuous across the episode. The selection loop retires a link
+// whose verdict stays down for DemoteWindows windows, so every wait on path
+// convergence comes before B dies.
 func TestBFDLivenessEpisode(t *testing.T) {
 	t.Parallel()
 	wpki := NewWebPKI(t)
@@ -36,12 +41,23 @@ func TestBFDLivenessEpisode(t *testing.T) {
 		return establishedOf(a, b.app.IA()) && establishedOf(b, a.app.IA()) &&
 			establishedOf(b, c.app.IA()) && establishedOf(c, b.app.IA())
 	})
-	Poll(t, "A reaches C through B", func() bool {
-		return pingFrom(ctx, a, c.app.IA(), c.host)
-	})
-
 	abEntry := entryOf(a, b.app.IA())
 	abIfID := abEntry.IfID
+	Poll(t, "A reaches C through B", func() bool {
+		return echoVia(ctx, t, a, c.app.IA(), c.host, abIfID, time.Second)
+	})
+
+	// A holds the floor of up links through a direct link to C — a line of
+	// three leaves both ends below the floor, so one end's selection loop
+	// promotes the other — and reaches C over it.
+	Poll(t, "A to hold a direct link to C", func() bool {
+		return establishedOf(a, c.app.IA())
+	})
+	acIfID := entryOf(a, c.app.IA()).IfID
+	Poll(t, "A to reach C directly", func() bool {
+		return echoVia(ctx, t, a, c.app.IA(), c.host, acIfID, time.Second)
+	})
+
 	session := a.app.Monitor().Session(abEntry)
 	if session == nil {
 		t.Fatal("no BFD session on A's link to B")
@@ -69,22 +85,10 @@ func TestBFDLivenessEpisode(t *testing.T) {
 		t.Error("the verdict flip minted a new session")
 	}
 
-	// A ping from A toward B's far side — C — rides the path through the
-	// dead link: the egress-down branch answers with the type-5 signal, and
-	// A's conn records the signaled interface in the shared cache.
-	pingLossy(ctx, t, a, c.app.IA(), c.host)
-	Poll(t, "the interface-down signal to land in A's cache", func() bool {
-		return a.app.InterfaceDown().Holds(a.app.IA(), abIfID)
-	})
-
-	// The selection loop, its neighbor now verdict-down below the up-link
-	// floor, promotes the reachable C from the directory.
-	Poll(t, "A to promote C to hold the floor", func() bool {
-		return establishedOf(a, c.app.IA())
-	})
-	Poll(t, "A to reach C directly", func() bool {
-		return pingFrom(ctx, a, c.app.IA(), c.host)
-	})
+	// An echo from A toward B's far side — C — over a path through the dead
+	// link: the egress-down branch answers with the type-5 signal, and A's
+	// conn records the signaled interface in the shared cache.
+	echoAcrossDownLink(ctx, t, a, c.app.IA(), c.host, abIfID)
 
 	// Lift the blackhole: B restarted on the same state serves its persisted
 	// link, and A's verdict returns up on the next answered arrival — the
@@ -141,10 +145,7 @@ func TestBFDStaticLabEpisode(t *testing.T) {
 		return !a.app.Monitor().Up(ifID)
 	})
 	// The dead route answers the source with the signal; A's cache holds it.
-	pingLossy(ctx, t, a.assemblyNode, c.app.IA(), c.host)
-	Poll(t, "the interface-down signal to land in A's cache", func() bool {
-		return a.app.InterfaceDown().Holds(a.app.IA(), ifID)
-	})
+	echoAcrossDownLink(ctx, t, a.assemblyNode, c.app.IA(), c.host, ifID)
 
 	// Lift the blackhole: B restarted from its link-set returns the link up.
 	b2 := bootStaticNode(t, wpki, ipB, false, b.stateDir, b.linkSet, nil)
@@ -164,25 +165,64 @@ func establishedOf(n *assemblyNode, ia addr.IA) bool {
 	return e != nil && e.State == links.StateEstablished
 }
 
-// pingLossy runs one ping whose request is expected to die on a down egress:
-// what matters is the SCMP error the slow path sends back, which the conn's
-// receive path recognizes into the node's shared cache while the ping waits.
-func pingLossy(ctx context.Context, t *testing.T, n *assemblyNode, dst addr.IA, host netip.Addr) {
+// echoAcrossDownLink sends echoes toward the destination over a path
+// leaving through the node's down interface until the node's shared cache
+// holds the egress-down branch's type-5 signal, which the receive path
+// records while each echo goes unanswered.
+func echoAcrossDownLink(ctx context.Context, t *testing.T, n *assemblyNode,
+	dst addr.IA, host netip.Addr, ifID uint16) {
+
 	t.Helper()
+	Poll(t, "the interface-down signal to land in the cache", func() bool {
+		echoVia(ctx, t, n, dst, host, ifID, 100*time.Millisecond)
+		return n.app.InterfaceDown().Holds(n.app.IA(), ifID)
+	})
+}
+
+// echoVia sends an echo request toward the destination over a composed
+// path leaving through the node's interface and reads the socket until the
+// reply arrives or the wait elapses, reporting whether the reply arrived;
+// while no such path is composed it reports false at once. The receive path
+// records an interface-down signal in the node's shared cache as it reads.
+func echoVia(ctx context.Context, t *testing.T, n *assemblyNode, dst addr.IA,
+	host netip.Addr, ifID uint16, wait time.Duration) bool {
+
+	t.Helper()
+	candidates, err := n.app.Provider().Enumerate(ctx, dst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	via := segment.LinkID{IA: n.app.IA(), IfID: ifID}
+	i := slices.IndexFunc(candidates, func(c scion.Candidate) bool {
+		return slices.Contains(c.Links, via)
+	})
+	if i < 0 {
+		return false
+	}
 	conn, err := n.app.Conn(0)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer func() { _ = conn.Close() }()
-	_, _ = ping.Run(ctx, ping.Config{
-		Conn:     conn,
-		Provider: n.app.Provider(),
-		Dst:      dst,
-		DstHost:  host,
-		Count:    1,
-		Interval: 100 * time.Millisecond,
-		Wait:     2 * time.Second,
-	})
+	if err := conn.WriteEchoRequestTo(&scion.Addr{
+		IA:   dst,
+		Addr: netip.AddrPortFrom(host, dataplane.EndhostPort),
+		Path: candidates[i].Path,
+	}, 0, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := conn.SetReadDeadline(time.Now().Add(wait)); err != nil {
+		t.Fatal(err)
+	}
+	for {
+		echo, _, err := conn.ReadEchoFrom()
+		if err != nil {
+			return false // the wait elapsed
+		}
+		if echo.Reply && echo.Identifier == conn.LocalPort() {
+			return true
+		}
+	}
 }
 
 // linkSetPath names a fresh link-set file.
