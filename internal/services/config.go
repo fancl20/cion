@@ -60,8 +60,10 @@ type NodeConfig struct {
 	Internal string
 	Control  string
 	// EnrollAuth selects the enrollment authorizer that gates first issuance,
-	// "method=spec": "cidrs" with a comma-separated prefix list, "telegram" with
-	// <chat>:<token>. Empty is open enrollment — the zero-conf default — and the
+	// host registration, and the founding core's sensitive vote on a core's
+	// TRC submission, "method=spec": "cidrs" with a comma-separated prefix
+	// list, "telegram" with <chat>:<token>. Empty is open enrollment and
+	// registration — the zero-conf default — with the vote denied, and the
 	// argument refuses to load off the founding core, the only node that
 	// issues chains.
 	EnrollAuth string

@@ -1,21 +1,21 @@
 // Package enrollauth is the node's admission policy module: the seam
-// gating a joiner node's first issuance, a joiner host's login, and a
-// core's seek for voting power — with its implementations filed one
-// package each beneath this root: the CIDR
-// authorizer admitting joiners by addressing, nodes and hosts alike, and
-// the Telegram one admitting them one by one from an operator's phone —
-// and a shared contract suite in impl/authtest every implementation
-// runs. The --trust.enroll-auth run argument selects exactly one method, the
-// caller importing the implementation it names; unset is open
-// enrollment, the zero-conf default.
+// gating a joiner node's first issuance, a joiner host's login, and the
+// founder's sensitive vote on a core's TRC submission — with its
+// implementations filed one package each beneath this root: the CIDR
+// authorizer admitting by addressing at every boundary, and the Telegram
+// one admitting one by one from an operator's phone — and a shared
+// contract suite in impl/authtest every implementation runs. The
+// --trust.enroll-auth run argument selects exactly one method, the caller
+// importing the implementation it names; unset is open enrollment and
+// registration, the zero-conf default, while the founder's vote is denied.
 //
-// Kind: policy — who is admitted, joiner node, host, or voting core;
-// selected by the operator's --trust.enroll-auth spec, exactly one method.
+// Kind: policy — who is admitted, joiner node or host, and what the
+// founder votes on; selected by the operator's --trust.enroll-auth spec,
+// exactly one method.
 package enrollauth
 
 import (
 	"context"
-	"crypto/x509"
 	"net/netip"
 
 	"github.com/scionproto/scion/pkg/addr"
@@ -23,8 +23,9 @@ import (
 
 // Boundary names the boundary asking one admission question: enrollment at
 // a joiner node's first issuance, registration at a joiner host's login,
-// the voting submission at a core's seek for voting power. The same plugin
-// answers all three, distinguished only by the context it is handed.
+// the voting submission at a core's TRC submission that needs the
+// founder's sensitive vote. The same plugin answers all three,
+// distinguished only by the context it is handed.
 type Boundary int
 
 const (
@@ -32,8 +33,8 @@ const (
 	BoundaryEnrollment Boundary = iota
 	// BoundaryRegistration is a host's coordination login.
 	BoundaryRegistration
-	// BoundaryVoting is a core's submission of the TRC update that would
-	// grant it voting power.
+	// BoundaryVoting is a core's TRC submission that needs the founder's
+	// sensitive vote.
 	BoundaryVoting
 )
 
@@ -52,9 +53,9 @@ type AdmissionFacts struct {
 	// Keys holds fingerprints of the keys the exchange presented — the CSR's
 	// subject key at enrollment, whose possession the CMS wrapper proved; the
 	// machine and node keys at registration, the first authenticated by the
-	// noise channel and the second offered for the data plane; the voting
-	// certificate's key at the voting submission, whose possession the
-	// submitted TRC's signature proved.
+	// noise channel and the second offered for the data plane; the keys of
+	// the certificates the submitted successor adds at the voting
+	// submission, in the successor's order.
 	Keys []string
 	// Source is the return-routable source: the SCION underlay address at
 	// enrollment, the internet address the completed TLS connection names at
@@ -70,11 +71,6 @@ type AdmissionFacts struct {
 	// self-assertion, the voting submission's channel-verified presenter;
 	// zero at registration.
 	Claim addr.IA
-	// VotingCert is the regular voting certificate the successor a core
-	// submitted carries — what the submitter asks voting power with, on the
-	// same seam the keys and the claim already answer. Nil at the other
-	// boundaries.
-	VotingCert *x509.Certificate
 }
 
 // AdmissionVerdict is an authorizer's decision. Deny is the zero value: an
@@ -106,12 +102,12 @@ type AdmissionAnswer struct {
 // AdmissionAuthorizer is the seam the boundaries ask: the caller invokes
 // it exactly when the mechanical checks pass and nothing yet stands for the
 // joiner — possession verified, the name free at enrollment, the key
-// unseen at registration, the update classifying at the voting submission —
-// and admits, refuses, or pends on its answer. The callers — the control
-// plane's trust service, its TRC decision, the coordination application —
-// import this root to pose the question; the implementations beneath it
-// import the same root to answer it, and neither caller knows a type of
-// them.
+// unseen at registration, a classifying update short of the founder's vote
+// at the voting submission — and admits, refuses, or pends on its answer.
+// The callers — the control plane's trust service, its TRC decision, the
+// coordination application — import this root to pose the question; the
+// implementations beneath it import the same root to answer it, and
+// neither caller knows a type of them.
 type AdmissionAuthorizer interface {
 	// Authorize answers one admission exchange.
 	Authorize(context.Context, AdmissionFacts) AdmissionAnswer

@@ -5,7 +5,7 @@ import (
 )
 
 // votingEntry is the TRC voting application's place in the table: the
-// founding core's surface for the cores of its ISD seeking voting power,
+// founding core's surface for the TRC updates the cores of its ISD submit,
 // every submission handed to the control plane's decision. The founding
 // core alone loads it, the one node whose control plane decides.
 var votingEntry = Entry{

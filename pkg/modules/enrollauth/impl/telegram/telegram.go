@@ -490,7 +490,7 @@ func identityOf(f enrollauth.AdmissionFacts) string {
 }
 
 // promptText renders one prompt: the enrollment's claimed name, the
-// registration's offered keys, the voting submission's certificate, the
+// registration's offered keys, the voting submission's added keys, the
 // source beside them.
 func promptText(f enrollauth.AdmissionFacts) string {
 	var b strings.Builder

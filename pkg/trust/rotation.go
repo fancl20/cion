@@ -27,30 +27,26 @@ const RollTimeout = 10 * time.Second
 // certificates: each staged certificate replaces the predecessor's
 // same-named counterpart of its class, everything else carried unchanged —
 // the quorum, both AS lists, and noTrustReset as they were, for a roll
-// changes keys, never membership. The votes field carries the predecessor's
-// index of the sensitive voting certificate (PKI draft, Section 3.5.5), the
-// validity is the window every certificate the successor carries still
-// covers, and the grace period is the AS certificate validity: the window a
-// chain issued under replaced material keeps verifying, the draft's Section
-// 3.2.4 update grace.
+// changes keys, never membership. The votes field carries the voter's index
+// in the predecessor: a sensitive voting certificate makes a sensitive
+// update (PKI draft, Section 3.5.5), and the regular one the roll replaces
+// makes a regular update (Section 3.5.4). The validity is the window every
+// certificate the successor carries still covers, and the grace period is
+// the AS certificate validity: the window a chain issued under replaced
+// material keeps verifying, the draft's Section 3.2.4 update grace.
 func AssembleRotation(
 	pred cppki.SignedTRC,
+	voter *x509.Certificate,
 	fresh []*x509.Certificate,
 ) (cppki.TRC, error) {
 
 	if len(fresh) == 0 {
 		return cppki.TRC{}, serrors.New("the rotation stages no certificate")
 	}
-	sensitiveIdx := -1
-	for i, cert := range pred.TRC.Certificates {
-		if ct, err := cppki.ValidateCert(cert); err == nil && ct == cppki.Sensitive {
-			sensitiveIdx = i
-			break
-		}
-	}
-	if sensitiveIdx < 0 {
-		return cppki.TRC{}, serrors.New("the predecessor holds no sensitive voting certificate",
-			"trc", pred.TRC.ID)
+	vote := slices.IndexFunc(pred.TRC.Certificates, voter.Equal)
+	if vote < 0 {
+		return cppki.TRC{}, serrors.New("the predecessor does not carry the voter",
+			"trc", pred.TRC.ID, "voter", voter.Subject)
 	}
 	certs := slices.Clone(pred.TRC.Certificates)
 	replaced := make([]bool, len(fresh))
@@ -104,7 +100,7 @@ func AssembleRotation(
 		// before the cast has expired by the time the window closes.
 		GracePeriod:       ASValidity,
 		NoTrustReset:      pred.TRC.NoTrustReset,
-		Votes:             []int{sensitiveIdx},
+		Votes:             []int{vote},
 		Quorum:            pred.TRC.Quorum,
 		CoreASes:          slices.Clone(pred.TRC.CoreASes),
 		AuthoritativeASes: slices.Clone(pred.TRC.AuthoritativeASes),
@@ -113,9 +109,10 @@ func AssembleRotation(
 	}, nil
 }
 
-// SignRotation signs the assembled successor with each staged certificate's
-// key — the proof of possession cppki requires of every certificate that
-// supersedes a same-named one, extended to the root.
+// SignRotation signs the assembled successor with each key under its
+// certificate: the staged keys' proof of possession cppki requires of every
+// certificate that supersedes a same-named one, extended to the root, and
+// on a regular update the vote of the key the roll replaces.
 func SignRotation(
 	trc cppki.TRC,
 	keys []crypto.Signer,
@@ -161,7 +158,7 @@ func RotateCoreKeys(
 	if err != nil {
 		return CoreKeys{}, cppki.SignedTRC{}, err
 	}
-	trc, err := AssembleRotation(pred, certs)
+	trc, err := AssembleRotation(pred, predSensitive, certs)
 	if err != nil {
 		return CoreKeys{}, cppki.SignedTRC{}, err
 	}
@@ -196,12 +193,15 @@ func RotateCoreKeys(
 // through the submission channel its join used: it resolves the founder's
 // newest TRC — the drafts' numbers-less ask, verified against the pinned
 // chain and pinned — stages a fresh key with its self-signed certificate,
-// assembles the successor replacing the certificate the newest names for the
-// core, signs the proof of possession, and submits the partially signed
-// artifact to the founder's voting application, whose decision casts the
-// sensitive vote. The completed artifact verifies against the resolved
-// predecessor before anything pins; the pin persists the staged pair beside
-// the key.
+// and assembles the successor replacing the certificate the newest names for
+// the core. While the persisted key covers that certificate, the successor
+// is a regular update the persisted key votes on beside the fresh key's
+// proof of possession, and the founder pins it as submitted. Once it no
+// longer does, the persisted key has no vote to cast: the successor is a
+// sensitive update the fresh key alone signs, completed by the founder's
+// vote on its admission policy's allow. What the founder answers verifies
+// against the resolved predecessor before anything pins here; the pin
+// persists the staged pair beside the key.
 func RollVotingKey(
 	ctx context.Context,
 	db trustdb.DB,
@@ -223,11 +223,38 @@ func RollVotingKey(
 	if len(named) == 0 {
 		return serrors.New("the newest TRC names no certificate of the core", "trc", newest.TRC.ID)
 	}
+	held := named[0]
+	current, err := LoadOrCreateVotingKey(stateDir)
+	if err != nil {
+		return err
+	}
 	key, cert, err := stageVotingPair(ia)
 	if err != nil {
 		return err
 	}
-	trc, err := AssembleRotation(newest, []*x509.Certificate{cert})
+	var (
+		voter   *x509.Certificate
+		signers []crypto.Signer
+		certs   []*x509.Certificate
+	)
+	if KeyMatchesCert(current, held) {
+		// The replaced certificate's key votes beside the fresh key's proof
+		// of possession: a regular update.
+		voter = held
+		signers = []crypto.Signer{key, current}
+		certs = []*x509.Certificate{cert, held}
+	} else {
+		// The persisted key covers no certificate of the newest TRC, so the
+		// founder's sensitive certificate is the voter: a sensitive update
+		// the fresh key alone signs.
+		voter, err = SignerCert(newest.TRC, cppki.Sensitive)
+		if err != nil {
+			return err
+		}
+		signers = []crypto.Signer{key}
+		certs = []*x509.Certificate{cert}
+	}
+	trc, err := AssembleRotation(newest, voter, []*x509.Certificate{cert})
 	if err != nil {
 		return err
 	}
@@ -235,13 +262,13 @@ func RollVotingKey(
 		return serrors.Wrap("classifying the successor against the founder's newest TRC",
 			err, "predecessor", newest.TRC.ID)
 	}
-	partial, err := SignUpdate(trc, key, cert)
+	partial, err := SignRotation(trc, signers, certs)
 	if err != nil {
 		return err
 	}
-	// The submitted artifact is checked short of the founder's vote: the
-	// successor classifies, and the possession signature verifies over the
-	// payload. The completion's verification demands both signatures.
+	// The submitted artifact is checked before it leaves: the successor
+	// classifies, and the possession signature verifies over the payload.
+	// The answer's verification demands every signature its update requires.
 	if err := verifySignedBy(partial, cert); err != nil {
 		return serrors.Wrap("verifying the proof of possession", err)
 	}
@@ -330,8 +357,8 @@ func sameSubject(a, b pkix.Name) bool {
 	return reflect.DeepEqual(a.ToRDNSequence(), b.ToRDNSequence())
 }
 
-// persistVotingCertPath names the persisted voting certificate inside the
-// state directory, for the pair's persist.
+// votingCertPath names the persisted voting certificate inside the state
+// directory, for the pair's persist.
 func votingCertPath(stateDir string) string {
 	return filepath.Join(keyDir(stateDir), RegularVotingCertFile)
 }

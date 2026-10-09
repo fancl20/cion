@@ -14,6 +14,7 @@ import (
 	"github.com/scionproto/scion/pkg/scrypto"
 	"github.com/scionproto/scion/pkg/scrypto/cppki"
 
+	"github.com/fancl20/cion/pkg/modules/enrollauth"
 	"github.com/fancl20/cion/pkg/modules/trustdb"
 	"github.com/fancl20/cion/pkg/modules/trustdb/impl/bbolt"
 	"github.com/fancl20/cion/pkg/trust"
@@ -232,14 +233,17 @@ func TestFounderRotationMismatch(t *testing.T) {
 }
 
 // authoritativeRotationFixture is an onboarded authoritative core — the
-// founder's decision beside it — with its persisted voting pair and the
-// watch over it.
+// founder's decision beside it, its admission policy allowing — with its
+// persisted voting pair and the watch over it.
 type authoritativeRotationFixture struct {
 	db        trustdb.DB
 	state     string
 	cfg       RotationConfig
 	issuer    *trust.Issuer
 	founderDB trustdb.DB
+	// auth records the founder's admission questions from the onboarding
+	// on: the onboarding's own is cleared.
+	auth *askAuthorizer
 }
 
 // enroll issues the joiner a fresh chain on the founder, the gate the
@@ -260,7 +264,13 @@ func (f *authoritativeRotationFixture) enroll(t *testing.T) {
 func newAuthoritativeRotationFixture(t *testing.T) *authoritativeRotationFixture {
 	t.Helper()
 	f := newTrustFixture(t)
-	decider := &TRCDecider{DB: f.db, IA: coreIATest, Sensitive: f.keys.Sensitive}
+	auth := &askAuthorizer{verdict: enrollauth.AdmissionAllow}
+	decider := &TRCDecider{
+		DB:         f.db,
+		IA:         coreIATest,
+		Sensitive:  f.keys.Sensitive,
+		Authorizer: auth,
+	}
 	// The joiner enrolled and onboarded: the founder's newest names it.
 	key, cert := votingMaterial(t, joinerIATest)
 	csr, _ := newCSR(t, joinerIATest)
@@ -282,6 +292,7 @@ func newAuthoritativeRotationFixture(t *testing.T) *authoritativeRotationFixture
 	if _, err := decider.DecideTRC(context.Background(), joinerIATest, partial); err != nil {
 		t.Fatal(err)
 	}
+	auth.asked = nil
 	db, err := bbolt.New(filepath.Join(t.TempDir(), "trust.db"), nil)
 	if err != nil {
 		t.Fatal(err)
@@ -307,7 +318,7 @@ func newAuthoritativeRotationFixture(t *testing.T) *authoritativeRotationFixture
 	}
 	return &authoritativeRotationFixture{
 		db: db, state: state, cfg: cfg,
-		issuer: f.issuer, founderDB: f.db,
+		issuer: f.issuer, founderDB: f.db, auth: auth,
 	}
 }
 
@@ -326,9 +337,11 @@ func (c deciderCaster) SubmitTRC(
 
 // TestAuthoritativeRotationPasses checks the authoritative core's watch in a
 // fake-time bubble: material beyond the threshold only inspects, material
-// within it submits the roll through the channel its join used — both sides
-// pinning, the staged pair persisting — and the mismatch trigger rolls at
-// the next pass whatever the calendar says.
+// within it submits the roll through the channel its join used — a regular
+// update the founder pins without asking its policy, both sides pinning, the
+// staged pair persisting — and the mismatch trigger rolls at the next pass
+// whatever the calendar says, by a sensitive update the policy is asked of
+// once.
 func TestAuthoritativeRotationPasses(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		f := newAuthoritativeRotationFixture(t)
@@ -361,6 +374,13 @@ func TestAuthoritativeRotationPasses(t *testing.T) {
 		if len(rolled) != 1 || !trust.KeyMatchesCert(key, rolled[0]) {
 			t.Error("the persisted pair does not cover the successor's certificate")
 		}
+		if got := updateType(t, pinned, pinnedAt(t, f.db, 2)); got != cppki.RegularUpdate {
+			t.Errorf("the routine roll's update type = %v, want a regular update", got)
+		}
+		if len(f.auth.asked) != 0 {
+			t.Errorf("the routine roll asked the founder's policy %d times, want none",
+				len(f.auth.asked))
+		}
 
 		// The mismatch: a replaced pair rolls at the next pass.
 		stranger, strangerCert := votingMaterial(t, joinerIATest)
@@ -370,8 +390,26 @@ func TestAuthoritativeRotationPasses(t *testing.T) {
 		if got := f.cfg.rotationPass(ctx); got != time.Millisecond {
 			t.Errorf("pass interval = %v, want the retry interval on the mismatch", got)
 		}
-		if pinned := pinnedAt(t, f.db, 4); pinned.IsZero() {
-			t.Error("the mismatch roll pinned no successor")
+		mismatch := pinnedAt(t, f.db, 4)
+		if mismatch.IsZero() {
+			t.Fatal("the mismatch roll pinned no successor")
+		}
+		if got := updateType(t, mismatch, pinned); got != cppki.SensitiveUpdate {
+			t.Errorf("the mismatch roll's update type = %v, want a sensitive update", got)
+		}
+		if len(f.auth.asked) != 1 {
+			t.Errorf("the mismatch roll asked the founder's policy %d times, want 1",
+				len(f.auth.asked))
 		}
 	})
+}
+
+// updateType classifies the successor against its predecessor.
+func updateType(t *testing.T, successor, pred cppki.SignedTRC) cppki.UpdateType {
+	t.Helper()
+	update, err := successor.TRC.ValidateUpdate(&pred.TRC)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return update.Type
 }

@@ -21,16 +21,13 @@ import (
 	"github.com/fancl20/cion/pkg/trust"
 )
 
-// TRCDecider is the control plane's decision on a submitted TRC update: the
-// founder's own step of the sensitive update's casting, with no network of
-// its own — the voting application hands each submission over, and the
-// decision is made here. It validates the partially signed successor a
-// joining core presented — the proof of possession over its new voting
-// certificate among the checks, and the presenter bound to the new voter by
-// the application's verified channel — asks the admission policy the
-// voting question, casts the founder's sensitive vote beside the submitted
-// signature, verifies the completed artifact against the newest pinned
-// TRC, and pins it.
+// TRCDecider is the control plane's decision on a submitted TRC update, with
+// no network of its own: the voting application hands each submission over,
+// and the decision is made here. A submission that verifies against the
+// newest pinned TRC as submitted pins as it is, and a sensitive update short
+// of the founder's vote gets the vote only on the admission policy's allow,
+// the completed artifact verified against the newest pinned TRC before it
+// pins. The founder's own casts run through CastLocal instead.
 type TRCDecider struct {
 	// DB serves and pins the founder's TRCs and chains.
 	DB trustdb.DB
@@ -40,29 +37,27 @@ type TRCDecider struct {
 	// the newest pinned TRC's certificate set. Nil where this node decides
 	// nothing — every node but the founding core.
 	Sensitive crypto.Signer
-	// Authorizer is the policy asked the voting question — whether the
-	// submitter gains voting power — once the mechanical gates pass. Nil is
-	// open admission, the gate the run arguments leave unset.
+	// Authorizer is the policy asked before the founder's sensitive vote on
+	// a submission. Nil denies every such vote: the run arguments left the
+	// policy unset.
 	Authorizer enrollauth.AdmissionAuthorizer
 
 	// mtx serializes the decision: each one reads the sensitive signer and
 	// the newest pinned TRC under it, so serials stay monotone under
-	// concurrent submissions, only a completed update ever advances the pin,
+	// concurrent submissions, only a verified update ever advances the pin,
 	// and a roll's reassignment of Sensitive lands between decisions.
 	mtx sync.Mutex
 }
 
-// DecideTRC casts the founder's vote on the successor a core submitted. A
-// submission whose landing the newest pinned TRC already carries is answered
-// with that TRC — the idempotent re-presentation of a cast that completed,
-// read from what the submission changes, never from the presenter's name
-// alone, for a rolling presenter is already named. Everything else is
-// refused unless it holds: the update classifies against the newest pinned
-// TRC, the presenter is the channel's verified peer holding an enrolled
-// chain, and what the submission changes is one of the two shapes the
-// channel serves — an onboarding of the presenter alone, asked the
-// admission policy's voting question, or a roll of the presenter's own
-// certificate, which grants no power the presenter lacked and asks nothing.
+// DecideTRC decides whether the founder accepts the successor a core
+// submitted. A submission whose landing the newest pinned TRC already
+// carries is answered with that TRC — the idempotent re-presentation, read
+// from what the submission holds, never from the presenter's name. Otherwise
+// the update must classify against the newest pinned TRC and the presenter
+// must be the channel's verified peer holding an enrolled chain. Past those
+// gates a submission that verifies as submitted pins as it is, the founder
+// signing nothing; a sensitive update that does not verify yet gets the
+// founder's vote on the admission policy's allow; anything else is refused.
 // What refuses pins nothing.
 func (c *TRCDecider) DecideTRC(
 	ctx context.Context,
@@ -84,38 +79,22 @@ func (c *TRCDecider) DecideTRC(
 		return cppki.SignedTRC{}, err
 	}
 	if landed(trc.TRC, newest.TRC) {
-		// The cast already completed, whether here or before a restart: the
-		// newest carries its landing, and nothing is cast again.
+		// The submission already landed, whether here or before a restart:
+		// the newest carries it, and nothing is decided again.
 		return newest, nil
 	}
 	// The submitted successor must classify against the newest pinned TRC:
-	// the serial increments it, the quorum and noTrustReset stand, and the
-	// votes name sensitive voters. A submission built on an older view is
-	// refused — the submitter resolves the newest TRC and submits again.
-	if _, err := trc.TRC.ValidateUpdate(&newest.TRC); err != nil {
+	// the serial increments it and noTrustReset stands. A submission built
+	// on an older view is refused — the submitter resolves the newest TRC
+	// and submits again.
+	update, err := trc.TRC.ValidateUpdate(&newest.TRC)
+	if err != nil {
 		return cppki.SignedTRC{}, serrors.Wrap("the submitted update does not classify "+
 			"against the newest pinned TRC", err, "submitted", trc.TRC.ID,
 			"predecessor", newest.TRC.ID)
 	}
-	// What the submission changes tells the roll from the onboarding: one
-	// certificate the predecessor's certificates' ISD-ASes do not cover is a
-	// fresh voter onboarding; one they cover is a changed certificate
-	// rolling.
-	novel := novelCerts(trc.TRC, newest.TRC)
-	if len(novel) != 1 {
-		if len(novel) == 0 {
-			return cppki.SignedTRC{}, serrors.New("the submission changes nothing")
-		}
-		return cppki.SignedTRC{}, serrors.New("the submission changes more than one certificate",
-			"changed", len(novel))
-	}
-	novelIA, err := cppki.ExtractIA(novel[0].Subject)
-	if err != nil {
-		return cppki.SignedTRC{}, serrors.Wrap("reading the changed certificate's ISD-AS", err)
-	}
-	roll := iaCovered(newest.TRC, novelIA)
-	// The enrolled core's gate: the cast is the enrolled core's, never the
-	// enrollment's shortcut.
+	// The enrolled core's gate: the submission is an enrolled core's, never
+	// the enrollment's shortcut.
 	chains, err := c.DB.Chains(ctx, trustdb.ChainQuery{
 		IA:       presenter,
 		Validity: cppki.Validity{NotBefore: time.Now(), NotAfter: time.Now()},
@@ -125,41 +104,29 @@ func (c *TRCDecider) DecideTRC(
 	}
 	if len(chains) == 0 {
 		return cppki.SignedTRC{}, serrors.New("the submitting core holds no chain yet; "+
-			"enroll before seeking voting power", "presenter", presenter)
+			"enroll before submitting", "presenter", presenter)
 	}
-	if !novelIA.Equal(presenter) {
-		if roll {
-			return cppki.SignedTRC{}, serrors.New("the roll replaces another core's certificate",
-				"presenter", presenter, "certificate", novel[0].Subject)
+	// A submission carrying every signature its update requires — a regular
+	// update its voters signed — pins as submitted.
+	verifyErr := trc.Verify(&newest.TRC)
+	if verifyErr == nil {
+		if _, err := c.DB.InsertTRC(ctx, trc); err != nil {
+			return cppki.SignedTRC{}, serrors.Wrap("pinning the submitted update", err,
+				"id", trc.TRC.ID)
 		}
-		return cppki.SignedTRC{}, serrors.New("the update onboards another ISD-AS than its presenter",
-			"presenter", presenter, "voter", novel[0].Subject)
+		slog.Info("Pinned a core's TRC update", "presenter", presenter,
+			"type", update.Type, "trc", trc.TRC.ID, "predecessor", newest.TRC.ID)
+		return trc, nil
 	}
-	if roll {
-		// The roll's narrower shape: exactly one certificate changed, naming
-		// the presenter's own ISD-AS, with the quorum and both AS lists as
-		// they were — a roll changes keys, never membership — and it asks no
-		// authorizer question, for it grants no power the presenter lacked.
-		if trc.TRC.Quorum != newest.TRC.Quorum {
-			return cppki.SignedTRC{}, serrors.New("a roll leaves the quorum as it was",
-				"submitted", trc.TRC.Quorum, "predecessor", newest.TRC.Quorum)
-		}
-		if err := equalASes(trc.TRC.CoreASes, newest.TRC.CoreASes); err != nil {
-			return cppki.SignedTRC{}, serrors.Wrap("a roll leaves the core ASes as they were", err)
-		}
-		if err := equalASes(trc.TRC.AuthoritativeASes, newest.TRC.AuthoritativeASes); err != nil {
-			return cppki.SignedTRC{}, serrors.Wrap(
-				"a roll leaves the authoritative ASes as they were", err)
-		}
-	} else if err := c.authorizeVoting(ctx, presenter, novel[0]); err != nil {
-		// The update onboards exactly its presenter: the one new voter is
-		// the peer the application's channel verified, asked the voting
-		// question.
+	if update.Type != cppki.SensitiveUpdate {
+		return cppki.SignedTRC{}, serrors.Wrap("the submitted update does not verify "+
+			"against the newest pinned TRC", verifyErr, "id", trc.TRC.ID)
+	}
+	// A sensitive update short of a vote asks for the founder's: the
+	// policy's allow is its only gate.
+	if err := c.authorizeVoting(ctx, presenter, novelCerts(trc.TRC, newest.TRC)); err != nil {
 		return cppki.SignedTRC{}, err
 	}
-	// The vote: the founder's sensitive voting certificate signing beside
-	// the submitted proof of possession, the completed artifact verified
-	// against the newest pinned TRC before anything pins.
 	sensitiveCert, err := trust.SignerCert(newest.TRC, cppki.Sensitive)
 	if err != nil {
 		return cppki.SignedTRC{}, err
@@ -176,13 +143,8 @@ func (c *TRCDecider) DecideTRC(
 		return cppki.SignedTRC{}, serrors.Wrap("pinning the completed update", err,
 			"id", completed.TRC.ID)
 	}
-	if roll {
-		slog.Info("Cast the sensitive update rolling a core's certificate",
-			"core", presenter, "trc", completed.TRC.ID, "predecessor", newest.TRC.ID)
-	} else {
-		slog.Info("Cast the sensitive update onboarding a core",
-			"joiner", presenter, "trc", completed.TRC.ID, "predecessor", newest.TRC.ID)
-	}
+	slog.Info("Cast the founder's vote on a core's sensitive update", "presenter", presenter,
+		"trc", completed.TRC.ID, "predecessor", newest.TRC.ID)
 	return completed, nil
 }
 
@@ -204,7 +166,7 @@ func landed(sub, newest cppki.TRC) bool {
 }
 
 // novelCerts returns the certificates the successor holds that the
-// predecessor does not — the changes the submission carries.
+// predecessor does not, in the successor's order.
 func novelCerts(sub, pred cppki.TRC) []*x509.Certificate {
 	var novel []*x509.Certificate
 	for _, cert := range sub.Certificates {
@@ -215,63 +177,53 @@ func novelCerts(sub, pred cppki.TRC) []*x509.Certificate {
 	return novel
 }
 
-// iaCovered reports whether one of the TRC's certificates names the ISD-AS.
-func iaCovered(trc cppki.TRC, ia addr.IA) bool {
-	for _, cert := range trc.Certificates {
-		if certIA, err := cppki.ExtractIA(cert.Subject); err == nil && certIA.Equal(ia) {
-			return true
-		}
-	}
-	return false
-}
-
-// equalASes reports whether the AS sequences are equal.
-func equalASes(a, b []addr.AS) error {
-	if slices.Equal(a, b) {
-		return nil
-	}
-	return serrors.New("the sequences differ", "submitted", a, "predecessor", b)
-}
-
-// authorizeVoting asks the policy the voting question — whether the
-// presenter gains the power the successor would grant it. Allow returns
-// nil; deny and pending refuse the submission, the verdict logged with the
-// facts beside it, and the joiner's retry asks again — the operator's
-// answer lands on the next submission.
+// authorizeVoting asks the admission policy before the founder's sensitive
+// vote, with the presenter, the fingerprints of the certificates the
+// successor adds, and the channel's source. Allow returns nil; deny and
+// pending refuse the submission, the verdict logged with the facts beside
+// it, and the submitter's retry asks again — the operator's answer lands on
+// the next submission. With no policy configured the vote is denied.
 func (c *TRCDecider) authorizeVoting(
 	ctx context.Context,
 	presenter addr.IA,
-	votingCert *x509.Certificate,
+	added []*x509.Certificate,
 ) error {
 
+	source := remoteUnderlay(ctx)
 	if c.Authorizer == nil {
-		return nil
+		slog.Warn("Denying voting submission: no admission policy is configured",
+			"isd_as", presenter, "source", source)
+		return serrors.New("voting submission denied: no admission policy is configured",
+			"isd_as", presenter, "source", source)
 	}
-	skid, err := cppki.SubjectKeyID(votingCert.PublicKey)
-	if err != nil {
-		return serrors.Wrap("computing the voting key's fingerprint", err)
+	keys := make([]string, 0, len(added))
+	for _, cert := range added {
+		skid, err := cppki.SubjectKeyID(cert.PublicKey)
+		if err != nil {
+			return serrors.Wrap("computing an added key's fingerprint", err,
+				"subject", cert.Subject)
+		}
+		keys = append(keys, hex.EncodeToString(skid))
 	}
 	facts := enrollauth.AdmissionFacts{
-		Boundary:   enrollauth.BoundaryVoting,
-		Keys:       []string{hex.EncodeToString(skid)},
-		Source:     remoteUnderlay(ctx),
-		Claim:      presenter,
-		VotingCert: votingCert,
+		Boundary: enrollauth.BoundaryVoting,
+		Keys:     keys,
+		Source:   source,
+		Claim:    presenter,
 	}
 	answer := c.Authorizer.Authorize(ctx, facts)
-	logFacts := []any{
-		"isd_as", presenter, "key", facts.Keys[0], "source", facts.Source}
+	logFacts := []any{"isd_as", presenter, "keys", keys, "source", source}
 	switch answer.Admission {
 	case enrollauth.AdmissionAllow:
 		return nil
 	case enrollauth.AdmissionPending:
 		slog.Info("Voting submission pending a decision", logFacts...)
 		return serrors.New("voting submission pending",
-			"isd_as", presenter, "source", facts.Source)
+			"isd_as", presenter, "source", source)
 	default:
 		slog.Warn("Denying voting submission", logFacts...)
 		return serrors.New("voting submission denied",
-			"isd_as", presenter, "source", facts.Source)
+			"isd_as", presenter, "source", source)
 	}
 }
 

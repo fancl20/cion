@@ -16,11 +16,11 @@ import (
 // return-routable: a joiner behind translation presents its private address,
 // and a private-range entry is what admits such joiners; a fabricated address
 // inside an allowed prefix completes no exchange at all. The posture answers
-// both boundaries alike — joiner nodes by SCION source, joiner hosts by the
-// internet address their TLS connection named — the one prefix list standing
-// for the one network's addressing. The check is stateless and instant, and
-// its denials are as quiet as its admissions: the caller's log line is the
-// whole of the record.
+// every boundary alike — joiner nodes and voting submissions by SCION
+// source, joiner hosts by the internet address their TLS connection named —
+// the one prefix list standing for the one network's addressing. The check
+// is stateless and instant, and its denials are as quiet as its admissions:
+// the caller's log line is the whole of the record.
 type Authorizer struct {
 	prefixes []netip.Prefix
 }

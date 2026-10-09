@@ -1,6 +1,6 @@
 # Onboard Authoritative Cores by Sensitive TRC Update
 
-*   Status: proposed
+*   Status: accepted
 *   Date: 2026-09-29
 
 [TOC]

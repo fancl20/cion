@@ -56,12 +56,14 @@ Untrusted:
     entries it signed itself — declining to sign is declining transit, and
     the data plane verifies each hop under the signer's key.
 *   **Admission decides on verified facts.** One seam serves every
-    boundary: a node's first issuance and a host's registration ask the
-    same plugin with the keys the exchange presented and a
-    return-routable source, never the joiner's claims about itself.
-    Admission is open by default, and a gate that cannot reach its signal
-    denies. The approving plugin's note is recorded with the entry — the
-    registry's own audit.
+    boundary: a node's first issuance, a host's registration, and a core's
+    TRC submission that needs the founder's sensitive vote ask the same
+    plugin with the keys the exchange presented and a return-routable
+    source, never the joiner's claims about itself. Enrollment and
+    registration are open by default, while the founder casts no such vote
+    without a plugin, and a gate that cannot reach its signal denies. The
+    approving plugin's note is recorded with the entry — the registry's own
+    audit.
 *   **Bounds rather than revocation.** No revocation exists: admission rate
     caps bound strangers at the doors, expiration retires stale trust, and
     liveness is the node's own probe.
@@ -75,8 +77,15 @@ Untrusted:
 ## Accepted residual risk
 
 *   The founding core is a single point of trust: a compromised core speaks
-    for the network's trust, a lost one halts enrollment, and no TRC update
-    path exists — changing roots means redeploying.
+    for the network's trust, and only its sensitive key votes on the TRC
+    updates that change roots or membership. Losing the core halts
+    enrollment and every TRC update; losing its sensitive key halts the
+    updates that need its vote, the core's own roll among them. Recovery
+    from either is a redeploy.
+*   The founder's sensitive vote on a core's TRC submission rests on the
+    admission plugin's answer alone, whatever the submission changes. An
+    address-based policy lends that vote to every enrolled core inside its
+    prefixes.
 *   Admission policy decides on addressing, not identity: a location is
     self-claimed and weakened by translation. A fabricated location still
     completes no enrollment, but address-based admission is a policy about

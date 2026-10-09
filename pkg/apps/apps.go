@@ -80,11 +80,11 @@ type Environment struct {
 	// open where none loads. The coordination application's registrations
 	// ask its verdict.
 	Authorizer enrollauth.AdmissionAuthorizer
-	// TRCDecision is the control plane's decision on TRC updates a core
-	// submitted seeking voting power: the founder's own gates and its
-	// admission policy's answer, the sensitive vote it casts over them. Nil
-	// on every node but the founding core, the one role the voting
-	// application loads on.
+	// TRCDecision is the control plane's decision on the TRC updates the
+	// cores submit: the founder's own gates, the pin of what verifies as
+	// submitted, and the sensitive vote it casts on its admission policy's
+	// allow. Nil on every node but the founding core, the one role the
+	// voting application loads on.
 	TRCDecision voting.Decider
 	// MountControlEndpoint mounts one of the application's handlers on the
 	// node's control endpoint, behind the peer-identity middleware, beside

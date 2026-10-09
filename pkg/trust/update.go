@@ -23,15 +23,16 @@ import (
 var ErrNoVotingApp = errors.New("the core hosts no voting application")
 
 // TRCCaster submits a TRC update to the core's voting application: the
-// channel a core seeking voting power presents its partially signed
-// successor on, for the control plane behind the application to decide on.
+// channel a core presents its successor on, an onboarding or a roll, for
+// the control plane behind the application to decide on.
 type TRCCaster interface {
-	// SubmitTRC hands the partially signed successor — the submitter's proof
-	// of possession over its new voting certificate — to the core's
-	// decision. It returns the completed TRC: the successor carrying the
-	// founder's sensitive vote beside the submitted signature, or, when the
-	// newest TRC already names the submitter, that TRC as pinned. The
-	// implementation reports ErrNoVotingApp when nothing answers.
+	// SubmitTRC hands the signed successor — the submitter's proofs of
+	// possession, and its vote when it rolls by regular update — to the
+	// core's decision. It returns the TRC the decision pinned: the successor
+	// as submitted when it verified without the founder's vote, the
+	// successor carrying the founder's sensitive vote otherwise, or the
+	// newest TRC when that already carries the landing. The implementation
+	// reports ErrNoVotingApp when nothing answers.
 	SubmitTRC(ctx context.Context, trc cppki.SignedTRC) (cppki.SignedTRC, error)
 }
 

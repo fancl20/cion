@@ -94,7 +94,8 @@ composition root, policy and the source by the operator's run arguments.
     links persists; every data plane generation is built from its
     snapshot.
 *   **Enrollment authorizer** — policy: who is admitted, joiner node or
-    host; `--trust.enroll-auth` selects exactly one method
+    host, and what the founder votes on; `--trust.enroll-auth` selects
+    exactly one method
     ([ADR-0010](/docs/adrs/0010-gate-enrollment-with-a-pluggable-authorizer.md)).
 *   **Topology source** — source: where topology decisions come from; the
     measured provider by default — loading it is what makes a node

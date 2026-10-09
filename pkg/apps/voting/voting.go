@@ -1,15 +1,15 @@
 // Package voting is the TRC voting application: the resident application a
-// founding core hosts for the cores of its ISD seeking voting power. A core
-// that enrolled as a normal node submits the successor TRC update it
-// assembled and signed with its regular voting key — the proof of possession
-// over the certificate the update carries — and the application hands the
-// submission to the control plane's decision, which casts the founder's
-// sensitive vote itself: the application decides nothing, and the control
-// plane serves no submission of its own. Nothing else depends on the
-// application — the network serves the drafts' control plane, enrollment,
-// and paths with or without it — and a joining core whose founder hosts none
-// stops itself rather than wait, for no voting power can be obtained that
-// way.
+// founding core hosts for the cores of its ISD to submit TRC updates on. A
+// core that enrolled as a normal node submits the successor it assembled and
+// signed — its proofs of possession, and its own vote when it rolls by
+// regular update — and the application hands the submission to the control
+// plane's decision, which pins what verifies as submitted and casts the
+// founder's sensitive vote itself where the update needs it: the application
+// decides nothing, and the control plane serves no submission of its own.
+// Nothing else depends on the application — the network serves the drafts'
+// control plane, enrollment, and paths with or without it — and a joining
+// core whose founder hosts none stops itself rather than wait, for no voting
+// power can be obtained that way.
 package voting
 
 import (
@@ -29,10 +29,10 @@ import (
 )
 
 // Decider is the decision the submissions are handed to: the control
-// plane's own update of the pinned TRC — the founder asking its gates and
-// its admission policy, casting its sensitive vote on the successor the
-// presenter signed, answered with the completed TRC. The presenter is the
-// ISD-AS the application's channel verified, never a claim.
+// plane's own update of the pinned TRC — the founder asking its gates,
+// pinning what verifies as submitted, and casting its sensitive vote on its
+// admission policy's allow — answered with the TRC it pinned. The presenter
+// is the ISD-AS the application's channel verified, never a claim.
 type Decider interface {
 	DecideTRC(ctx context.Context, presenter addr.IA,
 		trc cppki.SignedTRC) (cppki.SignedTRC, error)
@@ -95,9 +95,9 @@ type service struct {
 	decide Decider
 }
 
-// Submit hands the partially signed update to the control plane's decision
-// and answers with the TRC it completed and pinned. The submitter is the
-// ISD-AS the channel verified; the decision is the control plane's alone.
+// Submit hands the submitted successor to the control plane's decision and
+// answers with the TRC it pinned. The submitter is the ISD-AS the channel
+// verified; the decision is the control plane's alone.
 func (s *service) Submit(
 	ctx context.Context,
 	req *connect.Request[votingv1.SubmitRequest],
@@ -122,11 +122,11 @@ func (s *service) Submit(
 			errors.New("this node's control plane casts no TRC updates: "+
 				"the founding core alone holds the sensitive key"))
 	}
-	completed, err := s.decide.DecideTRC(ctx, presenter, trc)
+	pinned, err := s.decide.DecideTRC(ctx, presenter, trc)
 	if err != nil {
 		return nil, connect.NewError(connect.CodeFailedPrecondition, err)
 	}
-	// The pinned bytes, so every holder of the completed TRC holds the same
-	// DER the control plane verified.
-	return connect.NewResponse(&votingv1.SubmitResponse{Trc: completed.Raw}), nil
+	// The pinned bytes, so every holder of the pinned TRC holds the same DER
+	// the control plane verified.
+	return connect.NewResponse(&votingv1.SubmitResponse{Trc: pinned.Raw}), nil
 }

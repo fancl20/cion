@@ -303,16 +303,18 @@ func persistKeyFile(t *testing.T, state, name string, key crypto.Signer) {
 	}
 }
 
-// TestCoresRotateBySensitiveUpdate is the rotation seam's integration proof:
-// a founder and an authoritative core whose state is pre-seeded so each
+// TestCoresRotateByTRCUpdate is the rotation seam's integration proof: a
+// founder and an authoritative core whose state is pre-seeded so each
 // holder's material approaches expiry — the founder's watch casts its own
-// roll, the authoritative's submits its own, both pin, and the ladder's
-// serials stay monotone; a third node discovers the successors from the
-// founder's signed messages and a node enrolled after the founder's pin
-// holds a chain under the fresh root, while the founder's own pre-pin chain
-// keeps verifying through the grace; replacing the authoritative's persisted
-// voting pair fires the mismatch roll at the next pass.
-func TestCoresRotateBySensitiveUpdate(t *testing.T) {
+// roll by sensitive update, the authoritative's submits its own by regular
+// update, both pin, and the ladder's serials stay monotone; a third node
+// discovers the successors from the founder's signed messages and a node
+// enrolled after the founder's pin holds a chain under the fresh root, while
+// the founder's own pre-pin chain keeps verifying through the grace;
+// replacing the authoritative's persisted voting pair fires the mismatch
+// roll at the next pass, a sensitive update the founder votes on at its
+// admission policy's allow.
+func TestCoresRotateByTRCUpdate(t *testing.T) {
 	t.Parallel()
 	wpki := NewWebPKI(t)
 	ipA, ipB, ipC, ipD := hostSlot(t), hostSlot(t), hostSlot(t), hostSlot(t)
@@ -328,10 +330,10 @@ func TestCoresRotateBySensitiveUpdate(t *testing.T) {
 	authIA := addr.MustIAFrom(founderIA.ISD(), drawn.AS())
 	authState, authKey, authCert := seedAuthoritative(t, authIA)
 	founderState, base := seedFounder(t, founderIA, authIA, authKey, authCert)
-	ctx := context.Background()
 
 	// The founding core, its material pre-seeded: the founder's watch rolls
-	// its own three inside the cast it signs itself.
+	// its own three inside the cast it signs itself, and its admission
+	// policy allows the vote the mismatch roll below asks for.
 	a := bootAssembly(t, func(cfg *services.NodeConfig) {
 		cfg.Core = true
 		cfg.State = founderState
@@ -339,6 +341,7 @@ func TestCoresRotateBySensitiveUpdate(t *testing.T) {
 		cfg.Control = FreeUDPAddrOn(t, ipA)
 		cfg.CertFile = wpki.certFile
 		cfg.KeyFile = wpki.keyFile
+		cfg.EnrollAuth = votingAuth
 	})
 	// The authoritative core, its material pre-seeded and already named by
 	// the seeded base: its watch submits its own roll through the channel
@@ -374,27 +377,28 @@ func TestCoresRotateBySensitiveUpdate(t *testing.T) {
 	founderRolled := pollRolled(t, a, founderIA, base)
 	authRolled := pollRolled(t, b, authIA, base)
 
-	// The ladder's serials stay monotone: every successor the rollers pinned
-	// verifies against the pin before it.
-	for name, rolled := range map[string]cppki.SignedTRC{
-		"the founder's roll": founderRolled, "the authoritative's roll": authRolled,
-	} {
-		pred := base
-		for serial := scrypto.Version(2); serial <= rolled.TRC.ID.Serial; serial++ {
-			successor, err := a.app.TrustDB().SignedTRC(ctx,
-				cppki.TRCID{ISD: founderIA.ISD(), Base: 1, Serial: serial})
-			if err != nil {
-				t.Fatal(err)
-			}
-			if successor.IsZero() {
-				t.Fatalf("%s pinned serial %d that the founder never saw", name, serial)
-			}
-			if err := successor.Verify(&pred.TRC); err != nil {
-				t.Fatalf("%s's rung %d does not verify against its predecessor: %v",
-					name, serial, err)
-			}
-			pred = successor
+	// The ladder's serials stay monotone and each rung's type follows its
+	// roller: every successor the rollers pinned verifies against the pin
+	// before it, a rung that changes the founder's certificates is a
+	// sensitive update, and one that changes only the authoritative's is a
+	// regular update its old key voted on.
+	pred := base
+	top := max(founderRolled.TRC.ID.Serial, authRolled.TRC.ID.Serial)
+	for serial := scrypto.Version(2); serial <= top; serial++ {
+		successor := pinnedRung(t, a, founderIA.ISD(), serial)
+		if err := successor.Verify(&pred.TRC); err != nil {
+			t.Fatalf("rung %d does not verify against its predecessor: %v", serial, err)
 		}
+		want := cppki.RegularUpdate
+		if !slices.EqualFunc(trust.CertsOf(successor.TRC, founderIA),
+			trust.CertsOf(pred.TRC, founderIA), (*x509.Certificate).Equal) {
+
+			want = cppki.SensitiveUpdate
+		}
+		if got := updateType(t, successor, pred); got != want {
+			t.Errorf("rung %d is a %v update, want a %v one", serial, got, want)
+		}
+		pred = successor
 	}
 	// The staged sets persisted: each holder's disk holds the keys its
 	// successor's certificates cover. A roll pins the TRC before it persists
@@ -458,7 +462,9 @@ func TestCoresRotateBySensitiveUpdate(t *testing.T) {
 	}
 
 	// Replacing the authoritative's persisted voting pair fires the mismatch
-	// roll at the next pass, whatever the calendar says.
+	// roll at the next pass, whatever the calendar says: a sensitive update,
+	// for the persisted key no longer votes for the certificate the newest
+	// TRC names.
 	stranger := mintKey(t)
 	strangerCert := mintVotingCert(t, authIA, stranger, false)
 	persistKeyFile(t, authState, trust.RegularKeyFile, stranger)
@@ -472,6 +478,42 @@ func TestCoresRotateBySensitiveUpdate(t *testing.T) {
 		t.Fatalf("the mismatch roll's serial = %d, want past the landed roll's %d",
 			mismatch.TRC.ID.Serial, authRolled.TRC.ID.Serial)
 	}
+	pred = pinnedRung(t, a, founderIA.ISD(), mismatch.TRC.ID.Serial-1)
+	if got := updateType(t, mismatch, pred); got != cppki.SensitiveUpdate {
+		t.Errorf("the mismatch roll is a %v update, want a sensitive one", got)
+	}
+}
+
+// pinnedRung returns the TRC of the ISD's base 1 the node pins at the
+// serial, failing the test when it pins none.
+func pinnedRung(
+	t *testing.T,
+	n *assemblyNode,
+	isd addr.ISD,
+	serial scrypto.Version,
+) cppki.SignedTRC {
+
+	t.Helper()
+	trc, err := n.app.TrustDB().SignedTRC(context.Background(),
+		cppki.TRCID{ISD: isd, Base: 1, Serial: serial})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if trc.IsZero() {
+		t.Fatalf("serial %d of ISD %d is not pinned", serial, isd)
+	}
+	return trc
+}
+
+// updateType returns the type the successor's update classifies as against
+// its predecessor.
+func updateType(t *testing.T, successor, pred cppki.SignedTRC) cppki.UpdateType {
+	t.Helper()
+	update, err := successor.TRC.ValidateUpdate(&pred.TRC)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return update.Type
 }
 
 // pollRolled waits for the core's watch to roll its material past the given

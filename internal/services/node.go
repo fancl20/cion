@@ -113,9 +113,10 @@ type node struct {
 	apps []apps.Loaded
 
 	// enrollAuth gates the trust service's first issuance, the coordination
-	// application's registrations, and the TRC decision's voting question;
-	// nil is open admission. enrollRun launches the selected method's own
-	// loops — the Telegram authorizer's poll — nil when the method has none.
+	// application's registrations, and the TRC decision's sensitive vote;
+	// nil leaves the first two open and denies the vote. enrollRun launches
+	// the selected method's own loops — the Telegram authorizer's poll — nil
+	// when the method has none.
 	enrollAuth enrollauth.AdmissionAuthorizer
 	enrollRun  func(context.Context)
 
@@ -233,12 +234,14 @@ func (n *node) selectProvider() error {
 	return nil
 }
 
-// setupEnrollAuth loads the --trust.enroll-auth selection: the
-// authorizer the trust service asks at first issuance and, for a
-// method with loops of its own, the run that serves them. Unset is open enrollment; Validate already refused the
-// argument off the founding core, so a selected method loads on the issuing
-// node alone. The spec parses here once, so a malformed one fails the boot, not the
-// first joiner.
+// setupEnrollAuth loads the --trust.enroll-auth selection: the authorizer
+// the trust service asks at first issuance, the coordination application at
+// registration, and the TRC decision before the founder's sensitive vote,
+// and, for a method with loops of its own, the run that serves them. Unset
+// leaves enrollment and registration open and denies the founder's vote;
+// Validate already refused the argument off the founding core, so a
+// selected method loads on the issuing node alone. The spec parses here
+// once, so a malformed one fails the boot, not the first joiner.
 func (n *node) setupEnrollAuth() error {
 	if n.cfg.EnrollAuth == "" {
 		return nil
@@ -452,8 +455,8 @@ func (n *node) start(ctx context.Context) {
 			enrollment.Caster = caster
 			enrollment.Fatal = n.fatal
 			// The authoritative core's rotation watch: its certificate rolls
-			// through the same channel its join used, the founder's vote
-			// completing the successor.
+			// through the same channel its join used, by a regular update
+			// its current key votes on.
 			runBackground(ctx, "rotation watch", func(ctx context.Context) error {
 				controlplane.RunRotation(ctx, controlplane.RotationConfig{
 					IA:              n.ident.ia,

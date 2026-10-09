@@ -21,14 +21,14 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
-// SubmitRequest carries the TRC update a core seeking voting power signed
-// with its regular voting key — the proof of possession over the certificate
-// the successor carries — for the core's control plane to decide on.
+// SubmitRequest carries the TRC update a core assembled and signed — its
+// proofs of possession, and its own vote when it rolls by regular update —
+// for the core's control plane to decide on.
 type SubmitRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// trc is the DER-encoded CMS-signed TRC, partially signed: the submitter's
-	// signer info over the assembled successor, the founder's vote still
-	// missing.
+	// trc is the DER-encoded CMS-signed TRC: the submitter's signer infos over
+	// the assembled successor, the founder's vote missing where the update
+	// needs it.
 	Trc           []byte `protobuf:"bytes,1,opt,name=trc,proto3" json:"trc,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -71,10 +71,10 @@ func (x *SubmitRequest) GetTrc() []byte {
 	return nil
 }
 
-// SubmitResponse answers with the completed TRC: the submitted successor
-// carrying the founder's sensitive vote beside the submitter's proof of
-// possession, verified and pinned — or, when the newest TRC already names
-// the submitter, that TRC as pinned.
+// SubmitResponse answers with the TRC the control plane pinned: the
+// submitted successor as it was when it verified, the successor carrying the
+// founder's sensitive vote otherwise, or, when the newest TRC already
+// carries the landing, that TRC.
 type SubmitResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// trc is the DER-encoded CMS-signed TRC.

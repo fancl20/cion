@@ -39,8 +39,8 @@ const (
 
 // VotingServiceClient is a client for the voting.v1.VotingService service.
 type VotingServiceClient interface {
-	// Submit hands the partially signed successor to the control plane's
-	// decision and answers with the TRC it completed and pinned.
+	// Submit hands the submitted successor to the control plane's decision
+	// and answers with the TRC it pinned.
 	Submit(context.Context, *connect.Request[v1.SubmitRequest]) (*connect.Response[v1.SubmitResponse], error)
 }
 
@@ -76,8 +76,8 @@ func (c *votingServiceClient) Submit(ctx context.Context, req *connect.Request[v
 
 // VotingServiceHandler is an implementation of the voting.v1.VotingService service.
 type VotingServiceHandler interface {
-	// Submit hands the partially signed successor to the control plane's
-	// decision and answers with the TRC it completed and pinned.
+	// Submit hands the submitted successor to the control plane's decision
+	// and answers with the TRC it pinned.
 	Submit(context.Context, *connect.Request[v1.SubmitRequest]) (*connect.Response[v1.SubmitResponse], error)
 }
 

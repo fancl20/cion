@@ -25,9 +25,10 @@ func addCoreNodeFlags(flags *pflag.FlagSet, opts *services.NodeConfig) {
 	flags.StringVar(&opts.KeyFile, "trust.key-file", "",
 		"the founding core's TLS key file, the offline fallback to ACME")
 	flags.StringVar(&opts.EnrollAuth, "trust.enroll-auth", "",
-		"gate first issuance with a policy: "+
+		"gate first issuance and the founder's TRC votes with a policy: "+
 			"cidrs=<comma-separated prefix list> admits by source address, "+
-			"telegram=<chat>:<token> prompts the chat per joiner; open when unset")
+			"telegram=<chat>:<token> prompts the chat per joiner; "+
+			"enrollment is open and the votes are denied when unset")
 }
 
 // newRunCoreCommand builds `cion run core`: the founding core without a

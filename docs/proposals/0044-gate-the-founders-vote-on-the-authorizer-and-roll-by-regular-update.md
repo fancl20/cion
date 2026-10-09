@@ -180,3 +180,34 @@ window; it arrives with the key persistence work of its own proposal.
     the mismatch roll sensitive ones — and is renamed
     `TestCoresRotateByTRCUpdate`. The lab whose founder hosts no voting
     application is unchanged.
+
+## Implementation history
+
+*   The decision landed as proposed in `DecideTRC`, `authorizeVoting`
+    asking the policy and `novelCerts` reading the certificates the
+    successor adds ([trccast.go](/pkg/controlplane/trccast.go)); the roll
+    landed in `AssembleRotation` and `RollVotingKey`
+    ([rotation.go](/pkg/trust/rotation.go)).
+*   The unset meaning reached documentation the plan leaves unnamed: the
+    CIDR authorizer's, which decides every boundary on the source alone
+    ([cidr.go](/pkg/modules/enrollauth/impl/cidr/cidr.go)), the voting
+    application's ([voting.go](/pkg/apps/voting/voting.go)), and the
+    voting service's comments
+    ([voting.proto](/proto/voting/v1/voting.proto)). The generated Go
+    files carry the same comment edits, made by hand: the raw descriptor
+    holds no comments, so the edit is what regeneration produces.
+*   The security overview gained a residual risk beside the unset
+    meaning: the vote rests on the policy's answer alone, and an
+    address-based policy lends it to every enrolled core inside its
+    prefixes. Its line on losing the founding core now separates the
+    core, whose loss halts enrollment and every TRC update, from its
+    sensitive key, whose loss halts the updates that need its vote
+    ([security.md](/docs/design/security.md)).
+*   The tests landed as the plan spells them
+    ([trccast_test.go](/pkg/controlplane/trccast_test.go),
+    [rotation_test.go](/pkg/controlplane/rotation_test.go),
+    [rotation_test.go](/pkg/trust/rotation_test.go)). The labs share the
+    founder's policy as `votingAuth`
+    ([corejoin_test.go](/internal/testnetwork/corejoin_test.go)), and the
+    rotation lab classifies each rung against its predecessor
+    ([rotation_test.go](/internal/testnetwork/rotation_test.go)).

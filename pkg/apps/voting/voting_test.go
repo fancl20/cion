@@ -116,8 +116,8 @@ func fixtureTRC(t *testing.T) cppki.SignedTRC {
 
 // TestSubmitHandsToDecision checks the application's one job: a submission
 // from a verified presenter is handed to the control plane's decision with
-// the channel's fact, and the completed TRC the decision returned is answered
-// in its own bytes.
+// the channel's fact, and the TRC the decision returned is answered in its
+// own bytes.
 func TestSubmitHandsToDecision(t *testing.T) {
 	trc := fixtureTRC(t)
 	var gotPresenter addr.IA

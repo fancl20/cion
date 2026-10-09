@@ -210,10 +210,10 @@ func TestSignUpdateAndCompletion(t *testing.T) {
 }
 
 // fakeCaster stands in for the founder's voting application the JoinCore
-// tests submit to: it decides each submission the control plane's own shape
-// — the already-named answered with the pin, a classifying submission voted
-// and pinned — with the holds flag refusing everything, the join whose
-// submission never lands.
+// and RollVotingKey tests submit to: it decides each submission the control
+// plane's own shape — one that verifies as submitted pinned as it is, a
+// classifying one voted and pinned — with the holds flag refusing
+// everything, the submission that never lands.
 type fakeCaster struct {
 	keys  CoreKeys
 	db    trustdb.DB
@@ -223,6 +223,8 @@ type fakeCaster struct {
 	served cppki.SignedTRC
 
 	submissions int
+	// votes counts the submissions the founder's sensitive key co-signed.
+	votes int
 }
 
 func (c *fakeCaster) SubmitTRC(
@@ -244,6 +246,12 @@ func (c *fakeCaster) SubmitTRC(
 	if newest.IsZero() {
 		return cppki.SignedTRC{}, errors.New("the founder pinned no TRC")
 	}
+	if err := trc.Verify(&newest.TRC); err == nil {
+		if _, err := c.db.InsertTRC(ctx, trc); err != nil {
+			return cppki.SignedTRC{}, err
+		}
+		return trc, nil
+	}
 	if _, err := trc.TRC.ValidateUpdate(&newest.TRC); err != nil {
 		return cppki.SignedTRC{}, err
 	}
@@ -261,6 +269,7 @@ func (c *fakeCaster) SubmitTRC(
 	if _, err := c.db.InsertTRC(ctx, completed); err != nil {
 		return cppki.SignedTRC{}, err
 	}
+	c.votes++
 	return completed, nil
 }
 

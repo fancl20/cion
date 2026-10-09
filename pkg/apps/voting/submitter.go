@@ -19,7 +19,8 @@ import (
 // Submitter sends TRC update submissions to the core's voting application
 // over the node's verified peer channel — the node's chain presented, the
 // core's verified against the pinned TRC — so the submission arrives
-// identified by the chain the decision binds the new voter to.
+// identified by the chain the decision gates on and names to its admission
+// policy.
 type Submitter struct {
 	// hclt is the verified peer channel's HTTP client, the node's peer
 	// client's own.
@@ -40,11 +41,11 @@ func NewSubmitter(hclt *http.Client, coreRoute func() *scion.Addr) *Submitter {
 	return &Submitter{hclt: hclt, coreRoute: coreRoute}
 }
 
-// SubmitTRC hands the partially signed successor to the core's voting
-// application and answers with the TRC its control plane completed and
-// pinned. A submission nothing answers — the endpoint replies that no such
-// application is mounted — is the core hosting no voting application, the
-// terminal condition the caller stops the node on.
+// SubmitTRC hands the signed successor to the core's voting application and
+// answers with the TRC its control plane pinned. A submission nothing
+// answers — the endpoint replies that no such application is mounted — is
+// the core hosting no voting application, the terminal condition the caller
+// stops the node on.
 func (s *Submitter) SubmitTRC(
 	ctx context.Context,
 	trc cppki.SignedTRC,

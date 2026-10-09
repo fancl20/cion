@@ -64,7 +64,7 @@ func (f *rotationFixture) completedRotation(
 
 	t.Helper()
 	pred := f.pred
-	trc, err := AssembleRotation(pred, certs)
+	trc, err := AssembleRotation(pred, mustCert(t, pred, cppki.Sensitive), certs)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -84,20 +84,21 @@ func (f *rotationFixture) completedRotation(
 	return completed
 }
 
-// TestAssembleRotation checks the successor a roll assembles from the pinned
-// predecessor: the serial incremented on the same base, the staged
-// certificates replacing their same-named counterparts over fresh keys,
-// every other certificate carried unchanged, the quorum and both AS lists
-// untouched, the grace period set to the AS certificate validity, and a
-// validity bounded by the earliest expiry the carried set holds — cppki
-// reading the result as a sensitive update that verifies against the
-// predecessor with the vote and the staged certificates' signatures.
+// TestAssembleRotation checks the successor the founder's roll assembles
+// from the pinned predecessor, its sensitive certificate the voter: the
+// serial incremented on the same base, the staged certificates replacing
+// their same-named counterparts over fresh keys, every other certificate
+// carried unchanged, the quorum and both AS lists untouched, the grace
+// period set to the AS certificate validity, and a validity bounded by the
+// earliest expiry the carried set holds — cppki reading the result as a
+// sensitive update that verifies against the predecessor with the vote and
+// the staged certificates' signatures.
 func TestAssembleRotation(t *testing.T) {
 	f := newRotationFixture(t)
 	pred := f.pred
 	keys, certs := stagedCoreMaterial(t)
 
-	trc, err := AssembleRotation(pred, certs)
+	trc, err := AssembleRotation(pred, mustCert(t, pred, cppki.Sensitive), certs)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -231,7 +232,7 @@ func TestRotationSignatures(t *testing.T) {
 	keys, certs := stagedCoreMaterial(t)
 	pred := f.pred
 
-	trc, err := AssembleRotation(pred, certs)
+	trc, err := AssembleRotation(pred, mustCert(t, pred, cppki.Sensitive), certs)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -255,12 +256,14 @@ func TestRotationSignatures(t *testing.T) {
 }
 
 // TestAssembleRotationRefusals checks the assembly's fail-fast checks: no
-// staged certificate, one with no counterpart in the predecessor, and the
-// predecessor's own certificate staged.
+// staged certificate, one with no counterpart in the predecessor, the
+// predecessor's own certificate staged, and a voter the predecessor does not
+// carry.
 func TestAssembleRotationRefusals(t *testing.T) {
 	f := newRotationFixture(t)
+	voter := mustCert(t, f.pred, cppki.Sensitive)
 
-	if _, err := AssembleRotation(f.pred, nil); err == nil {
+	if _, err := AssembleRotation(f.pred, voter, nil); err == nil {
 		t.Error("an empty staging was assembled")
 	}
 	key, err := generateKey()
@@ -273,12 +276,16 @@ func TestAssembleRotationRefusals(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := AssembleRotation(f.pred, []*x509.Certificate{other}); err == nil {
+	if _, err := AssembleRotation(f.pred, voter, []*x509.Certificate{other}); err == nil {
 		t.Error("a certificate with no counterpart was assembled in")
 	}
-	if _, err := AssembleRotation(f.pred,
+	if _, err := AssembleRotation(f.pred, voter,
 		[]*x509.Certificate{mustCert(t, f.pred, cppki.Root)}); err == nil {
 		t.Error("the predecessor's own certificate was staged")
+	}
+	_, certs := stagedCoreMaterial(t)
+	if _, err := AssembleRotation(f.pred, other, certs); err == nil {
+		t.Error("a voter the predecessor does not carry was assembled in")
 	}
 }
 
@@ -380,7 +387,9 @@ func newRollFixture(
 // TestRollVotingKey checks the authoritative core's roll end to end: the
 // submission resolves the founder's newest, the successor replaces exactly
 // the joiner's certificate, both sides pin, and the staged pair persists
-// beside its key.
+// beside its key. The routine roll is a regular update the joiner's
+// persisted key votes on, the founder casting nothing; a persisted pair the
+// newest TRC does not name re-rolls by sensitive update, the founder voting.
 func TestRollVotingKey(t *testing.T) {
 	f, joiner, founderDB, caster, state := newRollFixture(t)
 	ctx := context.Background()
@@ -420,6 +429,20 @@ func TestRollVotingKey(t *testing.T) {
 	if !KeyMatchesCert(key, CertsOf(pinned.TRC, joinerIA)[0]) {
 		t.Error("the persisted key does not cover the successor's certificate")
 	}
+	update, err := pinned.TRC.ValidateUpdate(&f.pred.TRC)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if update.Type != cppki.RegularUpdate {
+		t.Errorf("the routine roll's update type = %v, want a regular update", update.Type)
+	}
+	if len(pinned.SignerInfos) != 2 {
+		t.Errorf("the routine roll carries %d signer infos, want the vote and the possession proof",
+			len(pinned.SignerInfos))
+	}
+	if caster.votes != 0 {
+		t.Errorf("the founder voted %d times on the routine roll, want none", caster.votes)
+	}
 
 	// The mismatch roll: a persisted pair the newest TRC's certificate does
 	// not cover — the crash between a pin and its persist, or an operator's
@@ -442,14 +465,14 @@ func TestRollVotingKey(t *testing.T) {
 		t.Fatalf("the mismatch roll failed: %v", err)
 	}
 	rerolled := cppki.TRCID{ISD: coreIA.ISD(), Base: 1, Serial: successor.Serial + 1}
-	pinned, err = joiner.SignedTRC(ctx, rerolled)
+	repinned, err := joiner.SignedTRC(ctx, rerolled)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if pinned.IsZero() {
+	if repinned.IsZero() {
 		t.Fatal("the re-roll pinned no successor")
 	}
-	rolled := CertsOf(pinned.TRC, joinerIA)
+	rolled := CertsOf(repinned.TRC, joinerIA)
 	if len(rolled) != 1 || rolled[0].Equal(f.joiner.cert) {
 		t.Error("the re-roll carried the joiner's original certificate")
 	}
@@ -459,6 +482,16 @@ func TestRollVotingKey(t *testing.T) {
 	}
 	if !KeyMatchesCert(key, rolled[0]) {
 		t.Error("the persisted key does not cover the re-roll's certificate")
+	}
+	update, err = repinned.TRC.ValidateUpdate(&pinned.TRC)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if update.Type != cppki.SensitiveUpdate {
+		t.Errorf("the re-roll's update type = %v, want a sensitive update", update.Type)
+	}
+	if caster.votes != 1 {
+		t.Errorf("the founder voted %d times after the re-roll, want 1", caster.votes)
 	}
 }
 

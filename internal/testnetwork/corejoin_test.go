@@ -15,15 +15,20 @@ import (
 	"github.com/fancl20/cion/pkg/trust"
 )
 
+// votingAuth is the founder's admission policy in the labs that need its
+// sensitive vote: every lab node sits on 127.0.x.y, and with no policy the
+// founder casts its vote on no core's submission.
+const votingAuth = "cidrs=127.0.0.0/8"
+
 // TestCoreJoinsBySensitiveUpdate is the join seam's integration proof: a
 // founding core and a core joining it by rendezvous — the run command's own
 // path, the core flag beside a neighbor — where the joiner completes its ISD
-// from the neighbor's reply, enrolls with its voting certificate presented,
-// submits its partially signed successor to the founder's voting
-// application, and the founder's decision votes and pins; both pin the
-// completed TRC, a third node discovers it from the founder's signed
-// messages and enumerates two core ASes, and a node neighboring the joiner
-// enrolls through the founder's endpoint — the issuer the route selects.
+// from the neighbor's reply, enrolls, submits the successor it signed to the
+// founder's voting application, and the founder's decision votes on its
+// admission policy's allow and pins; both pin the completed TRC, a third
+// node discovers it from the founder's signed messages and enumerates two
+// core ASes, and a node neighboring the joiner enrolls through the founder's
+// endpoint — the issuer the route selects.
 func TestCoreJoinsBySensitiveUpdate(t *testing.T) {
 	t.Parallel()
 	wpki := NewWebPKI(t)
@@ -37,6 +42,7 @@ func TestCoreJoinsBySensitiveUpdate(t *testing.T) {
 		cfg.Control = FreeUDPAddrOn(t, ipA)
 		cfg.CertFile = wpki.certFile
 		cfg.KeyFile = wpki.keyFile
+		cfg.EnrollAuth = votingAuth
 	})
 	// The joining core: the core flag beside the founder's rendezvous
 	// address, the network's core domain the bootstrap channel anchors to.
@@ -249,6 +255,7 @@ func TestJoiningCoreMeshesWithTheFounder(t *testing.T) {
 		cfg.Control = FreeUDPAddrOn(t, ipA)
 		cfg.CertFile = wpki.certFile
 		cfg.KeyFile = wpki.keyFile
+		cfg.EnrollAuth = votingAuth
 	})
 	b := bootAssembly(t, func(cfg *services.NodeConfig) {
 		cfg.Core = true

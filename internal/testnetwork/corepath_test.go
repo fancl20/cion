@@ -35,6 +35,7 @@ func TestPathLayerServesTwoCores(t *testing.T) {
 		cfg.Control = FreeUDPAddrOn(t, ipA)
 		cfg.CertFile = wpki.certFile
 		cfg.KeyFile = wpki.keyFile
+		cfg.EnrollAuth = votingAuth
 	})
 	// The authoritative core, joined per 0037: the core flag beside the
 	// founder's rendezvous address.
