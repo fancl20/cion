@@ -137,9 +137,8 @@ What the comparator measures:
 *   **Peer-Relative Latency:** The direct round trip against the
     composed paths to the same peer.
 *   **Marginal Utility:** What adding or removing the link changes for
-    the destinations beyond the peer — the latency of the freshest
-    route into the peer's region, and the count of independent routes
-    there.
+    the destinations beyond the peer — the price of the cheapest route
+    into the peer's region, and the count of independent routes there.
 *   **Coordinated Cuts:** A coordinator computes the network's cuts and
     assigns each node protected links.
 
@@ -155,8 +154,8 @@ What a missing baseline means:
 
 *   **No Evidence:** A candidate without a path baseline is unpromotable
     above the floor.
-*   **A Stranded Tier:** No path resolving into a peer's region is
-    itself the strongest promotion evidence.
+*   **A Stranded Tier:** No up link and no answered route into a peer's
+    region is itself the strongest promotion evidence.
 
 What displacement at the cap evicts:
 
@@ -189,7 +188,7 @@ follows:
     still emerge from beacon flow (ADR-0004).
 2.  **Utility is the comparator, and one test serves both directions.**
     A link's utility is what its presence or absence changes for the
-    destinations beyond the peer: the latency of the freshest composed
+    destinations beyond the peer: the price of the cheapest composed
     route into the peer's tier, and the count of independent routes
     there. Promotion asks whether adding the link improves either;
     retirement asks whether removing it changes neither. What the
@@ -198,22 +197,24 @@ follows:
     link exists, so promotion decides on the tier-relative estimate
     and retirement corrects on the link's own windows — the two rules
     form a feedback loop, which is why precision in each matters less
-    than agreement between them. The estimate reads two prices: the
-    measured tier baseline the loop's echoes take, and the declared
-    one-way delays the beacons carry — each AS attesting its own links
-    in the entries it signs, the drafts' StaticInfoExtension — so
-    every composed route into the tier prices the candidate, not the
-    freshest probed path alone. Declarations inform the estimate; the
-    echoes stay the authority.
+    than agreement between them. Each composed route is priced by the
+    loop's echo where the window probed it, and by the declared one-way
+    delays the beacons carry where it did not — each AS attesting its
+    own links in the entries it signs, the drafts' StaticInfoExtension —
+    so every composed route into the tier prices it, not the probed
+    paths alone; a probed route whose echo went unanswered prices
+    nothing. The price without a link is the same minimum over the
+    routes that avoid it. Declarations inform the price; the echoes
+    stay the authority.
 3.  **Tiers are derived every window from the sample map.** A tier is
     a latency class of the peers the window measured: walking them
     sorted by direct round trip, a peer opens a new tier when its
     round trip exceeds twice the median of the current one. A tier's
-    baseline is the fastest composed-path round trip among its
-    members, unreachable when none resolves. Tiers are decision labels
-    local to the node, recomputed each window, never protocol state
-    and never exchanged; two nodes may draw different boundaries, and
-    nothing depends on their agreeing.
+    baseline is the fastest of its members' baseline echoes, absent
+    when none answers. Tiers are decision labels local to the node,
+    recomputed each window, never protocol state and never exchanged;
+    two nodes may draw different boundaries, and nothing depends on
+    their agreeing.
 4.  **Route counts come from the path database.** A link's identity is
     the `(ISD-AS, interface ID)` pair the interface-down cache already
     keys on, and a composed path's link set is the walk the
@@ -225,65 +226,82 @@ follows:
     accepted: segments the node has not learned can only undercount
     routes, which errs toward over-protection, and links disjoint on
     the graph may share fate on the underlay — same fiber, same
-    facility — which no beacon carries.
+    facility — which no beacon carries. A third is accepted with a
+    bound: a segment through a link retired elsewhere stays composable
+    until it expires — ADR-0004 adds no revocation — and counts as a
+    route meanwhile. The node's own retired links never count.
 5.  **Promotion admits four cases, one establishment per window.**
     Below the floor of up links, reachability alone: the fastest
-    reachable candidate, no utility test. A tier no composed path
-    resolves into is stranded: a reachable member is promoted at once,
-    no streak — the clause that keeps every cut transient, for the
-    rendezvous establishment reaches where no path does. A tier with a
-    single route admits a second whose round trip is no worse than the
-    demotion ratio above the tier baseline, on sustained evidence. A
-    tier whose baseline a candidate beats by the promotion ratio
-    admits it on sustained evidence. At the cap, any admission
-    requires an eviction that qualifies under retirement.
+    reachable candidate, no utility test. A tier that no up link and no
+    answered composed route reach is stranded: a reachable member is
+    promoted at once, no streak — the clause that keeps every cut
+    transient, for the rendezvous establishment reaches where no path
+    does. A tier with a single route admits a second whose round trip
+    is no worse than the demotion ratio above the tier's price, on
+    sustained evidence. A tier whose price a candidate beats by the
+    promotion ratio admits it on sustained evidence. At the cap, any
+    admission requires an eviction that qualifies under retirement.
 6.  **Retirement guards before it prunes.** The floor counts up links
     only — a link the verdict marks down is no redundancy, whatever
-    its entry's state. A link whose exclusion leaves its tier without
-    a route is cut-critical and never retires, whatever its latency.
-    Past the guards, two retirements: a link whose verdict stays down
-    across the sustained window retires; and a link whose exclusion
-    leaves a route into its tier no worse than the demotion ratio
-    above the tier baseline retires as useless — measured each window
-    on the excluded baseline, the interface-down skip resolving the
-    paths that avoid the link, never a remembered value.
+    its entry's state — and an up link retires only while up links
+    exceed the floor. An up link whose exclusion leaves its tier
+    without a route — no other up link and no answered route avoiding
+    it — is cut-critical and never retires, whatever its latency; a
+    down link carries no route, so no guard holds it. Past the guards,
+    two retirements, each counting its own sustained windows: a link
+    whose verdict stays down across the sustained window retires; and
+    an up link retires as useless when its exclusion changes neither of
+    its tier's quantities — the route count without it unchanged, and
+    the price without it no worse than the demotion ratio above the
+    tier's price. The useless test is measured each window over the
+    routes that avoid the link, never a remembered value, and decides
+    only a window in which one of those routes answered its echo. One
+    up link leaves per window, by retirement or eviction: each
+    departure changes the routes every other exclusion was measured
+    against.
 7.  **The cap evicts the least harm.** At the cap the victim is the
-    retirement-qualified neighbor whose exclusion moves the tier
-    baseline least; when none qualifies, no promotion happens. The
-    bridge survives on measured merit — its exclusion strands a tier
-    — while the intra-regional mesh, whose exclusion changes nothing,
-    retires first.
-8.  **Below the floor, a stranded node dials what it knows.** With no
-    reachable candidate from the directory, the joiner's dials re-dial
-    the rendezvous addresses the table already holds, dead entries
-    included. The one address a stranded node independently holds is
-    worth more than an empty or expired directory snapshot.
+    retirement-qualified neighbor whose exclusion moves its tier's
+    price least; when none qualifies, no promotion happens. The bridge
+    survives on measured merit — its exclusion strands a tier — while
+    the intra-regional mesh, whose exclusion changes nothing, retires
+    first.
+8.  **Below the floor, a stranded node dials what it knows.** With
+    fewer up links than the floor and no reachable candidate from the
+    directory, the joiner's dials re-dial the rendezvous addresses of
+    the peers the table already holds, dead entries included. A revival
+    never doubles a neighbor the table holds live, and never takes the
+    link count past the cap. The one address a stranded node
+    independently holds is worth more than an empty or expired
+    directory snapshot.
 9.  **Joining takes two arguments, and identity is generated local
     state.** A joiner is given one existing node's underlay address and
     the core's domain: the address seeds the first link, the domain
     authenticates the enrollment and the TRC fetch over the WebPKI
     bootstrap channel — a joiner cannot otherwise know which domain is
     correct, so the domain is an argument for core and non-core alike.
-    The founding core takes its domain alone; a restarting node takes
-    neither, identity coming from local state and neighbors from the
-    running network. The node's ISD-AS, forwarding key, and AS keys
-    are created on first start and persisted with the trust material;
-    the ISD-AS is self-picked from the private ranges, and enrollment
-    is the gatekeeper that rejects collisions and strangers.
+    The founding core takes its domain alone. Every start repeats the
+    domain, and every start of a joining core repeats its neighbor
+    too, for a core without one is the founding core; identity comes
+    from local state, and a restarting node's links from its table and
+    the running network. The node's ISD-AS, forwarding key, and AS
+    keys are created on first start and persisted with the trust
+    material; the ISD-AS is self-picked from the private ranges, and
+    enrollment is the gatekeeper that rejects collisions and strangers.
 10. **First contact is the rendezvous exchange, and the rendezvous
     exchange is the candidate probe.** Every node listens on its
     advertised rendezvous address. The exchange is a plain underlay
     round trip — a nonce-bearing request, a matching reply — beneath
-    SCION, bounded by return-routability checks and admission limits,
-    with admission policy the acceptor's: open within those limits by
-    default, restrictable to allowlisted ISD-ASes. For a joiner with
-    no composed path the exchange is also the establishment, seeding
-    the link store entry; for the selection loop it is the candidate
-    measurement — the direct round trip to the peer's public address,
-    taken where no path and no interface exist, which is what makes it
-    an honest measurement of the hypothetical link rather than of the
-    paths it would compete with. Everything after first contact rides
-    authenticated channels.
+    SCION, bounded by return-routability checks and admission limits;
+    the restrictable admission policy is the enrollment authorizer, for
+    a joiner the authorizer never admits is a link no node establishes
+    ([ADR-0010](/docs/adrs/0010-gate-enrollment-with-a-pluggable-authorizer.md),
+    decision 5). For a joiner with no composed path the exchange is
+    also the establishment, seeding the link store entry; for the
+    selection loop it is the candidate measurement — the direct round
+    trip to the peer's public address, taken where no path and no
+    interface exist, which is what makes it an honest measurement of
+    the hypothetical link rather than of the paths it would compete
+    with. Everything after first contact rides authenticated channels.
 11. **A core-served directory informs selection.** Once enrolled, each
     node publishes its ISD-AS, control and rendezvous addresses over
     its own channel, authenticated by its TRC-anchored chain; the core
@@ -294,28 +312,34 @@ follows:
 12. **Every established link carries a BFD session.** Per the data
     plane draft (Section 6.1): the node answers its peers' sessions
     and initiates its own, BFD control packets in the drafts' SCION
-    framing carried on the one-hop path of each serving link. Silence
-    past the session's window marks the link down in both directions,
-    and the session keeps running while the link is down, which is how
-    recovery is seen. The session's own timers — the transmission
-    interval and the detect multiplier — are the link's liveness
-    constants.
+    framing carried on the one-hop path of each serving link. The link
+    is up while its session is Up, which RFC 5880's three-way handshake
+    reaches; it is down once the session leaves Up — on silence past
+    the detection time or on the peer's session signaling Down — so a
+    loss in either direction marks the link down at both ends. A new
+    session holds its link up for one detection time while the
+    handshake completes. The session keeps running while the link is
+    down, which is how recovery is seen. The session's own timers —
+    the transmission interval and the detect multiplier — are the
+    link's liveness constants.
 13. **The verdict is reversible runtime state within a generation.**
     A link the session marks down stops forwarding at once: the data
     plane drops traffic destined to it and answers sources with the
     rate-limited SCMP interface-down signal (Section 6.2), beaconing
     pauses on the interface, and the floor counts the link out — a
     down link is no redundancy, so sustained down state meets
-    retirement once the guards are past. Answers returning mark the
-    link up again: a state flip and its notification, with the
-    interface ID, the link addresses, and the serving generation all
-    intact. Both edges are hysteresed, so a lossy link settles rather
-    than flaps. A source that receives the interface-down signal sets
-    aside paths crossing that interface for a short window — its own
-    probes remain the authority and the received signal a prompt to
-    re-probe, which is the drafts' own posture: notifications are
-    optional and rate-limited, and endpoints detect failures by their
-    own means.
+    retirement. A completed handshake marks the link up again: a state
+    flip and its notification, with the interface ID, the link
+    addresses, and the serving generation all intact. The down edge
+    waits for a detection time of silence or the peer's own Down, and
+    the up edge for the handshake, which proves both directions carry:
+    a lone lost packet never marks the link down, and a lone arrival
+    never marks it up. A source that receives the interface-down
+    signal sets aside paths crossing that interface for a short window
+    — its own probes remain the authority and the received signal a
+    prompt to re-probe, which is the drafts' own posture:
+    notifications are optional and rate-limited, and endpoints detect
+    failures by their own means.
 14. **SCMP echo measures both sides of the comparator.** The direct
     side echoes over the one-hop path to each neighbor; the baseline
     echoes over the freshest resolved path to the same destination —
@@ -324,7 +348,7 @@ follows:
     cadence, the ping machinery as an internal service, and the
     comparator reads the two round trips against each other.
     Measurement cadence belongs to the selector alone, free of the
-    liveness timers. The declared delays the estimate reads are
+    liveness timers. The declared delays a price reads are
     attestations, not the node's measurements; they price only what
     the loop has not probed.
 15. **Membership changes ride generational replacement.** Interface
@@ -390,11 +414,11 @@ follows:
 *   Promotion and retirement share one utility test, so displacement
     cannot evict a link the policy must immediately re-recruit. The
     path database's hop identity informs policy through the walk the
-    interface-down skip already makes, and the estimate's declared
-    prices ride the beacons the network already sends — the drafts'
-    optional, signed StaticInfoExtension — so no new message or
-    exchange arrives, and the one new state is the latest per-link
-    sample the loop's own measurement already produces.
+    interface-down skip already makes, and the declared prices ride
+    the beacons the network already sends — the drafts' optional,
+    signed StaticInfoExtension — so no new message or exchange
+    arrives, and the one new state is the latest per-link sample the
+    loop's own measurement already produces.
 *   Zero config is intact: tiers derive from measurements the loop
     already takes, and no constant becomes an argument.
 
@@ -423,12 +447,27 @@ follows:
 *   The resilience guarantees are node-local: a coordinated two-sided
     retirement can still empty a cut for the windows the heal takes,
     and route counts see the graph, not the underlay.
+*   Route counts can overstate redundancy for a segment lifetime — no
+    revocation retires a segment through a link retired elsewhere — so
+    a useless retirement can rest on a route that no longer exists.
+    The stranded test reads answered echoes, so the overstatement never
+    hides a cut.
+*   A tier whose freshest composed routes went stale reads as stranded
+    until fresher segments replace them, and the rescue may add a link
+    the tier did not need: an establishment and, once measured useless,
+    a damped retirement.
+*   One up link leaves per window, so a node holding several useless
+    links sheds them one window at a time.
+*   A tier whose only routes are its two up links keeps both, for
+    neither exclusion leaves the route count unchanged; at the cap, a
+    faster candidate into that tier waits until another link qualifies
+    for eviction.
 *   Promotion decides on an estimate it can verify only after
     establishment, so a link whose measured utility disappoints costs
     its establishment and a damped retirement.
 *   The declared prices are attestations an AS can misstate, each
-    stale by a beacon interval; the estimate trusts them only where
-    the loop has not probed, and the echoes replace them where it has.
+    stale by a beacon interval; a price trusts them only where the
+    loop has not probed, and the echoes replace them where it has.
 
 ## Pros and cons of the options
 
@@ -544,10 +583,12 @@ follows:
 
 *   Good, because edge-disjointness is fully determined by data the
     node already holds, verifies, and walks for another purpose.
-*   Good, because ignorance errs toward over-protection — unseen
-    segments undercount routes, never overcount them.
+*   Good, because ignorance errs toward over-protection: unseen
+    segments undercount routes.
 *   Bad, because the graph is not the underlay; shared fate below the
     link layer counts as redundancy.
+*   Bad, because a segment outlives a link retired elsewhere, counting
+    as a route until it expires.
 
 ### Operator-declared regions
 
