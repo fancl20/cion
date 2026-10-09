@@ -513,8 +513,7 @@ func TestFounderBootPromotesStagedRoll(t *testing.T) {
 	// state directory, leaving the staged keys unpromoted.
 	a := boot()
 	ia := a.app.IA()
-	a.cancel()
-	a.app.Close()
+	a.stop(t)
 	ctx := context.Background()
 	db, err := trustbbolt.New(filepath.Join(state, "trust.db"), nil)
 	if err != nil {

@@ -84,7 +84,7 @@ func (n *node) setupMetrics() error {
 // serving entries: a provider, the internal link, one external link per
 // entry, every service backend registered on the new provider. It fails
 // only while the serving generation's addresses are still releasing; the
-// supervisor's bounded retry covers that.
+// data plane loop's bounded retry covers that.
 func (n *node) startGeneration(ctx context.Context) (*generation, error) {
 	entries, err := n.servingLinks(ctx)
 	if err != nil {
@@ -154,25 +154,15 @@ func (n *node) startGeneration(ctx context.Context) (*generation, error) {
 	return g, nil
 }
 
-// superviseDataplanes is the generation supervisor: build a generation and
-// serve it; on each link-store change, retire the serving one — stop ingest,
-// drain, close — and bring up its replacement, the same link addresses
-// rebound. The control plane never restarts: its sockets are its own, and it
-// submits packets to the internal link's address, which each generation
-// rebinds. A swap is packet loss measured in milliseconds; the QUIC
-// connections of the control channel retransmit through it.
-func (n *node) superviseDataplanes(ctx context.Context) error {
-	gen, err := n.startGeneration(ctx)
-	if err != nil {
-		return err
-	}
-	n.setGeneration(gen)
-	return n.supervise(ctx, gen)
-}
-
-// supervise watches the serving generation until the context ends or the
-// link store changes, swapping in its replacement.
-func (n *node) supervise(ctx context.Context, gen *generation) error {
+// serveGenerations is the data plane loop: it serves the generation boot
+// built and, on each link-store change, retires the serving one — stop
+// ingest, drain, close — and brings up its replacement, the same link
+// addresses rebound. The control plane never restarts: its sockets are its
+// own, and it submits packets to the internal link's address, which each
+// generation rebinds. A swap is packet loss measured in milliseconds; the
+// QUIC connections of the control channel retransmit through it. The loop
+// stops the serving generation before it returns.
+func (n *node) serveGenerations(ctx context.Context, gen *generation) error {
 	for {
 		select {
 		case <-ctx.Done():

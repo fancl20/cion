@@ -9,13 +9,13 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
-	"slices"
 	"sync"
 	"time"
 
 	"github.com/scionproto/scion/pkg/addr"
 	"github.com/scionproto/scion/pkg/scrypto/cppki"
 
+	"github.com/fancl20/cion/internal/supervise"
 	"github.com/fancl20/cion/pkg/apps"
 	"github.com/fancl20/cion/pkg/apps/voting"
 	"github.com/fancl20/cion/pkg/controlplane"
@@ -34,8 +34,10 @@ import (
 
 // node is the fully wired CION node: data plane generations, the control
 // plane, the resident applications, and — loaded through the provider seam —
-// the topology machinery. setupNode assembles it phase by phase; start
-// launches its loops; Close releases it.
+// the topology machinery. setupNode assembles it phase by phase, each phase
+// registering what it acquires with the node's group; start launches its
+// loops on the group, which releases the resources once the loops have
+// returned.
 type node struct {
 	cfg   NodeConfig
 	ident identity
@@ -52,7 +54,7 @@ type node struct {
 	linkStore   links.DB
 	linkChanges chan struct{}
 
-	// Data plane generations, run by superviseDataplanes.
+	// Data plane generations, served by the data plane loop.
 	metrics *dataplane.Metrics
 
 	// backendsMtx guards the serving generation and the applications' service
@@ -108,7 +110,7 @@ type node struct {
 	// apps is the loaded resident applications in table order — the
 	// WireGuard application first, its borrowers after — constructed at
 	// setup with their borrows resolved. start launches them under the
-	// node's supervision; Close releases them in reverse, the borrowers
+	// node's supervision; the group releases them in reverse, the borrowers
 	// before the machinery they borrow.
 	apps []apps.Loaded
 
@@ -120,12 +122,10 @@ type node struct {
 	enrollAuth enrollauth.AdmissionAuthorizer
 	enrollRun  func(context.Context)
 
-	// stop cancels the context the node's loops run under; fatal records a
-	// terminal failure and stops the node, the reason kept for the caller of
-	// Run to return. Set before start launches any loop.
-	stop      context.CancelFunc
-	fatalErr  error
-	fatalOnce sync.Once
+	// group runs the node's loops under their policies and holds the
+	// resources the boot registered, released in reverse once every loop has
+	// returned.
+	group *supervise.Group
 }
 
 // identity is the node's decoded self: what every assembly phase needs from
@@ -257,12 +257,15 @@ func (n *node) setupEnrollAuth() error {
 }
 
 // setupNode assembles a complete node from its run arguments and the state
-// directory. Each phase assigns the resources it opens to the node as it
-// goes, so the single deferred unwinding below releases a partially built
-// node — no per-phase Close cascades. A failed setup returns the
-// already-closed partial node beside the error; callers check the error
-// first.
-func setupNode(ctx context.Context, cfg NodeConfig, opts DataplaneOptions) (n *node, err error) {
+// directory, each phase registering the resources it acquires with the
+// group, so the group's Stop releases a partially built node.
+func setupNode(
+	ctx context.Context,
+	group *supervise.Group,
+	cfg NodeConfig,
+	opts DataplaneOptions,
+) (*node, error) {
+
 	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}
@@ -270,19 +273,15 @@ func setupNode(ctx context.Context, cfg NodeConfig, opts DataplaneOptions) (n *n
 	if err != nil {
 		return nil, err
 	}
-	n = &node{
+	n := &node{
 		cfg:         cfg,
 		ident:       ident,
 		opts:        opts,
 		linkChanges: make(chan struct{}, 1),
+		group:       group,
 	}
-	defer func() {
-		if err != nil {
-			n.Close()
-		}
-	}()
-	if err = n.selectProvider(); err != nil {
-		return n, err
+	if err := n.selectProvider(); err != nil {
+		return nil, err
 	}
 	if created {
 		// The one moment before the phases: the provider completes the
@@ -290,103 +289,59 @@ func setupNode(ctx context.Context, cfg NodeConfig, opts DataplaneOptions) (n *n
 		// neighbor's reply, the file provider's from the link-set's first
 		// entry — and the founding core's draw is final already; either
 		// way the completed identity persists before anything assembles.
-		ia, cerr := n.topology.CompleteIdentity(ctx, n.ident.ia)
-		if cerr != nil {
-			return n, cerr
+		ia, err := n.topology.CompleteIdentity(ctx, n.ident.ia)
+		if err != nil {
+			return nil, err
 		}
 		n.ident.ia = ia
-		if err = trust.PersistIA(n.cfg.State, ia); err != nil {
-			return n, err
+		if err := trust.PersistIA(n.cfg.State, ia); err != nil {
+			return nil, err
 		}
 	}
-	if err = n.setupMetrics(); err != nil {
-		return n, err
+	if err := n.setupMetrics(); err != nil {
+		return nil, err
 	}
-	if err = n.setupEnrollAuth(); err != nil {
-		return n, err
+	if err := n.setupEnrollAuth(); err != nil {
+		return nil, err
 	}
-	if err = n.setupControlPlane(ctx); err != nil {
-		return n, err
+	if err := n.setupControlPlane(ctx); err != nil {
+		return nil, err
 	}
-	if err = n.topology.Seed(ctx); err != nil {
-		return n, err
+	if err := n.topology.Seed(ctx); err != nil {
+		return nil, err
 	}
-	if err = n.setupApplications(); err != nil {
-		return n, err
+	if err := n.setupApplications(); err != nil {
+		return nil, err
 	}
-	if err = n.assembleHTTPS(); err != nil {
-		return n, err
+	if err := n.assembleHTTPS(); err != nil {
+		return nil, err
 	}
 	return n, nil
 }
 
-// Close releases the node's resources in reverse startup order. Fields a
-// partially built node never reached stay nil, so Close is safe at every
-// point setupNode can fail. The loops' own sockets (endpoint, responder,
-// clients) close with their owners when the process exits.
-func (n *node) Close() {
-	if n.httpsLn != nil {
-		_ = n.httpsLn.Close()
-	}
-	// The applications release in reverse table order — the borrowers
-	// before the WireGuard application whose machinery they borrow.
-	for _, v := range slices.Backward(n.apps) {
-		v.App.Close()
-	}
-	n.backendsMtx.Lock()
-	gen := n.gen
-	n.gen = nil
-	n.backendsMtx.Unlock()
-	if gen != nil {
-		gen.stop()
-	}
-	if n.topology != nil {
-		_ = n.topology.Close()
-	}
-	if n.peerClt != nil {
-		_ = n.peerClt.Close()
-	}
-	if n.linkStore != nil {
-		_ = n.linkStore.Close()
-	}
-	if n.pathDB != nil {
-		_ = n.pathDB.Close()
-	}
-	if n.trustDB != nil {
-		_ = n.trustDB.Close()
-	}
-}
-
-// fatal stops the node from a loop that cannot proceed: the reason recorded
-// for Run to return — the loops unwinding behind the cancellation — so an
-// operator sees the node leave with the cause, not a process spinning on a
-// condition nothing it does can advance.
-func (n *node) fatal(err error) {
-	n.fatalOnce.Do(func() {
-		n.fatalErr = err
-		slog.Error("Stopping the node", "err", err)
-		n.stop()
+// start launches the node's loops on its group, each under its policy: the
+// core's — the data plane serving the generation boot built, the BFD health
+// monitor, beaconing, the control endpoint, the SCMP echo responder, the
+// chain lifecycle loop and rotation watch the node's role prescribes — and
+// the HTTPS server under Fatal, a failure stopping the node; the loaded
+// topology provider's, the enrollment authorizer's, certificate management,
+// and the resident applications under Degrade, a failure logged and the node
+// serving on. Nothing serves before start, so assembly and serving stay
+// separate lifecycles.
+func (n *node) start(gen *generation) {
+	g := n.group
+	g.Go("data plane", supervise.Fatal, func(ctx context.Context) error {
+		return n.serveGenerations(ctx, gen)
 	})
-}
-
-// start launches the node's background loops: the BFD health monitor,
-// beaconing, the control endpoint, the SCMP echo responder, the loaded
-// topology provider's — the rendezvous acceptor, the joiner's dials, the
-// node directory, and the selection loop under the measured provider — the
-// chain lifecycle loop the node's role prescribes, and the resident
-// applications. Nothing serves before start, so assembly and serving stay
-// separate lifecycles; the data plane generations are served by
-// superviseDataplanes, the daemon's own body.
-func (n *node) start(ctx context.Context) {
-	runBackground(ctx, "health monitor", func(ctx context.Context) error {
+	g.Go("health monitor", supervise.Fatal, func(ctx context.Context) error {
 		n.monitor.Run(ctx)
 		return nil
 	})
-	runBackground(ctx, "beaconer", func(ctx context.Context) error {
+	g.Go("beaconer", supervise.Fatal, func(ctx context.Context) error {
 		n.beaconer.Run(ctx)
 		return nil
 	})
-	runBackground(ctx, "control endpoint", func(ctx context.Context) error {
+	g.Go("control endpoint", supervise.Fatal, func(ctx context.Context) error {
 		// The socket releases with the node's cancellation, so an in-process
 		// restart rebinds the fixed endpoint port.
 		go func() {
@@ -401,13 +356,13 @@ func (n *node) start(ctx context.Context) {
 				Engine: n.engine,
 			}))
 	})
-	runBackground(ctx, "echo responder", n.responder.Run)
-	runBackground(ctx, "topology provider", func(ctx context.Context) error {
+	g.Go("echo responder", supervise.Fatal, n.responder.Run)
+	g.Go("topology provider", supervise.Degrade, func(ctx context.Context) error {
 		n.topology.Run(ctx)
 		return nil
 	})
 	if n.ident.asType == trust.ASTypeCore {
-		runBackground(ctx, "core enrollment", func(ctx context.Context) error {
+		g.Go("core enrollment", supervise.Fatal, func(ctx context.Context) error {
 			return controlplane.RunCoreEnrollment(ctx, controlplane.EnrollmentConfig{
 				IA:            n.ident.ia,
 				DB:            n.trustDB,
@@ -419,7 +374,7 @@ func (n *node) start(ctx context.Context) {
 		// The founder's rotation watch: its own three certificates roll
 		// inside the cast it signs itself, serialized on the decision the
 		// submissions take too.
-		runBackground(ctx, "rotation watch", func(ctx context.Context) error {
+		g.Go("rotation watch", supervise.Fatal, func(ctx context.Context) error {
 			controlplane.RunRotation(ctx, controlplane.RotationConfig{
 				IA:              n.ident.ia,
 				DB:              n.trustDB,
@@ -452,7 +407,7 @@ func (n *node) start(ctx context.Context) {
 			// The authoritative core's rotation watch: its certificate rolls
 			// through the same channel its join used, by a regular update
 			// its current key votes on.
-			runBackground(ctx, "rotation watch", func(ctx context.Context) error {
+			g.Go("rotation watch", supervise.Fatal, func(ctx context.Context) error {
 				controlplane.RunRotation(ctx, controlplane.RotationConfig{
 					IA:              n.ident.ia,
 					DB:              n.trustDB,
@@ -466,21 +421,17 @@ func (n *node) start(ctx context.Context) {
 				return nil
 			})
 		}
-		runBackground(ctx, "enrollment", func(ctx context.Context) error {
-			// The joining core's onboarding failure is terminal: it stops
-			// the node, and Run returns it.
-			if err := controlplane.RunEnrollment(ctx, enrollment); err != nil {
-				n.fatal(err)
-			}
-			return nil
+		// The joining core's onboarding failure is terminal: the loop
+		// returns it, and the node stops with it as the cause.
+		g.Go("enrollment", supervise.Fatal, func(ctx context.Context) error {
+			return controlplane.RunEnrollment(ctx, enrollment)
 		})
 	}
 	slog.Info("Serving control endpoint", "port", controlplane.EndpointPort)
 	if n.enrollRun != nil {
-		// The selected authorizer's own loops — the Telegram poll — under
-		// the node's supervision like every other loop; core only, for the
-		// core is the only node that issues chains.
-		runBackground(ctx, "enrollment authorizer", func(ctx context.Context) error {
+		// The selected authorizer's own loops — the Telegram poll; core only,
+		// for the core is the only node that issues chains.
+		g.Go("enrollment authorizer", supervise.Degrade, func(ctx context.Context) error {
 			n.enrollRun(ctx)
 			return nil
 		})
@@ -490,21 +441,17 @@ func (n *node) start(ctx context.Context) {
 		// certificate maintenance below launches only after it — a first issuance's
 		// probe finds the port answered.
 		ln, handler := n.httpsLn, n.httpsHandler
-		runBackground(ctx, "https server", func(ctx context.Context) error {
+		g.Go("https server", supervise.Fatal, func(ctx context.Context) error {
 			return n.certMgr.ServeHTTPS(ctx, ln, handler)
 		})
 	}
 	if n.certMgr != nil {
 		// The certificate maintenance runs beside the server that presents
 		// it; static files manage nothing, so the loop is a no-op for them.
-		runBackground(ctx, "certificate management", func(ctx context.Context) error {
-			return n.certMgr.Manage(ctx)
-		})
+		g.Go("certificate management", supervise.Degrade, n.certMgr.Manage)
 	}
-	// The resident applications under the node's supervision: a panic in
-	// one application's loop is absorbed and logged, nothing restarted.
 	for _, l := range n.apps {
-		runBackground(ctx, l.Name, l.App.Run)
+		g.Go(l.Name, supervise.Degrade, l.App.Run)
 	}
 }
 
@@ -555,21 +502,4 @@ func selfEnroll(
 		return nil, err
 	}
 	return chain, nil
-}
-
-// runBackground runs one of the node's long-lived loops in its own
-// goroutine: a panic is logged and absorbed — one loop's bug must not take
-// the process down — and an error return is logged with the loop's name so
-// the operator can tell which one exited.
-func runBackground(ctx context.Context, name string, fn func(context.Context) error) {
-	go func() {
-		defer func() {
-			if r := recover(); r != nil {
-				slog.Error("Panic in background service", "service", name, "panic", r)
-			}
-		}()
-		if err := fn(ctx); err != nil {
-			slog.Error("Background service exited", "service", name, "err", err)
-		}
-	}()
 }

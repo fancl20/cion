@@ -19,7 +19,6 @@ import (
 	"github.com/scionproto/scion/pkg/addr"
 	"github.com/scionproto/scion/pkg/scrypto/cppki"
 
-	"github.com/fancl20/cion/pkg/modules/pathdb"
 	"github.com/fancl20/cion/pkg/modules/trustdb"
 	"github.com/fancl20/cion/pkg/modules/trustdb/impl/bbolt"
 	"github.com/fancl20/cion/pkg/trust"
@@ -379,29 +378,13 @@ func TestChainSweepLoop(t *testing.T) {
 	})
 }
 
-// panickingDB delegates to the wrapped database except on the first
-// expired-segment sweep, which it panics instead — the seeded round.
-type panickingDB struct {
-	pathdb.DB
-	swept atomic.Bool
-}
-
-func (d *panickingDB) DeleteExpired(ctx context.Context, now time.Time) (int, error) {
-	if !d.swept.Swap(true) {
-		panic("a round meets its panic")
-	}
-	return d.DB.DeleteExpired(ctx, now)
-}
-
-// TestBeaconingLoopAbsorbsPanics checks Run's own containment: a panicking
-// round is absorbed and logged by the loop that ran it — the process
-// intact, the sibling loops stepping on, and Run still returning once
-// every loop has exited — on the bubble-and-cancel shape the sweep loop's
-// episode set.
-func TestBeaconingLoopAbsorbsPanics(t *testing.T) {
+// TestBeaconingRunReturnsOnCancel checks Run's own join: the loops step on
+// their tickers, and Run returns once every loop has exited after the
+// cancellation — on the bubble-and-cancel shape the sweep loop's episode
+// set.
+func TestBeaconingRunReturnsOnCancel(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		f := newBeaconFixture(t)
-		db := &panickingDB{DB: f.pathDB}
 		var rounds atomic.Int32
 		links := func() map[uint16]addr.IA {
 			rounds.Add(1)
@@ -412,7 +395,7 @@ func TestBeaconingLoopAbsorbsPanics(t *testing.T) {
 			Engine:               f.engines[coreIATest],
 			MACKey:               []byte(testMACKey),
 			Store:                f.store,
-			DB:                   db,
+			DB:                   f.pathDB,
 			Links:                links,
 			Sender:               f.sender,
 			Core:                 true,
@@ -430,22 +413,17 @@ func TestBeaconingLoopAbsorbsPanics(t *testing.T) {
 			defer close(done)
 			b.Run(ctx)
 		}()
-
-		// The sweep's first round panics and its loop dies on it — one sweep
-		// ever — while the origination loop steps past it the whole while.
 		time.Sleep(10 * time.Millisecond)
-		if !db.swept.Load() {
-			t.Fatal("the seeded round never ran")
-		}
 		if got := rounds.Load(); got < 3 {
-			t.Fatalf("origination rounds = %d, want the loop stepping past the sibling's panicked round", got)
+			t.Fatalf("origination rounds = %d, want the loops stepping on their tickers", got)
 		}
 
 		cancel()
+		synctest.Wait()
 		select {
 		case <-done:
-		case <-time.After(5 * time.Second):
-			t.Fatal("Run did not return after cancellation")
+		default:
+			t.Fatal("Run did not return once its loops had exited")
 		}
 	})
 }

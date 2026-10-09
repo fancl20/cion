@@ -34,8 +34,8 @@ import (
 // beaconing (the lookup, beaconer, and path provider closing their cycle),
 // the wiring of the loaded topology provider over what the phases built, the
 // control endpoint's socket and the provider's mounted services, and the
-// echo responder. Each phase assigns what it opens to the node as it goes,
-// so setupNode's single deferred unwinding releases a partial node.
+// echo responder. Each phase registers what it acquires with the node's
+// group as it goes, so a failed boot's Stop releases a partial node.
 func (n *node) setupControlPlane(ctx context.Context) error {
 	if err := n.openState(ctx); err != nil {
 		return err
@@ -74,6 +74,7 @@ func (n *node) openState(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("opening trust DB: %w", err)
 	}
+	n.group.Own("trust database", trustDB.Close)
 	n.trustDB = trustDB
 	asKey, err := trust.LoadOrCreateASKey(n.cfg.State)
 	if err != nil {
@@ -84,11 +85,13 @@ func (n *node) openState(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("opening path DB: %w", err)
 	}
+	n.group.Own("path database", pathDB.Close)
 	n.pathDB = pathDB
 	linkStore, err := openStore(n.cfg.State, "links.db", linkbbolt.New)
 	if err != nil {
 		return fmt.Errorf("opening link DB: %w", err)
 	}
+	n.group.Own("link database", linkStore.Close)
 	n.linkStore = linkStore
 	return nil
 }
@@ -241,6 +244,7 @@ func (n *node) buildMessenger() error {
 			return path
 		},
 	})
+	n.group.Own("peer client", peerClt.Close)
 	n.peerClt = peerClt
 	return nil
 }
@@ -380,6 +384,9 @@ func (n *node) assembleEndpoint(ctx context.Context) error {
 	}
 	n.endpointConn = endpointConn
 
+	// The provider releases what Mounts binds, a Mounts that failed partway
+	// included.
+	n.group.Own("topology provider", n.topology.Close)
 	mounts, err := n.topology.Mounts()
 	if err != nil {
 		return err

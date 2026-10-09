@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/fancl20/cion/internal/supervise"
 	"github.com/fancl20/cion/pkg/apps"
 	"github.com/fancl20/cion/pkg/apps/coordination"
 	"github.com/fancl20/cion/pkg/apps/wireguard"
@@ -105,15 +106,17 @@ func TestAssembleHTTPSBind(t *testing.T) {
 	}
 	addr := reserved.Addr().String()
 	_ = reserved.Close()
+	group, _ := supervise.New(context.Background())
+	defer func() { _ = group.Stop() }()
 	n := &node{
 		cfg:     NodeConfig{Coordination: &CoordinationOptions{Addr: addr}},
 		certMgr: staticCertMgr(t),
 		apps:    []apps.Loaded{{Name: "coordination", App: app}},
+		group:   group,
 	}
 	if err := n.assembleHTTPS(); err != nil {
 		t.Fatalf("assembleHTTPS() = %v, want nil", err)
 	}
-	defer func() { _ = n.httpsLn.Close() }()
 	if n.httpsHandler == nil {
 		t.Fatal("the node assembled no handlers for the HTTPS server")
 	}

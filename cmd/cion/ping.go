@@ -52,8 +52,9 @@ func newPingCommand() *cobra.Command {
 
 // runPing boots the full node in place of serving: the pinger's packets cross
 // the data plane and its paths come from the node's own beaconing, so the node
-// serves underneath the run.
-func runPing(ctx context.Context, cfg services.NodeConfig, target string, opts *pingOptions) error {
+// serves underneath the run. A ping that succeeds returns how the node
+// stopped.
+func runPing(ctx context.Context, cfg services.NodeConfig, target string, opts *pingOptions) (err error) {
 	dst, host, err := parsePingTarget(target)
 	if err != nil {
 		return err
@@ -62,7 +63,11 @@ func runPing(ctx context.Context, cfg services.NodeConfig, target string, opts *
 	if err != nil {
 		return err
 	}
-	defer app.Close()
+	defer func() {
+		if cerr := app.Close(); err == nil {
+			err = cerr
+		}
+	}()
 	conn, err := app.Conn(0)
 	if err != nil {
 		return err

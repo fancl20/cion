@@ -881,8 +881,8 @@ func StartPingResponder(t *testing.T, n *Node) {
 	}()
 }
 
-// handlePanic absorbs a background loop's panic, the way the node assembly's
-// own runner does — one loop's bug must not take the test binary down.
+// handlePanic absorbs a background loop's panic: one loop's bug must not
+// take the test binary down.
 func handlePanic() {
 	if r := recover(); r != nil {
 		slog.Error("Panic in testnetwork", "panic", r)

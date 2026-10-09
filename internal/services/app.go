@@ -8,10 +8,12 @@ package services
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 
 	"github.com/scionproto/scion/pkg/addr"
 
+	"github.com/fancl20/cion/internal/supervise"
 	"github.com/fancl20/cion/pkg/apps"
 	"github.com/fancl20/cion/pkg/controlplane"
 	"github.com/fancl20/cion/pkg/modules/links"
@@ -20,27 +22,38 @@ import (
 	"github.com/fancl20/cion/pkg/scion"
 )
 
-// Run assembles the node the run arguments and state directory describe,
-// starts its loops, and serves the data plane generations until the context
-// is canceled — the run command's daemon. A loop's terminal failure stops
-// the node from inside, and Run returns the failure as its own.
+// Run boots the node the run arguments and state directory describe and
+// serves it until it stops — the run command's daemon. It returns nil once
+// the context ends, or the failure of the Fatal loop that stopped the node,
+// joined with the releases' errors.
 func Run(ctx context.Context, cfg NodeConfig, opts DataplaneOptions) error {
-	n, err := setupNode(ctx, cfg, opts)
+	n, err := boot(ctx, cfg, opts)
 	if err != nil {
 		return err
 	}
-	defer n.Close()
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	n.stop = cancel
-	n.start(ctx)
 	slog.Info("Starting CION", "ia", n.ident.ia, "asType", n.ident.asType,
 		"core", cfg.Core, "internal", cfg.Internal, "control", cfg.Control)
-	err = n.superviseDataplanes(ctx)
-	if n.fatalErr != nil {
-		return n.fatalErr
+	return n.group.Wait()
+}
+
+// boot assembles the node, builds its first data plane generation, and
+// starts its loops, all on one group. The generation builds synchronously,
+// so a bind failure surfaces here instead of as a lost packet, and the
+// loops start after it. A failed boot stops the group, releasing what the
+// boot acquired.
+func boot(ctx context.Context, cfg NodeConfig, opts DataplaneOptions) (*node, error) {
+	group, loops := supervise.New(ctx)
+	n, err := setupNode(ctx, group, cfg, opts)
+	if err != nil {
+		return nil, errors.Join(err, group.Stop())
 	}
-	return err
+	gen, err := n.startGeneration(loops)
+	if err != nil {
+		return nil, errors.Join(err, group.Stop())
+	}
+	n.setGeneration(gen)
+	n.start(gen)
+	return n, nil
 }
 
 // App is a fully assembled node booted for an application: the node's loops
@@ -49,35 +62,23 @@ func Run(ctx context.Context, cfg NodeConfig, opts DataplaneOptions) error {
 // 0005's in-process entry, the form tests and embedded use share with the
 // subcommand.
 type App struct {
-	node   *node
-	cancel context.CancelFunc
+	node *node
 }
 
-// BootApp assembles the node and starts it serving underneath the
-// application; Close releases it when the application is done. The first
-// data plane generation builds synchronously, so a bind failure surfaces
-// here instead of as a lost packet. A loop's terminal failure stops the
-// node's loops from inside.
+// BootApp boots the node and starts it serving underneath the application;
+// Close stops it when the application is done.
 func BootApp(ctx context.Context, cfg NodeConfig) (*App, error) {
-	n, err := setupNode(ctx, cfg, DefaultDataplaneOptions())
+	n, err := boot(ctx, cfg, DefaultDataplaneOptions())
 	if err != nil {
 		return nil, err
 	}
-	ctx, cancel := context.WithCancel(ctx)
-	n.stop = cancel
-	gen, err := n.startGeneration(ctx)
-	if err != nil {
-		cancel()
-		n.Close()
-		return nil, err
-	}
-	n.setGeneration(gen)
-	n.start(ctx)
-	runBackground(ctx, "dataplane", func(ctx context.Context) error {
-		return n.supervise(ctx, gen)
-	})
-	return &App{node: n, cancel: cancel}, nil
+	return &App{node: n}, nil
 }
+
+// Wait blocks until the node stops — its context ended, Close called, or a
+// Fatal loop failed — and returns how: the Fatal failure, if one stopped
+// it, joined with the releases' errors.
+func (a *App) Wait() error { return a.node.group.Wait() }
 
 // IA returns the node's ISD-AS.
 func (a *App) IA() addr.IA { return a.node.ident.ia }
@@ -124,8 +125,5 @@ func (a *App) Application(name string) apps.Application {
 	return apps.AppOf(a.node.apps, name)
 }
 
-// Close releases the node's resources.
-func (a *App) Close() {
-	a.cancel()
-	a.node.Close()
-}
+// Close stops the node and returns what Wait returns.
+func (a *App) Close() error { return a.node.group.Stop() }

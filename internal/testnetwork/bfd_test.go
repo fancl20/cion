@@ -64,18 +64,17 @@ func TestBFDLivenessEpisode(t *testing.T) {
 	}
 
 	// The blackhole: kill B.
-	b.cancel()
-	b.app.Close()
+	b.stop(t)
 
 	// A marks the link down within the window while its BFD keeps leaving
 	// on the link's own socket — the stream survives its own verdict.
-	sent := session.Transmitted()
 	Poll(t, "A to mark the A–B link down", func() bool {
 		return !a.app.Monitor().Up(abIfID)
 	})
-	if now := session.Transmitted(); now <= sent {
-		t.Error("A's BFD stopped transmitting on the down link")
-	}
+	sent := session.Transmitted()
+	Poll(t, "A's BFD to keep transmitting on the down link", func() bool {
+		return session.Transmitted() > sent
+	})
 	// The serving instance is untouched: the entry stays established on the
 	// same interface — no generation swap for a verdict flip.
 	if e := entryOf(a, b.app.IA()); e.State != links.StateEstablished || e.IfID != abIfID {
@@ -139,8 +138,7 @@ func TestBFDStaticLabEpisode(t *testing.T) {
 
 	// The blackhole: B dies, and A's monitor marks the file provider's link
 	// down exactly as the measured provider's.
-	b.cancel()
-	b.app.Close()
+	b.stop(t)
 	Poll(t, "A to mark the static link down", func() bool {
 		return !a.app.Monitor().Up(ifID)
 	})

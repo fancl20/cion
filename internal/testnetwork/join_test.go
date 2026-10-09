@@ -35,7 +35,6 @@ var fastPacing = services.NodePacing{
 // assemblyNode is a node booted through the run command's own assembly.
 type assemblyNode struct {
 	app      *services.App
-	cancel   context.CancelFunc
 	stateDir string
 	host     netip.Addr
 }
@@ -46,8 +45,17 @@ func (n *assemblyNode) rendezvousOf() string {
 	return netip.AddrPortFrom(n.host, measured.RendezvousPort).String()
 }
 
+// stop stops the node, its loops returned and its resources released when
+// stop returns, and fails the test on the node's stop result.
+func (n *assemblyNode) stop(t *testing.T) {
+	t.Helper()
+	if err := n.app.Close(); err != nil {
+		t.Fatalf("stopping %v: %v", n.app.IA(), err)
+	}
+}
+
 // bootAssembly boots a full node assembly — the run command's own wiring —
-// and serves it underneath the test.
+// and serves it underneath the test, stopping it at cleanup.
 func bootAssembly(t *testing.T, mutate func(*services.NodeConfig)) *assemblyNode {
 	t.Helper()
 	cfg := services.NodeConfig{
@@ -60,23 +68,21 @@ func bootAssembly(t *testing.T, mutate func(*services.NodeConfig)) *assemblyNode
 	if cfg.State == "" {
 		cfg.State = t.TempDir()
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	app, err := services.BootApp(ctx, cfg)
+	app, err := services.BootApp(context.Background(), cfg)
 	if err != nil {
-		cancel()
 		t.Fatal(err)
 	}
-	n := &assemblyNode{app: app, cancel: cancel, stateDir: cfg.State}
+	n := &assemblyNode{app: app, stateDir: cfg.State}
+	t.Cleanup(func() {
+		if err := app.Close(); err != nil {
+			t.Errorf("stopping %v: %v", app.IA(), err)
+		}
+	})
 	ap, err := netip.ParseAddrPort(cfg.Control)
 	if err != nil {
-		cancel()
 		t.Fatal(err)
 	}
 	n.host = ap.Addr()
-	t.Cleanup(func() {
-		cancel()
-		app.Close()
-	})
 	return n
 }
 
@@ -246,8 +252,7 @@ func TestJoinByRendezvous(t *testing.T) {
 	})
 
 	// Killing B leaves C connected through A.
-	b.cancel()
-	b.app.Close()
+	b.stop(t)
 	// C's BFD verdict on its link to B turns down — the condition the wait
 	// wants, not a fixed multiple of the transmission interval — so the
 	// composed route crosses no link the monitor distrusts.
@@ -322,8 +327,7 @@ func TestLineCutHeals(t *testing.T) {
 	})
 
 	// Killing B strands C: every route from C to A crossed the dead link.
-	b.cancel()
-	b.app.Close()
+	b.stop(t)
 	cbEntry := entryOf(c, b.app.IA())
 	Poll(t, "C to mark the C–B link down", func() bool {
 		return !c.app.Monitor().Up(cbEntry.IfID)
@@ -473,7 +477,7 @@ func TestHeldStateRefusesBoot(t *testing.T) {
 		KeyFile:      wpki.keyFile,
 	})
 	if err == nil {
-		app.Close()
+		_ = app.Close()
 		t.Fatal("a second boot on the held state directory succeeded")
 	}
 	if want := "the state directory " + running.stateDir + " is in use"; !strings.Contains(err.Error(), want) {

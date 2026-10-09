@@ -7,6 +7,8 @@ import (
 	"testing/synctest"
 
 	"go.etcd.io/bbolt"
+
+	"github.com/fancl20/cion/internal/supervise"
 )
 
 // TestOpenStateRefusesHeldDatabase checks a database another process holds
@@ -23,8 +25,9 @@ func TestOpenStateRefusesHeldDatabase(t *testing.T) {
 			}
 			defer func() { _ = held.Close() }()
 			synctest.Test(t, func(t *testing.T) {
-				n := &node{cfg: NodeConfig{State: state}}
-				defer n.Close()
+				group, _ := supervise.New(t.Context())
+				defer func() { _ = group.Stop() }()
+				n := &node{cfg: NodeConfig{State: state}, group: group}
 				err := n.openState(t.Context())
 				if err == nil {
 					t.Fatal("the held state directory opened")

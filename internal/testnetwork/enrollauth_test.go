@@ -288,8 +288,7 @@ func TestJoinByEnrollAuthTelegramRestart(t *testing.T) {
 	// control host carries the fixed endpoint and rendezvous ports, so the
 	// joiner's retries converge on the fresh process.
 	state := a.stateDir
-	a.cancel()
-	a.app.Close()
+	a.stop(t)
 	bootAssembly(t, func(cfg *services.NodeConfig) {
 		cfg.Core = true
 		cfg.State = state
@@ -353,8 +352,7 @@ func TestJoinDeniedByEnrollAuth(t *testing.T) {
 
 	// The joiner goes silent — a link no node establishes — and the window
 	// retires its entry.
-	b.cancel()
-	b.app.Close()
+	b.stop(t)
 	Poll(t, "the candidate to retire with the window", func() bool {
 		e := entryOf(a, b.app.IA())
 		return e != nil && e.State == links.StateRetired

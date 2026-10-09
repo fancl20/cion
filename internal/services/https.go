@@ -54,6 +54,7 @@ func (n *node) assembleHTTPS() error {
 	if err != nil {
 		return err
 	}
+	n.group.Own("https listener", ln.Close)
 	n.httpsLn = ln
 	n.httpsHandler = mux
 	return nil

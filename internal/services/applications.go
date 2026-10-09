@@ -14,8 +14,10 @@ import (
 // and constructs the loaded in table order — the WireGuard application
 // first, its borrowers after — the environment built once from the node's
 // phases and the loaded set growing as the constructors return, so each
-// borrower finds the owner's exported surface beside it. Validate already
-// refused the miscombinations; whatever loads here was named or implied.
+// borrower finds the owner's exported surface beside it. Each registers its
+// release as it loads, so the group releases the borrowers before the
+// machinery they borrow. Validate already refused the miscombinations;
+// whatever loads here was named or implied.
 func (n *node) setupApplications() error {
 	env := n.appEnvironment()
 	selected, err := apps.Select(n.cfg.Applications, env.Core, n.cfg.AppArguments)
@@ -27,6 +29,10 @@ func (n *node) setupApplications() error {
 		if err != nil {
 			return fmt.Errorf("assembling the %s application: %w", e.Name, err)
 		}
+		n.group.Own(e.Name+" application", func() error {
+			app.Close()
+			return nil
+		})
 		n.apps = append(n.apps, apps.Loaded{Name: e.Name, App: app})
 	}
 	return nil

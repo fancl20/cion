@@ -163,13 +163,14 @@ func holdsAssemblyChain(t *testing.T, n *assemblyNode, ia addr.IA) bool {
 // TestJoinerStopsWithoutVotingApp checks the application's absence: a
 // deliberate core — the empty applications list loads none — serves the
 // network fine, and the joining core that seeks voting power through it
-// stops itself with the reason, while a plain node keeps enrolling against
-// the same core. The network is operational with or without the application;
-// only the onboarding needs it.
+// stops itself with the reason, whether run through the daemon's own body
+// or booted for an application, whose Wait reports the same, while a plain
+// node keeps enrolling against the same core. The network is operational
+// with or without the application; only the onboarding needs it.
 func TestJoinerStopsWithoutVotingApp(t *testing.T) {
 	t.Parallel()
 	wpki := NewWebPKI(t)
-	ipA, ipB, ipD := hostSlot(t), hostSlot(t), hostSlot(t)
+	ipA, ipB, ipD, ipE := hostSlot(t), hostSlot(t), hostSlot(t), hostSlot(t)
 
 	// The deliberate core: no application loads, the voting application
 	// among them.
@@ -182,21 +183,33 @@ func TestJoinerStopsWithoutVotingApp(t *testing.T) {
 		cfg.CertFile = wpki.certFile
 		cfg.KeyFile = wpki.keyFile
 	})
+	joiner := func(ip netip.Addr) services.NodeConfig {
+		return services.NodeConfig{
+			Core:      true,
+			Domain:    TestDomain,
+			State:     t.TempDir(),
+			Internal:  PinnedUDPAddrOn(t, ip),
+			Control:   FreeUDPAddrOn(t, ip),
+			Neighbors: []string{a.rendezvousOf()},
+			RootCAs:   wpki.pool,
+			Pacing:    fastPacing,
+		}
+	}
 	// The joining core, run through the daemon's own body: its exit is the
 	// assertion.
 	bErr := make(chan error, 1)
 	go func() {
-		bErr <- services.Run(context.Background(), services.NodeConfig{
-			Core:      true,
-			Domain:    TestDomain,
-			State:     t.TempDir(),
-			Internal:  PinnedUDPAddrOn(t, ipB),
-			Control:   FreeUDPAddrOn(t, ipB),
-			Neighbors: []string{a.rendezvousOf()},
-			RootCAs:   wpki.pool,
-			Pacing:    fastPacing,
-		}, services.DefaultDataplaneOptions())
+		bErr <- services.Run(context.Background(), joiner(ipB), services.DefaultDataplaneOptions())
 	}()
+	// The same joining core booted for an application: its Wait is the
+	// assertion.
+	e, err := services.BootApp(context.Background(), joiner(ipE))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = e.Close() })
+	eErr := make(chan error, 1)
+	go func() { eErr <- e.Wait() }()
 	// A plain node keeps enrolling against the deliberate core.
 	d := bootAssembly(t, func(cfg *services.NodeConfig) {
 		cfg.State = t.TempDir()
@@ -206,20 +219,22 @@ func TestJoinerStopsWithoutVotingApp(t *testing.T) {
 		cfg.RootCAs = wpki.pool
 	})
 
-	// The joiner enrolls, finds no voting application behind its submission,
-	// and the node stops with the reason.
-	var stopped error
-	PollFor(t, RestartTimeout, "the joining core to stop itself", func() bool {
-		select {
-		case stopped = <-bErr:
-			return true
-		default:
-			return false
+	// Each joiner enrolls, finds no voting application behind its
+	// submission, and the node stops with the reason.
+	for name, stop := range map[string]chan error{"run": bErr, "booted": eErr} {
+		var stopped error
+		PollFor(t, RestartTimeout, "the "+name+" joining core to stop itself", func() bool {
+			select {
+			case stopped = <-stop:
+				return true
+			default:
+				return false
+			}
+		})
+		if !errors.Is(stopped, trust.ErrNoVotingApp) {
+			t.Fatalf("the %s joining core's stop = %v, want the absent voting application",
+				name, stopped)
 		}
-	})
-	if !errors.Is(stopped, trust.ErrNoVotingApp) {
-		t.Fatalf("the joining core's exit = %v, want the absent voting application",
-			stopped)
 	}
 
 	// The network the exit leaves behind still serves enrollment.
