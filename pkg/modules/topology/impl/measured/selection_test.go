@@ -614,22 +614,71 @@ func TestSelectionCapEviction(t *testing.T) {
 }
 
 // TestSelectionStrandedFlag checks the dialer's trigger: the window records
-// whether any directory candidate answered its probe — the flag the
-// joiner's dial loop reads to re-dial what the table holds.
+// the node stranded only while it holds fewer up links than the floor and
+// no directory candidate answered its probe.
 func TestSelectionStrandedFlag(t *testing.T) {
-	f := newSelFixture(t, selPeer)
+	f := newSelFixture(t, selPeer, selA)
 	var stranded atomic.Bool
 	f.sel.cfg.Stranded = &stranded
+	// The establishments fail, so the windows below keep the table as set.
+	f.sel.establishFn = func(context.Context, DirectoryEntry, string) bool { return false }
 
-	f.candidate(selA, 30*time.Millisecond, 0)
+	// At the floor, every directory peer a neighbor: no candidate answers,
+	// and still the node is not stranded.
+	f.pass(t)
+	if stranded.Load() {
+		t.Error("a node at the floor recorded itself stranded")
+	}
+
+	// One up link short of the floor with no candidate: stranded.
+	f.down[selA] = true
+	f.pass(t)
+	if !stranded.Load() {
+		t.Error("a node below the floor with no candidate recorded itself unstranded")
+	}
+
+	// A candidate answers: not stranded.
+	f.candidate(selB, 30*time.Millisecond, 0)
 	f.pass(t)
 	if stranded.Load() {
 		t.Error("a window with a reachable candidate recorded the node stranded")
 	}
-	f.samples[selA] = sm(0, 0)
+
+	// The candidate goes silent: stranded again.
+	f.samples[selB] = sm(0, 0)
 	f.pass(t)
 	if !stranded.Load() {
 		t.Error("a window no candidate answered recorded the node unstranded")
+	}
+}
+
+// TestSelectionCapCountsCandidates checks what the cap counts: the named
+// live entries, so a named candidate in flight holds its place, and a
+// promotion past it needs an eviction even while the established neighbors
+// alone sit below the cap.
+func TestSelectionCapCountsCandidates(t *testing.T) {
+	neighbors := []addr.IA{selPeer, selA, selB}
+	f := newSelFixture(t, neighbors...)
+	f.sel.cfg.MaxLinks = len(neighbors) + 1
+	// No exclusion qualifies a neighbor for eviction.
+	for _, ia := range neighbors {
+		f.setExcluded(t, ia, excludedSample{survived: true, echo: 40 * time.Millisecond})
+	}
+	// A peer's own dial minted a named candidate the sweep has not settled.
+	if err := f.store.Insert(context.Background(), &links.Link{
+		NeighborIA: selC,
+		Local:      netip.MustParseAddrPort("127.0.0.1:40001"),
+		Remote:     netip.MustParseAddrPort("127.0.0.1:40002"),
+		State:      links.StateCandidate,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	f.candidate(selD, 8*time.Millisecond, 20*time.Millisecond)
+
+	f.pass(t) // streak 1
+	f.pass(t) // streak 2: at the cap, nothing qualifies for eviction
+	if len(f.established) != 0 {
+		t.Errorf("promoted %v past the candidate holding the cap's last place", f.established)
 	}
 }
 

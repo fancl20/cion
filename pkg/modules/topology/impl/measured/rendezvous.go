@@ -423,12 +423,9 @@ func (r *Rendezvous) unnamedLinks() (int, error) {
 }
 
 // namedLinks counts the live entries that name a neighbor — the ones the
-// link cap bounds, since only they carry beacons. Unnamed candidates —
-// probes and bootstrap claims — retire with the candidate window.
+// link cap bounds.
 func (r *Rendezvous) namedLinks() (int, error) {
-	return r.countLinks(func(l *links.Link) bool {
-		return l.Live() && !l.NeighborIA.IsZero()
-	})
+	return r.countLinks(named)
 }
 
 // countLinks counts the entries a predicate keeps.

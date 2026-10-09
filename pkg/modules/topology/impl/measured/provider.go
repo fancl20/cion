@@ -460,12 +460,15 @@ func (z *Provider) runJoinDials(ctx context.Context) {
 // dialJoins runs one pass of the joiner's dials. The reply names the
 // joiner's own entry — the acceptor's ISD-AS — beside retargeting it, so
 // both sides of the establishment are named before the link serves. A
-// stranded node — the selection loop's window found no reachable candidate
-// from the directory — dials what it knows: the retired entries re-dial
-// their rendezvous addresses too, and an answered re-dial revives the entry
-// as a candidate, the state flip and the recorded sides, for the sweep to
-// settle by the peer's evidence, exactly as it settles a joiner's. An
-// unanswered one costs a UDP round trip and changes nothing.
+// stranded node — the selection loop's window found it below the floor with
+// no reachable candidate from the directory — dials what it knows: each
+// retired entry revivable admits re-dials its peer's rendezvous socket too,
+// and an answered re-dial revives the entry as a candidate, the state flip
+// and the recorded sides, for the sweep to settle by the peer's evidence,
+// exactly as it settles a joiner's. An answer naming a neighbor the table
+// holds live revives nothing. Each check reads the table as the pass's
+// earlier revivals left it. An unanswered re-dial costs a UDP round trip
+// and changes nothing.
 func (z *Provider) dialJoins(ctx context.Context) {
 	entries, err := z.pcs.Store.All(ctx)
 	if err != nil {
@@ -474,22 +477,28 @@ func (z *Provider) dialJoins(ctx context.Context) {
 	}
 	stranded := z.stranded.Load()
 	for _, l := range entries {
-		if !l.Rendezvous.IsValid() {
+		target := rendezvousTarget(l)
+		if !target.IsValid() {
 			continue
 		}
-		if l.Live() && l.Remote.IsValid() {
-			continue // retargeted already: waiting on the peer's evidence
-		}
-		if !l.Live() && !stranded {
+		if l.Live() {
+			if l.Remote.IsValid() {
+				continue // retargeted already: waiting on the peer's evidence
+			}
+		} else if !stranded || !revivable(entries, l) {
 			continue
 		}
-		reply, _, err := RendezvousEcho(ctx, z.cfg.ControlHost,
-			l.Rendezvous, z.pcs.IA, l.Local)
+		reply, _, err := RendezvousEcho(ctx, z.cfg.ControlHost, target, z.pcs.IA, l.Local)
 		if err != nil {
-			slog.Debug("Rendezvous dial", "rendezvous", l.Rendezvous, "err", err)
+			slog.Debug("Rendezvous dial", "rendezvous", target, "err", err)
 			continue
 		}
 		z.learn(reply.Observed.Addr())
+		if !l.Live() && liveNeighbor(entries, reply.IA) {
+			slog.Debug("Rendezvous revival answered by a live neighbor",
+				"rendezvous", target, "neighbor", reply.IA)
+			continue
+		}
 		l.NeighborIA = reply.IA
 		l.Remote = reply.LinkAddr
 		l.RemoteIfID = reply.IfID
@@ -505,6 +514,22 @@ func (z *Provider) dialJoins(ctx context.Context) {
 			"neighbor", l.NeighborIA, "local", l.Local, "remote", l.Remote,
 			"interface", l.IfID)
 	}
+}
+
+// revivable reports whether a stranded node re-dials a retired entry. A
+// named entry is re-dialed while no live entry names its neighbor, so a
+// revival never doubles a live neighbor. An unnamed entry is re-dialed only
+// when it records the rendezvous address it was seeded with: the entries a
+// probe mints on the acceptor name no peer. Either waits while the named
+// live entries fill the cap.
+func revivable(entries []*links.Link, l *links.Link) bool {
+	if namedLive(entries) >= MaxNeighbors {
+		return false
+	}
+	if l.NeighborIA.IsZero() {
+		return l.Rendezvous.IsValid()
+	}
+	return !liveNeighbor(entries, l.NeighborIA)
 }
 
 // linkClient establishes links in-band over the peer client's mutually

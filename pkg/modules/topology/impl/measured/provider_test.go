@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/netip"
+	"slices"
 	"testing"
 
 	"github.com/scionproto/scion/pkg/addr"
@@ -311,5 +312,149 @@ func TestStrandedRedial(t *testing.T) {
 	if !entry.Remote.IsValid() || entry.RemoteIfID == 0 {
 		t.Errorf("the revived entry's remote = %v, interface %d, want the reply's side",
 			entry.Remote, entry.RemoteIfID)
+	}
+}
+
+// strandedDialer returns a stranded provider over a store holding the given
+// entries, claiming its own ISD-AS so that no two dialers meet in the
+// acceptor's per-ISD-AS rate limit.
+func strandedDialer(t *testing.T, ia addr.IA, entries ...*links.Link) (*Provider, *memory.DB) {
+	t.Helper()
+	z, err := New(Config{ControlHost: netip.MustParseAddr("127.0.0.1")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := memory.New()
+	z.Wire(topology.Pieces{IA: ia, Store: store})
+	for _, l := range entries {
+		if err := store.Insert(context.Background(), l); err != nil {
+			t.Fatal(err)
+		}
+	}
+	z.stranded.Store(true)
+	return z, store
+}
+
+// liveLink returns an established entry of the neighbor, retargeted
+// already so that no dial pass touches it.
+func liveLink(ia addr.IA, port uint16) *links.Link {
+	return &links.Link{
+		NeighborIA: ia,
+		Local:      netip.AddrPortFrom(netip.MustParseAddr("127.0.0.1"), port),
+		Remote:     netip.AddrPortFrom(netip.MustParseAddr("127.0.0.1"), port+1),
+		State:      links.StateEstablished,
+	}
+}
+
+// retiredLink returns a retired entry of the neighbor recording the
+// rendezvous address.
+func retiredLink(ia addr.IA, rendezvous netip.AddrPort) *links.Link {
+	return &links.Link{
+		NeighborIA: ia,
+		Local:      netip.MustParseAddrPort("127.0.0.1:40001"),
+		Remote:     netip.MustParseAddrPort("127.0.0.1:40002"),
+		Rendezvous: rendezvous,
+		State:      links.StateRetired,
+	}
+}
+
+// statesOf returns the states of the neighbor's entries.
+func statesOf(t *testing.T, store *memory.DB, ia addr.IA) []links.State {
+	t.Helper()
+	entries, err := store.All(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var states []links.State
+	for _, l := range entries {
+		if l.NeighborIA.Equal(ia) {
+			states = append(states, l.State)
+		}
+	}
+	slices.Sort(states)
+	return states
+}
+
+// TestStrandedRedialRespectsTable checks what a revival reads from the
+// table: a retired entry whose neighbor holds a live one stays retired, the
+// named live entries at the cap revive nothing, an answer naming a
+// neighbor the table holds live revives nothing, and of two retired entries
+// of one neighbor only the first revives, the second reading the first's
+// revival.
+func TestStrandedRedialRespectsTable(t *testing.T) {
+	f := newRendezvousFixture(t, func(cfg *RendezvousConfig) {
+		cfg.IA = rendezvousIA
+	})
+	other := addr.MustIAFrom(20, 0xfd0000000061)
+	retired := []links.State{links.StateRetired}
+
+	t.Run("a live neighbor", func(t *testing.T) {
+		z, store := strandedDialer(t, addr.MustIAFrom(20, 0xfd0000000071),
+			retiredLink(rendezvousIA, f.addr), liveLink(rendezvousIA, 40011))
+		z.dialJoins(context.Background())
+		want := []links.State{links.StateEstablished, links.StateRetired}
+		if got := statesOf(t, store, rendezvousIA); !slices.Equal(got, want) {
+			t.Errorf("the neighbor's entries = %v, want %v", got, want)
+		}
+	})
+
+	t.Run("the cap", func(t *testing.T) {
+		entries := []*links.Link{retiredLink(rendezvousIA, f.addr)}
+		for i := range MaxNeighbors {
+			entries = append(entries,
+				liveLink(addr.MustIAFrom(20, 0xfd0000000080+addr.AS(i)), uint16(40100+2*i)))
+		}
+		z, store := strandedDialer(t, addr.MustIAFrom(20, 0xfd0000000072), entries...)
+		z.dialJoins(context.Background())
+		if got := statesOf(t, store, rendezvousIA); !slices.Equal(got, retired) {
+			t.Errorf("the retired entry at the cap = %v, want %v", got, retired)
+		}
+	})
+
+	t.Run("an answer naming a live neighbor", func(t *testing.T) {
+		z, store := strandedDialer(t, addr.MustIAFrom(20, 0xfd0000000073),
+			retiredLink(other, f.addr), liveLink(rendezvousIA, 40011))
+		z.dialJoins(context.Background())
+		if got := statesOf(t, store, other); !slices.Equal(got, retired) {
+			t.Errorf("the entry answered by a live neighbor = %v, want %v", got, retired)
+		}
+		if got := statesOf(t, store, rendezvousIA); len(got) != 1 {
+			t.Errorf("the answering neighbor's entries = %v, want its live one alone", got)
+		}
+	})
+
+	t.Run("two retired entries of one neighbor", func(t *testing.T) {
+		z, store := strandedDialer(t, addr.MustIAFrom(20, 0xfd0000000074),
+			retiredLink(rendezvousIA, f.addr), retiredLink(rendezvousIA, f.addr))
+		z.dialJoins(context.Background())
+		want := []links.State{links.StateCandidate, links.StateRetired}
+		if got := statesOf(t, store, rendezvousIA); !slices.Equal(got, want) {
+			t.Errorf("the neighbor's entries = %v, want %v", got, want)
+		}
+	})
+}
+
+// TestStrandedRedialAcceptorMinted checks the revival of an entry the
+// acceptor minted: it records no rendezvous address, so the re-dial aims at
+// the fixed rendezvous port on its remote host. The acceptor binds that
+// port on a loopback host no other test of the package takes.
+func TestStrandedRedialAcceptorMinted(t *testing.T) {
+	host := netip.MustParseAddr("127.0.0.121")
+	newRendezvousFixture(t, func(cfg *RendezvousConfig) {
+		cfg.IA = rendezvousIA
+		cfg.Bind = netip.AddrPortFrom(host, RendezvousPort).String()
+		cfg.LinkHost = host
+	})
+	minted := &links.Link{
+		NeighborIA: rendezvousIA,
+		Local:      netip.MustParseAddrPort("127.0.0.1:40001"),
+		Remote:     netip.AddrPortFrom(host, 40002),
+		State:      links.StateRetired,
+	}
+	z, store := strandedDialer(t, zeroconfDraw, minted)
+	z.dialJoins(context.Background())
+	want := []links.State{links.StateCandidate}
+	if got := statesOf(t, store, rendezvousIA); !slices.Equal(got, want) {
+		t.Errorf("the acceptor-minted entry = %v, want %v", got, want)
 	}
 }

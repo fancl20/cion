@@ -104,10 +104,11 @@ type SelectionConfig struct {
 	Evidence func(*links.Link) bool
 	// Changed is called once per pass that changed the table.
 	Changed func()
-	// Stranded, when set, records the window's finding that no directory
-	// candidate answered its probe — the flag the joiner's dial loop reads
-	// to re-dial the rendezvous addresses the table already holds, retired
-	// entries included. Nil discards the finding.
+	// Stranded, when set, records the window's finding that the node holds
+	// fewer up links than the floor and no directory candidate answered its
+	// probe — the flag the joiner's dial loop reads to re-dial the
+	// rendezvous addresses the table already holds, retired entries
+	// included. Nil discards the finding.
 	Stranded *atomic.Bool
 	// MaxLinks caps the neighbor count; zero uses MaxNeighbors.
 	MaxLinks int
@@ -237,8 +238,9 @@ func (s *selection) pass(ctx context.Context) {
 				break
 			}
 		}
-		// A node no directory candidate answers dials what it knows.
-		s.cfg.Stranded.Store(!reachable)
+		// Below the floor, a node no directory candidate answers dials what
+		// it knows.
+		s.cfg.Stranded.Store(s.upCount(neighbors) < NeighborFloor && !reachable)
 	}
 	ts := s.windowTiers(ctx, neighbors, entriesByIA, samples)
 	// Damp the promotions: a candidate is promoted on sustained evidence
@@ -250,7 +252,7 @@ func (s *selection) pass(ctx context.Context) {
 			s.streak(e.IA).promote = 0
 		}
 	}
-	changed = s.promote(ctx, neighbors, candidates, samples, ts) || changed
+	changed = s.promote(ctx, entries, neighbors, candidates, samples, ts) || changed
 	changed = s.prune(ctx, entries, ts) || changed
 	if changed && s.cfg.Changed != nil {
 		s.cfg.Changed()
@@ -300,10 +302,8 @@ func (s *selection) sweep(ctx context.Context, entries []*links.Link) bool {
 }
 
 // candidateAlive runs one rendezvous echo against the candidate's own
-// rendezvous socket — the address its entry records, or the fixed
-// rendezvous port on the host of its recorded remote address, the two
-// sharing the control host — through the test seam when set. An answer is a
-// peer alive and trying; the echo claims the zero ISD-AS like every probe,
+// rendezvous socket, through the test seam when set. An answer is a peer
+// alive and trying; the echo claims the zero ISD-AS like every probe,
 // minting no entry a sweep could mistake for a peer.
 func (s *selection) candidateAlive(ctx context.Context, l *links.Link) bool {
 	if l.NeighborIA.IsZero() {
@@ -312,16 +312,28 @@ func (s *selection) candidateAlive(ctx context.Context, l *links.Link) bool {
 	if s.aliveFn != nil {
 		return s.aliveFn(l)
 	}
-	target := l.Rendezvous
-	if !target.IsValid() && l.Remote.Addr().IsValid() {
-		target = netip.AddrPortFrom(l.Remote.Addr(), RendezvousPort)
-	}
+	target := rendezvousTarget(l)
 	if !target.IsValid() {
 		return false
 	}
 	_, _, err := s.echo(ctx, s.cfg.ControlAddr.Addr(), target,
 		addr.IA(0), s.cfg.ControlAddr)
 	return err == nil
+}
+
+// rendezvousTarget returns the rendezvous socket of an entry's peer: the
+// address the entry records, or else the fixed rendezvous port on the host
+// of its recorded remote address, the two sharing the control host. The
+// entries the acceptor mints record no rendezvous address. Invalid when the
+// entry records neither.
+func rendezvousTarget(l *links.Link) netip.AddrPort {
+	if l.Rendezvous.IsValid() {
+		return l.Rendezvous
+	}
+	if l.Remote.Addr().IsValid() {
+		return netip.AddrPortFrom(l.Remote.Addr(), RendezvousPort)
+	}
+	return netip.AddrPort{}
 }
 
 // echo dials one rendezvous exchange, recording the external host the
@@ -350,6 +362,47 @@ func (s *selection) neighbors(entries []*links.Link) map[addr.IA]*links.Link {
 		}
 	}
 	return out
+}
+
+// upCount counts the established neighbors whose verdicts are up — the
+// count the floor reads.
+func (s *selection) upCount(neighbors map[addr.IA]*links.Link) int {
+	up := 0
+	for _, l := range neighbors {
+		if s.linkUp(l.IfID) {
+			up++
+		}
+	}
+	return up
+}
+
+// named reports whether the entry is live and names its neighbor — the
+// entries the link cap bounds, since only they carry beacons. Unnamed
+// candidates, probes and bootstrap claims, retire with the candidate
+// window.
+func named(l *links.Link) bool {
+	return l.Live() && !l.NeighborIA.IsZero()
+}
+
+// namedLive counts the entries the link cap bounds.
+func namedLive(entries []*links.Link) int {
+	n := 0
+	for _, l := range entries {
+		if named(l) {
+			n++
+		}
+	}
+	return n
+}
+
+// liveNeighbor reports whether a live entry names the neighbor.
+func liveNeighbor(entries []*links.Link, ia addr.IA) bool {
+	for _, l := range entries {
+		if l.Live() && l.NeighborIA.Equal(ia) {
+			return true
+		}
+	}
+	return false
 }
 
 // linkUp reports the interface's verdict; a loop without the monitor's
@@ -542,18 +595,14 @@ func (s *selection) echoRTT(dst *scion.Addr) time.Duration {
 // under retirement, the floor and stranded cases included.
 func (s *selection) promote(
 	ctx context.Context,
+	entries []*links.Link,
 	neighbors map[addr.IA]*links.Link,
 	candidates []DirectoryEntry,
 	samples map[addr.IA]sample,
 	ts []tier,
 ) bool {
 
-	live := 0
-	for _, l := range neighbors {
-		if s.linkUp(l.IfID) {
-			live++
-		}
-	}
+	live := s.upCount(neighbors)
 	// Rank the reachable candidates: fastest first.
 	var reachable []DirectoryEntry
 	for _, e := range candidates {
@@ -573,7 +622,7 @@ func (s *selection) promote(
 				"neighbors", live, "floor", NeighborFloor)
 			return false
 		}
-		return s.admit(ctx, neighbors, ts, samples, reachable[0], "the redundancy floor")
+		return s.admit(ctx, entries, neighbors, ts, samples, reachable[0], "the redundancy floor")
 	}
 
 	// A stranded tier: its fastest reachable member, at once. The fastest
@@ -587,7 +636,7 @@ func (s *selection) promote(
 		}
 	}
 	if rescue != nil {
-		return s.admit(ctx, neighbors, ts, samples, *rescue, "its stranded tier")
+		return s.admit(ctx, entries, neighbors, ts, samples, *rescue, "its stranded tier")
 	}
 
 	// The priced cases, sustained — a second route for a single-route tier
@@ -600,7 +649,7 @@ func (s *selection) promote(
 		}
 		if s.streak(e.IA).promote >= PromoteWindows &&
 			samples[e.IA].m.direct <= ratioOf(t.price, DemotionRatio) {
-			return s.admit(ctx, neighbors, ts, samples, e, "a second route for its tier")
+			return s.admit(ctx, entries, neighbors, ts, samples, e, "a second route for its tier")
 		}
 	}
 	for _, e := range reachable {
@@ -608,7 +657,7 @@ func (s *selection) promote(
 			!s.qualifies(e.IA, samples, ts) {
 			continue
 		}
-		return s.admit(ctx, neighbors, ts, samples, e, "its direct link beats its tier's price")
+		return s.admit(ctx, entries, neighbors, ts, samples, e, "its direct link beats its tier's price")
 	}
 	return false
 }
@@ -629,9 +678,11 @@ func (s *selection) qualifies(ia addr.IA, samples map[addr.IA]sample, ts []tier)
 // admit lands a promotion, evicting at the cap first: the victim is the
 // retirement-qualified neighbor whose exclusion moves its tier's baseline
 // least, and none qualifying means no promotion — the cap bounds the set at
-// every instant.
+// every instant. The cap counts the named live entries, as the acceptor's
+// does, so a candidate in flight holds its place.
 func (s *selection) admit(
 	ctx context.Context,
+	entries []*links.Link,
 	neighbors map[addr.IA]*links.Link,
 	ts []tier,
 	samples map[addr.IA]sample,
@@ -643,7 +694,7 @@ func (s *selection) admit(
 	if cap == 0 {
 		cap = MaxNeighbors
 	}
-	if len(neighbors) >= cap {
+	if namedLive(entries) >= cap {
 		victim := s.evict(neighbors, ts, samples)
 		if victim == nil {
 			return false
@@ -670,12 +721,7 @@ func (s *selection) evict(
 	ts []tier,
 	samples map[addr.IA]sample,
 ) *links.Link {
-	up := 0
-	for _, l := range neighbors {
-		if s.linkUp(l.IfID) {
-			up++
-		}
-	}
+	up := s.upCount(neighbors)
 	var worst *links.Link
 	var worstHarm, worstDirect time.Duration
 	for _, l := range neighbors {
