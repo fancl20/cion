@@ -359,3 +359,60 @@ has never touched TRCs
     nowhere; a submission interrupted between possession and vote
     retries from the newest pinned TRC and leaves nothing partial
     pinned.
+
+## Implementation history
+
+*   Landed in e1ae214. The watch is `RunRotation`, run beside the
+    enrollment loops on both core tiers with the threshold override
+    `NodePacing.RotationThreshold`
+    ([rotation.go](/pkg/controlplane/rotation.go),
+    [node.go](/internal/services/node.go),
+    [config.go](/internal/services/config.go)). The founder's roll is
+    `RotateCoreKeys`, cast through `CastLocal` on the decision's mutex;
+    the authoritative's is `RollVotingKey`, submitted through the join's
+    caster. `RollTimeout` bounds each attempt, and `PersistCoreKeys` or
+    `PersistVotingPair` writes the staged keys after the pin
+    ([rotation.go](/pkg/trust/rotation.go),
+    [trccast.go](/pkg/controlplane/trccast.go),
+    [keys.go](/pkg/trust/keys.go)).
+*   The decision reads the one certificate the successor adds and calls
+    the submission a roll when the predecessor already names that
+    certificate's ISD-AS, an onboarding otherwise. It checks neither the
+    certificate's class nor what the successor drops, so the roll, which
+    asks no authorizer, admits more than the same-named replacement the
+    plan describes ([trccast.go](/pkg/controlplane/trccast.go)).
+*   `anchorPool` walks back from the newest TRC while each rung is within
+    its own grace period, so a ladder keeps every rung still in grace
+    active, past the two active TRCs the draft allows (Sections 3.1 and
+    3.2.4). It serves `GetChains` and `RenewChain`
+    ([network.go](/pkg/trust/network.go)); `Engine.AnchorPool`, the same
+    walk over the local database, moves `verifyChainAgainstTRC`, the TLS
+    peer check, off the base TRC ([engine.go](/pkg/trust/engine.go),
+    [mtls.go](/pkg/controlplane/mtls.go)).
+*   The renewal does not pull: `fetchTRC` answers the newest-TRC ask from
+    the database whenever anything is pinned, so a chain issued under a
+    root the node has not discovered fails verification until discovery
+    pins the successor ([network.go](/pkg/trust/network.go)).
+*   The issuer rekeys through a new `Issuer.Rekey`, which swaps the root
+    key, the CA key, and the anchoring TRC together, rather than through
+    `ensureCACert` ([issuer.go](/pkg/trust/issuer.go)); at boot,
+    `setupTrustRole` anchors the issuer in the newest pinned TRC
+    ([controlplane.go](/internal/services/controlplane.go)).
+*   The staged keys persist one file at a time, not as a set. A crash
+    after the founder's pin and before its root key is rewritten stops
+    the next boot, for `NewIssuer` cannot sign the CA certificate under
+    the newest root with the old root key; a crash between the
+    authoritative's key and certificate writes leaves
+    `LoadOrCreateVotingCert` refusing its boot
+    ([keys.go](/pkg/trust/keys.go), [issuer.go](/pkg/trust/issuer.go)).
+*   The watch is silent beyond the threshold, and neither core tier runs
+    `logTRCValidity`, so no core reports a newest TRC capped by another
+    holder's certificate; normal nodes keep the report
+    ([lifecycle.go](/pkg/controlplane/lifecycle.go)).
+*   No test reaches the quorum gate, an authoritative-list change, or a
+    renewal against a rotated founder. The rotation lab seeds six-hour
+    material rather than shrinking the threshold, seeds the
+    authoritative into the base TRC, checks the founder's boot chain
+    against a pool the test builds, and proves the fresh root on a fourth
+    node's first chain
+    ([rotation_test.go](/internal/testnetwork/rotation_test.go)).
