@@ -10,14 +10,12 @@ import (
 // The comparator's queries over the enumerated candidates — the questions
 // ADR-0017's loop asks of the path layer, answered beside the selection loop
 // that owns them: the baseline echo's carrier, the route count into a tier,
-// and the promotion estimate's declared prices.
+// and the price of the cheapest route.
 
 // freshest returns the freshest clean candidate of an enumeration: freshness
 // picks the route the baseline echo measures, never a freshness value
-// itself. Nil when no clean route resolves — past an exclusion that is the
-// no-route-into-the-tier fact the retirement guard reads, and with no clean
-// candidate the baseline stays unmeasured for the window rather than ride a
-// route the network would not serve.
+// itself. Nil when no clean route resolves: the baseline stays unmeasured
+// for the window rather than ride a route the network would not serve.
 func (s *selection) freshest(candidates []scion.Candidate) *scion.Candidate {
 	var best *scion.Candidate
 	for i := range candidates {
@@ -56,15 +54,15 @@ func (s *selection) clean(c *scion.Candidate) bool {
 // the first, checked over all pairs, for a greedy first pick can miss the
 // pair a different first would yield. Pairs are few and the miss direction
 // is safe either way: undercount errs toward over-protection.
-func routeCount(upLinks []segment.LinkID, candidates []scion.Candidate) int {
+func routeCount(upLinks []segment.LinkID, candidates []*scion.Candidate) int {
 	count := min(len(upLinks), 2)
 	if count == 2 {
 		return 2
 	}
 	var avoiding []*scion.Candidate
-	for i := range candidates {
-		if !traverses(&candidates[i], upLinks) {
-			avoiding = append(avoiding, &candidates[i])
+	for _, c := range candidates {
+		if !traverses(c, upLinks) {
+			avoiding = append(avoiding, c)
 		}
 	}
 	if len(avoiding) == 0 {
@@ -113,25 +111,30 @@ func edgeDisjoint(a, b *scion.Candidate) bool {
 	return true
 }
 
-// tierPrice prices the routes into a tier for the promotion estimate: the
-// measured tier baseline the loop's echoes take — the authority wherever an
-// echo exists, a misstated declaration moving no measured baseline — beside
-// every composed route's declared one-way sum, doubled to meet the round
-// trips it is judged against, each side pricing the same quantity. A route
-// no edge of which declares its delay prices nothing: an undeclared edge is
-// unknown, not free. Zero when nothing prices the tier.
-func tierPrice(baseline time.Duration, candidates []scion.Candidate) time.Duration {
-	if baseline > 0 {
-		return baseline
-	}
+// cheapest prices a set of routes by the cheapest of them: the routes the
+// window probed by their echoes — the measured authority, an unanswered
+// echo, a zero, pricing nothing — and every other route by its declared
+// one-way sum, doubled to meet the round trips it is judged against. A
+// route whose sum is unknown prices nothing: an undeclared edge is unknown,
+// not free. Zero when nothing prices the set.
+func cheapest(
+	echoes []time.Duration,
+	routes []*scion.Candidate,
+	probed map[*scion.Candidate]bool,
+) time.Duration {
+
 	var price time.Duration
-	for i := range candidates {
-		if candidates[i].Latency == nil {
-			continue
+	consider := func(p time.Duration) {
+		if p > 0 && (price == 0 || p < price) {
+			price = p
 		}
-		declared := 2 * *candidates[i].Latency
-		if price == 0 || declared < price {
-			price = declared
+	}
+	for _, echo := range echoes {
+		consider(echo)
+	}
+	for _, c := range routes {
+		if !probed[c] && c.Latency != nil {
+			consider(2 * *c.Latency)
 		}
 	}
 	return price

@@ -18,10 +18,10 @@ import (
 )
 
 // selFixture is the selection loop's test harness: a memory link store, a
-// directory snapshot, the monitor's verdicts, injected measurements and
-// excluded measurements, and injected candidate-grace probes. The
-// establishment is recorded rather than performed; the promotion and
-// retirement rules are what the tests assert.
+// directory snapshot, the monitor's verdicts, injected measurements and path
+// echoes, and injected candidate-grace probes. The establishment is
+// recorded rather than performed; the promotion and retirement rules are
+// what the tests assert.
 type selFixture struct {
 	store     *memory.DB
 	directory []DirectoryEntry
@@ -34,10 +34,9 @@ type selFixture struct {
 	// probed holds the directory entries the last pass measured, the scope
 	// filter's own record.
 	probed map[addr.IA]bool
-	// excluded holds the injected excluded measurements by the questioned
-	// link's interface ID; an unset one resolves a survivor that answers
-	// nothing — unmeasured, never cut-critical.
-	excluded    map[uint16]*excludedSample
+	// echoes holds the excluded measurements' path echoes by route key; an
+	// unset route goes unanswered.
+	echoes      map[string]time.Duration
 	established []addr.IA // the promoted candidates, in order
 	changed     int
 	sel         *selection
@@ -80,7 +79,7 @@ func newSelFixture(t *testing.T, neighbors ...addr.IA) *selFixture {
 		down:     make(map[addr.IA]bool),
 		alive:    make(map[addr.IA]bool),
 		probed:   make(map[addr.IA]bool),
-		excluded: make(map[uint16]*excludedSample),
+		echoes:   make(map[string]time.Duration),
 	}
 	for _, ia := range neighbors {
 		if err := f.store.Insert(context.Background(), &links.Link{
@@ -111,11 +110,8 @@ func newSelFixture(t *testing.T, neighbors ...addr.IA) *selFixture {
 			f.probed[e.IA] = true
 			return f.samples[e.IA]
 		},
-		excludedFn: func(_ context.Context, _ []addr.IA, exclude segment.LinkID) excludedSample {
-			if ex := f.excluded[exclude.IfID]; ex != nil {
-				return *ex
-			}
-			return excludedSample{survived: true}
+		pathEchoFn: func(_ addr.IA, c *scion.Candidate) time.Duration {
+			return f.echoes[routeKey(c)]
 		},
 		establishFn: func(_ context.Context, e DirectoryEntry, _ string) bool {
 			if err := f.store.Insert(context.Background(), &links.Link{
@@ -201,10 +197,25 @@ func (f *selFixture) candidate(ia addr.IA, direct, path time.Duration, routes ..
 	f.samples[ia] = sample{m: measurement{direct: direct, path: path}, candidates: routes}
 }
 
-// setExcluded injects the excluded measurement of the neighbor's link.
-func (f *selFixture) setExcluded(t *testing.T, ia addr.IA, ex excludedSample) {
+// via builds a route that leaves through the neighbor's link and crosses
+// the remote ASes, fresh at the offset.
+func (f *selFixture) via(t *testing.T, through addr.IA, fresh time.Duration, remote ...addr.IA) scion.Candidate {
 	t.Helper()
-	f.excluded[f.ifID(t, ia)] = &ex
+	path := []segment.LinkID{local(f.ifID(t, through))}
+	for _, ia := range remote {
+		path = append(path, link(ia))
+	}
+	return route(fresh, 0, path...)
+}
+
+// carried sets the peer's sample to the round trips and routes given, the
+// first route the baseline's carrier: an excluded measurement echoing that
+// route answers as the baseline did.
+func (f *selFixture) carried(ia addr.IA, direct, path time.Duration, routes ...scion.Candidate) {
+	s := sm(direct, path, routes...)
+	s.carrier = &s.candidates[0]
+	f.samples[ia] = s
+	f.echoes[routeKey(s.carrier)] = path
 }
 
 // ifID returns the neighbor's entry's interface ID.
@@ -343,12 +354,14 @@ func TestSelectionSingleRoutePromotion(t *testing.T) {
 }
 
 // TestSelectionUnpricedTier checks the unpriced reading: a tier nothing
-// prices — no echo answered and no edge declares — promotes nothing,
-// however many windows pass.
+// prices — its up link's echo unanswered and no edge declaring — promotes
+// nothing, however many windows pass; the up link keeps it from stranding.
 func TestSelectionUnpricedTier(t *testing.T) {
 	f := newSelFixture(t, selPeer, selA)
-	// A slow tier of one member whose single route is clean but undeclared.
-	f.candidate(selB, 22*time.Millisecond, 0, cand(link(selX)))
+	// A slow tier of A, up, and the candidate B, whose single route is
+	// clean but undeclared.
+	f.samples[selA] = sm(50*time.Millisecond, 0)
+	f.candidate(selB, 55*time.Millisecond, 0, cand(link(selX)))
 
 	for range 4 {
 		f.pass(t)
@@ -394,30 +407,34 @@ func TestSelectionOneEstablishment(t *testing.T) {
 	}
 }
 
-// TestSelectionUselessRetirement checks the useless rule: a link whose
-// excluded baseline serves its tier no worse than the demotion ratio above
-// the price retires on the third consecutive bad window, the survivor is
-// measured each window — an unanswered one extends no streak, a useful one
-// resets it — and never below the floor of up links.
+// TestSelectionUselessRetirement checks the useless rule: an up link whose
+// exclusion leaves its tier's route count unchanged and its price within
+// the demotion ratio retires on the third consecutive window decided
+// useless — the survivor measured each window — and never at the floor of
+// up links.
 func TestSelectionUselessRetirement(t *testing.T) {
 	f := newSelFixture(t, selPeer, selA, selB) // above the floor of two
-	// A's exclusion leaves the tier served at the price — useless — and its
-	// own direct round trip earns nothing: the retirement sticks.
-	f.samples[selA] = sm(18*time.Millisecond, 20*time.Millisecond)
-	f.setExcluded(t, selA, excludedSample{survived: true, echo: 20 * time.Millisecond})
+	// A's baseline rides Peer's link: excluding A's link leaves the tier two
+	// up links and the route through Peer answering at the price — useless —
+	// and A's own round trip earns nothing.
+	f.carried(selA, 18*time.Millisecond, 20*time.Millisecond, f.via(t, selPeer, 0, selPeer, selA))
 
 	f.pass(t)
 	f.pass(t)
 	if f.state(t, selA) != links.StateEstablished {
-		t.Fatal("a neighbor was retired before three bad windows")
+		t.Fatal("a neighbor was retired before three useless windows")
 	}
 	f.pass(t)
 	if f.state(t, selA) != links.StateRetired {
 		t.Fatal("a durably useless neighbor was not retired")
 	}
 
-	// At the floor, the same useless evidence retires nothing.
-	f.setExcluded(t, selPeer, excludedSample{survived: true, echo: 20 * time.Millisecond})
+	// At the floor, the same useless evidence retires nothing: Peer's
+	// baseline rides B's link, and a route through a third interface keeps
+	// the tier's two routes without Peer's link.
+	f.carried(selPeer, 10*time.Millisecond, 20*time.Millisecond,
+		f.via(t, selB, 0, selB, selPeer),
+		route(-time.Minute, 0, local(9), link(selX), link(selPeer)))
 	for range 5 {
 		f.pass(t)
 	}
@@ -426,37 +443,98 @@ func TestSelectionUselessRetirement(t *testing.T) {
 	}
 }
 
-// TestSelectionUselessStreak checks the measurement's own rules: a window
-// the excluded enumeration resolves a survivor the echo cannot answer
-// leaves the streak intact but unextended — no evidence, no retirement —
-// and a window the survivor serves the tier usefully resets it.
-func TestSelectionUselessStreak(t *testing.T) {
-	// Unanswered: the streak survives a quiet window unextended.
+// TestSelectionSecondRouteKept checks the route count's half of the useless
+// test: a link bought as its tier's second route never decides useless
+// while it is one of the tier's two routes, though its exclusion leaves the
+// first route answering at the price — where latency alone would retire it.
+func TestSelectionSecondRouteKept(t *testing.T) {
+	f := newSelFixture(t, selPeer, selA, selB, selC)
+	// A slow tier of B and C, both reached over B's link alone besides C's
+	// own: excluding C's link leaves B's route at the price, and one route.
+	f.carried(selB, 50*time.Millisecond, 60*time.Millisecond, f.via(t, selB, 0, selB))
+	f.carried(selC, 55*time.Millisecond, 60*time.Millisecond, f.via(t, selB, 0, selB, selC))
+	for range 5 {
+		f.pass(t)
+	}
+	if f.state(t, selC) != links.StateEstablished {
+		t.Error("the tier's second route retired as useless")
+	}
+}
+
+// TestSelectionRetirementCounts checks that each rule counts its own
+// windows: a down window holds the useless count, an up window resets the
+// down count alone, an undecided window holds the useless count, and a
+// count at DemoteWindows retires a link only in a window decided useless.
+func TestSelectionRetirementCounts(t *testing.T) {
+	// A down window between useless ones holds the useless count: the link
+	// retires on the third useless window, not on the down one.
 	f := newSelFixture(t, selPeer, selA, selB)
-	f.samples[selA] = sm(18*time.Millisecond, 20*time.Millisecond)
-	f.setExcluded(t, selA, excludedSample{survived: true, echo: 20 * time.Millisecond})
-	f.pass(t)                                              // bad: streak 1
-	f.pass(t)                                              // bad: streak 2
-	f.setExcluded(t, selA, excludedSample{survived: true}) // the echo went unanswered
-	f.pass(t)                                              // unmeasured: streak 2 still
-	f.setExcluded(t, selA, excludedSample{survived: true, echo: 20 * time.Millisecond})
-	f.pass(t) // bad: streak 3 — retired now
+	f.carried(selA, 18*time.Millisecond, 20*time.Millisecond, f.via(t, selPeer, 0, selPeer, selA))
+	f.pass(t)
+	f.pass(t)
+	f.down[selA] = true
+	f.pass(t)
+	if f.state(t, selA) != links.StateEstablished {
+		t.Fatal("a down window added to the useless windows retired the link")
+	}
+	f.down[selA] = false
+	f.pass(t)
 	if f.state(t, selA) != links.StateRetired {
-		t.Fatal("the unmeasured window extended the streak")
+		t.Fatal("the third useless window did not retire the link")
 	}
 
-	// Useful: the streak resets.
+	// An up window resets the down count: two down windows, an up one, and
+	// two down again retire nothing; the third consecutive one retires.
 	f = newSelFixture(t, selPeer, selA, selB)
-	f.samples[selA] = sm(18*time.Millisecond, 20*time.Millisecond)
-	f.setExcluded(t, selA, excludedSample{survived: true, echo: 20 * time.Millisecond})
-	f.pass(t) // bad: streak 1
-	f.pass(t) // bad: streak 2
-	f.setExcluded(t, selA, excludedSample{survived: true, echo: 40 * time.Millisecond})
-	f.pass(t) // useful: reset
-	f.setExcluded(t, selA, excludedSample{survived: true, echo: 20 * time.Millisecond})
-	f.pass(t) // bad: streak 1
+	f.down[selB] = true
+	f.pass(t)
+	f.pass(t)
+	f.down[selB] = false
+	f.pass(t)
+	f.down[selB] = true
+	f.pass(t)
+	f.pass(t)
+	if f.state(t, selB) != links.StateEstablished {
+		t.Fatal("down windows on either side of an up one retired the link")
+	}
+	f.pass(t)
+	if f.state(t, selB) != links.StateRetired {
+		t.Fatal("the third consecutive down window did not retire the link")
+	}
+
+	// The floor holds A while its useless count passes the threshold; a
+	// third up link lifts the floor in a window A's survivor goes
+	// unanswered, which decides nothing; the next window decided useless
+	// retires A.
+	f = newSelFixture(t, selPeer, selA)
+	carrier := f.via(t, selPeer, 0, selPeer, selA)
+	f.carried(selA, 18*time.Millisecond, 20*time.Millisecond, carrier,
+		route(-time.Minute, 0, local(9), link(selX), link(selA)))
+	for range DemoteWindows + 1 {
+		f.pass(t)
+	}
 	if f.state(t, selA) != links.StateEstablished {
-		t.Fatal("a neighbor was retired without three consecutive bad windows")
+		t.Fatal("an up link retired at the floor")
+	}
+	if err := f.store.Insert(context.Background(), &links.Link{
+		NeighborIA: selB,
+		Local:      netip.MustParseAddrPort("127.0.0.1:40001"),
+		Remote:     netip.MustParseAddrPort("127.0.0.1:40002"),
+		State:      links.StateEstablished,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	f.directory = append(f.directory, entryOf(selB))
+	f.samples[selB] = sm(10*time.Millisecond, 20*time.Millisecond)
+	f.echoes[routeKey(&carrier)] = 0
+	f.pass(t)
+	if f.state(t, selA) != links.StateEstablished {
+		t.Fatal("a count at the threshold retired the link in an undecided window")
+	}
+	f.echoes[routeKey(&carrier)] = 20 * time.Millisecond
+	f.pass(t)
+	if f.state(t, selA) != links.StateRetired {
+		t.Fatal("a window decided useless past the threshold did not retire the link")
 	}
 }
 
@@ -514,48 +592,119 @@ func TestSelectionFloorCountsUpLinks(t *testing.T) {
 	}
 }
 
-// TestSelectionCutCritical checks the guard: a link whose exclusion leaves
-// its tier without a live route never retires, however slow its verdict or
-// useless its exclusion — the bridge survives on measured merit, healing is
-// promotion's work.
+// TestSelectionOneUpLinkPerWindow checks the departure budget: useless up
+// links retire one per window, down to the floor — each departure changes
+// the routes the others' exclusions were measured against.
+func TestSelectionOneUpLinkPerWindow(t *testing.T) {
+	f := newSelFixture(t, selPeer, selA, selB, selC, selD)
+	// A, B, and C ride Peer's link: every exclusion but Peer's leaves the
+	// tier two up links and an answered route at the price.
+	for _, ia := range []addr.IA{selA, selB, selC} {
+		f.carried(ia, 18*time.Millisecond, 20*time.Millisecond, f.via(t, selPeer, 0, selPeer, ia))
+	}
+	retired := func() int {
+		n := 0
+		for _, ia := range []addr.IA{selPeer, selA, selB, selC, selD} {
+			if f.state(t, ia) == links.StateRetired {
+				n++
+			}
+		}
+		return n
+	}
+	for range DemoteWindows - 1 {
+		f.pass(t)
+	}
+	for _, want := range []int{1, 2, 3, 3} {
+		f.pass(t)
+		if got := retired(); got != want {
+			t.Fatalf("retired links = %d, want %d", got, want)
+		}
+	}
+	if f.state(t, selPeer) != links.StateEstablished {
+		t.Error("the link every other route rides retired")
+	}
+}
+
+// TestSelectionEvictionBlocksPrune checks that an eviction spends the
+// window's departure: the window whose eviction takes an up link retires
+// no useless one, and the next window does.
+func TestSelectionEvictionBlocksPrune(t *testing.T) {
+	neighbors := []addr.IA{selPeer, selA, selB, selC}
+	f := newSelFixture(t, neighbors...)
+	f.sel.cfg.MaxLinks = len(neighbors)
+	// A and B ride Peer's link, useless from the first window; B is the
+	// slower direct sample.
+	f.carried(selA, 18*time.Millisecond, 20*time.Millisecond, f.via(t, selPeer, 0, selPeer, selA))
+	f.carried(selB, 19*time.Millisecond, 20*time.Millisecond, f.via(t, selPeer, 0, selPeer, selB))
+	f.pass(t)
+	// D beats the price, sustained from the second window: the third
+	// window evicts at the cap while A's useless count reaches the
+	// threshold.
+	f.candidate(selD, 8*time.Millisecond, 20*time.Millisecond)
+	f.pass(t)
+	f.pass(t)
+	if len(f.established) != 1 || !f.established[0].Equal(selD) {
+		t.Fatalf("promoted %v, want the candidate", f.established)
+	}
+	if f.state(t, selB) != links.StateRetired {
+		t.Fatal("the eviction took another link than the slowest least-harm one")
+	}
+	if f.state(t, selA) != links.StateEstablished {
+		t.Fatal("the window of an eviction also retired a useless up link")
+	}
+	f.pass(t)
+	if f.state(t, selA) != links.StateRetired {
+		t.Fatal("the window after the eviction retired no useless up link")
+	}
+}
+
+// TestSelectionCutCritical checks the guard the useless test holds by
+// construction: the bridge, its tier's only route, decides nothing and never
+// retires as useless, while the useless link beside it does; and once the
+// bridge's verdict stays down it retires at its count, for no guard holds a
+// link that carries no route.
 func TestSelectionCutCritical(t *testing.T) {
 	f := newSelFixture(t, selPeer, selA, selB, selC)
-	// B is the slow tier's only link, and its exclusion strands the tier:
-	// no survivor, no other up link.
-	f.samples[selB] = sm(50*time.Millisecond, 60*time.Millisecond)
-	f.setExcluded(t, selB, excludedSample{})
-	f.down[selB] = true
-	// A is useless in the fast tier, its exclusion serving it no worse.
-	f.samples[selA] = sm(18*time.Millisecond, 20*time.Millisecond)
-	f.setExcluded(t, selA, excludedSample{survived: true, echo: 20 * time.Millisecond})
+	// B is the slow tier's only link, and every route into the tier rides it.
+	f.carried(selB, 50*time.Millisecond, 60*time.Millisecond, f.via(t, selB, 0, selB))
+	// A is useless in the fast tier, its baseline riding Peer's link.
+	f.carried(selA, 18*time.Millisecond, 20*time.Millisecond, f.via(t, selPeer, 0, selPeer, selA))
 
 	for range 5 {
 		f.pass(t)
 	}
 	if f.state(t, selB) != links.StateEstablished {
-		t.Fatal("the cut-critical bridge was retired")
+		t.Fatal("the bridge was retired as useless")
 	}
 	if f.state(t, selA) != links.StateRetired {
 		t.Error("the useless link beside it kept its entry")
 	}
+
+	f.down[selB] = true
+	for range DemoteWindows {
+		f.pass(t)
+	}
+	if f.state(t, selB) != links.StateRetired {
+		t.Fatal("a guard held the down bridge")
+	}
 }
 
 // TestSelectionCapEviction checks the cap: at it, an admission evicts the
-// retirement-qualified neighbor whose exclusion moves its tier's baseline
+// retirement-qualified neighbor whose exclusion moves its tier's price
 // least, ties to the slower direct sample; none qualifying means no
-// promotion; and a bridge whose exclusion strands its tier is not eligible
-// and blocks the promotion.
+// promotion; the bridge, whose exclusion leaves no answered survivor, is
+// never evicted and the promotion waits; and a down link whose count
+// reached DemoteWindows goes at no harm.
 func TestSelectionCapEviction(t *testing.T) {
 	neighbors := []addr.IA{selPeer, selA, selB, selC}
 	f := newSelFixture(t, neighbors...)
 	f.sel.cfg.MaxLinks = len(neighbors)
-	// B is the slower direct sample of the two least-harm evictions; the
-	// other two exclusions serve their tiers too well to qualify.
-	f.setExcluded(t, selA, excludedSample{survived: true, echo: 20 * time.Millisecond})
-	f.setExcluded(t, selB, excludedSample{survived: true, echo: 20 * time.Millisecond})
-	f.setExcluded(t, selPeer, excludedSample{survived: true, echo: 40 * time.Millisecond})
-	f.setExcluded(t, selC, excludedSample{survived: true, echo: 40 * time.Millisecond})
-	f.samples[selB] = sm(12*time.Millisecond, 20*time.Millisecond)
+	// C's baseline rides A's link and sets the price at 16ms: excluding A's
+	// link raises it to 20ms, a harm of 4ms. Excluding B's or C's moves it
+	// by nothing, and B is the slower direct sample.
+	f.carried(selA, 10*time.Millisecond, 20*time.Millisecond, f.via(t, selPeer, 0, selPeer, selA))
+	f.carried(selB, 12*time.Millisecond, 20*time.Millisecond, f.via(t, selPeer, 0, selPeer, selB))
+	f.carried(selC, 10*time.Millisecond, 16*time.Millisecond, f.via(t, selA, 0, selA, selC))
 	f.candidate(selD, 8*time.Millisecond, 20*time.Millisecond)
 
 	f.pass(t) // streak 1
@@ -564,7 +713,7 @@ func TestSelectionCapEviction(t *testing.T) {
 		t.Fatalf("promoted %v, want the displacing candidate", f.established)
 	}
 	if f.state(t, selB) != links.StateRetired {
-		t.Error("the slower of the least-harm pair was not displaced")
+		t.Error("the slower of the least-harm links was not displaced")
 	}
 	for _, ia := range []addr.IA{selPeer, selA, selC} {
 		if f.state(t, ia) != links.StateEstablished {
@@ -575,9 +724,6 @@ func TestSelectionCapEviction(t *testing.T) {
 	// None qualifying means no promotion: the cap stands.
 	f = newSelFixture(t, neighbors...)
 	f.sel.cfg.MaxLinks = len(neighbors)
-	for _, ia := range neighbors {
-		f.setExcluded(t, ia, excludedSample{survived: true, echo: 40 * time.Millisecond})
-	}
 	f.candidate(selD, 8*time.Millisecond, 20*time.Millisecond)
 	f.pass(t)
 	f.pass(t)
@@ -585,31 +731,97 @@ func TestSelectionCapEviction(t *testing.T) {
 		t.Error("a candidate displaced a neighbor no retirement rule qualified")
 	}
 
-	// The bridge is not eligible: its exclusion strands its tier, so the
-	// promotion it alone could serve is blocked.
+	// The bridge B, alone in a slow tier with no route around its link,
+	// decides nothing: with nothing else qualifying, the promotion waits.
+	// Then C's verdict stays down, and at its count C is the victim.
 	f = newSelFixture(t, neighbors...)
 	f.sel.cfg.MaxLinks = len(neighbors)
-	f.samples[selB] = sm(50*time.Millisecond, 60*time.Millisecond)
-	f.setExcluded(t, selB, excludedSample{})
-	f.down[selB] = true
-	for _, ia := range []addr.IA{selPeer, selA, selC} {
-		f.setExcluded(t, ia, excludedSample{survived: true, echo: 40 * time.Millisecond})
+	f.carried(selB, 50*time.Millisecond, 60*time.Millisecond, f.via(t, selB, 0, selB))
+	f.candidate(selD, 8*time.Millisecond, 20*time.Millisecond)
+	f.pass(t)
+	f.pass(t)
+	if len(f.established) != 0 || f.state(t, selB) != links.StateEstablished {
+		t.Fatal("the promotion evicted the bridge")
 	}
-	// Three windows build the dead bridge's sustained-down streak — the
-	// retirement test it would qualify under — while the candidate earns
-	// none; then the candidate turns fast.
-	f.candidate(selD, 18*time.Millisecond, 20*time.Millisecond)
-	for range 3 {
+	f.down[selC] = true
+	for range DemoteWindows - 1 {
 		f.pass(t)
 	}
-	f.samples[selD] = sm(8*time.Millisecond, 20*time.Millisecond)
-	f.pass(t) // streak 1
-	f.pass(t) // streak 2: the eviction finds no eligible neighbor
 	if len(f.established) != 0 {
-		t.Fatal("the promotion evicted the bridge its exclusion strands")
+		t.Fatal("the eviction took the down link short of its count")
 	}
-	if f.state(t, selB) != links.StateEstablished {
-		t.Error("the bridge was retired at the cap")
+	f.pass(t)
+	if len(f.established) != 1 || !f.established[0].Equal(selD) {
+		t.Fatalf("promoted %v, want the candidate once the down link reached its count",
+			f.established)
+	}
+	if f.state(t, selC) != links.StateRetired || f.state(t, selB) != links.StateEstablished {
+		t.Error("the eviction took the bridge, or left the down link")
+	}
+}
+
+// TestSelectionEquilibrium plays regional meshes joined by a bridge at a cap
+// of three: the regional links R1 and R2 and the bridge Z, a composed route
+// through the bridge giving the region a third route. A faster regional
+// candidate R3, sustained, evicts a regional link, never the bridge, whose
+// exclusion leaves its tier no answered route. Then the bridge goes down
+// while a far candidate W appears: the far tier strands, and its rescue
+// waits — the regional links, the floor's two up links, qualify for
+// nothing — until the bridge's down count reaches DemoteWindows and the
+// eviction takes it at no harm.
+func TestSelectionEquilibrium(t *testing.T) {
+	r1, r2, z, r3, w := selA, selB, selC, selD, selE
+	f := newSelFixture(t, r1, r2, z)
+	f.sel.cfg.MaxLinks = 3
+	// R1 and R2 reach each other over their own links, and both by the
+	// round route through the bridge. R2 is the slower direct sample, so
+	// the tie between the two regional evictions is decided.
+	f.carried(r1, 10*time.Millisecond, 20*time.Millisecond,
+		f.via(t, r2, 0, r2, r1), f.via(t, z, -time.Minute, z, selX, r1))
+	f.carried(r2, 11*time.Millisecond, 20*time.Millisecond,
+		f.via(t, r1, 0, r1, r2), f.via(t, z, -time.Minute, z, selX, r2))
+	f.carried(z, 100*time.Millisecond, 200*time.Millisecond, f.via(t, z, 0, z))
+	viaR1 := f.via(t, r1, 0, r1, r3)
+	f.candidate(r3, 5*time.Millisecond, 20*time.Millisecond, viaR1)
+	f.echoes[routeKey(&viaR1)] = 20 * time.Millisecond
+
+	f.pass(t)
+	f.pass(t)
+	if len(f.established) != 1 || !f.established[0].Equal(r3) {
+		t.Fatalf("promoted %v, want the faster regional candidate", f.established)
+	}
+	if f.state(t, r2) != links.StateRetired {
+		t.Fatal("the eviction took another link than a regional one")
+	}
+	if f.state(t, r1) != links.StateEstablished || f.state(t, z) != links.StateEstablished {
+		t.Fatal("the eviction took the bridge or both regional links")
+	}
+
+	// The bridge goes down: its one-hop echo and its routes fail. W, far,
+	// answers its rendezvous echo, and its routes all ride the bridge.
+	f.down[z] = true
+	f.samples[z] = sm(0, 0, f.via(t, z, 0, z))
+	f.carried(r1, 10*time.Millisecond, 20*time.Millisecond,
+		f.via(t, r3, 0, r3, r1), f.via(t, z, -time.Minute, z, selX, r1))
+	f.carried(r3, 5*time.Millisecond, 20*time.Millisecond, f.via(t, r1, 0, r1, r3))
+	f.candidate(w, 100*time.Millisecond, 0, f.via(t, z, 0, z, w))
+	for range DemoteWindows - 1 {
+		f.pass(t)
+	}
+	if len(f.established) != 1 || f.state(t, z) != links.StateEstablished {
+		t.Fatal("the rescue displaced a link short of the bridge's down count")
+	}
+	f.pass(t)
+	if len(f.established) != 2 || !f.established[1].Equal(w) {
+		t.Fatalf("promoted %v, want the stranded far candidate", f.established)
+	}
+	if f.state(t, z) != links.StateRetired {
+		t.Error("the rescue did not take the down bridge")
+	}
+	for _, ia := range []addr.IA{r1, r3} {
+		if f.state(t, ia) != links.StateEstablished {
+			t.Errorf("the rescue took the regional link %s", ia)
+		}
 	}
 }
 
@@ -660,10 +872,8 @@ func TestSelectionCapCountsCandidates(t *testing.T) {
 	neighbors := []addr.IA{selPeer, selA, selB}
 	f := newSelFixture(t, neighbors...)
 	f.sel.cfg.MaxLinks = len(neighbors) + 1
-	// No exclusion qualifies a neighbor for eviction.
-	for _, ia := range neighbors {
-		f.setExcluded(t, ia, excludedSample{survived: true, echo: 40 * time.Millisecond})
-	}
+	// No route survives an exclusion, so none qualifies a neighbor for
+	// eviction.
 	// A peer's own dial minted a named candidate the sweep has not settled.
 	if err := f.store.Insert(context.Background(), &links.Link{
 		NeighborIA: selC,

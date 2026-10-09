@@ -783,7 +783,7 @@ func TestEnumerateTruncatedFacts(t *testing.T) {
 
 // TestEnumerateCoverage checks the containing branch beside the joins: a
 // destination both serve yields the joins and one candidate per containing
-// up segment, exclusion filtering both kinds identically.
+// up segment.
 func TestEnumerateCoverage(t *testing.T) {
 	up := linePCB(t, time.Now(), iaCore, iaMid, iaLeaf)
 	down := linePCB(t, time.Now(), iaCore, iaMid)
@@ -794,19 +794,17 @@ func TestEnumerateCoverage(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	newProvider := func() *PathProvider {
-		return &PathProvider{
-			IA: iaLeaf,
-			DB: db,
-			Lookup: func(context.Context, addr.IA) []*pathdb.Segment {
-				return []*pathdb.Segment{{Type: pathdb.SegmentTypeDown, PCB: down}}
-			},
-		}
+	p := &PathProvider{
+		IA: iaLeaf,
+		DB: db,
+		Lookup: func(context.Context, addr.IA) []*pathdb.Segment {
+			return []*pathdb.Segment{{Type: pathdb.SegmentTypeDown, PCB: down}}
+		},
 	}
 
 	// The join at the middle and the containing up segment's truncated
 	// reversal beside it.
-	candidates, err := newProvider().Enumerate(context.Background(), iaMid)
+	candidates, err := p.Enumerate(context.Background(), iaMid)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -818,33 +816,13 @@ func TestEnumerateCoverage(t *testing.T) {
 			t.Errorf("candidate %d = %d hops, want the truncated 2", i, c.Hops)
 		}
 	}
-
-	// Excluding the middle's interface drops both kinds; excluding an
-	// interface no traversed hop names drops neither.
-	mid := segment.LinkID{IA: iaMid, IfID: testIfID}
-	candidates, err = newProvider().Enumerate(context.Background(), iaMid, mid)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(candidates) != 0 {
-		t.Errorf("candidates past the exclusion = %d, want 0", len(candidates))
-	}
-	candidates, err = newProvider().Enumerate(context.Background(), iaMid,
-		segment.LinkID{IA: iaMid, IfID: testIfID + 1})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(candidates) != 2 {
-		t.Errorf("candidates past the absent exclusion = %d, want 2", len(candidates))
-	}
 }
 
-// TestEnumerateExclusion checks the exclusion's semantics against the
-// signaled-down skip's: an excluded link never yields a candidate — no last
-// resort — while a signaled interface still yields a flagged one; either of
-// a hop's two interface IDs suffices; the local ISD-AS errors and the
-// unreachable destination enumerates empty.
-func TestEnumerateExclusion(t *testing.T) {
+// TestEnumerateLastResortAndBounds checks the signaled-down skip and the
+// enumeration's bounds: a signaled interface on the traversed stretch
+// yields a flagged candidate — the last resort — never a filtered one; the
+// local ISD-AS errors, and an unreachable destination enumerates empty.
+func TestEnumerateLastResortAndBounds(t *testing.T) {
 	up := linePCB(t, time.Now(), iaCore, iaMid, iaLeaf)
 	down := linePCB(t, time.Now(), iaCore, iaDest)
 	db := &fakePathDB{}
@@ -854,20 +832,14 @@ func TestEnumerateExclusion(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	newProvider := func() *PathProvider {
-		return &PathProvider{
-			IA:            iaLeaf,
-			DB:            db,
-			InterfaceDown: NewInterfaceDownCache(),
-			Lookup: func(context.Context, addr.IA) []*pathdb.Segment {
-				return []*pathdb.Segment{{Type: pathdb.SegmentTypeDown, PCB: down}}
-			},
-		}
+	p := &PathProvider{
+		IA:            iaLeaf,
+		DB:            db,
+		InterfaceDown: NewInterfaceDownCache(),
+		Lookup: func(context.Context, addr.IA) []*pathdb.Segment {
+			return []*pathdb.Segment{{Type: pathdb.SegmentTypeDown, PCB: down}}
+		},
 	}
-
-	// A signaled interface on the traversed stretch yields a flagged
-	// candidate, never a filtered one.
-	p := newProvider()
 	p.InterfaceDown.Record(InterfaceDownSignal{IA: iaMid, IfID: testIfID})
 	candidates, err := p.Enumerate(context.Background(), iaDest)
 	if err != nil {
@@ -878,24 +850,7 @@ func TestEnumerateExclusion(t *testing.T) {
 			len(candidates), len(candidates) == 1 && candidates[0].Crossing)
 	}
 
-	// Excluding the signaled link drops the candidate outright: exclusion
-	// hard-filters, no last resort. Excluding by the destination's ingress
-	// end — the other interface ID of the same hop — drops it too.
-	for _, link := range []segment.LinkID{
-		{IA: iaMid, IfID: testIfID},
-		{IA: iaDest, IfID: testIfID},
-	} {
-		candidates, err = p.Enumerate(context.Background(), iaDest, link)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if len(candidates) != 0 {
-			t.Errorf("candidates past excluding %v = %d, want 0", link, len(candidates))
-		}
-	}
-
-	// The local ISD-AS errors; an unreachable destination is empty.
-	if _, err := newProvider().Enumerate(context.Background(), iaLeaf); err == nil {
+	if _, err := p.Enumerate(context.Background(), iaLeaf); err == nil {
 		t.Error("enumerating to the local ISD-AS succeeded, want error")
 	}
 	empty := &PathProvider{

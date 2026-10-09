@@ -17,7 +17,6 @@ import (
 	"github.com/fancl20/cion/pkg/dataplane"
 	"github.com/fancl20/cion/pkg/modules/links"
 	"github.com/fancl20/cion/pkg/scion"
-	"github.com/fancl20/cion/pkg/segment"
 	nodev1 "github.com/fancl20/cion/proto/node/v1"
 )
 
@@ -158,18 +157,26 @@ type selection struct {
 	cfg SelectionConfig
 	// streaks damp the decisions: consecutive windows of the same evidence.
 	streaks map[addr.IA]*peerStreak
-	// probeFn, excludedFn, aliveFn, and establishFn override the
-	// measurement, the excluded measurement, the candidate-grace probe, and
-	// the establishment in tests; nil uses the real ones.
+	// upLeft records that an up link left this window, by retirement or
+	// eviction: each departure changes the routes every other exclusion was
+	// measured against, so one up link leaves per window.
+	upLeft bool
+	// probeFn, pathEchoFn, aliveFn, and establishFn override the
+	// measurement, the excluded measurement's echo, the candidate-grace
+	// probe, and the establishment in tests; nil uses the real ones.
 	probeFn     func(context.Context, DirectoryEntry, *links.Link) sample
-	excludedFn  func(context.Context, []addr.IA, segment.LinkID) excludedSample
+	pathEchoFn  func(addr.IA, *scion.Candidate) time.Duration
 	aliveFn     func(*links.Link) bool
 	establishFn func(context.Context, DirectoryEntry, string) bool
 }
 
+// peerStreak counts a peer's consecutive windows of evidence, one count per
+// rule: promote for a candidate's priced admission, down for an
+// established link's verdict, and useless for an up link's useless test.
 type peerStreak struct {
 	promote int
-	demote  int
+	down    int
+	useless int
 }
 
 // measurement is one peer's probe sample.
@@ -186,11 +193,13 @@ type measurement struct {
 
 // sample is one peer's window record: the probe's measurement — its two
 // fields — beside the enumeration the probe already ran, kept rather than
-// discarded: the baseline echo rode its freshest clean candidate, and the
-// tier's route counts and declared prices read the rest.
+// discarded: the tier's route counts and prices read it. carrier points
+// into the enumeration at the candidate the baseline echo rode; nil when no
+// clean candidate resolved.
 type sample struct {
 	m          measurement
 	candidates []scion.Candidate
+	carrier    *scion.Candidate
 }
 
 // pass runs one evaluation window.
@@ -242,7 +251,8 @@ func (s *selection) pass(ctx context.Context) {
 		// it knows.
 		s.cfg.Stranded.Store(s.upCount(neighbors) < NeighborFloor && !reachable)
 	}
-	ts := s.windowTiers(ctx, neighbors, entriesByIA, samples)
+	ts := s.windowTiers(neighbors, entriesByIA, samples)
+	s.count(neighbors, ts)
 	// Damp the promotions: a candidate is promoted on sustained evidence
 	// only, a flapping one never.
 	for _, e := range candidates {
@@ -252,8 +262,9 @@ func (s *selection) pass(ctx context.Context) {
 			s.streak(e.IA).promote = 0
 		}
 	}
+	s.upLeft = false
 	changed = s.promote(ctx, entries, neighbors, candidates, samples, ts) || changed
-	changed = s.prune(ctx, entries, ts) || changed
+	changed = s.prune(ctx, entries, samples, ts) || changed
 	if changed && s.cfg.Changed != nil {
 		s.cfg.Changed()
 	}
@@ -497,13 +508,13 @@ func (s *selection) establish(ctx context.Context, e DirectoryEntry, why string)
 // reversed arrival path — and a candidate's (a demoted neighbor included)
 // by the rendezvous echo that reaches where no path and no interface exist.
 // The baseline is the same SCMP echo instrument over the freshest clean
-// composed route of the enumeration the probe keeps beside the sample: one
-// destination, two routes, the same median-of-runs discipline, and no clean
-// route leaves the baseline unmeasured for the window rather than measured
-// over a route the network would not serve. The echo claims the zero
-// ISD-AS — a probe mints no entry a candidate sweep could mistake for a
-// peer, and no identity the acceptor would admit against an allowlist —
-// deduplicated by the control address it claims.
+// composed route of the enumeration the probe keeps beside the sample, the
+// route recorded as the sample's carrier: one destination, two routes, the
+// same median-of-runs discipline, and no clean route leaves the baseline
+// unmeasured for the window rather than measured over a route the network
+// would not serve. The rendezvous echo claims the zero ISD-AS — a probe
+// mints no entry a candidate sweep could mistake for a peer — deduplicated
+// by the control address it claims.
 func (s *selection) probe(ctx context.Context, e DirectoryEntry, l *links.Link) sample {
 	var m measurement
 	if l != nil {
@@ -526,13 +537,23 @@ func (s *selection) probe(ctx context.Context, e DirectoryEntry, l *links.Link) 
 	// Freshness picks the baseline's route and the echo measures it: the
 	// comparator reads the two round trips against each other.
 	if c := s.freshest(candidates); c != nil {
-		sm.m.path = s.echoRTT(&scion.Addr{
-			IA:   e.IA,
-			Addr: netip.AddrPortFrom(e.ControlAddr.Addr(), dataplane.EndhostPort),
-			Path: c.Path,
-		})
+		sm.carrier = c
+		sm.m.path = s.pathEcho(e, c)
 	}
 	return sm
+}
+
+// pathEcho takes the median SCMP echo round trip to the peer over the
+// candidate's path, through the test seam when set.
+func (s *selection) pathEcho(e DirectoryEntry, c *scion.Candidate) time.Duration {
+	if s.pathEchoFn != nil {
+		return s.pathEchoFn(e.IA, c)
+	}
+	return s.echoRTT(&scion.Addr{
+		IA:   e.IA,
+		Addr: netip.AddrPortFrom(e.ControlAddr.Addr(), dataplane.EndhostPort),
+		Path: c.Path,
+	})
 }
 
 // declare lands the window's per-link one-way estimates in the shared table
@@ -585,14 +606,14 @@ func (s *selection) echoRTT(dst *scion.Addr) time.Duration {
 // network-wide, so the window's budget is one establishment, as today.
 // Below the floor of up links, reachability alone admits, the fastest
 // reachable candidate. A stranded tier admits a reachable member at once,
-// no streak — the clause that keeps every cut transient, for no composed
-// path resolves into the tier and the establishment rides the rendezvous
-// exchange that reaches where no path does. A single-route tier admits a
-// second member within the demotion ratio of the price, and a tier whose
-// price a candidate beats by the promotion ratio admits it — the priced
-// cases sustained, the sustained winner the fastest direct sample among
-// qualifiers. At the cap every case requires an eviction that qualifies
-// under retirement, the floor and stranded cases included.
+// no streak — the clause that keeps every cut transient, for no up link and
+// no answered composed route reach the tier, and the establishment rides
+// the rendezvous exchange that reaches where no path does. A single-route
+// tier admits a second member within the demotion ratio of the price, and a
+// tier whose price a candidate beats by the promotion ratio admits it — the
+// priced cases sustained, the sustained winner the fastest direct sample
+// among qualifiers. At the cap every case requires an eviction that
+// qualifies under retirement, the floor and stranded cases included.
 func (s *selection) promote(
 	ctx context.Context,
 	entries []*links.Link,
@@ -676,7 +697,7 @@ func (s *selection) qualifies(ia addr.IA, samples map[addr.IA]sample, ts []tier)
 }
 
 // admit lands a promotion, evicting at the cap first: the victim is the
-// retirement-qualified neighbor whose exclusion moves its tier's baseline
+// retirement-qualified neighbor whose exclusion moves its tier's price
 // least, and none qualifying means no promotion — the cap bounds the set at
 // every instant. The cap counts the named live entries, as the acceptor's
 // does, so a candidate in flight holds its place.
@@ -699,23 +720,24 @@ func (s *selection) admit(
 		if victim == nil {
 			return false
 		}
+		up := s.linkUp(victim.IfID)
 		if !s.retire(ctx, victim, "displaced by the least-harm eviction") {
 			return false
 		}
+		s.upLeft = s.upLeft || up
 	}
 	return s.establish(ctx, e, why)
 }
 
-// evict returns the cap's victim: the retirement-qualified neighbor — past
-// both guards and meeting a retirement rule's test this window, the
-// sustained-down streak for a dead link, the useless test for a live one —
-// whose exclusion moves its tier's baseline least, the smallest distance
-// from the excluded baseline to the tier's price, ties to the slower direct
-// sample. Nil when none qualifies — no promotion happens and the cap
-// stands, so displacement cannot evict a link the policy must immediately
-// re-recruit: the intra-regional mesh, whose exclusion changes nothing,
-// retires first, and the bridge, whose exclusion strands its tier, is not
-// eligible at all.
+// evict returns the cap's victim among the retirement-qualified neighbors:
+// a down link whose down count reached DemoteWindows, at no harm, and an up
+// link this window decides useless while up links exceed the floor. The
+// victim is the one whose exclusion moves its tier's price least, ties to
+// the slower direct sample. Nil when none qualifies — no promotion happens
+// and the cap stands, so displacement cannot evict a link the policy must
+// immediately re-recruit: the intra-regional mesh, whose exclusion changes
+// nothing, retires first, and the bridge, whose exclusion leaves its tier no
+// answered route, decides nothing and is not eligible at all.
 func (s *selection) evict(
 	neighbors map[addr.IA]*links.Link,
 	ts []tier,
@@ -724,47 +746,34 @@ func (s *selection) evict(
 	up := s.upCount(neighbors)
 	var worst *links.Link
 	var worstHarm, worstDirect time.Duration
-	for _, l := range neighbors {
-		live := s.linkUp(l.IfID)
-		if live && up <= NeighborFloor {
-			continue // an up link retires only while up links exceed the floor
-		}
-		t := tierOf(ts, l.NeighborIA)
-		var ex excludedSample
-		if t != nil {
-			ex = t.excluded[l.NeighborIA]
-			if !ex.survived && soleUp(t, l.NeighborIA) {
-				continue // cut-critical: never the last route's removal
+	for ia, l := range neighbors {
+		var cost time.Duration
+		if !s.linkUp(l.IfID) {
+			if s.streak(ia).down < DemoteWindows {
+				continue
 			}
-		}
-		qualified := false
-		if !live {
-			qualified = s.streak(l.NeighborIA).demote >= DemoteWindows
-		} else if t != nil && t.price > 0 && ex.survived && ex.echo > 0 {
-			qualified = ex.echo <= ratioOf(t.price, DemotionRatio)
-		}
-		if !qualified {
-			continue
-		}
-		harm := time.Duration(0)
-		if t != nil {
-			harm = ex.echo - t.price
-			if harm < 0 {
-				harm = -harm
+		} else {
+			if up <= NeighborFloor {
+				continue // an up link leaves only while up links exceed the floor
 			}
+			t := tierOf(ts, ia)
+			if decided, useless := judge(t, ia); !decided || !useless {
+				continue
+			}
+			cost = harm(t, ia)
 		}
-		direct := samples[l.NeighborIA].m.direct
-		if worst == nil || harm < worstHarm ||
-			harm == worstHarm && slower(direct, worstDirect) {
-			worst, worstHarm, worstDirect = l, harm, direct
+		direct := samples[ia].m.direct
+		if worst == nil || cost < worstHarm ||
+			cost == worstHarm && slower(direct, worstDirect) {
+			worst, worstHarm, worstDirect = l, cost, direct
 		}
 	}
 	return worst
 }
 
-// slower ranks two direct samples for the eviction's tie: no sample counts
-// as infinitely slow — an unmeasured link is the slower one, however recent
-// its last answer was.
+// slower ranks two direct samples for the least-harm ties of eviction and
+// retirement: no sample counts as infinitely slow — an unmeasured link is
+// the slower one, however recent its last answer was.
 func slower(a, b time.Duration) bool {
 	if a == 0 {
 		return b != 0
@@ -775,78 +784,88 @@ func slower(a, b time.Duration) bool {
 	return a > b
 }
 
-// prune applies the retirement rules: two guards, then two rules, and the
-// floor holds at every instant — however many links go bad in one window, up
-// links retire only down to the floor. The floor counts up links only — a
-// link the verdict marks down is no redundancy and never blocks another's
-// retirement — and a cut-critical link, whose exclusion leaves its tier
-// without a live route, never retires, whatever its latency. Past the
-// guards, a link whose verdict stays down across the sustained window
-// retires, and a link whose excluded baseline serves its tier no worse than
-// the demotion ratio above the price retires as useless — the survivor
-// measured each window, never a remembered value, and an excluded
-// enumeration that resolves a clean survivor the echo cannot answer leaves
-// the streak intact but unextended: no evidence, no retirement. The useless
-// rule and promotion's priced cases read the same price with hysteresis
-// between the thresholds — one test serving both directions, each
-// correcting the other's estimation error.
+// count advances each established link's retirement counts by the window's
+// evidence. The down count grows in a window whose verdict is down and
+// resets in one whose verdict is up. The useless count grows in a window
+// that decides the link useless, resets in one that decides it useful, and
+// holds in a window that decides nothing — a down one included: no
+// evidence, no change.
+func (s *selection) count(neighbors map[addr.IA]*links.Link, ts []tier) {
+	for ia, l := range neighbors {
+		st := s.streak(ia)
+		if !s.linkUp(l.IfID) {
+			st.down++
+			continue
+		}
+		st.down = 0
+		switch decided, useless := judge(tierOf(ts, ia), ia); {
+		case decided && useless:
+			st.useless++
+		case decided:
+			st.useless = 0
+		}
+	}
+}
+
+// prune applies the two retirement rules, each on its own count. A link
+// whose verdict stayed down for DemoteWindows windows retires, with no
+// guard: a down link carries no route and is no redundancy. Then at most
+// one up link retires as useless — none in a window whose eviction took an
+// up link, for each departure changes the routes every other exclusion was
+// measured against — and only while up links exceed the floor: of the up
+// links whose useless count reached DemoteWindows and whose window decides
+// them useless, the one whose exclusion moves its tier's price least, ties
+// to the slower direct sample. The useless test is measured each window and
+// decides only when a route avoiding the link answered, so a cut-critical
+// link never retires as useless; it and promotion's priced cases read the
+// same price with hysteresis between the thresholds — one test serving both
+// directions, each correcting the other's estimation error.
 func (s *selection) prune(
 	ctx context.Context,
 	entries []*links.Link,
+	samples map[addr.IA]sample,
 	ts []tier,
 ) bool {
 
-	up := 0
-	for _, l := range entries {
-		if l.State == links.StateEstablished && s.linkUp(l.IfID) {
-			up++
-		}
-	}
 	changed := false
+	up := 0
 	for _, l := range entries {
 		if l.State != links.StateEstablished {
 			continue
 		}
-		live := s.linkUp(l.IfID)
-		t := tierOf(ts, l.NeighborIA)
-		var ex excludedSample
-		if t != nil {
-			ex = t.excluded[l.NeighborIA]
-		}
-		bad, measured := false, false
-		if !live {
-			bad, measured = true, true // the verdict is down: the down rule's evidence
-		} else if t != nil && t.price > 0 && ex.survived && ex.echo > 0 {
-			measured = true
-			bad = ex.echo <= ratioOf(t.price, DemotionRatio)
-		}
-		streak := s.streak(l.NeighborIA)
-		switch {
-		case measured && bad:
-			streak.demote++
-		case measured: // the evidence broke: the streak resets
-			streak.demote = 0
-		}
-		// Unmeasured leaves the streak intact but unextended.
-		if streak.demote < DemoteWindows {
+		if s.linkUp(l.IfID) {
+			up++
 			continue
 		}
-		if live && up <= NeighborFloor {
-			continue // an up link retires only while up links exceed the floor
-		}
-		if t != nil && !ex.survived && soleUp(t, l.NeighborIA) {
-			continue // cut-critical: never the last route's removal
-		}
-		why := "its verdict stayed down"
-		if live {
-			why = "its tier served no worse without it"
-		}
-		if s.retire(ctx, l, why) {
+		if s.streak(l.NeighborIA).down >= DemoteWindows &&
+			s.retire(ctx, l, "its verdict stayed down") {
 			changed = true
-			if live {
-				up--
-			}
 		}
+	}
+	if s.upLeft || up <= NeighborFloor {
+		return changed
+	}
+	var worst *links.Link
+	var worstHarm, worstDirect time.Duration
+	for _, l := range entries {
+		if l.State != links.StateEstablished || !s.linkUp(l.IfID) ||
+			s.streak(l.NeighborIA).useless < DemoteWindows {
+			continue
+		}
+		t := tierOf(ts, l.NeighborIA)
+		if decided, useless := judge(t, l.NeighborIA); !decided || !useless {
+			continue
+		}
+		cost := harm(t, l.NeighborIA)
+		direct := samples[l.NeighborIA].m.direct
+		if worst == nil || cost < worstHarm ||
+			cost == worstHarm && slower(direct, worstDirect) {
+			worst, worstHarm, worstDirect = l, cost, direct
+		}
+	}
+	if worst != nil && s.retire(ctx, worst, "its tier served no worse without it") {
+		s.upLeft = true
+		changed = true
 	}
 	return changed
 }

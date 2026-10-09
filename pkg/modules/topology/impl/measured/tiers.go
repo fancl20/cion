@@ -1,22 +1,20 @@
 package measured
 
 import (
-	"context"
-	"net/netip"
+	"slices"
 	"sort"
 	"time"
 
 	"github.com/scionproto/scion/pkg/addr"
 
-	"github.com/fancl20/cion/pkg/dataplane"
 	"github.com/fancl20/cion/pkg/modules/links"
 	"github.com/fancl20/cion/pkg/scion"
 	"github.com/fancl20/cion/pkg/segment"
 )
 
 // The window's tiers: the latency classes the sample map falls into, the
-// facts the comparator's rules read off them, and each established link's
-// excluded measurement.
+// facts the comparator's rules read off them, and each up link's excluded
+// measurement.
 
 // tier is one latency class of the window's sample map beside the facts the
 // rules read — a decision label local to the node, recomputed each window,
@@ -29,21 +27,19 @@ type tier struct {
 	// route count's first term — one link ID per link: every composed path
 	// over an up segment of the node names the interface it leaves through.
 	upLinks []segment.LinkID
-	// up holds the peers of the up links, the cut-critical guard's "no other
-	// up link in the tier".
-	up map[addr.IA]bool
-	// baseline is the fastest composed-path round trip among the members:
-	// the minimum of their baseline echoes. Zero when none answered.
+	// baseline is the fastest answered baseline echo among the members;
+	// zero when none answered. The stranded test reads it.
 	baseline time.Duration
-	// price is tierPrice over the baseline and the members' candidates.
+	// price is the cheapest route into the tier: a route the window probed
+	// by its baseline echo, any other clean candidate by its declared sum.
 	// Zero when nothing prices the tier, and no priced rule fires on it.
 	price time.Duration
 	// routes is the independent routes into the tier, saturated at two.
 	routes int
-	// stranded reports no live route: no up links and no clean composed
-	// candidate into any member.
+	// stranded reports that no up link and no answered composed route reach
+	// the tier.
 	stranded bool
-	// excluded holds each established member link's excluded measurement.
+	// excluded holds each up member link's excluded measurement.
 	excluded map[addr.IA]excludedSample
 }
 
@@ -53,18 +49,22 @@ type member struct {
 	direct time.Duration
 }
 
-// excludedSample is one established link's excluded measurement: the
-// enumeration to its tier's members with the link excluded, the freshest
-// clean survivor echoed. One measurement answering three questions — the
-// useless test, cut-criticality, and the eviction ranking.
+// excludedSample is one up link's excluded measurement: the tier's clean
+// candidates that avoid the link — its survivors — with the freshest of them
+// echoed. One measurement answering the useless test, the cut-critical
+// reading, and the eviction ranking.
 type excludedSample struct {
-	// survived reports whether a clean route into the tier survives the
-	// exclusion.
-	survived bool
-	// echo is the freshest survivor's round trip — the excluded baseline,
-	// measured each window, never a remembered value. Zero when no survivor
-	// resolved or the echo went unanswered.
+	// echo is the freshest survivor's round trip, measured each window,
+	// never a remembered value. Zero when no survivor resolved or the echo
+	// went unanswered: the window decides nothing about the link.
 	echo time.Duration
+	// price is the cheapest survivor: the echoed one by its echo, a
+	// surviving carrier of a baseline echo by that echo, any other by its
+	// declared sum. Zero when nothing prices the survivors.
+	price time.Duration
+	// routes is the tier's route count without the link: its other up links
+	// beside the survivors, saturated at two.
+	routes int
 }
 
 // deriveTiers classes the window's samples by direct round trip: walked
@@ -100,12 +100,11 @@ func deriveTiers(samples map[addr.IA]sample) []tier {
 }
 
 // windowTiers derives the window's tiers, computes their facts from the
-// store, the verdicts, and the per-peer enumerations, and runs each
-// established member link's excluded measurement — the enumeration to its
-// tier's members with the link excluded, the freshest clean survivor echoed
-// over the member it resolves into.
+// store, the verdicts, and the per-peer enumerations, and runs each up
+// member link's excluded measurement over the window's candidates. A
+// candidate that crosses a signaled interface or one of the node's down
+// links is no route, so it prices nothing and counts as nothing.
 func (s *selection) windowTiers(
-	ctx context.Context,
 	neighbors map[addr.IA]*links.Link,
 	entries map[addr.IA]DirectoryEntry,
 	samples map[addr.IA]sample,
@@ -114,88 +113,119 @@ func (s *selection) windowTiers(
 	ts := deriveTiers(samples)
 	for i := range ts {
 		t := &ts[i]
-		t.up = make(map[addr.IA]bool)
-		var priced, clean []scion.Candidate
+		up := make(map[addr.IA]segment.LinkID)
+		clean := make(map[addr.IA][]*scion.Candidate)
+		var routes []*scion.Candidate
+		var echoes []time.Duration
+		probed := make(map[*scion.Candidate]bool)
 		for _, m := range t.members {
 			if l, ok := neighbors[m.ia]; ok && s.linkUp(l.IfID) {
-				t.up[m.ia] = true
-				t.upLinks = append(t.upLinks, segment.LinkID{IA: s.cfg.IA, IfID: l.IfID})
+				link := segment.LinkID{IA: s.cfg.IA, IfID: l.IfID}
+				up[m.ia] = link
+				t.upLinks = append(t.upLinks, link)
 			}
 			sm := samples[m.ia]
 			if sm.m.path > 0 && (t.baseline == 0 || sm.m.path < t.baseline) {
 				t.baseline = sm.m.path
 			}
-			priced = append(priced, sm.candidates...)
+			echoes = append(echoes, sm.m.path)
+			if sm.carrier != nil {
+				probed[sm.carrier] = true
+			}
 			for j := range sm.candidates {
-				if s.clean(&sm.candidates[j]) {
-					clean = append(clean, sm.candidates[j])
+				if c := &sm.candidates[j]; s.clean(c) {
+					clean[m.ia] = append(clean[m.ia], c)
+					routes = append(routes, c)
 				}
 			}
 		}
-		t.price = tierPrice(t.baseline, priced)
-		t.routes = routeCount(t.upLinks, clean)
-		t.stranded = t.routes == 0
-		t.excluded = make(map[addr.IA]excludedSample)
-		for _, m := range t.members {
-			l, ok := neighbors[m.ia]
-			if !ok {
-				continue
-			}
-			t.excluded[m.ia] = s.measureExcluded(ctx, t, entries,
-				segment.LinkID{IA: s.cfg.IA, IfID: l.IfID})
+		t.price = cheapest(echoes, routes, probed)
+		t.routes = routeCount(t.upLinks, routes)
+		t.stranded = len(t.upLinks) == 0 && t.baseline == 0
+		t.excluded = make(map[addr.IA]excludedSample, len(up))
+		for ia, link := range up {
+			t.excluded[ia] = s.measureExcluded(t, clean, samples, entries, link)
 		}
 	}
 	return ts
 }
 
-// measureExcluded runs one established link's excluded measurement: the
-// enumeration to its tier's members with the link excluded — the hard filter
-// the path layer defines, never the cache's last resort — echoed over the
-// freshest clean survivor. The probes cross the survivors, not the
-// questioned link, at the loop's cadence on its own socket, in the
-// evaluation window — measurement stays the selector's instrument.
+// measureExcluded runs one up link's excluded measurement over the window's
+// candidates: the tier's clean candidates that do not traverse the link —
+// either of its two interface IDs sufficing, a hard filter, for a survivor
+// crossing the link would answer the question falsely — the freshest of
+// them echoed over the member it resolves into. The probe crosses the
+// survivors, not the questioned link, at the loop's cadence on its own
+// socket, in the evaluation window — measurement stays the selector's
+// instrument.
 func (s *selection) measureExcluded(
-	ctx context.Context,
 	t *tier,
+	clean map[addr.IA][]*scion.Candidate,
+	samples map[addr.IA]sample,
 	entries map[addr.IA]DirectoryEntry,
-	exclude segment.LinkID,
+	link segment.LinkID,
 ) excludedSample {
 
-	if s.excludedFn != nil {
-		members := make([]addr.IA, len(t.members))
-		for i, m := range t.members {
-			members[i] = m.ia
-		}
-		return s.excludedFn(ctx, members, exclude)
-	}
-	probeCtx, cancel := context.WithTimeout(ctx, ProbeWait*ProbeRuns+time.Second)
-	defer cancel()
-	var best *scion.Candidate
+	excluded := []segment.LinkID{link}
+	var survivors []*scion.Candidate
+	var freshest *scion.Candidate
 	var dst addr.IA
 	for _, m := range t.members {
-		if _, ok := entries[m.ia]; !ok {
-			continue // no published control address to echo at
-		}
-		candidates, err := s.cfg.Provider.Enumerate(probeCtx, m.ia, exclude)
-		if err != nil {
-			continue
-		}
-		for i := range candidates {
-			c := &candidates[i]
-			if s.clean(c) && (best == nil || c.Fresh.After(best.Fresh)) {
-				best, dst = c, m.ia
+		for _, c := range clean[m.ia] {
+			if traverses(c, excluded) {
+				continue
+			}
+			survivors = append(survivors, c)
+			if freshest == nil || c.Fresh.After(freshest.Fresh) {
+				freshest, dst = c, m.ia
 			}
 		}
 	}
-	if best == nil {
-		return excludedSample{}
-	}
-	echo := s.echoRTT(&scion.Addr{
-		IA:   dst,
-		Addr: netip.AddrPortFrom(entries[dst].ControlAddr.Addr(), dataplane.EndhostPort),
-		Path: best.Path,
+	others := slices.DeleteFunc(slices.Clone(t.upLinks), func(l segment.LinkID) bool {
+		return l == link
 	})
-	return excludedSample{survived: true, echo: echo}
+	ex := excludedSample{routes: routeCount(others, survivors)}
+	if freshest == nil {
+		return ex
+	}
+	ex.echo = s.pathEcho(entries[dst], freshest)
+	echoes := []time.Duration{ex.echo}
+	probed := map[*scion.Candidate]bool{freshest: true}
+	for _, m := range t.members {
+		sm := samples[m.ia]
+		if c := sm.carrier; c != nil && c != freshest && slices.Contains(survivors, c) {
+			echoes = append(echoes, sm.m.path)
+			probed[c] = true
+		}
+	}
+	ex.price = cheapest(echoes, survivors, probed)
+	return ex
+}
+
+// judge reads an up link's useless test off its tier this window. The
+// window decides when the tier is priced and the freshest route avoiding the
+// link answered its echo; it decides useless when the link's exclusion
+// leaves the tier's route count unchanged and its price no worse than the
+// demotion ratio above the tier's. A link no answered route avoids decides
+// nothing — the cut-critical link, which no useless retirement takes.
+func judge(t *tier, ia addr.IA) (decided, useless bool) {
+	if t == nil || t.price == 0 {
+		return false, false
+	}
+	ex, ok := t.excluded[ia]
+	if !ok || ex.echo == 0 {
+		return false, false
+	}
+	return true, ex.routes == t.routes && ex.price <= ratioOf(t.price, DemotionRatio)
+}
+
+// harm is how far a link's exclusion moves its tier's price.
+func harm(t *tier, ia addr.IA) time.Duration {
+	d := t.excluded[ia].price - t.price
+	if d < 0 {
+		return -d
+	}
+	return d
 }
 
 // tierOf returns the tier holding the peer, nil when the window left it
@@ -209,16 +239,6 @@ func tierOf(ts []tier, ia addr.IA) *tier {
 		}
 	}
 	return nil
-}
-
-// soleUp reports whether the peer names the tier's only up link.
-func soleUp(t *tier, ia addr.IA) bool {
-	for member := range t.up {
-		if !member.Equal(ia) {
-			return false
-		}
-	}
-	return true
 }
 
 // qualifies reports whether a direct round trip earns a link into the tier

@@ -1,91 +1,14 @@
 package measured
 
 import (
-	"context"
-	"hash"
 	"testing"
 	"time"
 
 	"github.com/scionproto/scion/pkg/addr"
-	"github.com/scionproto/scion/pkg/scrypto"
 
 	"github.com/fancl20/cion/pkg/modules/links"
-	"github.com/fancl20/cion/pkg/modules/pathdb"
 	"github.com/fancl20/cion/pkg/scion"
-	"github.com/fancl20/cion/pkg/segment"
 )
-
-// queriesMACHasher builds the test forwarding key's MAC hashers the line
-// segments below hop with.
-func queriesMACHasher() hash.Hash {
-	h, _ := scrypto.InitMac([]byte("0123456789abcdef"))
-	return h
-}
-
-// lineSegment builds an unsigned route-form segment crossing the given ASes
-// in order, every hop on the one test interface.
-func lineSegment(
-	t *testing.T,
-	segType pathdb.SegmentType,
-	now time.Time,
-	ias ...addr.IA,
-) *pathdb.Segment {
-
-	t.Helper()
-	pcb, err := segment.PCBWithID(now, 0x111)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for i, ia := range ias {
-		opts := segment.EntryOptions{}
-		if i > 0 {
-			opts.IngressIfID = 1
-		}
-		if i < len(ias)-1 {
-			opts.EgressIfID = 1
-		}
-		if _, err := pcb.AppendRouteHop(ia, opts, queriesMACHasher); err != nil {
-			t.Fatal(err)
-		}
-	}
-	return &pathdb.Segment{Type: segType, PCB: pcb}
-}
-
-// enumPathDB is an in-memory path database for the enumeration fixtures.
-type enumPathDB struct{ segs []*pathdb.Segment }
-
-func (d *enumPathDB) Insert(_ context.Context, seg *pathdb.Segment) (bool, error) {
-	d.segs = append(d.segs, seg)
-	return true, nil
-}
-
-func (d *enumPathDB) Get(_ context.Context, q pathdb.Query) ([]*pathdb.Segment, error) {
-	var out []*pathdb.Segment
-	for _, s := range d.segs {
-		if q.Type != pathdb.SegmentTypeUnspecified && q.Type != s.Type {
-			continue
-		}
-		out = append(out, s)
-	}
-	return out, nil
-}
-
-func (d *enumPathDB) DeleteExpired(context.Context, time.Time) (int, error) { return 0, nil }
-func (d *enumPathDB) Close() error                                          { return nil }
-
-// enumSelection builds a selection whose provider serves the given up and
-// down segments.
-func enumSelection(ups, downs []*pathdb.Segment) *selection {
-	db := &enumPathDB{segs: ups}
-	return &selection{cfg: SelectionConfig{
-		IA: selIA,
-		Provider: &scion.PathProvider{
-			IA:     selIA,
-			DB:     db,
-			Lookup: func(context.Context, addr.IA) []*pathdb.Segment { return downs },
-		},
-	}}
-}
 
 // sm builds a window sample of the given round trips and enumerated routes.
 func sm(direct, path time.Duration, candidates ...scion.Candidate) sample {
@@ -147,77 +70,83 @@ func TestDeriveTiers(t *testing.T) {
 }
 
 // TestWindowTierFacts checks what one helper turns a tier into: up links
-// from the verdicts alone, the baseline the fastest member echo takes, the
-// price the measured baseline fixes over declared sums, the route count
-// reading the clean candidates alone — a crossing candidate and one over a
-// local verdict-down interface counting as no route — and strandedness over
-// live routes alone.
+// from the verdicts alone; the baseline the fastest answered echo takes;
+// the price of the cheapest route — a declared route under the echoed
+// carrier sets it, while an unanswered carrier, a crossing candidate, and
+// one over a local down interface price nothing; the route count reading
+// the clean candidates alone; and strandedness on the echoes, however many
+// clean candidates compose into a tier none of whose echoes answered.
 func TestWindowTierFacts(t *testing.T) {
-	verdicts := map[uint16]bool{4: false, 7: false} // the down link and the node's own dead interface
+	verdicts := map[uint16]bool{3: true, 4: false, 7: false} // B's link down, the node's own 7 dead
 	up := &links.Link{NeighborIA: selA, IfID: 3, State: links.StateEstablished}
 	dead := &links.Link{NeighborIA: selB, IfID: 4, State: links.StateEstablished}
 	neighbors := map[addr.IA]*links.Link{selA: up, selB: dead}
 	entries := map[addr.IA]DirectoryEntry{
-		selA: entryOf(selA), selB: entryOf(selB), selC: entryOf(selC),
+		selA: entryOf(selA), selB: entryOf(selB), selC: entryOf(selC), selD: entryOf(selD),
 	}
 	s := &selection{
 		cfg: SelectionConfig{
 			IA:       selIA,
 			Verdicts: func() map[uint16]bool { return verdicts },
 		},
-		excludedFn: func(context.Context, []addr.IA, segment.LinkID) excludedSample {
-			return excludedSample{survived: true}
-		},
+		pathEchoFn: func(addr.IA, *scion.Candidate) time.Duration { return 0 },
 	}
-	// One fast tier of three measured peers: A up with a path baseline and
-	// a declared route beside it, B verdict-down, C a candidate whose
-	// enumerated routes are all the ones the comparator refuses — a
-	// crossing candidate, one over the node's own dead interface — beside
-	// one clean route; and a slow stranded tier of one.
-	samples := map[addr.IA]sample{
-		selA: sm(5, 20*time.Millisecond, declared(1*time.Millisecond)),
-		selB: sm(6, 30*time.Millisecond),
-		selC: sm(7, 0,
-			scion.Candidate{Crossing: true},
-			cand(segment.LinkID{IA: selIA, IfID: 7}),
-			cand(link(selX)),
-		),
-		selD: sm(50, 0),
-	}
-	ts := s.windowTiers(context.Background(), neighbors, entries, samples)
+	// One fast tier of three measured peers: A up, its echoed carrier at
+	// 20ms beside a clean route declaring 8ms one way; B verdict-down, its
+	// carrier over the down link; C a candidate whose routes are a crossing
+	// one and one over the node's own dead interface, both declaring 1ms,
+	// beside one clean undeclared route. And a slow tier of one, D, whose
+	// clean carrier declares 2ms but went unanswered.
+	a := sm(5, 20*time.Millisecond,
+		route(0, 0, local(3), link(selA)),
+		route(-time.Minute, 8*time.Millisecond, link(selX), link(selA)),
+	)
+	a.carrier = &a.candidates[0]
+	b := sm(6, 0, route(0, time.Millisecond, local(4), link(selB)))
+	b.carrier = &b.candidates[0]
+	crossing := route(0, time.Millisecond, link(selC))
+	crossing.Crossing = true
+	c := sm(7, 0,
+		crossing,
+		route(0, time.Millisecond, local(7), link(selC)),
+		route(0, 0, link(selX), link(selC)),
+	)
+	d := sm(50, 0, route(0, 2*time.Millisecond, link(selX), link(selD)))
+	d.carrier = &d.candidates[0]
+	samples := map[addr.IA]sample{selA: a, selB: b, selC: c, selD: d}
+
+	ts := s.windowTiers(neighbors, entries, samples)
 	if len(ts) != 2 {
 		t.Fatalf("tiers = %d, want the fast one and the slow one", len(ts))
 	}
 	fast, slow := &ts[0], &ts[1]
 
-	// The fast tier's up links: A's alone, the verdict-down B no
-	// redundancy. Its baseline is the fastest member echo, and the price
-	// the measured baseline fixes over the misstated declaration.
-	if len(fast.upLinks) != 1 || fast.upLinks[0].IfID != up.IfID {
+	if len(fast.upLinks) != 1 || fast.upLinks[0] != local(3) {
 		t.Errorf("up links = %v, want the verdict-up link alone", fast.upLinks)
 	}
 	if fast.baseline != 20*time.Millisecond {
-		t.Errorf("baseline = %v, want the fastest member echo 20ms", fast.baseline)
+		t.Errorf("baseline = %v, want the answered echo 20ms", fast.baseline)
 	}
-	if fast.price != 20*time.Millisecond {
-		t.Errorf("price = %v, want the measured baseline over the declared 2ms",
-			fast.price)
+	if fast.price != 16*time.Millisecond {
+		t.Errorf("price = %v, want the declared route's doubled 16ms", fast.price)
 	}
-	// The route count reads the clean candidates alone, and the excluded
-	// measurements cover the established members.
+	// The up link beside a clean route that avoids it: the declared route
+	// and C's clean route share no link with the up link.
 	if fast.routes != 2 {
-		t.Errorf("routes = %d, want the up link beside the one clean route", fast.routes)
+		t.Errorf("routes = %d, want the up link beside a clean route", fast.routes)
 	}
-	for _, ia := range []addr.IA{selA, selB} {
-		if _, ok := fast.excluded[ia]; !ok {
-			t.Errorf("no excluded measurement for the established %s", ia)
-		}
+	if fast.stranded {
+		t.Error("a tier with an up link is stranded")
+	}
+	if _, ok := fast.excluded[selA]; !ok {
+		t.Error("no excluded measurement for the up link")
 	}
 
-	// The slow tier holds no live route: no up links, no clean candidate —
-	// stranded.
-	if slow.routes != 0 || !slow.stranded {
-		t.Error("the tier of a stranded peer is not stranded")
+	// D's tier: a clean route composes into it, but no up link and no
+	// answered echo reach it — stranded, and unpriced.
+	if slow.routes != 1 || !slow.stranded {
+		t.Errorf("the slow tier = %d routes, stranded %v; want 1 and stranded",
+			slow.routes, slow.stranded)
 	}
 	if slow.price != 0 {
 		t.Errorf("the stranded tier's price = %v, want nothing pricing it", slow.price)

@@ -161,32 +161,21 @@ func (c *Candidate) Before(o *Candidate) bool {
 // beyond it — with one candidate per up segment containing the destination,
 // its truncated reversal, beside them: the branch LocalPath short-circuits,
 // enumerated so the peers its own up segments hold join the candidate space.
-// exclude hard-filters before composition: a candidate whose traversed
-// stretch names an excluded link — either of a hop's two interface IDs
-// sufficing — never composes, for a survivor crossing the excluded link
-// would answer the excluded baseline's question falsely; a signaled
-// interface keeps its demote-to-last-resort semantics, a flagged candidate.
 // A candidate naming one of the node's own interfaces the live snapshot
-// lacks never composes either, the snapshot taken once per call. The local
-// ISD-AS is the one error, a caller mistake failed fast at entry; an
-// unreachable destination is the empty answer.
-func (p *PathProvider) Enumerate(
-	ctx context.Context, dst addr.IA, exclude ...segment.LinkID,
-) ([]Candidate, error) {
-
+// lacks never composes, the snapshot taken once per call; a signaled
+// interface keeps its demote-to-last-resort semantics, a flagged candidate.
+// The local ISD-AS is the one error, a caller mistake failed fast at entry;
+// an unreachable destination is the empty answer.
+func (p *PathProvider) Enumerate(ctx context.Context, dst addr.IA) ([]Candidate, error) {
 	if dst.Equal(p.IA) {
 		return nil, serrors.New("destination is the local ISD-AS", "isd_as", dst)
-	}
-	excluded := make(map[segment.LinkID]bool, len(exclude))
-	for _, link := range exclude {
-		excluded[link] = true
 	}
 	live := p.liveInterfaces()
 	downs := p.Lookup(ctx, dst)
 	ups := p.upSegments()
 	var out []Candidate
 	emit := func(up *pathdb.Segment, mUp int, down *pathdb.Segment, mDown int) error {
-		c, err := p.compose(up, mUp, down, mDown, excluded, live)
+		c, err := p.compose(up, mUp, down, mDown, live)
 		if err != nil {
 			return err
 		}
@@ -231,13 +220,13 @@ func (p *PathProvider) Enumerate(
 
 // compose builds the candidate of one meeting — the up segment truncated at
 // its entry mUp, the down segment at its entry mDown, either side optional —
-// or nil when a hop of either traversed stretch names an excluded link or
-// one of the node's own interfaces the live snapshot lacks: both filters
-// drop the candidate before composition, never a flagged survivor.
+// or nil when a hop of either traversed stretch names one of the node's own
+// interfaces the live snapshot lacks: the data plane serves no such
+// interface, so the candidate is dropped before composition, never a
+// flagged survivor.
 func (p *PathProvider) compose(
 	up *pathdb.Segment, mUp int,
 	down *pathdb.Segment, mDown int,
-	excluded map[segment.LinkID]bool,
 	live map[uint16]addr.IA,
 ) (*Candidate, error) {
 
@@ -264,7 +253,7 @@ func (p *PathProvider) compose(
 		crossing = crossing || p.crossesFrom(down, mDown)
 	}
 	for _, link := range links {
-		if excluded[link] || link.IA.Equal(p.IA) && retired(live, link.IfID) {
+		if link.IA.Equal(p.IA) && retired(live, link.IfID) {
 			return nil, nil
 		}
 	}
