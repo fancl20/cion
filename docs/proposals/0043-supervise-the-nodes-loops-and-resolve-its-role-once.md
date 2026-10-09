@@ -20,10 +20,7 @@ orders them. The role is
 enumeration, derived from the run arguments as
 [ADR-0015](/docs/adrs/0015-onboard-authoritative-cores-by-sensitive-trc-update.md)'s
 decision 1 decides; it is derived once, where the rest of the run arguments
-are now resolved. ADR-0015 is `proposed`: a separate records-cleanup change
-accepts it before this proposal's code lands. This proposal reads the tree
-with the fix in flight beside it applied: the applications follow the
-founding tier, with coordination and voting on the founder alone.
+are now resolved.
 
 [TOC]
 
@@ -37,9 +34,10 @@ run flags, from `identity.asType`, and from whichever role-specific values
 are set. The change:
 
 *   A supervisor, `internal/supervise` (introduced): named loops, each under
-    a policy — Fatal for the core and the assembly's own surfaces, Degrade
-    for the modules and the applications — and a stack of owned resources,
-    released in reverse order of acquisition once every loop has returned.
+    a policy — Fatal for the core and the node's HTTPS server, Degrade for
+    the modules, the applications, and certificate management — and a stack
+    of owned resources, released in reverse order of acquisition once every
+    loop has returned.
 *   The failures that should stop the node are returned: the authoritative
     core's onboarding returns `trust.ErrNoVotingApp` where it called a
     callback, the echo responder its failed read where it logged it, and
@@ -153,18 +151,19 @@ them through `dataplane.ResolveAddrPort`, and a DNS lookup for a host name.
 *   No change to the modules' and applications' posture: a panicking or
     exited loop is absorbed and logged, and nothing restarts it —
     ADR-0009's consequence, ADR-0014's decision 4, and the topology
-    contract. Changing it is a record's conversation (open question 2).
+    contract. A module or resident whose failure should stop the node needs
+    a record narrowing that decision and the contract.
 *   No restart machinery: a stopped node is the process supervisor's to
     restart, proposal 0019's posture, with no budget and no backoff.
 *   No change to the data plane's own recovers — the underlay's receiver
     and forwarder and the internal link's dispatch keep `handlePanic`, as
     proposal 0019 left them — nor to the generation swap.
 *   No joins inside the applications: the goroutines the WireGuard and
-    SOCKS applications start beneath their `Run` stay theirs (open
-    question 8).
+    SOCKS applications start beneath their `Run` stay theirs, for a series
+    of their own.
 *   No new flag, default, or wire change.
-*   No change to how the role derives: from the run arguments, ADR-0015's
-    decision 1 (open question 6).
+*   No change to how the role derives: from the run arguments alone,
+    ADR-0015's decision 1.
 *   No change to `testnetwork.StartNode` beyond its call sites: retiring it
     in favor of `services.BootApp` is a later proposal's.
 *   No new record.
@@ -196,9 +195,8 @@ A loop's policy, a `supervise.Policy`, is one of two:
 
 *   `supervise.Fatal`: an error returned before the group's context ends
     cancels the group, the error its cause. A nil return is completion,
-    logged: certificate management returns once `ManageSync` has loaded or
-    obtained the certificate. A panic is not recovered: it unwinds to the
-    runtime, which prints the value and the stack and exits, and the
+    logged, and the group runs on. A panic is not recovered: it unwinds to
+    the runtime, which prints the value and the stack and exits, and the
     process supervisor restarts the node.
 *   `supervise.Degrade`: a panic is recovered and logged with the loop's
     name and `runtime/debug.Stack`, and a return before the group's context
@@ -213,7 +211,7 @@ the supervisor's own. A recovered panic must unwind into an ordered stop,
 and the stop waits for loops that may block on state the panicking
 goroutine left behind — one held mutex keeps `Wait` from returning. The
 crash cannot hang, keeps the runtime's own report, and leaves a core loop's
-death "either impossible or loud" (open question 1).
+death "either impossible or loud".
 
 | Loop                                 | Policy  |
 | :----------------------------------- | :------ |
@@ -225,18 +223,21 @@ death "either impossible or loud" (open question 1).
 | Enrollment, every role               | Fatal   |
 | Rotation watch, cores                | Fatal   |
 | HTTPS server, when bound             | Fatal   |
-| Certificate management, founder      | Fatal   |
+| Certificate management, founder      | Degrade |
 | Topology provider                    | Degrade |
 | Enrollment authorizer, when selected | Degrade |
 | Each resident application            | Degrade |
 
 The Fatal rows are the core ADR-0009 enumerates, the trust lifecycle's
-loops among them, and the assembly's own surfaces: certificate management
-keeps the founder's WebPKI identity current — the identity every joiner's
-enrollment verifies — and the HTTPS server answers its TLS-ALPN challenge.
-The Degrade rows are the modules and the residents: the topology provider
-absorbs its own loops' panics under its contract, and a dead authorizer
-poll answers no prompt, so the gate it serves stays closed.
+loops among them, and the node's HTTPS server, whose failure leaves every
+mounted surface and the TLS-ALPN challenge unanswered. The Degrade rows are
+the modules, the residents, and certificate management. The topology
+provider absorbs its own loops' panics under its contract, and a dead
+authorizer poll answers no prompt, so the gate it serves stays closed.
+Certificate management retries a failed issuance at the CA's pace: a
+founder whose WebPKI identity is not yet obtained still serves the rest of
+the ISD, and a crash would restart into a fresh request each time, against
+the CA's rate limits.
 
 ### What loops return
 
@@ -256,7 +257,14 @@ network may still answer, as it does today:
     failures already; under `BootApp`, the data plane's now stops the node,
     as it ends `Run`.
 *   A failed read of the node's own state — its chain, its pinned TRC, its
-    voting material — stays a logged retry (open question 4).
+    voting material — stays a logged retry: with the stores released only
+    after the loops, it marks a store fault, not a shutdown, and a lasting
+    one shows in the log.
+*   Certificate management keeps a failed issuance retrying: `Manage` hands
+    the domain to certmagic's `ManageAsync`, whose obtain retries at
+    certmagic's backoff until it succeeds or the group's context ends, and
+    holds until that context ends. A static-file founder starts no
+    certificate management.
 *   The rotation watch's lost-sensitive-key verdict stays a logged
     condition: the founder serves everything else, and stopping it would
     take the ISD's issuer down over a loss whose recovery is a redeploy.
@@ -352,14 +360,13 @@ arguments as `loadIdentity` does today: `trust.ASTypeCore` for the core
 flag without a neighbor, `trust.ASTypeAuthoritative` with one,
 `trust.ASTypeNormal` without the flag. It is ADR-0002's enumeration, the
 one "certificate generation can simply switch on", and no second type
-appears (open question 5).
+appears.
 `identity.asType` goes, and every branch reads the resolved role:
 `resolve`'s own founding checks, `selectProvider`'s founding flag,
 `buildBeaconing`'s core tier (any role but `trust.ASTypeNormal`), the role
 switch below, `assembleHTTPS` in place of its `certMgr == nil`, and the
 application selection and environment in place of the founding predicate
-the in-flight fix hands them. The derivation stays argument-only (open
-question 6).
+they read today.
 
 ### The resolved configuration
 
@@ -448,18 +455,18 @@ configuration, and `stop`, `fatalErr`, and `fatalOnce` to the group.
 
 ### Packages touched
 
-| Package                              | Change                                   |
-| :----------------------------------- | :--------------------------------------- |
-| `internal/supervise`                 | New: the group, its policies, the stack  |
-| `internal/services`                  | The group, one boot, the role, `resolve` |
-| `pkg/controlplane`                   | Returned failures, per-role values       |
-| `pkg/webpki`                         | `context.AfterFunc`, `CertManager.Close` |
-| `pkg/modules/topology`               | The contract's `Run` and `Close` docs    |
-| `pkg/modules/topology/impl/measured` | Joined loops, closed conns               |
-| `pkg/apps`                           | `Environment.TRCDecision`'s doc          |
-| `pkg/apps/voting`                    | `New` refuses a nil decision             |
-| `internal/testnetwork`               | Call sites, the restart labs             |
-| `cmd/cion`                           | `App.Close`'s error                      |
+| Package                              | Change                                             |
+| :----------------------------------- | :------------------------------------------------- |
+| `internal/supervise`                 | New: the group, its policies, the stack            |
+| `internal/services`                  | The group, one boot, the role, `resolve`           |
+| `pkg/controlplane`                   | Returned failures, per-role values                 |
+| `pkg/webpki`                         | `context.AfterFunc`, `CertManager.Close`, `Manage` |
+| `pkg/modules/topology`               | The contract's `Run` and `Close` docs              |
+| `pkg/modules/topology/impl/measured` | Joined loops, closed conns                         |
+| `pkg/apps`                           | `Environment.TRCDecision`'s doc                    |
+| `pkg/apps/voting`                    | `New` refuses a nil decision                       |
+| `internal/testnetwork`               | Call sites, the restart labs                       |
+| `cmd/cion`                           | `App.Close`'s error                                |
 
 `internal/supervise` belongs to none of the kinds ADR-0009 and ADR-0013
 file — core, libraries, modules, applications. It is the assembly's own
@@ -472,7 +479,7 @@ No record is needed: the new package sits outside the roofs those records
 file; the modules' and applications' posture stands as ADR-0009, ADR-0014's
 decision 4, and the topology contract state it; the core's posture is
 proposal 0019's; and the role is ADR-0002's enumeration, derived as
-ADR-0015's decision 1 decides (open question 7).
+ADR-0015's decision 1 decides.
 
 ### What this leaves for the assembly proposal
 
@@ -486,8 +493,7 @@ given a per-role value, under its own `handlePanic`.
 
 ### Migration
 
-The change accepting ADR-0015 lands first. Each commit keeps the tree
-green:
+Each commit keeps the tree green:
 
 1.  **Add the supervisor.** `internal/supervise` and its tests; nothing uses
     it yet.
@@ -509,7 +515,9 @@ green:
     returning with its socket released.
 6.  **Release what nothing releases.** The endpoint and responder conns,
     the core client and its two conns, and the peer conn join the stack;
-    `CertManager.Close` takes the HTTP-01 server off the setup context.
+    `CertManager.Close` takes the HTTP-01 server off the setup context; and
+    `Manage` retries through `ManageAsync`, started for an ACME-managed
+    identity alone.
 7.  **Resolve the run arguments once.** `NodeConfig.resolve` and
     `resolvedConfig`, the role among its fields; `Validate`,
     `setupEnrollAuth`, `controlBind`, `parseControlHost`,
@@ -538,15 +546,19 @@ green:
     any other release error joins the result.
 *   **Unit, the Fatal panic:** the test re-executes its own binary for the
     panicking case alone and asserts a non-zero exit whose output carries
-    the panic's value — the crash observed, not simulated.
+    the panic's value — the crash observed, not simulated. Until its exec,
+    the fork holds every descriptor the test process has open, and the
+    package holds no test that rebinds an address, so the fork keeps no
+    sibling's socket bound.
 *   **Unit, close on cancel:** the responder, the rendezvous acceptor, and
     `ServeHTTPS` each serve, see their context canceled, and return, and
     the address each held binds again at once, without a retry.
 *   **Unit, the certificate manager:** a manager `PrepareTLSCert` builds
     for a domain over a throwaway storage serves HTTP-01 on port 80, the
     port `TestHTTP01ChallengeSolves` already binds; once `Close` returns,
-    port 80 binds again at once. A static-file manager's `Close` returns
-    nil.
+    port 80 binds again at once. Against a CA that answers nothing,
+    `Manage` keeps running until its context ends and then returns nil. A
+    static-file manager's `Close` returns nil.
 *   **Unit, the measured provider:** a provider assembled through `Mounts`
     on a loopback host of the package's own, as `TestZeroconfMounts` takes
     one, with `NewConn` drawing real conns. `Run` returns after
@@ -581,36 +593,3 @@ green:
     past the refusal: the held socket closes, and a second boot on the same
     host succeeds, the endpoint and responder ports released by the first
     boot's unwinding.
-
-## Open questions
-
-1.  **Crash or ordered stop?** A Fatal panic crashes the process as
-    proposed. The alternative recovers it into an ordered stop, `Run`
-    returning the panic and its stack as an error, at the cost of a stop
-    that can hang on state the panic left behind.
-2.  **Any application or module Fatal?** A topology provider or a resident
-    whose failure should stop the node needs a record narrowing ADR-0014's
-    decision 4 and the topology contract.
-3.  **Certificate management Fatal?** Fatal stops a founder whose first
-    issuance fails, and each restart asks the CA again, against its rate
-    limits. The alternative is a `Manage` that retries, under Degrade.
-4.  **Own-state reads Fatal?** The enrollment and rotation passes retry a
-    failed read of the node's own trust database and voting material. With
-    the stores released only after the loops, such a failure no longer
-    marks a shutdown; returning it would stop the node on a store fault.
-5.  **`trust.ASType` or a role type?** A distinct type in
-    `internal/services` would name the role where the assembly reads it, at
-    the cost of a second enumeration beside ADR-0002's single one.
-6.  **Check the role against the state directory?** An authoritative core
-    restarted as `cion run core` without `--topology.neighbor` derives the
-    founding tier, and `trust.LoadOrCreateCoreKeys` writes the sensitive,
-    root, and CA keys into a state directory that
-    `trust.LoadOrCreateVotingKey`'s doc says the tiers never share.
-    Comparing the derived role with the key material present would refuse
-    that boot.
-7.  **A package, and no record?** `internal/supervise` could stay an
-    unexported type inside `internal/services` until a second user exists,
-    and the finding that no record is needed wants confirming.
-8.  **Application joins?** The WireGuard and SOCKS applications start
-    goroutines their `Run` does not join; joining them belongs in this
-    series or in one of its own.
