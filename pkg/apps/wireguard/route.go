@@ -39,26 +39,31 @@ type routeChoice struct {
 	challenger []segment.LinkID
 	// streak is the consecutive windows the named challenger has led.
 	streak int
+	// declared records whether the incumbent declared its sum in the
+	// window that last counted the streak.
+	declared bool
 }
 
 // pickRoute is the warm loop's pick over one window's candidates: the rank,
 // the pools, and the switch's reluctance, pure over its inputs. The
 // candidates divide into a clean pool and a crossing one — the flagged last
 // resort Path honors — and the pick considers the clean pool, falling back to
-// the crossing one only when nothing clean composes. Within the pool a
-// declared sum outranks an undeclared one and a smaller declared sum a
-// larger, ties and undeclared pairs falling to the path layer's rank. An
-// incumbent the pool no longer holds — its route gone, or demoted to the
-// crossing pool while clean candidates stand — is a failure, and the pool's
-// best replaces it at once. A surviving incumbent switches reluctantly: the
-// challenger must beat its declared sum by SwitchRatio, and a window where a
-// different candidate leads, where the leader falls back inside the ratio, or
-// where a declaration lapses resets the count. The declaration gaps govern
-// where no ratio applies: an incumbent without a declared sum yields to a
-// declared challenger through the streak alone, and neither declaring is
-// today's case — the default rank picks, immediately. It answers the pick —
-// nil when nothing composes — the next choice, and whether the pick replaced
-// an incumbent.
+// the crossing one only when nothing clean composes. A pool keeps one
+// candidate per route, the freshest composition Before ranks first, so the
+// route the pick lands is its freshest instance. Within the pool a declared
+// sum outranks an undeclared one and a smaller declared sum a larger, ties
+// and undeclared pairs falling to the path layer's rank. An incumbent the
+// pool no longer holds — its route gone, or demoted to the crossing pool
+// while clean candidates stand — is a failure, and the pool's best replaces
+// it at once. A surviving incumbent switches reluctantly: the challenger must
+// beat its declared sum by SwitchRatio, and a window where a different
+// candidate leads, where the leader falls back inside the ratio, or where
+// the incumbent's declaration lapses or returns resets the count. The
+// declaration gaps govern where no ratio applies: an incumbent without a
+// declared sum yields to a declared challenger through the streak alone, and
+// neither declaring is today's case — the default rank picks, immediately.
+// It answers the pick — nil when nothing composes — the next choice, and
+// whether the pick replaced an incumbent.
 func pickRoute(candidates []scion.Candidate, choice routeChoice) (pick *scion.Candidate, next routeChoice, switched bool) {
 	var pool []*scion.Candidate
 	for i := range candidates {
@@ -75,6 +80,7 @@ func pickRoute(candidates []scion.Candidate, choice routeChoice) (pick *scion.Ca
 	if len(pool) == 0 {
 		return nil, choice, false
 	}
+	pool = freshestPerRoute(pool)
 	best := pool[0]
 	for _, c := range pool[1:] {
 		if outranks(c, best) {
@@ -96,7 +102,7 @@ func pickRoute(candidates []scion.Candidate, choice routeChoice) (pick *scion.Ca
 		// failure semantics, the best candidate at once.
 		return best, routeChoice{incumbent: best.Links}, true
 	}
-	if slices.Equal(best.Links, matched.Links) {
+	if best == matched {
 		// The incumbent keeps the lead, and whatever was building against it
 		// resets.
 		return matched, routeChoice{incumbent: matched.Links}, false
@@ -106,18 +112,15 @@ func pickRoute(candidates []scion.Candidate, choice routeChoice) (pick *scion.Ca
 		// Neither side declares: the default rank picks, immediately — the
 		// hops-first order a non-declaring network has always had.
 		return best, routeChoice{incumbent: best.Links}, true
-	case best.Latency == nil:
-		// Knowledge is not traded for ignorance: a challenger without a
-		// declared sum never displaces a declared incumbent — the rank's
-		// declared-first order usually keeps it from leading at all — and
-		// the streak against it resets.
-		return matched, routeChoice{incumbent: matched.Links}, false
 	case matched.Latency != nil && *best.Latency >= ratioOf(*matched.Latency, SwitchRatio):
-		// The leader fell back inside the ratio: the streak resets.
+		// The leader fell back inside the ratio: the streak resets. Ahead
+		// of a declared incumbent only a declared candidate can lead, for
+		// the rank puts declared sums first.
 		return matched, routeChoice{incumbent: matched.Links}, false
 	}
+	declared := matched.Latency != nil
 	streak := 1
-	if slices.Equal(choice.challenger, best.Links) {
+	if slices.Equal(choice.challenger, best.Links) && choice.declared == declared {
 		streak = choice.streak + 1
 	}
 	if streak >= SwitchWindows {
@@ -129,7 +132,26 @@ func pickRoute(candidates []scion.Candidate, choice routeChoice) (pick *scion.Ca
 		incumbent:  matched.Links,
 		challenger: best.Links,
 		streak:     streak,
+		declared:   declared,
 	}, false
+}
+
+// freshestPerRoute keeps one candidate per link set, in first-seen order:
+// the one Before ranks first, the freshest composition of the route.
+func freshestPerRoute(pool []*scion.Candidate) []*scion.Candidate {
+	var out []*scion.Candidate
+	for _, c := range pool {
+		i := slices.IndexFunc(out, func(o *scion.Candidate) bool {
+			return slices.Equal(o.Links, c.Links)
+		})
+		switch {
+		case i < 0:
+			out = append(out, c)
+		case c.Before(out[i]):
+			out[i] = c
+		}
+	}
+	return out
 }
 
 // outranks reports whether c outranks o by the pick's rank: a declared sum

@@ -390,6 +390,28 @@ func TestPickRoute(t *testing.T) {
 			},
 		},
 		{
+			name: "a lapse of the incumbent's declaration restarts the streak",
+			windows: []pickWindow{
+				{
+					candidates: []scion.Candidate{incumbent100},
+					wantPick:   1,
+				},
+				{
+					candidates: []scion.Candidate{incumbent100, declared(mint(2, 6, 8, fresh), 70*time.Millisecond)},
+					wantPick:   1, // the streak builds against the declared incumbent
+				},
+				{
+					candidates: []scion.Candidate{mint(1, 4, 6, fresh), declared(mint(2, 6, 8, fresh), 70*time.Millisecond)},
+					wantPick:   1, // the declaration lapsed: the streak restarts at one
+				},
+				{
+					candidates: []scion.Candidate{mint(1, 4, 6, fresh), declared(mint(2, 6, 8, fresh), 70*time.Millisecond)},
+					wantPick:   2,
+					wantSwitch: true,
+				},
+			},
+		},
+		{
 			name: "neither side declaring picks by the default rank at once",
 			windows: []pickWindow{
 				{
@@ -434,6 +456,56 @@ func TestPickRoute(t *testing.T) {
 				if switched != w.wantSwitch {
 					t.Errorf("window %d switched = %v, want %v", i+1, switched, w.wantSwitch)
 				}
+			}
+		})
+	}
+}
+
+// TestPickRouteFreshestInstance checks the pick among instances of one
+// route: two compositions of the incumbent's link set land the fresher,
+// whether the incumbent keeps the lead or holds against a building
+// challenger — the staler instance listed first, where the first match
+// would find it.
+func TestPickRouteFreshestInstance(t *testing.T) {
+	fresh := time.Now()
+	instance := func(latency time.Duration, at time.Time) scion.Candidate {
+		return scion.Candidate{
+			Links:   []segment.LinkID{{IA: addr.MustIAFrom(20, 1), IfID: 1}},
+			Hops:    4,
+			Entries: 6,
+			Fresh:   at,
+			Latency: &latency,
+		}
+	}
+	challenger := func(latency time.Duration) scion.Candidate {
+		return scion.Candidate{
+			Links:   []segment.LinkID{{IA: addr.MustIAFrom(20, 2), IfID: 2}},
+			Hops:    6,
+			Entries: 8,
+			Fresh:   fresh,
+			Latency: &latency,
+		}
+	}
+	stale := instance(100*time.Millisecond, fresh.Add(-time.Hour))
+	current := instance(100*time.Millisecond, fresh)
+	_, choice, _ := pickRoute([]scion.Candidate{current}, routeChoice{})
+
+	for _, tc := range []struct {
+		name       string
+		candidates []scion.Candidate
+	}{
+		{"the incumbent keeps the lead", []scion.Candidate{stale, current}},
+		{"the incumbent holds against a challenger", []scion.Candidate{
+			stale, current, challenger(70 * time.Millisecond),
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pick, _, switched := pickRoute(tc.candidates, choice)
+			if pick == nil || switched {
+				t.Fatalf("pick = %v (switched %v), want the incumbent kept", pick, switched)
+			}
+			if !pick.Fresh.Equal(fresh) {
+				t.Errorf("pick's freshness = %v, want the fresher instance's %v", pick.Fresh, fresh)
 			}
 		})
 	}
