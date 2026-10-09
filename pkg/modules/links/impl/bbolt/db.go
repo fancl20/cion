@@ -131,13 +131,17 @@ func New(path string, opts *bbolt.Options) (links.DB, error) {
 // Insert stores a new entry: an entry carrying no interface ID is allocated
 // one monotonically from the persisted counter — IDs of live entries and of
 // entries retired within the holdback are skipped — and one carrying an ID
-// takes it, refused when the ID is held.
+// takes it, refused when the ID is held. A live entry naming a neighbor
+// another live entry names is refused.
 func (b *bboltDB) Insert(ctx context.Context, l *links.Link) error {
 	return b.db.Update(func(tx *bbolt.Tx) error {
 		linksB := tx.Bucket([]byte(linksBucket))
 		metaB := tx.Bucket([]byte(metaBucket))
 		held, err := heldIfIDs(linksB, time.Now())
 		if err != nil {
+			return err
+		}
+		if err := checkNeighbor(linksB, l); err != nil {
 			return err
 		}
 		id := l.IfID
@@ -166,13 +170,17 @@ func (b *bboltDB) Insert(ctx context.Context, l *links.Link) error {
 }
 
 // Update replaces the stored entry with the same interface ID, stamping
-// Updated.
+// Updated; refused when the replacement is live and names a neighbor
+// another live entry names.
 func (b *bboltDB) Update(ctx context.Context, l *links.Link) error {
 	return b.db.Update(func(tx *bbolt.Tx) error {
 		linksB := tx.Bucket([]byte(linksBucket))
 		key := beUint16(l.IfID)
 		if linksB.Get(key) == nil {
 			return fmt.Errorf("no stored link with interface ID %d", l.IfID)
+		}
+		if err := checkNeighbor(linksB, l); err != nil {
+			return err
 		}
 		l.Updated = time.Now()
 		value, err := marshalStored(l)
@@ -187,15 +195,9 @@ func (b *bboltDB) Update(ctx context.Context, l *links.Link) error {
 func (b *bboltDB) All(ctx context.Context) ([]*links.Link, error) {
 	var out []*links.Link
 	err := b.db.View(func(tx *bbolt.Tx) error {
-		c := tx.Bucket([]byte(linksBucket)).Cursor()
-		for k, v := c.First(); k != nil; k, v = c.Next() {
-			l, err := unmarshalStored(v, beUint16Decode(k))
-			if err != nil {
-				return err
-			}
-			out = append(out, l)
-		}
-		return nil
+		var err error
+		out, err = decodeAll(tx.Bucket([]byte(linksBucket)))
+		return err
 	})
 	if err != nil {
 		return nil, err
@@ -237,6 +239,30 @@ func (b *bboltDB) ByNeighbor(ctx context.Context, ia addr.IA) (*links.Link, erro
 
 func (b *bboltDB) Close() error {
 	return b.db.Close()
+}
+
+// decodeAll decodes every entry of the bucket.
+func decodeAll(linksB *bbolt.Bucket) ([]*links.Link, error) {
+	var out []*links.Link
+	c := linksB.Cursor()
+	for k, v := c.First(); k != nil; k, v = c.Next() {
+		l, err := unmarshalStored(v, beUint16Decode(k))
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, l)
+	}
+	return out, nil
+}
+
+// checkNeighbor refuses an entry that would leave two live entries naming
+// one neighbor, reading the stored entries in the write's transaction.
+func checkNeighbor(linksB *bbolt.Bucket, l *links.Link) error {
+	stored, err := decodeAll(linksB)
+	if err != nil {
+		return err
+	}
+	return links.CheckNeighbor(stored, l)
 }
 
 // heldIfIDs returns the IDs no new entry may take — those of live entries

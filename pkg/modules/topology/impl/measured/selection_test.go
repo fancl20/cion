@@ -4,6 +4,7 @@ import (
 	"context"
 	"net"
 	"net/netip"
+	"slices"
 	"sync/atomic"
 	"testing"
 	"testing/synctest"
@@ -1239,5 +1240,35 @@ func TestSelectionRendezvousGuard(t *testing.T) {
 	}
 	if updated.Remote.IsValid() {
 		t.Errorf("the refused establishment recorded the remote %v", updated.Remote)
+	}
+}
+
+// TestSelectionLosesRecordRace checks a promotion that loses the race to
+// record its neighbor: another writer records the neighbor between the
+// selection's lookup and its insert, the store refuses the second live
+// entry, and the promotion proceeds on the recorded one.
+func TestSelectionLosesRecordRace(t *testing.T) {
+	store := &staleStore{DB: memory.New()}
+	s := &selection{cfg: SelectionConfig{
+		Store:    store,
+		LinkHost: netip.MustParseAddr("127.0.0.1"),
+	}}
+	recorded := liveLink(selA, 40001)
+	recorded.State = links.StateCandidate
+	if err := store.Insert(context.Background(), recorded); err != nil {
+		t.Fatal(err)
+	}
+	store.armed.Store(true)
+	entry, err := s.ownEntry(context.Background(), entryOf(selA))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if entry.IfID != recorded.IfID {
+		t.Errorf("the promotion's entry = %+v, want the recorded one, interface %d",
+			entry, recorded.IfID)
+	}
+	want := []links.State{links.StateCandidate}
+	if got := statesOf(t, store.DB, selA); !slices.Equal(got, want) {
+		t.Errorf("the neighbor's entries = %v, want the recorded one alone", got)
 	}
 }

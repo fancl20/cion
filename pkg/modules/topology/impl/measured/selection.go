@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/binary"
+	"errors"
 	"log/slog"
 	"net/netip"
 	"slices"
@@ -996,8 +997,21 @@ func (s *selection) establishByRendezvous(
 }
 
 // ownEntry returns the local side of a promoted candidate, allocating the
-// link address and interface ID of a new one.
+// link address and interface ID of a new one. The rendezvous acceptor and
+// the in-band link service record entries too; the store refuses a
+// neighbor's second live entry, and a promotion that loses that race looks
+// again and proceeds on the winner's.
 func (s *selection) ownEntry(ctx context.Context, e DirectoryEntry) (*links.Link, error) {
+	entry, err := s.recordEntry(ctx, e)
+	if errors.Is(err, links.ErrDuplicateNeighbor) {
+		entry, err = s.recordEntry(ctx, e)
+	}
+	return entry, err
+}
+
+// recordEntry returns the neighbor's live entry, inserting a candidate
+// when the table holds none.
+func (s *selection) recordEntry(ctx context.Context, e DirectoryEntry) (*links.Link, error) {
 	entry, err := s.cfg.Store.ByNeighbor(ctx, e.IA)
 	if err != nil {
 		return nil, err

@@ -541,3 +541,25 @@ func TestStrandedRedialAcceptorMinted(t *testing.T) {
 		t.Errorf("the acceptor-minted entry = %v, want %v", got, want)
 	}
 }
+
+// TestJoinDialRetiresRedundantEntry checks a live entry whose rendezvous
+// answers for a neighbor the table holds live — a second seed of one node:
+// the store refuses to name it after that neighbor, and it retires rather
+// than dial on.
+func TestJoinDialRetiresRedundantEntry(t *testing.T) {
+	f := newRendezvousFixture(t, func(cfg *RendezvousConfig) {
+		cfg.IA = rendezvousIA
+	})
+	z, store := strandedDialer(t, addr.MustIAFrom(20, 0xfd0000000075),
+		liveLink(rendezvousIA, 40011), &links.Link{
+			Local:      netip.MustParseAddrPort("127.0.0.1:40021"),
+			Rendezvous: f.addr,
+			State:      links.StateCandidate,
+		})
+	z.dialJoins(context.Background())
+	want := []links.State{links.StateEstablished, links.StateRetired}
+	if got := statesOf(t, store, rendezvousIA); !slices.Equal(got, want) {
+		t.Errorf("the neighbor's entries = %v, want the live one and the retired seed %v",
+			got, want)
+	}
+}

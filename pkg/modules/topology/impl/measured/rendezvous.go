@@ -331,12 +331,36 @@ func (r *Rendezvous) handle(raw []byte, src *net.UDPAddr) ([]byte, error) {
 	} else if !r.byIA.admit(req.IA) {
 		return nil, fmt.Errorf("ISD-AS %s exceeds the admission rate", req.IA)
 	}
-	// The lookup and the insert run under the handler's lock: concurrent
+	// The lookup and the write run under the handler's lock: concurrent
 	// requests for one peer re-answer the first's entry instead of racing
-	// a second into the table.
+	// a second into the table. The in-band link service and the selection's
+	// establishment record entries too; the store refuses a neighbor's
+	// second live entry, and a claim that loses that race looks again and
+	// answers with the winner's entry.
 	r.mtx.Lock()
 	defer r.mtx.Unlock()
+	entry, err := r.admit(req)
+	if errors.Is(err, links.ErrDuplicateNeighbor) {
+		entry, err = r.admit(req)
+	}
+	if err != nil {
+		return nil, err
+	}
+	reply := RendezvousReply{
+		Nonce:    req.Nonce,
+		LinkAddr: entry.Local,
+		IfID:     entry.IfID,
+		IA:       r.cfg.IA,
+		Observed: src.AddrPort(),
+	}
+	return reply.Marshal(), nil
+}
+
+// admit returns the claim's entry: the one the table holds for it, an
+// unnamed one a named claim adopts, or a candidate it mints under the cap.
+func (r *Rendezvous) admit(req RendezvousRequest) (*links.Link, error) {
 	var entry *links.Link
+	var err error
 	if req.IA.IsZero() {
 		// An unnamed claim — a probe, or a bootstrap joiner whose identity
 		// is not final — deduplicates by the address it claims.
@@ -403,14 +427,7 @@ func (r *Rendezvous) handle(raw []byte, src *net.UDPAddr) ([]byte, error) {
 		}
 		r.changed()
 	}
-	reply := RendezvousReply{
-		Nonce:    req.Nonce,
-		LinkAddr: entry.Local,
-		IfID:     entry.IfID,
-		IA:       r.cfg.IA,
-		Observed: src.AddrPort(),
-	}
-	return reply.Marshal(), nil
+	return entry, nil
 }
 
 // unnamedLinks counts the live entries without a neighbor name — probes and

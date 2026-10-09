@@ -28,7 +28,8 @@ func New() *DB {
 }
 
 // Insert stores a new entry: an entry carrying no interface ID is allocated
-// one, and one carrying an ID takes it, refused when the ID is held.
+// one, and one carrying an ID takes it, refused when the ID is held. A live
+// entry naming a neighbor another live entry names is refused.
 func (d *DB) Insert(ctx context.Context, l *links.Link) error {
 	d.mtx.Lock()
 	defer d.mtx.Unlock()
@@ -40,6 +41,9 @@ func (d *DB) Insert(ctx context.Context, l *links.Link) error {
 			}
 		}
 		return false
+	}
+	if err := links.CheckNeighbor(d.entries, l); err != nil {
+		return err
 	}
 	if l.IfID != 0 {
 		if held(l.IfID) {
@@ -65,12 +69,16 @@ func (d *DB) Insert(ctx context.Context, l *links.Link) error {
 	return nil
 }
 
-// Update replaces the stored entry with the same interface ID.
+// Update replaces the stored entry with the same interface ID, refused when
+// the replacement is live and names a neighbor another live entry names.
 func (d *DB) Update(ctx context.Context, l *links.Link) error {
 	d.mtx.Lock()
 	defer d.mtx.Unlock()
 	for i, e := range d.entries {
 		if e.IfID == l.IfID {
+			if err := links.CheckNeighbor(d.entries, l); err != nil {
+				return err
+			}
 			copied := *l
 			copied.Updated = time.Now()
 			d.entries[i] = &copied

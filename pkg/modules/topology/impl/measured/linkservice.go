@@ -93,8 +93,33 @@ func (s *LinkService) Request(
 			errors.New("interface ID out of range"))
 	}
 
+	// The rendezvous acceptor and the selection's establishment record
+	// entries too; the store refuses a neighbor's second live entry, and a
+	// request that loses that race looks again and refreshes the winner's.
 	s.mtx.Lock()
 	defer s.mtx.Unlock()
+	entry, err := s.record(ctx, peer, linkAddr, uint16(req.Msg.IfId))
+	if errors.Is(err, links.ErrDuplicateNeighbor) {
+		entry, err = s.record(ctx, peer, linkAddr, uint16(req.Msg.IfId))
+	}
+	if err != nil {
+		return nil, err
+	}
+	s.changed()
+	slog.Info("Link established", "neighbor", peer, "local", entry.Local,
+		"remote", entry.Remote, "interface", entry.IfID)
+	return connect.NewResponse(&nodev1.LinkReply{
+		LocalAddr: entry.Local.String(),
+		IfId:      uint32(entry.IfID),
+	}), nil
+}
+
+// record lands the peer's entry as established: a peer the table lacks is
+// admitted under the cap with a fresh link address and interface ID.
+func (s *LinkService) record(
+	ctx context.Context, peer addr.IA, linkAddr netip.AddrPort, remoteIfID uint16,
+) (*links.Link, error) {
+
 	entry, err := s.Store.ByNeighbor(ctx, peer)
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInternal, err)
@@ -116,7 +141,7 @@ func (s *LinkService) Request(
 			NeighborIA: peer,
 			Local:      local,
 			Remote:     linkAddr,
-			RemoteIfID: uint16(req.Msg.IfId),
+			RemoteIfID: remoteIfID,
 			State:      links.StateEstablished,
 		}
 		if err := s.Store.Insert(ctx, entry); err != nil {
@@ -127,19 +152,13 @@ func (s *LinkService) Request(
 		// re-establishment refreshes the requester's addresses without a new
 		// interface ID — the cap never blocks a returning neighbor.
 		entry.Remote = linkAddr
-		entry.RemoteIfID = uint16(req.Msg.IfId)
+		entry.RemoteIfID = remoteIfID
 		entry.State = links.StateEstablished
 		if err := s.Store.Update(ctx, entry); err != nil {
 			return nil, connect.NewError(connect.CodeInternal, err)
 		}
 	}
-	s.changed()
-	slog.Info("Link established", "neighbor", peer, "local", entry.Local,
-		"remote", entry.Remote, "interface", entry.IfID)
-	return connect.NewResponse(&nodev1.LinkReply{
-		LocalAddr: entry.Local.String(),
-		IfId:      uint32(entry.IfID),
-	}), nil
+	return entry, nil
 }
 
 func (s *LinkService) liveLinks(ctx context.Context) (int, error) {

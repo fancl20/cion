@@ -80,8 +80,8 @@ func TestAllocateHoldsRetired(t *testing.T) {
 		t.Fatal(err)
 	}
 	allocated := make(map[uint16]bool)
-	for range 4 {
-		fresh := &links.Link{NeighborIA: ia(4), State: links.StateEstablished}
+	for i := range uint64(4) {
+		fresh := &links.Link{NeighborIA: ia(4 + i), State: links.StateEstablished}
 		if err := db.Insert(ctx, fresh); err != nil {
 			t.Fatal(err)
 		}

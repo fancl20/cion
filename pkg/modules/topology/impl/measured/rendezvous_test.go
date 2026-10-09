@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net"
 	"net/netip"
+	"slices"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -155,6 +156,42 @@ func TestRendezvousNamesCandidate(t *testing.T) {
 	entries, err := f.store.All(context.Background())
 	if err != nil || len(entries) != 1 {
 		t.Fatalf("entries = %v (%v), want the one named", entries, err)
+	}
+}
+
+// TestRendezvousLosesRecordRace checks a claim that loses the race to
+// record its peer: the in-band link service records the peer between the
+// acceptor's lookup and its insert, the store refuses the second live
+// entry, and the claim answers with the recorded entry's side. The test
+// calls the handler: a dial would resend a refused request and mask the
+// handler's own retry.
+func TestRendezvousLosesRecordRace(t *testing.T) {
+	var store *staleStore
+	f := newRendezvousFixture(t, func(cfg *RendezvousConfig) {
+		store = &staleStore{DB: cfg.Store.(*memory.DB)}
+		cfg.Store = store
+	})
+	recorded := liveLink(rendezvousIA, 40001)
+	if err := store.Insert(context.Background(), recorded); err != nil {
+		t.Fatal(err)
+	}
+	store.armed.Store(true)
+	req := RendezvousRequest{IA: rendezvousIA, LinkAddr: recorded.Remote}
+	raw, err := f.handle(req.Marshal(), net.UDPAddrFromAddrPort(recorded.Remote))
+	if err != nil {
+		t.Fatal(err)
+	}
+	reply, err := ParseRendezvousReply(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reply.LinkAddr != recorded.Local || reply.IfID != recorded.IfID {
+		t.Errorf("reply = %v/%d, want the recorded entry's %v/%d",
+			reply.LinkAddr, reply.IfID, recorded.Local, recorded.IfID)
+	}
+	want := []links.State{links.StateEstablished}
+	if got := statesOf(t, f.store, rendezvousIA); !slices.Equal(got, want) {
+		t.Errorf("the peer's entries = %v, want the recorded one alone", got)
 	}
 }
 

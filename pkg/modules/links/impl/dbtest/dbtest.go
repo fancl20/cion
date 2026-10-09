@@ -5,6 +5,7 @@ package dbtest
 
 import (
 	"context"
+	"errors"
 	"net/netip"
 	"testing"
 	"time"
@@ -28,12 +29,13 @@ type TestableDB interface {
 // has at least one test that calls this suite.
 func Run(t *testing.T, db TestableDB) {
 	tests := map[string]func(*testing.T, TestableDB){
-		"insert and read":     testInsertRead,
-		"update":              testUpdate,
-		"lookups":             testLookups,
-		"allocate skips live": testAllocateSkipsLive,
-		"preset interface id": testPresetIfID,
-		"persist across open": testPersist,
+		"insert and read":       testInsertRead,
+		"update":                testUpdate,
+		"lookups":               testLookups,
+		"allocate skips live":   testAllocateSkipsLive,
+		"preset interface id":   testPresetIfID,
+		"persist across open":   testPersist,
+		"one live per neighbor": testOneLivePerNeighbor,
 	}
 	for name, test := range tests {
 		t.Run("DB: "+name, func(t *testing.T) {
@@ -255,5 +257,54 @@ func testPersist(t *testing.T, db TestableDB) {
 	}
 	if fresh.IfID <= l.IfID {
 		t.Errorf("interface ID after reopen = %d, want one past %d", fresh.IfID, l.IfID)
+	}
+}
+
+// testOneLivePerNeighbor checks the table's rule: an insert or an update
+// that would leave two live entries naming one neighbor is refused with
+// ErrDuplicateNeighbor and changes nothing, while unnamed entries are
+// unbound, an entry's own update passes, and a retired entry frees its
+// neighbor.
+func testOneLivePerNeighbor(t *testing.T, db TestableDB) {
+	ctx := context.Background()
+	a := link(iaA, links.StateEstablished)
+	if err := db.Insert(ctx, a); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Insert(ctx, link(iaA, links.StateCandidate)); !errors.Is(err, links.ErrDuplicateNeighbor) {
+		t.Errorf("a second live entry of %s inserted with %v, want ErrDuplicateNeighbor", iaA, err)
+	}
+	unnamed := link(0, links.StateCandidate)
+	if err := db.Insert(ctx, unnamed); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Insert(ctx, link(0, links.StateCandidate)); err != nil {
+		t.Errorf("a second unnamed entry was refused: %v", err)
+	}
+	named := *unnamed
+	named.NeighborIA = iaA
+	if err := db.Update(ctx, &named); !errors.Is(err, links.ErrDuplicateNeighbor) {
+		t.Errorf("an update naming a second live entry of %s returned %v, want ErrDuplicateNeighbor",
+			iaA, err)
+	}
+	got, err := db.ByNeighbor(ctx, iaA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got == nil || got.IfID != a.IfID {
+		t.Fatalf("ByNeighbor after the refusals = %+v, want the first entry", got)
+	}
+
+	a.RemoteIfID = 7
+	if err := db.Update(ctx, a); err != nil {
+		t.Errorf("updating the neighbor's own entry: %v", err)
+	}
+	a.State = links.StateRetired
+	a.Retired = time.Now()
+	if err := db.Update(ctx, a); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Update(ctx, &named); err != nil {
+		t.Errorf("naming an entry after a retired neighbor: %v", err)
 	}
 }

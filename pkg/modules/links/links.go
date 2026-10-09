@@ -1,6 +1,6 @@
-// Package links stores the neighbor table: one entry per neighbor, holding
-// the addresses, interface IDs, and state of the link. The store is the one
-// source of truth — the control plane reads snapshots of it,
+// Package links stores the neighbor table: one live entry per neighbor,
+// holding the addresses, interface IDs, and state of the link. The store is
+// the one source of truth — the control plane reads snapshots of it,
 // and every data plane generation is built from its non-retired entries.
 // Beneath the contract, one package per implementation — the bbolt store
 // under the state directory, the memory store for tests and embeddings that
@@ -12,6 +12,8 @@ package links
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"math"
 	"net/netip"
 	"time"
@@ -97,7 +99,10 @@ func (l *Link) Serving() bool {
 }
 
 // DB is the database of neighbor table entries. Lookup methods report
-// absence as a nil entry with a nil error.
+// absence as a nil entry with a nil error. A write that would leave two
+// live entries naming one neighbor is refused with ErrDuplicateNeighbor,
+// the check running inside the write: writers that each looked the
+// neighbor up and found none cannot both record it.
 type DB interface {
 	// Insert stores a new entry, stamping Created and Updated. An entry
 	// carrying no interface ID is allocated one monotonically from a
@@ -117,6 +122,26 @@ type DB interface {
 	ByNeighbor(ctx context.Context, ia addr.IA) (*Link, error)
 
 	Close() error
+}
+
+// ErrDuplicateNeighbor refuses a write that would leave two live entries
+// naming one neighbor.
+var ErrDuplicateNeighbor = errors.New("a live entry already names the neighbor")
+
+// CheckNeighbor returns ErrDuplicateNeighbor when l is live and names a
+// neighbor that a live entry of entries, other than l's own interface ID,
+// names too — the check each store runs inside the write it guards.
+// Unnamed and retired entries are bound by nothing.
+func CheckNeighbor(entries []*Link, l *Link) error {
+	if !l.Live() || l.NeighborIA.IsZero() {
+		return nil
+	}
+	for _, e := range entries {
+		if e.IfID != l.IfID && e.Live() && e.NeighborIA.Equal(l.NeighborIA) {
+			return fmt.Errorf("neighbor %s: %w", l.NeighborIA, ErrDuplicateNeighbor)
+		}
+	}
+	return nil
 }
 
 // Links maps each live entry's interface ID to its neighbor ISD-AS — the

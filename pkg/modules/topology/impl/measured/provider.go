@@ -475,9 +475,11 @@ func (z *Provider) runJoinDials(ctx context.Context) {
 // and an answered re-dial revives the entry as a candidate, the state flip
 // and the recorded sides, for the sweep to settle by the peer's evidence,
 // exactly as it settles a joiner's. An answer naming a neighbor the table
-// holds live revives nothing. Each check reads the table as the pass's
-// earlier revivals left it. An unanswered re-dial costs a UDP round trip
-// and changes nothing.
+// holds live revives nothing, and the store refuses to name a live entry
+// after it: that entry retires, for its re-dials would retarget the peer's
+// unproven entry for this node to an address no generation serves. Each
+// check reads the table as the pass's earlier revivals left it. An
+// unanswered re-dial costs a UDP round trip and changes nothing.
 func (z *Provider) dialJoins(ctx context.Context) {
 	entries, err := z.pcs.Store.All(ctx)
 	if err != nil {
@@ -503,7 +505,8 @@ func (z *Provider) dialJoins(ctx context.Context) {
 			continue
 		}
 		z.learn(reply.Observed.Addr())
-		if !l.Live() && liveNeighbor(entries, reply.IA) {
+		revival := !l.Live()
+		if revival && liveNeighbor(entries, reply.IA) {
 			slog.Debug("Rendezvous revival answered by a live neighbor",
 				"rendezvous", target, "neighbor", reply.IA)
 			continue
@@ -511,10 +514,26 @@ func (z *Provider) dialJoins(ctx context.Context) {
 		l.NeighborIA = reply.IA
 		l.Remote = reply.LinkAddr
 		l.RemoteIfID = reply.IfID
-		if !l.Live() {
+		if revival {
 			l.State = links.StateCandidate
 		}
-		if err := z.pcs.Store.Update(ctx, l); err != nil {
+		err = z.pcs.Store.Update(ctx, l)
+		if errors.Is(err, links.ErrDuplicateNeighbor) {
+			if revival {
+				continue
+			}
+			l.State = links.StateRetired
+			l.Retired = time.Now()
+			if err := z.pcs.Store.Update(ctx, l); err != nil {
+				slog.Error("Retiring a redundant entry", "err", err)
+				continue
+			}
+			z.notify()
+			slog.Info("Retired an entry whose rendezvous answered for a live neighbor",
+				"neighbor", l.NeighborIA, "interface", l.IfID)
+			continue
+		}
+		if err != nil {
 			slog.Error("Retargeting a seeded neighbor", "err", err)
 			continue
 		}

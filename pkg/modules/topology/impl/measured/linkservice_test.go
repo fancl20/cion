@@ -3,6 +3,8 @@ package measured
 import (
 	"context"
 	"net/netip"
+	"slices"
+	"sync/atomic"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -64,6 +66,52 @@ func linkEntry(t *testing.T, svc *LinkService, peer addr.IA) *links.Link {
 		t.Fatalf("no entry for %s (%v)", peer, err)
 	}
 	return entry
+}
+
+// staleStore is a memory link store whose next neighbor lookup misses once
+// armed: the view of a writer that looked the neighbor up just before
+// another writer recorded it.
+type staleStore struct {
+	*memory.DB
+	armed atomic.Bool
+}
+
+func (s *staleStore) ByNeighbor(ctx context.Context, ia addr.IA) (*links.Link, error) {
+	if s.armed.CompareAndSwap(true, false) {
+		return nil, nil
+	}
+	return s.DB.ByNeighbor(ctx, ia)
+}
+
+// TestLinkServiceLosesRecordRace checks a request that loses the race to
+// record its peer: the rendezvous acceptor records the peer between the
+// service's lookup and its insert, the store refuses the second live entry,
+// and the request refreshes the recorded one, answering with its side.
+func TestLinkServiceLosesRecordRace(t *testing.T) {
+	store := &staleStore{DB: memory.New()}
+	svc := newLinkService(t, func(s *LinkService) { s.Store = store })
+	minted := liveLink(linkIA, 40001)
+	minted.State = links.StateCandidate
+	if err := store.Insert(context.Background(), minted); err != nil {
+		t.Fatal(err)
+	}
+	store.armed.Store(true)
+	reply, err := linkRequest(context.Background(), svc, linkIA, "127.0.0.1:4242", 9)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := netip.MustParseAddrPort(reply.LocalAddr); got != minted.Local ||
+		reply.IfId != uint32(minted.IfID) {
+		t.Errorf("reply = %v/%d, want the recorded entry's %v/%d",
+			got, reply.IfId, minted.Local, minted.IfID)
+	}
+	want := []links.State{links.StateEstablished}
+	if got := statesOf(t, store.DB, linkIA); !slices.Equal(got, want) {
+		t.Errorf("the peer's entries = %v, want the recorded one alone, established", got)
+	}
+	if entry := linkEntry(t, svc, linkIA); entry.IfID != minted.IfID || entry.RemoteIfID != 9 {
+		t.Errorf("the peer's entry = %+v, want the recorded one with the request's side", entry)
+	}
 }
 
 // TestLinkServiceAdmits checks the in-band establishment: the authenticated
