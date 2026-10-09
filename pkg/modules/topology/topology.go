@@ -62,9 +62,10 @@ type Provider interface {
 	Mounts() ([]controlplane.Mount, error)
 	// Run runs the provider's loops until the context is canceled, each in
 	// its own goroutine with a panic absorbed and logged — one loop's bug
-	// must not take the provider's down.
+	// must not take the provider's down — and returns once every loop it
+	// started has returned.
 	Run(ctx context.Context)
-	// Close releases the provider's sockets; Run returns.
+	// Close releases what assembly bound, once Run has returned.
 	Close() error
 }
 

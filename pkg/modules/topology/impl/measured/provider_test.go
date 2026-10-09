@@ -3,9 +3,11 @@ package measured
 import (
 	"context"
 	"errors"
+	"net"
 	"net/netip"
 	"slices"
 	"testing"
+	"time"
 
 	"github.com/scionproto/scion/pkg/addr"
 
@@ -168,6 +170,87 @@ func TestZeroconfMounts(t *testing.T) {
 	if len(got) != 2 || got[0] != linkPath || got[1] != directoryPath {
 		t.Errorf("the core's mounts = %v, want the link and directory services'", got)
 	}
+}
+
+// TestProviderRunReturnsAndCloseReleases checks the provider's loops and
+// sockets: a joiner assembled through Mounts on a loopback host no other
+// test of the package takes, with NewConn drawing real conns, holds Run
+// while its acceptor answers and returns from it once its context is
+// canceled, and after Close a read on each drawn conn reports net.ErrClosed
+// and the rendezvous port binds again.
+func TestProviderRunReturnsAndCloseReleases(t *testing.T) {
+	host := netip.MustParseAddr("127.0.0.122")
+	var drawn []*scion.Conn
+	z, err := New(Config{
+		ControlHost: host,
+		NewConn: func() (*scion.Conn, error) {
+			conn, err := scion.NewConn(scion.ConnConfig{
+				IA:           zeroconfDraw,
+				Bind:         netip.AddrPortFrom(host, 0).String(),
+				InternalAddr: netip.AddrPortFrom(host, 30001).String(),
+				MACKey:       make([]byte, 16),
+			})
+			if err == nil {
+				drawn = append(drawn, conn)
+			}
+			return conn, err
+		},
+		CoreRoute: func() *scion.Addr { return nil },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	z.Wire(topology.Pieces{IA: zeroconfDraw, Store: memory.New()})
+	if _, err := z.Mounts(); err != nil {
+		t.Fatal(err)
+	}
+	if len(drawn) != 2 {
+		t.Fatalf("NewConn drew %d conns, want the directory's and the probe's", len(drawn))
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	returned := make(chan struct{})
+	go func() {
+		z.Run(ctx)
+		close(returned)
+	}()
+	if _, _, err := RendezvousEcho(context.Background(), host,
+		netip.AddrPortFrom(host, RendezvousPort), addr.IA(0),
+		netip.AddrPortFrom(host, 4242)); err != nil {
+		t.Fatalf("the acceptor did not answer while Run served: %v", err)
+	}
+	select {
+	case <-returned:
+		t.Fatal("Run returned before its context ended")
+	default:
+	}
+	cancel()
+	var expired <-chan time.Time
+	if deadline, ok := t.Deadline(); ok {
+		expired = time.After(time.Until(deadline) - 5*time.Second)
+	}
+	select {
+	case <-returned:
+	case <-expired:
+		t.Fatal("Run kept running after its context ended")
+	}
+
+	if err := z.Close(); err != nil {
+		t.Fatalf("Close = %v", err)
+	}
+	for i, conn := range drawn {
+		// A past deadline ends a read on a conn Close left open.
+		_ = conn.SetReadDeadline(time.Now())
+		if _, _, err := conn.ReadFrom(make([]byte, 1)); !errors.Is(err, net.ErrClosed) {
+			t.Errorf("a read on drawn conn %d = %v, want net.ErrClosed", i, err)
+		}
+	}
+	rebound, err := net.ListenUDP("udp",
+		net.UDPAddrFromAddrPort(netip.AddrPortFrom(host, RendezvousPort)))
+	if err != nil {
+		t.Fatalf("rebinding the rendezvous port: %v", err)
+	}
+	_ = rebound.Close()
 }
 
 // TestContract runs the module's shared contract suite: a founding core

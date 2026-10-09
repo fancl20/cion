@@ -356,10 +356,13 @@ func (d *NodeDirectory) Close() error {
 	return nil
 }
 
-// Run owns the publication and fetch cadence until the context is canceled.
+// Run owns the publication and fetch cadence until the context is canceled,
+// returning once both loops have returned.
 func (d *NodeDirectory) Run(ctx context.Context) {
-	go d.runPublish(ctx)
+	var publish sync.WaitGroup
+	runLoop(ctx, &publish, "node directory publication", d.runPublish)
 	d.runFetch(ctx)
+	publish.Wait()
 }
 
 // runPublish waits for enrollment to produce the node's chain, publishes the

@@ -6,8 +6,10 @@ package measured
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/netip"
 	"path/filepath"
 	"sync"
@@ -104,12 +106,14 @@ type Provider struct {
 
 	// mtx guards the one-time assembly of the serving machinery.
 	mtx sync.Mutex
-	// rendezvous, links, directoryStore, directory, and probeConn are the
-	// assembled machinery, built before the first of Mounts and Run.
+	// rendezvous, links, directoryStore, directory, and the two conns drawn
+	// through NewConn are the assembled machinery, built by Mounts before
+	// Run.
 	rendezvous     *Rendezvous
 	links          *LinkService
 	directoryStore *DirectoryStore
 	directory      *NodeDirectory
+	directoryConn  *scion.Conn
 	probeConn      *scion.Conn
 	assembled      bool
 }
@@ -341,6 +345,7 @@ func (z *Provider) assemble() error {
 		if err != nil {
 			return err
 		}
+		z.directoryConn = conn
 		directoryCfg.Conn = conn
 		directoryCfg.CoreRoute = z.cfg.CoreRoute
 	}
@@ -379,37 +384,41 @@ func (z *Provider) Mounts() ([]controlplane.Mount, error) {
 	return mounts, nil
 }
 
-// Run owns the measured provider's loops until the context is canceled: the
+// Run owns the measured provider's loops until the context is canceled — the
 // rendezvous acceptor, the joiner's dials, the node directory's publish and
-// fetch, and the selection sweep.
+// fetch, and the selection sweep — and returns once every one has returned.
+// Mounts assembled what the loops serve.
 func (z *Provider) Run(ctx context.Context) {
-	if err := z.assemble(); err != nil {
-		panic(fmt.Sprintf("assembling the measured provider: %v", err))
-	}
-	if z.rendezvous != nil {
-		runLoop(ctx, "rendezvous", z.rendezvous.Run)
-	}
-	runLoop(ctx, "join dials", z.runJoinDials)
-	if z.directory != nil {
-		runLoop(ctx, "node directory", z.directory.Run)
-	}
-	runLoop(ctx, "selection", func(ctx context.Context) {
+	var loops sync.WaitGroup
+	runLoop(ctx, &loops, "rendezvous", z.rendezvous.Run)
+	runLoop(ctx, &loops, "join dials", z.runJoinDials)
+	runLoop(ctx, &loops, "node directory", z.directory.Run)
+	runLoop(ctx, &loops, "selection", func(ctx context.Context) {
 		RunSelection(ctx, z.selectionConfig())
 	})
+	loops.Wait()
 }
 
-// Close releases the acceptor's and the directory's sockets.
+// Close releases what Mounts bound, once Run has returned: the directory's
+// transport, the two conns drawn through NewConn beneath it, and the
+// acceptor's socket. A provider never assembled releases nothing.
 func (z *Provider) Close() error {
-	var err error
+	var errs []error
 	if z.directory != nil {
-		err = z.directory.Close()
+		errs = append(errs, z.directory.Close())
 	}
-	if z.rendezvous != nil {
-		if cerr := z.rendezvous.Close(); err == nil {
-			err = cerr
+	for _, conn := range []*scion.Conn{z.directoryConn, z.probeConn} {
+		if conn != nil {
+			errs = append(errs, conn.Close())
 		}
 	}
-	return err
+	if z.rendezvous != nil {
+		// Run closes the acceptor's socket as its context ends.
+		if err := z.rendezvous.Close(); !errors.Is(err, net.ErrClosed) {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // selectionConfig builds the topology loop's configuration from the
@@ -576,12 +585,12 @@ func (c *linkClient) Link(
 	return resp.Msg, nil
 }
 
-// runLoop runs one of the provider's long-lived loops in its own goroutine:
-// a panic is logged and absorbed, and a return before the node's
-// cancellation is logged with the loop's name — the node's own supervision,
-// lent to the provider's loops.
-func runLoop(ctx context.Context, name string, fn func(context.Context)) {
-	go func() {
+// runLoop runs one of the provider's long-lived loops in its own goroutine
+// under the wait group: a panic is logged and absorbed, and a return before
+// the node's cancellation is logged with the loop's name — the node's own
+// supervision, lent to the provider's loops.
+func runLoop(ctx context.Context, loops *sync.WaitGroup, name string, fn func(context.Context)) {
+	loops.Go(func() {
 		defer func() {
 			if r := recover(); r != nil {
 				slog.Error("Panic in topology loop", "loop", name, "panic", r)
@@ -591,5 +600,5 @@ func runLoop(ctx context.Context, name string, fn func(context.Context)) {
 		if ctx.Err() == nil {
 			slog.Error("Topology loop exited", "loop", name)
 		}
-	}()
+	})
 }
