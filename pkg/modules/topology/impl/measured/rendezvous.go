@@ -452,7 +452,10 @@ func (r *Rendezvous) changed() {
 // RendezvousEcho sends one request run to the target and returns the reply
 // with the round trip, the measurement the selection loop probes candidates
 // with. The requester claims the given address; a probe claims its control
-// address, a promotion its link address.
+// address, a promotion its link address. The context's end moves the read
+// deadline to the past, ending a wait in flight; each attempt reads the
+// context after setting its own deadline, so no attempt overrides the move
+// unseen.
 func RendezvousEcho(
 	ctx context.Context,
 	bindHost netip.Addr,
@@ -467,6 +470,8 @@ func RendezvousEcho(
 		return RendezvousReply{}, 0, fmt.Errorf("binding the rendezvous client: %w", err)
 	}
 	defer func() { _ = conn.Close() }()
+	stop := context.AfterFunc(ctx, func() { _ = conn.SetReadDeadline(time.Now()) })
+	defer stop()
 	var req RendezvousRequest
 	if _, err := rand.Read(req.Nonce[:]); err != nil {
 		return RendezvousReply{}, 0, err
@@ -479,6 +484,9 @@ func RendezvousEcho(
 	// holds the longest form an IPv6 reply takes.
 	buf := make([]byte, 192)
 	for range RendezvousAttempts {
+		if err := conn.SetReadDeadline(time.Now().Add(RendezvousAttemptWait)); err != nil {
+			return RendezvousReply{}, 0, err
+		}
 		if err := ctx.Err(); err != nil {
 			return RendezvousReply{}, 0, err
 		}
@@ -486,13 +494,10 @@ func RendezvousEcho(
 		if _, err := conn.WriteToUDP(raw, udpAddr(target)); err != nil {
 			return RendezvousReply{}, 0, err
 		}
-		if err := conn.SetReadDeadline(sent.Add(RendezvousAttemptWait)); err != nil {
-			return RendezvousReply{}, 0, err
-		}
 		for {
 			n, _, err := conn.ReadFromUDP(buf)
 			if err != nil {
-				break // the wait elapsed: lost, retry
+				break // the wait elapsed or the context ended: lost, retry
 			}
 			reply, err := ParseRendezvousReply(buf[:n])
 			if err != nil || reply.Nonce != req.Nonce {

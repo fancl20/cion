@@ -212,7 +212,7 @@ func TestMeasureExcluded(t *testing.T) {
 			return echoes[routeKey(c)]
 		},
 	}
-	ts := s.windowTiers(neighbors, entries, samples)
+	ts := s.windowTiers(t.Context(), neighbors, entries, samples)
 	if len(ts) != 2 {
 		t.Fatalf("tiers = %d, want the fast one and E's", len(ts))
 	}

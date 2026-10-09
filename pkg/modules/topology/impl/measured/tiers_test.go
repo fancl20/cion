@@ -115,7 +115,7 @@ func TestWindowTierFacts(t *testing.T) {
 	d.carrier = &d.candidates[0]
 	samples := map[addr.IA]sample{selA: a, selB: b, selC: c, selD: d}
 
-	ts := s.windowTiers(neighbors, entries, samples)
+	ts := s.windowTiers(t.Context(), neighbors, entries, samples)
 	if len(ts) != 2 {
 		t.Fatalf("tiers = %d, want the fast one and the slow one", len(ts))
 	}

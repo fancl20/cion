@@ -2,6 +2,7 @@ package measured
 
 import (
 	"context"
+	"net"
 	"net/netip"
 	"sync/atomic"
 	"testing"
@@ -1028,6 +1029,97 @@ func TestSelectionSweepGrace(t *testing.T) {
 		}
 		_ = answering
 	})
+}
+
+// TestSelectionCancelledPassLandsNothing checks a pass its context ends
+// mid-window: a grace echo the end cut short is no silence, so the stale
+// candidate keeps its entry, and the window's samples promote and declare
+// nothing though the floor stands unmet with a reachable candidate in view.
+// The sweep reads the clock, so the test runs in a bubble.
+func TestSelectionCancelledPassLandsNothing(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		f := newSelFixture(t, selPeer) // below the floor
+		f.sel.cfg.Window = 50 * time.Millisecond
+		latencies := controlplane.NewLinkLatency()
+		f.sel.cfg.Latencies = latencies
+		if err := f.store.Insert(context.Background(), &links.Link{
+			NeighborIA: selB,
+			Local:      netip.MustParseAddrPort("127.0.0.1:40003"),
+			Remote:     netip.MustParseAddrPort("127.0.0.1:40004"),
+			State:      links.StateCandidate,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		time.Sleep(60 * time.Millisecond) // the candidate outlives the window
+		f.candidate(selA, 30*time.Millisecond, 10*time.Millisecond)
+
+		// The context ends during the sweep's grace echo, which goes
+		// unanswered.
+		ctx, cancel := context.WithCancel(context.Background())
+		f.sel.aliveFn = func(*links.Link) bool {
+			cancel()
+			return false
+		}
+		f.refresh()
+		f.sel.pass(ctx)
+		if f.state(t, selB) != links.StateCandidate {
+			t.Error("the candidate whose grace echo the end cut short retired")
+		}
+		if len(f.established) != 0 {
+			t.Errorf("promoted %v, want nothing", f.established)
+		}
+		if got := latencies.Sample(f.ifID(t, selPeer)); got != 0 {
+			t.Errorf("declared one-way delay = %v, want nothing declared", got)
+		}
+	})
+}
+
+// TestEchoRTTEndsWithItsContext checks the SCMP echo's wait: a probe no one
+// answers, its context ending once the first request is out, returns well
+// inside the run's ProbeWait — the end cuts the wait short, and no next run
+// starts. A plain UDP socket stands in for the router the requests leave
+// through.
+func TestEchoRTTEndsWithItsContext(t *testing.T) {
+	host := netip.MustParseAddr("127.0.0.1")
+	router, err := net.ListenUDP("udp", net.UDPAddrFromAddrPort(netip.AddrPortFrom(host, 0)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = router.Close() }()
+	conn, err := scion.NewConn(scion.ConnConfig{
+		IA:           selIA,
+		Bind:         netip.AddrPortFrom(host, 0).String(),
+		InternalAddr: router.LocalAddr().String(),
+		MACKey:       make([]byte, 16),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = conn.Close() }()
+	s := &selection{cfg: SelectionConfig{Conn: conn}}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	returned := make(chan struct{})
+	start := time.Now()
+	go func() {
+		s.echoRTT(ctx, &scion.Addr{
+			IA:   selPeer,
+			Addr: netip.AddrPortFrom(host, 30041),
+			IfID: 1,
+		})
+		close(returned)
+	}()
+	if _, _, err := router.ReadFromUDP(make([]byte, 2048)); err != nil {
+		t.Fatal(err)
+	}
+	cancel()
+	<-returned
+	// The run's deadline is set after start: a wait the end does not cut
+	// short holds the probe a full ProbeWait.
+	if held := time.Since(start); held >= ProbeWait {
+		t.Errorf("echoRTT returned after %v, want under ProbeWait", held)
+	}
 }
 
 // TestSelectionScopeFilter checks the candidate skip's scope filter: a

@@ -2,6 +2,7 @@ package measured
 
 import (
 	"context"
+	"errors"
 	"net"
 	"net/netip"
 	"testing"
@@ -332,5 +333,41 @@ func TestRendezvousWireFormat(t *testing.T) {
 	bad[0] = 9
 	if _, err := ParseRendezvousRequest(bad); err == nil {
 		t.Error("an unsupported version parsed")
+	}
+}
+
+// TestRendezvousEchoEndsWithItsContext checks the rendezvous echo's wait: a
+// dial no acceptor answers, its context ending once the first request is
+// out, returns the context's error well inside the attempt's
+// RendezvousAttemptWait — the end cuts the wait short, and no next attempt
+// starts.
+func TestRendezvousEchoEndsWithItsContext(t *testing.T) {
+	host := netip.MustParseAddr("127.0.0.1")
+	silent, err := net.ListenUDP("udp", net.UDPAddrFromAddrPort(netip.AddrPortFrom(host, 0)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = silent.Close() }()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	echoed := make(chan error, 1)
+	start := time.Now()
+	go func() {
+		_, _, err := RendezvousEcho(ctx, host, silent.LocalAddr().(*net.UDPAddr).AddrPort(),
+			addr.IA(0), netip.AddrPortFrom(host, 4242))
+		echoed <- err
+	}()
+	if _, _, err := silent.ReadFromUDP(make([]byte, 192)); err != nil {
+		t.Fatal(err)
+	}
+	cancel()
+	if err := <-echoed; !errors.Is(err, context.Canceled) {
+		t.Errorf("RendezvousEcho = %v, want the context's end", err)
+	}
+	// The attempt's deadline is set after start: a wait the end does not
+	// cut short holds the dial a full RendezvousAttemptWait.
+	if held := time.Since(start); held >= RendezvousAttemptWait {
+		t.Errorf("RendezvousEcho returned after %v, want under RendezvousAttemptWait", held)
 	}
 }

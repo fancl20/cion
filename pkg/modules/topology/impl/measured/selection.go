@@ -202,7 +202,8 @@ type sample struct {
 	carrier    *scion.Candidate
 }
 
-// pass runs one evaluation window.
+// pass runs one evaluation window. A context that ends mid-window cuts the
+// probes short, and their samples land nothing.
 func (s *selection) pass(ctx context.Context) {
 	if s.streaks == nil {
 		s.streaks = make(map[addr.IA]*peerStreak)
@@ -238,6 +239,10 @@ func (s *selection) pass(ctx context.Context) {
 		candidates = append(candidates, e)
 		samples[e.IA] = s.measure(ctx, e, nil)
 	}
+	ts := s.windowTiers(ctx, neighbors, entriesByIA, samples)
+	if ctx.Err() != nil {
+		return
+	}
 	s.declare(neighbors, samples)
 	if s.cfg.Stranded != nil {
 		reachable := false
@@ -251,7 +256,6 @@ func (s *selection) pass(ctx context.Context) {
 		// it knows.
 		s.cfg.Stranded.Store(s.upCount(neighbors) < NeighborFloor && !reachable)
 	}
-	ts := s.windowTiers(neighbors, entriesByIA, samples)
 	s.count(neighbors, ts)
 	// Damp the promotions: a candidate is promoted on sustained evidence
 	// only, a flapping one never.
@@ -302,7 +306,8 @@ func (s *selection) sweep(ctx context.Context, entries []*links.Link) bool {
 				"neighbor", l.NeighborIA, "interface", l.IfID)
 			changed = true
 		} else if now.Sub(l.Created) > window {
-			if s.candidateAlive(ctx, l) {
+			// An echo the context's end cut short is no silence.
+			if s.candidateAlive(ctx, l) || ctx.Err() != nil {
 				continue
 			}
 			s.retire(ctx, l, "candidate window elapsed without a proven peer")
@@ -518,7 +523,7 @@ func (s *selection) establish(ctx context.Context, e DirectoryEntry, why string)
 func (s *selection) probe(ctx context.Context, e DirectoryEntry, l *links.Link) sample {
 	var m measurement
 	if l != nil {
-		m.direct = s.echoRTT(&scion.Addr{
+		m.direct = s.echoRTT(ctx, &scion.Addr{
 			IA:   e.IA,
 			Addr: netip.AddrPortFrom(e.ControlAddr.Addr(), dataplane.EndhostPort),
 		})
@@ -538,18 +543,20 @@ func (s *selection) probe(ctx context.Context, e DirectoryEntry, l *links.Link) 
 	// comparator reads the two round trips against each other.
 	if c := s.freshest(candidates); c != nil {
 		sm.carrier = c
-		sm.m.path = s.pathEcho(e, c)
+		sm.m.path = s.pathEcho(ctx, e, c)
 	}
 	return sm
 }
 
 // pathEcho takes the median SCMP echo round trip to the peer over the
 // candidate's path, through the test seam when set.
-func (s *selection) pathEcho(e DirectoryEntry, c *scion.Candidate) time.Duration {
+func (s *selection) pathEcho(
+	ctx context.Context, e DirectoryEntry, c *scion.Candidate,
+) time.Duration {
 	if s.pathEchoFn != nil {
 		return s.pathEchoFn(e.IA, c)
 	}
-	return s.echoRTT(&scion.Addr{
+	return s.echoRTT(ctx, &scion.Addr{
 		IA:   e.IA,
 		Addr: netip.AddrPortFrom(e.ControlAddr.Addr(), dataplane.EndhostPort),
 		Path: c.Path,
@@ -572,24 +579,32 @@ func (s *selection) declare(neighbors map[addr.IA]*links.Link, samples map[addr.
 
 // echoRTT takes the median SCMP echo round trip to the destination — over
 // the one-hop path the conn resolves for a neighbor, over the supplied path
-// for the baseline. Zero without a probe conn.
-func (s *selection) echoRTT(dst *scion.Addr) time.Duration {
+// for the baseline. Zero without a probe conn. The context's end moves the
+// read deadline to the past, ending a wait in flight; each run reads the
+// context after setting its own deadline, so no run overrides the move
+// unseen.
+func (s *selection) echoRTT(ctx context.Context, dst *scion.Addr) time.Duration {
 	if s.cfg.Conn == nil {
 		return 0
 	}
+	stop := context.AfterFunc(ctx, func() { _ = s.cfg.Conn.SetReadDeadline(time.Now()) })
+	defer stop()
 	var rtts []time.Duration
 	for seq := range uint16(ProbeRuns) {
-		sent := time.Now()
-		if err := s.cfg.Conn.WriteEchoRequestTo(dst, seq, nil); err != nil {
+		if err := s.cfg.Conn.SetReadDeadline(time.Now().Add(ProbeWait)); err != nil {
 			continue
 		}
-		if err := s.cfg.Conn.SetReadDeadline(time.Now().Add(ProbeWait)); err != nil {
+		if ctx.Err() != nil {
+			break
+		}
+		sent := time.Now()
+		if err := s.cfg.Conn.WriteEchoRequestTo(dst, seq, nil); err != nil {
 			continue
 		}
 		for {
 			echo, _, err := s.cfg.Conn.ReadEchoFrom()
 			if err != nil {
-				break // the wait elapsed: lost
+				break // the wait elapsed or the context ended: lost
 			}
 			if !echo.Reply || echo.Identifier != s.cfg.Conn.LocalPort() || echo.Seq != seq {
 				continue

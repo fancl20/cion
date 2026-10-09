@@ -1,6 +1,7 @@
 package measured
 
 import (
+	"context"
 	"slices"
 	"sort"
 	"time"
@@ -105,6 +106,7 @@ func deriveTiers(samples map[addr.IA]sample) []tier {
 // candidate that crosses a signaled interface or one of the node's down
 // links is no route, so it prices nothing and counts as nothing.
 func (s *selection) windowTiers(
+	ctx context.Context,
 	neighbors map[addr.IA]*links.Link,
 	entries map[addr.IA]DirectoryEntry,
 	samples map[addr.IA]sample,
@@ -144,7 +146,7 @@ func (s *selection) windowTiers(
 		t.stranded = len(t.upLinks) == 0 && t.baseline == 0
 		t.excluded = make(map[addr.IA]excludedSample, len(up))
 		for ia, link := range up {
-			t.excluded[ia] = s.measureExcluded(t, clean, samples, entries, link)
+			t.excluded[ia] = s.measureExcluded(ctx, t, clean, samples, entries, link)
 		}
 	}
 	return ts
@@ -159,6 +161,7 @@ func (s *selection) windowTiers(
 // socket, in the evaluation window — measurement stays the selector's
 // instrument.
 func (s *selection) measureExcluded(
+	ctx context.Context,
 	t *tier,
 	clean map[addr.IA][]*scion.Candidate,
 	samples map[addr.IA]sample,
@@ -188,7 +191,7 @@ func (s *selection) measureExcluded(
 	if freshest == nil {
 		return ex
 	}
-	ex.echo = s.pathEcho(entries[dst], freshest)
+	ex.echo = s.pathEcho(ctx, entries[dst], freshest)
 	echoes := []time.Duration{ex.echo}
 	probed := map[*scion.Candidate]bool{freshest: true}
 	for _, m := range t.members {
