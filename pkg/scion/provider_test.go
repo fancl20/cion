@@ -1001,6 +1001,147 @@ func TestEnumerateDeclaredLatency(t *testing.T) {
 	}
 }
 
+// TestEnumerateSkipsRetiredInterfaces checks the live filter: a candidate
+// naming one of the node's own interfaces the link-table snapshot lacks
+// never composes — the interface the up part arrives on, or either
+// interface of the node's entry on a down segment — while the candidates
+// over live interfaces compose as before, and a nil snapshot filters
+// nothing.
+func TestEnumerateSkipsRetiredInterfaces(t *testing.T) {
+	up := signedLine(t, time.Now(),
+		linkHop{ia: iaCore, eg: 11},
+		linkHop{ia: iaLeaf, in: 14},
+	)
+	down := signedLine(t, time.Now(),
+		linkHop{ia: iaCore, eg: 21},
+		linkHop{ia: iaDest, in: 22},
+	)
+	// The node sits mid-segment on a second down segment: its entry names
+	// the interface toward the core and the one toward the destination.
+	through := signedLine(t, time.Now(),
+		linkHop{ia: iaCore, eg: 31},
+		linkHop{ia: iaLeaf, in: 32, eg: 33},
+		linkHop{ia: iaDest, in: 34},
+	)
+	db := &fakePathDB{}
+	if _, err := db.Insert(context.Background(), &pathdb.Segment{
+		Type: pathdb.SegmentTypeUp,
+		PCB:  up,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var live map[uint16]addr.IA
+	p := &PathProvider{
+		IA: iaLeaf,
+		DB: db,
+		Lookup: func(context.Context, addr.IA) []*pathdb.Segment {
+			return []*pathdb.Segment{
+				{Type: pathdb.SegmentTypeDown, PCB: down},
+				{Type: pathdb.SegmentTypeDown, PCB: through},
+			}
+		},
+		Links: func() map[uint16]addr.IA { return live },
+	}
+	naming := func(candidates []Candidate, ifID uint16) int {
+		n := 0
+		for _, c := range candidates {
+			if slices.Contains(c.Links, segment.LinkID{IA: iaLeaf, IfID: ifID}) {
+				n++
+			}
+		}
+		return n
+	}
+
+	// The join over the up segment leaves through 14; the meeting at the
+	// node's entry on the second down segment — enumerated twice, as the
+	// down-only meeting and as the up segment's meeting there — through 33.
+	for _, tc := range []struct {
+		name          string
+		live          map[uint16]addr.IA
+		join, meeting int
+	}{
+		{"every interface live", map[uint16]addr.IA{14: iaCore, 32: iaCore, 33: iaDest}, 1, 2},
+		{"the up part's interface retired", map[uint16]addr.IA{32: iaCore, 33: iaDest}, 0, 2},
+		{"the entry's core-ward interface retired", map[uint16]addr.IA{14: iaCore, 33: iaDest}, 1, 0},
+		{"the entry's onward interface retired", map[uint16]addr.IA{14: iaCore, 32: iaCore}, 1, 0},
+		{"a nil snapshot", nil, 1, 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			live = tc.live
+			candidates, err := p.Enumerate(context.Background(), iaDest)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(candidates) != tc.join+tc.meeting {
+				t.Errorf("candidates = %d, want %d", len(candidates), tc.join+tc.meeting)
+			}
+			if got := naming(candidates, 14); got != tc.join {
+				t.Errorf("candidates leaving through 14 = %d, want %d", got, tc.join)
+			}
+			if got := naming(candidates, 33); got != tc.meeting {
+				t.Errorf("candidates leaving through 33 = %d, want %d", got, tc.meeting)
+			}
+		})
+	}
+}
+
+// TestProviderLocalPathSkipsRetiredInterface checks the live filter on the
+// local resolution: LocalPath and Path pass over the freshest up segment
+// the node terminated on a retired interface for a staler one on a live
+// interface, and resolve nothing when every containing segment arrived on
+// a retired one.
+func TestProviderLocalPathSkipsRetiredInterface(t *testing.T) {
+	fresh := signedLine(t, time.Now(),
+		linkHop{ia: iaCore, eg: 11},
+		linkHop{ia: iaLeaf, in: 14},
+	)
+	stale := signedLine(t, time.Now().Add(-time.Hour),
+		linkHop{ia: iaCore, eg: 21},
+		linkHop{ia: iaLeaf, in: 24},
+	)
+	db := &fakePathDB{}
+	for _, pcb := range []*segment.PCB{fresh, stale} {
+		if _, err := db.Insert(context.Background(), &pathdb.Segment{
+			Type: pathdb.SegmentTypeUp,
+			PCB:  pcb,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	live := map[uint16]addr.IA{24: iaCore}
+	p := &PathProvider{
+		IA:     iaLeaf,
+		DB:     db,
+		Lookup: func(context.Context, addr.IA) []*pathdb.Segment { return nil },
+		Links:  func() map[uint16]addr.IA { return live },
+	}
+
+	path, err := p.LocalPath(iaCore)
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkHops(t, path, stale.Entries[1], stale.Entries[0])
+	path, err = p.Path(context.Background(), iaCore)
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkHops(t, path, stale.Entries[1], stale.Entries[0])
+
+	// Without the filter the freshest segment serves, retired or not.
+	p.Links = nil
+	path, err = p.LocalPath(iaCore)
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkHops(t, path, fresh.Entries[1], fresh.Entries[0])
+
+	// Every containing segment arrived on a retired interface: no route.
+	p.Links = func() map[uint16]addr.IA { return map[uint16]addr.IA{} }
+	if _, err := p.LocalPath(iaCore); err == nil {
+		t.Error("LocalPath over retired interfaces only succeeded, want no path")
+	}
+}
+
 // TestProviderEntriesTiebreak checks the rank's third tiebreak: two joins
 // tied on hops and timestamp resolve to the pair with fewer entries.
 func TestProviderEntriesTiebreak(t *testing.T) {

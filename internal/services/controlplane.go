@@ -302,6 +302,7 @@ func (n *node) buildBeaconing() error {
 		Bootstrap:     beaconer.BootstrapRoute,
 		Cores:         cores,
 		InterfaceDown: n.ifDown,
+		Links:         n.linkTable,
 	}
 	return nil
 }

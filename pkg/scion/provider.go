@@ -41,6 +41,13 @@ type PathProvider struct {
 	// interface until the entry lapses, keeping a crossing path only when
 	// nothing else exists. Nil composes without the filter.
 	InterfaceDown *InterfaceDownCache
+	// Links snapshots the node's live interfaces and their neighbors, the
+	// link table every consumer of the link set reads. A segment through an
+	// interface the node retired stays until it expires, while the data
+	// plane serves the interface no more: composition drops every path
+	// naming one of the node's own interfaces the snapshot lacks, never a
+	// last resort. Nil, or a nil snapshot, composes without the filter.
+	Links func() map[uint16]addr.IA
 }
 
 // LocalPath resolves a data-plane path from local state only: up segments
@@ -159,8 +166,10 @@ func (c *Candidate) Before(o *Candidate) bool {
 // sufficing — never composes, for a survivor crossing the excluded link
 // would answer the excluded baseline's question falsely; a signaled
 // interface keeps its demote-to-last-resort semantics, a flagged candidate.
-// The local ISD-AS is the one error, a caller mistake failed fast at entry;
-// an unreachable destination is the empty answer.
+// A candidate naming one of the node's own interfaces the live snapshot
+// lacks never composes either, the snapshot taken once per call. The local
+// ISD-AS is the one error, a caller mistake failed fast at entry; an
+// unreachable destination is the empty answer.
 func (p *PathProvider) Enumerate(
 	ctx context.Context, dst addr.IA, exclude ...segment.LinkID,
 ) ([]Candidate, error) {
@@ -172,11 +181,12 @@ func (p *PathProvider) Enumerate(
 	for _, link := range exclude {
 		excluded[link] = true
 	}
+	live := p.liveInterfaces()
 	downs := p.Lookup(ctx, dst)
 	ups := p.upSegments()
 	var out []Candidate
 	emit := func(up *pathdb.Segment, mUp int, down *pathdb.Segment, mDown int) error {
-		c, err := p.compose(up, mUp, down, mDown, excluded)
+		c, err := p.compose(up, mUp, down, mDown, excluded, live)
 		if err != nil {
 			return err
 		}
@@ -221,12 +231,14 @@ func (p *PathProvider) Enumerate(
 
 // compose builds the candidate of one meeting — the up segment truncated at
 // its entry mUp, the down segment at its entry mDown, either side optional —
-// or nil when an excluded link names a hop of either traversed stretch: the
-// exclusion hard-filters before composition, never a flagged survivor.
+// or nil when a hop of either traversed stretch names an excluded link or
+// one of the node's own interfaces the live snapshot lacks: both filters
+// drop the candidate before composition, never a flagged survivor.
 func (p *PathProvider) compose(
 	up *pathdb.Segment, mUp int,
 	down *pathdb.Segment, mDown int,
 	excluded map[segment.LinkID]bool,
+	live map[uint16]addr.IA,
 ) (*Candidate, error) {
 
 	// A meeting at the local node carries no up part: the reversed up
@@ -252,7 +264,7 @@ func (p *PathProvider) compose(
 		crossing = crossing || p.crossesFrom(down, mDown)
 	}
 	for _, link := range links {
-		if excluded[link] {
+		if excluded[link] || link.IA.Equal(p.IA) && retired(live, link.IfID) {
 			return nil, nil
 		}
 	}
@@ -400,13 +412,20 @@ func (p *PathProvider) upSegments() []*pathdb.Segment {
 // containingUp returns the freshest up segment whose entries contain the
 // given ISD-AS and that entry's index — a core at the origin, an on-path AS
 // mid-segment — the freshest one that crosses no signaled interface, the
-// freshest crossing one kept when nothing else exists.
+// freshest crossing one kept when nothing else exists. A segment the node
+// terminated on an interface the live snapshot lacks serves neither.
 func (p *PathProvider) containingUp(ia addr.IA) (*pathdb.Segment, int) {
+	live := p.liveInterfaces()
 	var best, clean *pathdb.Segment
 	bestAt, cleanAt := -1, -1
 	for _, seg := range p.upSegments() {
 		at := seg.PCB.IndexOfIA(ia)
 		if at < 0 {
+			continue
+		}
+		// The node's own entry terminates the segment, its ingress the
+		// interface the beacon arrived on.
+		if retired(live, seg.PCB.Entries[len(seg.PCB.Entries)-1].Hop.ConsIngress) {
 			continue
 		}
 		if freshest(best, seg) == seg {
@@ -420,6 +439,24 @@ func (p *PathProvider) containingUp(ia addr.IA) (*pathdb.Segment, int) {
 		return clean, cleanAt
 	}
 	return best, bestAt
+}
+
+// liveInterfaces snapshots the node's live interfaces; nil filters nothing.
+func (p *PathProvider) liveInterfaces() map[uint16]addr.IA {
+	if p.Links == nil {
+		return nil
+	}
+	return p.Links()
+}
+
+// retired reports whether the live snapshot lacks one of the node's own
+// interfaces; a nil snapshot lacks none.
+func retired(live map[uint16]addr.IA, ifID uint16) bool {
+	if live == nil {
+		return false
+	}
+	_, ok := live[ifID]
+	return !ok
 }
 
 // freshest picks the freshest of two segments — nil keeps the other — by

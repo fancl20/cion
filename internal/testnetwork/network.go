@@ -581,6 +581,7 @@ func StartNode(t *testing.T, cfg NodeConfig) *Node {
 		Lookup:    lookup.Down,
 		Bootstrap: beaconer.BootstrapRoute,
 		Cores:     cores,
+		Links:     linkTableOf(linkStore),
 	}
 
 	var webPKIConf *tls.Config
