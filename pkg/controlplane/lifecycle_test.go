@@ -119,6 +119,62 @@ func (f *lifecycleFixture) enroll(t *testing.T) {
 	}
 }
 
+// enrollPassOf runs one non-core pass, failing the test on a terminal
+// failure, and returns the wait it asks for.
+func enrollPassOf(t *testing.T, ctx context.Context, cfg EnrollmentConfig) time.Duration {
+	t.Helper()
+	wait, err := cfg.enrollPass(ctx)
+	if err != nil {
+		t.Fatalf("enrollment pass: %v", err)
+	}
+	return wait
+}
+
+// absentVoting is the caster of a core that hosts no voting application.
+type absentVoting struct{}
+
+func (absentVoting) SubmitTRC(context.Context, cppki.SignedTRC) (cppki.SignedTRC, error) {
+	return cppki.SignedTRC{}, trust.ErrNoVotingApp
+}
+
+// TestEnrollmentStopsWithoutVotingApp checks the onboarding's terminal
+// failure in a fake-time bubble: an enrolled joining core whose cast finds
+// no voting application makes RunEnrollment return it at that pass, with
+// the context still live — which RunEnrollment does only once its chain
+// sweep has returned.
+func TestEnrollmentStopsWithoutVotingApp(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		f := newTrustFixture(t)
+		lf := newLifecycleFixture(t, f)
+		lf.enroll(t)
+		state := t.TempDir()
+		key, err := trust.LoadOrCreateVotingKey(state)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cert, err := trust.LoadOrCreateVotingCert(state, nodeIATest, key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cfg := lf.cfg
+		cfg.VotingKey, cfg.VotingCert, cfg.Caster = key, cert, absentVoting{}
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		done := make(chan error, 1)
+		go func() { done <- RunEnrollment(ctx, cfg) }()
+		synctest.Wait()
+		select {
+		case err := <-done:
+			if !errors.Is(err, trust.ErrNoVotingApp) {
+				t.Fatalf("RunEnrollment = %v, want the absent voting application", err)
+			}
+		default:
+			t.Fatal("RunEnrollment still runs after the onboarding's terminal failure")
+		}
+	})
+}
+
 // TestEnrollmentPasses checks the lifecycle loop's decisions: a valid chain
 // with enough remaining validity only inspects; below the renewal threshold
 // it re-enrolls; past expiry it re-enrolls after logging an error. The
@@ -133,7 +189,7 @@ func TestEnrollmentPasses(t *testing.T) {
 		// Fresh chain: three days of validity, well above the one-day
 		// threshold — no enrollment, calm inspection interval.
 		lf.cfg.InspectInterval = 7 * time.Minute
-		if got := lf.cfg.enrollPass(ctx); got != 7*time.Minute {
+		if got := enrollPassOf(t, ctx, lf.cfg); got != 7*time.Minute {
 			t.Errorf("pass interval = %v, want the inspection interval", got)
 		}
 		if got := lf.core.renewals(); got != 0 {
@@ -143,7 +199,7 @@ func TestEnrollmentPasses(t *testing.T) {
 		// Approaching expiry: the clock advances past the threshold —
 		// re-enroll, fast retry cadence.
 		time.Sleep(trust.ASValidity - trust.ChainRenewalThreshold + time.Minute)
-		if got := lf.cfg.enrollPass(ctx); got != time.Millisecond {
+		if got := enrollPassOf(t, ctx, lf.cfg); got != time.Millisecond {
 			t.Errorf("pass interval = %v, want the retry interval", got)
 		}
 		if got := lf.core.renewals(); got != 1 {
@@ -165,7 +221,7 @@ func TestEnrollmentPasses(t *testing.T) {
 
 		// Past expiry: still re-enrolling, never settled.
 		time.Sleep(3 * trust.ASValidity)
-		if got := lf.cfg.enrollPass(ctx); got != time.Millisecond {
+		if got := enrollPassOf(t, ctx, lf.cfg); got != time.Millisecond {
 			t.Errorf("pass interval = %v, want the retry interval past expiry", got)
 		}
 		if got := lf.core.renewals(); got != 2 {
@@ -184,7 +240,7 @@ func TestEnrollmentPassFailing(t *testing.T) {
 		lf.core.issuer = nil // the core goes dark
 		time.Sleep(2 * trust.ASValidity)
 
-		if got := lf.cfg.enrollPass(context.Background()); got != time.Millisecond {
+		if got := enrollPassOf(t, context.Background(), lf.cfg); got != time.Millisecond {
 			t.Errorf("pass interval = %v, want the retry interval while failing", got)
 		}
 		if got := lf.core.renewals(); got != 0 {
@@ -215,7 +271,7 @@ func TestEnrollmentPassUnreadableChains(t *testing.T) {
 	cfg := lf.cfg
 	cfg.DB = unreadableChainsDB{DB: lf.db}
 
-	if got := cfg.enrollPass(ctx); got != time.Millisecond {
+	if got := enrollPassOf(t, ctx, cfg); got != time.Millisecond {
 		t.Errorf("pass interval = %v, want the retry interval", got)
 	}
 	if got := lf.core.renewals(); got != 0 {

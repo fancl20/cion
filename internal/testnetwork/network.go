@@ -621,18 +621,22 @@ func StartNode(t *testing.T, cfg NodeConfig) *Node {
 	if core {
 		go func() {
 			defer handlePanic()
-			controlplane.RunCoreEnrollment(ctx, controlplane.EnrollmentConfig{
+			if err := controlplane.RunCoreEnrollment(ctx, controlplane.EnrollmentConfig{
 				IA: ia, DB: trustDB, Key: asKey, Issuer: issuer,
 				RetryInterval: EnrollRetry, Timeout: time.Second,
-			})
+			}); err != nil {
+				slog.Error("core enrollment exited", "err", err)
+			}
 		}()
 	} else {
 		go func() {
 			defer handlePanic()
-			controlplane.RunEnrollment(ctx, controlplane.EnrollmentConfig{
+			if err := controlplane.RunEnrollment(ctx, controlplane.EnrollmentConfig{
 				IA: ia, DB: trustDB, Key: asKey, Remote: coreClt,
 				RetryInterval: EnrollRetry, Timeout: time.Second,
-			})
+			}); err != nil {
+				slog.Error("enrollment exited", "err", err)
+			}
 		}()
 	}
 	go func() {

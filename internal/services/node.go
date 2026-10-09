@@ -401,24 +401,20 @@ func (n *node) start(ctx context.Context) {
 				Engine: n.engine,
 			}))
 	})
-	runBackground(ctx, "echo responder", func(ctx context.Context) error {
-		n.responder.Run(ctx)
-		return nil
-	})
+	runBackground(ctx, "echo responder", n.responder.Run)
 	runBackground(ctx, "topology provider", func(ctx context.Context) error {
 		n.topology.Run(ctx)
 		return nil
 	})
 	if n.ident.asType == trust.ASTypeCore {
 		runBackground(ctx, "core enrollment", func(ctx context.Context) error {
-			controlplane.RunCoreEnrollment(ctx, controlplane.EnrollmentConfig{
+			return controlplane.RunCoreEnrollment(ctx, controlplane.EnrollmentConfig{
 				IA:            n.ident.ia,
 				DB:            n.trustDB,
 				Key:           n.asKey,
 				Issuer:        n.issuer,
 				RetryInterval: n.cfg.Pacing.Enrollment,
 			})
-			return nil
 		})
 		// The founder's rotation watch: its own three certificates roll
 		// inside the cast it signs itself, serialized on the decision the
@@ -453,7 +449,6 @@ func (n *node) start(ctx context.Context) {
 			enrollment.VotingKey = n.votingKey
 			enrollment.VotingCert = n.votingCert
 			enrollment.Caster = caster
-			enrollment.Fatal = n.fatal
 			// The authoritative core's rotation watch: its certificate rolls
 			// through the same channel its join used, by a regular update
 			// its current key votes on.
@@ -472,7 +467,11 @@ func (n *node) start(ctx context.Context) {
 			})
 		}
 		runBackground(ctx, "enrollment", func(ctx context.Context) error {
-			controlplane.RunEnrollment(ctx, enrollment)
+			// The joining core's onboarding failure is terminal: it stops
+			// the node, and Run returns it.
+			if err := controlplane.RunEnrollment(ctx, enrollment); err != nil {
+				n.fatal(err)
+			}
 			return nil
 		})
 	}

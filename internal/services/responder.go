@@ -33,9 +33,9 @@ type responder struct {
 	conn *scion.Conn
 }
 
-// Run serves echo replies until the context is canceled or the socket
-// fails.
-func (r *responder) Run(ctx context.Context) {
+// Run serves echo replies until the context is canceled, returning nil, or
+// until the socket's read fails, returning the failure.
+func (r *responder) Run(ctx context.Context) error {
 	go func() {
 		<-ctx.Done()
 		_ = r.conn.Close()
@@ -43,10 +43,10 @@ func (r *responder) Run(ctx context.Context) {
 	for {
 		echo, from, err := r.conn.ReadEchoFrom()
 		if err != nil {
-			if ctx.Err() == nil {
-				slog.Error("Echo responder exited", "err", err)
+			if ctx.Err() != nil {
+				return nil
 			}
-			return
+			return fmt.Errorf("reading echo requests: %w", err)
 		}
 		if echo.Reply {
 			continue
