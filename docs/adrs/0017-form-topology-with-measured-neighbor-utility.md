@@ -1,6 +1,6 @@
 # Form the Topology with Measured Neighbor Utility
 
-*   Status: proposed
+*   Status: accepted
 *   Date: 2026-10-03
 
 [TOC]

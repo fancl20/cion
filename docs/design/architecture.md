@@ -161,11 +161,12 @@ SCION library's socket.
 The topology source meets candidate peers at the rendezvous exchange —
 first contact, admission probe, and a joiner's establishment in one — and
 learns of them from the core-served node directory. Admitted links enter the
-neighbor table; the selection loop then measures every peer and keeps a
-direct link only while it beats the composed-path alternative, holding a
-resilience floor and changing slowly, because every change reshapes paths
-network-wide. Membership changes land as generation swaps: the new data
-plane is built from the neighbor table's snapshot and the old one retires.
+neighbor table; the selection loop then measures every peer and keeps a link
+for what it adds into the region beyond its peer — a cheaper route or an
+independent one — holding a resilience floor and changing slowly, because
+every change reshapes paths network-wide. Membership changes land as
+generation swaps: the new data plane is built from the neighbor table's
+snapshot and the old one retires.
 Liveness runs beside the source: a session per link feeds the monitor, whose
 verdict stops forwarding on a dead link and resumes it on recovery — a state
 flip within the same generation, faster and reversible where membership

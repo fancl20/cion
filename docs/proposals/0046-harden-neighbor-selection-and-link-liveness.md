@@ -358,3 +358,64 @@ it adds into the region beyond its peer.
     `TestBFDStaticLabEpisode`, recover by the handshake; and
     `TestNodeConfigValidate` and `TestJoinDeniedByEnrollAuth` stand for
     decisions 9 and 10.
+
+## Implementation history
+
+*   Landed in six commits: bab745f, the path layer
+    ([provider.go](/pkg/scion/provider.go)); c2941ed, the stranded flag,
+    the revivals, and the cap; 63f57c0, the BFD verdict
+    ([bfd.go](/pkg/controlplane/bfd.go),
+    [monitor.go](/pkg/controlplane/monitor.go)); dbba33b, the WireGuard
+    pick ([route.go](/pkg/apps/wireguard/route.go)), which keeps each
+    route's freshest instance in `freshestPerRoute`; 943c79d, pricing and
+    retirement together, for the useless test reads the excluded price;
+    and the commit that flips ADR-0017, the lab and this record. The
+    selection loop's changes live in
+    [selection.go](/pkg/modules/topology/impl/measured/selection.go),
+    [tiers.go](/pkg/modules/topology/impl/measured/tiers.go),
+    [queries.go](/pkg/modules/topology/impl/measured/queries.go), and
+    [provider.go](/pkg/modules/topology/impl/measured/provider.go).
+*   A revival re-dials an entry the acceptor minted only once the entry
+    names its peer. An unnamed retired entry is re-dialed only when it
+    records the rendezvous address it was seeded with (`revivable`): the
+    entries a probe mints on the acceptor name no peer, so no live entry
+    can be checked against them.
+*   A useless retirement's ties at equal harm go to the slower direct
+    sample, as the eviction's do.
+*   The lab, `TestStrandedTierHeals`
+    ([stranded_test.go](/internal/testnetwork/stranded_test.go)), departs
+    from the plan's topology. The one-way delays are 1, 15, and 40 ms.
+    Each side is a full mesh by its joins, G joining A and F, D joining A
+    and C, and E joining C and D, so C's and D's links to A are the only
+    bridges. While the sides form, E is blackholed from A, beside F and G
+    from the far side. The blackholes lift before the cut, and the lab
+    waits for every probe across the sides to land with no link crossing,
+    so the link that forms after the cut answers the cut. The shaping
+    helpers are test code
+    ([netem_test.go](/internal/testnetwork/netem_test.go)): `ownNetns`,
+    `shapeLoopback`, `steer`, and `lift`.
+*   The planned topology linked the sides before the cut. Its detour
+    through a sibling, 12 ms, sat half a millisecond inside the demotion
+    ratio over the 10 ms between A and a far node, and with every far node
+    joined to A, each bridge was useless beside the other two. Under the
+    loopback's noise the bridges retired and returned, and the stale
+    segments the churn left read the far tier as stranded at F and G,
+    whose rescue crossed early, a consequence the ADR accepts. The landed
+    delays keep every comparison clear of its ratio, the two bridges hold
+    each other by the route count, and E's blackhole keeps a node whose
+    joins are not yet proven from linking A for its floor, which would add
+    a third bridge.
+*   The unit episodes live beside their code: the path layer's in
+    [provider_test.go](/pkg/scion/provider_test.go), where what
+    `TestEnumerateExclusion` held beyond the exclusion became
+    `TestEnumerateLastResortAndBounds`; pricing, stranding, retirement,
+    the cap, and the equilibrium in
+    [queries_test.go](/pkg/modules/topology/impl/measured/queries_test.go),
+    [tiers_test.go](/pkg/modules/topology/impl/measured/tiers_test.go),
+    and
+    [selection_test.go](/pkg/modules/topology/impl/measured/selection_test.go);
+    revival in `TestSelectionStrandedFlag` and
+    [provider_test.go](/pkg/modules/topology/impl/measured/provider_test.go);
+    BFD in [bfd_test.go](/pkg/controlplane/bfd_test.go) and
+    [monitor_test.go](/pkg/controlplane/monitor_test.go); and the pick in
+    [route_test.go](/pkg/apps/wireguard/route_test.go).
