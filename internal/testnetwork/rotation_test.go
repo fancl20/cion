@@ -10,6 +10,8 @@ import (
 	"crypto/x509/pkix"
 	"encoding/asn1"
 	"encoding/pem"
+	"errors"
+	"io/fs"
 	"math/big"
 	"os"
 	"path/filepath"
@@ -25,6 +27,7 @@ import (
 	"github.com/fancl20/cion/internal/services"
 	"github.com/fancl20/cion/pkg/modules/trustdb"
 	trustbbolt "github.com/fancl20/cion/pkg/modules/trustdb/impl/bbolt"
+	"github.com/fancl20/cion/pkg/statefile"
 	"github.com/fancl20/cion/pkg/trust"
 )
 
@@ -33,7 +36,7 @@ import (
 const seedValidity = 6 * time.Hour
 
 // seedFounder writes the founding core's pre-seeded state: the identity, the
-// four persisted keys, and the trust database pinning the base TRC the
+// four live keys, and the trust database pinning the base TRC the
 // material signs — the founder's three certificates and the authoritative's
 // one, all short-dated, both ASes named cores.
 func seedFounder(
@@ -104,13 +107,7 @@ func seedAuthoritative(t *testing.T, ia addr.IA) (string, crypto.Signer, *x509.C
 	cert := mintVotingCert(t, ia, key, false)
 	persistIAFile(t, state, ia)
 	persistKeyFile(t, state, trust.RegularKeyFile, key)
-	if err := os.MkdirAll(filepath.Join(state, "keys"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(state, "keys", trust.RegularVotingCertFile),
-		pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: cert.Raw}), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	persistCertFile(t, state, trust.RegularVotingCertFile, cert)
 	return state, key, cert
 }
 
@@ -293,12 +290,18 @@ func persistKeyFile(t *testing.T, state, name string, key crypto.Signer) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	dir := filepath.Join(state, "keys")
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	if err := statefile.Write(filepath.Join(state, "keys", name),
+		pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der})); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, name),
-		pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der}), 0o600); err != nil {
+}
+
+// persistCertFile writes a certificate under the state directory's keys
+// folder.
+func persistCertFile(t *testing.T, state, name string, cert *x509.Certificate) {
+	t.Helper()
+	if err := statefile.Write(filepath.Join(state, "keys", name),
+		pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: cert.Raw})); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -311,9 +314,9 @@ func persistKeyFile(t *testing.T, state, name string, key crypto.Signer) {
 // discovers the successors from the founder's signed messages and a node
 // enrolled after the founder's pin holds a chain under the fresh root, while
 // the founder's own pre-pin chain keeps verifying through the grace;
-// replacing the authoritative's persisted voting pair fires the mismatch
-// roll at the next pass, a sensitive update the founder votes on at its
-// admission policy's allow.
+// replacing the authoritative's live voting pair fires the mismatch roll at
+// the next pass, a sensitive update the founder votes on at its admission
+// policy's allow.
 func TestCoresRotateByTRCUpdate(t *testing.T) {
 	t.Parallel()
 	wpki := NewWebPKI(t)
@@ -400,12 +403,15 @@ func TestCoresRotateByTRCUpdate(t *testing.T) {
 		}
 		pred = successor
 	}
-	// The staged sets persisted: each holder's disk holds the keys its
-	// successor's certificates cover. A roll pins the TRC before it persists
-	// the pair, so the poll waits the persist out — which is also what keeps
-	// the stranger pair below overwriting the settled pair, not one a landing
-	// roll is still writing.
-	Poll(t, "the founder's staged keys to persist", func() bool {
+	// The rolls promoted: each holder's live files hold the keys its
+	// successor's certificates cover, and no staged file remains. A roll
+	// pins its successor before it promotes, so the polls wait for the
+	// promotion, which also keeps a late promotion from overwriting the
+	// stranger pair below.
+	Poll(t, "the founder's roll to promote", func() bool {
+		if hasStaged(t, founderState) {
+			return false
+		}
 		keys, err := trust.LoadOrCreateCoreKeys(founderState)
 		if err != nil {
 			t.Fatal(err)
@@ -417,7 +423,10 @@ func TestCoresRotateByTRCUpdate(t *testing.T) {
 		}
 		return true
 	})
-	Poll(t, "the authoritative's staged pair to persist", func() bool {
+	Poll(t, "the authoritative's roll to promote", func() bool {
+		if hasStaged(t, authState) {
+			return false
+		}
 		key, err := trust.LoadOrCreateVotingKey(authState)
 		if err != nil {
 			t.Fatal(err)
@@ -461,18 +470,13 @@ func TestCoresRotateByTRCUpdate(t *testing.T) {
 		t.Errorf("the post-pin chain does not verify under the fresh root: %v", err)
 	}
 
-	// Replacing the authoritative's persisted voting pair fires the mismatch
-	// roll at the next pass, whatever the calendar says: a sensitive update,
-	// for the persisted key no longer votes for the certificate the newest
-	// TRC names.
+	// Replacing the authoritative's live voting pair fires the mismatch roll
+	// at the next pass, whatever the calendar says: a sensitive update, for
+	// the live key no longer votes for the certificate the newest TRC names.
 	stranger := mintKey(t)
 	strangerCert := mintVotingCert(t, authIA, stranger, false)
 	persistKeyFile(t, authState, trust.RegularKeyFile, stranger)
-	if err := os.WriteFile(filepath.Join(authState, "keys", trust.RegularVotingCertFile),
-		pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: strangerCert.Raw}),
-		0o600); err != nil {
-		t.Fatal(err)
-	}
+	persistCertFile(t, authState, trust.RegularVotingCertFile, strangerCert)
 	mismatch := pollRolled(t, b, authIA, authRolled)
 	if mismatch.TRC.ID.Serial <= authRolled.TRC.ID.Serial {
 		t.Fatalf("the mismatch roll's serial = %d, want past the landed roll's %d",
@@ -481,6 +485,89 @@ func TestCoresRotateByTRCUpdate(t *testing.T) {
 	pred = pinnedRung(t, a, founderIA.ISD(), mismatch.TRC.ID.Serial-1)
 	if got := updateType(t, mismatch, pred); got != cppki.SensitiveUpdate {
 		t.Errorf("the mismatch roll is a %v update, want a sensitive one", got)
+	}
+}
+
+// TestFounderBootPromotesStagedRoll checks a founder stopped between its
+// roll's pin and the promotion: booted again, it promotes the staged keys,
+// so its live keys cover the successor's certificates and no staged file
+// remains, and a node that joins it holds a chain that verifies against the
+// successor alone.
+func TestFounderBootPromotesStagedRoll(t *testing.T) {
+	t.Parallel()
+	wpki := NewWebPKI(t)
+	ipA, ipB := hostSlot(t), hostSlot(t)
+	state := t.TempDir()
+	boot := func() *assemblyNode {
+		return bootAssembly(t, func(cfg *services.NodeConfig) {
+			cfg.Core = true
+			cfg.State = state
+			cfg.Internal = PinnedUDPAddrOn(t, ipA)
+			cfg.Control = FreeUDPAddrOn(t, ipA)
+			cfg.CertFile = wpki.certFile
+			cfg.KeyFile = wpki.keyFile
+		})
+	}
+
+	// The founder starts and stops, and its roll pins on the stopped node's
+	// state directory, leaving the staged keys unpromoted.
+	a := boot()
+	ia := a.app.IA()
+	a.cancel()
+	a.app.Close()
+	ctx := context.Background()
+	db, err := trustbbolt.New(filepath.Join(state, "trust.db"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pred, err := db.SignedTRC(ctx, cppki.TRCID{
+		ISD: ia.ISD(), Base: scrypto.LatestVer, Serial: scrypto.LatestVer,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, rolled, err := trust.RotateCoreKeys(ctx, db, state, ia, pred)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if !hasStaged(t, state) {
+		t.Fatal("the roll left no staged file")
+	}
+
+	// The second boot promotes the staged keys.
+	a = boot()
+	keys, err := trust.LoadOrCreateCoreKeys(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, cert := range trust.CertsOf(rolled.TRC, ia) {
+		if !covers(keys, cert) {
+			t.Errorf("the live keys do not cover the successor's %s", cert.Subject)
+		}
+	}
+	if hasStaged(t, state) {
+		t.Error("the staged file outlived the boot")
+	}
+
+	// A node that joins the founder holds a chain under the successor's
+	// root.
+	b := bootAssembly(t, func(cfg *services.NodeConfig) {
+		cfg.State = t.TempDir()
+		cfg.Internal = PinnedUDPAddrOn(t, ipB)
+		cfg.Control = FreeUDPAddrOn(t, ipB)
+		cfg.Neighbors = []string{a.rendezvousOf()}
+		cfg.RootCAs = wpki.pool
+	})
+	Poll(t, "the joiner to enroll", func() bool {
+		return holdsAssemblyChain(t, b, b.app.IA())
+	})
+	if err := cppki.VerifyChain(ownChain(t, b), cppki.VerifyOptions{
+		TRC: []*cppki.TRC{&rolled.TRC}, CurrentTime: time.Now(),
+	}); err != nil {
+		t.Errorf("the joiner's chain does not verify against the successor alone: %v", err)
 	}
 }
 
@@ -599,4 +686,18 @@ func covers(keys trust.CoreKeys, cert *x509.Certificate) bool {
 		}
 	}
 	return false
+}
+
+// hasStaged reports whether the state directory holds a staged file: a roll
+// not yet promoted.
+func hasStaged(t *testing.T, state string) bool {
+	t.Helper()
+	_, err := os.Stat(filepath.Join(state, "keys", trust.StagedFile))
+	if errors.Is(err, fs.ErrNotExist) {
+		return false
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	return true
 }

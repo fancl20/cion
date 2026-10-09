@@ -11,6 +11,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/fancl20/cion/pkg/statefile"
 )
 
 // ExternalHostFile holds the learned external host in the state directory's
@@ -72,7 +74,7 @@ func (h *externalHost) observe(host netip.Addr) error {
 		return nil
 	}
 	if h.path != "" {
-		if err := os.WriteFile(h.path, []byte(host.String()+"\n"), 0o600); err != nil {
+		if err := statefile.Write(h.path, []byte(host.String()+"\n")); err != nil {
 			return err
 		}
 	}

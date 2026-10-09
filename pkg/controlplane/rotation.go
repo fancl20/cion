@@ -19,8 +19,8 @@ import (
 // the enrollment loops that rolls the trust material the node itself holds —
 // the founder's sensitive and regular voting certificates and its root
 // certificate, an authoritative core's regular one — before the earliest
-// expiry among them crosses the threshold, or the moment the persisted keys
-// and the newest TRC's certificates disagree, whatever the calendar says.
+// expiry among them crosses the threshold, or the moment the live keys and
+// the newest TRC's certificates disagree, whatever the calendar says.
 // The founder casts its roll alone, serialized on the decision; the
 // authoritative submits through the channel its join used.
 type RotationConfig struct {
@@ -28,10 +28,12 @@ type RotationConfig struct {
 	IA addr.IA
 	// DB holds the pinned TRCs.
 	DB trustdb.DB
-	// State is the state directory whose keys folder holds the persisted
-	// voting material. Each pass rereads it, so a replacement of the material
-	// — the crash between a pin and its persist, or an operator evicting a
-	// compromised key — is seen at the next pass.
+	// State is the state directory whose keys folder holds the voting
+	// material: the live files the node signs with, and a roll's staged file
+	// until a pinned TRC names it. Each pass promotes a staged file the
+	// newest pinned TRC names and rereads the live files, so an operator's
+	// replacement of the material, such as the eviction of a compromised
+	// key, is seen at the next pass.
 	State string
 	// Decider serializes the founder's own cast and holds the sensitive
 	// signer the roll swaps; the founder's watch alone. Nil on the
@@ -73,9 +75,10 @@ func (cfg RotationConfig) threshold() time.Duration {
 
 // RunRotation runs the rotation watch of a core: a calm inspection interval
 // while nothing is due, the retry cadence while a cast is failing. Each pass
-// reads the newest pinned TRC and the certificates in it the node itself
-// holds, finds their earliest expiry, and rolls inside the threshold — or on
-// the mismatch a persisted key and the newest TRC's certificates disagree on.
+// reads the newest pinned TRC, promotes a staged file it names, reads the
+// certificates in it the node itself holds, finds their earliest expiry, and
+// rolls inside the threshold — or on the mismatch a live key and the newest
+// TRC's certificates disagree on.
 func RunRotation(ctx context.Context, cfg RotationConfig) {
 	for {
 		select {
@@ -89,9 +92,9 @@ func RunRotation(ctx context.Context, cfg RotationConfig) {
 // rotationPass runs one watch inspection: it returns how long to wait before
 // the next one — the calm inspection interval while the node's material is
 // beyond the threshold and agrees with the pin, the retry cadence while a
-// roll is due or failing. Beyond the threshold the pass reports what
-// logTRCValidity reports; within it the holder rolls, the report escalating
-// with the expiry while the casts fail.
+// roll is due or failing, or a promotion is. Beyond the threshold the pass
+// reports what logTRCValidity reports; within it the holder rolls, the report
+// escalating with the expiry while the casts fail.
 func (cfg RotationConfig) rotationPass(ctx context.Context) time.Duration {
 	newest, err := cfg.DB.SignedTRC(ctx, cppki.TRCID{
 		ISD:    cfg.IA.ISD(),
@@ -107,20 +110,26 @@ func (cfg RotationConfig) rotationPass(ctx context.Context) time.Duration {
 		// core's onboarding cast is the enrollment loop's until it lands.
 		return cfg.interval(cfg.InspectInterval, ChainInspectInterval)
 	}
+	// A roll that pinned and failed to promote its staged material completes
+	// here, before the live files are read.
+	if _, err := trust.PromoteStaged(cfg.State, cfg.IA, newest.TRC); err != nil {
+		slog.Error("Promoting the staged voting material", "isd_as", cfg.IA, "err", err)
+		return cfg.interval(cfg.RetryInterval, EnrollmentRetryInterval)
+	}
 	owned := trust.CertsOf(newest.TRC, cfg.IA)
 	due, err := cfg.materialDue(owned)
 	if err != nil {
-		slog.Error("Reading the persisted voting material", "isd_as", cfg.IA, "err", err)
+		slog.Error("Reading the live voting material", "isd_as", cfg.IA, "err", err)
 		return cfg.interval(cfg.RetryInterval, EnrollmentRetryInterval)
 	}
 	if due.lost {
-		slog.Error("The persisted sensitive key is not the one the newest TRC names; "+
+		slog.Error("The live sensitive key is not the one the newest TRC names; "+
 			"the vote it alone can cast is the recovery, and its loss is the redeploy",
 			"isd_as", cfg.IA, "trc", newest.TRC.ID)
 		return cfg.interval(cfg.InspectInterval, ChainInspectInterval)
 	}
 	if due.mismatch {
-		slog.Warn("The persisted voting material disagrees with the newest TRC; rolling",
+		slog.Warn("The live voting material disagrees with the newest TRC; rolling",
 			"isd_as", cfg.IA, "trc", newest.TRC.ID)
 	} else if due.remaining > cfg.threshold() {
 		return cfg.interval(cfg.InspectInterval, ChainInspectInterval)
@@ -145,18 +154,18 @@ type materialState struct {
 	// remaining is the earliest expiry among the certificates the newest TRC
 	// names for the node.
 	remaining time.Duration
-	// mismatch reports a persisted key the newest TRC's certificate no
-	// longer covers.
+	// mismatch reports a live key the newest TRC's certificate no longer
+	// covers.
 	mismatch bool
-	// lost reports a persisted sensitive key the newest TRC's sensitive
+	// lost reports a live sensitive key the newest TRC's sensitive
 	// certificate no longer covers: the vote it alone can cast is the
 	// recovery, and its loss is the redeploy the quorum-one coupling
 	// records — nothing the node does can advance it.
 	lost bool
 }
 
-// materialDue reads the persisted voting material and reports its state
-// against the certificates the newest TRC names for the node.
+// materialDue reads the live voting material and reports its state against
+// the certificates the newest TRC names for the node.
 func (cfg RotationConfig) materialDue(owned []*x509.Certificate) (materialState, error) {
 	state := materialState{remaining: time.Until(owned[0].NotAfter)}
 	for _, cert := range owned[1:] {
@@ -224,13 +233,17 @@ func (cfg RotationConfig) roll(ctx context.Context) error {
 			if err != nil {
 				return err
 			}
+			// The node signs with the material the pin names before the disk
+			// catches up: the decision votes with the fresh sensitive key, the
+			// assignment made under the mutex the cast holds, and the issuer
+			// issues under the fresh root. A promotion that fails here
+			// completes at the next pass.
+			cfg.Decider.Sensitive = keys.Sensitive
 			if err := cfg.Issuer.Rekey(keys, completed); err != nil {
 				return err
 			}
-			// The decision votes with the fresh sensitive key from the pin on,
-			// the assignment made under the mutex the cast holds.
-			cfg.Decider.Sensitive = keys.Sensitive
-			return nil
+			_, err = trust.PromoteStaged(cfg.State, cfg.IA, completed.TRC)
+			return err
 		})
 	}
 	return trust.RollVotingKey(attemptCtx, cfg.DB, cfg.Remote, cfg.Caster, cfg.IA, cfg.State)

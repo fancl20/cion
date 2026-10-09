@@ -139,11 +139,11 @@ func (i *Issuer) ensureCACertLocked() (*x509.Certificate, error) {
 	return caCert, nil
 }
 
-// Rekey rekeys the issuer under the successor a rotation pinned: the fresh
-// root and CA keys taking the place of the persisted ones, the CA certificate
+// Rekey rekeys the issuer under the successor a rotation pinned: the staged
+// root and CA keys taking the place of the ones it held, the CA certificate
 // minted afresh under the successor's root certificate, the chains issuing
-// under it from the pin on. The rotation's pin step — the completed successor
-// already verified, the staged set already persisted.
+// under it from the pin on. The successor is already verified and pinned; the
+// live key files catch up when the staged keys are promoted.
 func (i *Issuer) Rekey(keys CoreKeys, trc cppki.SignedTRC) error {
 	i.mtx.Lock()
 	defer i.mtx.Unlock()

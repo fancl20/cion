@@ -79,6 +79,9 @@ run no loops of their own and hold no policy.
     joiner's first verified fetch of it.
 *   **Peer identity** — the verified chain's identity, shared as middleware
     by every authenticated channel.
+*   **State files** — the files a node keeps in its state directory, written
+    whole: a reader sees the old content or the new one, and a crash leaves
+    one of the two.
 
 ### Modules
 

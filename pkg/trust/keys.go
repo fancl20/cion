@@ -19,6 +19,8 @@ import (
 
 	"github.com/scionproto/scion/pkg/addr"
 	"github.com/scionproto/scion/pkg/scrypto/cppki"
+
+	"github.com/fancl20/cion/pkg/statefile"
 )
 
 // Names of the key files inside the state directory's keys folder. All keys
@@ -42,6 +44,10 @@ const (
 	// CAKeyFile holds the CP CA key of the founding core. It signs AS
 	// certificates; the matching certificate is never placed in the TRC.
 	CAKeyFile = "cp-ca.key"
+	// StagedFile holds a roll's fresh material from before anything can pin
+	// it until a pinned TRC names it: PEM blocks, each one's File header
+	// naming the live file the block replaces.
+	StagedFile = "staged.pem"
 )
 
 // CoreKeys is the key material of the founding core.
@@ -106,30 +112,24 @@ func GenerateIA() (addr.IA, error) {
 // persisting a new one on first start. The key MACs only the node's own hop
 // fields, so it needs no coordination.
 func LoadOrCreateForwardingKey(stateDir string) ([]byte, error) {
-	path := filepath.Join(keyDir(stateDir), ForwardingKeyFile)
-	if raw, err := os.ReadFile(path); err == nil {
-		key, err := hex.DecodeString(strings.TrimSpace(string(raw)))
-		if err != nil {
-			return nil, fmt.Errorf("%s: %w", path, err)
-		}
-		if len(key) == 0 {
-			return nil, fmt.Errorf("%s: key must not be empty", path)
-		}
-		return key, nil
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return nil, err
-	}
-	key := make([]byte, 16)
-	if _, err := rand.Read(key); err != nil {
-		return nil, err
-	}
-	if err := os.MkdirAll(keyDir(stateDir), 0o700); err != nil {
-		return nil, err
-	}
-	if err := writeFile(path, []byte(hex.EncodeToString(key)+"\n")); err != nil {
-		return nil, err
-	}
-	return key, nil
+	return statefile.LoadOrCreate(filepath.Join(keyDir(stateDir), ForwardingKeyFile),
+		func(raw []byte) ([]byte, error) {
+			key, err := hex.DecodeString(strings.TrimSpace(string(raw)))
+			if err != nil {
+				return nil, err
+			}
+			if len(key) == 0 {
+				return nil, errors.New("key must not be empty")
+			}
+			return key, nil
+		},
+		func() ([]byte, []byte, error) {
+			key := make([]byte, 16)
+			if _, err := rand.Read(key); err != nil {
+				return nil, nil, err
+			}
+			return key, []byte(hex.EncodeToString(key) + "\n"), nil
+		})
 }
 
 // LoadOrCreateASKey returns the node's AS key, generating and persisting a
@@ -181,39 +181,32 @@ func LoadOrCreateVotingCert(
 	key crypto.Signer,
 ) (*x509.Certificate, error) {
 
-	path := filepath.Join(keyDir(stateDir), RegularVotingCertFile)
-	if raw, err := os.ReadFile(path); err == nil {
-		block, _ := pem.Decode(raw)
-		if block == nil {
-			return nil, fmt.Errorf("%s: no PEM block", path)
-		}
-		cert, err := x509.ParseCertificate(block.Bytes)
-		if err != nil {
-			return nil, fmt.Errorf("%s: %w", path, err)
-		}
-		if err := checkVotingCert(cert, ia, key); err != nil {
-			return nil, fmt.Errorf("%s: %w", path, err)
-		}
-		return cert, nil
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return nil, err
-	}
-	// Whole seconds and the signing backdate, the genesis certificates'
-	// own shape, so the certificate covers the successor TRC's validity from
-	// its first second.
-	now := time.Now().UTC().Add(signingBackdate).Truncate(time.Second)
-	cert, err := createVotingCert(ia, key, false, now)
-	if err != nil {
-		return nil, err
-	}
-	if err := os.MkdirAll(keyDir(stateDir), 0o700); err != nil {
-		return nil, err
-	}
-	if err := writeFile(path, pem.EncodeToMemory(
-		&pem.Block{Type: "CERTIFICATE", Bytes: cert.Raw})); err != nil {
-		return nil, err
-	}
-	return cert, nil
+	return statefile.LoadOrCreate(filepath.Join(keyDir(stateDir), RegularVotingCertFile),
+		func(raw []byte) (*x509.Certificate, error) {
+			block, _ := pem.Decode(raw)
+			if block == nil {
+				return nil, errors.New("no PEM block")
+			}
+			cert, err := x509.ParseCertificate(block.Bytes)
+			if err != nil {
+				return nil, err
+			}
+			if err := checkVotingCert(cert, ia, key); err != nil {
+				return nil, err
+			}
+			return cert, nil
+		},
+		func() (*x509.Certificate, []byte, error) {
+			// Whole seconds and the signing backdate, the genesis
+			// certificates' own shape, so the certificate covers the
+			// successor TRC's validity from its first second.
+			now := time.Now().UTC().Add(signingBackdate).Truncate(time.Second)
+			cert, err := createVotingCert(ia, key, false, now)
+			if err != nil {
+				return nil, nil, err
+			}
+			return cert, pem.EncodeToMemory(certBlock(cert)), nil
+		})
 }
 
 // checkVotingCert checks that the persisted voting certificate is the regular
@@ -242,23 +235,18 @@ func keyDir(stateDir string) string {
 // loadOrCreateKey returns the private key stored under dir/name, generating
 // and persisting a new ECDSA P-256 key if the file does not exist yet.
 func loadOrCreateKey(dir, name string) (crypto.Signer, error) {
-	path := filepath.Join(dir, name)
-	if raw, err := os.ReadFile(path); err == nil {
-		return parseKey(raw, path)
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return nil, err
-	}
-	key, err := generateKey()
-	if err != nil {
-		return nil, err
-	}
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return nil, err
-	}
-	if err := persistKey(path, key); err != nil {
-		return nil, err
-	}
-	return key, nil
+	return statefile.LoadOrCreate(filepath.Join(dir, name), parseKey,
+		func() (crypto.Signer, []byte, error) {
+			key, err := generateKey()
+			if err != nil {
+				return nil, nil, err
+			}
+			block, err := keyBlock(key)
+			if err != nil {
+				return nil, nil, err
+			}
+			return key, pem.EncodeToMemory(block), nil
+		})
 }
 
 // generateKey mints a fresh ECDSA P-256 signing key, the curve all SCION
@@ -271,108 +259,46 @@ func generateKey() (crypto.Signer, error) {
 	return key, nil
 }
 
-// generateCoreKeys mints the founding core's four fresh keys in memory alone:
-// the rotation's staged set, persisted only once the successor carrying its
-// certificates is pinned.
-func generateCoreKeys() (CoreKeys, error) {
-	sensitive, err := generateKey()
-	if err != nil {
-		return CoreKeys{}, err
-	}
-	regular, err := generateKey()
-	if err != nil {
-		return CoreKeys{}, err
-	}
-	root, err := generateKey()
-	if err != nil {
-		return CoreKeys{}, err
-	}
-	ca, err := generateKey()
-	if err != nil {
-		return CoreKeys{}, err
-	}
-	return CoreKeys{Sensitive: sensitive, Regular: regular, Root: root, CA: ca}, nil
-}
-
-// persistKey writes the key under path, replacing whatever file held the
-// predecessor.
-func persistKey(path string, key crypto.Signer) error {
+// keyBlock returns the key's PEM block, the form a key file holds it in.
+func keyBlock(key crypto.Signer) (*pem.Block, error) {
 	der, err := x509.MarshalPKCS8PrivateKey(key)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	return writeFile(path, pem.EncodeToMemory(
-		&pem.Block{Type: "PRIVATE KEY", Bytes: der},
-	))
+	return &pem.Block{Type: "PRIVATE KEY", Bytes: der}, nil
 }
 
-// PersistCoreKeys replaces the founding core's persisted key material as a
-// set — the rotation's completed pin landing on disk, the fresh voting and
-// root keys beside the CA key rotating with them. A crash ahead of the
-// replacement leaves the predecessor's keys serving, and the next pass rolls
-// again; nothing references the fresh keys until the TRC carrying their
-// certificates is pinned.
-func PersistCoreKeys(stateDir string, keys CoreKeys) error {
-	dir := keyDir(stateDir)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return err
-	}
-	for _, entry := range []struct {
-		file string
-		key  crypto.Signer
-	}{
-		{SensitiveKeyFile, keys.Sensitive},
-		{RegularKeyFile, keys.Regular},
-		{RootKeyFile, keys.Root},
-		{CAKeyFile, keys.CA},
-	} {
-		if err := persistKey(filepath.Join(dir, entry.file), entry.key); err != nil {
-			return fmt.Errorf("%s: %w", entry.file, err)
-		}
-	}
-	return nil
+// certBlock returns the certificate's PEM block, the form a certificate file
+// holds it in.
+func certBlock(cert *x509.Certificate) *pem.Block {
+	return &pem.Block{Type: "CERTIFICATE", Bytes: cert.Raw}
 }
 
-// PersistVotingPair replaces the authoritative core's persisted voting pair,
-// the fresh certificate beside the fresh key exactly as the joiner's first
-// pair persisted.
-func PersistVotingPair(stateDir string, key crypto.Signer, cert *x509.Certificate) error {
-	dir := keyDir(stateDir)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return err
-	}
-	if err := persistKey(filepath.Join(dir, RegularKeyFile), key); err != nil {
-		return err
-	}
-	return writeFile(votingCertPath(stateDir), pem.EncodeToMemory(
-		&pem.Block{Type: "CERTIFICATE", Bytes: cert.Raw}))
-}
-
-func parseKey(raw []byte, path string) (crypto.Signer, error) {
+// parseKey parses the key a key file holds.
+func parseKey(raw []byte) (crypto.Signer, error) {
 	block, _ := pem.Decode(raw)
 	if block == nil {
-		return nil, fmt.Errorf("%s: no PEM block", path)
+		return nil, errors.New("no PEM block")
 	}
-	key, err := x509.ParsePKCS8PrivateKey(block.Bytes)
+	return parseKeyDER(block.Bytes)
+}
+
+// parseKeyDER parses a PKCS #8 private key into its signer.
+func parseKeyDER(der []byte) (crypto.Signer, error) {
+	key, err := x509.ParsePKCS8PrivateKey(der)
 	if err != nil {
-		return nil, fmt.Errorf("%s: %w", path, err)
+		return nil, err
 	}
 	signer, ok := key.(crypto.Signer)
 	if !ok {
-		return nil, fmt.Errorf("%s: key of type %T is not a signer", path, key)
+		return nil, fmt.Errorf("key of type %T is not a signer", key)
 	}
 	return signer, nil
-}
-
-// writeFile creates or replaces the file with restrictive permissions, so a
-// fresh key never appears world-readable even for a moment.
-func writeFile(path string, data []byte) error {
-	return os.WriteFile(path, data, 0o600)
 }
 
 // PersistIA rewrites the persisted ISD-AS — the completion of a joiner's
 // identity, whose first ISD was a provisional draw replaced by the network's
 // once a neighbor answered.
 func PersistIA(stateDir string, ia addr.IA) error {
-	return writeFile(filepath.Join(stateDir, IAFile), []byte(ia.String()+"\n"))
+	return statefile.Write(filepath.Join(stateDir, IAFile), []byte(ia.String()+"\n"))
 }

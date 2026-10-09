@@ -6,8 +6,9 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
+
+	"github.com/fancl20/cion/pkg/statefile"
 )
 
 // KeyFile holds the node's WireGuard private key inside the application's
@@ -51,32 +52,24 @@ func ParsePublicKey(s string) (PublicKey, error) {
 }
 
 // LoadOrCreateKey returns the application's WireGuard private key, generating
-// and persisting a new one on first start, following pkg/trust/keys.go's
-// pattern into the application's own state directory.
+// and persisting a new one on first start in the application's own state
+// directory.
 func LoadOrCreateKey(stateDir string) (PrivateKey, error) {
-	path := filepath.Join(stateDir, KeyFile)
-	if raw, err := os.ReadFile(path); err == nil {
-		return parseKey(raw, path)
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return PrivateKey{}, err
-	}
-	var key PrivateKey
-	if _, err := rand.Read(key[:]); err != nil {
-		return PrivateKey{}, fmt.Errorf("generating key: %w", err)
-	}
-	// Clamped the way WireGuard clamps its scalars (RFC 7748, section 5).
-	key[0] &= 248
-	key[31] = (key[31] & 127) | 64
-	if err := os.MkdirAll(stateDir, 0o700); err != nil {
-		return PrivateKey{}, err
-	}
-	if err := os.WriteFile(path, []byte(hex.EncodeToString(key[:])), 0o600); err != nil {
-		return PrivateKey{}, err
-	}
-	return key, nil
+	return statefile.LoadOrCreate(filepath.Join(stateDir, KeyFile), parseKey,
+		func() (PrivateKey, []byte, error) {
+			var key PrivateKey
+			if _, err := rand.Read(key[:]); err != nil {
+				return PrivateKey{}, nil, fmt.Errorf("generating key: %w", err)
+			}
+			// Clamped the way WireGuard clamps its scalars (RFC 7748,
+			// section 5).
+			key[0] &= 248
+			key[31] = (key[31] & 127) | 64
+			return key, []byte(hex.EncodeToString(key[:])), nil
+		})
 }
 
-func parseKey(raw []byte, path string) (PrivateKey, error) {
+func parseKey(raw []byte) (PrivateKey, error) {
 	var key PrivateKey
 	encoded := string(raw)
 	if len(encoded) > 0 && encoded[len(encoded)-1] == '\n' {
@@ -84,10 +77,10 @@ func parseKey(raw []byte, path string) (PrivateKey, error) {
 	}
 	decoded, err := hex.DecodeString(encoded)
 	if err != nil {
-		return PrivateKey{}, fmt.Errorf("%s: %w", path, err)
+		return PrivateKey{}, err
 	}
 	if len(decoded) != len(key) {
-		return PrivateKey{}, fmt.Errorf("%s: key must be 32 bytes", path)
+		return PrivateKey{}, errors.New("key must be 32 bytes")
 	}
 	copy(key[:], decoded)
 	return key, nil

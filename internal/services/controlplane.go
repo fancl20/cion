@@ -112,10 +112,16 @@ func openStore[DB any](state, name string, open func(string, *bbolt.Options) (DB
 // channel, the core's control service resolved through the drafts'
 // exchange when the dial wants an underlay address. The joining core loads
 // its voting material on the way: the regular voting key alone, and the
-// self-signed certificate over it naming the completed ISD-AS.
+// self-signed certificate over it naming the completed ISD-AS. Both core
+// tiers first promote the material a roll staged once the newest pinned TRC
+// names it, so the material they load covers that TRC wherever the roll
+// stopped.
 func (n *node) setupTrustRole(ctx context.Context) error {
 	if n.ident.asType != trust.ASTypeCore {
 		if n.ident.asType == trust.ASTypeAuthoritative {
+			if _, err := n.promoteStaged(ctx); err != nil {
+				return err
+			}
 			votingKey, err := trust.LoadOrCreateVotingKey(n.cfg.State)
 			if err != nil {
 				return fmt.Errorf("loading voting key: %w", err)
@@ -155,6 +161,10 @@ func (n *node) setupTrustRole(ctx context.Context) error {
 		n.coreClt = coreClt
 		return nil
 	}
+	newest, err := n.promoteStaged(ctx)
+	if err != nil {
+		return err
+	}
 	keys, err := trust.LoadOrCreateCoreKeys(n.cfg.State)
 	if err != nil {
 		return err
@@ -164,16 +174,8 @@ func (n *node) setupTrustRole(ctx context.Context) error {
 		return fmt.Errorf("TRC genesis: %w", err)
 	}
 	// The issuer anchors in the newest pinned TRC, not the base: a restart
-	// after a rotation finds the successor whose root certificate the
-	// persisted keys hold, and the chains issue under it from the boot on.
-	newest, err := n.trustDB.SignedTRC(ctx, cppki.TRCID{
-		ISD:    n.ident.ia.ISD(),
-		Base:   scrypto.LatestVer,
-		Serial: scrypto.LatestVer,
-	})
-	if err != nil {
-		return fmt.Errorf("reading the newest pinned TRC: %w", err)
-	}
+	// after a rotation finds the successor whose root certificate the live
+	// keys hold, and the chains issue under it from the boot on.
 	if !newest.IsZero() {
 		trc = newest
 	}
@@ -192,6 +194,23 @@ func (n *node) setupTrustRole(ctx context.Context) error {
 		return fmt.Errorf("self-enrolling core: %w", err)
 	}
 	return nil
+}
+
+// promoteStaged promotes the material a roll staged once the newest pinned
+// TRC names it, and returns that TRC, zero on a first start.
+func (n *node) promoteStaged(ctx context.Context) (cppki.SignedTRC, error) {
+	newest, err := n.trustDB.SignedTRC(ctx, cppki.TRCID{
+		ISD:    n.ident.ia.ISD(),
+		Base:   scrypto.LatestVer,
+		Serial: scrypto.LatestVer,
+	})
+	if err != nil {
+		return cppki.SignedTRC{}, fmt.Errorf("reading the newest pinned TRC: %w", err)
+	}
+	if _, err := trust.PromoteStaged(n.cfg.State, n.ident.ia, newest.TRC); err != nil {
+		return cppki.SignedTRC{}, fmt.Errorf("promoting the staged voting material: %w", err)
+	}
+	return newest, nil
 }
 
 // buildMessenger builds the trust engine and the peer client every node

@@ -39,6 +39,9 @@ var (
 // trustFixture is a serving-side trust stack: DB with a genesis TRC and an
 // issuer.
 type trustFixture struct {
+	// dir is the state directory: the database beside the keys folder, the
+	// node's own layout.
+	dir    string
 	db     trustdb.DB
 	keys   trust.CoreKeys
 	issuer *trust.Issuer
@@ -65,7 +68,7 @@ func newTrustFixture(t *testing.T) *trustFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return &trustFixture{db: db, keys: keys, issuer: issuer, trc: trc}
+	return &trustFixture{dir: dir, db: db, keys: keys, issuer: issuer, trc: trc}
 }
 
 // newCSR returns a CSR for a freshly generated AS key.

@@ -7,7 +7,6 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"fmt"
-	"path/filepath"
 	"reflect"
 	"slices"
 	"time"
@@ -124,12 +123,14 @@ func SignRotation(
 
 // RotateCoreKeys rolls the founder's whole trust material — the sensitive and
 // regular voting certificates and the root certificate, the CA key beside
-// them — inside the cast it signs itself: fresh keys minted in memory, the
-// successor assembled on the given predecessor, each fresh certificate
-// signing it, the persisted sensitive key casting the vote. The completed
-// artifact verifies against the predecessor before anything pins; the pin
-// persists the staged set as a set and answers with it, so the caller rekeys
-// the issuer and the decision's signer under the fresh material.
+// them — inside the cast it signs itself: the fresh keys staged on disk, or
+// the ones an earlier attempt staged, certified afresh; the successor
+// assembled on the given predecessor, each fresh certificate signing it, the
+// live sensitive key casting the vote. The completed artifact verifies
+// against the predecessor before it pins. The roll ends at the pin and
+// answers with the staged keys and the successor, so the caller moves the
+// decision's signer and the issuer onto them before it promotes the staged
+// file.
 func RotateCoreKeys(
 	ctx context.Context,
 	db trustdb.DB,
@@ -138,23 +139,23 @@ func RotateCoreKeys(
 	pred cppki.SignedTRC,
 ) (CoreKeys, cppki.SignedTRC, error) {
 
-	persisted, err := LoadOrCreateCoreKeys(stateDir)
+	live, err := LoadOrCreateCoreKeys(stateDir)
 	if err != nil {
 		return CoreKeys{}, cppki.SignedTRC{}, err
 	}
-	// The vote is cast by the persisted sensitive key — an index into the
+	// The vote is cast by the live sensitive key — an index into the
 	// predecessor's certificates — so a key the predecessor's certificate does
 	// not cover cannot cast the roll at all.
 	predSensitive, err := SignerCert(pred.TRC, cppki.Sensitive)
 	if err != nil {
 		return CoreKeys{}, cppki.SignedTRC{}, err
 	}
-	if !KeyMatchesCert(persisted.Sensitive, predSensitive) {
+	if !KeyMatchesCert(live.Sensitive, predSensitive) {
 		return CoreKeys{}, cppki.SignedTRC{}, serrors.New(
-			"the persisted sensitive key is not the one the predecessor names; "+
+			"the live sensitive key is not the one the predecessor names; "+
 				"the roll has no vote to cast", "predecessor", pred.TRC.ID)
 	}
-	fresh, certs, err := stageCoreKeys(ia, pred)
+	fresh, certs, err := stageCoreKeys(stateDir, ia)
 	if err != nil {
 		return CoreKeys{}, cppki.SignedTRC{}, err
 	}
@@ -172,7 +173,7 @@ func RotateCoreKeys(
 	if err != nil {
 		return CoreKeys{}, cppki.SignedTRC{}, err
 	}
-	completed, err := CoSign(partial, persisted.Sensitive, predSensitive)
+	completed, err := CoSign(partial, live.Sensitive, predSensitive)
 	if err != nil {
 		return CoreKeys{}, cppki.SignedTRC{}, err
 	}
@@ -183,25 +184,25 @@ func RotateCoreKeys(
 	if _, err := db.InsertTRC(ctx, completed); err != nil {
 		return CoreKeys{}, cppki.SignedTRC{}, fmt.Errorf("pinning the completed rotation: %w", err)
 	}
-	if err := PersistCoreKeys(stateDir, fresh); err != nil {
-		return CoreKeys{}, cppki.SignedTRC{}, err
-	}
 	return fresh, completed, nil
 }
 
 // RollVotingKey rolls the authoritative core's regular voting certificate
 // through the submission channel its join used: it resolves the founder's
 // newest TRC — the drafts' numbers-less ask, verified against the pinned
-// chain and pinned — stages a fresh key with its self-signed certificate,
-// and assembles the successor replacing the certificate the newest names for
-// the core. While the persisted key covers that certificate, the successor
-// is a regular update the persisted key votes on beside the fresh key's
-// proof of possession, and the founder pins it as submitted. Once it no
-// longer does, the persisted key has no vote to cast: the successor is a
-// sensitive update the fresh key alone signs, completed by the founder's
-// vote on its admission policy's allow. What the founder answers verifies
-// against the resolved predecessor before anything pins here; the pin
-// persists the staged pair beside the key.
+// chain and pinned — and promotes the staged pair if the newest names it,
+// for then an earlier attempt landed though its answer was lost, and the roll
+// is complete without a submission. Otherwise it stages a fresh key with its
+// self-signed certificate, or reuses the pair an earlier attempt staged, and
+// assembles the successor replacing the certificate the newest names for the
+// core. While the live key covers that certificate, the successor is a
+// regular update the live key votes on beside the fresh key's proof of
+// possession, and the founder pins it as submitted. Once it no longer does,
+// the live key has no vote to cast: the successor is a sensitive update the
+// fresh key alone signs, completed by the founder's vote on its admission
+// policy's allow. What the founder answers verifies against the resolved
+// predecessor before it pins here, and must name the staged pair, which the
+// pin then promotes.
 func RollVotingKey(
 	ctx context.Context,
 	db trustdb.DB,
@@ -219,6 +220,13 @@ func RollVotingKey(
 	if err != nil {
 		return err
 	}
+	promoted, err := PromoteStaged(stateDir, ia, newest.TRC)
+	if err != nil {
+		return err
+	}
+	if promoted {
+		return nil
+	}
 	named := CertsOf(newest.TRC, ia)
 	if len(named) == 0 {
 		return serrors.New("the newest TRC names no certificate of the core", "trc", newest.TRC.ID)
@@ -228,7 +236,7 @@ func RollVotingKey(
 	if err != nil {
 		return err
 	}
-	key, cert, err := stageVotingPair(ia)
+	key, cert, err := stageVotingPair(stateDir, ia)
 	if err != nil {
 		return err
 	}
@@ -244,7 +252,7 @@ func RollVotingKey(
 		signers = []crypto.Signer{key, current}
 		certs = []*x509.Certificate{cert, held}
 	} else {
-		// The persisted key covers no certificate of the newest TRC, so the
+		// The live key covers no certificate of the newest TRC, so the
 		// founder's sensitive certificate is the voter: a sensitive update
 		// the fresh key alone signs.
 		voter, err = SignerCert(newest.TRC, cppki.Sensitive)
@@ -282,7 +290,15 @@ func RollVotingKey(
 	if _, err := db.InsertTRC(ctx, completed); err != nil {
 		return fmt.Errorf("pinning the completed rotation: %w", err)
 	}
-	return PersistVotingPair(stateDir, key, cert)
+	promoted, err = PromoteStaged(stateDir, ia, completed.TRC)
+	if err != nil {
+		return err
+	}
+	if !promoted {
+		return serrors.New("the completed rotation does not name the staged pair",
+			"id", completed.TRC.ID)
+	}
+	return nil
 }
 
 // CertsOf returns the certificates in the TRC naming the ISD-AS: the material
@@ -308,12 +324,13 @@ func KeyMatchesCert(key crypto.Signer, cert *x509.Certificate) bool {
 	return bytes.Equal(skid, cert.SubjectKeyId)
 }
 
-// stageCoreKeys mints the founder's fresh material — the whole set as a set,
-// for the issuer's keys rotate beside the anchored ones — with the
+// stageCoreKeys returns the founder's fresh material — the whole set as a
+// set, for the issuer's keys rotate beside the anchored ones — with the
 // certificates over the fresh keys naming the ISD-AS exactly as the
-// predecessors' constructions do.
-func stageCoreKeys(ia addr.IA, pred cppki.SignedTRC) (CoreKeys, []*x509.Certificate, error) {
-	keys, err := generateCoreKeys()
+// predecessors' constructions do. The keys are the staged ones; the
+// certificates are minted afresh on every attempt.
+func stageCoreKeys(stateDir string, ia addr.IA) (CoreKeys, []*x509.Certificate, error) {
+	keys, err := stagedCoreKeys(stateDir)
 	if err != nil {
 		return CoreKeys{}, nil, err
 	}
@@ -336,9 +353,68 @@ func stageCoreKeys(ia addr.IA, pred cppki.SignedTRC) (CoreKeys, []*x509.Certific
 	return keys, []*x509.Certificate{sensitive, regular, root}, nil
 }
 
-// stageVotingPair mints the authoritative core's fresh voting pair, the
-// construction its join used.
-func stageVotingPair(ia addr.IA) (crypto.Signer, *x509.Certificate, error) {
+// stagedCoreKeys returns the founder's staged keys: the set an earlier
+// attempt staged, or four fresh keys staged in one write.
+func stagedCoreKeys(stateDir string) (CoreKeys, error) {
+	var keys CoreKeys
+	files := []struct {
+		name string
+		key  *crypto.Signer
+	}{
+		{SensitiveKeyFile, &keys.Sensitive},
+		{RegularKeyFile, &keys.Regular},
+		{RootKeyFile, &keys.Root},
+		{CAKeyFile, &keys.CA},
+	}
+	blocks, err := readStaged(stateDir)
+	if err != nil {
+		return CoreKeys{}, err
+	}
+	if blocks != nil {
+		for _, file := range files {
+			if *file.key, err = stagedKey(blocks, file.name); err != nil {
+				return CoreKeys{}, err
+			}
+		}
+		return keys, nil
+	}
+	for _, file := range files {
+		key, err := generateKey()
+		if err != nil {
+			return CoreKeys{}, err
+		}
+		block, err := keyBlock(key)
+		if err != nil {
+			return CoreKeys{}, err
+		}
+		*file.key = key
+		blocks = append(blocks, staged(file.name, block))
+	}
+	if err := writeStaged(stateDir, blocks...); err != nil {
+		return CoreKeys{}, err
+	}
+	return keys, nil
+}
+
+// stageVotingPair returns the authoritative core's fresh voting pair, the
+// construction its join used: the pair an earlier attempt staged, or a fresh
+// one staged in one write.
+func stageVotingPair(stateDir string, ia addr.IA) (crypto.Signer, *x509.Certificate, error) {
+	blocks, err := readStaged(stateDir)
+	if err != nil {
+		return nil, nil, err
+	}
+	if blocks != nil {
+		key, err := stagedKey(blocks, RegularKeyFile)
+		if err != nil {
+			return nil, nil, err
+		}
+		cert, err := stagedCert(blocks, RegularVotingCertFile)
+		if err != nil {
+			return nil, nil, err
+		}
+		return key, cert, nil
+	}
 	key, err := generateKey()
 	if err != nil {
 		return nil, nil, err
@@ -348,6 +424,15 @@ func stageVotingPair(ia addr.IA) (crypto.Signer, *x509.Certificate, error) {
 	if err != nil {
 		return nil, nil, err
 	}
+	block, err := keyBlock(key)
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := writeStaged(stateDir, staged(RegularKeyFile, block),
+		staged(RegularVotingCertFile, certBlock(cert))); err != nil {
+
+		return nil, nil, err
+	}
 	return key, cert, nil
 }
 
@@ -355,10 +440,4 @@ func stageVotingPair(ia addr.IA) (crypto.Signer, *x509.Certificate, error) {
 // reading of a certificate's name.
 func sameSubject(a, b pkix.Name) bool {
 	return reflect.DeepEqual(a.ToRDNSequence(), b.ToRDNSequence())
-}
-
-// votingCertPath names the persisted voting certificate inside the state
-// directory, for the pair's persist.
-func votingCertPath(stateDir string) string {
-	return filepath.Join(keyDir(stateDir), RegularVotingCertFile)
 }

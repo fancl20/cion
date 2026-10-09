@@ -218,6 +218,9 @@ type fakeCaster struct {
 	keys  CoreKeys
 	db    trustdb.DB
 	holds bool
+	// loses, when set, fails each answer after its decision pinned, the
+	// answer lost on its way back.
+	loses bool
 	// served, when set, is answered in place of the decision, standing in
 	// for a founder that completes what it should refuse.
 	served cppki.SignedTRC
@@ -250,7 +253,7 @@ func (c *fakeCaster) SubmitTRC(
 		if _, err := c.db.InsertTRC(ctx, trc); err != nil {
 			return cppki.SignedTRC{}, err
 		}
-		return trc, nil
+		return c.answer(trc)
 	}
 	if _, err := trc.TRC.ValidateUpdate(&newest.TRC); err != nil {
 		return cppki.SignedTRC{}, err
@@ -270,7 +273,15 @@ func (c *fakeCaster) SubmitTRC(
 		return cppki.SignedTRC{}, err
 	}
 	c.votes++
-	return completed, nil
+	return c.answer(completed)
+}
+
+// answer returns the pinned decision, or fails it when answers are lost.
+func (c *fakeCaster) answer(trc cppki.SignedTRC) (cppki.SignedTRC, error) {
+	if c.loses {
+		return cppki.SignedTRC{}, errors.New("the answer was lost")
+	}
+	return trc, nil
 }
 
 // founderRemote serves the founder's pinned TRCs — the newest among them —

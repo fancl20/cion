@@ -225,3 +225,28 @@ reaches it.
     that verifies against the successor alone. The rotation lab's polls
     wait for each promotion: the live keys cover the roll's successor, and
     no staged file remains.
+
+## Implementation history
+
+*   The library landed as proposed
+    ([statefile.go](/pkg/statefile/statefile.go)), except that a write
+    failing after its rename leaves the new content: the directory's sync
+    follows the rename, which nothing undoes.
+*   The staged file's reading, writing, and promotion live in
+    [staged.go](/pkg/trust/staged.go), and the rolls stage through
+    `stageCoreKeys`, `stagedCoreKeys`, and `stageVotingPair`
+    ([rotation.go](/pkg/trust/rotation.go)). The boot promotes through
+    `promoteStaged`, which `setupTrustRole` calls on both core tiers
+    ([controlplane.go](/internal/services/controlplane.go)).
+*   `RollVotingKey` fails the roll when the answer it pinned does not name
+    the staged pair, a case the plan leaves open: the staged file stays for
+    the next roll to submit again.
+*   The tests landed as the plan spells them: the state files
+    ([statefile_test.go](/pkg/statefile/statefile_test.go)); the founder's
+    stop points and the authoritative's stop between its two writes
+    ([staged_test.go](/pkg/trust/staged_test.go)); the authoritative's
+    lost and refused answers ([rotation_test.go](/pkg/trust/rotation_test.go));
+    the watch ([rotation_test.go](/pkg/controlplane/rotation_test.go)); and
+    the stopped founder's boot, `TestFounderBootPromotesStagedRoll`, beside
+    the rotation lab's polls
+    ([rotation_test.go](/internal/testnetwork/rotation_test.go)).

@@ -35,7 +35,9 @@ func newTestDB(t *testing.T) trustdb.DB {
 
 // genesisFixture is a DB and key material with a genesis TRC in place.
 type genesisFixture struct {
-	db   trustdb.DB
+	db trustdb.DB
+	// dir is the state directory whose keys folder holds the live keys.
+	dir  string
 	keys CoreKeys
 	trc  cppki.SignedTRC
 }
@@ -49,7 +51,7 @@ func newGenesisFixture(t *testing.T) *genesisFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return &genesisFixture{db: db, keys: keys, trc: trc}
+	return &genesisFixture{db: db, dir: dir, keys: keys, trc: trc}
 }
 
 // TestGenesis checks that genesis produces a base TRC that passes cppki

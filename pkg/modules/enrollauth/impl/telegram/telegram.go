@@ -24,6 +24,7 @@ import (
 	"github.com/scionproto/scion/pkg/addr"
 
 	"github.com/fancl20/cion/pkg/modules/enrollauth"
+	"github.com/fancl20/cion/pkg/statefile"
 )
 
 // botAPI is the Telegram Bot API's public base URL.
@@ -405,7 +406,7 @@ func (t *Authorizer) loadInvites() error {
 	return nil
 }
 
-// persistInvitesLocked writes the unspent invitations back, atomically; the
+// persistInvitesLocked writes the unspent invitations back, whole; the
 // caller holds the mutex.
 func (t *Authorizer) persistInvitesLocked() error {
 	keys := make([]string, 0, len(t.invites))
@@ -417,15 +418,10 @@ func (t *Authorizer) persistInvitesLocked() error {
 	if err != nil {
 		return err
 	}
-	dir := filepath.Dir(t.invitesPath())
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return fmt.Errorf("creating the invitations' state: %w", err)
-	}
-	tmp := t.invitesPath() + ".tmp"
-	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
+	if err := statefile.Write(t.invitesPath(), raw); err != nil {
 		return fmt.Errorf("writing the invitations: %w", err)
 	}
-	return os.Rename(tmp, t.invitesPath())
+	return nil
 }
 
 func (t *Authorizer) invitesPath() string {
