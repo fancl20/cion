@@ -40,11 +40,13 @@ const bfdVersion = 1
 // our own, no authentication, demand mode, or echo function — its control
 // packets SCION-framed (NextHdr 203) on the link's one-hop path and sent on
 // the link's own underlay socket, beneath the forwarding plane. The session
-// doubles as the link's verdict: up until the detect multiplier expires
-// without an arrival, up again on the next answered one, both edges the
-// session's own timers damp — a lossy link settles into whichever state its
-// evidence sustains rather than flapping. The verdict is volatile: a node
-// restarts with every link up and re-derives within one silence window.
+// doubles as the link's verdict: up while the session is Up, which the
+// three-way handshake reaches, and down once it leaves Up, on silence past
+// the detection time or on the peer's signaled Down — so a loss in either
+// direction downs both ends, and a lone arrival raises nothing. A new
+// session holds its verdict up for one detection time while the handshake
+// completes. The verdict is volatile: a node restarts with every link up and
+// re-derives within one detection time.
 type BFDSession struct {
 	ifID        uint16
 	myDisc      uint32
@@ -69,16 +71,21 @@ type BFDSession struct {
 	neighborIA addr.IA
 	localHost  netip.Addr
 	remoteHost netip.Addr
-	// lastRX is the last arrival; the detect multiplier expires from it.
-	lastRX  time.Time
-	stopped bool
+	// lastRX is the last arrival; the detection time expires from it.
+	lastRX time.Time
+	// started is when the session began, its startup grace's origin, and
+	// reachedUp records whether the handshake ever completed: only a
+	// session that never reached Up holds its verdict up on the grace.
+	started   time.Time
+	reachedUp bool
+	stopped   bool
 
 	up atomic.Bool
 }
 
 // newBFDSession starts a session on the link's interface: transmitting at
-// once, its protocol state Down per RFC 5880, its verdict up by default
-// until the first silence window says otherwise.
+// the monitor's next interval, its protocol state Down per RFC 5880, its
+// verdict up for the startup grace.
 func newBFDSession(
 	localIA addr.IA,
 	macFactory func() hash.Hash,
@@ -104,8 +111,8 @@ func newBFDSession(
 		neighborIA: neighbor,
 		localHost:  localHost,
 		remoteHost: remoteHost,
+		started:    time.Now(),
 	}
-	s.lastRX = time.Now()
 	s.up.Store(true)
 	return s
 }
@@ -151,9 +158,8 @@ func (s *BFDSession) stop() {
 }
 
 // ReceiveMessage hands one received control message to the session — the
-// data plane's BFD branch calls it for every arrival on the link. Any
-// decodable control packet is the up edge: the peer's session transmitting
-// is the link carrying traffic.
+// data plane's BFD branch calls it for every arrival on the link. The
+// arrival advances the protocol state, and the verdict follows the state.
 func (s *BFDSession) ReceiveMessage(msg *layers.BFD) {
 	s.mtx.Lock()
 	defer s.mtx.Unlock()
@@ -171,33 +177,39 @@ func (s *BFDSession) ReceiveMessage(msg *layers.BFD) {
 	}
 	s.remoteState = msg.State
 	s.advance(msg.State)
-	s.lastRX = time.Now()
-	if !s.up.Swap(true) {
-		slog.Info("Link up", "interface", s.ifID, "neighbor", s.neighborIA)
-	}
+	now := time.Now()
+	s.lastRX = now
+	s.refresh(now)
 }
 
-// advance moves the local state one step of RFC 5880's async machine: Down
-// on the peer's Down from Init or Up, Init on the peer's Down from our own
-// Down, Up once the peer reports Init or Up toward us.
+// advance moves the local state by RFC 5880's reception rules (Section
+// 6.8.6): the peer's AdminDown downs any session not Down; a Down session
+// moves to Init on the peer's Down and to Up on its Init; an Init session
+// moves to Up on the peer's Init or Up; an Up session falls to Down on the
+// peer's Down. Every other pair leaves the state as it is.
 func (s *BFDSession) advance(remote layers.BFDState) {
+	if remote == layers.BFDStateAdminDown {
+		if s.localState != layers.BFDStateDown {
+			s.localState = layers.BFDStateDown
+			s.diagnostic = layers.BFDDiagnosticNeighborSignalDown
+		}
+		return
+	}
 	switch s.localState {
 	case layers.BFDStateDown:
 		switch remote {
 		case layers.BFDStateDown:
 			s.localState = layers.BFDStateInit
-		case layers.BFDStateInit, layers.BFDStateUp:
+			s.diagnostic = layers.BFDDiagnosticNone
+		case layers.BFDStateInit:
 			s.localState = layers.BFDStateUp
+			s.diagnostic = layers.BFDDiagnosticNone
 		}
-		s.diagnostic = layers.BFDDiagnosticNone
 	case layers.BFDStateInit:
-		switch remote {
-		case layers.BFDStateDown:
-			s.localState = layers.BFDStateDown
-		case layers.BFDStateInit, layers.BFDStateUp:
+		if remote == layers.BFDStateInit || remote == layers.BFDStateUp {
 			s.localState = layers.BFDStateUp
+			s.diagnostic = layers.BFDDiagnosticNone
 		}
-		s.diagnostic = layers.BFDDiagnosticNone
 	case layers.BFDStateUp:
 		if remote == layers.BFDStateDown {
 			s.localState = layers.BFDStateDown
@@ -206,10 +218,38 @@ func (s *BFDSession) advance(remote layers.BFDState) {
 	}
 }
 
-// tick runs the session's interval: expire the verdict if the detect
-// multiplier passed without an arrival, then transmit a control packet
-// either way — the stream survives its own down verdict, which is how
-// recovery is seen.
+// refresh sets the verdict from the protocol state, logging each edge: up
+// while the session is Up, and for a session that never reached Up, up
+// until one detection time from its start. Must be called with the mutex
+// held.
+func (s *BFDSession) refresh(now time.Time) {
+	if s.localState == layers.BFDStateUp {
+		s.reachedUp = true
+	}
+	detection := time.Duration(s.detectMult) * s.interval
+	up := s.localState == layers.BFDStateUp ||
+		!s.reachedUp && now.Sub(s.started) < detection
+	if s.up.Swap(up) == up {
+		return
+	}
+	if up {
+		slog.Info("Link up", "interface", s.ifID, "neighbor", s.neighborIA)
+		return
+	}
+	why := "no handshake within the detection time"
+	switch s.diagnostic {
+	case layers.BFDDiagnosticTimeExpired:
+		why = "bfd silence"
+	case layers.BFDDiagnosticNeighborSignalDown:
+		why = "the peer signaled down"
+	}
+	slog.Info("Link down", "interface", s.ifID, "neighbor", s.neighborIA, "why", why)
+}
+
+// tick runs the session's interval: an Init or Up session silent for the
+// detection time goes Down (Section 6.8.4), the verdict follows, and a
+// control packet leaves either way — the stream survives its own down
+// verdict, which is how recovery is seen.
 func (s *BFDSession) tick() {
 	s.mtx.Lock()
 	defer s.mtx.Unlock()
@@ -217,18 +257,12 @@ func (s *BFDSession) tick() {
 		return
 	}
 	now := time.Now()
-	if now.Sub(s.lastRX) >= time.Duration(s.detectMult)*s.interval {
-		if s.localState != layers.BFDStateDown ||
-			s.diagnostic != layers.BFDDiagnosticTimeExpired {
-
-			s.localState = layers.BFDStateDown
-			s.diagnostic = layers.BFDDiagnosticTimeExpired
-			if s.up.Swap(false) {
-				slog.Info("Link down", "interface", s.ifID, "neighbor", s.neighborIA,
-					"why", "bfd silence")
-			}
-		}
+	if (s.localState == layers.BFDStateInit || s.localState == layers.BFDStateUp) &&
+		now.Sub(s.lastRX) >= time.Duration(s.detectMult)*s.interval {
+		s.localState = layers.BFDStateDown
+		s.diagnostic = layers.BFDDiagnosticTimeExpired
 	}
+	s.refresh(now)
 	if s.writer == nil {
 		return
 	}

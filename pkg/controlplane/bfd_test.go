@@ -1,6 +1,7 @@
 package controlplane
 
 import (
+	"fmt"
 	"net/netip"
 	"testing"
 	"testing/synctest"
@@ -146,76 +147,96 @@ func TestBFDControlPacketFrame(t *testing.T) {
 	}
 }
 
-// TestBFDSessionStateMachine checks the async subset: Down on the peer's
-// Down from our own Down becomes Init, the peer's Init or Up brings Up, and
-// the peer's Down from Up returns Down — the peer's discriminator learned
-// from every arrival. Each step's state is read from the packet the next
-// interval transmits.
+// sessionIn returns a session brought to the given state by the peer's
+// arrivals, as the handshake brings it.
+func sessionIn(t *testing.T, state layers.BFDState) *BFDSession {
+	t.Helper()
+	s, _ := newTestSession(t)
+	steps := map[layers.BFDState][]layers.BFDState{
+		layers.BFDStateDown: nil,
+		layers.BFDStateInit: {layers.BFDStateDown},
+		layers.BFDStateUp:   {layers.BFDStateDown, layers.BFDStateInit},
+	}[state]
+	for _, remote := range steps {
+		s.ReceiveMessage(peerMessage(remote, 0x2a2a2a2a, s.myDisc))
+	}
+	if got := s.localStateOf(); got != state {
+		t.Fatalf("session brought to %v, want %v", got, state)
+	}
+	return s
+}
+
+// TestBFDSessionStateMachine checks RFC 5880's reception rules transition
+// by transition (Section 6.8.6): the handshake's Down, Init, Up; an Up
+// session's fall on the peer's Down; the peer's AdminDown downing any
+// session not Down; and every other pair leaving the state as it is. The
+// state each step reaches is the one the next interval transmits.
 func TestBFDSessionStateMachine(t *testing.T) {
-	s, w := newTestSession(t)
-	peerDisc := uint32(0x2a2a2a2a)
-
-	receiveAndTick := func(state layers.BFDState) *layers.BFD {
-		s.ReceiveMessage(peerMessage(state, peerDisc, s.myDisc))
-		w.packets = nil
-		s.tick()
-		_, bfd := decodeControl(t, lastPacket(t, w))
-		return bfd
-	}
-
-	bfd := receiveAndTick(layers.BFDStateDown)
-	if bfd.State != layers.BFDStateInit {
-		t.Errorf("state after the peer's Down = %v, want Init", bfd.State)
-	}
-	if bfd.YourDiscriminator != layers.BFDDiscriminator(peerDisc) {
-		t.Errorf("your discriminator = %d, want the peer's %d",
-			bfd.YourDiscriminator, peerDisc)
-	}
-
-	if bfd := receiveAndTick(layers.BFDStateInit); bfd.State != layers.BFDStateUp {
-		t.Errorf("state after the peer's Init = %v, want Up", bfd.State)
-	}
-
-	bfd = receiveAndTick(layers.BFDStateDown)
-	if bfd.State != layers.BFDStateDown {
-		t.Errorf("state after the peer's Down = %v, want Down", bfd.State)
-	}
-	if bfd.Diagnostic != layers.BFDDiagnosticNeighborSignalDown {
-		t.Errorf("diagnostic = %v, want Neighbor Signaled Session Down", bfd.Diagnostic)
+	down, initial, up, admin := layers.BFDStateDown, layers.BFDStateInit,
+		layers.BFDStateUp, layers.BFDStateAdminDown
+	none, signaled := layers.BFDDiagnosticNone, layers.BFDDiagnosticNeighborSignalDown
+	for _, tc := range []struct {
+		from, remote, want layers.BFDState
+		diag               layers.BFDDiagnostic
+	}{
+		{down, down, initial, none},
+		{down, initial, up, none},
+		{down, up, down, none},
+		{down, admin, down, none},
+		{initial, down, initial, none},
+		{initial, initial, up, none},
+		{initial, up, up, none},
+		{initial, admin, down, signaled},
+		{up, down, down, signaled},
+		{up, initial, up, none},
+		{up, up, up, none},
+		{up, admin, down, signaled},
+	} {
+		t.Run(fmt.Sprintf("%v on the peer's %v", tc.from, tc.remote), func(t *testing.T) {
+			s := sessionIn(t, tc.from)
+			w := &fakeWriter{}
+			s.SetRawWriter(w)
+			s.ReceiveMessage(peerMessage(tc.remote, 0x2a2a2a2a, s.myDisc))
+			s.tick()
+			_, bfd := decodeControl(t, lastPacket(t, w))
+			if bfd.State != tc.want || bfd.Diagnostic != tc.diag {
+				t.Errorf("state/diagnostic = %v/%v, want %v/%v",
+					bfd.State, bfd.Diagnostic, tc.want, tc.diag)
+			}
+			if bfd.YourDiscriminator != layers.BFDDiscriminator(0x2a2a2a2a) {
+				t.Errorf("your discriminator = %d, want the peer's", bfd.YourDiscriminator)
+			}
+		})
 	}
 }
 
 // TestBFDSessionRejectsForeignDiscriminator checks the demultiplexing: a
 // message naming another session's discriminator is not ours and changes
-// nothing.
+// nothing, while a zero discriminator — the peer has not learned ours yet —
+// is ours.
 func TestBFDSessionRejectsForeignDiscriminator(t *testing.T) {
 	s, _ := newTestSession(t)
-	s.ReceiveMessage(peerMessage(layers.BFDStateUp, 1, s.myDisc+1))
+	s.ReceiveMessage(peerMessage(layers.BFDStateDown, 1, s.myDisc+1))
 	if s.localStateOf() != layers.BFDStateDown {
 		t.Error("a foreign discriminator advanced the session")
 	}
-	// A zero discriminator is the bootstrapping form: the peer has not
-	// learned ours yet, and the message is ours.
-	s.ReceiveMessage(peerMessage(layers.BFDStateUp, 1, 0))
-	if s.localStateOf() != layers.BFDStateUp {
+	s.ReceiveMessage(peerMessage(layers.BFDStateDown, 1, 0))
+	if s.localStateOf() != layers.BFDStateInit {
 		t.Error("a bootstrapping message was refused")
-	}
-	if !s.IsUp() {
-		t.Error("verdict = down after an arrival")
 	}
 }
 
-// TestBFDVerdictDownAtSilence checks the verdict: up until the detect
-// multiplier expires without an arrival, down the moment it does — and
-// transmitting throughout, including while down, with the expiry named in
-// the diagnostic. The silence is a fake-time sleep in the bubble, instant
-// and exactly at the window's edge.
+// TestBFDVerdictDownAtSilence checks the silence edge: an Up session silent
+// for the detection time goes Down with the expiry named in the diagnostic,
+// its verdict with it, and keeps transmitting; a lone arrival then raises
+// nothing, and only the completed handshake raises the verdict again. The
+// silence is a fake-time sleep in the bubble, instant and exactly at the
+// window's edge.
 func TestBFDVerdictDownAtSilence(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		s, w := newTestSession(t)
-		if !s.IsUp() {
-			t.Fatal("a fresh session's verdict is down; a node restarts with every link up")
-		}
+		s := sessionIn(t, layers.BFDStateUp)
+		w := &fakeWriter{}
+		s.SetRawWriter(w)
 		s.tick()
 		if !s.IsUp() {
 			t.Fatal("the verdict went down before the silence window passed")
@@ -225,7 +246,7 @@ func TestBFDVerdictDownAtSilence(t *testing.T) {
 		before := len(w.packets)
 		s.tick()
 		if s.IsUp() {
-			t.Fatal("the verdict stayed up past the detect multiplier's silence")
+			t.Fatal("the verdict stayed up past the detection time's silence")
 		}
 		if len(w.packets) != before+1 {
 			t.Fatal("the session stopped transmitting while down; recovery is seen by the stream")
@@ -237,29 +258,33 @@ func TestBFDVerdictDownAtSilence(t *testing.T) {
 				bfd.State, bfd.Diagnostic)
 		}
 
-		// The next answered arrival is the up edge, whatever the negotiated
-		// state: the peer's packet arriving is the link carrying traffic.
-		s.ReceiveMessage(peerMessage(layers.BFDStateDown, 1, 0))
+		// A lone arrival proves one direction: the session moves to Init,
+		// and the verdict stays down.
+		s.ReceiveMessage(peerMessage(layers.BFDStateDown, 0x2a2a2a2a, 0))
+		if s.IsUp() {
+			t.Fatal("a lone arrival raised the verdict")
+		}
+		// The peer's Init completes the handshake.
+		s.ReceiveMessage(peerMessage(layers.BFDStateInit, 0x2a2a2a2a, s.myDisc))
 		if !s.IsUp() {
-			t.Fatal("the verdict stayed down after an arrival")
+			t.Fatal("the completed handshake left the verdict down")
 		}
 	})
 }
 
-// TestBFDVerdictSettles checks the hysteresis by construction: an
-// alternating arrive-and-silence stream — never three intervals of silence,
-// never a quiet verdict flip — settles with the link up and crosses neither
-// edge twice in a window. The stream's intervals are fake-time sleeps in
-// the bubble.
+// TestBFDVerdictSettles checks the hysteresis by construction: on an Up
+// session, an alternating arrive-and-silence stream — never a detection
+// time of silence — keeps the verdict up and crosses no edge. The stream's
+// intervals are fake-time sleeps in the bubble.
 func TestBFDVerdictSettles(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		s, _ := newTestSession(t)
+		s := sessionIn(t, layers.BFDStateUp)
 		flips := 0
 		last := s.IsUp()
-		for i := range 12 {
+		for range 12 {
 			// Arrive, then two intervals of quiet: the silence never reaches
-			// the detect multiplier, so the verdict never goes down.
-			s.ReceiveMessage(peerMessage(layers.BFDStateUp, 1, 0))
+			// the detection time, so the verdict never goes down.
+			s.ReceiveMessage(peerMessage(layers.BFDStateUp, 0x2a2a2a2a, s.myDisc))
 			time.Sleep(2 * BFDTransmissionInterval)
 			s.tick()
 			time.Sleep(BFDTransmissionInterval)
@@ -267,13 +292,117 @@ func TestBFDVerdictSettles(t *testing.T) {
 				flips++
 				last = got
 			}
-			if i == 0 && !s.IsUp() {
-				t.Fatal("the verdict dropped on sub-window silence")
+		}
+		if !last || flips != 0 {
+			t.Fatalf("verdict %v after %d edges on an arrive-and-silence stream, want up and none",
+				last, flips)
+		}
+	})
+}
+
+// TestBFDStartupGrace checks a new session's verdict: up for one detection
+// time while the handshake completes, and down after it when no handshake
+// did. The grace is a fake-time sleep in the bubble.
+func TestBFDStartupGrace(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		s, _ := newTestSession(t)
+		if !s.IsUp() {
+			t.Fatal("a new session's verdict is down; a node restarts with every link up")
+		}
+		time.Sleep(time.Duration(BFDDetectMultiplier)*BFDTransmissionInterval - time.Nanosecond)
+		s.tick()
+		if !s.IsUp() {
+			t.Fatal("the verdict fell inside the startup grace")
+		}
+		time.Sleep(time.Nanosecond)
+		s.tick()
+		if s.IsUp() {
+			t.Fatal("the verdict stayed up past the grace with no handshake")
+		}
+	})
+}
+
+// pairWriter carries one session's transmissions to its peer session, each
+// packet decoded as the data plane's BFD branch decodes it and held until
+// the test delivers it, unless the direction drops.
+type pairWriter struct {
+	t       *testing.T
+	queue   []*layers.BFD
+	dropped bool
+}
+
+func (w *pairWriter) WriteRaw(b []byte) error {
+	if w.dropped {
+		return nil
+	}
+	_, bfd := decodeControl(w.t, b)
+	w.queue = append(w.queue, bfd)
+	return nil
+}
+
+// deliver hands the queued packets to the receiving session.
+func (w *pairWriter) deliver(to *BFDSession) {
+	for _, msg := range w.queue {
+		to.ReceiveMessage(msg)
+	}
+	w.queue = nil
+}
+
+// TestBFDSessionPair checks the verdict on two sessions wired back to back:
+// the startup grace ends with both down when every packet drops; a lone
+// direction raises neither; the handshake raises both once it completes;
+// dropping one direction downs both ends, the deaf end on silence and the
+// other on the deaf end's signaled Down; and restoring it brings both up by
+// the handshake. Each step is one interval of fake time in the bubble.
+func TestBFDSessionPair(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		a, _ := newTestSession(t)
+		b, _ := newTestSession(t)
+		ab, ba := &pairWriter{t: t}, &pairWriter{t: t}
+		a.SetRawWriter(ab)
+		b.SetRawWriter(ba)
+		step := func() {
+			time.Sleep(BFDTransmissionInterval)
+			a.tick()
+			b.tick()
+			ab.deliver(b)
+			ba.deliver(a)
+		}
+		verdicts := func(want bool, what string) {
+			t.Helper()
+			if a.IsUp() != want || b.IsUp() != want {
+				t.Fatalf("%s: verdicts %v/%v, want both %v", what, a.IsUp(), b.IsUp(), want)
 			}
 		}
-		if flips != 0 {
-			t.Fatalf("the verdict crossed an edge %d times on an arrive-and-silence stream", flips)
+
+		ab.dropped, ba.dropped = true, true
+		for range BFDDetectMultiplier {
+			step()
 		}
+		verdicts(false, "the grace ended with every packet dropped")
+
+		ba.dropped = false
+		for range BFDDetectMultiplier {
+			step()
+		}
+		verdicts(false, "one direction carrying")
+
+		ab.dropped = false
+		step()
+		step()
+		verdicts(true, "the handshake completed")
+
+		ab.dropped = true
+		for range BFDDetectMultiplier + 1 {
+			step()
+		}
+		verdicts(false, "one direction dropped")
+
+		ab.dropped = false
+		for range 3 {
+			step()
+		}
+		verdicts(true, "the direction restored")
 	})
 }
 

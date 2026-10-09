@@ -4,8 +4,10 @@ import (
 	"context"
 	"net/netip"
 	"testing"
+	"testing/synctest"
 	"time"
 
+	"github.com/gopacket/gopacket/layers"
 	"github.com/scionproto/scion/pkg/addr"
 
 	"github.com/fancl20/cion/pkg/modules/links"
@@ -104,7 +106,7 @@ func TestMonitorSessionSurvivesSwap(t *testing.T) {
 	if s.Transmitted() == 0 {
 		t.Fatal("the session never transmitted")
 	}
-	s.ReceiveMessage(peerMessage(3, 0x11223344, 0)) // peer Up
+	s.ReceiveMessage(peerMessage(layers.BFDStateDown, 0x11223344, 0))
 
 	// The swap: the store's entry is served again by a new generation, whose
 	// link attaches a fresh writer to the same session.
@@ -124,12 +126,41 @@ func TestMonitorSessionSurvivesSwap(t *testing.T) {
 		t.Errorf("transmissions after the swap = %d/%d, want the new writer carrying them",
 			len(second.packets), len(first.packets))
 	}
-	if s.localStateOf() == 0 {
+	if s.localStateOf() != layers.BFDStateInit {
 		t.Error("the swap reset the session's state")
 	}
 	if !m.Up(entry.IfID) {
 		t.Error("the swap disturbed the verdict")
 	}
+}
+
+// TestMonitorTransmitsOncePerInterval checks the monitor's cadence: every
+// session transmits once per interval, the first at once — reconciling the
+// sessions transmits nothing of its own. The intervals are fake time in the
+// bubble.
+func TestMonitorTransmitsOncePerInterval(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		m, store := newTestMonitor(t)
+		entry := servingEntry(bfdPeer)
+		if err := store.Insert(context.Background(), entry); err != nil {
+			t.Fatal(err)
+		}
+		s := m.Session(entry)
+		s.SetRawWriter(&fakeWriter{})
+		ctx, cancel := context.WithCancel(context.Background())
+		go m.Run(ctx)
+
+		synctest.Wait()
+		for want := uint64(1); want <= 4; want++ {
+			if got := s.Transmitted(); got != want {
+				t.Fatalf("transmissions after %d intervals = %d, want %d", want-1, got, want)
+			}
+			time.Sleep(BFDTransmissionInterval)
+			synctest.Wait()
+		}
+		cancel()
+		synctest.Wait()
+	})
 }
 
 // TestMonitorRetargetsSession checks that the session's frames follow the

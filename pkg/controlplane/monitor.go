@@ -134,19 +134,20 @@ func (m *HealthMonitor) Verdicts() map[uint16]bool {
 
 // Run maintains the sessions until the context is canceled: a session for
 // every serving entry, none for the departed ones, and every session's
-// interval — expiring silent links and transmitting control packets, down
-// verdicts included, which is how recovery is seen.
+// interval run once per tick — expiring silent links and transmitting
+// control packets, down verdicts included, which is how recovery is seen.
+// The first tick runs at once, so the sessions present at start transmit
+// at once.
 func (m *HealthMonitor) Run(ctx context.Context) {
-	m.reconcile()
 	ticker := time.NewTicker(m.tick)
 	defer ticker.Stop()
 	for {
+		m.reconcile()
+		m.tickAll()
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			m.reconcile()
-			m.tickAll()
 		}
 	}
 }
@@ -168,7 +169,7 @@ func (m *HealthMonitor) reconcile() {
 			continue
 		}
 		serving[l.IfID] = true
-		m.session(l).tick() // a new session transmits at once
+		m.session(l)
 	}
 	for ifID, s := range m.sessions {
 		if !serving[ifID] {
