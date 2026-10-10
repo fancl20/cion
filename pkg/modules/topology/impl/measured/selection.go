@@ -100,8 +100,9 @@ type SelectionConfig struct {
 	// names for the node, latest observation winning; nil discards it.
 	Learn func(netip.Addr)
 	// Evidence reports whether a candidate's peer has proven itself — a
-	// verified beacon or an enrollment the node has seen.
-	Evidence func(*links.Link) bool
+	// verified beacon or an enrollment the node has seen — or the failure of
+	// the read that would tell, which leaves the candidate to the next pass.
+	Evidence func(*links.Link) (bool, error)
 	// Changed is called once per pass that changed the table.
 	Changed func()
 	// Stranded, when set, records the window's finding that the node holds
@@ -296,7 +297,12 @@ func (s *selection) sweep(ctx context.Context, entries []*links.Link) bool {
 		if l.State != links.StateCandidate {
 			continue
 		}
-		if s.cfg.Evidence != nil && s.cfg.Evidence(l) {
+		proven, err := s.proven(l)
+		if err != nil {
+			slog.Error("Reading a candidate's evidence", "neighbor", l.NeighborIA, "err", err)
+			continue
+		}
+		if proven {
 			l.State = links.StateEstablished
 			if err := s.cfg.Store.Update(ctx, l); err != nil {
 				slog.Error("Establishing a candidate", "neighbor", l.NeighborIA, "err", err)
@@ -316,6 +322,15 @@ func (s *selection) sweep(ctx context.Context, entries []*links.Link) bool {
 		}
 	}
 	return changed
+}
+
+// proven reads the candidate's evidence; without an evidence source no
+// candidate is proven.
+func (s *selection) proven(l *links.Link) (bool, error) {
+	if s.cfg.Evidence == nil {
+		return false, nil
+	}
+	return s.cfg.Evidence(l)
 }
 
 // candidateAlive runs one rendezvous echo against the candidate's own

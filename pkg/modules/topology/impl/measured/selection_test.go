@@ -2,6 +2,7 @@ package measured
 
 import (
 	"context"
+	"errors"
 	"net"
 	"net/netip"
 	"slices"
@@ -134,7 +135,7 @@ func newSelFixture(t *testing.T, neighbors ...addr.IA) *selFixture {
 	f.sel.cfg.Verdicts = func() map[uint16]bool { return f.verdicts }
 	// Every established neighbor holds its verdict up unless a test says
 	// otherwise.
-	f.sel.cfg.Evidence = func(*links.Link) bool { return false }
+	f.sel.cfg.Evidence = func(*links.Link) (bool, error) { return false, nil }
 	f.sel.aliveFn = func(l *links.Link) bool { return f.alive[l.NeighborIA] }
 	f.refresh()
 	return f
@@ -912,7 +913,7 @@ func TestSelectionSweepCandidateWindow(t *testing.T) {
 		if err := f.store.Insert(context.Background(), proven); err != nil {
 			t.Fatal(err)
 		}
-		f.sel.cfg.Evidence = func(l *links.Link) bool { return l.IfID == proven.IfID }
+		f.sel.cfg.Evidence = func(l *links.Link) (bool, error) { return l.IfID == proven.IfID, nil }
 
 		time.Sleep(20 * time.Millisecond)
 		f.pass(t)
@@ -934,6 +935,36 @@ func TestSelectionSweepCandidateWindow(t *testing.T) {
 		}
 		if !found {
 			t.Error("the unproven candidate vanished instead of retiring")
+		}
+	})
+}
+
+// TestSelectionSweepEvidenceReadFails checks the logged retry of a failed
+// evidence read: past its window, a candidate whose evidence the pass cannot
+// read is neither established nor retired, and the next pass that reads no
+// evidence retires it. The test runs in a bubble, like the window's own.
+func TestSelectionSweepEvidenceReadFails(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		f := newSelFixture(t)
+		f.sel.cfg.Window = 10 * time.Millisecond
+		if err := f.store.Insert(context.Background(),
+			neighborLink(selPeer, links.StateCandidate)); err != nil {
+			t.Fatal(err)
+		}
+		f.sel.cfg.Evidence = func(*links.Link) (bool, error) {
+			return false, errors.New("the trust database is unreadable")
+		}
+
+		time.Sleep(20 * time.Millisecond)
+		f.pass(t)
+		if got := f.state(t, selPeer); got != links.StateCandidate {
+			t.Errorf("after the failed read the candidate is %v, want it still a candidate", got)
+		}
+		f.sel.cfg.Evidence = func(*links.Link) (bool, error) { return false, nil }
+		f.pass(t)
+		if got := f.state(t, selPeer); got != links.StateRetired {
+			t.Errorf("after an unproven read past the window the candidate is %v, want it retired",
+				got)
 		}
 	})
 }

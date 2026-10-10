@@ -727,6 +727,34 @@ func TestPropagateOnce(t *testing.T) {
 	}
 }
 
+// TestBeaconerReturnsTrustDBFailures checks the logged retry of a failed
+// read of the pinned TRC: with the trust database closed, the reception
+// check refuses the beacon with the failure, and the propagation and core
+// termination passes skip their round, sending nothing.
+func TestBeaconerReturnsTrustDBFailures(t *testing.T) {
+	f := newBeaconFixture(t)
+	ctx := context.Background()
+	if err := f.beaconer.HandleBeacon(ctx, lineBeacon(t, f, time.Now()), 1); err != nil {
+		t.Fatal(err)
+	}
+	late := lineBeacon(t, f, time.Now())
+	if err := f.db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := f.beaconer.HandleBeacon(ctx, late, 1); err == nil {
+		t.Error("a beacon was accepted with the trust database unreadable")
+	}
+	f.beaconer.propagateOnce(ctx)
+	f.beaconer.registerCoreOnce(ctx)
+	f.sender.mtx.Lock()
+	defer f.sender.mtx.Unlock()
+	if len(f.sender.beacons) != 0 {
+		t.Errorf("sent %d beacons with the trust database unreadable, want none",
+			len(f.sender.beacons))
+	}
+}
+
 // TestPropagateOnceDeclaresLatency checks the entry's declaration: the
 // propagated entry declares the egress link's latest one-way sample — the
 // window's echo round trip halved — and an unsampled egress declares

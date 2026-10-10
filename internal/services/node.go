@@ -341,25 +341,19 @@ func (n *node) start(gen *generation) {
 // chain of the peer the node knows — one it issued on the core, or one a
 // verified beacon's signatures resolved through — is the enrollment and the
 // verified beacon in one check.
-func (n *node) linkEvidence(l *links.Link) bool {
+func (n *node) linkEvidence(l *links.Link) (bool, error) {
 	if l.NeighborIA.IsZero() {
-		return false
+		return false, nil
 	}
 	now := time.Now()
-	chains := mustChains(n.trustDB, trustdb.ChainQuery{
+	chains, err := n.trustDB.Chains(context.Background(), trustdb.ChainQuery{
 		IA:       l.NeighborIA,
 		Validity: cppki.Validity{NotBefore: now, NotAfter: now},
 	})
-	return len(chains) > 0
-}
-
-// mustChains queries the trust database, panicking on a read failure.
-func mustChains(db trustdb.DB, q trustdb.ChainQuery) [][]*x509.Certificate {
-	chains, err := db.Chains(context.Background(), q)
 	if err != nil {
-		panic(fmt.Sprintf("querying the chains of %s: %v", q.IA, err))
+		return false, fmt.Errorf("querying the chains of %s: %w", l.NeighborIA, err)
 	}
-	return chains
+	return len(chains) > 0, nil
 }
 
 // selfEnroll issues the core's own certificate chain locally, through the

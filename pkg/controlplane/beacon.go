@@ -245,7 +245,11 @@ func (b *Beaconer) HandleBeacon(
 	if err := b.checkBeacon(pcb, ingress); err != nil {
 		return err
 	}
-	if !b.trcPinned() {
+	pinned, err := b.trcPinned()
+	if err != nil {
+		return err
+	}
+	if !pinned {
 		b.recordBootstrap(ingress, pcb)
 		return nil
 	}
@@ -368,7 +372,11 @@ func (b *Beaconer) checkBeacon(pcb *segment.PCB, ingress uint16) error {
 	// bootstrap state waives the check, the tolerance the propagation pruning
 	// already carries; the drop lands here, before signature verification spends
 	// work on the beacon.
-	if cores := b.coreASes(); cores != nil && !cores[pcb.FirstIA()] {
+	cores, err := b.coreASes()
+	if err != nil {
+		return err
+	}
+	if cores != nil && !cores[pcb.FirstIA()] {
 		return serrors.New("beacon does not originate at a core the TRC names",
 			"origin", pcb.FirstIA())
 	}
@@ -448,31 +456,31 @@ func (b *Beaconer) verifySignatures(ctx context.Context, pcb *segment.PCB) error
 }
 
 // trcPinned reports whether the ISD's base TRC is pinned locally.
-func (b *Beaconer) trcPinned() bool {
+func (b *Beaconer) trcPinned() (bool, error) {
 	trc, err := b.engine.BaseTRC()
 	if err != nil {
-		panic(fmt.Sprintf("reading the pinned TRC: %v", err))
+		return false, serrors.Wrap("reading the pinned TRC", err)
 	}
-	return !trc.IsZero()
+	return !trc.IsZero(), nil
 }
 
 // coreASes returns the ISD's core ASes named by the pinned TRC; empty when
 // the TRC is not pinned yet, in which case propagation floods upward too —
 // harmless, since every beacon already contains the core and the core drops
 // any beacon containing itself.
-func (b *Beaconer) coreASes() map[addr.IA]bool {
+func (b *Beaconer) coreASes() (map[addr.IA]bool, error) {
 	ias, err := b.engine.CoreASes(b.ia.ISD())
 	if err != nil {
-		panic(fmt.Sprintf("enumerating the core ASes: %v", err))
+		return nil, serrors.Wrap("enumerating the core ASes", err)
 	}
 	if len(ias) == 0 {
-		return nil
+		return nil, nil
 	}
 	set := make(map[addr.IA]bool, len(ias))
 	for _, ia := range ias {
 		set[ia] = true
 	}
-	return set
+	return set, nil
 }
 
 // originateOnce originates a fresh PCB on each of the core's links (draft
@@ -516,7 +524,11 @@ func (b *Beaconer) originateOnce(ctx context.Context) {
 // 2.3.5). The propagation targets are the neighbors' control services as
 // service destinations on the one-hop paths.
 func (b *Beaconer) propagateOnce(ctx context.Context) {
-	cores := b.coreASes()
+	cores, err := b.coreASes()
+	if err != nil {
+		slog.Error("Propagating beacons", "err", err)
+		return
+	}
 	for _, cand := range b.store.BestSet(BestSetSize) {
 		for egress, neighborIA := range b.linkTable() {
 			if egress == cand.Ingress {
@@ -593,7 +605,11 @@ func (b *Beaconer) registerOnce(ctx context.Context) {
 // core terminates what it receives, and core segments stay local, none
 // registered with another core.
 func (b *Beaconer) registerCoreOnce(ctx context.Context) {
-	cores := b.coreASes()
+	cores, err := b.coreASes()
+	if err != nil {
+		slog.Error("Terminating core beacons", "err", err)
+		return
+	}
 	for _, cand := range b.store.BestSet(BestSetSize) {
 		if !cores[b.linkTable()[cand.Ingress]] {
 			continue
