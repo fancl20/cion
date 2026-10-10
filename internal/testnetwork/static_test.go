@@ -115,15 +115,17 @@ func bootStaticLine(t *testing.T, wpki *WebPKI,
 }
 
 // staticTopology is a lab topology on the file provider: its nodes by
-// ISD-AS, the founding core among them, the links between neighbors, and
-// the interface IDs a lab crafts hop fields against, each keyed by the node
-// whose entry pins it and the neighbor the entry names. A zero core leaves
-// every node non-core.
+// ISD-AS, the founding core among them, the links between neighbors, the
+// interface IDs a lab crafts hop fields against, each keyed by the node
+// whose entry pins it and the neighbor the entry names, and, when set, a
+// mutation every node's run arguments take last. A zero core leaves every
+// node non-core.
 type staticTopology struct {
-	core  addr.IA
-	nodes []addr.IA
-	links [][2]addr.IA
-	pins  map[[2]addr.IA]uint16
+	core   addr.IA
+	nodes  []addr.IA
+	links  [][2]addr.IA
+	pins   map[[2]addr.IA]uint16
+	mutate func(*services.NodeConfig)
 }
 
 // bootTopology boots a static topology through the node's own assembly,
@@ -159,15 +161,20 @@ func bootTopology(t *testing.T, wpki *WebPKI, topo staticTopology) map[addr.IA]*
 		sets[ia] = linkSetPath(t)
 		writeStaticSet(t, sets[ia], entries[ia]...)
 	}
+	mutate := func(cfg *services.NodeConfig) {
+		productionBFD(cfg)
+		if topo.mutate != nil {
+			topo.mutate(cfg)
+		}
+	}
 	nodes := make(map[addr.IA]*staticNode, len(topo.nodes))
 	if !topo.core.IsZero() {
 		nodes[topo.core] = bootStaticNode(t, wpki, hosts[topo.core], true,
-			states[topo.core], sets[topo.core], productionBFD)
+			states[topo.core], sets[topo.core], mutate)
 	}
 	for _, ia := range topo.nodes {
 		if ia != topo.core {
-			nodes[ia] = bootStaticNode(t, wpki, hosts[ia], false, states[ia], sets[ia],
-				productionBFD)
+			nodes[ia] = bootStaticNode(t, wpki, hosts[ia], false, states[ia], sets[ia], mutate)
 		}
 	}
 	return nodes

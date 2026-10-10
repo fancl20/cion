@@ -15,7 +15,7 @@ import (
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/header"
 
-	"github.com/fancl20/cion/pkg/apps"
+	"github.com/fancl20/cion/internal/services"
 	"github.com/fancl20/cion/pkg/apps/wireguard"
 )
 
@@ -93,46 +93,50 @@ func hasHostPeer(a *wireguard.App, host wireguard.HostEntry) bool {
 }
 
 // nodeHostPort returns the node's shared host-facing underlay endpoint.
-func nodeHostPort(n *Node) netip.AddrPort {
-	return netip.AddrPortFrom(n.ControlIP, n.Wireguard.HostPort())
+func nodeHostPort(n *assemblyNode) netip.AddrPort {
+	return netip.AddrPortFrom(n.host, wireguardOf(n).HostPort())
 }
 
 // registerHost records one host's registry entry in the core's store — the
 // record the coordination service's gate writes, handed here by the tests that
 // stand in for the service.
-func registerHost(t *testing.T, core *Node, host wireguard.HostEntry) {
+func registerHost(t *testing.T, core *assemblyNode, host wireguard.HostEntry) {
 	t.Helper()
-	if err := core.WireguardStore.PublishHost(context.Background(), host); err != nil {
+	if err := wireguardOf(core).Registry().PublishHost(context.Background(), host); err != nil {
 		t.Fatal(err)
 	}
 }
 
-// startWireguardNodes brings up the two-node WireGuard topology: the core A
-// and the leaf B, meshed over their seeded link, each serving its hosts on
-// the default shared port and holding the slice the directory assigned its
-// publication.
-func startWireguardNodes(t *testing.T, ipA, ipB netip.Addr) (*Node, *Node) {
+// startWireguardNodes brings up the two-node WireGuard topology on the
+// static builder: the core A and the leaf B, each loading the WireGuard
+// application on a host port from the pinned band — a WireGuard interface
+// on the test host may hold the default — and meshed once B's publication
+// lands. B's first publication precedes its chain, so the mesh waits out
+// one publication retry.
+func startWireguardNodes(t *testing.T) (a, b *assemblyNode) {
 	t.Helper()
-	wpki := NewWebPKI(t)
-	extA, extB := PinnedUDPAddrOn(t, ipA), PinnedUDPAddrOn(t, ipB)
-	a := StartNode(t, NodeConfig{
-		IA: wireguardA, Host: ipA, Core: true, WPKI: wpki,
-		Links:     []Link{{Local: extA, Remote: extB, Neighbor: wireguardB}},
-		Wireguard: &WireguardOptions{ListenPort: apps.DefaultHostPort},
+	nodes := bootTopology(t, NewWebPKI(t), staticTopology{
+		core:  wireguardA,
+		nodes: []addr.IA{wireguardA, wireguardB},
+		links: [][2]addr.IA{{wireguardA, wireguardB}},
+		mutate: func(cfg *services.NodeConfig) {
+			cfg.Applications = []string{"wireguard"}
+			host := netip.MustParseAddrPort(cfg.Control).Addr()
+			cfg.AppArguments.Wireguard.HostPort =
+				netip.MustParseAddrPort(PinnedUDPAddrOn(t, host)).Port()
+		},
 	})
-	b := StartNode(t, NodeConfig{
-		IA: wireguardB, Host: ipB, WPKI: wpki,
-		Links:     []Link{{Local: extB, Remote: extA, Neighbor: wireguardA}},
-		Wireguard: &WireguardOptions{ListenPort: apps.DefaultHostPort},
+	a, b = nodes[wireguardA].assemblyNode, nodes[wireguardB].assemblyNode
+	PollFor(t, TestTimeout+wireguard.PublishRetry, "A's mesh peer", func() bool {
+		return hasMeshPeer(wireguardOf(a), wireguardB)
 	})
-	Poll(t, "A's mesh peer", func() bool { return hasMeshPeer(a.Wireguard, wireguardB) })
-	Poll(t, "B's mesh peer", func() bool { return hasMeshPeer(b.Wireguard, wireguardA) })
+	Poll(t, "B's mesh peer", func() bool { return hasMeshPeer(wireguardOf(b), wireguardA) })
 	return a, b
 }
 
 // assignedSlice waits for the node's directory entry to carry its assigned
 // slice and returns it: the harness places its nodes by publication.
-func assignedSlice(t *testing.T, n *Node) netip.Prefix {
+func assignedSlice(t *testing.T, n *assemblyNode) netip.Prefix {
 	t.Helper()
 	Poll(t, "the node's assigned slice", func() bool {
 		return sliceOf(n).IsValid()
@@ -142,13 +146,13 @@ func assignedSlice(t *testing.T, n *Node) netip.Prefix {
 
 // sliceOf returns the slice the node's directory entry carries, invalid
 // while none does.
-func sliceOf(n *Node) netip.Prefix {
-	directory, err := n.Wireguard.Directory(context.Background())
+func sliceOf(n *assemblyNode) netip.Prefix {
+	directory, err := wireguardOf(n).Directory(context.Background())
 	if err != nil {
 		return netip.Prefix{}
 	}
 	for _, entry := range directory.Nodes {
-		if entry.IA.Equal(n.IA) {
+		if entry.IA.Equal(n.app.IA()) {
 			return entry.Overlay
 		}
 	}
@@ -173,7 +177,7 @@ func TestWireguardMeshExchange(t *testing.T) {
 	hostAKey, hostAPub := newHostKey(t)
 	hostBKey, hostBPub := newHostKey(t)
 
-	a, b := startWireguardNodes(t, hostSlot(t), hostSlot(t))
+	a, b := startWireguardNodes(t)
 	// The two placements are distinct — unique by construction — and the
 	// hosts' addresses come from them.
 	sliceA, sliceB := assignedSlice(t, a), assignedSlice(t, b)
@@ -189,17 +193,17 @@ func TestWireguardMeshExchange(t *testing.T) {
 	// The nodes program themselves from the fetched set: both host devices
 	// gain their peers within one fetch cadence.
 	Poll(t, "A's host peer", func() bool {
-		return hasHostPeer(a.Wireguard, wireguard.HostEntry{
+		return hasHostPeer(wireguardOf(a), wireguard.HostEntry{
 			PublicKey: hostAPub, Addr: hostAAddr})
 	})
 	Poll(t, "B's host peer", func() bool {
-		return hasHostPeer(b.Wireguard, wireguard.HostEntry{
+		return hasHostPeer(wireguardOf(b), wireguard.HostEntry{
 			PublicKey: hostBPub, Addr: hostBAddr})
 	})
 
 	// Hosts: standard clients of their local nodes.
-	hostA := newRawHost(t, a.Wireguard.PublicKey(), hostAKey, hostAAddr, nodeHostPort(a))
-	hostB := newRawHost(t, b.Wireguard.PublicKey(), hostBKey, hostBAddr, nodeHostPort(b))
+	hostA := newRawHost(t, wireguardOf(a).PublicKey(), hostAKey, hostAAddr, nodeHostPort(a))
+	hostB := newRawHost(t, wireguardOf(b).PublicKey(), hostBKey, hostBAddr, nodeHostPort(b))
 
 	// Host A echoes host B across the mesh: through A's host device, the
 	// tunnel, and B's delivery to its own host.
