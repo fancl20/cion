@@ -31,9 +31,15 @@ import (
 // nothing there, its surfaces its own sockets instead. The concrete
 // applications satisfy it without importing this package.
 type Application interface {
-	// Run serves the application until the context is canceled.
+	// Run runs the application's loops until the context is canceled,
+	// each in its own goroutine with a panic absorbed and logged, and
+	// returns once every goroutine it started has returned. It may close
+	// what nothing borrows to end a loop; what a borrower uses stays for
+	// Close.
 	Run(ctx context.Context) error
-	// Close releases the application.
+	// Close releases what the constructor bound, once Run has returned, or
+	// alone when Run never ran — a failed boot releases applications whose
+	// Run never started. A second call releases nothing again.
 	Close()
 	// HTTPSHandler is the handler the node's HTTPS server mounts at its
 	// root, nil when the application mounts nothing on it; at most one

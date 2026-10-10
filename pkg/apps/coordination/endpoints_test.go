@@ -163,18 +163,7 @@ func derpClientFor(t *testing.T, addr string, roots *x509.CertPool,
 	nodeKey key.NodePrivate) (*derp.Client, *bufio.Writer) {
 
 	t.Helper()
-	conn, err := tls.Dial("tcp", addr, &tls.Config{
-		RootCAs:    roots,
-		ServerName: TestDomain,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	req := "GET /derp HTTP/1.1\r\nHost: " + TestDomain +
-		"\r\nUpgrade: DERP\r\nConnection: Upgrade\r\n\r\n"
-	if _, err := conn.Write([]byte(req)); err != nil {
-		t.Fatal(err)
-	}
+	conn := relayUpgrade(t, addr, roots)
 	br := bufio.NewReader(conn)
 	status, err := br.ReadString('\n')
 	if err != nil || status == "" {
@@ -204,6 +193,26 @@ func derpClientFor(t *testing.T, addr string, roots *x509.CertPool,
 	if err := brw.Flush(); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = conn.Close() })
 	return client, brw.Writer
+}
+
+// relayUpgrade dials the endpoint's TLS identity and sends the relay's
+// upgrade request, handing back the connection before any answer; the
+// connection closes with the test.
+func relayUpgrade(t *testing.T, addr string, roots *x509.CertPool) net.Conn {
+	t.Helper()
+	conn, err := tls.Dial("tcp", addr, &tls.Config{
+		RootCAs:    roots,
+		ServerName: TestDomain,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	req := "GET /derp HTTP/1.1\r\nHost: " + TestDomain +
+		"\r\nUpgrade: DERP\r\nConnection: Upgrade\r\n\r\n"
+	if _, err := conn.Write([]byte(req)); err != nil {
+		t.Fatal(err)
+	}
+	return conn
 }

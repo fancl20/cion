@@ -276,3 +276,55 @@ Each commit keeps the tree green:
     once.
 *   **Integration, the stop:** a tailnet lab closes the node before its
     clients leave, and the node's `Close` returns.
+
+## Implementation history
+
+*   Landed in four commits, one per migration step: 21cdc51, the loops
+    package ([loops.go](/pkg/loops/loops.go)) with the measured provider
+    on it; 9a0413e, the WireGuard application
+    ([app.go](/pkg/apps/wireguard/app.go)); 0b14a12, the SOCKS application
+    ([app.go](/pkg/apps/socks/app.go)); and the commit that closes the
+    relay's connections ([derp.go](/pkg/apps/coordination/derp.go)),
+    states the contract ([apps.go](/pkg/apps/apps.go)), and appends this
+    record.
+*   a13723f landed beside the series: a streaming map request takes its
+    slot of the bounded set before its first frame, the race
+    `TestMapStreamBound` lost in two of the series' full runs.
+*   `loops.Go` logs with the supervisor's messages, `Loop panicked` and
+    `Loop exited`; the measured provider's own messages go.
+*   `applyDirectory` takes the sync loop's context rather than the
+    application holding one; the wait group is the application's.
+    WireGuard's `Close` runs once and shares `release` with `New`'s
+    failure path, which so resets the interface-down receiver too.
+*   The WireGuard episode splits in two
+    ([app_test.go](/pkg/apps/wireguard/app_test.go)), for a core has no
+    directory client: `TestWireguardRunJoinsItsLoops` runs a core with a
+    publication held in flight across the stop, a mesh peer's device up,
+    and the relay presence blocked in `Recv` against an in-process relay;
+    `TestWireguardClosesTheDirectoryClientConn` reads the other node's
+    conn.
+*   The restart lab lists `wireguard` and `voting` and draws the host port
+    from the pinned band: a WireGuard interface on the test host may hold
+    the default, and the list keeps the coordination application, with
+    its privileged HTTPS port, out of the lab.
+*   SOCKS's `Config` gains a `Dial` override for tests beside `Handshake`.
+    `Server` keeps no application: `Server.Run` releases it, so
+    `Server.Close` releases nothing. The application's `Close` destroys
+    the netstack only when `Run` never ran; the stop closed and waited for
+    it otherwise.
+*   The stopped mark is held alone by `TestStoppedRefusesLateFlows`
+    ([app_test.go](/pkg/apps/socks/app_test.go)), which sets it with the
+    netstack open: in `TestRunStopsItsFlows` the netstack's close already
+    fails a late flow's reply.
+*   The relay registers the hijacked connection itself and releases it
+    when the relay's handler returns, so the DERP server keeps reading its
+    TCP statistics. A hijack after `Close` closes the connection and hands
+    it to the relay, whose serving of it fails at once.
+*   The episodes the plan left unnamed: the loops' unit is
+    `TestPanicIsAbsorbed`, `TestEarlyReturnIsLogged`, and
+    `TestWaitJoinsTheLoops` ([loops_test.go](/pkg/loops/loops_test.go));
+    the handshake bound is `TestHandshakeBound`; coordination's is
+    `TestCloseEndsRelayClients`
+    ([bounds_test.go](/pkg/apps/coordination/bounds_test.go)); and the
+    stop is the last episode of `TestCoordinationOpenJoin`
+    ([coordination_test.go](/internal/testnetwork/coordination_test.go)).

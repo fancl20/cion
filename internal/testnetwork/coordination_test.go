@@ -307,7 +307,8 @@ func echoOverTailnet(t *testing.T, dst *tsnet.Server, dstAddr netip.Addr,
 // topology: a host registers through the open default, its login
 // completing on the spot; the node programs itself from the fetched
 // registry within one cadence; and two hosts exchange traffic through the
-// mesh — the tunnel carrying the tailnet and nothing else.
+// mesh — the tunnel carrying the tailnet and nothing else. The core then
+// stops before its hosts leave, and its Close returns.
 func TestCoordinationOpenJoin(t *testing.T) {
 	t.Parallel()
 	// The package CA: its certificate file is the one the vendored
@@ -394,4 +395,17 @@ func TestCoordinationOpenJoin(t *testing.T) {
 		src, dstHost, dstIP = hostB, hostA, ipsA[0]
 	}
 	echoOverTailnet(t, dstHost, dstIP, src, "through the tailnet")
+
+	// The core stops before its hosts leave: its Close returns with their
+	// conversations and relay connections still open.
+	stopped := make(chan error, 1)
+	go func() { stopped <- a.app.Close() }()
+	select {
+	case err := <-stopped:
+		if err != nil {
+			t.Errorf("stopping the core: %v", err)
+		}
+	case <-time.After(TestTimeout):
+		t.Fatal("the core's Close never returned with its hosts connected")
+	}
 }

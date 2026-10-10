@@ -185,6 +185,44 @@ func TestCloseEndsConversations(t *testing.T) {
 	}
 }
 
+// TestCloseEndsRelayClients checks that Close ends the relay's clients as it
+// ends the conversations: with a relay client connected, Close returns and
+// the client's connection ends, and a relay upgrade that completes after
+// the close ends at once, none of the relay's handshake on it.
+func TestCloseEndsRelayClients(t *testing.T) {
+	roots, tlsCfg := testCert(t)
+	a := testApp(t, Config{Store: &dbtest.MemStore{}})
+	addr := serveCoordination(t, a, tlsCfg)
+
+	client, _ := derpClientFor(t, addr, roots, key.NewNode())
+	ended := make(chan struct{})
+	go func() {
+		defer close(ended)
+		for {
+			if _, err := client.Recv(); err != nil {
+				return
+			}
+		}
+	}()
+	closed := make(chan struct{})
+	go func() {
+		a.Close()
+		close(closed)
+	}()
+	select {
+	case <-closed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Close still waits on the connected relay client")
+	}
+	select {
+	case <-ended:
+	case <-time.After(5 * time.Second):
+		t.Error("the relay client's connection outlived Close")
+	}
+
+	checkEnded(t, relayUpgrade(t, addr, roots), "the relay upgrade after the close")
+}
+
 // checkEnded fails the test unless the client's side of a conversation
 // reports the conversation's end within the bound.
 func checkEnded(t *testing.T, conn net.Conn, what string) {

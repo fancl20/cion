@@ -3,6 +3,7 @@ package coordination
 import (
 	"context"
 	"errors"
+	"net"
 	"net/http"
 	"sync"
 	"sync/atomic"
@@ -108,12 +109,14 @@ type App struct {
 	// the upgrade refuses before the handshake begins.
 	conversations atomic.Int64
 
-	// convMtx guards the open conversations and the closed flag. A
-	// conversation otherwise ends only when its client leaves, so Close
-	// closes the open ones' connections, and once it has marked the
-	// application closed no conversation starts.
+	// convMtx guards the open conversations, the relay's client
+	// connections, and the closed flag. A conversation or a relay client
+	// otherwise ends only when its client leaves, so Close closes the open
+	// ones' connections, and once it has marked the application closed no
+	// conversation starts and a relay client's connection closes at once.
 	convMtx sync.Mutex
 	convs   map[*conversationConn]struct{}
+	relays  map[net.Conn]struct{}
 	closed  bool
 	// wg waits for the served noise conversations, so Close returns once
 	// the server has closed each one's connection.
@@ -151,10 +154,11 @@ func New(cfg Config) (*App, error) {
 		overall:    rate.NewLimiter(rate.Every(admissionMinInterval), 1),
 		mapStreams: make(chan struct{}, maxMapStreams),
 		convs:      make(map[*conversationConn]struct{}),
+		relays:     make(map[net.Conn]struct{}),
 	}
 	mux := http.NewServeMux()
 	mux.Handle("/ts2021", http.HandlerFunc(a.handleNoise))
-	mux.Handle("/derp", a.derp.handler())
+	mux.Handle("/derp", a.relayHandler())
 	// The client's first exchange is the key fetch over plain TLS: the
 	// noise machine key it must know before the handshake can begin.
 	mux.HandleFunc("/key", a.handleKey)
@@ -172,14 +176,19 @@ func (a *App) Run(ctx context.Context) error {
 
 // Close retires the application: the served noise conversations and the
 // relay with its connected clients. It marks the application closed, so no
-// conversation starts after it, and closes each open conversation's
-// connection, for its client may never leave; it returns once the server
-// has finished with each.
+// conversation starts after it and a relay client's connection closes at
+// once, and closes each open conversation's connection and each relay
+// client's, for their clients may never leave; it returns once the server
+// has finished with each conversation and the relay with each client. A
+// second call releases nothing.
 func (a *App) Close() {
 	a.convMtx.Lock()
 	a.closed = true
 	for conv := range a.convs {
 		conv.abort()
+	}
+	for conn := range a.relays {
+		_ = conn.Close()
 	}
 	a.convMtx.Unlock()
 	a.wg.Wait()
