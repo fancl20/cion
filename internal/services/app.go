@@ -20,6 +20,7 @@ import (
 	"github.com/fancl20/cion/pkg/modules/pathdb"
 	"github.com/fancl20/cion/pkg/modules/trustdb"
 	"github.com/fancl20/cion/pkg/scion"
+	"github.com/fancl20/cion/pkg/trust"
 )
 
 // Run boots the node the run arguments and state directory describe and
@@ -117,6 +118,14 @@ func (a *App) PathDB() pathdb.DB { return a.node.pathDB }
 // Lookup returns the node's segment lookup service — the handler the control
 // endpoint serves and the fetcher the provider resolves through.
 func (a *App) Lookup() *controlplane.LookupService { return a.node.lookup }
+
+// Engine returns the node's trust engine: it signs the node's own beacon
+// entries and verifies each received entry bound to the identity it claims.
+func (a *App) Engine() *trust.Engine { return a.node.engine }
+
+// PeerClient returns the node's verified peer channel: the client its
+// beacons, registrations, and segment fetches ride.
+func (a *App) PeerClient() *controlplane.PeerClient { return a.node.peerClt }
 
 // Application returns the loaded application the name names, nil when it
 // did not load. The labs assert the concrete application where they watch

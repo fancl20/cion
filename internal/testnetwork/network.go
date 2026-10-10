@@ -94,21 +94,10 @@ type Node struct {
 	// WireguardStore is the core's directory store — the registry the
 	// coordination application writes host entries into. Nil on non-cores.
 	WireguardStore wireguard.DirectoryStore
-	cancel         context.CancelFunc
-	// underlayDone closes when the data plane's Serve returned — its
-	// underlay sockets released with it.
-	underlayDone chan struct{}
-}
-
-// WaitUnderlayReleased waits the node's data plane out: Serve returned, the
-// underlay addresses released — a restarted node rebinds the recorded link
-// addresses against no holder of its previous incarnation.
-func (n *Node) WaitUnderlayReleased() {
-	<-n.underlayDone
 }
 
 // Link is one seeded external link of a node: both endpoints' addresses
-// recorded in each side's store, the shape a restart serves.
+// recorded in each side's store.
 type Link struct {
 	Local    string
 	Remote   string
@@ -230,10 +219,8 @@ type NodeConfig struct {
 	// Host is the loopback host the node's addresses sit on, so several
 	// nodes share one test host even with the fixed ports.
 	Host netip.Addr
-	// StateDir persists the node's state; "" uses a fresh temporary one.
-	StateDir string
 	// Links are the node's seeded external links, recorded in its store as
-	// established — the shape a restart serves.
+	// established.
 	Links []Link
 	// Core marks the founding core node.
 	Core bool
@@ -249,7 +236,7 @@ type NodeConfig struct {
 func StartNode(t *testing.T, cfg NodeConfig) *Node {
 	t.Helper()
 	ia, host, linksCfg, core, wpki := cfg.IA, cfg.Host, cfg.Links, cfg.Core, cfg.WPKI
-	stateDir := cfg.StateDir
+	stateDir := t.TempDir()
 
 	metrics, err := dataplane.NewMetrics()
 	if err != nil {
@@ -263,9 +250,6 @@ func StartNode(t *testing.T, cfg NodeConfig) *Node {
 	controlAddr, err := netip.ParseAddrPort(control)
 	if err != nil {
 		t.Fatal(err)
-	}
-	if stateDir == "" {
-		stateDir = t.TempDir()
 	}
 	trustDB, err := trustbbolt.New(filepath.Join(stateDir, "trust.db"), nil)
 	if err != nil {
@@ -382,17 +366,13 @@ func StartNode(t *testing.T, cfg NodeConfig) *Node {
 		}
 		provider.Stop()
 	})
-	// The link store's file lock releases with the node's cancellation, so
-	// a restarted node — the same state directory — opens it instead of
-	// blocking on it.
+	// The link store closes with the node's cancellation.
 	go func() {
 		<-ctx.Done()
 		_ = linkStore.Close()
 	}()
-	underlayDone := make(chan struct{})
 	go func() {
 		serveDone <- d.Serve(ctx)
-		close(underlayDone)
 	}()
 	go func() {
 		defer handlePanic()
@@ -634,9 +614,6 @@ func StartNode(t *testing.T, cfg NodeConfig) *Node {
 		PeerClt:   peerClt,
 		Provider:  pathProvider,
 		Lookup:    lookup,
-		cancel:    cancel,
-
-		underlayDone: underlayDone,
 	}
 
 	if cfg.Wireguard != nil {

@@ -126,10 +126,11 @@ type staticTopology struct {
 	pins  map[[2]addr.IA]uint16
 }
 
-// bootTopology boots a static topology through the node's own assembly.
-// Each node's ISD-AS is written to its state before any boot, so every
-// node's link set names its neighbors up front, each link's addresses drawn
-// from its two nodes' hosts; the founding core, if any, boots first.
+// bootTopology boots a static topology through the node's own assembly,
+// each node on the production BFD interval. Each node's ISD-AS is written
+// to its state before any boot, so every node's link set names its
+// neighbors up front, each link's addresses drawn from its two nodes'
+// hosts; the founding core, if any, boots first.
 func bootTopology(t *testing.T, wpki *WebPKI, topo staticTopology) map[addr.IA]*staticNode {
 	t.Helper()
 	hosts := make(map[addr.IA]netip.Addr, len(topo.nodes))
@@ -158,13 +159,6 @@ func bootTopology(t *testing.T, wpki *WebPKI, topo staticTopology) map[addr.IA]*
 		sets[ia] = linkSetPath(t)
 		writeStaticSet(t, sets[ia], entries[ia]...)
 	}
-	// The labs prove carriage, not liveness: their nodes run the production
-	// BFD interval, whose detection time rides out the stalls of a loaded
-	// runner, which at lab pacing take every link down and lose the echoes
-	// in flight.
-	productionBFD := func(cfg *services.NodeConfig) {
-		cfg.Pacing.BFD = controlplane.BFDTransmissionInterval
-	}
 	nodes := make(map[addr.IA]*staticNode, len(topo.nodes))
 	if !topo.core.IsZero() {
 		nodes[topo.core] = bootStaticNode(t, wpki, hosts[topo.core], true,
@@ -177,6 +171,14 @@ func bootTopology(t *testing.T, wpki *WebPKI, topo staticTopology) map[addr.IA]*
 		}
 	}
 	return nodes
+}
+
+// productionBFD boots a node on the production BFD interval. The builder's
+// labs prove carriage, not liveness, and the production interval's
+// detection time rides out the stalls of a loaded runner, which at lab
+// pacing take every link down and lose the echoes in flight.
+func productionBFD(cfg *services.NodeConfig) {
+	cfg.Pacing.BFD = controlplane.BFDTransmissionInterval
 }
 
 // TestStaticLabByLinkSet is the file provider's integration proof: a
