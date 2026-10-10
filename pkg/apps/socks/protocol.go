@@ -79,13 +79,13 @@ func (d destination) String() string {
 
 // resolve turns the named destination into an address: an address-named one
 // is itself, a domain-named one resolves through the node's resolver under
-// the dial timeout's bound, IPv4 preferred — the stack the service
-// terminates is IPv4, the outbound legs the node's own sockets.
-func (d destination) resolve() (netip.AddrPort, error) {
+// the dial timeout's bound and the context, IPv4 preferred — the stack the
+// service terminates is IPv4, the outbound legs the node's own sockets.
+func (d destination) resolve(ctx context.Context) (netip.AddrPort, error) {
 	if d.name == "" {
 		return netip.AddrPortFrom(d.ip, d.port), nil
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), egressDialTimeout)
+	ctx, cancel := context.WithTimeout(ctx, egressDialTimeout)
 	defer cancel()
 	ips, err := net.DefaultResolver.LookupNetIP(ctx, "ip", d.name)
 	if err != nil {

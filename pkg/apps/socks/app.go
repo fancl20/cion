@@ -35,6 +35,7 @@ import (
 	"gvisor.dev/gvisor/pkg/tcpip/transport/udp"
 
 	"github.com/fancl20/cion/pkg/apps/wireguard"
+	"github.com/fancl20/cion/pkg/loops"
 )
 
 // Egress flow policy, carried whole by the service: flow state is bounded by a
@@ -48,7 +49,8 @@ const (
 	// egressIdle is how long a flow stays silent before the service drops
 	// it.
 	egressIdle = 5 * time.Minute
-	// egressDialTimeout bounds an outbound leg's establishment.
+	// egressDialTimeout bounds an outbound leg's establishment, and a
+	// conversation's handshake beside it.
 	egressDialTimeout = 15 * time.Second
 )
 
@@ -88,6 +90,12 @@ type Config struct {
 	Idle time.Duration
 	// Flows overrides the flow bound, for tests; zero means the constant.
 	Flows int
+	// Handshake overrides the handshake bound, for tests; zero means the
+	// dial timeout.
+	Handshake time.Duration
+	// Dial overrides how a CONNECT dials its internet leg, for tests; nil
+	// means the node's own sockets under the dial timeout.
+	Dial func(ctx context.Context, network, address string) (net.Conn, error)
 }
 
 // App is the SOCKS application: a netstack claiming the node's own address,
@@ -100,17 +108,22 @@ type App struct {
 	link  *channel.Endpoint
 	nicID tcpip.NICID
 	// own is the node's own overlay address, the service's serving address.
-	own    netip.Addr
-	cnt    *counters
-	dialer *net.Dialer
-	ln     *gonet.TCPListener
-	idle   time.Duration
-	bound  int
+	own       netip.Addr
+	cnt       *counters
+	dial      func(ctx context.Context, network, address string) (net.Conn, error)
+	ln        *gonet.TCPListener
+	idle      time.Duration
+	bound     int
+	handshake time.Duration
 
 	// route carries the packets netstack produces to the borrowed router.
 	route func(pkt []byte)
 	// undo uninstalls the own address's delivery.
 	undo func()
+
+	// wg joins Run's loops and the goroutines they start per conversation,
+	// splice, association, and outbound socket.
+	wg sync.WaitGroup
 
 	mtx sync.Mutex
 	// tcpFlows holds the CONNECT legs, udpLegs the associations' outbound
@@ -120,6 +133,9 @@ type App struct {
 	tcpFlows map[*tcpFlow]struct{}
 	udpLegs  map[*udpLeg]struct{}
 	assocs   map[*association]struct{}
+	// stopped marks Run's stop: a flow completing afterward closes its
+	// legs instead of entering the tables.
+	stopped bool
 
 	closeOnce sync.Once
 }
@@ -128,7 +144,8 @@ type App struct {
 // on a link endpoint the borrowed router feeds, the SOCKS listener binds the
 // registered port on that address alone, and the flow tables stand empty.
 // The delivery installs here and uninstalls at Close: the address is routed
-// exactly while the application exists.
+// exactly while the application exists. A failed assembly destroys the
+// netstack it created.
 func New(cfg Config) (*App, error) {
 	if cfg.Router == nil {
 		return nil, fmt.Errorf("no overlay router configured to borrow")
@@ -142,17 +159,21 @@ func New(cfg Config) (*App, error) {
 	})
 	link := channel.New(512, uint32(wireguard.OverlayMTU), "")
 	a := &App{
-		stack:    s,
-		link:     link,
-		nicID:    1,
-		own:      own,
-		cnt:      &counters{},
-		dialer:   &net.Dialer{Timeout: egressDialTimeout},
-		idle:     cfg.Idle,
-		bound:    cfg.Flows,
-		tcpFlows: make(map[*tcpFlow]struct{}),
-		udpLegs:  make(map[*udpLeg]struct{}),
-		assocs:   make(map[*association]struct{}),
+		stack:     s,
+		link:      link,
+		nicID:     1,
+		own:       own,
+		cnt:       &counters{},
+		dial:      cfg.Dial,
+		idle:      cfg.Idle,
+		bound:     cfg.Flows,
+		handshake: cfg.Handshake,
+		tcpFlows:  make(map[*tcpFlow]struct{}),
+		udpLegs:   make(map[*udpLeg]struct{}),
+		assocs:    make(map[*association]struct{}),
+	}
+	if a.dial == nil {
+		a.dial = (&net.Dialer{Timeout: egressDialTimeout}).DialContext
 	}
 	if a.idle == 0 {
 		a.idle = egressIdle
@@ -160,7 +181,11 @@ func New(cfg Config) (*App, error) {
 	if a.bound == 0 {
 		a.bound = maxEgressFlows
 	}
+	if a.handshake == 0 {
+		a.handshake = egressDialTimeout
+	}
 	if err := s.CreateNIC(a.nicID, link); err != nil {
+		s.Destroy()
 		return nil, fmt.Errorf("creating the service NIC: %v", err)
 	}
 	if err := s.AddProtocolAddress(a.nicID, tcpip.ProtocolAddress{
@@ -170,6 +195,7 @@ func New(cfg Config) (*App, error) {
 			PrefixLen: cfg.Subnet.Bits(),
 		},
 	}, stack.AddressProperties{}); err != nil {
+		s.Destroy()
 		return nil, fmt.Errorf("adding the own address: %v", err)
 	}
 	// The stack's own route covers the tailnet and nothing else: every
@@ -181,6 +207,7 @@ func New(cfg Config) (*App, error) {
 		tcpip.AddrFrom4(tailnet.Masked().Addr().As4()),
 		tcpip.MaskFromBytes(prefixMask(tailnet.Bits())))
 	if err != nil {
+		s.Destroy()
 		return nil, fmt.Errorf("building the tailnet route: %w", err)
 	}
 	s.SetRouteTable([]tcpip.Route{{Destination: subnet, NIC: a.nicID}})
@@ -190,6 +217,7 @@ func New(cfg Config) (*App, error) {
 		Port: Port,
 	}, netipv4.ProtocolNumber)
 	if err != nil {
+		s.Destroy()
 		return nil, fmt.Errorf("binding the SOCKS listener: %v", err)
 	}
 	a.ln = ln
@@ -221,16 +249,17 @@ func (a *App) Inbound(pkt []byte) {
 
 // Run serves the application until the context is canceled: the listener
 // accepts, netstack's own packets route toward their overlay destinations
-// through the borrowed router, and idle flows expire.
+// through the borrowed router, and idle flows expire. It returns once every
+// goroutine it started has returned, and the netstack's own with them.
 func (a *App) Run(ctx context.Context) error {
-	defer a.Close()
-	go a.accept()
-	go a.drain(ctx)
+	loops.Go(ctx, &a.wg, "socks accept", a.accept)
+	loops.Go(ctx, &a.wg, "socks drain", a.drain)
 	sweep := time.NewTicker(a.idle / 2)
 	defer sweep.Stop()
 	for {
 		select {
 		case <-ctx.Done():
+			a.stop()
 			return nil
 		case <-sweep.C:
 			a.expireIdle(time.Now())
@@ -238,43 +267,60 @@ func (a *App) Run(ctx context.Context) error {
 	}
 }
 
+// stop ends what Run started, its context ended — the dials and
+// resolutions in flight, which take it, end with it. The application stops
+// taking flows and closes the ones it holds, so a CONNECT or ASSOCIATE that
+// completes afterward closes its legs instead of entering the tables; the
+// netstack's close aborts every endpoint left, the listener's accept and a
+// handshake's read among them. It returns once the goroutines Run started
+// and the netstack's own have returned.
+func (a *App) stop() {
+	a.mtx.Lock()
+	a.stopped = true
+	for f := range a.tcpFlows {
+		delete(a.tcpFlows, f)
+		f.close()
+	}
+	for asc := range a.assocs {
+		a.teardownLocked(asc)
+	}
+	a.mtx.Unlock()
+	a.stack.Close()
+	a.wg.Wait()
+	a.stack.Wait()
+}
+
 // Close retires the application: the served address's delivery uninstalls —
-// the address counting unroutable again — the listener and the link close,
-// and every flow and association tears down. No operating-system
-// provisioning exists to undo.
+// the address counting unroutable again — and, when Run never ran, the
+// netstack closes with the listener and the link beneath it; Run's stop
+// closed them otherwise. No operating-system provisioning exists to undo,
+// and a second call releases nothing.
 func (a *App) Close() {
 	a.closeOnce.Do(func() {
-		if a.undo != nil {
-			a.undo()
-		}
-		_ = a.ln.Close()
-		a.link.Close()
+		a.undo()
 		a.mtx.Lock()
-		defer a.mtx.Unlock()
-		for f := range a.tcpFlows {
-			delete(a.tcpFlows, f)
-			f.close()
-		}
-		for asc := range a.assocs {
-			a.teardownLocked(asc)
+		ran := a.stopped
+		a.mtx.Unlock()
+		if !ran {
+			a.stack.Destroy()
 		}
 	})
 }
 
-// accept serves the listener until it closes: one conversation per
-// connection.
-func (a *App) accept() {
+// accept serves the listener until the netstack's close aborts it: one
+// conversation per connection, joining Run's wait group.
+func (a *App) accept(ctx context.Context) {
 	for {
 		conn, err := a.ln.Accept()
 		if err != nil {
 			return
 		}
-		go a.serve(conn)
+		a.wg.Go(func() { a.serve(ctx, conn) })
 	}
 }
 
 // drain moves packets netstack wrote — replies and relays — into the
-// borrowed router.
+// borrowed router until the context ends.
 func (a *App) drain(ctx context.Context) {
 	for {
 		pkt := a.link.ReadContext(ctx)

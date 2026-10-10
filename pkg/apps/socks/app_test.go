@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"net/netip"
+	"os"
 	"sync"
 	"testing"
 	"time"
@@ -67,8 +68,18 @@ func (r *labRouter) deliverNow(pkt []byte) {
 // newLab assembles the service beside its client double — the egress
 // suite's in-process lab: a client netstack whose outbound packets the lab
 // feeds to the service's inbound path and whose inbound the service's
-// replies feed back, the whole tailnet leg without the tunnels.
+// replies feed back, the whole tailnet leg without the tunnels. The
+// service runs until the test's cleanup stops it.
 func newLab(t *testing.T, mutate func(*Config)) (*App, *stack.Stack) {
+	t.Helper()
+	app, client, _ := runLab(t, mutate)
+	return app, client
+}
+
+// runLab is newLab handing the test the service's stop: stop cancels Run's
+// context and returns what Run returned, or an error once ten seconds pass
+// without its return. The cleanup stops the service too, then closes it.
+func runLab(t *testing.T, mutate func(*Config)) (*App, *stack.Stack, func() error) {
 	t.Helper()
 	client := stack.New(stack.Options{
 		NetworkProtocols: []stack.NetworkProtocolFactory{
@@ -125,13 +136,25 @@ func newLab(t *testing.T, mutate func(*Config)) (*App, *stack.Stack) {
 		}
 	}()
 	ctx, cancel := context.WithCancel(context.Background())
-	go func() { _ = app.Run(ctx) }()
-	t.Cleanup(func() {
+	returned := make(chan error, 1)
+	go func() { returned <- app.Run(ctx) }()
+	stop := sync.OnceValue(func() error {
 		cancel()
+		select {
+		case err := <-returned:
+			return err
+		case <-time.After(10 * time.Second):
+			return errors.New("Run did not return once its context was canceled")
+		}
+	})
+	t.Cleanup(func() {
+		if err := stop(); err != nil {
+			t.Error(err)
+		}
 		app.Close()
 		stopPump()
 	})
-	return app, client
+	return app, client, stop
 }
 
 // dialClient dials the service's listener from the client stack.
@@ -624,6 +647,190 @@ func TestAssociationClosesWithLeg(t *testing.T) {
 	waitFor(t, "the association swept", func() bool {
 		return app.flowCount() == 0
 	})
+}
+
+// TestRunStopsItsFlows checks the stop: once its context is canceled, Run
+// returns with a client held mid-handshake, a CONNECT whose dial blocks
+// until its context ends, and a spliced flow, whose internet leg sees its
+// connection close. A CONNECT whose dial returns only after the stop closes
+// both its legs at once and enters no table.
+func TestRunStopsItsFlows(t *testing.T) {
+	internet := newHoldingListener(t)
+	const blocked, late = "192.0.2.1:9", "192.0.2.2:9"
+	dialing := make(chan struct{}, 2)
+	release := make(chan struct{})
+	app, client, stop := runLab(t, func(cfg *Config) {
+		cfg.Dial = func(ctx context.Context, network, address string) (net.Conn, error) {
+			var d net.Dialer
+			switch address {
+			case blocked:
+				dialing <- struct{}{}
+				<-ctx.Done()
+				return nil, ctx.Err()
+			case late:
+				dialing <- struct{}{}
+				<-release
+				return d.Dial(network, internet.addr.String())
+			}
+			return d.DialContext(ctx, network, address)
+		}
+	})
+	releaseLate := sync.OnceFunc(func() { close(release) })
+	t.Cleanup(releaseLate)
+
+	// A client held mid-handshake: its method agreed, its request unsent.
+	held := dialClient(t, client)
+	t.Cleanup(func() { _ = held.Close() })
+	if _, err := held.Write([]byte{version, 1, methodNone}); err != nil {
+		t.Fatal(err)
+	}
+	var method [2]byte
+	_ = held.SetReadDeadline(time.Now().Add(10 * time.Second))
+	if _, err := io.ReadFull(held, method[:]); err != nil {
+		t.Fatalf("reading the method reply: %v", err)
+	}
+
+	// A spliced flow, its internet leg held by the test.
+	spliced, err := socksclient.Connect(dialClient(t, client), internet.addr.String())
+	if err != nil {
+		t.Fatalf("CONNECT: %v", err)
+	}
+	t.Cleanup(func() { _ = spliced.Close() })
+	splicedLeg := internet.next(t)
+
+	// The two CONNECTs whose dials block. The client side never hears the
+	// stop — the service's drain ends with it — so the cleanup closes them.
+	for _, dst := range []string{blocked, late} {
+		conn := dialClient(t, client)
+		t.Cleanup(func() { _ = conn.Close() })
+		go func() { _, _ = socksclient.Connect(conn, dst) }()
+	}
+	for range 2 {
+		select {
+		case <-dialing:
+		case <-time.After(10 * time.Second):
+			t.Fatal("a CONNECT's dial never started")
+		}
+	}
+
+	stopped := make(chan error, 1)
+	go func() { stopped <- stop() }()
+	assertClosed(t, "the spliced flow's internet leg", splicedLeg)
+	select {
+	case err := <-stopped:
+		t.Fatalf("Run returned while a dial was in flight: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	// The late dial returns only now, once the stop has closed the flows.
+	releaseLate()
+	assertClosed(t, "the late CONNECT's internet leg", internet.next(t))
+	if err := <-stopped; err != nil {
+		t.Fatal(err)
+	}
+	if got := app.flowCount(); got != 0 {
+		t.Errorf("flows held after the stop = %d, want none", got)
+	}
+}
+
+// TestStoppedRefusesLateFlows checks the stop's mark alone, the netstack
+// still open: a CONNECT or an ASSOCIATE completing once the application
+// has stopped closes its legs, tells the client nothing, and enters no
+// table.
+func TestStoppedRefusesLateFlows(t *testing.T) {
+	internet := newHoldingListener(t)
+	app, _ := newLab(t, nil)
+	app.mtx.Lock()
+	app.stopped = true
+	app.mtx.Unlock()
+
+	in, client := net.Pipe()
+	t.Cleanup(func() { _ = client.Close() })
+	dst := destination{ip: internet.addr.Addr(), port: internet.addr.Port()}
+	go app.connect(t.Context(), in, dst)
+	assertClosed(t, "the late CONNECT's internet leg", internet.next(t))
+	assertClosed(t, "the late CONNECT's client leg", client)
+
+	in, client = net.Pipe()
+	t.Cleanup(func() { _ = client.Close() })
+	go app.associate(t.Context(), in, destination{})
+	assertClosed(t, "the late ASSOCIATE's client leg", client)
+
+	if got := app.flowCount(); got != 0 {
+		t.Errorf("flows held = %d, want none", got)
+	}
+}
+
+// TestHandshakeBound checks the handshake's bound: a client that connects
+// and sends nothing sees its connection close once the bound has passed.
+func TestHandshakeBound(t *testing.T) {
+	const bound = 200 * time.Millisecond
+	_, client := newLab(t, func(cfg *Config) { cfg.Handshake = bound })
+
+	start := time.Now()
+	conn := dialClient(t, client)
+	defer func() { _ = conn.Close() }()
+	_ = conn.SetReadDeadline(time.Now().Add(10 * time.Second))
+	if _, err := conn.Read(make([]byte, 1)); !errors.Is(err, io.EOF) {
+		t.Fatalf("a silent client's read = %v, want the service's close", err)
+	}
+	if elapsed := time.Since(start); elapsed < bound {
+		t.Errorf("the service closed a silent client after %v, inside the bound %v",
+			elapsed, bound)
+	}
+}
+
+// holdingListener is an internet service that accepts each connection and
+// hands it to the test, reading and closing nothing itself: a peer that
+// never ends a flow.
+type holdingListener struct {
+	addr  netip.AddrPort
+	conns chan net.Conn
+}
+
+func newHoldingListener(t *testing.T) *holdingListener {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	h := &holdingListener{
+		addr:  listener.Addr().(*net.TCPAddr).AddrPort(),
+		conns: make(chan net.Conn, 4),
+	}
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			h.conns <- conn
+		}
+	}()
+	return h
+}
+
+// next returns the next connection the service accepted.
+func (h *holdingListener) next(t *testing.T) net.Conn {
+	t.Helper()
+	select {
+	case conn := <-h.conns:
+		t.Cleanup(func() { _ = conn.Close() })
+		return conn
+	case <-time.After(10 * time.Second):
+		t.Fatal("the internet leg never arrived")
+		return nil
+	}
+}
+
+// assertClosed checks that the connection's peer has closed it: a read
+// ends in an error other than its deadline's.
+func assertClosed(t *testing.T, what string, conn net.Conn) {
+	t.Helper()
+	_ = conn.SetReadDeadline(time.Now().Add(10 * time.Second))
+	if _, err := conn.Read(make([]byte, 1)); err == nil || errors.Is(err, os.ErrDeadlineExceeded) {
+		t.Errorf("a read on %s = %v, want the connection closed", what, err)
+	}
 }
 
 // waitFor sleeps until cond holds, failing the test when it never does.

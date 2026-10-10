@@ -14,10 +14,12 @@ import (
 
 // serve speaks one accepted connection's conversation: method none is
 // offered and the rest refused, then the one request the client sends
-// decides the command. The connection passes to whichever handler serves
-// it — the flow's splice or the association — and the paths that keep
-// nothing close it.
-func (a *App) serve(conn net.Conn) {
+// decides the command. The handshake runs under its bound, so a client
+// that connects and sends nothing gives its goroutine and its endpoint
+// back. The connection passes to whichever handler serves it — the flow's
+// splice or the association — and the paths that keep nothing close it.
+func (a *App) serve(ctx context.Context, conn net.Conn) {
+	_ = conn.SetDeadline(time.Now().Add(a.handshake))
 	if err := negotiate(conn); err != nil {
 		_ = conn.Close()
 		return
@@ -27,11 +29,12 @@ func (a *App) serve(conn net.Conn) {
 		_ = conn.Close()
 		return
 	}
+	_ = conn.SetDeadline(time.Time{})
 	switch cmd {
 	case cmdConnect:
-		a.connect(conn, dst)
+		a.connect(ctx, conn, dst)
 	case cmdAssociate:
-		a.associate(conn, dst)
+		a.associate(ctx, conn, dst)
 	default:
 		// BIND and anything unnamed: told, not implied.
 		_, _ = conn.Write(reply(repCommandNotSupported, netip.Addr{}, 0))
@@ -45,7 +48,7 @@ func (a *App) serve(conn net.Conn) {
 // half-close propagation, the flow entering the TCP table, counting against
 // the bound, and swept by the idle sweep. A refusal is told, not implied:
 // the client learns the cause on its own leg.
-func (a *App) connect(conn net.Conn, dst destination) {
+func (a *App) connect(ctx context.Context, conn net.Conn, dst destination) {
 	a.mtx.Lock()
 	full := a.atCapacityLocked()
 	a.mtx.Unlock()
@@ -55,7 +58,7 @@ func (a *App) connect(conn net.Conn, dst destination) {
 		_ = conn.Close()
 		return
 	}
-	out, err := a.dialer.DialContext(context.Background(), "tcp", dst.dialAddr())
+	out, err := a.dial(ctx, "tcp", dst.dialAddr())
 	if err != nil {
 		a.cnt.droppedPackets.Add(1)
 		slog.Warn("SOCKS dialing the internet leg", "dst", dst.String(), "err", err)
@@ -66,16 +69,21 @@ func (a *App) connect(conn net.Conn, dst destination) {
 	flow := &tcpFlow{in: conn, out: out}
 	flow.last.Store(time.Now().UnixNano())
 	a.mtx.Lock()
+	if a.stopped {
+		a.mtx.Unlock()
+		flow.close()
+		return
+	}
 	a.tcpFlows[flow] = struct{}{}
 	a.mtx.Unlock()
 	if _, err := conn.Write(reply(repSucceeded, netip.Addr{}, 0)); err != nil {
 		a.removeTCPFlow(flow)
 		return
 	}
-	go func() {
+	a.wg.Go(func() {
 		defer a.removeTCPFlow(flow)
 		spliceConns(flow.in, flow.out, &flow.last)
-	}()
+	})
 }
 
 // associate serves UDP ASSOCIATE: the reply names the exit's true tailnet
@@ -85,7 +93,7 @@ func (a *App) connect(conn net.Conn, dst destination) {
 // sweeps the association's sockets and releases the relay port at once.
 // The association itself counts one flow against the bound, TCP and UDP
 // together; a refusal is told on the leg.
-func (a *App) associate(conn net.Conn, _ destination) {
+func (a *App) associate(ctx context.Context, conn net.Conn, _ destination) {
 	relay, err := gonet.DialUDP(a.stack, &tcpip.FullAddress{
 		NIC:  a.nicID,
 		Addr: netipToAddress(a.own),
@@ -106,6 +114,12 @@ func (a *App) associate(conn net.Conn, _ destination) {
 	}
 	asc.last.Store(time.Now().UnixNano())
 	a.mtx.Lock()
+	if a.stopped {
+		a.mtx.Unlock()
+		_ = relay.Close()
+		_ = conn.Close()
+		return
+	}
 	if a.atCapacityLocked() {
 		a.mtx.Unlock()
 		a.cnt.droppedPackets.Add(1)
@@ -120,8 +134,8 @@ func (a *App) associate(conn net.Conn, _ destination) {
 		a.teardown(asc)
 		return
 	}
-	go a.watchLeg(asc)
-	go a.serveRelay(asc)
+	a.wg.Go(func() { a.watchLeg(asc) })
+	a.wg.Go(func() { a.serveRelay(ctx, asc) })
 }
 
 // watchLeg waits out the association's TCP connection: its end — the
@@ -142,7 +156,7 @@ func (a *App) watchLeg(asc *association) {
 // datagram the client sends names its destination, and the reply path
 // answers the association peer's arrival address — the source the client's
 // datagrams arrived from, never the address its TCP request named.
-func (a *App) serveRelay(asc *association) {
+func (a *App) serveRelay(ctx context.Context, asc *association) {
 	buf := make([]byte, 64<<10)
 	for {
 		n, from, err := asc.relay.ReadFrom(buf)
@@ -152,7 +166,7 @@ func (a *App) serveRelay(asc *association) {
 		udp := from.(*net.UDPAddr)
 		peer := netip.AddrPortFrom(netip.AddrFrom4([4]byte(udp.IP)),
 			uint16(udp.Port))
-		a.datagram(asc, peer, buf[:n])
+		a.datagram(ctx, asc, peer, buf[:n])
 	}
 }
 
@@ -161,13 +175,13 @@ func (a *App) serveRelay(asc *association) {
 // destination the client names gets one outbound socket of the node's own,
 // the socket itself the reply mapping, one flow against the bound, swept by
 // idle and by the association's teardown alike.
-func (a *App) datagram(asc *association, from netip.AddrPort, data []byte) {
+func (a *App) datagram(ctx context.Context, asc *association, from netip.AddrPort, data []byte) {
 	dstDest, payload, ok := parseDatagram(data)
 	if !ok {
 		a.cnt.droppedPackets.Add(1)
 		return
 	}
-	dst, err := dstDest.resolve()
+	dst, err := dstDest.resolve(ctx)
 	if err != nil {
 		a.cnt.droppedPackets.Add(1)
 		return
@@ -195,7 +209,7 @@ func (a *App) datagram(asc *association, from netip.AddrPort, data []byte) {
 		leg.last.Store(now)
 		asc.out[dst] = leg
 		a.udpLegs[leg] = struct{}{}
-		go a.pumpLeg(leg)
+		a.wg.Go(func() { a.pumpLeg(leg) })
 	}
 	asc.peer = from
 	asc.last.Store(now)

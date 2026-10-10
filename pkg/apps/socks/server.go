@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/netip"
-	"sync"
 
 	"github.com/fancl20/cion/pkg/apps/wireguard"
 )
@@ -29,10 +28,6 @@ type Owner interface {
 // application's own, and a node that serves no hosts serves no one.
 type Server struct {
 	owner Owner
-
-	mtx sync.Mutex
-	// app is the assembled application, set once the assignment arrived.
-	app *App
 }
 
 // NewServer stands the serving form beside the WireGuard application
@@ -43,7 +38,8 @@ func NewServer(owner Owner) *Server {
 
 // Run waits for the directory's assignment and serves the application it
 // assembles on the slice's first address — the node's own, which the
-// allocator never issues — until the context ends.
+// allocator never issues — until the context ends. Nothing borrows the
+// application, so Run releases it before it returns.
 func (s *Server) Run(ctx context.Context) error {
 	subnet, err := s.owner.Subnet(ctx)
 	if err != nil {
@@ -54,23 +50,13 @@ func (s *Server) Run(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("assembling the SOCKS application: %w", err)
 	}
-	s.mtx.Lock()
-	s.app = app
-	s.mtx.Unlock()
+	defer app.Close()
 	return app.Run(ctx)
 }
 
-// Close retires the assembled application whenever it stands; before the
-// assignment arrives nothing assembled, and nothing releases.
-func (s *Server) Close() {
-	s.mtx.Lock()
-	app := s.app
-	s.app = nil
-	s.mtx.Unlock()
-	if app != nil {
-		app.Close()
-	}
-}
+// Close releases nothing: the serving form binds nothing of its own, and
+// Run releases the application it assembled before it returns.
+func (s *Server) Close() {}
 
 // HTTPSHandler is nil: the application's serving surface is its own
 // listener on the overlay, and it mounts nothing on the node's HTTPS
