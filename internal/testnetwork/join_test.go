@@ -16,6 +16,7 @@ import (
 	"github.com/fancl20/cion/pkg/modules/links"
 	"github.com/fancl20/cion/pkg/modules/pathdb"
 	"github.com/fancl20/cion/pkg/modules/topology/impl/measured"
+	"github.com/fancl20/cion/pkg/scion"
 	"github.com/fancl20/cion/pkg/trust"
 )
 
@@ -52,6 +53,18 @@ func (n *assemblyNode) stop(t *testing.T) {
 	if err := n.app.Close(); err != nil {
 		t.Fatalf("stopping %v: %v", n.app.IA(), err)
 	}
+}
+
+// conn binds a SCION conn on the node's control host at an ephemeral port,
+// sending through the node's internal link, and closes it with the test.
+func (n *assemblyNode) conn(t *testing.T) *scion.Conn {
+	t.Helper()
+	conn, err := n.app.Conn(0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	return conn
 }
 
 // bootAssembly boots a full node assembly — the run command's own wiring —

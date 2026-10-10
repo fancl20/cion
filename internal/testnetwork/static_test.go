@@ -8,6 +8,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/scionproto/scion/pkg/addr"
+
 	"github.com/fancl20/cion/internal/services"
 	"github.com/fancl20/cion/pkg/modules/links"
 )
@@ -109,6 +111,50 @@ func bootStaticLine(t *testing.T, wpki *WebPKI,
 		staticLink{IA: a.app.IA().String(), Local: abB, Remote: abA},
 		staticLink{IA: c.app.IA().String(), Local: bcB, Remote: bcC})
 	return a, b, c
+}
+
+// staticTopology is a lab topology on the file provider: its nodes by
+// ISD-AS, the founding core among them, and the links between neighbors.
+type staticTopology struct {
+	core  addr.IA
+	nodes []addr.IA
+	links [][2]addr.IA
+}
+
+// bootTopology boots a static topology through the node's own assembly.
+// Each node's ISD-AS is written to its state before any boot, so every
+// node's link set names its neighbors up front, each link's addresses drawn
+// from its two nodes' hosts; the founding core boots first.
+func bootTopology(t *testing.T, wpki *WebPKI, topo staticTopology) map[addr.IA]*staticNode {
+	t.Helper()
+	hosts := make(map[addr.IA]netip.Addr, len(topo.nodes))
+	states := make(map[addr.IA]string, len(topo.nodes))
+	for _, ia := range topo.nodes {
+		hosts[ia] = hostSlot(t)
+		states[ia] = t.TempDir()
+		persistIAFile(t, states[ia], ia)
+	}
+	entries := make(map[addr.IA][]staticLink, len(topo.nodes))
+	for _, l := range topo.links {
+		x, y := l[0], l[1]
+		atX, atY := PinnedUDPAddrOn(t, hosts[x]), PinnedUDPAddrOn(t, hosts[y])
+		entries[x] = append(entries[x], staticLink{IA: y.String(), Local: atX, Remote: atY})
+		entries[y] = append(entries[y], staticLink{IA: x.String(), Local: atY, Remote: atX})
+	}
+	sets := make(map[addr.IA]string, len(topo.nodes))
+	for _, ia := range topo.nodes {
+		sets[ia] = linkSetPath(t)
+		writeStaticSet(t, sets[ia], entries[ia]...)
+	}
+	nodes := make(map[addr.IA]*staticNode, len(topo.nodes))
+	nodes[topo.core] = bootStaticNode(t, wpki, hosts[topo.core], true,
+		states[topo.core], sets[topo.core], nil)
+	for _, ia := range topo.nodes {
+		if ia != topo.core {
+			nodes[ia] = bootStaticNode(t, wpki, hosts[ia], false, states[ia], sets[ia], nil)
+		}
+	}
+	return nodes
 }
 
 // TestStaticLabByLinkSet is the file provider's integration proof: a

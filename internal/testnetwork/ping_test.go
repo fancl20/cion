@@ -17,49 +17,34 @@ import (
 )
 
 // TestPingForkTopology is the end-to-end proof of the path library's first
-// application: a responder on one node and a pinger on another of a fork
-// topology — the core A between the leaves B and C. The leaf's requests ride
-// the composed up/down path B←A→C and its replies ride the reversed arrival
-// path — the first multi-segment carriage by the data plane — and the core's
-// requests ride the down segment alone.
+// application: a pinger on one node of a fork topology — the core A between
+// the leaves B and C — and the responder every node runs. The leaf's
+// requests ride the composed up/down path B←A→C and its replies ride the
+// reversed arrival path — the first multi-segment carriage by the data
+// plane — and the core's requests ride the down segment alone.
 func TestPingForkTopology(t *testing.T) {
 	t.Parallel()
-	wpki := NewWebPKI(t)
-	ipA := hostSlot(t)
-	ipB := hostSlot(t)
-	ipC := hostSlot(t)
-	extA1, extB := PinnedUDPAddrOn(t, ipA), PinnedUDPAddrOn(t, ipB)
-	extA2, extC := PinnedUDPAddrOn(t, ipA), PinnedUDPAddrOn(t, ipC)
-
-	a := StartNode(t, NodeConfig{IA: coreIA, Host: ipA, Links: []Link{
-		{Local: extA1, Remote: extB, Neighbor: nodeIA},
-		{Local: extA2, Remote: extC, Neighbor: lineCIA},
-	}, Core: true, WPKI: wpki})
-	b := StartNode(t, NodeConfig{IA: nodeIA, Host: ipB, Links: []Link{
-		{Local: extB, Remote: extA1, Neighbor: coreIA},
-	}, WPKI: wpki})
-	c := StartNode(t, NodeConfig{IA: lineCIA, Host: ipC, Links: []Link{
-		{Local: extC, Remote: extA2, Neighbor: coreIA},
-	}, WPKI: wpki})
+	nodes := bootTopology(t, NewWebPKI(t), staticTopology{
+		core:  coreIA,
+		nodes: []addr.IA{coreIA, nodeIA, lineCIA},
+		links: [][2]addr.IA{{coreIA, nodeIA}, {coreIA, lineCIA}},
+	})
+	a, b, c := nodes[coreIA], nodes[nodeIA], nodes[lineCIA]
 	ctx := context.Background()
-
-	StartPingResponder(t, a)
-	StartPingResponder(t, b)
-	StartPingResponder(t, c)
 
 	// Beacons propagate, C enrolls, and the provider resolves the composed
 	// path C→A→B from C — the fork's three-node join pipeline, budgeted at
 	// the restart lab's patience: on a loaded runner it outgrows the plain
 	// test timeout while still progressing.
 	PollFor(t, RestartTimeout, "path from C to B", func() bool {
-		_, err := c.Provider.Path(ctx, nodeIA)
+		_, err := c.app.Provider().Path(ctx, nodeIA)
 		return err == nil
 	})
 	report, err := ping.Run(ctx, ping.Config{
-		Conn:     c.NewConn(t, 0),
-		Provider: c.Provider,
+		Conn:     c.conn(t),
+		Provider: c.app.Provider(),
 		Dst:      nodeIA,
-		DstHost:  b.ControlIP,
+		DstHost:  b.host,
 		Count:    3,
 		Interval: 100 * time.Millisecond,
 		// The reply wait tolerates a loaded runner's stall: a late reply
@@ -94,14 +79,14 @@ func TestPingForkTopology(t *testing.T) {
 	// complete route — its resolution waited for first, the run not
 	// retrying one.
 	PollFor(t, RestartTimeout, "path from A to C", func() bool {
-		path, err := a.Provider.Path(ctx, lineCIA)
+		path, err := a.app.Provider().Path(ctx, lineCIA)
 		return err == nil && len(path.HopFields) == 2
 	})
 	report, err = ping.Run(ctx, ping.Config{
-		Conn:     a.NewConn(t, 0),
-		Provider: a.Provider,
+		Conn:     a.conn(t),
+		Provider: a.app.Provider(),
 		Dst:      lineCIA,
-		DstHost:  c.ControlIP,
+		DstHost:  c.host,
 		Count:    3,
 		Interval: 100 * time.Millisecond,
 		Wait:     5 * time.Second,
@@ -129,12 +114,13 @@ func TestPingForkTopology(t *testing.T) {
 // episodes pass unchanged.
 func TestPingLineMiddleNode(t *testing.T) {
 	t.Parallel()
-	wpki := NewWebPKI(t)
-	a, b, c := startLine(t, wpki, hostSlot(t), hostSlot(t), hostSlot(t))
+	nodes := bootTopology(t, NewWebPKI(t), staticTopology{
+		core:  coreIA,
+		nodes: []addr.IA{coreIA, nodeIA, lineCIA},
+		links: [][2]addr.IA{{coreIA, nodeIA}, {nodeIA, lineCIA}},
+	})
+	a, b, c := nodes[coreIA], nodes[nodeIA], nodes[lineCIA]
 	ctx := context.Background()
-	StartPingResponder(t, a)
-	StartPingResponder(t, b)
-	StartPingResponder(t, c)
 
 	// C's up segment [A, B, C] and B's registered down segment [A, B] meet
 	// at B: the truncated reversed up segment alone is the route. The join
@@ -144,23 +130,23 @@ func TestPingLineMiddleNode(t *testing.T) {
 	// registered at the core — before pinging, the resolution a ping run
 	// does not retry.
 	PollFor(t, RestartTimeout, "path from C to B", func() bool {
-		path, err := c.Provider.Path(ctx, nodeIA)
+		path, err := c.app.Provider().Path(ctx, nodeIA)
 		return err == nil && len(path.HopFields) == 2
 	})
 	PollFor(t, RestartTimeout, "path from B to C", func() bool {
-		path, err := b.Provider.Path(ctx, lineCIA)
+		path, err := b.app.Provider().Path(ctx, lineCIA)
 		return err == nil && len(path.HopFields) == 2
 	})
 	PollFor(t, RestartTimeout, "path from A to C", func() bool {
-		path, err := a.Provider.Path(ctx, lineCIA)
+		path, err := a.app.Provider().Path(ctx, lineCIA)
 		return err == nil && len(path.HopFields) == 3
 	})
 
-	run := func(p *Node, dst addr.IA, host netip.Addr, wantHops, wantSegs int) {
+	run := func(p *staticNode, dst addr.IA, host netip.Addr, wantHops, wantSegs int) {
 		t.Helper()
 		report, err := ping.Run(ctx, ping.Config{
-			Conn:     p.NewConn(t, 0),
-			Provider: p.Provider,
+			Conn:     p.conn(t),
+			Provider: p.app.Provider(),
 			Dst:      dst,
 			DstHost:  host,
 			Count:    3,
@@ -183,11 +169,11 @@ func TestPingLineMiddleNode(t *testing.T) {
 	}
 	// The middle node reached from below and reaching below: the meeting at
 	// B truncates both sides, one segment each way.
-	run(c, nodeIA, b.ControlIP, 2, 1)
-	run(b, lineCIA, c.ControlIP, 2, 1)
+	run(c, nodeIA, b.host, 2, 1)
+	run(b, lineCIA, c.host, 2, 1)
 	// The line's existing episodes pass unchanged.
-	run(c, coreIA, a.ControlIP, 3, 1)
-	run(a, lineCIA, c.ControlIP, 3, 1)
+	run(c, coreIA, a.host, 3, 1)
+	run(a, lineCIA, c.host, 3, 1)
 }
 
 // TestPingSiblingNodes is the sibling episode: on the fork with
@@ -196,44 +182,27 @@ func TestPingLineMiddleNode(t *testing.T) {
 func TestPingSiblingNodes(t *testing.T) {
 	t.Parallel()
 	iaD := addr.MustIAFrom(20, 0xff0000000004)
-	wpki := NewWebPKI(t)
-	ipA, ipB := hostSlot(t), hostSlot(t)
-	ipC, ipD := hostSlot(t), hostSlot(t)
-	extA, extB1 := PinnedUDPAddrOn(t, ipA), PinnedUDPAddrOn(t, ipB)
-	extB2, extC := PinnedUDPAddrOn(t, ipB), PinnedUDPAddrOn(t, ipC)
-	extB3, extD := PinnedUDPAddrOn(t, ipB), PinnedUDPAddrOn(t, ipD)
-
 	// The core and the parent run unattended: the episode reads only the
 	// siblings' ends.
-	StartNode(t, NodeConfig{IA: coreIA, Host: ipA, Links: []Link{
-		{Local: extA, Remote: extB1, Neighbor: nodeIA},
-	}, Core: true, WPKI: wpki})
-	StartNode(t, NodeConfig{IA: nodeIA, Host: ipB, Links: []Link{
-		{Local: extB1, Remote: extA, Neighbor: coreIA},
-		{Local: extB2, Remote: extC, Neighbor: lineCIA},
-		{Local: extB3, Remote: extD, Neighbor: iaD},
-	}, WPKI: wpki})
-	c := StartNode(t, NodeConfig{IA: lineCIA, Host: ipC, Links: []Link{
-		{Local: extC, Remote: extB2, Neighbor: nodeIA},
-	}, WPKI: wpki})
-	d := StartNode(t, NodeConfig{IA: iaD, Host: ipD, Links: []Link{
-		{Local: extD, Remote: extB3, Neighbor: nodeIA},
-	}, WPKI: wpki})
+	nodes := bootTopology(t, NewWebPKI(t), staticTopology{
+		core:  coreIA,
+		nodes: []addr.IA{coreIA, nodeIA, lineCIA, iaD},
+		links: [][2]addr.IA{{coreIA, nodeIA}, {nodeIA, lineCIA}, {nodeIA, iaD}},
+	})
+	c, d := nodes[lineCIA], nodes[iaD]
 	ctx := context.Background()
-	StartPingResponder(t, c)
-	StartPingResponder(t, d)
 
 	// C's up segment [A, B, C] and D's registered down segment [A, B, D]
 	// meet at B: [C, B] composed before [B, D], four hops in two segments.
 	PollFor(t, RestartTimeout, "path from C to D", func() bool {
-		path, err := c.Provider.Path(ctx, iaD)
+		path, err := c.app.Provider().Path(ctx, iaD)
 		return err == nil && len(path.HopFields) == 4
 	})
 	report, err := ping.Run(ctx, ping.Config{
-		Conn:     c.NewConn(t, 0),
-		Provider: c.Provider,
+		Conn:     c.conn(t),
+		Provider: c.app.Provider(),
 		Dst:      iaD,
-		DstHost:  d.ControlIP,
+		DstHost:  d.host,
 		Count:    3,
 		Interval: 100 * time.Millisecond,
 		Wait:     5 * time.Second,
