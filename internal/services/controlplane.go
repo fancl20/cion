@@ -120,8 +120,8 @@ func openStore[DB any](state, name string, open func(string, *bbolt.Options) (DB
 // names it, so the material they load covers that TRC wherever the roll
 // stopped.
 func (n *node) setupTrustRole(ctx context.Context) error {
-	if n.ident.asType != trust.ASTypeCore {
-		if n.ident.asType == trust.ASTypeAuthoritative {
+	if n.cfg.role != trust.ASTypeCore {
+		if n.cfg.role == trust.ASTypeAuthoritative {
 			if _, err := n.promoteStaged(ctx); err != nil {
 				return err
 			}
@@ -196,7 +196,7 @@ func (n *node) setupTrustRole(ctx context.Context) error {
 		DB:         n.trustDB,
 		IA:         n.ident.ia,
 		Sensitive:  keys.Sensitive,
-		Authorizer: n.enrollAuth,
+		Authorizer: n.cfg.enrollAuth,
 	}
 	if _, err := selfEnroll(ctx, n.trustDB, issuer, n.ident.ia, n.asKey); err != nil {
 		return fmt.Errorf("self-enrolling core: %w", err)
@@ -276,7 +276,7 @@ func (n *node) buildBeaconing() error {
 	// Both core selections take the tier: the founding and the authoritative
 	// core alike originate beacons, terminate core beacons, and serve the
 	// core's segment-lookup handler.
-	coreTier := n.ident.asType != trust.ASTypeNormal
+	coreTier := n.cfg.role != trust.ASTypeNormal
 	lookup := controlplane.NewLookupService()
 	lookup.IA = n.ident.ia
 	lookup.DB = n.pathDB
@@ -372,7 +372,7 @@ func (n *node) assembleMonitor() error {
 // applications mount — serves it and answers the ACME TLS-ALPN challenge on
 // it, so no core's TLS path branches on an app's presence.
 func (n *node) assembleEndpoint(ctx context.Context) error {
-	if n.ident.asType == trust.ASTypeCore {
+	if n.cfg.role == trust.ASTypeCore {
 		manager, err := webpki.PrepareTLSCert(webpki.TLSCertConfig{
 			Domain:   n.cfg.Domain,
 			Email:    n.cfg.AcmeEmail,
@@ -405,7 +405,7 @@ func (n *node) assembleEndpoint(ctx context.Context) error {
 		TrustService: &controlplane.TrustService{
 			DB:          n.trustDB,
 			Issuer:      n.issuer,
-			Authorizer:  n.enrollAuth,
+			Authorizer:  n.cfg.enrollAuth,
 			MinInterval: n.cfg.Pacing.RendezvousRate,
 		},
 		SegmentService: &controlplane.SegmentService{
@@ -422,14 +422,10 @@ func (n *node) assembleEndpoint(ctx context.Context) error {
 // shares the node's interface-down cache: each receive path recognizes the
 // signal the data plane's egress-down branch sends back.
 func (n *node) scionConn(port uint16) (*scion.Conn, error) {
-	bind, err := controlBind(n.cfg.Control, port)
-	if err != nil {
-		return nil, err
-	}
 	return scion.NewConn(scion.ConnConfig{
 		IA:            n.ident.ia,
-		Bind:          bind,
-		InternalAddr:  n.cfg.Internal,
+		Bind:          netip.AddrPortFrom(n.cfg.controlAddr.Addr(), port).String(),
+		InternalAddr:  n.cfg.internalAddr.String(),
 		MACKey:        n.ident.key,
 		Links:         n.linkTable,
 		InterfaceDown: n.ifDown,

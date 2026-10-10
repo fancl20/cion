@@ -6,7 +6,7 @@ import (
 	"net"
 	"net/http"
 
-	"github.com/fancl20/cion/pkg/dataplane"
+	"github.com/fancl20/cion/pkg/trust"
 	"github.com/fancl20/cion/pkg/webpki"
 )
 
@@ -23,8 +23,8 @@ import (
 // certificate maintenance, so a first issuance's probe finds the port
 // answered by structure rather than by retry.
 func (n *node) assembleHTTPS() error {
-	if n.certMgr == nil {
-		// A non-core holds no WebPKI identity to serve.
+	if n.cfg.role != trust.ASTypeCore {
+		// Only the founding core holds a WebPKI identity to serve.
 		return nil
 	}
 	mux := http.NewServeMux()
@@ -69,13 +69,10 @@ func (n *node) httpsBindAddr() (string, error) {
 	if o := n.cfg.Coordination; o != nil && o.Addr != "" {
 		return o.Addr, nil
 	}
-	listenHost, err := dataplane.ResolveAddrPort(n.cfg.Control)
-	if err != nil {
-		return "", fmt.Errorf("parsing the control address: %w", err)
-	}
-	if listenHost.Addr().IsUnspecified() {
+	host := n.cfg.controlAddr.Addr()
+	if host.IsUnspecified() {
 		return "", errors.New("the coordination endpoint needs a specific host: " +
 			"a wildcard control address would publish an endpoint no host could dial")
 	}
-	return net.JoinHostPort(listenHost.Addr().String(), webpki.HTTPSPort), nil
+	return net.JoinHostPort(host.String(), webpki.HTTPSPort), nil
 }

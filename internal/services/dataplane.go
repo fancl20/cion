@@ -94,7 +94,7 @@ func (n *node) startGeneration(ctx context.Context) (*generation, error) {
 
 	dlinks := make([]dataplane.Link, 0, len(entries)+1)
 	internalLink, err := provider.NewInternalLink(
-		n.cfg.Internal, n.opts.QueueSize, n.metrics.NewInterfaceMetrics(0, n.ident.ia, 0))
+		n.cfg.internalAddr.String(), n.opts.QueueSize, n.metrics.NewInterfaceMetrics(0, n.ident.ia, 0))
 	if err != nil {
 		provider.Stop()
 		return nil, fmt.Errorf("creating internal link: %w", err)
@@ -241,11 +241,8 @@ func (n *node) linkTable() map[uint16]addr.IA {
 // resolution requests alike — is delivered to the endpoint beside whose
 // services the resolution answers.
 func (n *node) registerControlService(provider *dataplane.UDPProvider) error {
-	host, err := parseControlHost(n.cfg.Control)
-	if err != nil {
-		return err
-	}
-	return provider.AddSvc(addr.SvcCS, addr.HostIP(host), controlplane.EndpointPort)
+	host := addr.HostIP(n.cfg.controlAddr.Addr())
+	return provider.AddSvc(addr.SvcCS, host, controlplane.EndpointPort)
 }
 
 // backend is one service registration the applications own.
@@ -257,14 +254,11 @@ type backend struct {
 // registerBackends re-registers the applications' service backends on a new
 // provider; the CS registration is discovery's own.
 func (n *node) registerBackends(provider *dataplane.UDPProvider) error {
-	host, err := parseControlHost(n.cfg.Control)
-	if err != nil {
-		return err
-	}
+	host := addr.HostIP(n.cfg.controlAddr.Addr())
 	n.backendsMtx.Lock()
 	defer n.backendsMtx.Unlock()
 	for _, b := range n.backends {
-		if err := provider.AddSvc(b.svc, addr.HostIP(host), b.port); err != nil {
+		if err := provider.AddSvc(b.svc, host, b.port); err != nil {
 			return err
 		}
 	}
@@ -274,25 +268,19 @@ func (n *node) registerBackends(provider *dataplane.UDPProvider) error {
 // registerSvc registers one of the applications' sockets as a SCION service
 // in this AS — on the serving provider and on every generation to come.
 func (n *node) registerSvc(svc addr.SVC, port uint16) error {
-	host, err := parseControlHost(n.cfg.Control)
-	if err != nil {
-		return err
-	}
+	host := addr.HostIP(n.cfg.controlAddr.Addr())
 	n.backendsMtx.Lock()
 	defer n.backendsMtx.Unlock()
 	n.backends = append(n.backends, backend{svc: svc, port: port})
 	if n.gen != nil {
-		return n.gen.provider.AddSvc(svc, addr.HostIP(host), port)
+		return n.gen.provider.AddSvc(svc, host, port)
 	}
 	return nil
 }
 
 // unregisterSvc deregisters a socket registerSvc registered.
 func (n *node) unregisterSvc(svc addr.SVC, port uint16) error {
-	host, err := parseControlHost(n.cfg.Control)
-	if err != nil {
-		return err
-	}
+	host := addr.HostIP(n.cfg.controlAddr.Addr())
 	n.backendsMtx.Lock()
 	defer n.backendsMtx.Unlock()
 	kept := n.backends[:0]
@@ -304,7 +292,7 @@ func (n *node) unregisterSvc(svc addr.SVC, port uint16) error {
 	}
 	n.backends = kept
 	if n.gen != nil {
-		return n.gen.provider.DelSvc(svc, addr.HostIP(host), port)
+		return n.gen.provider.DelSvc(svc, host, port)
 	}
 	return nil
 }

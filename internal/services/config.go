@@ -1,15 +1,16 @@
 package services
 
 import (
+	"context"
 	"crypto/x509"
 	"fmt"
 	"net/netip"
 	"time"
 
-	"github.com/scionproto/scion/pkg/addr"
-
 	"github.com/fancl20/cion/pkg/apps"
 	"github.com/fancl20/cion/pkg/dataplane"
+	"github.com/fancl20/cion/pkg/modules/enrollauth"
+	"github.com/fancl20/cion/pkg/trust"
 )
 
 // Default run arguments: a restart needs none of them.
@@ -76,7 +77,7 @@ type NodeConfig struct {
 	// requirements load, and its required arguments are present; the empty
 	// list runs the deliberate core, no application at all; a given list
 	// loads exactly the named, in table order whatever order the list
-	// spells. Validate refuses every miscombination with the fix named.
+	// spells. resolve refuses every miscombination with the fix named.
 	Applications []string
 	// AppArguments carries the resident applications' own run arguments,
 	// one block per entry; the commands register them from the
@@ -140,77 +141,88 @@ type NodePacing struct {
 	RotationThreshold time.Duration // remaining validity below which the rotation watch rolls
 }
 
-// Validate applies the role-aware argument checks: the domain is always
-// required, the founding core is the core without a neighbor, and the gate
-// and the core-bound applications load on the founding core alone.
-func (c NodeConfig) Validate() error {
-	founding := c.Core && len(c.Neighbors) == 0
+// resolvedConfig is the run arguments resolved once at boot: the NodeConfig
+// beside what every phase reads from it, derived and checked a single time.
+type resolvedConfig struct {
+	NodeConfig
+	// role is the node's tier: the founding core for the core flag without
+	// a neighbor, the authoritative core with one, the normal node without
+	// the flag. The state directory plays no part, so a restart keeps its
+	// tier by spelling the same arguments.
+	role trust.ASType
+	// controlAddr and internalAddr are the control and internal addresses.
+	// A host name in either resolves here, so every conn and generation
+	// binds the one answer.
+	controlAddr  netip.AddrPort
+	internalAddr netip.AddrPort
+	// enrollAuth gates the trust service's first issuance, the coordination
+	// application's registrations, and the TRC decision's sensitive vote;
+	// nil leaves the first two open and denies the vote. enrollRun runs the
+	// selected method's own loops — the Telegram authorizer's poll — nil
+	// when the method has none.
+	enrollAuth enrollauth.AdmissionAuthorizer
+	enrollRun  func(context.Context)
+	// apps is the selected resident applications, in table order.
+	apps []apps.Entry
+}
+
+// resolve applies the role-aware argument checks and resolves the run
+// arguments once: the domain is always required, the role derives from the
+// core flag and the neighbors, and the gate and the core-bound applications
+// load on the founding core alone. The authorizer is built and the
+// applications selected here, so a malformed spec or a miscombination fails
+// the boot before any assembly runs.
+func (c NodeConfig) resolve() (resolvedConfig, error) {
+	r := resolvedConfig{NodeConfig: c}
+	if c.Core {
+		r.role = trust.ASTypeCore
+		if len(c.Neighbors) > 0 {
+			r.role = trust.ASTypeAuthoritative
+		}
+	}
+	founding := r.role == trust.ASTypeCore
 	if c.Domain == "" {
 		if founding {
-			return fmt.Errorf("--trust.domain is required: the founding core's own, " +
+			return resolvedConfig{}, fmt.Errorf("--trust.domain is required: the founding core's own, " +
 				"the WebPKI identity of its certificate")
 		}
-		return fmt.Errorf("--trust.domain is required: the network's core domain, " +
+		return resolvedConfig{}, fmt.Errorf("--trust.domain is required: the network's core domain, " +
 			"the WebPKI identity of the enrollment and TRC fetch")
 	}
 	if c.LinkSet != "" && len(c.Neighbors) > 0 {
-		return fmt.Errorf("--topology.link-set refuses --topology.neighbor: " +
+		return resolvedConfig{}, fmt.Errorf("--topology.link-set refuses --topology.neighbor: " +
 			"one topology provider per process, the static and the measured")
 	}
 	if c.State == "" || c.Internal == "" || c.Control == "" {
-		return fmt.Errorf("--state, --internal, and --control are required")
+		return resolvedConfig{}, fmt.Errorf("--state, --internal, and --control are required")
 	}
 	for _, s := range c.Neighbors {
 		if _, err := netip.ParseAddrPort(s); err != nil {
-			return fmt.Errorf("parsing --topology.neighbor %q: %w", s, err)
+			return resolvedConfig{}, fmt.Errorf("parsing --topology.neighbor %q: %w", s, err)
 		}
+	}
+	var err error
+	if r.controlAddr, err = dataplane.ResolveAddrPort(c.Control); err != nil {
+		return resolvedConfig{}, fmt.Errorf("parsing control address: %w", err)
+	}
+	if r.internalAddr, err = dataplane.ResolveAddrPort(c.Internal); err != nil {
+		return resolvedConfig{}, fmt.Errorf("parsing internal address: %w", err)
 	}
 	if c.EnrollAuth != "" {
 		// A silently inert gate is the misleading configuration the
 		// role-aware checks exist to refuse: only the founding core issues
 		// chains, so only the founding core's gate means anything.
 		if !founding {
-			return fmt.Errorf("--trust.enroll-auth requires the founding core: " +
+			return resolvedConfig{}, fmt.Errorf("--trust.enroll-auth requires the founding core: " +
 				"the founding core is the only node that issues chains")
 		}
-		if _, _, err := loadEnrollAuth(c.EnrollAuth, c.TelegramAPI, c.State); err != nil {
-			return fmt.Errorf("parsing --trust.enroll-auth: %w", err)
+		r.enrollAuth, r.enrollRun, err = loadEnrollAuth(c.EnrollAuth, c.TelegramAPI, c.State)
+		if err != nil {
+			return resolvedConfig{}, fmt.Errorf("parsing --trust.enroll-auth: %w", err)
 		}
 	}
-	// The applications list's miscombinations refuse here, before any
-	// assembly runs: the same resolution the assembly's walk selects, on
-	// the same founding tier.
-	if _, err := apps.Select(c.Applications, founding, c.AppArguments); err != nil {
-		return err
+	if r.apps, err = apps.Select(c.Applications, founding, c.AppArguments); err != nil {
+		return resolvedConfig{}, err
 	}
-	return nil
-}
-
-// controlBind returns the "host:port" address for the control endpoint: the
-// control address's host with the given port.
-func controlBind(control string, port uint16) (string, error) {
-	ap, err := dataplane.ResolveAddrPort(control)
-	if err != nil {
-		return "", fmt.Errorf("parsing control address: %w", err)
-	}
-	return netip.AddrPortFrom(ap.Addr(), port).String(), nil
-}
-
-// parseControlHost returns the control address's host.
-func parseControlHost(control string) (netip.Addr, error) {
-	ap, err := dataplane.ResolveAddrPort(control)
-	if err != nil {
-		return netip.Addr{}, fmt.Errorf("parsing control address: %w", err)
-	}
-	return ap.Addr(), nil
-}
-
-// parseInternalHost returns the local host address derived from the internal
-// address.
-func parseInternalHost(internal string) (addr.Host, error) {
-	ap, err := dataplane.ResolveAddrPort(internal)
-	if err != nil {
-		return addr.Host{}, fmt.Errorf("parsing internal address: %w", err)
-	}
-	return addr.HostIP(ap.Addr()), nil
+	return r, nil
 }

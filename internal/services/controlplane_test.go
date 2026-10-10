@@ -27,7 +27,7 @@ func TestOpenStateRefusesHeldDatabase(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
 				group, _ := supervise.New(t.Context())
 				defer func() { _ = group.Stop() }()
-				n := &node{cfg: NodeConfig{State: state}, group: group}
+				n := &node{cfg: resolvedConfig{NodeConfig: NodeConfig{State: state}}, group: group}
 				err := n.openState(t.Context())
 				if err == nil {
 					t.Fatal("the held state directory opened")

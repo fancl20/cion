@@ -1,6 +1,7 @@
 package services
 
 import (
+	"net/netip"
 	"strings"
 	"testing"
 
@@ -20,26 +21,33 @@ func nodeConfig() NodeConfig {
 	}
 }
 
-// TestNodeConfigValidate checks the role-aware argument validation: the
-// domain is always required, the joining core takes its neighbor, and the
-// addresses parse.
-func TestNodeConfigValidate(t *testing.T) {
-	if err := nodeConfig().Validate(); err != nil {
-		t.Fatalf("validating the minimal core: %v", err)
+// TestNodeConfigResolve checks the role-aware argument checks: the domain
+// is always required, the joining core takes its neighbor, and the
+// addresses resolve.
+func TestNodeConfigResolve(t *testing.T) {
+	rc, err := nodeConfig().resolve()
+	if err != nil {
+		t.Fatalf("resolving the minimal core: %v", err)
+	}
+	if want := netip.MustParseAddrPort(DefaultControl); rc.controlAddr != want {
+		t.Errorf("the control address = %v, want %v", rc.controlAddr, want)
+	}
+	if want := netip.MustParseAddrPort(DefaultInternal); rc.internalAddr != want {
+		t.Errorf("the internal address = %v, want %v", rc.internalAddr, want)
 	}
 
 	cfg := nodeConfig()
 	cfg.Core = false
 	cfg.Neighbors = []string{"192.0.2.7:30043"}
-	if err := cfg.Validate(); err != nil {
-		t.Fatalf("validating a joiner: %v", err)
+	if _, err := cfg.resolve(); err != nil {
+		t.Fatalf("resolving a joiner: %v", err)
 	}
 
 	// The core role with a neighbor joins: the founding refusal is gone.
 	joining := nodeConfig()
 	joining.Neighbors = []string{"192.0.2.7:30043"}
-	if err := joining.Validate(); err != nil {
-		t.Fatalf("validating a joining core: %v", err)
+	if _, err := joining.resolve(); err != nil {
+		t.Fatalf("resolving a joining core: %v", err)
 	}
 
 	// Both methods of the selector parse.
@@ -49,16 +57,18 @@ func TestNodeConfigValidate(t *testing.T) {
 	} {
 		cfg := nodeConfig()
 		cfg.EnrollAuth = spec
-		if err := cfg.Validate(); err != nil {
-			t.Errorf("validating %q: %v", spec, err)
+		if _, err := cfg.resolve(); err != nil {
+			t.Errorf("resolving %q: %v", spec, err)
 		}
 	}
 
 	bad := map[string]func(*NodeConfig){
-		"missing domain":   func(c *NodeConfig) { c.Domain = "" },
-		"missing state":    func(c *NodeConfig) { c.State = "" },
-		"bad neighbor":     func(c *NodeConfig) { c.Core = false; c.Neighbors = []string{"nope"} },
-		"missing internal": func(c *NodeConfig) { c.Internal = "" },
+		"missing domain":      func(c *NodeConfig) { c.Domain = "" },
+		"missing state":       func(c *NodeConfig) { c.State = "" },
+		"bad neighbor":        func(c *NodeConfig) { c.Core = false; c.Neighbors = []string{"nope"} },
+		"missing internal":    func(c *NodeConfig) { c.Internal = "" },
+		"unparsable internal": func(c *NodeConfig) { c.Internal = "127.0.0.1" },
+		"unparsable control":  func(c *NodeConfig) { c.Control = "nope" },
 		"enroll-auth without the founding core": func(c *NodeConfig) {
 			c.Neighbors = []string{"192.0.2.7:30043"}
 			c.EnrollAuth = "cidrs=192.0.2.0/24"
@@ -91,30 +101,30 @@ func TestNodeConfigValidate(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			cfg := nodeConfig()
 			mutate(&cfg)
-			if err := cfg.Validate(); err == nil {
+			if _, err := cfg.resolve(); err == nil {
 				t.Error("the malformed run arguments were accepted")
 			}
 		})
 	}
 }
 
-// TestNodeConfigValidateApplications checks the applications list's
+// TestNodeConfigResolveApplications checks the applications list's
 // regimes and refusals where every role-aware check reads them, at
-// Validate and before any assembly runs.
-func TestNodeConfigValidateApplications(t *testing.T) {
+// resolve and before any assembly runs.
+func TestNodeConfigResolveApplications(t *testing.T) {
 	// The inference and the deliberate core need no list at all: an unset
 	// list with refused arguments loads nothing, an empty one states it.
-	if err := nodeConfig().Validate(); err != nil {
+	if _, err := nodeConfig().resolve(); err != nil {
 		t.Fatalf("an unset list with the port refused: %v", err)
 	}
 	deliberate := nodeConfig()
 	deliberate.Applications = []string{}
-	if err := deliberate.Validate(); err != nil {
+	if _, err := deliberate.resolve(); err != nil {
 		t.Fatalf("the deliberate core: %v", err)
 	}
 	serving := nodeConfig()
 	serving.AppArguments.Wireguard.HostPort = apps.DefaultHostPort
-	if err := serving.Validate(); err != nil {
+	if _, err := serving.resolve(); err != nil {
 		t.Fatalf("the inference with the port given: %v", err)
 	}
 
@@ -158,7 +168,7 @@ func TestNodeConfigValidateApplications(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			cfg := nodeConfig()
 			tc.mutate(&cfg)
-			err := cfg.Validate()
+			_, err := cfg.resolve()
 			if err == nil {
 				t.Fatal("the miscombination was accepted")
 			}
@@ -169,66 +179,69 @@ func TestNodeConfigValidateApplications(t *testing.T) {
 	}
 }
 
-// TestLoadIdentityDerivesTier checks the tier derives from the pair the run
-// arguments spell: the core flag without a neighbor founds, with one it joins
-// as an authoritative core, the flag alone leaves the normal node, and a
-// restart derives the same tier from the same arguments.
-func TestLoadIdentityDerivesTier(t *testing.T) {
-	cfg := func(mutate func(*NodeConfig)) NodeConfig {
-		c := NodeConfig{
-			Domain:   "core.example.org",
-			State:    t.TempDir(),
-			Internal: DefaultInternal,
-			Control:  DefaultControl,
+// TestNodeConfigResolveRole checks the role derives from the pair the run
+// arguments spell: the core flag without a neighbor founds, with one it
+// joins as an authoritative core, and without the flag the node is a
+// normal one.
+func TestNodeConfigResolveRole(t *testing.T) {
+	neighbor := []string{"192.0.2.7:30043"}
+	for _, tc := range []struct {
+		name      string
+		core      bool
+		neighbors []string
+		want      trust.ASType
+	}{
+		{"the core flag without a neighbor", true, nil, trust.ASTypeCore},
+		{"the core flag with a neighbor", true, neighbor, trust.ASTypeAuthoritative},
+		{"a neighbor without the core flag", false, neighbor, trust.ASTypeNormal},
+	} {
+		cfg := nodeConfig()
+		cfg.Core, cfg.Neighbors = tc.core, tc.neighbors
+		rc, err := cfg.resolve()
+		if err != nil {
+			t.Fatalf("resolving %s: %v", tc.name, err)
 		}
-		mutate(&c)
-		return c
+		if rc.role != tc.want {
+			t.Errorf("%s resolves %v, want %v", tc.name, rc.role, tc.want)
+		}
+	}
+}
+
+// TestLoadIdentityRestart checks a restart on the same arguments: the
+// identity the first start persisted loads unchanged, and the role resolves
+// as it did.
+func TestLoadIdentityRestart(t *testing.T) {
+	cfg := nodeConfig()
+	cfg.State = t.TempDir()
+	cfg.Neighbors = []string{"192.0.2.7:30043"}
+	rc, err := cfg.resolve()
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, created, err := loadIdentity(rc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !created {
+		t.Fatal("the first start found an identity, want a draw")
+	}
+	if err := trust.PersistIA(cfg.State, first.ia); err != nil {
+		t.Fatal(err)
 	}
 
-	founding := cfg(func(c *NodeConfig) { c.Core = true })
-	ident, created, err := loadIdentity(founding)
+	rc, err = cfg.resolve()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !created || ident.asType != trust.ASTypeCore {
-		t.Errorf("the core without a neighbor = %v (created %v), want a founding first start",
-			ident.asType, created)
-	}
-
-	joining := cfg(func(c *NodeConfig) {
-		c.Core = true
-		c.Neighbors = []string{"192.0.2.7:30043"}
-	})
-	ident, created, err = loadIdentity(joining)
+	restart, created, err := loadIdentity(rc)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !created || ident.asType != trust.ASTypeAuthoritative {
-		t.Errorf("the core with a neighbor = %v (created %v), want an authoritative first start",
-			ident.asType, created)
+	if created || !restart.ia.Equal(first.ia) {
+		t.Errorf("the restart loaded %v (created %v), want the persisted %v",
+			restart.ia, created, first.ia)
 	}
-	if err := trust.PersistIA(joining.State, ident.ia); err != nil {
-		t.Fatal(err)
-	}
-	// The restart of the same arguments derives the same tier, the persisted
-	// identity untouched by it.
-	ident, created, err = loadIdentity(joining)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if created || ident.asType != trust.ASTypeAuthoritative {
-		t.Errorf("the authoritative restart = %v (created %v), want the same tier unpersisted",
-			ident.asType, created)
-	}
-
-	local := cfg(func(c *NodeConfig) {
-		c.Neighbors = []string{"192.0.2.7:30043"}
-	})
-	ident, _, err = loadIdentity(local)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if ident.asType != trust.ASTypeNormal {
-		t.Errorf("the node without the core flag = %v, want the normal tier", ident.asType)
+	if rc.role != trust.ASTypeAuthoritative {
+		t.Errorf("the restart resolves %v, want the authoritative core", rc.role)
 	}
 }

@@ -20,7 +20,6 @@ import (
 	"github.com/fancl20/cion/pkg/apps/voting"
 	"github.com/fancl20/cion/pkg/controlplane"
 	"github.com/fancl20/cion/pkg/dataplane"
-	"github.com/fancl20/cion/pkg/modules/enrollauth"
 	"github.com/fancl20/cion/pkg/modules/links"
 	"github.com/fancl20/cion/pkg/modules/pathdb"
 	"github.com/fancl20/cion/pkg/modules/topology"
@@ -39,7 +38,7 @@ import (
 // loops on the group, which releases the resources once the loops have
 // returned.
 type node struct {
-	cfg   NodeConfig
+	cfg   resolvedConfig
 	ident identity
 	opts  DataplaneOptions
 
@@ -114,14 +113,6 @@ type node struct {
 	// before the machinery they borrow.
 	apps []apps.Loaded
 
-	// enrollAuth gates the trust service's first issuance, the coordination
-	// application's registrations, and the TRC decision's sensitive vote;
-	// nil leaves the first two open and denies the vote. enrollRun launches
-	// the selected method's own loops — the Telegram authorizer's poll — nil
-	// when the method has none.
-	enrollAuth enrollauth.AdmissionAuthorizer
-	enrollRun  func(context.Context)
-
 	// group runs the node's loops under their policies and holds the
 	// resources the boot registered, released in reverse once every loop has
 	// returned.
@@ -132,7 +123,6 @@ type node struct {
 // the state directory, where the first start generated it.
 type identity struct {
 	ia        addr.IA
-	asType    trust.ASType
 	key       []byte
 	localHost addr.Host
 }
@@ -141,11 +131,8 @@ type identity struct {
 // generating it on first start: the ISD-AS drawn randomly from the private
 // ranges, the forwarding key beside the AS keys. The ISD-AS is the node's
 // name for its lifetime, logged loudly at creation. A first start's ISD is
-// a provisional draw the loaded provider completes with the network's. The
-// tier derives from the run arguments — the core flag without a neighbor
-// founds, with one it joins as an authoritative core — so a restart of
-// either tier derives the same tier from the same arguments.
-func loadIdentity(cfg NodeConfig) (identity, bool, error) {
+// a provisional draw the loaded provider completes with the network's.
+func loadIdentity(cfg resolvedConfig) (identity, bool, error) {
 	ia, err := trust.LoadIA(cfg.State)
 	if err != nil {
 		return identity{}, false, err
@@ -165,18 +152,8 @@ func loadIdentity(cfg NodeConfig) (identity, bool, error) {
 	if err != nil {
 		return identity{}, false, err
 	}
-	asType := trust.ASTypeNormal
-	if cfg.Core {
-		asType = trust.ASTypeCore
-		if len(cfg.Neighbors) > 0 {
-			asType = trust.ASTypeAuthoritative
-		}
-	}
-	localHost, err := parseInternalHost(cfg.Internal)
-	if err != nil {
-		return identity{}, false, err
-	}
-	return identity{ia: ia, asType: asType, key: key, localHost: localHost}, created, nil
+	localHost := addr.HostIP(cfg.internalAddr.Addr())
+	return identity{ia: ia, key: key, localHost: localHost}, created, nil
 }
 
 // selectProvider loads the source module the run arguments name: the
@@ -188,11 +165,7 @@ func loadIdentity(cfg NodeConfig) (identity, bool, error) {
 // a joining core takes the joiner's path — its neighbor's rendezvous, its
 // learned host — like any local node.
 func (n *node) selectProvider() error {
-	host, err := parseControlHost(n.cfg.Control)
-	if err != nil {
-		return err
-	}
-	founding := n.ident.asType == trust.ASTypeCore
+	founding := n.cfg.role == trust.ASTypeCore
 	if n.cfg.LinkSet != "" {
 		n.topology = filesource.New(filesource.Config{
 			Core:          founding,
@@ -206,7 +179,7 @@ func (n *node) selectProvider() error {
 		Core:        founding,
 		Neighbors:   n.cfg.Neighbors,
 		StateDir:    n.cfg.State,
-		ControlHost: host,
+		ControlHost: n.cfg.controlAddr.Addr(),
 		NewConn: func() (*scion.Conn, error) {
 			return n.scionConn(0)
 		},
@@ -234,28 +207,6 @@ func (n *node) selectProvider() error {
 	return nil
 }
 
-// setupEnrollAuth loads the --trust.enroll-auth selection: the authorizer
-// the trust service asks at first issuance, the coordination application at
-// registration, and the TRC decision before the founder's sensitive vote,
-// and, for a method with loops of its own, the run that serves them. Unset
-// leaves enrollment and registration open and denies the founder's vote;
-// Validate already refused the argument off the founding core, so a
-// selected method loads on the issuing node alone. The spec parses here
-// once, so a malformed one fails the boot, not the first joiner.
-func (n *node) setupEnrollAuth() error {
-	if n.cfg.EnrollAuth == "" {
-		return nil
-	}
-	auth, run, err := loadEnrollAuth(n.cfg.EnrollAuth,
-		n.cfg.TelegramAPI, n.cfg.State)
-	if err != nil {
-		return fmt.Errorf("parsing --trust.enroll-auth: %w", err)
-	}
-	n.enrollAuth = auth
-	n.enrollRun = run
-	return nil
-}
-
 // setupNode assembles a complete node from its run arguments and the state
 // directory, each phase registering the resources it acquires with the
 // group, so the group's Stop releases a partially built node.
@@ -266,15 +217,16 @@ func setupNode(
 	opts DataplaneOptions,
 ) (*node, error) {
 
-	if err := cfg.Validate(); err != nil {
+	rc, err := cfg.resolve()
+	if err != nil {
 		return nil, err
 	}
-	ident, created, err := loadIdentity(cfg)
+	ident, created, err := loadIdentity(rc)
 	if err != nil {
 		return nil, err
 	}
 	n := &node{
-		cfg:         cfg,
+		cfg:         rc,
 		ident:       ident,
 		opts:        opts,
 		linkChanges: make(chan struct{}, 1),
@@ -299,9 +251,6 @@ func setupNode(
 		}
 	}
 	if err := n.setupMetrics(); err != nil {
-		return nil, err
-	}
-	if err := n.setupEnrollAuth(); err != nil {
 		return nil, err
 	}
 	if err := n.setupControlPlane(ctx); err != nil {
@@ -365,7 +314,7 @@ func (n *node) start(gen *generation) {
 		n.topology.Run(ctx)
 		return nil
 	})
-	if n.ident.asType == trust.ASTypeCore {
+	if n.cfg.role == trust.ASTypeCore {
 		g.Go("core enrollment", supervise.Fatal, func(ctx context.Context) error {
 			return controlplane.RunCoreEnrollment(ctx, controlplane.EnrollmentConfig{
 				IA:            n.ident.ia,
@@ -432,11 +381,11 @@ func (n *node) start(gen *generation) {
 		})
 	}
 	slog.Info("Serving control endpoint", "port", controlplane.EndpointPort)
-	if n.enrollRun != nil {
+	if n.cfg.enrollRun != nil {
 		// The selected authorizer's own loops — the Telegram poll; core only,
 		// for the core is the only node that issues chains.
 		g.Go("enrollment authorizer", supervise.Degrade, func(ctx context.Context) error {
-			n.enrollRun(ctx)
+			n.cfg.enrollRun(ctx)
 			return nil
 		})
 	}

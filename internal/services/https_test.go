@@ -76,6 +76,20 @@ func staticCertMgr(t *testing.T) *webpki.CertManager {
 	return manager
 }
 
+// resolvedNode builds a node from the minimal run arguments, the mutation
+// applied before they resolve: the founding core when it changes no role
+// argument.
+func resolvedNode(t *testing.T, mutate func(*NodeConfig)) *node {
+	t.Helper()
+	cfg := nodeConfig()
+	mutate(&cfg)
+	rc, err := cfg.resolve()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &node{cfg: rc}
+}
+
 // testRegistry is an in-memory registry for the mounted application.
 type testRegistry struct{}
 
@@ -108,12 +122,12 @@ func TestAssembleHTTPSBind(t *testing.T) {
 	_ = reserved.Close()
 	group, _ := supervise.New(context.Background())
 	defer func() { _ = group.Stop() }()
-	n := &node{
-		cfg:     NodeConfig{Coordination: &CoordinationOptions{Addr: addr}},
-		certMgr: staticCertMgr(t),
-		apps:    []apps.Loaded{{Name: "coordination", App: app}},
-		group:   group,
-	}
+	n := resolvedNode(t, func(c *NodeConfig) {
+		c.Coordination = &CoordinationOptions{Addr: addr}
+	})
+	n.certMgr = staticCertMgr(t)
+	n.apps = []apps.Loaded{{Name: "coordination", App: app}}
+	n.group = group
 	if err := n.assembleHTTPS(); err != nil {
 		t.Fatalf("assembleHTTPS() = %v, want nil", err)
 	}
@@ -131,19 +145,30 @@ func TestAssembleHTTPSBind(t *testing.T) {
 }
 
 // TestAssembleHTTPSNoBind checks the bind decision's negative: a
-// static-file identity on a core whose apps mount nothing leaves port 443
-// unbound, as the tree behaves today, and a non-core holds no identity to
-// serve at all.
+// static-file identity on a founding core whose apps mount nothing leaves
+// port 443 unbound, as the tree behaves today, and the authoritative core
+// and the normal node hold no identity to serve at all.
 func TestAssembleHTTPSNoBind(t *testing.T) {
-	n := &node{cfg: NodeConfig{Control: "127.0.0.1:30042"}, certMgr: staticCertMgr(t)}
+	n := resolvedNode(t, func(*NodeConfig) {})
+	n.certMgr = staticCertMgr(t)
 	if err := n.assembleHTTPS(); err != nil {
 		t.Fatalf("assembleHTTPS() = %v, want nil", err)
 	}
 	if n.httpsLn != nil {
 		t.Error("a static-file identity with nothing mounted bound the port")
 	}
-	if err := (&node{}).assembleHTTPS(); err != nil {
-		t.Fatalf("assembleHTTPS() of a non-core = %v, want nil", err)
+	neighbor := []string{"192.0.2.7:30043"}
+	for name, mutate := range map[string]func(*NodeConfig){
+		"the authoritative core": func(c *NodeConfig) { c.Neighbors = neighbor },
+		"the normal node":        func(c *NodeConfig) { c.Core = false; c.Neighbors = neighbor },
+	} {
+		n := resolvedNode(t, mutate)
+		if err := n.assembleHTTPS(); err != nil {
+			t.Fatalf("assembleHTTPS() of %s = %v, want nil", name, err)
+		}
+		if n.httpsLn != nil {
+			t.Errorf("%s bound the port", name)
+		}
 	}
 }
 
@@ -158,13 +183,11 @@ func (rootApp) HTTPSHandler() http.Handler    { return http.NotFoundHandler() }
 // loaded applications contributing HTTPS handlers refuse the boot with both
 // named, before the port binds.
 func TestAssembleHTTPSRefusesSecondHandler(t *testing.T) {
-	n := &node{
-		cfg:     NodeConfig{Control: "127.0.0.1:30042"},
-		certMgr: staticCertMgr(t),
-		apps: []apps.Loaded{
-			{Name: "first", App: rootApp{}},
-			{Name: "second", App: rootApp{}},
-		},
+	n := resolvedNode(t, func(*NodeConfig) {})
+	n.certMgr = staticCertMgr(t)
+	n.apps = []apps.Loaded{
+		{Name: "first", App: rootApp{}},
+		{Name: "second", App: rootApp{}},
 	}
 	err := n.assembleHTTPS()
 	if err == nil {
@@ -193,11 +216,9 @@ func TestAssembleHTTPSWildcardRefused(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(app.Close)
-	n := &node{
-		cfg:     NodeConfig{Control: "0.0.0.0:30042"},
-		certMgr: staticCertMgr(t),
-		apps:    []apps.Loaded{{Name: "coordination", App: app}},
-	}
+	n := resolvedNode(t, func(c *NodeConfig) { c.Control = "0.0.0.0:30042" })
+	n.certMgr = staticCertMgr(t)
+	n.apps = []apps.Loaded{{Name: "coordination", App: app}}
 	_, err = n.httpsBindAddr()
 	if err == nil {
 		t.Fatal("a wildcard control address named a bind, want refusal")

@@ -31,7 +31,7 @@ func Run(ctx context.Context, cfg NodeConfig, opts DataplaneOptions) error {
 	if err != nil {
 		return err
 	}
-	slog.Info("Starting CION", "ia", n.ident.ia, "asType", n.ident.asType,
+	slog.Info("Starting CION", "ia", n.ident.ia, "asType", n.cfg.role,
 		"core", cfg.Core, "internal", cfg.Internal, "control", cfg.Control)
 	return n.group.Wait()
 }
