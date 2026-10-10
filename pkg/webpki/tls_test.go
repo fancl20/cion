@@ -106,7 +106,7 @@ func serveHTTPS(t *testing.T, m *CertManager, ln net.Listener, handler http.Hand
 // request reaches the mounted handler over the loaded certificate.
 func TestServeHTTPSHTTP11(t *testing.T) {
 	certFile, keyFile, pool := mintCertFiles(t)
-	manager, err := PrepareTLSCert(context.Background(), TLSCertConfig{
+	manager, err := PrepareTLSCert(TLSCertConfig{
 		Domain:   testDomain,
 		CertFile: certFile,
 		KeyFile:  keyFile,
@@ -159,7 +159,7 @@ func TestServeHTTPSHTTP11(t *testing.T) {
 // the address binding again at once.
 func TestServeHTTPSReleasesOnCancel(t *testing.T) {
 	certFile, keyFile, pool := mintCertFiles(t)
-	manager, err := PrepareTLSCert(context.Background(), TLSCertConfig{
+	manager, err := PrepareTLSCert(TLSCertConfig{
 		Domain:   testDomain,
 		CertFile: certFile,
 		KeyFile:  keyFile,
@@ -336,10 +336,14 @@ func TestHTTP01ChallengeSolves(t *testing.T) {
 		Identifier:       acme.Identifier{Type: "dns", Value: domain},
 	})
 
-	ctx := t.Context()
-	if err := serveHTTP01(ctx, issuer); err != nil {
+	srv, done, err := serveHTTP01(issuer)
+	if err != nil {
 		t.Fatalf("serving the HTTP-01 challenge: %v", err)
 	}
+	t.Cleanup(func() {
+		_ = srv.Close()
+		<-done
+	})
 
 	// The validation an ACME CA performs: the identifier as the Host, the
 	// challenge's resource path.
@@ -372,5 +376,90 @@ func TestHTTP01ChallengeSolves(t *testing.T) {
 	if resp.StatusCode != http.StatusNotFound {
 		t.Errorf("an ordinary request = %d, want the wrapped handler's 404",
 			resp.StatusCode)
+	}
+}
+
+// TestCertManagerClose checks the manager's release: an ACME-managed
+// manager answers HTTP-01 on port 80 until Close returns, and the port
+// binds again at once; a static-file manager's Close releases nothing and
+// returns nil.
+func TestCertManagerClose(t *testing.T) {
+	manager, err := PrepareTLSCert(TLSCertConfig{
+		Domain:  "cion-core-02.test",
+		Storage: t.TempDir(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := &http.Client{Transport: &http.Transport{DisableKeepAlives: true}}
+	resp, err := client.Get("http://127.0.0.1/")
+	if err != nil {
+		t.Fatalf("the challenge server did not answer on port 80: %v", err)
+	}
+	_ = resp.Body.Close()
+	if err := manager.Close(); err != nil {
+		t.Fatalf("Close = %v, want nil", err)
+	}
+	ln, err := net.Listen("tcp", ":80")
+	if err != nil {
+		t.Fatalf("port 80 did not bind again after Close: %v", err)
+	}
+	_ = ln.Close()
+
+	certFile, keyFile, _ := mintCertFiles(t)
+	static, err := PrepareTLSCert(TLSCertConfig{
+		Domain:   testDomain,
+		CertFile: certFile,
+		KeyFile:  keyFile,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := static.Close(); err != nil {
+		t.Errorf("a static-file manager's Close = %v, want nil", err)
+	}
+}
+
+// TestManageRunsUntilItsContextEnds checks the maintenance against a CA
+// that accepts and answers nothing: Manage holds while the issuance waits
+// on the CA, and returns nil once its context ends.
+func TestManageRunsUntilItsContextEnds(t *testing.T) {
+	ca, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = ca.Close() }()
+	manager, err := PrepareTLSCert(TLSCertConfig{
+		Domain:  "cion-core-03.test",
+		Storage: t.TempDir(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = manager.Close() }()
+	issuer, ok := manager.magic.Issuers[0].(*certmagic.ACMEIssuer)
+	if !ok {
+		t.Fatal("certmagic did not configure an ACME issuer")
+	}
+	issuer.CA = "https://" + ca.Addr().String() + "/directory"
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	managed := make(chan error, 1)
+	go func() { managed <- manager.Manage(ctx) }()
+	// The issuance reaches the CA, whose silence holds it.
+	conn, err := ca.Accept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = conn.Close() }()
+	select {
+	case err := <-managed:
+		t.Fatalf("Manage returned %v while the issuance waited on the CA", err)
+	default:
+	}
+	cancel()
+	if err := <-managed; err != nil {
+		t.Errorf("Manage = %v once its context ended, want nil", err)
 	}
 }

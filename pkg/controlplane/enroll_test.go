@@ -110,7 +110,7 @@ func serveCore(t *testing.T, n *testNode, wpki *webPKI) *trustFixture {
 	t.Helper()
 	f := newTrustFixture(t)
 
-	certMgr, err := webpki.PrepareTLSCert(context.Background(), webpki.TLSCertConfig{
+	certMgr, err := webpki.PrepareTLSCert(webpki.TLSCertConfig{
 		Domain:   testDomain,
 		CertFile: wpki.certFile,
 		KeyFile:  wpki.keyFile,

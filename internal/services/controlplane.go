@@ -145,10 +145,12 @@ func (n *node) setupTrustRole(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
+		n.group.Own("core client conn", conn.Close)
 		resolutionConn, err := n.scionConn(0)
 		if err != nil {
 			return err
 		}
+		n.group.Own("resolution conn", resolutionConn.Close)
 		coreClt, err := webpki.NewCoreClient(webpki.CoreClientConfig{
 			Domain:  n.cfg.Domain,
 			Conn:    conn,
@@ -161,6 +163,9 @@ func (n *node) setupTrustRole(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
+		// The client's Close closes its QUIC transport alone; registered
+		// after its conns, it releases first.
+		n.group.Own("core client", coreClt.Close)
 		n.coreClt = coreClt
 		return nil
 	}
@@ -233,6 +238,9 @@ func (n *node) buildMessenger() error {
 	if err != nil {
 		return err
 	}
+	// The client's Close closes its QUIC transport alone; registered after
+	// the conn, it releases first.
+	n.group.Own("peer conn", peerConn.Close)
 	peerClt := controlplane.NewPeerClient(controlplane.PeerClientConfig{
 		Engine: n.engine,
 		Conn:   peerConn,
@@ -365,7 +373,7 @@ func (n *node) assembleMonitor() error {
 // it, so no core's TLS path branches on an app's presence.
 func (n *node) assembleEndpoint(ctx context.Context) error {
 	if n.ident.asType == trust.ASTypeCore {
-		manager, err := webpki.PrepareTLSCert(ctx, webpki.TLSCertConfig{
+		manager, err := webpki.PrepareTLSCert(webpki.TLSCertConfig{
 			Domain:   n.cfg.Domain,
 			Email:    n.cfg.AcmeEmail,
 			CertFile: n.cfg.CertFile,
@@ -375,6 +383,7 @@ func (n *node) assembleEndpoint(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
+		n.group.Own("certificate manager", manager.Close)
 		n.certMgr = manager
 		n.webPKI = manager.TLSConfig()
 	}
@@ -382,6 +391,7 @@ func (n *node) assembleEndpoint(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	n.group.Own("endpoint conn", endpointConn.Close)
 	n.endpointConn = endpointConn
 
 	// The provider releases what Mounts binds, a Mounts that failed partway

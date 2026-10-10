@@ -65,7 +65,7 @@ func mintCertFiles(t *testing.T) (certFile, keyFile string) {
 func staticCertMgr(t *testing.T) *webpki.CertManager {
 	t.Helper()
 	certFile, keyFile := mintCertFiles(t)
-	manager, err := webpki.PrepareTLSCert(context.Background(), webpki.TLSCertConfig{
+	manager, err := webpki.PrepareTLSCert(webpki.TLSCertConfig{
 		Domain:   "core.example.org",
 		CertFile: certFile,
 		KeyFile:  keyFile,

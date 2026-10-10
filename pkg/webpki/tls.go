@@ -55,17 +55,24 @@ type CertManager struct {
 	magic *certmagic.Config
 	// domain is the maintained name; empty for static files.
 	domain string
+	// cache holds magic's certificates and runs their renewals; nil for
+	// static files.
+	cache *certmagic.Cache
+	// http01 answers the HTTP-01 challenge on port 80, and http01Done
+	// closes once its Serve has returned; nil for static files.
+	http01     *http.Server
+	http01Done <-chan struct{}
 }
 
 // PrepareTLSCert prepares the certificate identity without binding the
 // HTTPS port: with certificate files configured it loads them once;
 // otherwise certmagic's ACME machinery stands ready, its HTTP-01 challenge
-// answered on the dedicated port 80, and the maintenance runs under
-// Manage. Every core takes this half and serves it on the node's HTTPS
-// server — ListenHTTPS and ServeHTTPS below — where the TLS-ALPN-01
+// answered on the dedicated port 80 until Close, and the maintenance runs
+// under Manage. Every core takes this half and serves it on the node's
+// HTTPS server — ListenHTTPS and ServeHTTPS below — where the TLS-ALPN-01
 // challenge is answered beside the mounted apps' own protocols (proposal
 // 0023).
-func PrepareTLSCert(ctx context.Context, cfg TLSCertConfig) (*CertManager, error) {
+func PrepareTLSCert(cfg TLSCertConfig) (*CertManager, error) {
 	if cfg.CertFile != "" || cfg.KeyFile != "" {
 		cert, err := tls.LoadX509KeyPair(cfg.CertFile, cfg.KeyFile)
 		if err != nil {
@@ -101,7 +108,8 @@ func PrepareTLSCert(ctx context.Context, cfg TLSCertConfig) (*CertManager, error
 
 	// The HTTP-01 challenge must be answerable before issuance starts; the
 	// TLS-ALPN-01 challenge rides whichever server holds port 443.
-	if err := serveHTTP01(ctx, issuer); err != nil {
+	http01, http01Done, err := serveHTTP01(issuer)
+	if err != nil {
 		cache.Stop()
 		return nil, err
 	}
@@ -111,8 +119,11 @@ func PrepareTLSCert(ctx context.Context, cfg TLSCertConfig) (*CertManager, error
 			NextProtos:     []string{"h3"},
 			MinVersion:     tls.VersionTLS13,
 		},
-		magic:  magic,
-		domain: cfg.Domain,
+		magic:      magic,
+		domain:     cfg.Domain,
+		cache:      cache,
+		http01:     http01,
+		http01Done: http01Done,
 	}, nil
 }
 
@@ -126,16 +137,31 @@ func (m *CertManager) TLSConfig() *tls.Config { return m.tlsCfg }
 // of their own.
 func (m *CertManager) ACMEManaged() bool { return m.magic != nil }
 
-// Manage maintains the certificate — obtaining it at first need and
-// renewing it on the cache's own schedule. Static files manage nothing.
+// Manage maintains the ACME-managed certificate until the context ends:
+// certmagic obtains it in the background, retrying a failed issuance at its
+// own backoff, and the cache renews it on its schedule. It returns nil once
+// the context ends — the end cancels the retries — or the error that kept
+// the maintenance from starting. A static-file identity has nothing to
+// manage and runs no Manage.
 func (m *CertManager) Manage(ctx context.Context) error {
+	if err := m.magic.ManageAsync(ctx, []string{m.domain}); err != nil {
+		return fmt.Errorf("managing the certificate for %s: %w", m.domain, err)
+	}
+	<-ctx.Done()
+	return nil
+}
+
+// Close stops the certificate cache's renewals and shuts the HTTP-01
+// challenge server down, returning once its Serve has returned and port 80
+// is free. A static-file manager releases nothing.
+func (m *CertManager) Close() error {
 	if m.magic == nil {
 		return nil
 	}
-	if err := m.magic.ManageSync(ctx, []string{m.domain}); err != nil {
-		return fmt.Errorf("obtaining certificate for %s: %w", m.domain, err)
-	}
-	return nil
+	m.cache.Stop()
+	err := m.http01.Close()
+	<-m.http01Done
+	return err
 }
 
 // ListenHTTPS binds the node's HTTPS server on the address the assembly
@@ -195,24 +221,20 @@ func (m *CertManager) httpsTLSConfig() *tls.Config {
 }
 
 // serveHTTP01 answers the ACME HTTP-01 challenge on a dedicated TCP
-// listener, port 80.
-func serveHTTP01(ctx context.Context, issuer *certmagic.ACMEIssuer) error {
+// listener, port 80, returning the server and a channel that closes once
+// its Serve has returned.
+func serveHTTP01(issuer *certmagic.ACMEIssuer) (*http.Server, <-chan struct{}, error) {
 	ln, err := net.Listen("tcp", ":80")
 	if err != nil {
-		return fmt.Errorf("binding HTTP-01 challenge port: %w", err)
+		return nil, nil, fmt.Errorf("binding HTTP-01 challenge port: %w", err)
 	}
 	srv := &http.Server{Handler: issuer.HTTPChallengeHandler(http.NotFoundHandler())}
+	done := make(chan struct{})
 	go func() {
-		defer func() { _ = ln.Close() }()
-		<-ctx.Done()
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		_ = srv.Shutdown(shutdownCtx)
-	}()
-	go func() {
+		defer close(done)
 		if err := srv.Serve(ln); !errors.Is(err, http.ErrServerClosed) {
 			slog.Error("HTTP-01 challenge server exited", "err", err)
 		}
 	}()
-	return nil
+	return srv, done, nil
 }

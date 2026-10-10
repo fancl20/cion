@@ -586,7 +586,7 @@ func StartNode(t *testing.T, cfg NodeConfig) *Node {
 
 	var webPKIConf *tls.Config
 	if core {
-		manager, err := webpki.PrepareTLSCert(ctx, webpki.TLSCertConfig{
+		manager, err := webpki.PrepareTLSCert(webpki.TLSCertConfig{
 			Domain:   TestDomain,
 			CertFile: wpki.certFile,
 			KeyFile:  wpki.keyFile,

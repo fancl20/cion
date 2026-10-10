@@ -23,6 +23,7 @@ func (n *node) assembleResponder() error {
 	if err != nil {
 		return fmt.Errorf("binding the echo responder (the control address's host must not share the internal link's port): %w", err)
 	}
+	n.group.Own("responder conn", conn.Close)
 	n.responder = &responder{conn: conn}
 	return nil
 }

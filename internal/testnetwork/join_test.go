@@ -417,7 +417,9 @@ func TestBootstrapWithoutAnswer(t *testing.T) {
 // TestHeldHostPortRefusesBoot checks the default's failure mode: a boot
 // against a shared port another socket already holds — the machine's
 // existing WireGuard interface — fails loudly at the bind, the argument's
-// override the remedy.
+// override the remedy. The refusal releases what the boot acquired: once the
+// held socket closes, a second boot on the same host and state succeeds,
+// the endpoint, responder, and rendezvous ports free again.
 func TestHeldHostPortRefusesBoot(t *testing.T) {
 	t.Parallel()
 	wpki := NewWebPKI(t)
@@ -427,10 +429,8 @@ func TestHeldHostPortRefusesBoot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer func() { _ = held.Close() }()
 
-	ctx := t.Context()
-	_, err = services.BootApp(ctx, services.NodeConfig{
+	cfg := services.NodeConfig{
 		Core:     true,
 		Domain:   TestDomain,
 		State:    t.TempDir(),
@@ -441,12 +441,22 @@ func TestHeldHostPortRefusesBoot(t *testing.T) {
 		AppArguments: apps.Arguments{
 			Wireguard: apps.WireguardArguments{HostPort: apps.DefaultHostPort},
 		},
-	})
+	}
+	_, err = services.BootApp(t.Context(), cfg)
+	_ = held.Close()
 	if err == nil {
 		t.Fatal("a boot against a held shared port succeeded")
 	}
 	if want := "binding the host port"; !strings.Contains(err.Error(), want) {
 		t.Errorf("the boot's refusal = %v, want it to name %q", err, want)
+	}
+
+	app, err := services.BootApp(t.Context(), cfg)
+	if err != nil {
+		t.Fatalf("a boot on the refused boot's host and state: %v", err)
+	}
+	if err := app.Close(); err != nil {
+		t.Errorf("stopping the second boot: %v", err)
 	}
 }
 
@@ -483,6 +493,41 @@ func TestHeldStateRefusesBoot(t *testing.T) {
 	if want := "the state directory " + running.stateDir + " is in use"; !strings.Contains(err.Error(), want) {
 		t.Errorf("the boot's refusal = %v, want it to name %q", err, want)
 	}
+}
+
+// TestCoreRestartsInPlace checks the restart a process supervisor performs:
+// a core stopped and booted again three times on the same state and
+// addresses boots at once each time — the stopped node's every socket
+// released when its Close returns — and a joiner enrolls against the last.
+func TestCoreRestartsInPlace(t *testing.T) {
+	t.Parallel()
+	wpki := NewWebPKI(t)
+	ipA, ipB := hostSlot(t), hostSlot(t)
+	state := t.TempDir()
+	internal, control := PinnedUDPAddrOn(t, ipA), FreeUDPAddrOn(t, ipA)
+	boot := func() *assemblyNode {
+		return bootAssembly(t, func(cfg *services.NodeConfig) {
+			cfg.Core = true
+			cfg.State = state
+			cfg.Internal = internal
+			cfg.Control = control
+			cfg.CertFile = wpki.certFile
+			cfg.KeyFile = wpki.keyFile
+		})
+	}
+	a := boot()
+	for range 3 {
+		a.stop(t)
+		a = boot()
+	}
+
+	b := bootAssembly(t, func(cfg *services.NodeConfig) {
+		cfg.Internal = PinnedUDPAddrOn(t, ipB)
+		cfg.Control = FreeUDPAddrOn(t, ipB)
+		cfg.Neighbors = []string{a.rendezvousOf()}
+		cfg.RootCAs = wpki.pool
+	})
+	Poll(t, "the joiner to enroll against the last boot", func() bool { return holdsChain(b) })
 }
 
 // TestDeliberateCore is the empty list's proof: a core and a joiner that

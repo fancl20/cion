@@ -449,9 +449,10 @@ func (n *node) start(gen *generation) {
 			return n.certMgr.ServeHTTPS(ctx, ln, handler)
 		})
 	}
-	if n.certMgr != nil {
+	if n.certMgr != nil && n.certMgr.ACMEManaged() {
 		// The certificate maintenance runs beside the server that presents
-		// it; static files manage nothing, so the loop is a no-op for them.
+		// it, retrying a failed issuance while the node serves on; static
+		// files manage nothing and start no loop.
 		g.Go("certificate management", supervise.Degrade, n.certMgr.Manage)
 	}
 	for _, l := range n.apps {
