@@ -107,24 +107,6 @@ func (n *Node) WaitUnderlayReleased() {
 	<-n.underlayDone
 }
 
-// NewConn returns a SCION connection of the node, bound to the control
-// address's host with the given port.
-func (n *Node) NewConn(t *testing.T, port uint16) *scion.Conn {
-	t.Helper()
-	conn, err := scion.NewConn(scion.ConnConfig{
-		IA:           n.IA,
-		Bind:         netip.AddrPortFrom(n.ControlIP, port).String(),
-		InternalAddr: n.Internal,
-		MACKey:       n.MACKey,
-		Links:        n.Links,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = conn.Close() })
-	return conn
-}
-
 // Link is one seeded external link of a node: both endpoints' addresses
 // recorded in each side's store, the shape a restart serves.
 type Link struct {
@@ -851,30 +833,6 @@ func selfEnroll(
 	}
 	_, err = db.InsertChain(ctx, chain)
 	return err
-}
-
-// StartPingResponder serves echo replies on the node's endhost port, the loop
-// the daemon's own core runs beside the control endpoint — the harness wires
-// it by hand, its nodes not being the daemon's assembly.
-func StartPingResponder(t *testing.T, n *Node) {
-	t.Helper()
-	conn := n.NewConn(t, dataplane.EndhostPort)
-	t.Cleanup(func() { _ = conn.Close() })
-	go func() {
-		for {
-			echo, from, err := conn.ReadEchoFrom()
-			if err != nil {
-				return
-			}
-			if echo.Reply {
-				continue
-			}
-			if err := conn.WriteEchoReplyTo(from, echo.Identifier, echo.Seq,
-				echo.Payload); err != nil {
-				return
-			}
-		}
-	}()
 }
 
 // handlePanic absorbs a background loop's panic: one loop's bug must not

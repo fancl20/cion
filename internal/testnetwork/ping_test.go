@@ -229,31 +229,24 @@ func TestPingReresolvesExpiredPath(t *testing.T) {
 	t.Parallel()
 	iaP := addr.MustIAFrom(20, 0xff0000000021)
 	iaR := addr.MustIAFrom(20, 0xff0000000022)
-	ipP, ipR := hostSlot(t), hostSlot(t)
-	extP, extR := PinnedUDPAddrOn(t, ipP), PinnedUDPAddrOn(t, ipR)
-
-	p := StartNode(t, NodeConfig{IA: iaP, Host: ipP, Links: []Link{
-		{Local: extP, Remote: extR, Neighbor: iaR},
-	}, WPKI: NewWebPKI(t)})
-	r := StartNode(t, NodeConfig{IA: iaR, Host: ipR, Links: []Link{
-		{Local: extR, Remote: extP, Neighbor: iaP},
-	}, WPKI: NewWebPKI(t)})
-	StartPingResponder(t, r)
+	p, r := bootPair(t, iaP, iaR)
+	keyP, keyR := p.forwardingKey(t), r.forwardingKey(t)
 
 	// The pinger resolves through a provider of crafted up segments: the
 	// first resolution sees a stale segment — expired twenty-five hours
 	// after its beacon — and every later one a fresh segment routing over
 	// the real link.
+	fresh := upSegment(t, keyR, keyP, time.Now(), iaR, iaP)
 	db := &flipPathDB{
-		stale: upSegment(t, r.MACKey, p.MACKey, time.Now().Add(-25*time.Hour), iaR, iaP),
-		fresh: upSegment(t, r.MACKey, p.MACKey, time.Now(), iaR, iaP),
+		stale: upSegment(t, keyR, keyP, time.Now().Add(-25*time.Hour), iaR, iaP),
+		fresh: fresh,
 	}
-	provider := &scion.PathProvider{IA: iaP, DB: db}
+	warmUp(t, p, r, fresh)
 	report, err := ping.Run(context.Background(), ping.Config{
-		Conn:     p.NewConn(t, 0),
-		Provider: provider,
+		Conn:     p.conn(t),
+		Provider: &scion.PathProvider{IA: iaP, DB: db},
 		Dst:      iaR,
-		DstHost:  r.ControlIP,
+		DstHost:  r.host,
 		Count:    3,
 		Interval: 100 * time.Millisecond,
 		Wait:     2 * time.Second,
@@ -274,6 +267,31 @@ func TestPingReresolvesExpiredPath(t *testing.T) {
 				reply.Seq, reply.Hops)
 		}
 	}
+}
+
+// bootPair boots the crafted-path labs' two non-core nodes, P and R, on the
+// static builder with no core: their one link pins interface 1 at both
+// ends, the interface upSegment's hop fields name.
+func bootPair(t *testing.T, iaP, iaR addr.IA) (p, r *staticNode) {
+	t.Helper()
+	nodes := bootTopology(t, NewWebPKI(t), staticTopology{
+		nodes: []addr.IA{iaP, iaR},
+		links: [][2]addr.IA{{iaP, iaR}},
+		pins:  map[[2]addr.IA]uint16{{iaP, iaR}: 1, {iaR, iaP}: 1},
+	})
+	return nodes[iaP], nodes[iaR]
+}
+
+// warmUp waits until R's responder answers an echo P sends over the
+// crafted segment: until the link's BFD session comes up, P's data plane
+// refuses the egress, and each node's generation swap at boot may drop a
+// request.
+func warmUp(t *testing.T, p, r *staticNode, seg *pathdb.Segment) {
+	t.Helper()
+	provider := &scion.PathProvider{IA: p.app.IA(), DB: &staticPathDB{seg: seg}}
+	Poll(t, "R answers P's echo over the crafted segment", func() bool {
+		return pingOver(context.Background(), p.assemblyNode, provider, r.app.IA(), r.host)
+	})
 }
 
 // upSegment builds the unsigned route form of a two-AS up segment from core
@@ -339,22 +357,15 @@ func TestPingUnreachable(t *testing.T) {
 	t.Parallel()
 	iaP := addr.MustIAFrom(20, 0xff0000000031)
 	iaR := addr.MustIAFrom(20, 0xff0000000032)
-	ipP, ipR := hostSlot(t), hostSlot(t)
-	extP, extR := PinnedUDPAddrOn(t, ipP), PinnedUDPAddrOn(t, ipR)
-
-	p := StartNode(t, NodeConfig{IA: iaP, Host: ipP, Links: []Link{
-		{Local: extP, Remote: extR, Neighbor: iaR},
-	}, WPKI: NewWebPKI(t)})
-	StartNode(t, NodeConfig{IA: iaR, Host: ipR, Links: []Link{
-		{Local: extR, Remote: extP, Neighbor: iaP},
-	}, WPKI: NewWebPKI(t)})
+	p, _ := bootPair(t, iaP, iaR)
 
 	stranger := addr.MustIAFrom(20, 0xff0000000077)
+	conn := p.conn(t)
 	done := make(chan error, 1)
 	go func() {
 		_, err := ping.Run(context.Background(), ping.Config{
-			Conn:     p.NewConn(t, 0),
-			Provider: p.Provider,
+			Conn:     conn,
+			Provider: p.app.Provider(),
 			Dst:      stranger,
 			DstHost:  netip.MustParseAddr("127.0.0.99"),
 			Count:    1,
@@ -373,33 +384,26 @@ func TestPingUnreachable(t *testing.T) {
 	}
 }
 
-// TestPingLossSummary checks the loss accounting: a destination whose
-// responder is down loses every request, and the run still completes with
-// the summary.
+// TestPingLossSummary checks the loss accounting: a destination host no
+// responder listens on loses every request, and the run still completes
+// with the summary.
 func TestPingLossSummary(t *testing.T) {
 	t.Parallel()
 	iaP := addr.MustIAFrom(20, 0xff0000000041)
 	iaR := addr.MustIAFrom(20, 0xff0000000042)
-	ipP, ipR := hostSlot(t), hostSlot(t)
-	extP, extR := PinnedUDPAddrOn(t, ipP), PinnedUDPAddrOn(t, ipR)
+	p, r := bootPair(t, iaP, iaR)
 
 	// The provider resolves over a crafted up segment, so the requests are
-	// delivered; no responder answers them.
-	p := StartNode(t, NodeConfig{IA: iaP, Host: ipP, Links: []Link{
-		{Local: extP, Remote: extR, Neighbor: iaR},
-	}, WPKI: NewWebPKI(t)})
-	r := StartNode(t, NodeConfig{IA: iaR, Host: ipR, Links: []Link{
-		{Local: extR, Remote: extP, Neighbor: iaP},
-	}, WPKI: NewWebPKI(t)})
-	provider := &scion.PathProvider{
-		IA: iaP,
-		DB: &staticPathDB{seg: upSegment(t, r.MACKey, p.MACKey, time.Now(), iaR, iaP)},
-	}
+	// delivered — R's responder answers the warm-up over it — and they aim
+	// at a host of R's AS where no socket listens: the pool's next loopback
+	// address, which no node binds.
+	seg := upSegment(t, r.forwardingKey(t), p.forwardingKey(t), time.Now(), iaR, iaP)
+	warmUp(t, p, r, seg)
 	report, err := ping.Run(context.Background(), ping.Config{
-		Conn:     p.NewConn(t, 0),
-		Provider: provider,
+		Conn:     p.conn(t),
+		Provider: &scion.PathProvider{IA: iaP, DB: &staticPathDB{seg: seg}},
 		Dst:      iaR,
-		DstHost:  r.ControlIP,
+		DstHost:  hostSlot(t),
 		Count:    2,
 		Interval: 100 * time.Millisecond,
 		Wait:     200 * time.Millisecond,

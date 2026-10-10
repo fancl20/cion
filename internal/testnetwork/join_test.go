@@ -67,6 +67,17 @@ func (n *assemblyNode) conn(t *testing.T) *scion.Conn {
 	return conn
 }
 
+// forwardingKey reads the forwarding key the node's boot wrote to its
+// state: the key its data plane verifies its own hop fields with.
+func (n *assemblyNode) forwardingKey(t *testing.T) []byte {
+	t.Helper()
+	key, err := trust.LoadOrCreateForwardingKey(n.stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return key
+}
+
 // bootAssembly boots a full node assembly — the run command's own wiring —
 // and serves it underneath the test, stopping it at cleanup.
 func bootAssembly(t *testing.T, mutate func(*services.NodeConfig)) *assemblyNode {
@@ -103,6 +114,13 @@ func bootAssembly(t *testing.T, mutate func(*services.NodeConfig)) *assemblyNode
 // reporting success. The responder runs beside every node's control
 // endpoint, as the daemon serves it.
 func pingFrom(ctx context.Context, n *assemblyNode, dst addr.IA, host netip.Addr) bool {
+	return pingOver(ctx, n, n.app.Provider(), dst, host)
+}
+
+// pingOver is pingFrom resolving the path through the given provider.
+func pingOver(ctx context.Context, n *assemblyNode, provider *scion.PathProvider,
+	dst addr.IA, host netip.Addr) bool {
+
 	conn, err := n.app.Conn(0)
 	if err != nil {
 		return false
@@ -110,7 +128,7 @@ func pingFrom(ctx context.Context, n *assemblyNode, dst addr.IA, host netip.Addr
 	defer func() { _ = conn.Close() }()
 	report, err := ping.Run(ctx, ping.Config{
 		Conn:     conn,
-		Provider: n.app.Provider(),
+		Provider: provider,
 		Dst:      dst,
 		DstHost:  host,
 		Count:    1,

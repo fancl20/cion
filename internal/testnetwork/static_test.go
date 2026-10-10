@@ -11,6 +11,7 @@ import (
 	"github.com/scionproto/scion/pkg/addr"
 
 	"github.com/fancl20/cion/internal/services"
+	"github.com/fancl20/cion/pkg/controlplane"
 	"github.com/fancl20/cion/pkg/modules/links"
 )
 
@@ -114,17 +115,21 @@ func bootStaticLine(t *testing.T, wpki *WebPKI,
 }
 
 // staticTopology is a lab topology on the file provider: its nodes by
-// ISD-AS, the founding core among them, and the links between neighbors.
+// ISD-AS, the founding core among them, the links between neighbors, and
+// the interface IDs a lab crafts hop fields against, each keyed by the node
+// whose entry pins it and the neighbor the entry names. A zero core leaves
+// every node non-core.
 type staticTopology struct {
 	core  addr.IA
 	nodes []addr.IA
 	links [][2]addr.IA
+	pins  map[[2]addr.IA]uint16
 }
 
 // bootTopology boots a static topology through the node's own assembly.
 // Each node's ISD-AS is written to its state before any boot, so every
 // node's link set names its neighbors up front, each link's addresses drawn
-// from its two nodes' hosts; the founding core boots first.
+// from its two nodes' hosts; the founding core, if any, boots first.
 func bootTopology(t *testing.T, wpki *WebPKI, topo staticTopology) map[addr.IA]*staticNode {
 	t.Helper()
 	hosts := make(map[addr.IA]netip.Addr, len(topo.nodes))
@@ -134,24 +139,41 @@ func bootTopology(t *testing.T, wpki *WebPKI, topo staticTopology) map[addr.IA]*
 		states[ia] = t.TempDir()
 		persistIAFile(t, states[ia], ia)
 	}
+	entry := func(local, neighbor addr.IA, atLocal, atNeighbor string) staticLink {
+		e := staticLink{IA: neighbor.String(), Local: atLocal, Remote: atNeighbor}
+		if ifID, ok := topo.pins[[2]addr.IA{local, neighbor}]; ok {
+			e.Interface = &ifID
+		}
+		return e
+	}
 	entries := make(map[addr.IA][]staticLink, len(topo.nodes))
 	for _, l := range topo.links {
 		x, y := l[0], l[1]
 		atX, atY := PinnedUDPAddrOn(t, hosts[x]), PinnedUDPAddrOn(t, hosts[y])
-		entries[x] = append(entries[x], staticLink{IA: y.String(), Local: atX, Remote: atY})
-		entries[y] = append(entries[y], staticLink{IA: x.String(), Local: atY, Remote: atX})
+		entries[x] = append(entries[x], entry(x, y, atX, atY))
+		entries[y] = append(entries[y], entry(y, x, atY, atX))
 	}
 	sets := make(map[addr.IA]string, len(topo.nodes))
 	for _, ia := range topo.nodes {
 		sets[ia] = linkSetPath(t)
 		writeStaticSet(t, sets[ia], entries[ia]...)
 	}
+	// The labs prove carriage, not liveness: their nodes run the production
+	// BFD interval, whose detection time rides out the stalls of a loaded
+	// runner, which at lab pacing take every link down and lose the echoes
+	// in flight.
+	productionBFD := func(cfg *services.NodeConfig) {
+		cfg.Pacing.BFD = controlplane.BFDTransmissionInterval
+	}
 	nodes := make(map[addr.IA]*staticNode, len(topo.nodes))
-	nodes[topo.core] = bootStaticNode(t, wpki, hosts[topo.core], true,
-		states[topo.core], sets[topo.core], nil)
+	if !topo.core.IsZero() {
+		nodes[topo.core] = bootStaticNode(t, wpki, hosts[topo.core], true,
+			states[topo.core], sets[topo.core], productionBFD)
+	}
 	for _, ia := range topo.nodes {
 		if ia != topo.core {
-			nodes[ia] = bootStaticNode(t, wpki, hosts[ia], false, states[ia], sets[ia], nil)
+			nodes[ia] = bootStaticNode(t, wpki, hosts[ia], false, states[ia], sets[ia],
+				productionBFD)
 		}
 	}
 	return nodes
