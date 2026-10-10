@@ -103,6 +103,18 @@ func (a *App) handleMap(w http.ResponseWriter, r *http.Request,
 		http.Error(w, "no registration for the key", http.StatusForbidden)
 		return
 	}
+	// An open stream holds one of a bounded set, taken before the first map
+	// goes out: past the bound the map answers once, and the stream closes —
+	// no error, the client's own polling carrying the rest.
+	streaming := false
+	if req.Stream {
+		select {
+		case a.mapStreams <- struct{}{}:
+			streaming = true
+			defer func() { <-a.mapStreams }()
+		default:
+		}
+	}
 	flusher, _ := w.(http.Flusher)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
@@ -112,17 +124,7 @@ func (a *App) handleMap(w http.ResponseWriter, r *http.Request,
 	if flusher != nil {
 		flusher.Flush()
 	}
-	if !req.Stream {
-		return
-	}
-
-	// An open stream holds one of a bounded set: past the bound the map has
-	// just answered one full map, and the stream closes — no error, the
-	// client's own polling carrying the rest.
-	select {
-	case a.mapStreams <- struct{}{}:
-		defer func() { <-a.mapStreams }()
-	default:
+	if !streaming {
 		return
 	}
 
