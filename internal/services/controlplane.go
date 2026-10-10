@@ -16,6 +16,8 @@ import (
 	"go.etcd.io/bbolt"
 	bolterrors "go.etcd.io/bbolt/errors"
 
+	"github.com/fancl20/cion/internal/supervise"
+	"github.com/fancl20/cion/pkg/apps/voting"
 	"github.com/fancl20/cion/pkg/controlplane"
 	linkbbolt "github.com/fancl20/cion/pkg/modules/links/impl/bbolt"
 	"github.com/fancl20/cion/pkg/modules/pathdb"
@@ -28,14 +30,14 @@ import (
 )
 
 // setupControlPlane brings up the node's control plane, in phases: the state
-// databases and keys — the link store among them — the
-// trust role (the founding core's issuer or every other node's core client),
-// the messenger (trust engine and peer client), the BFD health monitor,
-// beaconing (the lookup, beaconer, and path provider closing their cycle),
-// the wiring of the loaded topology provider over what the phases built, the
-// control endpoint's socket and the provider's mounted services, and the
-// echo responder. Each phase registers what it acquires with the node's
-// group as it goes, so a failed boot's Stop releases a partial node.
+// databases and keys — the link store among them — the trust role (the
+// role's parts, the products the later phases take, and the role's own
+// loops), the messenger (trust engine and peer client), the BFD health
+// monitor, beaconing (the lookup, beaconer, and path provider closing their
+// cycle), the wiring of the loaded topology provider over what the phases
+// built, the control endpoint's socket and the provider's mounted services,
+// and the echo responder. Each phase registers what it acquires with the
+// node's group as it goes, so a failed boot's Stop releases a partial node.
 func (n *node) setupControlPlane(ctx context.Context) error {
 	if err := n.openState(ctx); err != nil {
 		return err
@@ -53,7 +55,7 @@ func (n *node) setupControlPlane(ctx context.Context) error {
 		return err
 	}
 	n.wireTopology()
-	if err := n.assembleEndpoint(ctx); err != nil {
+	if err := n.assembleEndpoint(); err != nil {
 		return err
 	}
 	return n.assembleResponder()
@@ -107,68 +109,41 @@ func openStore[DB any](state, name string, open func(string, *bbolt.Options) (DB
 	return db, err
 }
 
-// setupTrustRole establishes the node's trust role: the founding core
-// originates its TRC, issuer, and first chain synchronously — the chain
-// lifecycle's first pass — and holds the decision on submitted TRC updates
-// the voting application hands each submission to, while every other node
-// builds the client for enrolling with its core over the WebPKI-verified
-// channel, the core's control service resolved through the drafts'
-// exchange when the dial wants an underlay address. The joining core loads
-// its voting material on the way: the regular voting key alone, and the
-// self-signed certificate over it naming the completed ISD-AS. Both core
-// tiers first promote the material a roll staged once the newest pinned TRC
-// names it, so the material they load covers that TRC wherever the roll
-// stopped.
+// roleLoop is one of the role's own loops: its name, its policy, and its
+// run, which start hands to the group.
+type roleLoop struct {
+	name   string
+	policy supervise.Policy
+	run    func(context.Context) error
+}
+
+// setupTrustRole builds the node's trust role in one switch over the
+// resolved role. Each case builds the role's parts, sets the products the
+// later phases take, and adds the role's own loops. Both core tiers first
+// promote the material a roll staged once the newest pinned TRC names it,
+// so the material they load covers that TRC wherever the roll stopped.
 func (n *node) setupTrustRole(ctx context.Context) error {
-	if n.cfg.role != trust.ASTypeCore {
-		if n.cfg.role == trust.ASTypeAuthoritative {
-			if _, err := n.promoteStaged(ctx); err != nil {
-				return err
-			}
-			votingKey, err := trust.LoadOrCreateVotingKey(n.cfg.State)
-			if err != nil {
-				return fmt.Errorf("loading voting key: %w", err)
-			}
-			votingCert, err := trust.LoadOrCreateVotingCert(n.cfg.State, n.ident.ia, votingKey)
-			if err != nil {
-				return fmt.Errorf("loading voting certificate: %w", err)
-			}
-			n.votingKey = votingKey
-			n.votingCert = votingCert
-		}
-		// The client socket takes an ephemeral port on the control address;
-		// the local router delivers the core's replies to it. The resolution
-		// exchange takes its own beside it: the exchange reads its conn for
-		// each reply's wait, and a conn the client's QUIC transport reads
-		// would share its packets with that loop.
-		conn, err := n.scionConn(0)
-		if err != nil {
-			return err
-		}
-		n.group.Own("core client conn", conn.Close)
-		resolutionConn, err := n.scionConn(0)
-		if err != nil {
-			return err
-		}
-		n.group.Own("resolution conn", resolutionConn.Close)
-		coreClt, err := webpki.NewCoreClient(webpki.CoreClientConfig{
-			Domain:  n.cfg.Domain,
-			Conn:    conn,
-			RootCAs: n.cfg.RootCAs,
-			Locator: n.coreRoute,
-			ResolveService: func(ctx context.Context, peer *scion.Addr) (netip.AddrPort, error) {
-				return controlplane.ResolveService(ctx, resolutionConn, peer)
-			},
-		})
-		if err != nil {
-			return err
-		}
-		// The client's Close closes its QUIC transport alone; registered
-		// after its conns, it releases first.
-		n.group.Own("core client", coreClt.Close)
-		n.coreClt = coreClt
-		return nil
+	switch n.cfg.role {
+	case trust.ASTypeCore:
+		return n.setupFounder(ctx)
+	case trust.ASTypeAuthoritative:
+		return n.setupAuthoritative(ctx)
+	default:
+		return n.setupNormal()
 	}
+}
+
+// setupFounder builds the founding core's parts: its core keys, its TRC —
+// genesis, or the newest pinned — the issuer anchored in it, the decision
+// on submitted TRC updates the voting application hands each submission
+// to, its first chain by self-enrollment — the chain lifecycle's first
+// pass — and its WebPKI identity, prepared whatever the applications: the
+// node's HTTPS server, assembled after they mount, serves it and answers
+// the ACME TLS-ALPN challenge on it, so no TLS path branches on an
+// application's presence. Its loops renew by self-issue, roll by local
+// cast, manage an ACME-managed certificate, and run the selected
+// authorizer's own loops when the method has them.
+func (n *node) setupFounder(ctx context.Context) error {
 	newest, err := n.promoteStaged(ctx)
 	if err != nil {
 		return err
@@ -191,8 +166,7 @@ func (n *node) setupTrustRole(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("creating issuer: %w", err)
 	}
-	n.issuer = issuer
-	n.decider = &controlplane.TRCDecider{
+	decider := &controlplane.TRCDecider{
 		DB:         n.trustDB,
 		IA:         n.ident.ia,
 		Sensitive:  keys.Sensitive,
@@ -201,7 +175,178 @@ func (n *node) setupTrustRole(ctx context.Context) error {
 	if _, err := selfEnroll(ctx, n.trustDB, issuer, n.ident.ia, n.asKey); err != nil {
 		return fmt.Errorf("self-enrolling core: %w", err)
 	}
+	manager, err := webpki.PrepareTLSCert(webpki.TLSCertConfig{
+		Domain:   n.cfg.Domain,
+		Email:    n.cfg.AcmeEmail,
+		CertFile: n.cfg.CertFile,
+		KeyFile:  n.cfg.KeyFile,
+		Storage:  filepath.Join(n.cfg.State, "certs"),
+	})
+	if err != nil {
+		return err
+	}
+	n.group.Own("certificate manager", manager.Close)
+	n.issuer = issuer
+	n.trcDecision = decider
+	n.certMgr = manager
+	n.webPKI = manager.TLSConfig()
+	n.roleLoops = []roleLoop{
+		{"enrollment", supervise.Fatal, func(ctx context.Context) error {
+			return controlplane.RunEnrollment(ctx,
+				n.enrollment(controlplane.FounderRenewal(issuer)))
+		}},
+		// The founder's rotation watch: its own three certificates roll
+		// inside the cast it signs itself, serialized on the decision the
+		// submissions take too.
+		{"rotation watch", supervise.Fatal, func(ctx context.Context) error {
+			controlplane.RunRotation(ctx,
+				n.rotation(controlplane.FounderRoll(decider, issuer)))
+			return nil
+		}},
+	}
+	if manager.ACMEManaged() {
+		// The certificate maintenance retries a failed issuance while the
+		// node serves on; static files manage nothing and start no loop.
+		n.roleLoops = append(n.roleLoops,
+			roleLoop{"certificate management", supervise.Degrade, manager.Manage})
+	}
+	if run := n.cfg.enrollRun; run != nil {
+		// The selected authorizer's own loops — the Telegram poll.
+		n.roleLoops = append(n.roleLoops, roleLoop{"enrollment authorizer", supervise.Degrade,
+			func(ctx context.Context) error {
+				run(ctx)
+				return nil
+			}})
+	}
 	return nil
+}
+
+// setupAuthoritative builds the authoritative core's parts: its voting
+// material — the regular voting key alone, and the self-signed certificate
+// over it naming the completed ISD-AS — and the core client. Its loops
+// renew remotely and cast the onboarding update, and roll by submission,
+// both submitting to the founder's voting application over the verified
+// peer channel, the submission identified by the node's chain.
+func (n *node) setupAuthoritative(ctx context.Context) error {
+	if _, err := n.promoteStaged(ctx); err != nil {
+		return err
+	}
+	votingKey, err := trust.LoadOrCreateVotingKey(n.cfg.State)
+	if err != nil {
+		return fmt.Errorf("loading voting key: %w", err)
+	}
+	votingCert, err := trust.LoadOrCreateVotingCert(n.cfg.State, n.ident.ia, votingKey)
+	if err != nil {
+		return fmt.Errorf("loading voting certificate: %w", err)
+	}
+	coreClt, err := n.coreClient()
+	if err != nil {
+		return err
+	}
+	n.remote = coreClt
+	n.roleLoops = []roleLoop{
+		// The onboarding's failure is terminal: the loop returns it, and the
+		// node stops with it as the cause.
+		{"enrollment", supervise.Fatal, func(ctx context.Context) error {
+			return controlplane.RunEnrollment(ctx, n.enrollment(
+				controlplane.AuthoritativeRenewal(coreClt, n.submitter(), votingKey, votingCert)))
+		}},
+		// The authoritative core's rotation watch: its certificate rolls
+		// through the same channel its join used, by a regular update its
+		// current key votes on.
+		{"rotation watch", supervise.Fatal, func(ctx context.Context) error {
+			controlplane.RunRotation(ctx,
+				n.rotation(controlplane.AuthoritativeRoll(coreClt, n.submitter())))
+			return nil
+		}},
+	}
+	return nil
+}
+
+// setupNormal builds the normal node's one part, the core client. Its loop
+// renews remotely, reporting the pinned TRC's validity.
+func (n *node) setupNormal() error {
+	coreClt, err := n.coreClient()
+	if err != nil {
+		return err
+	}
+	n.remote = coreClt
+	n.roleLoops = []roleLoop{
+		{"enrollment", supervise.Fatal, func(ctx context.Context) error {
+			return controlplane.RunEnrollment(ctx,
+				n.enrollment(controlplane.NormalRenewal(coreClt)))
+		}},
+	}
+	return nil
+}
+
+// coreClient builds the client every role but the founder enrolls with its
+// core through, over the WebPKI-verified channel, the core's control
+// service resolved through the drafts' exchange when the dial wants an
+// underlay address.
+func (n *node) coreClient() (*webpki.CoreClient, error) {
+	// The client socket takes an ephemeral port on the control address;
+	// the local router delivers the core's replies to it. The resolution
+	// exchange takes its own beside it: the exchange reads its conn for
+	// each reply's wait, and a conn the client's QUIC transport reads
+	// would share its packets with that loop.
+	conn, err := n.scionConn(0)
+	if err != nil {
+		return nil, err
+	}
+	n.group.Own("core client conn", conn.Close)
+	resolutionConn, err := n.scionConn(0)
+	if err != nil {
+		return nil, err
+	}
+	n.group.Own("resolution conn", resolutionConn.Close)
+	coreClt, err := webpki.NewCoreClient(webpki.CoreClientConfig{
+		Domain:  n.cfg.Domain,
+		Conn:    conn,
+		RootCAs: n.cfg.RootCAs,
+		Locator: n.coreRoute,
+		ResolveService: func(ctx context.Context, peer *scion.Addr) (netip.AddrPort, error) {
+			return controlplane.ResolveService(ctx, resolutionConn, peer)
+		},
+	})
+	if err != nil {
+		return nil, err
+	}
+	// The client's Close closes its QUIC transport alone; registered after
+	// its conns, it releases first.
+	n.group.Own("core client", coreClt.Close)
+	return coreClt, nil
+}
+
+// submitter returns a submitter to the founder's voting application over
+// the node's verified peer channel. The channel is the messenger phase's,
+// built after the role's, so the loops build their submitter as they start.
+func (n *node) submitter() *voting.Submitter {
+	return voting.NewSubmitter(n.peerClt.VerifiedClient(), n.coreRoute)
+}
+
+// enrollment configures the node's chain lifecycle with the role's renewal.
+func (n *node) enrollment(renewal controlplane.Renewal) controlplane.EnrollmentConfig {
+	return controlplane.EnrollmentConfig{
+		IA:            n.ident.ia,
+		DB:            n.trustDB,
+		Key:           n.asKey,
+		Renewal:       renewal,
+		RetryInterval: n.cfg.Pacing.Enrollment,
+	}
+}
+
+// rotation configures a core's rotation watch with the holder's roll.
+func (n *node) rotation(roll controlplane.Roll) controlplane.RotationConfig {
+	return controlplane.RotationConfig{
+		IA:              n.ident.ia,
+		DB:              n.trustDB,
+		State:           n.cfg.State,
+		Roll:            roll,
+		Threshold:       n.cfg.Pacing.RotationThreshold,
+		RetryInterval:   n.cfg.Pacing.Enrollment,
+		InspectInterval: n.cfg.Pacing.Enrollment,
+	}
 }
 
 // promoteStaged promotes the material a roll staged once the newest pinned
@@ -224,15 +369,12 @@ func (n *node) promoteStaged(ctx context.Context) (cppki.SignedTRC, error) {
 // buildMessenger builds the trust engine and the peer client every node
 // beacons and fetches segments through.
 func (n *node) buildMessenger() error {
-	// The provider behind the engine is DB-first: non-core nodes fall back
-	// to the core's endpoint over the SCION-native transport; the core uses
-	// none, since its DB holds every chain it issued.
-	remote := trust.Remote(nil)
-	if n.coreClt != nil {
-		remote = n.coreClt
-	}
+	// The provider behind the engine is DB-first: every role but the
+	// founder falls back to the core's endpoint through its core client
+	// over the SCION-native transport; the founder's role leaves none, its
+	// DB holding every chain it issued.
 	n.engine = trust.NewEngine(n.ident.ia, n.asKey,
-		&trust.NetworkProvider{DB: n.trustDB, Remote: remote})
+		&trust.NetworkProvider{DB: n.trustDB, Remote: n.remote})
 
 	peerConn, err := n.scionConn(0)
 	if err != nil {
@@ -362,31 +504,13 @@ func (n *node) assembleMonitor() error {
 	return nil
 }
 
-// assembleEndpoint binds the control endpoint's socket and, on the core,
-// prepares its WebPKI certificate. Every node serves its ConnectRPC services
-// over HTTP/3 on the endpoint port — the drafts' beside the loaded provider's
-// mounts, the drafts' service resolution answering beside them on the same
-// socket — and the core's endpoint additionally serves the bootstrap channel
-// for clients offering its domain as the TLS server name. Every core prepares
-// the identity the same way: the node's HTTPS server — assembled after the
-// applications mount — serves it and answers the ACME TLS-ALPN challenge on
-// it, so no core's TLS path branches on an app's presence.
-func (n *node) assembleEndpoint(ctx context.Context) error {
-	if n.cfg.role == trust.ASTypeCore {
-		manager, err := webpki.PrepareTLSCert(webpki.TLSCertConfig{
-			Domain:   n.cfg.Domain,
-			Email:    n.cfg.AcmeEmail,
-			CertFile: n.cfg.CertFile,
-			KeyFile:  n.cfg.KeyFile,
-			Storage:  filepath.Join(n.cfg.State, "certs"),
-		})
-		if err != nil {
-			return err
-		}
-		n.group.Own("certificate manager", manager.Close)
-		n.certMgr = manager
-		n.webPKI = manager.TLSConfig()
-	}
+// assembleEndpoint binds the control endpoint's socket. Every node serves
+// its ConnectRPC services over HTTP/3 on the endpoint port — the drafts'
+// beside the loaded provider's mounts, the drafts' service resolution
+// answering beside them on the same socket — and the founder's endpoint
+// additionally serves the bootstrap channel, under the WebPKI identity its
+// role prepared, for clients offering its domain as the TLS server name.
+func (n *node) assembleEndpoint() error {
 	endpointConn, err := n.scionConn(controlplane.EndpointPort)
 	if err != nil {
 		return err

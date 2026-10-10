@@ -593,3 +593,67 @@ Each commit keeps the tree green:
     past the refusal: the held socket closes, and a second boot on the same
     host succeeds, the endpoint and responder ports released by the first
     boot's unwinding.
+
+## Implementation history
+
+*   Landed in nine commits, one per migration step: f288932, the
+    supervisor ([supervise.go](/internal/supervise/supervise.go)); 460f605,
+    the returned failures; c128a77, the measured provider's joins; 38a604d,
+    the group, the one boot, and the policies; 13c3b9d, close on cancel;
+    8e29f21, the releases; cd6440c, the resolved configuration
+    ([config.go](/internal/services/config.go)); e6fc893, the per-role
+    values ([lifecycle.go](/pkg/controlplane/lifecycle.go),
+    [rotation.go](/pkg/controlplane/rotation.go)); and the commit that
+    builds each role's parts in one switch
+    ([controlplane.go](/internal/services/controlplane.go)) and appends
+    this record.
+*   fd8acb0 landed before the group: the selection pass ends with its
+    context. Its echoes waited out their windows whatever the context, so
+    the measured provider's joined `Run` held a stop for up to about 12 s,
+    and an echo the stop cut short counted as silence and retired a live
+    candidate.
+*   Two link-store fixes landed after the group: 500ee06 refuses a second
+    live entry for one neighbor, and caa7872 a second serving entry for one
+    remote address. Under the group the data plane loop stops a `BootApp`
+    node too, and either duplicate kept the replacement generation from
+    building.
+*   The loops close on cancel release their socket on every return: the
+    registration and the loop's deferred call share one `sync.OnceValue`
+    close, which waits for a close under way and closes the socket of a
+    loop that returned on its own.
+*   `PrepareTLSCert` drops its context with `serveHTTP01`.
+*   The run-argument tests take `resolve`'s names
+    ([config_test.go](/internal/services/config_test.go)):
+    `TestNodeConfigResolve` and `TestNodeConfigResolveApplications` refuse,
+    `TestNodeConfigResolveRole` is the role table, and
+    `TestLoadIdentityRestart` keeps the restart case.
+    `TestSetupNodeConsumesResolution`
+    ([node_test.go](/internal/services/node_test.go)) holds the authorizer
+    instance and the loaded entries.
+*   `controlplane.Renewal` and `controlplane.Roll` have unexported methods,
+    so their constructors are their whole API: `FounderRenewal`,
+    `NormalRenewal`, and `AuthoritativeRenewal`; `FounderRoll` and
+    `AuthoritativeRoll`. `RunEnrollment` logs one set of messages for every
+    role; the founder's own go. With the decision's nil-key refusal,
+    `TestTRCDeciderWithoutSensitiveKey` became
+    `TestTRCDeciderRefusesUnverifiedPresenter`, and `voting.New`'s refusal
+    is `TestNewRefusesNilDecision`.
+*   The switch dispatches to `setupFounder`, `setupAuthoritative`, and
+    `setupNormal`, which set the products on the node and add the role's
+    loops to `roleLoops` rather than return them. The authoritative core's
+    two loops each build their submitter as they start: the verified peer
+    channel it rides is the messenger phase's, built after the role's. The
+    founder's enrollment loop is named `enrollment`, like the others.
+    `TestSetupFounderBuildsItsParts` and `TestSetupFounderRunsTheAuthorizer`
+    hold the founder's products and loops.
+*   The episodes the plan left unnamed: the crash is
+    `TestFatalPanicCrashes`, beside the supervisor's others in
+    [supervise_test.go](/internal/supervise/supervise_test.go); close on
+    cancel is `TestResponderReleasesOnCancel`,
+    `TestRendezvousRunReleasesOnCancel`, and
+    `TestServeHTTPSReleasesOnCancel`; the certificate manager is
+    `TestCertManagerClose` and `TestManageRunsUntilItsContextEnds`; the
+    measured provider is `TestProviderRunReturnsAndCloseReleases`; the
+    stop's `BootApp` variant runs inside `TestJoinerStopsWithoutVotingApp`;
+    and the restart lab is `TestCoreRestartsInPlace`
+    ([join_test.go](/internal/testnetwork/join_test.go)).

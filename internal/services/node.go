@@ -73,11 +73,6 @@ type node struct {
 	trustDB      trustdb.DB
 	pathDB       pathdb.DB
 	asKey        crypto.Signer
-	issuer       *trust.Issuer            // founding core only
-	decider      *controlplane.TRCDecider // the founding core's decision on submitted TRC updates
-	coreClt      *webpki.CoreClient       // non-core only
-	votingKey    crypto.Signer            // authoritative core only
-	votingCert   *x509.Certificate        // authoritative core only
 	engine       *trust.Engine
 	peerClt      *controlplane.PeerClient
 	lookup       *controlplane.LookupService
@@ -93,15 +88,26 @@ type node struct {
 	monitor *controlplane.HealthMonitor
 	ifDown  *scion.InterfaceDownCache
 
+	// The trust role's products for the later phases, each held as the type
+	// its consumer takes and nil where the role offers none: the engine's
+	// remote — the core client, every role's but the founder's — and the
+	// founder's issuer, TRC decision, and WebPKI identity. roleLoops are
+	// the role's own loops, built with its parts; start hands them to the
+	// group.
+	remote      trust.Remote
+	issuer      *trust.Issuer
+	trcDecision voting.Decider
+	certMgr     *webpki.CertManager
+	webPKI      *tls.Config
+	roleLoops   []roleLoop
+
 	// Assembled sockets and services, started by start.
 	endpointConn *scion.Conn
-	webPKI       *tls.Config
-	certMgr      *webpki.CertManager
 	// httpsLn and httpsHandler are the node's HTTPS server: the listener the
 	// assembly holds on internet HTTPS's port — answering the ACME TLS-ALPN
 	// challenge beside the mounted apps' handlers — and those handlers. nil when
-	// nothing binds: a non-core, or a static-file identity on a core whose apps
-	// mount nothing.
+	// nothing binds: every role but the founder, or a static-file founder whose
+	// apps mount nothing.
 	httpsLn      net.Listener
 	httpsHandler http.Handler
 	services     *controlplane.Services
@@ -270,13 +276,12 @@ func setupNode(
 
 // start launches the node's loops on its group, each under its policy: the
 // core's — the data plane serving the generation boot built, the BFD health
-// monitor, beaconing, the control endpoint, the SCMP echo responder, the
-// chain lifecycle loop and rotation watch the node's role prescribes — and
+// monitor, beaconing, the control endpoint, the SCMP echo responder — and
 // the HTTPS server under Fatal, a failure stopping the node; the loaded
-// topology provider's, the enrollment authorizer's, certificate management,
-// and the resident applications under Degrade, a failure logged and the node
-// serving on. Nothing serves before start, so assembly and serving stay
-// separate lifecycles.
+// topology provider's and the resident applications under Degrade, a
+// failure logged and the node serving on; and the role's own loops under
+// the policies its case in setupTrustRole gave them. Nothing serves before
+// start, so assembly and serving stay separate lifecycles.
 func (n *node) start(gen *generation) {
 	g := n.group
 	g.Go("data plane", supervise.Fatal, func(ctx context.Context) error {
@@ -314,92 +319,18 @@ func (n *node) start(gen *generation) {
 		n.topology.Run(ctx)
 		return nil
 	})
-	if n.cfg.role == trust.ASTypeCore {
-		g.Go("core enrollment", supervise.Fatal, func(ctx context.Context) error {
-			return controlplane.RunEnrollment(ctx, controlplane.EnrollmentConfig{
-				IA:            n.ident.ia,
-				DB:            n.trustDB,
-				Key:           n.asKey,
-				Renewal:       controlplane.FounderRenewal(n.issuer),
-				RetryInterval: n.cfg.Pacing.Enrollment,
-			})
-		})
-		// The founder's rotation watch: its own three certificates roll
-		// inside the cast it signs itself, serialized on the decision the
-		// submissions take too.
-		g.Go("rotation watch", supervise.Fatal, func(ctx context.Context) error {
-			controlplane.RunRotation(ctx, controlplane.RotationConfig{
-				IA:              n.ident.ia,
-				DB:              n.trustDB,
-				State:           n.cfg.State,
-				Roll:            controlplane.FounderRoll(n.decider, n.issuer),
-				Threshold:       n.cfg.Pacing.RotationThreshold,
-				RetryInterval:   n.cfg.Pacing.Enrollment,
-				InspectInterval: n.cfg.Pacing.Enrollment,
-			})
-			return nil
-		})
-	} else {
-		renewal := controlplane.NormalRenewal(n.coreClt)
-		if n.votingKey != nil {
-			// The joining core's loop casts its voting material: once the
-			// chain is issued, it submits the onboarding update to the
-			// core's voting application — over the verified peer channel,
-			// the submission identified by the node's chain.
-			caster := voting.NewSubmitter(n.peerClt.VerifiedClient(), n.coreRoute)
-			renewal = controlplane.AuthoritativeRenewal(n.coreClt, caster,
-				n.votingKey, n.votingCert)
-			// The authoritative core's rotation watch: its certificate rolls
-			// through the same channel its join used, by a regular update
-			// its current key votes on.
-			g.Go("rotation watch", supervise.Fatal, func(ctx context.Context) error {
-				controlplane.RunRotation(ctx, controlplane.RotationConfig{
-					IA:              n.ident.ia,
-					DB:              n.trustDB,
-					State:           n.cfg.State,
-					Roll:            controlplane.AuthoritativeRoll(n.coreClt, caster),
-					Threshold:       n.cfg.Pacing.RotationThreshold,
-					RetryInterval:   n.cfg.Pacing.Enrollment,
-					InspectInterval: n.cfg.Pacing.Enrollment,
-				})
-				return nil
-			})
-		}
-		// The joining core's onboarding failure is terminal: the loop
-		// returns it, and the node stops with it as the cause.
-		g.Go("enrollment", supervise.Fatal, func(ctx context.Context) error {
-			return controlplane.RunEnrollment(ctx, controlplane.EnrollmentConfig{
-				IA:            n.ident.ia,
-				DB:            n.trustDB,
-				Key:           n.asKey,
-				Renewal:       renewal,
-				RetryInterval: n.cfg.Pacing.Enrollment,
-			})
-		})
-	}
 	slog.Info("Serving control endpoint", "port", controlplane.EndpointPort)
-	if n.cfg.enrollRun != nil {
-		// The selected authorizer's own loops — the Telegram poll; core only,
-		// for the core is the only node that issues chains.
-		g.Go("enrollment authorizer", supervise.Degrade, func(ctx context.Context) error {
-			n.cfg.enrollRun(ctx)
-			return nil
-		})
-	}
 	if n.httpsLn != nil {
 		// The node's HTTPS server: the listener is held from assembly, and the
-		// certificate maintenance below launches only after it — a first issuance's
-		// probe finds the port answered.
+		// founder's certificate maintenance among the role's loops launches
+		// only after it — a first issuance's probe finds the port answered.
 		ln, handler := n.httpsLn, n.httpsHandler
 		g.Go("https server", supervise.Fatal, func(ctx context.Context) error {
 			return n.certMgr.ServeHTTPS(ctx, ln, handler)
 		})
 	}
-	if n.certMgr != nil && n.certMgr.ACMEManaged() {
-		// The certificate maintenance runs beside the server that presents
-		// it, retrying a failed issuance while the node serves on; static
-		// files manage nothing and start no loop.
-		g.Go("certificate management", supervise.Degrade, n.certMgr.Manage)
+	for _, l := range n.roleLoops {
+		g.Go(l.name, l.policy, l.run)
 	}
 	for _, l := range n.apps {
 		g.Go(l.Name, supervise.Degrade, l.App.Run)

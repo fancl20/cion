@@ -59,6 +59,7 @@ func (n *node) appEnvironment() *apps.Environment {
 		RegisterSvc:     n.registerSvc,
 		UnregisterSvc:   n.unregisterSvc,
 		Authorizer:      n.cfg.enrollAuth,
+		TRCDecision:     n.trcDecision,
 		CoreRoute:       n.coreRoute,
 		DirectoryPacing: n.cfg.Pacing.Directory,
 		MountControlEndpoint: func(pattern string, handler http.Handler) error {
@@ -70,11 +71,6 @@ func (n *node) appEnvironment() *apps.Environment {
 			})
 			return nil
 		},
-	}
-	// The typed-nil guard: a nil decider must read as no decision wired,
-	// not as a decision that would panic under the application's nil check.
-	if n.decider != nil {
-		env.TRCDecision = n.decider
 	}
 
 	if o := n.cfg.Coordination; o != nil {
