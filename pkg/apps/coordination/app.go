@@ -108,8 +108,15 @@ type App struct {
 	// the upgrade refuses before the handshake begins.
 	conversations atomic.Int64
 
-	// wg waits for the served noise conversations, so Close waits for what
-	// the mounting began.
+	// convMtx guards the open conversations and the closed flag. A
+	// conversation otherwise ends only when its client leaves, so Close
+	// closes the open ones' connections, and once it has marked the
+	// application closed no conversation starts.
+	convMtx sync.Mutex
+	convs   map[*conversationConn]struct{}
+	closed  bool
+	// wg waits for the served noise conversations, so Close returns once
+	// the server has closed each one's connection.
 	wg sync.WaitGroup
 }
 
@@ -143,6 +150,7 @@ func New(cfg Config) (*App, error) {
 		bySource:   newSourceLimiter(admissionMinInterval),
 		overall:    rate.NewLimiter(rate.Every(admissionMinInterval), 1),
 		mapStreams: make(chan struct{}, maxMapStreams),
+		convs:      make(map[*conversationConn]struct{}),
 	}
 	mux := http.NewServeMux()
 	mux.Handle("/ts2021", http.HandlerFunc(a.handleNoise))
@@ -163,8 +171,17 @@ func (a *App) Run(ctx context.Context) error {
 }
 
 // Close retires the application: the served noise conversations and the
-// relay with its connected clients.
+// relay with its connected clients. It marks the application closed, so no
+// conversation starts after it, and closes each open conversation's
+// connection, for its client may never leave; it returns once the server
+// has finished with each.
 func (a *App) Close() {
+	a.convMtx.Lock()
+	a.closed = true
+	for conv := range a.convs {
+		conv.abort()
+	}
+	a.convMtx.Unlock()
 	a.wg.Wait()
 	_ = a.derp.close()
 }

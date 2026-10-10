@@ -4,8 +4,11 @@ import (
 	"bytes"
 	"encoding/binary"
 	"encoding/json/v2"
+	"errors"
 	"io"
+	"net"
 	"net/http"
+	"os"
 	"testing"
 	"time"
 
@@ -140,5 +143,58 @@ func TestConversationBound(t *testing.T) {
 	if err == nil {
 		_ = conn.Close()
 		t.Error("a conversation past the bound upgraded, want the refusal")
+	}
+}
+
+// TestCloseEndsConversations checks the close ends the conversations the
+// application serves rather than wait on their clients: with a client's
+// conversation open, Close returns and the client's connection ends, and a
+// handshake that completes after the close ends its connection at once.
+func TestCloseEndsConversations(t *testing.T) {
+	store := &dbtest.MemStore{}
+	roots, tlsCfg := testCert(t)
+	a := testApp(t, Config{Store: store})
+	addr := serveCoordination(t, a, tlsCfg)
+
+	open, err := dialNoise(t, addr, roots, a.machineKey.Public())
+	if err != nil {
+		t.Fatalf("dialing the noise channel: %v", err)
+	}
+	t.Cleanup(func() { _ = open.Close() })
+	closed := make(chan struct{})
+	go func() {
+		a.Close()
+		close(closed)
+	}()
+	select {
+	case <-closed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Close still waits on the connected client's conversation")
+	}
+	checkEnded(t, open, "the open conversation")
+
+	// A handshake that completes after the close: the dial may succeed, but
+	// the conversation ends at once.
+	late, err := dialNoise(t, addr, roots, a.machineKey.Public())
+	if err == nil {
+		t.Cleanup(func() { _ = late.Close() })
+		checkEnded(t, late, "the conversation dialed after the close")
+	}
+	if served := a.conversations.Load(); served != 0 {
+		t.Errorf("the served conversations = %d, want none", served)
+	}
+}
+
+// checkEnded fails the test unless the client's side of a conversation
+// reports the conversation's end within the bound.
+func checkEnded(t *testing.T, conn net.Conn, what string) {
+	t.Helper()
+	if err := conn.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := conn.Read(make([]byte, 1)); err == nil ||
+		errors.Is(err, os.ErrDeadlineExceeded) {
+
+		t.Errorf("%s: the read = %v, want the conversation's end", what, err)
 	}
 }

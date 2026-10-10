@@ -22,7 +22,8 @@ const maxConversations = 128
 // client's — and the hijacked connection becomes an HTTP/2 session carrying
 // the machine endpoints, registration and the netmap, inside the noise
 // envelope. The conversation holds one of a bounded set: past the bound the
-// upgrade refuses before the handshake begins.
+// upgrade refuses before the handshake begins. A handshake that completes
+// once Close has run closes its connection instead.
 func (a *App) handleNoise(w http.ResponseWriter, r *http.Request) {
 	if a.conversations.Add(1) > maxConversations {
 		a.conversations.Add(-1)
@@ -36,10 +37,23 @@ func (a *App) handleNoise(w http.ResponseWriter, r *http.Request) {
 		slog.Warn("Coordination noise handshake", "remote", r.RemoteAddr, "err", err)
 		return
 	}
+	conv := newConversationConn(conn)
+	a.convMtx.Lock()
+	defer a.convMtx.Unlock()
+	if a.closed {
+		a.conversations.Add(-1)
+		_ = conv.Close()
+		return
+	}
+	a.convs[conv] = struct{}{}
 	a.wg.Go(func() {
-		defer a.conversations.Add(-1)
-		conv := newConversationConn(conn)
-		defer func() { _ = conv.Close() }()
+		defer func() {
+			_ = conv.Close()
+			a.convMtx.Lock()
+			delete(a.convs, conv)
+			a.convMtx.Unlock()
+			a.conversations.Add(-1)
+		}()
 		var protocols http.Protocols
 		protocols.SetUnencryptedHTTP2(true)
 		_ = (&http.Server{
@@ -70,6 +84,11 @@ func (c *conversationConn) Close() error {
 	c.once.Do(func() { close(c.done) })
 	return c.Conn.Close()
 }
+
+// abort closes the connection beneath the conversation's session: the
+// server's next read fails, and the server closes the conversation as it
+// finishes serving it, so the holder still waits for the server.
+func (c *conversationConn) abort() { _ = c.Conn.Close() }
 
 // singleListener hands the one conversation connection to http.Server.Serve,
 // whose accepting loop takes a listener rather than a bare connection.
