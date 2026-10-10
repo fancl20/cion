@@ -94,6 +94,69 @@ func TestNetworkProviderFetchesOnMiss(t *testing.T) {
 	}
 }
 
+// TestGetChainsVerifiesStoredChains checks that the database answers only
+// with chains the anchor pool verifies: a stored chain no pinned TRC anchors
+// is passed over — none answered without a Remote, the Remote's chain
+// fetched and cached with one — and the cached chain answers once the Remote
+// is gone.
+func TestGetChainsVerifiesStoredChains(t *testing.T) {
+	ctx := context.Background()
+	remote := newFakeRemote(t)
+	db := newTestDB(t)
+	if _, err := db.InsertTRC(ctx, remote.trc); err != nil {
+		t.Fatal(err)
+	}
+	csr, err := CreateCSR(nodeIA, newTestASKey(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Issued with a DIFFERENT core's keys, so the stored chain does not
+	// verify against the pinned TRC.
+	other := newGenesisFixture(t)
+	otherIssuer, err := NewIssuer(coreIA, other.keys, other.trc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	unanchored, err := otherIssuer.IssueChain(csr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.InsertChain(ctx, unanchored); err != nil {
+		t.Fatal(err)
+	}
+	q := trustdb.ChainQuery{IA: nodeIA}
+
+	local := &NetworkProvider{DB: db}
+	if chains, err := local.GetChains(ctx, q); err != nil || len(chains) != 0 {
+		t.Fatalf("local-only chains = %d (%v), want none: the stored chain is unanchored",
+			len(chains), err)
+	}
+
+	anchored, err := remote.issuer.IssueChain(csr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	remote.chains = [][]*x509.Certificate{anchored}
+	provider := &NetworkProvider{DB: db, Remote: remote}
+	isAnchored := func(chains [][]*x509.Certificate) bool {
+		return len(chains) == 1 && bytes.Equal(chains[0][0].Raw, anchored[0].Raw)
+	}
+	chains, err := provider.GetChains(ctx, q)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !isAnchored(chains) || remote.chainFetches != 1 {
+		t.Fatalf("chains = %d after %d remote fetches, want the anchored chain after 1",
+			len(chains), remote.chainFetches)
+	}
+
+	remote.failFollowing = true
+	if chains, err := provider.GetChains(ctx, q); err != nil || !isAnchored(chains) {
+		t.Errorf("cached chains = %d (%v), want the anchored chain from the DB",
+			len(chains), err)
+	}
+}
+
 // TestEnroll checks the enrollment round trip against a fake remote: TRC
 // fetch, chain request, verification, and storage; a second run is a no-op.
 func TestEnroll(t *testing.T) {

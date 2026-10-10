@@ -69,64 +69,69 @@ func (p *NetworkProvider) GetSignedTRC(
 	opts ...Option,
 ) (cppki.SignedTRC, error) {
 
-	trc, err := p.DB.SignedTRC(ctx, id)
-	if err != nil {
-		return cppki.SignedTRC{}, err
-	}
-	if !trc.IsZero() {
-		return trc, nil
-	}
-	if p.Remote == nil {
-		return cppki.SignedTRC{}, nil
-	}
 	return fetchTRC(ctx, p.DB, p.Remote, id)
 }
 
-// GetChains returns the chains matching the query, fetching them from the
-// Remote on a DB miss. Only chains that verify against the anchor pool — the
-// newest pinned TRC's roots, the predecessor's beside them while the newest
-// is within its grace period — are returned and cached.
+// GetChains returns the chains matching the query that verify against the
+// anchor pool — the newest pinned TRC's roots, the predecessor's beside them
+// while the newest is within its grace period: the database's when any of
+// them verifies, else the Remote's, which are cached. A stored chain whose
+// root no pooled TRC carries is passed over.
 func (p *NetworkProvider) GetChains(
 	ctx context.Context,
 	q trustdb.ChainQuery,
 	opts ...Option,
 ) ([][]*x509.Certificate, error) {
 
-	chains, err := p.DB.Chains(ctx, q)
+	stored, err := p.DB.Chains(ctx, q)
 	if err != nil {
 		return nil, err
 	}
-	if len(chains) != 0 {
-		return chains, nil
-	}
-	if p.Remote == nil {
-		return nil, nil
-	}
-	chains, err = p.Remote.Chains(ctx, q)
-	if err != nil {
-		return nil, serrors.Wrap("fetching chains from remote", err)
-	}
-	if len(chains) == 0 {
+	if len(stored) == 0 && p.Remote == nil {
 		return nil, nil
 	}
 	pool, err := anchorPool(ctx, p.DB, p.Remote, q.IA.ISD())
 	if err != nil {
 		return nil, serrors.Wrap("fetching TRCs to verify chains", err)
 	}
-	var verified [][]*x509.Certificate
-	for _, chain := range chains {
-		if err := cppki.VerifyChain(chain,
-			cppki.VerifyOptions{TRC: pool}); err != nil {
-
-			slog.Warn("Dropping fetched chain that does not verify against TRC", "err", err)
-			continue
-		}
-		verified = append(verified, chain)
+	if verified, _ := verifiedChains(stored, pool); len(verified) != 0 {
+		return verified, nil
+	}
+	if p.Remote == nil {
+		return nil, nil
+	}
+	fetched, err := p.Remote.Chains(ctx, q)
+	if err != nil {
+		return nil, serrors.Wrap("fetching chains from remote", err)
+	}
+	verified, failures := verifiedChains(fetched, pool)
+	for _, err := range failures {
+		slog.Warn("Dropping fetched chain that does not verify against TRC", "err", err)
+	}
+	for _, chain := range verified {
 		if _, err := p.DB.InsertChain(ctx, chain); err != nil {
 			return nil, fmt.Errorf("caching fetched chain: %w", err)
 		}
 	}
 	return verified, nil
+}
+
+// verifiedChains returns the chains that verify against the pool, beside
+// the failures of the ones that do not.
+func verifiedChains(
+	chains [][]*x509.Certificate, pool []*cppki.TRC,
+) ([][]*x509.Certificate, []error) {
+
+	var verified [][]*x509.Certificate
+	var failures []error
+	for _, chain := range chains {
+		if err := cppki.VerifyChain(chain, cppki.VerifyOptions{TRC: pool}); err != nil {
+			failures = append(failures, err)
+			continue
+		}
+		verified = append(verified, chain)
+	}
+	return verified, failures
 }
 
 // NotifyTRC ensures the TRC with the given ID is known locally.
@@ -244,7 +249,7 @@ func anchorPool(
 
 // fetchTRC returns the TRC with the given ID — the newest of the ISD when the
 // ID is numbers-less — from the DB or the Remote, verifying what it fetches
-// and caching it in the DB.
+// and caching it in the DB; with a nil Remote, a DB miss is the zero TRC.
 func fetchTRC(
 	ctx context.Context,
 	db trustdb.DB,
@@ -256,6 +261,9 @@ func fetchTRC(
 		return cppki.SignedTRC{}, err
 	} else if !trc.IsZero() {
 		return trc, nil
+	}
+	if remote == nil {
+		return cppki.SignedTRC{}, nil
 	}
 	trc, err := remote.TRC(ctx, id)
 	if err != nil {
