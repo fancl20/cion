@@ -28,12 +28,11 @@ import (
 var kinds = map[string]bool{"storage": true, "policy": true, "source": true}
 
 // implAllowlist is the set of packages that may import an implementation
-// package in production: the assemblies alone — the node's composition
-// root and the integration harness. Everything else reaches a seam through
-// its module root, and tests import what they test.
+// package in production: the node's composition root alone. Everything
+// else reaches a seam through its module root, and tests import what they
+// test.
 var implAllowlist = map[string]bool{
-	"github.com/fancl20/cion/internal/services":    true,
-	"github.com/fancl20/cion/internal/testnetwork": true,
+	"github.com/fancl20/cion/internal/services": true,
 }
 
 // TestWalk asserts the roof's shape: every child of the roof is a module;
@@ -142,8 +141,8 @@ func walkModule(t *testing.T, mod string, listing map[string]*listPkg) []string 
 }
 
 // TestImportRule asserts that implementation packages are imported by the
-// assemblies and the tests alone — composition-root exclusivity as a
-// mechanical fact.
+// node's composition root and the tests alone — composition-root
+// exclusivity as a mechanical fact.
 func TestImportRule(t *testing.T) {
 	roof := roofDir(t)
 	listing := goList(t, repoRoot(t))
@@ -161,7 +160,7 @@ func TestImportRule(t *testing.T) {
 }
 
 // importProblems reports every production importer of one implementation
-// package that stands outside the assemblies.
+// package that stands outside the allowlist.
 func importProblems(impl string, listing map[string]*listPkg) []string {
 	var problems []string
 	for path, p := range listing {
@@ -172,8 +171,8 @@ func importProblems(impl string, listing map[string]*listPkg) []string {
 			continue
 		}
 		problems = append(problems, impl+" is imported in production by "+
-			path+"; only the assemblies and the tests may import an "+
-			"implementation")
+			path+"; only the node's composition root and the tests may "+
+			"import an implementation")
 	}
 	return problems
 }
@@ -282,8 +281,8 @@ func TestWalkFixtures(t *testing.T) {
 }
 
 // TestImportRuleFixtures proves the import rule can fail: a fabricated
-// production import from outside the allowlist is reported, the assemblies
-// alone pass.
+// production import from outside the allowlist is reported, the node's
+// composition root alone passes.
 func TestImportRuleFixtures(t *testing.T) {
 	const impl = "github.com/fancl20/cion/pkg/modules/m/impl/bbolt"
 	listing := map[string]*listPkg{

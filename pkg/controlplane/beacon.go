@@ -79,7 +79,6 @@ type Beaconer struct {
 	core         bool
 	propagation  time.Duration
 	registration time.Duration
-	sendTimeout  time.Duration
 
 	// bootstrap keeps each origin's freshest unverified beacon and the
 	// interface it arrived on: a fresh node receives beacons before it has
@@ -131,8 +130,6 @@ type BeaconerConfig struct {
 	// zero keeps them.
 	PropagationInterval  time.Duration
 	RegistrationInterval time.Duration
-	// SendTimeout bounds each RPC; zero uses the default.
-	SendTimeout time.Duration
 }
 
 // NewBeaconer returns a beaconer with the defaults filled in.
@@ -152,10 +149,6 @@ func NewBeaconer(cfg BeaconerConfig) (*Beaconer, error) {
 	if registration == 0 {
 		registration = RegistrationInterval
 	}
-	sendTimeout := cfg.SendTimeout
-	if sendTimeout == 0 {
-		sendTimeout = SendTimeout
-	}
 	return &Beaconer{
 		ia:               cfg.IA,
 		engine:           cfg.Engine,
@@ -169,7 +162,6 @@ func NewBeaconer(cfg BeaconerConfig) (*Beaconer, error) {
 		core:             cfg.Core,
 		propagation:      propagation,
 		registration:     registration,
-		sendTimeout:      sendTimeout,
 		bootstraps:       make(map[addr.IA]*segment.PCB),
 		bootstrapIngress: make(map[addr.IA]uint16),
 	}, nil
@@ -648,7 +640,7 @@ func (b *Beaconer) sweepOnce(ctx context.Context) {
 func (b *Beaconer) sendBeacon(
 	ctx context.Context, peer *scion.Addr, pb *control_plane.PathSegment) error {
 
-	ctx, cancel := context.WithTimeout(ctx, b.sendTimeout)
+	ctx, cancel := context.WithTimeout(ctx, SendTimeout)
 	defer cancel()
 	return b.sender.Beacon(ctx, peer, pb)
 }
@@ -657,7 +649,7 @@ func (b *Beaconer) sendBeacon(
 func (b *Beaconer) sendRegistration(
 	ctx context.Context, peer *scion.Addr, segments []*control_plane.PathSegment) error {
 
-	ctx, cancel := context.WithTimeout(ctx, b.sendTimeout)
+	ctx, cancel := context.WithTimeout(ctx, SendTimeout)
 	defer cancel()
 	return b.sender.RegisterSegments(ctx, peer, segments)
 }

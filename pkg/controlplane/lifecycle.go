@@ -52,8 +52,6 @@ type EnrollmentConfig struct {
 	// them.
 	RetryInterval   time.Duration
 	InspectInterval time.Duration
-	// Timeout bounds one enrollment attempt; zero uses the default.
-	Timeout time.Duration
 }
 
 func (cfg EnrollmentConfig) interval(v, def time.Duration) time.Duration {
@@ -61,13 +59,6 @@ func (cfg EnrollmentConfig) interval(v, def time.Duration) time.Duration {
 		return def
 	}
 	return v
-}
-
-func (cfg EnrollmentConfig) timeout() time.Duration {
-	if cfg.Timeout == 0 {
-		return EnrollmentTimeout
-	}
-	return cfg.Timeout
 }
 
 // Renewal is a role's part of the chain lifecycle RunEnrollment runs: how
@@ -187,7 +178,7 @@ func (r authoritativeRenewal) owed(ctx context.Context, cfg EnrollmentConfig) (b
 	if onboarded(ctx, cfg) {
 		return false, nil
 	}
-	attemptCtx, cancel := context.WithTimeout(ctx, cfg.timeout())
+	attemptCtx, cancel := context.WithTimeout(ctx, EnrollmentTimeout)
 	defer cancel()
 	err := trust.JoinCore(attemptCtx, cfg.DB, r.remote, r.caster,
 		cfg.IA, r.votingKey, r.votingCert)
@@ -284,7 +275,7 @@ func (cfg EnrollmentConfig) enrollPass(ctx context.Context) (time.Duration, erro
 // attemptRenewal performs one renewal attempt the Renewal's way, bounded so
 // a wedged connection does not stall the loop renewing through it.
 func (cfg EnrollmentConfig) attemptRenewal(ctx context.Context) {
-	attemptCtx, cancel := context.WithTimeout(ctx, cfg.timeout())
+	attemptCtx, cancel := context.WithTimeout(ctx, EnrollmentTimeout)
 	defer cancel()
 	if err := cfg.Renewal.renew(attemptCtx, cfg); err != nil {
 		slog.Warn("Renewing chain", "isd_as", cfg.IA, "err", err)

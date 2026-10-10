@@ -205,3 +205,40 @@ Each commit keeps the tree green and deletes what its labs no longer use:
     `App.Engine`, and the fabrication lab's delivery through
     `App.PeerClient`.
 *   **The suite:** the full suite, `-race -count=2`, passes at every step.
+
+## Implementation history
+
+*   Landed in six commits, one per migration step, the origins lab's
+    before the line labs': 5fdcbbb, the builder
+    ([static_test.go](/internal/testnetwork/static_test.go)) and the ping
+    labs; 42ce2e6, the crafted-path labs; 5cb1190, the origins lab's
+    retirement; 40c6610, the accessors
+    ([app.go](/internal/services/app.go)) and the line, fabrication, and
+    restart labs; 035cdf7, the WireGuard mesh lab; and the commit that
+    retires `StartNode` and the knobs and appends this record.
+*   The origins lab retired before the line labs moved: it shared
+    `holdsChainOf` and `boundVerifies` with the fabrication lab, which
+    rewrites them for assembly nodes. The existing `holdsChain` serves in
+    place of an assembly `holdsChainOf`.
+*   The builder takes a `staticTopology`: its nodes, its founding core —
+    zero for the crafted-path labs' two non-core nodes — its links, the
+    interface IDs pinned per node and neighbor, and a mutation of every
+    node's run arguments, which loads the mesh lab's application on its
+    host port.
+*   The builder's nodes run the production BFD interval. At lab pacing a
+    link drops after 600 ms of silence, and in a full run a stall of the
+    loaded test binary took every link down and lost a counted echo of
+    `TestPingLineMiddleNode`; the builder's labs prove carriage, not
+    liveness.
+*   Only the crafted-path labs warm up: the ping labs' path polls outlast
+    the boot's generation swap. The warm-up waits for an answered echo
+    over the crafted segment, which also waits out the link's BFD
+    session, the data plane refusing the egress until it is up; without
+    it `TestPingReresolvesExpiredPath` lost its first echo in every run.
+*   `TestPingLossSummary` aims at a fresh host of the labs' loopback pool,
+    after the warm-up proves the destination's responder answers over the
+    crafted segment.
+*   The line lab polls the up segments at C and at B where it polled the
+    beacon store; its later poll of B's up segment folds into the first.
+*   The mesh lab's first poll budgets `TestTimeout` plus one
+    `wireguard.PublishRetry`: B's first publication precedes its chain.

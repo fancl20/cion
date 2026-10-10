@@ -158,12 +158,6 @@ func (c *CoreClient) SetCore(ia addr.IA, addr netip.AddrPort) {
 	c.core = &scion.Addr{IA: ia, Addr: addr}
 }
 
-// SetLocator sets the locator resolving the core's SCION address at dial
-// time; it overrides SetCore's address.
-func (c *CoreClient) SetLocator(locator func() *scion.Addr) {
-	c.locator = locator
-}
-
 // coreAddr resolves the core's current address: the locator when configured,
 // else the address set with SetCore. Nil means the locator is unknown.
 func (c *CoreClient) coreAddr() *scion.Addr {
