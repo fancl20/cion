@@ -15,6 +15,7 @@ import (
 	spath "github.com/scionproto/scion/pkg/slayers/path/scion"
 
 	"github.com/fancl20/cion/pkg/controlplane"
+	"github.com/fancl20/cion/pkg/loops"
 	"github.com/fancl20/cion/pkg/peeria"
 	"github.com/fancl20/cion/pkg/scion"
 	"github.com/fancl20/cion/pkg/trust"
@@ -360,7 +361,7 @@ func (d *NodeDirectory) Close() error {
 // returning once both loops have returned.
 func (d *NodeDirectory) Run(ctx context.Context) {
 	var publish sync.WaitGroup
-	runLoop(ctx, &publish, "node directory publication", d.runPublish)
+	loops.Go(ctx, &publish, "node directory publication", d.runPublish)
 	d.runFetch(ctx)
 	publish.Wait()
 }

@@ -20,6 +20,7 @@ import (
 	"github.com/scionproto/scion/pkg/addr"
 
 	"github.com/fancl20/cion/pkg/controlplane"
+	"github.com/fancl20/cion/pkg/loops"
 	"github.com/fancl20/cion/pkg/modules/links"
 	"github.com/fancl20/cion/pkg/modules/topology"
 	"github.com/fancl20/cion/pkg/scion"
@@ -389,14 +390,14 @@ func (z *Provider) Mounts() ([]controlplane.Mount, error) {
 // fetch, and the selection sweep — and returns once every one has returned.
 // Mounts assembled what the loops serve.
 func (z *Provider) Run(ctx context.Context) {
-	var loops sync.WaitGroup
-	runLoop(ctx, &loops, "rendezvous", z.rendezvous.Run)
-	runLoop(ctx, &loops, "join dials", z.runJoinDials)
-	runLoop(ctx, &loops, "node directory", z.directory.Run)
-	runLoop(ctx, &loops, "selection", func(ctx context.Context) {
+	var wg sync.WaitGroup
+	loops.Go(ctx, &wg, "rendezvous", z.rendezvous.Run)
+	loops.Go(ctx, &wg, "join dials", z.runJoinDials)
+	loops.Go(ctx, &wg, "node directory", z.directory.Run)
+	loops.Go(ctx, &wg, "selection", func(ctx context.Context) {
 		RunSelection(ctx, z.selectionConfig())
 	})
-	loops.Wait()
+	wg.Wait()
 }
 
 // Close releases what Mounts bound, once Run has returned: the directory's
@@ -602,22 +603,4 @@ func (c *linkClient) Link(
 		return nil, err
 	}
 	return resp.Msg, nil
-}
-
-// runLoop runs one of the provider's long-lived loops in its own goroutine
-// under the wait group: a panic is logged and absorbed, and a return before
-// the node's cancellation is logged with the loop's name — the node's own
-// supervision, lent to the provider's loops.
-func runLoop(ctx context.Context, loops *sync.WaitGroup, name string, fn func(context.Context)) {
-	loops.Go(func() {
-		defer func() {
-			if r := recover(); r != nil {
-				slog.Error("Panic in topology loop", "loop", name, "panic", r)
-			}
-		}()
-		fn(ctx)
-		if ctx.Err() == nil {
-			slog.Error("Topology loop exited", "loop", name)
-		}
-	})
 }
