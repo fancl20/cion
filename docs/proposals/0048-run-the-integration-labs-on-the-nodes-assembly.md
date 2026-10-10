@@ -5,10 +5,10 @@ This proposal retires the integration harness's own node assembly,
 the assembly the run command and 29 labs already use.
 [Proposal 0043](/docs/proposals/0043-supervise-the-nodes-loops-and-resolve-its-role-once.md)
 left the production assembly one boot with each role's parts built in one
-switch, and named this retirement as the next proposal. The labs keep their
-topologies and their assertions; the harness keeps only helpers over the
-booted node, and `services.App` gains the two accessors the labs read and
-it lacks.
+switch, and named this retirement as the next proposal. The labs that move
+keep their topologies and their assertions; the harness keeps only helpers
+over the booted node, and `services.App` gains the two accessors the labs
+read and it lacks.
 
 [TOC]
 
@@ -24,12 +24,13 @@ service no authorizer; and every loop it starts absorbs its panics. Eleven
 labs run on it, so the line, fork, origins, ping, fabrication, and
 WireGuard mesh proofs exercise wiring that no node runs.
 
-Here those labs boot through `BootApp` as the others do. Their links come
-from the static topology provider's link sets, each node's ISD-AS written
-to its state before any boot so that every file names its neighbors up
-front. `services.App` gains `Engine` and `PeerClient`; the forwarding key,
-the link table, and the labs' conns come from what the node already
-exposes. `StartNode` and its types go.
+Here ten of those labs boot through `BootApp` as the others do, and the
+origins lab, whose coverage two other tests hold, retires. The labs' links
+come from the static topology provider's link sets, each node's ISD-AS
+written to its state before any boot so that every file names its
+neighbors up front. `services.App` gains `Engine` and `PeerClient`; the
+forwarding key, the link table, and the labs' conns come from what the node
+already exposes. `StartNode` and its types go, with the knobs only it set.
 
 ## Motivation
 
@@ -62,18 +63,20 @@ on without them.
 *   The harness wires nothing of a node: no data plane, control plane,
     store, or application of its own.
 *   Each migrated lab keeps its topology and its assertions — the hop and
-    segment counts, the fabricated beacon's refusal, the shared segment
-    ID — or the change says why one moves.
-*   Production gains accessors on `services.App` and nothing else.
+    segment counts, the crafted paths' outcomes, the fabricated beacon's
+    refusal — or the change says why one moves.
+*   Production gains accessors on `services.App`, and loses only the knobs
+    the harness alone set.
 
 ### Non-goals
 
-*   No new run argument or `NodeConfig` field: a lab's identities, and the
-    two-core genesis, are seeded into the state directory, the form a
-    deployment's state takes.
+*   No new run argument or `NodeConfig` field: a lab's identities are
+    seeded into the state directory, the form a deployment's state takes.
+*   No configuration that runs a node without its echo responder.
 *   No data plane options for tests: `BootApp` keeps
     `DefaultDataplaneOptions`.
-*   No change to the topology providers.
+*   No change to the topology providers, or to the WireGuard application's
+    pacing.
 *   No merger of the two self-issuance copies left.
 *   No new record.
 
@@ -102,26 +105,26 @@ A builder in the harness, generalizing `bootStaticLine`
 `TestStaticLabByLinkSet` stays the proof of a drawn identity's completion
 and of the link set's edits at run time.
 
-### The two-core genesis
+### The retired lab
 
-`TestTwoOriginsShareOneSegmentID` needs a base TRC naming two cores. Before
-the founder's first boot the lab opens its trust database, loads or creates
-its core keys, and runs `trust.Genesis` with the fellow core; the founder's
-setup then finds the base and anchors its issuer in it. The rotation labs
-seed a founder's trust database before its boot too
-([rotation_test.go](/internal/testnetwork/rotation_test.go)). An
-authoritative join cannot stand in: a link set refuses neighbors
-([config.go](/internal/services/config.go)).
+`TestTwoOriginsShareOneSegmentID` retires instead of moving. Its base TRC
+names two cores, which the node's assembly builds only from a founder's
+trust database seeded by hand before its boot, and
+`TestPathLayerServesTwoCores`
+([corepath_test.go](/internal/testnetwork/corepath_test.go)) and the beacon
+store's `TestBeaconStoreKeysByOrigin`
+([beacon_test.go](/pkg/controlplane/beacon_test.go)) already hold two cores
+and the origin-keyed store. Its helpers go with it.
 
 ### The accessors
 
 `services.App` ([app.go](/internal/services/app.go)) is the in-process form
 "tests and embedded use share". It gains:
 
-*   `Engine`, the node's trust engine: the labs sign with it and verify
-    segments bound to the node's chain.
-*   `PeerClient`, the node's verified peer channel: the origins and
-    fabrication labs deliver beacons over it.
+*   `Engine`, the node's trust engine: the fabrication lab signs with it,
+    and the line labs verify segments bound to the node's chain.
+*   `PeerClient`, the node's verified peer channel: the fabrication lab
+    delivers its beacon over it.
 
 Everything else the labs read the node already exposes: the link table
 through `Links`, conns through `Conn`, the stores, the path provider, and
@@ -138,6 +141,9 @@ crafts hop fields with is read from the node's state with
     lab's first echo is a warm-up the swap may lose.
 *   **The crafted-path labs** run two non-core nodes whose link sets pin
     interface 1 on each side, the interface their crafted segments name.
+    `TestPingLossSummary` aims its echo at an address in the destination's
+    AS where no socket listens, so the destination's responder never
+    answers it.
 *   **The line control plane labs** read the path databases where they read
     the beacon store; the stores' unit tests cover the beacon store's own
     keying.
@@ -146,7 +152,8 @@ crafts hop fields with is read from the node's state with
     harness's teardown by hand goes.
 *   **The WireGuard mesh lab** loads the WireGuard application by name on a
     host port from the pinned band, and seeds its host entries through the
-    application's registry.
+    application's registry. Its polls budget for the node's 10 s
+    publication retry, as `TestJoiningCoreMeshesWithTheFounder` does.
 
 ### Packages touched
 
@@ -154,6 +161,8 @@ crafts hop fields with is read from the node's state with
 | :--------------------- | :----------------------------------------- |
 | `internal/services`    | `App.Engine`, `App.PeerClient`             |
 | `internal/testnetwork` | The builder, the labs, `StartNode` retired |
+| `pkg/controlplane`     | The send and enrollment timeout knobs go   |
+| `pkg/webpki`           | `CoreClient.SetLocator` goes               |
 | `pkg/modules`          | The import walk's allowlist                |
 
 No record is needed: the labs move onto the assembly ADR-0013's topology
@@ -172,10 +181,13 @@ Each commit keeps the tree green and deletes what its labs no longer use:
 3.  **The line control plane and the restart.** The accessors;
     `TestLineTopology`, `TestFabricatingNeighbor`, and
     `TestRestartedNodeServesUpSegments` move; `startLine` goes.
-4.  **The two-core genesis.** `TestTwoOriginsShareOneSegmentID` moves.
+4.  **The origins lab.** `TestTwoOriginsShareOneSegmentID` and its helpers
+    go.
 5.  **The WireGuard mesh.** `TestWireguardMeshExchange` moves.
-6.  **The retirement.** `StartNode`, its types and helpers, and the
-    harness's entry in the import walk's allowlist go.
+6.  **The retirement.** `StartNode`, its types and helpers, the harness's
+    entry in the import walk's allowlist, and the knobs only it set go:
+    `CoreClient.SetLocator`, the beaconer's send timeout, and the
+    enrollment timeout.
 
 ## Test plan
 
@@ -184,30 +196,12 @@ Each commit keeps the tree green and deletes what its labs no longer use:
     one, the line's three hops, the sibling's four; the crafted path's
     re-resolution, the unreachable destination, and the loss summary; the
     line's chains, segments, and bound verification; the fabricated
-    beacon's refusal; the restarted node's up segments; the two origins'
-    shared segment ID; and the WireGuard mesh's exchange.
+    beacon's refusal; the restarted node's up segments; and the WireGuard
+    mesh's exchange.
+*   **The retired lab:** `TestPathLayerServesTwoCores` and
+    `TestBeaconStoreKeysByOrigin` hold its two cores and its origin-keyed
+    beacon store.
 *   **The accessors:** the line lab's bound verification runs through
     `App.Engine`, and the fabrication lab's delivery through
     `App.PeerClient`.
 *   **The suite:** the full suite, `-race -count=2`, passes at every step.
-
-## Open questions
-
-1.  **Keep the origins lab?** Seed the founder's trust database for its
-    two-core genesis, or retire it: `TestPathLayerServesTwoCores` and the
-    beacon store's unit test cover two cores and the origin-keyed store,
-    though only this lab forces two origins onto one segment ID.
-2.  **The loss summary's premise?** Aim the lab's echo at an address in
-    the destination's AS where no socket listens, or add a configuration
-    that runs no responder, which the responder's place in the core
-    argues against.
-3.  **The WireGuard mesh lab?** Migrate it, or retire it: its registry
-    hand-off stands in "until the coordination suites drive real logins",
-    which `TestCoordinationOpenJoin` now does, though it alone drives a
-    raw wireguard-go client.
-4.  **The publication retry?** The harness retries a failed publication
-    every 100 ms; the node every 10 s, with no knob. Accept the wait, or
-    let the directory pacing tests already set pace the retry too.
-5.  **The knobs only the harness set?** `CoreClient.SetLocator`, the
-    beaconer's send timeout, and the enrollment timeout have no other
-    setter. Remove them in the last step, or keep them.
