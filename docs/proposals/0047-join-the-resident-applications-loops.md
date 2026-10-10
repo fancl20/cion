@@ -31,13 +31,14 @@ application, its borrower, still serves from. The SOCKS application
 goroutines per connection and per association, joins none of them, and
 never closes its netstack.
 
-Here an application's `Run` starts every goroutine it owns through a wait
-group, each with a panic absorbed and logged, ends them at cancellation,
-and returns once they have returned; `Close` releases what the constructor
-bound, after `Run` or alone. The WireGuard application stops releasing at
-`Run`'s end, the SOCKS application closes its netstack and refuses flows
-once stopped, and the coordination application closes its relay clients'
-connections beside its conversations'.
+Here an application's `Run` starts its loops through a wait group, each
+with a panic absorbed and logged, and the goroutines they start per peer,
+connection, or association join the same group. `Run` ends them at
+cancellation and returns once they have returned; `Close` releases what
+the constructor bound, after `Run` or alone. The WireGuard application
+stops releasing at `Run`'s end, the SOCKS application closes its netstack
+and refuses flows once stopped, and the coordination application closes
+its relay clients' connections beside its conversations'.
 
 ## Motivation
 
@@ -83,8 +84,8 @@ used to end, are closed by its `Close` since 3565a4b.
     and a second call releases nothing again.
 *   No goroutine an application started outlives its `Close`, and every
     socket it bound is closed by then.
-*   An application's own goroutines absorb a panic and log it, as the
-    supervisor does for `Run` itself.
+*   An application's loops absorb a panic and log it, as the supervisor
+    does for `Run` itself.
 
 ### Non-goals
 
@@ -92,6 +93,12 @@ used to end, are closed by its `Close` since 3565a4b.
     quic-go's and HTTP/3's connection goroutines, and `net/http`'s handler
     goroutines end through their owner's `Close`, and nothing waits for
     them.
+*   No recover in the callbacks wireguard-go's routines run — the binds and
+    the pipes' reads and writes: absorbing a panic there would leave the
+    third party's locks and state as the panic found them.
+*   No recover in the goroutines the loops start per peer, per connection,
+    or per association: a panic in one crashes the process, as one in the
+    coordination application's conversations does.
 *   No change to the applications' policy: Degrade, as ADR-0014's
     decision 4 and proposal 0043 give it.
 *   No change to how the coordination application ends its conversations.
@@ -117,27 +124,37 @@ application". They become:
 
 The wording follows the topology contract
 ([topology.go](/pkg/modules/topology/topology.go)) as proposal 0043 left
-it. Each application starts its goroutines through a `runLoop` of the
-measured provider's shape
-([provider.go](/pkg/modules/topology/impl/measured/provider.go)):
-`sync.WaitGroup.Go`, a deferred recover that logs, and a log when a loop
-returns before the context ends. No `pkg/` package imports
-`internal/supervise`.
+it.
+
+### The loops package
+
+No `pkg/` package imports `internal/supervise`, so the measured provider
+starts its loops through a `runLoop` of its own
+([provider.go](/pkg/modules/topology/impl/measured/provider.go)). That
+shape moves into a library package, `pkg/loops` (introduced), which the
+measured provider and the applications share: `loops.Go(ctx, wg, name,
+fn)` runs `fn`, a `func(context.Context)`, in its own goroutine under the
+`sync.WaitGroup` `wg`; a panic is absorbed and logged with the loop's name
+and `runtime/debug.Stack`, and a return before the context ends is logged
+with the name. A loop runs for `Run`'s span, so its early return marks a
+fault. A goroutine a loop starts per peer, connection, or association ends
+with what it serves, so it joins the same wait group through `wg.Go`
+alone, as the coordination application's conversations do.
 
 ### The WireGuard application
 
-`Run` stops deferring `Close`. It starts, through `runLoop`:
+`Run` stops deferring `Close`. It starts, through `loops.Go`:
 
 *   The mesh and host socket readers ([bind.go](/pkg/apps/wireguard/bind.go),
     [hostbind.go](/pkg/apps/wireguard/hostbind.go)). A `context.AfterFunc`
     sets each socket's read deadline to now, the shape the measured
     provider's probes take, and a reader returns on the deadline once the
-    context has ended. The sockets stay open for `Close`.
-*   The host pipe's drain, and each mesh peer's drain that `applyDirectory`
-    starts ([pipe.go](/pkg/apps/wireguard/pipe.go)). A drain returns at
-    cancellation as well as at its pipe's close. `applyDirectory` runs on
-    the sync loop, so the application holds the wait group and the context
-    for `Run`'s span, and the drains it starts join them.
+    context has ended. The sockets stay open for `Close`, so `Run` releases
+    nothing `New` bound, and `Close`, which the group runs before its
+    `Stop` returns, frees the fixed host port in time for an in-process
+    restart.
+*   The host pipe's drain ([pipe.go](/pkg/apps/wireguard/pipe.go)), which
+    returns at cancellation as well as at its pipe's close.
 *   The relay bridge, whose client a `context.AfterFunc` closes at
     cancellation, ending a blocked `Recv`. Each attempt closes its network
     monitor and event bus as it returns.
@@ -147,6 +164,11 @@ returns before the context ends. No `pkg/` package imports
     QUIC answers a read deadline by reading again, so only the close ends
     the serve. `Close` closes the socket again, harmlessly.
 *   The publisher and the sync loop, which already return at cancellation.
+
+`applyDirectory`, on the sync loop, starts each mesh peer's drain through
+`wg.Go`, so the application holds the wait group and the context for
+`Run`'s span. A peer's drain returns at cancellation, or when its peer
+leaves the directory and its pipe closes.
 
 `Run` returns once all have returned. `Close` keeps its order — the
 devices, the registrations, the sockets, the directory client, the
@@ -160,10 +182,13 @@ calls `Close` once its `Run` returns.
 
 `Server.Run` assembles the application once the slice is assigned and
 runs it. Nothing borrows the application, so `Run` releases it before it
-returns. `App.Run` starts the accept loop, the drain, and each
-connection's conversation through `runLoop`, and each conversation starts
-its splice and its association's loops through the same wait group. At
-cancellation `App.Run`:
+returns. `App.Run` starts the accept loop and the drain through
+`loops.Go`. The accept loop starts each connection's conversation, and a
+conversation its splice or its association's relay and legs, through
+`wg.Go`. A conversation's handshake runs under a deadline of
+`egressDialTimeout`, so a client that connects and sends nothing gives its
+goroutine and its endpoint back while the node serves. At cancellation
+`App.Run`:
 
 1.  marks the application stopped, so a CONNECT or ASSOCIATE that
     completes afterward closes its legs instead of registering them;
@@ -192,35 +217,44 @@ ones before the DERP server's own close waits for them.
 
 ### Packages touched
 
-| Package                 | Change                                      |
-| :---------------------- | :------------------------------------------ |
-| `pkg/apps`              | The contract's `Run` and `Close` docs       |
-| `pkg/apps/wireguard`    | Joined loops, no release at `Run`'s end     |
-| `pkg/apps/socks`        | Joined loops, the netstack closed, refusals |
-| `pkg/apps/coordination` | Relay connections closed like conversations |
-| `internal/testnetwork`  | The harness's `Close`, the labs             |
+| Package                              | Change                                |
+| :----------------------------------- | :------------------------------------ |
+| `pkg/loops`                          | New: `Go`, the libraries' loop start  |
+| `pkg/modules/topology/impl/measured` | Its loops through `pkg/loops`         |
+| `pkg/apps`                           | The `Run` and `Close` docs            |
+| `pkg/apps/wireguard`                 | Joined loops, no release in `Run`     |
+| `pkg/apps/socks`                     | Joined loops, the netstack closed     |
+| `pkg/apps/coordination`              | Relay conns closed like conversations |
+| `internal/testnetwork`               | The harness's `Close`, the labs       |
 
 No record is needed: the posture stands as ADR-0009 states it, and the
 lifecycle as ADR-0014's decision 4 orders it; this proposal makes the
-applications keep both.
+applications keep both. `pkg/loops` is a library like the others, which
+the applications import as they import the core's.
 
 ### Migration
 
 Each commit keeps the tree green:
 
-1.  **Join the WireGuard application.** `runLoop`, the readers' deadlines,
+1.  **Add the loops package.** `pkg/loops` and its tests; the measured
+    provider's `runLoop` gives way to it.
+2.  **Join the WireGuard application.** The loops, the readers' deadlines,
     the drains, the relay bridge's ends, the directory server's close,
     `Run` releasing nothing, the directory client's conn, the
     interface-down reset, and the harness's `Close`.
-2.  **Join the SOCKS application.** `runLoop`, the stopped flag, the
-    netstack's close and wait, the derived contexts, and `New`'s failure
-    paths.
-3.  **Close the relay's connections.** The coordination application's
+3.  **Join the SOCKS application.** The loops, the handshake deadline, the
+    stopped flag, the netstack's close and wait, the derived contexts, and
+    `New`'s failure paths.
+4.  **Close the relay's connections.** The coordination application's
     relay handler, and the contract's docs, true of every resident from
     this commit on.
 
 ## Test plan
 
+*   **Unit, the loops:** in a `testing/synctest` bubble, a loop's panic is
+    logged with its name and stack and absorbed while its sibling runs on,
+    a return before the context ends is logged, and the wait group's
+    `Wait` returns once every loop has returned after cancellation.
 *   **Unit, WireGuard:** an application built over the package's fixture
     runs; once its context is canceled, `Run` returns — the test waits on a
     channel `Run`'s return closes, bounded by the test's deadline — with a
@@ -231,7 +265,9 @@ Each commit keeps the tree green:
     cancellation with a client held mid-handshake, a CONNECT whose dial
     blocks until its context ends, and a spliced flow, whose internet leg
     sees its connection close. A CONNECT whose dial returns only after the
-    stop closes both legs at once.
+    stop closes both legs at once. A client that connects and sends
+    nothing sees its connection close after the handshake bound, which
+    the lab's configuration shortens as it shortens the idle bound.
 *   **Unit, coordination:** with a relay client connected, `Close` returns,
     and the client sees its connection end; a relay upgrade that completes
     after `Close` ends at once.
@@ -240,23 +276,3 @@ Each commit keeps the tree green:
     once.
 *   **Integration, the stop:** a tailnet lab closes the node before its
     clients leave, and the node's `Close` returns.
-
-## Open questions
-
-1.  **One helper or one per package?** `runLoop` copied into the WireGuard
-    and SOCKS packages beside the measured provider's, or one small
-    library package under `pkg/` that the three import.
-2.  **End the readers by deadline or by close?** A read deadline ends the
-    WireGuard readers at cancellation and leaves the sockets to `Close`.
-    Closing them at cancellation releases the fixed host port before `Run`
-    returns, as proposal 0043 releases the node's fixed ports, at the cost
-    of `Run` releasing what `New` bound.
-3.  **A handshake deadline for SOCKS?** The netstack's close ends a
-    handshake at the stop. A deadline, the egress dial timeout's bound,
-    would also bound a client that connects and sends nothing while the
-    node serves.
-4.  **Recover in the callbacks on third-party goroutines?** The binds and
-    pipes run on wireguard-go's goroutines, and SOCKS's `Inbound` runs on
-    the WireGuard drains; a panic there crashes the process today. A
-    recover in each callback would absorb it, at the cost of absorbing a
-    panic inside a third party's invariants.
