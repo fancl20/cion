@@ -1,6 +1,7 @@
 package webpki
 
 import (
+	"bufio"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -11,6 +12,7 @@ import (
 	"encoding/asn1"
 	"encoding/json/v2"
 	"encoding/pem"
+	"errors"
 	"io"
 	"math/big"
 	"net"
@@ -149,6 +151,68 @@ func TestServeHTTPSHTTP11(t *testing.T) {
 	if string(body) != "mounted" {
 		t.Errorf("the mounted handler's body = %q, want %q", body, "mounted")
 	}
+}
+
+// TestServeHTTPSReleasesOnCancel checks the server's stop: once its context
+// ends, ServeHTTPS closes the server — the listener and the connection it
+// tracks, an idle keep-alive here — and returns nil with the port released,
+// the address binding again at once.
+func TestServeHTTPSReleasesOnCancel(t *testing.T) {
+	certFile, keyFile, pool := mintCertFiles(t)
+	manager, err := PrepareTLSCert(context.Background(), TLSCertConfig{
+		Domain:   testDomain,
+		CertFile: certFile,
+		KeyFile:  keyFile,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ln, err := manager.ListenHTTPS("127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	address := ln.Addr().String()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	served := make(chan error, 1)
+	go func() {
+		served <- manager.ServeHTTPS(ctx, ln, http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	}()
+
+	conn, err := tls.Dial("tcp", address, &tls.Config{RootCAs: pool, ServerName: testDomain})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = conn.Close() }()
+	req, err := http.NewRequest(http.MethodGet, "https://"+address+"/", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := req.Write(conn); err != nil {
+		t.Fatal(err)
+	}
+	reader := bufio.NewReader(conn)
+	resp, err := http.ReadResponse(reader, req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+
+	cancel()
+	if err := <-served; err != nil {
+		t.Errorf("ServeHTTPS = %v, want nil once its context ended", err)
+	}
+	// The idle connection's read ends with the server's close; the deadline
+	// bounds only a connection the stop left open.
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	if _, err := reader.ReadByte(); err == nil || errors.Is(err, os.ErrDeadlineExceeded) {
+		t.Errorf("the idle connection outlived the stop: read = %v", err)
+	}
+	rebound, err := net.Listen("tcp", address)
+	if err != nil {
+		t.Fatalf("the HTTPS address did not bind again: %v", err)
+	}
+	_ = rebound.Close()
 }
 
 // TestServeHTTPSACMEChallenge checks the challenge answers on the mounted

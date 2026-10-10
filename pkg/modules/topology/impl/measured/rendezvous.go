@@ -281,10 +281,16 @@ func (r *Rendezvous) Close() error {
 }
 
 // Run answers requests until the context is canceled or the socket fails.
+// The context's end closes the socket, failing the read; Run returns with
+// the socket closed and released either way, waiting on a close already
+// under way, for a second Close returns before the first's release
+// finishes.
 func (r *Rendezvous) Run(ctx context.Context) {
-	go func() {
-		<-ctx.Done()
-		_ = r.conn.Close()
+	release := sync.OnceValue(r.conn.Close)
+	stop := context.AfterFunc(ctx, func() { _ = release() })
+	defer func() {
+		stop()
+		_ = release()
 	}()
 	buf := make([]byte, 128)
 	for {

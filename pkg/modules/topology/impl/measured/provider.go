@@ -413,7 +413,7 @@ func (z *Provider) Close() error {
 		}
 	}
 	if z.rendezvous != nil {
-		// Run closes the acceptor's socket as its context ends.
+		// Run closes the acceptor's socket before it returns.
 		if err := z.rendezvous.Close(); !errors.Is(err, net.ErrClosed) {
 			errs = append(errs, err)
 		}

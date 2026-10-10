@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/caddyserver/certmagic"
@@ -156,7 +157,10 @@ func (m *CertManager) ListenHTTPS(addr string) (net.Listener, error) {
 // canceled. The server carries the settings the surface needs — a
 // read-header timeout and nothing beside — for the netmap poll and the
 // relay conversations are long-lived connections a server-level write
-// timeout would cut.
+// timeout would cut. The context's end closes the server — the listener and
+// the connections it tracks; a hijacked connection stays its handler's —
+// and ServeHTTPS returns with them closed, waiting on a close already under
+// way, for a second Close returns before the first's release finishes.
 func (m *CertManager) ServeHTTPS(
 	ctx context.Context, ln net.Listener, handler http.Handler,
 ) error {
@@ -165,9 +169,11 @@ func (m *CertManager) ServeHTTPS(
 		Handler:           handler,
 		ReadHeaderTimeout: readHeaderTimeout,
 	}
-	go func() {
-		<-ctx.Done()
-		_ = ln.Close()
+	release := sync.OnceValue(srv.Close)
+	stop := context.AfterFunc(ctx, func() { _ = release() })
+	defer func() {
+		stop()
+		_ = release()
 	}()
 	slog.Info("Serving the node's HTTPS server", "addr", ln.Addr().String())
 	err := srv.Serve(ln)

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"sync"
 
 	"github.com/fancl20/cion/pkg/dataplane"
 	"github.com/fancl20/cion/pkg/scion"
@@ -34,11 +35,16 @@ type responder struct {
 }
 
 // Run serves echo replies until the context is canceled, returning nil, or
-// until the socket's read fails, returning the failure.
+// until the socket's read fails, returning the failure. The context's end
+// closes the socket, failing the read; Run returns with the socket closed
+// and released either way, waiting on a close already under way, for a
+// second Close returns before the first's release finishes.
 func (r *responder) Run(ctx context.Context) error {
-	go func() {
-		<-ctx.Done()
-		_ = r.conn.Close()
+	release := sync.OnceValue(r.conn.Close)
+	stop := context.AfterFunc(ctx, func() { _ = release() })
+	defer func() {
+		stop()
+		_ = release()
 	}()
 	for {
 		echo, from, err := r.conn.ReadEchoFrom()

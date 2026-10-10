@@ -442,3 +442,32 @@ func TestRendezvousEchoEndsWithItsContext(t *testing.T) {
 		t.Errorf("RendezvousEcho returned after %v, want under RendezvousAttemptWait", held)
 	}
 }
+
+// TestRendezvousRunReleasesOnCancel checks the acceptor's stop: once its
+// context ends, Run returns with its socket closed and released, and the
+// address binds again at once.
+func TestRendezvousRunReleasesOnCancel(t *testing.T) {
+	r, err := NewRendezvous(RendezvousConfig{
+		Bind:     "127.0.0.1:0",
+		Store:    memory.New(),
+		MaxLinks: 8,
+		LinkHost: netip.MustParseAddr("127.0.0.1"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	bound := r.conn.LocalAddr().(*net.UDPAddr).AddrPort()
+	ctx, cancel := context.WithCancel(context.Background())
+	returned := make(chan struct{})
+	go func() {
+		r.Run(ctx)
+		close(returned)
+	}()
+	cancel()
+	<-returned
+	rebound, err := net.ListenUDP("udp", net.UDPAddrFromAddrPort(bound))
+	if err != nil {
+		t.Fatalf("the acceptor's address did not bind again: %v", err)
+	}
+	_ = rebound.Close()
+}
