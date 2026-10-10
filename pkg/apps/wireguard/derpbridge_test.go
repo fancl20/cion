@@ -3,6 +3,7 @@ package wireguard
 import (
 	"encoding/hex"
 	"net"
+	"net/http/httptest"
 	"net/netip"
 	"strconv"
 	"strings"
@@ -11,7 +12,9 @@ import (
 	"time"
 
 	"tailscale.com/derp"
+	"tailscale.com/derp/derpserver"
 	"tailscale.com/types/key"
+	"tailscale.com/types/logger"
 
 	"golang.zx2c4.com/wireguard/conn"
 	"golang.zx2c4.com/wireguard/device"
@@ -52,6 +55,28 @@ func (d *relayDouble) sent() []sentDatagram {
 	d.mtx.Lock()
 	defer d.mtx.Unlock()
 	return append([]sentDatagram(nil), d.sends...)
+}
+
+// newSilentRelay stands an in-process DERP relay on plain HTTP — the relay
+// client speaks HTTP to an http URL — which answers a presence's handshake
+// and sends it nothing until its first keepalive, a minute on, so the
+// presence blocks in Recv.
+func newSilentRelay(t *testing.T) *DERPConfig {
+	t.Helper()
+	srv := derpserver.New(key.NewNode(), logger.Discard)
+	hs := httptest.NewServer(derpserver.Handler(srv))
+	t.Cleanup(func() {
+		_ = srv.Close()
+		hs.Close()
+	})
+	return &DERPConfig{URL: hs.URL + "/derp"}
+}
+
+// relayConnected reports whether the presence holds a relay connection.
+func relayConnected(b *derpBridge) bool {
+	b.mtx.Lock()
+	defer b.mtx.Unlock()
+	return b.conn != nil
 }
 
 // captureBind is a host client's bind: its sends land in a channel the test
@@ -135,7 +160,7 @@ func TestDERPBridgeRoamsByLastArrival(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = udpConn.Close() })
 	socket := newHostSocket(udpConn, cnt)
-	go socket.run()
+	go socket.run(t.Context())
 
 	relay := &relayDouble{}
 	bridge := &derpBridge{cfg: derpBridgeConfig{Cnt: cnt}, conn: relay}

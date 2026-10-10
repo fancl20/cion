@@ -18,6 +18,7 @@ import (
 	"golang.zx2c4.com/wireguard/device"
 
 	"github.com/fancl20/cion/pkg/controlplane"
+	"github.com/fancl20/cion/pkg/loops"
 	"github.com/fancl20/cion/pkg/scion"
 	wireguardv1connect "github.com/fancl20/cion/proto/wireguard/v1/wireguardv1connect"
 )
@@ -134,6 +135,11 @@ type App struct {
 
 	// bridge is the node's DERP presence, when configured.
 	bridge *derpBridge
+
+	// wg joins Run's loops and the mesh peers' drains applyDirectory starts
+	// beneath the sync loop.
+	wg        sync.WaitGroup
+	closeOnce sync.Once
 
 	mtx sync.Mutex
 	// meshPeers holds one mesh device per directory peer.
@@ -313,10 +319,16 @@ func (a *App) deregisterAll() {
 	a.regs = nil
 }
 
-// release closes what New opened on a failed construction. The store stays
-// the caller's: it opened it, and a construction that never returned owns
-// nothing of it.
+// release closes what New opened beneath the devices: the interface-down
+// receiver New installed resets, the service registrations undo, and the
+// sockets and the directory client close. A failed construction runs it
+// alone — the store stays the caller's: it opened it, and a construction
+// that never returned owns nothing of it — and Close runs it between the
+// devices and the store.
 func (a *App) release() {
+	if a.cfg.InterfaceDown != nil {
+		a.cfg.InterfaceDown.OnSignal(nil)
+	}
 	a.deregisterAll()
 	a.mesh.Close()
 	a.host.Close()
@@ -392,8 +404,9 @@ func (a *App) newMeshDevice(entry Entry) (*meshPeer, error) {
 // and their router entries; the host entries the node owns become the host
 // device's peers — a new key gains its /32, a departed key loses it — the
 // same diff shape the node entries give the mesh. A later milestone's host
-// removal arrives as this same diff.
-func (a *App) applyDirectory(directory Directory) {
+// removal arrives as this same diff. A new peer's drain joins the
+// application's wait group and returns when ctx ends or the peer departs.
+func (a *App) applyDirectory(ctx context.Context, directory Directory) {
 	a.mtx.Lock()
 	defer a.mtx.Unlock()
 	live := make(map[addr.IA]bool, len(directory.Nodes))
@@ -413,7 +426,7 @@ func (a *App) applyDirectory(directory Directory) {
 			continue
 		}
 		a.meshPeers[entry.IA] = peer
-		go peer.pipe.drain(a.router.route)
+		a.wg.Go(func() { peer.pipe.drain(ctx, a.router.route) })
 		slog.Info("WireGuard mesh tunnel up", "peer", entry.IA, "subnet", entry.Overlay)
 	}
 	for ia, peer := range a.meshPeers {
@@ -546,24 +559,28 @@ func (a *App) Registry() Registry {
 	return a.cfg.Store
 }
 
-// Run serves the application until the context is canceled: the sockets' read
-// loops, the devices' pipes through the router, the directory — served by
-// the core, published and fetched by everyone — and the counters log.
+// Run serves the application until the context is canceled: the sockets'
+// readers, the host device's drain, the relay presence, the directory —
+// served by the core, published and fetched by everyone — and the counters
+// log. It returns once every goroutine it started has returned, the mesh
+// peers' drains among them, and leaves what New bound to Close.
 func (a *App) Run(ctx context.Context) error {
-	defer a.Close()
-	go a.mesh.run()
-	go a.host.run()
+	loops.Go(ctx, &a.wg, "wireguard mesh socket", a.mesh.run)
+	loops.Go(ctx, &a.wg, "wireguard host socket", a.host.run)
 	if a.hosts != nil {
-		go a.hosts.pipe.drain(a.router.route)
+		pipe := a.hosts.pipe
+		loops.Go(ctx, &a.wg, "wireguard host drain", func(ctx context.Context) {
+			pipe.drain(ctx, a.router.route)
+		})
 	}
 	if a.bridge != nil {
-		go a.bridge.run(ctx)
+		loops.Go(ctx, &a.wg, "wireguard relay presence", a.bridge.run)
 	}
 	if a.cfg.Store != nil {
-		a.serveDirectory(ctx)
+		loops.Go(ctx, &a.wg, "wireguard directory service", a.serveDirectory)
 	}
-	go a.runPublish(ctx)
-	go a.runSync(ctx)
+	loops.Go(ctx, &a.wg, "wireguard directory publication", a.runPublish)
+	loops.Go(ctx, &a.wg, "wireguard directory sync", a.runSync)
 	slog.Info("Serving the WireGuard application",
 		"ia", a.cfg.IA, "listenPort", a.cfg.ListenPort,
 		"publicKey", a.PublicKey())
@@ -572,6 +589,7 @@ func (a *App) Run(ctx context.Context) error {
 	for {
 		select {
 		case <-ctx.Done():
+			a.wg.Wait()
 			return nil
 		case <-logTick.C:
 			slog.Info("WireGuard counters", a.cnt.snapshot()...)
@@ -581,20 +599,25 @@ func (a *App) Run(ctx context.Context) error {
 
 // serveDirectory serves the core's directory on the socket New bound and
 // registered under the directory service, over the application's
-// authenticated channel: the control endpoint's TLS machinery, every
-// publisher identified by its verified chain.
+// authenticated channel — the control endpoint's TLS machinery, every
+// publisher identified by its verified chain — until the context ends. QUIC
+// answers a read deadline by reading again, so the context's end closes the
+// socket, and the loop returns with it released, the deferred release
+// waiting on a close under way. Close closes the socket again, harmlessly.
 func (a *App) serveDirectory(ctx context.Context) {
-	conn := a.dirServe
-	go func() {
-		defer func() { _ = conn.Close() }()
-		if err := controlplane.ServeHTTP3(conn, a.DirectoryHandler(),
-			controlplane.EndpointTLS(controlplane.EndpointTLSConfig{
-				Engine: a.cfg.Engine,
-			})); err != nil && ctx.Err() == nil {
-			slog.Error("WireGuard directory service exited", "err", err)
-		}
+	release := sync.OnceValue(a.dirServe.Close)
+	stop := context.AfterFunc(ctx, func() { _ = release() })
+	defer func() {
+		stop()
+		_ = release()
 	}()
 	slog.Info("Serving the WireGuard directory", "service", serviceName(SvcDirectory))
+	if err := controlplane.ServeHTTP3(a.dirServe, a.DirectoryHandler(),
+		controlplane.EndpointTLS(controlplane.EndpointTLSConfig{
+			Engine: a.cfg.Engine,
+		})); err != nil && ctx.Err() == nil {
+		slog.Error("WireGuard directory service exited", "err", err)
+	}
 }
 
 // HTTPSHandler is nil: the application's surfaces are its own registered
@@ -613,33 +636,29 @@ func (a *App) DirectoryHandler() http.Handler {
 	return mux
 }
 
-// Close releases the application: the devices close, the sockets retire with
-// their service registrations, the flow state expires, and the store closes;
-// no operating-system provisioning exists to undo.
+// Close releases what New bound: the devices close, the sockets retire with
+// their service registrations and the interface-down receiver, and the
+// store closes last; no operating-system provisioning exists to undo. It
+// runs once Run has returned, or alone when Run never ran, and a second
+// call releases nothing.
 func (a *App) Close() {
-	a.mtx.Lock()
-	defer a.mtx.Unlock()
-	for _, peer := range a.meshPeers {
-		peer.dev.Close()
-		_ = peer.pipe.Close()
-	}
-	a.meshPeers = nil
-	if a.hosts != nil {
-		a.hosts.dev.Close()
-		_ = a.hosts.pipe.Close()
-		a.hosts = nil
-	}
-	a.hostPeers = nil
-	a.deregisterAll()
-	a.mesh.Close()
-	a.host.Close()
-	if a.dirConn != nil {
-		_ = a.dirConn.Close()
-	}
-	if a.dirServe != nil {
-		_ = a.dirServe.Close()
-	}
-	if a.cfg.Store != nil {
-		_ = a.cfg.Store.Close()
-	}
+	a.closeOnce.Do(func() {
+		a.mtx.Lock()
+		defer a.mtx.Unlock()
+		for _, peer := range a.meshPeers {
+			peer.dev.Close()
+			_ = peer.pipe.Close()
+		}
+		a.meshPeers = nil
+		if a.hosts != nil {
+			a.hosts.dev.Close()
+			_ = a.hosts.pipe.Close()
+			a.hosts = nil
+		}
+		a.hostPeers = nil
+		a.release()
+		if a.cfg.Store != nil {
+			_ = a.cfg.Store.Close()
+		}
+	})
 }

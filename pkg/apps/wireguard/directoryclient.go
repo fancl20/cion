@@ -55,8 +55,11 @@ func newRPCDirectoryClient(
 	}
 }
 
-// Close releases the transport.
-func (c *rpcDirectoryClient) Close() error { return c.qclt.Close() }
+// Close releases the transport, then the SCION conn beneath it, which a
+// transport over a conn it did not create leaves open.
+func (c *rpcDirectoryClient) Close() error {
+	return errors.Join(c.qclt.Close(), c.conn.Close())
+}
 
 // client returns the ConnectRPC client for the core's directory endpoint,
 // building it — or rebuilding it when the core's route moved — on demand.

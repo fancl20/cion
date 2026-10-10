@@ -3,9 +3,11 @@ package wireguard
 import (
 	"context"
 	"crypto/x509"
+	"errors"
 	"net"
 	"net/netip"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -65,6 +67,28 @@ func (d *recordingDirectory) List(context.Context) (Directory, error) {
 }
 
 func (d *recordingDirectory) Close() error { return nil }
+
+// stallingDirectory holds every publication until released — a
+// publication in flight when the stop comes — signals the first one's
+// arrival, and records its close.
+type stallingDirectory struct {
+	recordingDirectory
+	arrived chan struct{}
+	arrive  sync.Once
+	release chan struct{}
+	closed  atomic.Bool
+}
+
+func (d *stallingDirectory) Publish(ctx context.Context, entry Entry) (Entry, error) {
+	d.arrive.Do(func() { close(d.arrived) })
+	<-d.release
+	return d.recordingDirectory.Publish(ctx, entry)
+}
+
+func (d *stallingDirectory) Close() error {
+	d.closed.Store(true)
+	return nil
+}
 
 // flippableTrustDB serves no chains until it serves one; the publish loop
 // reads it while the test flips it.
@@ -133,9 +157,10 @@ func (r *recordingRegs) registered(svc addr.SVC) (uint16, bool) {
 
 // newTestWireguard assembles an application around throwaway sockets: a SCION conn
 // submitting to a sink, the shared host port on an ephemeral one, and the
-// core's store-side directory.
+// core's store-side directory. The mutations edit the configuration before
+// the assembly.
 func newTestWireguard(
-	t *testing.T, ia addr.IA, db *flippableTrustDB,
+	t *testing.T, ia addr.IA, db *flippableTrustDB, mutate ...func(*Config),
 ) (*App, *recordingDirectory) {
 	t.Helper()
 	internal, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
@@ -154,7 +179,7 @@ func newTestWireguard(
 	provider := &scion.PathProvider{IA: ia, DB: &memDB{}}
 	directory := &recordingDirectory{published: make(chan Entry, 16)}
 	regs := &recordingRegs{}
-	a, err := New(Config{
+	cfg := Config{
 		IA:         ia,
 		ListenHost: netip.MustParseAddr("127.0.0.1"),
 		ListenPort: listenPort,
@@ -176,7 +201,11 @@ func newTestWireguard(
 		PublishInterval: time.Hour,
 		PublishRetry:    20 * time.Millisecond,
 		RefreshInterval: time.Hour,
-	})
+	}
+	for _, m := range mutate {
+		m(&cfg)
+	}
+	a, err := New(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -193,7 +222,7 @@ func newTestWireguard(
 	if _, ok := regs.registered(SvcWireguard); !ok {
 		t.Error("the mesh socket was not registered under the wireguard service")
 	}
-	if _, ok := regs.registered(SvcDirectory); !ok {
+	if _, ok := regs.registered(SvcDirectory); cfg.Store != nil && !ok {
 		t.Error("the core's directory socket was not registered under the directory service")
 	}
 	return a, directory
@@ -285,15 +314,15 @@ func TestWireguardAppliesDirectoryDiff(t *testing.T) {
 	e1 := entry(peer1, "100.64.11.0/24")
 	e2 := entry(peer2, "100.64.12.0/24")
 
-	a.applyDirectory(Directory{Nodes: []Entry{e1}})
+	a.applyDirectory(t.Context(), Directory{Nodes: []Entry{e1}})
 	if len(a.meshPeers) != 1 || a.meshPeers[peer1] == nil {
 		t.Fatalf("peers after the first directory = %v, want %s", a.meshPeers, peer1)
 	}
-	a.applyDirectory(Directory{Nodes: []Entry{e1, e2}})
+	a.applyDirectory(t.Context(), Directory{Nodes: []Entry{e1, e2}})
 	if len(a.meshPeers) != 2 {
 		t.Fatalf("peers after the second directory = %d, want 2", len(a.meshPeers))
 	}
-	a.applyDirectory(Directory{Nodes: []Entry{e2}})
+	a.applyDirectory(t.Context(), Directory{Nodes: []Entry{e2}})
 	if len(a.meshPeers) != 1 || a.meshPeers[peer2] == nil {
 		t.Fatalf("departed peer kept its device: %v", a.meshPeers)
 	}
@@ -336,14 +365,14 @@ func TestWireguardAppliesHostEntries(t *testing.T) {
 	}
 
 	// A foreign-owned entry changes nothing.
-	a.applyDirectory(Directory{Hosts: []HostEntry{foreign}})
+	a.applyDirectory(t.Context(), Directory{Hosts: []HostEntry{foreign}})
 	if len(a.hostPeers) != 0 {
 		t.Fatalf("a foreign host programmed the device: %v", a.hostPeers)
 	}
 
 	// An owned entry gains its /32; the router table follows.
 	h1 := owned(1, "100.64.1.2")
-	a.applyDirectory(Directory{Hosts: []HostEntry{h1, foreign}})
+	a.applyDirectory(t.Context(), Directory{Hosts: []HostEntry{h1, foreign}})
 	if len(a.hostPeers) != 1 || a.hostPeers[h1.PublicKey].Addr != h1.Addr {
 		t.Fatalf("owned hosts after the first directory = %v, want the one", a.hostPeers)
 	}
@@ -353,11 +382,11 @@ func TestWireguardAppliesHostEntries(t *testing.T) {
 
 	// A second owned key joins; the first departs with the second fetch.
 	h2 := owned(2, "100.64.1.3")
-	a.applyDirectory(Directory{Hosts: []HostEntry{h1, h2}})
+	a.applyDirectory(t.Context(), Directory{Hosts: []HostEntry{h1, h2}})
 	if len(a.hostPeers) != 2 {
 		t.Fatalf("owned hosts after the second directory = %d, want 2", len(a.hostPeers))
 	}
-	a.applyDirectory(Directory{Hosts: []HostEntry{h2}})
+	a.applyDirectory(t.Context(), Directory{Hosts: []HostEntry{h2}})
 	if len(a.hostPeers) != 1 || a.hostPeers[h2.PublicKey].Addr != h2.Addr {
 		t.Fatalf("the departed host kept its peer: %v", a.hostPeers)
 	}
@@ -368,6 +397,126 @@ func TestWireguardAppliesHostEntries(t *testing.T) {
 	// The snapshot the application exposes matches.
 	if snap := a.HostPeers(); len(snap) != 1 || snap[0] != h2 {
 		t.Fatalf("the host snapshot = %v, want the survivor", snap)
+	}
+}
+
+// TestWireguardRunJoinsItsLoops checks the stop: once its context is
+// canceled, Run returns only after its loops have — a publication in flight
+// held to its end, a mesh peer's drain, the relay presence blocked in Recv
+// against a relay that sends nothing, the sockets' readers, the directory
+// service — and it releases nothing New bound but the directory socket its
+// service closed. Close then releases the rest: the store, and the host
+// port, which binds again at once.
+func TestWireguardRunJoinsItsLoops(t *testing.T) {
+	ia := addr.MustIAFrom(20, 0xff0000000251)
+	db := &flippableTrustDB{}
+	db.enroll([]*x509.Certificate{iaSubjectCert(t, ia)})
+	store := &stallingDirectory{arrived: make(chan struct{}), release: make(chan struct{})}
+	release := sync.OnceFunc(func() { close(store.release) })
+	relay := newSilentRelay(t)
+	a, _ := newTestWireguard(t, ia, db, func(cfg *Config) {
+		cfg.Store = store
+		cfg.DERP = relay
+	})
+	t.Cleanup(release)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	returned := make(chan error, 1)
+	go func() { returned <- a.Run(ctx) }()
+
+	// A sync pass's diff raises the peer's device and its drain.
+	a.applyDirectory(ctx, Directory{Nodes: []Entry{{
+		IA:        addr.MustIAFrom(20, 0xff0000000252),
+		PublicKey: mustPubKey(0x52),
+		Overlay:   netip.MustParsePrefix("100.64.52.0/24"),
+	}}})
+	if len(a.MeshPeers()) != 1 {
+		t.Fatal("the peer's mesh device did not come up")
+	}
+	tick := time.NewTicker(10 * time.Millisecond)
+	defer tick.Stop()
+	bound := time.After(10 * time.Second)
+	for !relayConnected(a.bridge) {
+		select {
+		case <-tick.C:
+		case <-bound:
+			t.Fatal("the relay presence never connected")
+		}
+	}
+	select {
+	case <-store.arrived:
+	case <-bound:
+		t.Fatal("no publication reached the store")
+	}
+
+	cancel()
+	select {
+	case <-returned:
+		t.Fatal("Run returned while a publication was in flight")
+	case <-time.After(100 * time.Millisecond):
+	}
+	release()
+	select {
+	case err := <-returned:
+		if err != nil {
+			t.Errorf("Run = %v, want nil", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Run did not return once its loops could")
+	}
+	if relayConnected(a.bridge) {
+		t.Error("the relay presence held its connection after Run returned")
+	}
+	for name, done := range map[string]chan struct{}{
+		"mesh": a.mesh.done, "host": a.host.done,
+	} {
+		select {
+		case <-done:
+		default:
+			t.Errorf("the %s socket's reader outlived Run", name)
+		}
+	}
+	assertReadsClosed(t, "the directory socket after Run", a.dirServe)
+	hostAddr := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: int(a.HostPort())}
+	if held, err := net.ListenUDP("udp", hostAddr); err == nil {
+		_ = held.Close()
+		t.Error("Run released the host port New bound")
+	}
+	if store.closed.Load() {
+		t.Error("Run closed the store its borrower serves from")
+	}
+
+	a.Close()
+	held, err := net.ListenUDP("udp", hostAddr)
+	if err != nil {
+		t.Fatalf("binding the host port after Close: %v", err)
+	}
+	_ = held.Close()
+	if !store.closed.Load() {
+		t.Error("Close left the store open")
+	}
+}
+
+// TestWireguardClosesTheDirectoryClientConn checks every other node's
+// directory client: Close closes the SCION conn beneath its transport, Run
+// or no Run.
+func TestWireguardClosesTheDirectoryClientConn(t *testing.T) {
+	a, _ := newTestWireguard(t, addr.MustIAFrom(20, 0xff0000000253),
+		&flippableTrustDB{}, func(cfg *Config) {
+			cfg.Store = nil
+			cfg.CoreRoute = func() *scion.Addr { return nil }
+		})
+	a.Close()
+	assertReadsClosed(t, "the directory client's conn after Close", a.dirConn.conn)
+}
+
+// assertReadsClosed checks that a read on the conn reports it closed; the
+// read deadline set first turns an open conn's wait into a timeout.
+func assertReadsClosed(t *testing.T, what string, conn *scion.Conn) {
+	t.Helper()
+	_ = conn.SetReadDeadline(time.Now())
+	if _, _, err := conn.ReadFrom(make([]byte, 1)); !errors.Is(err, net.ErrClosed) {
+		t.Errorf("a read on %s = %v, want net.ErrClosed", what, err)
 	}
 }
 

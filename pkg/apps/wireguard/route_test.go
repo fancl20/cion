@@ -753,7 +753,7 @@ func TestWireguardWarmMeshPaths(t *testing.T) {
 		}
 		return downs
 	}
-	a.applyDirectory(Directory{Nodes: []Entry{{
+	a.applyDirectory(t.Context(), Directory{Nodes: []Entry{{
 		IA:        dest,
 		PublicKey: mustPubKey(0x36),
 		Overlay:   netip.MustParsePrefix("100.64.36.0/24"),

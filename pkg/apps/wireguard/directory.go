@@ -287,7 +287,7 @@ func (a *App) runSync(ctx context.Context) {
 			slog.Warn("WireGuard directory fetch", "err", err)
 			continue
 		}
-		a.applyDirectory(directory)
+		a.applyDirectory(ctx, directory)
 		a.warmMeshPaths(ctx)
 	}
 }

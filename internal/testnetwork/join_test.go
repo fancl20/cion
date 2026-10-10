@@ -498,16 +498,22 @@ func TestHeldStateRefusesBoot(t *testing.T) {
 // TestCoreRestartsInPlace checks the restart a process supervisor performs:
 // a core stopped and booted again three times on the same state and
 // addresses boots at once each time — the stopped node's every socket
-// released when its Close returns — and a joiner enrolls against the last.
+// released when its Close returns, the WireGuard application's fixed host
+// port among them — and a joiner enrolls against the last.
 func TestCoreRestartsInPlace(t *testing.T) {
 	t.Parallel()
 	wpki := NewWebPKI(t)
 	ipA, ipB := hostSlot(t), hostSlot(t)
 	state := t.TempDir()
 	internal, control := PinnedUDPAddrOn(t, ipA), FreeUDPAddrOn(t, ipA)
+	// The shared host port is drawn from the pinned band, for a WireGuard
+	// interface on the test host may hold the default.
+	hostPort := netip.MustParseAddrPort(PinnedUDPAddrOn(t, ipA)).Port()
 	boot := func() *assemblyNode {
 		return bootAssembly(t, func(cfg *services.NodeConfig) {
 			cfg.Core = true
+			cfg.Applications = []string{"wireguard", "voting"}
+			cfg.AppArguments.Wireguard.HostPort = hostPort
 			cfg.State = state
 			cfg.Internal = internal
 			cfg.Control = control

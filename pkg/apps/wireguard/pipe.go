@@ -1,6 +1,7 @@
 package wireguard
 
 import (
+	"context"
 	"net"
 	"os"
 	"sync"
@@ -115,14 +116,16 @@ func (p *pipe) deliver(pkt []byte) {
 	}
 }
 
-// drain takes packets away from the device until the pipe closes; the router
-// runs it once per device.
-func (p *pipe) drain(fn func(pkt []byte)) {
+// drain takes packets away from the device until the context ends or the
+// pipe closes; the application runs it once per device.
+func (p *pipe) drain(ctx context.Context, fn func(pkt []byte)) {
 	for {
 		select {
 		case pkt := <-p.outbound:
 			fn(pkt)
 		case <-p.closed:
+			return
+		case <-ctx.Done():
 			return
 		}
 	}

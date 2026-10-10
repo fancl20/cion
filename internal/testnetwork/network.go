@@ -767,12 +767,14 @@ func (n *Node) startWireguard(
 		n.WireguardStore = wgCfg.Store
 	}
 	// The application's loop reports through the package logger like the
-	// endpoint's: both outlive the test's own thread.
+	// endpoint's: both outlive the test's own thread. Close releases the
+	// application once Run has returned, as the node's group does.
 	go func() {
 		defer handlePanic()
 		if err := app.Run(ctx); err != nil {
 			slog.Debug("wireguard application exited", "err", err)
 		}
+		app.Close()
 	}()
 }
 

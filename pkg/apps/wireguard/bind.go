@@ -10,6 +10,7 @@
 package wireguard
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"net/netip"
@@ -81,9 +82,13 @@ func newMeshSocket(c *scion.Conn, provider *scion.PathProvider, cnt *counters) *
 }
 
 // run reads the shared socket and delivers every datagram to every opened
-// bind until the socket fails — Close closes it — and every bind's receive
-// function reports it closed.
-func (s *meshSocket) run() {
+// bind until the context ends — its end sets a read deadline that wakes the
+// blocked read — or the socket fails, then finishes the socket, so every
+// bind's receive function reports it closed. The socket stays open for
+// Close.
+func (s *meshSocket) run(ctx context.Context) {
+	stop := context.AfterFunc(ctx, func() { _ = s.conn.SetReadDeadline(time.Now()) })
+	defer stop()
 	buf := make([]byte, 64<<10)
 	for {
 		n, from, err := s.conn.ReadFrom(buf)
@@ -112,8 +117,7 @@ func (s *meshSocket) deliver(data []byte, src conn.Endpoint) {
 	}
 }
 
-// Close stops the read loop by closing the socket; the loop's failure path
-// finishes the socket and wakes every bind.
+// Close closes the socket, failing a read loop still blocked on it.
 func (s *meshSocket) Close() {
 	_ = s.conn.Close()
 }

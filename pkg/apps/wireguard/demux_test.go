@@ -76,7 +76,7 @@ func TestSharedHostPortDemultiplexes(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = udpConn.Close() })
 	socket := newHostSocket(udpConn, cnt)
-	go socket.run()
+	go socket.run(t.Context())
 	nodeAddr := udpConn.LocalAddr().(*net.UDPAddr).AddrPort()
 
 	// The one host device behind the shared port, both hosts as peers.

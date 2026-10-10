@@ -105,14 +105,19 @@ func (b *derpBridge) run(ctx context.Context) {
 }
 
 // connectAndServe dials the relay and feeds the host socket until the
-// connection or the context ends.
+// connection or the context ends: the context's end closes the client,
+// ending a blocked Recv. The attempt closes its client, network monitor,
+// and event bus as it returns.
 func (b *derpBridge) connectAndServe(ctx context.Context) error {
+	bus := eventbus.New()
+	defer bus.Close()
 	// The presence's own monitor, discarded to silence: its logs would say
 	// nothing the connection's own lines do not.
-	netMon, err := netmon.New(eventbus.New(), logger.Discard)
+	netMon, err := netmon.New(bus, logger.Discard)
 	if err != nil {
 		return fmt.Errorf("building the relay monitor: %w", err)
 	}
+	defer func() { _ = netMon.Close() }()
 	client, err := derphttp.NewClient(nodePrivateOf(b.cfg.Key), b.cfg.URL,
 		logger.Logf(func(format string, args ...any) {
 			slog.Debug("WireGuard DERP client: "+format, args...)
@@ -120,6 +125,11 @@ func (b *derpBridge) connectAndServe(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("building the relay client: %w", err)
 	}
+	stop := context.AfterFunc(ctx, func() { _ = client.Close() })
+	defer func() {
+		stop()
+		_ = client.Close()
+	}()
 	if b.cfg.IPv4 != "" {
 		ipv4 := b.cfg.IPv4
 		client.SetURLDialer(func(ctx context.Context, network, _ string) (

@@ -1,10 +1,12 @@
 package wireguard
 
 import (
+	"context"
 	"errors"
 	"net"
 	"net/netip"
 	"sync"
+	"time"
 
 	"golang.zx2c4.com/wireguard/conn"
 )
@@ -38,8 +40,13 @@ func newHostSocket(c *net.UDPConn, cnt *counters) *hostSocket {
 func (s *hostSocket) LocalPort() uint16 { return uint16(s.conn.LocalAddr().(*net.UDPAddr).Port) }
 
 // run reads the shared socket and delivers every datagram to every opened
-// bind until Close retires it.
-func (s *hostSocket) run() {
+// bind until the context ends — its end sets a read deadline that wakes the
+// blocked read — or the socket fails, then finishes the socket, so every
+// bind's receive function reports it closed. The port stays bound for
+// Close.
+func (s *hostSocket) run(ctx context.Context) {
+	stop := context.AfterFunc(ctx, func() { _ = s.conn.SetReadDeadline(time.Now()) })
+	defer stop()
 	buf := make([]byte, 64<<10)
 	for {
 		n, from, err := s.conn.ReadFromUDP(buf)
@@ -68,7 +75,7 @@ func (s *hostSocket) deliver(data []byte, src conn.Endpoint) {
 	}
 }
 
-// Close stops the read loop by closing the socket.
+// Close closes the socket, failing a read loop still blocked on it.
 func (s *hostSocket) Close() {
 	_ = s.conn.Close()
 }
