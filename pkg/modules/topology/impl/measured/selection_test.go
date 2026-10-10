@@ -72,6 +72,15 @@ func scopedEntry(ia addr.IA, rendezvous string) DirectoryEntry {
 	}
 }
 
+// neighborLink builds an entry of the neighbor with link addresses no other
+// ISD-AS of the tests holds: the store refuses two serving entries with one
+// remote address.
+func neighborLink(ia addr.IA, state links.State) *links.Link {
+	l := liveLink(ia, uint16(41000+2*(uint64(ia.AS())&0xff)))
+	l.State = state
+	return l
+}
+
 func newSelFixture(t *testing.T, neighbors ...addr.IA) *selFixture {
 	t.Helper()
 	f := &selFixture{
@@ -84,12 +93,8 @@ func newSelFixture(t *testing.T, neighbors ...addr.IA) *selFixture {
 		echoes:   make(map[string]time.Duration),
 	}
 	for _, ia := range neighbors {
-		if err := f.store.Insert(context.Background(), &links.Link{
-			NeighborIA: ia,
-			Local:      netip.MustParseAddrPort("127.0.0.1:40001"),
-			Remote:     netip.MustParseAddrPort("127.0.0.1:40002"),
-			State:      links.StateEstablished,
-		}); err != nil {
+		if err := f.store.Insert(context.Background(),
+			neighborLink(ia, links.StateEstablished)); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -116,12 +121,8 @@ func newSelFixture(t *testing.T, neighbors ...addr.IA) *selFixture {
 			return f.echoes[routeKey(c)]
 		},
 		establishFn: func(_ context.Context, e DirectoryEntry, _ string) bool {
-			if err := f.store.Insert(context.Background(), &links.Link{
-				NeighborIA: e.IA,
-				Local:      netip.MustParseAddrPort("127.0.0.1:40001"),
-				Remote:     netip.MustParseAddrPort("127.0.0.1:40002"),
-				State:      links.StateEstablished,
-			}); err != nil {
+			if err := f.store.Insert(context.Background(),
+				neighborLink(e.IA, links.StateEstablished)); err != nil {
 				t.Error(err)
 				return false
 			}
@@ -518,12 +519,8 @@ func TestSelectionRetirementCounts(t *testing.T) {
 	if f.state(t, selA) != links.StateEstablished {
 		t.Fatal("an up link retired at the floor")
 	}
-	if err := f.store.Insert(context.Background(), &links.Link{
-		NeighborIA: selB,
-		Local:      netip.MustParseAddrPort("127.0.0.1:40001"),
-		Remote:     netip.MustParseAddrPort("127.0.0.1:40002"),
-		State:      links.StateEstablished,
-	}); err != nil {
+	if err := f.store.Insert(context.Background(),
+		neighborLink(selB, links.StateEstablished)); err != nil {
 		t.Fatal(err)
 	}
 	f.directory = append(f.directory, entryOf(selB))
@@ -877,12 +874,8 @@ func TestSelectionCapCountsCandidates(t *testing.T) {
 	// No route survives an exclusion, so none qualifies a neighbor for
 	// eviction.
 	// A peer's own dial minted a named candidate the sweep has not settled.
-	if err := f.store.Insert(context.Background(), &links.Link{
-		NeighborIA: selC,
-		Local:      netip.MustParseAddrPort("127.0.0.1:40001"),
-		Remote:     netip.MustParseAddrPort("127.0.0.1:40002"),
-		State:      links.StateCandidate,
-	}); err != nil {
+	if err := f.store.Insert(context.Background(),
+		neighborLink(selC, links.StateCandidate)); err != nil {
 		t.Fatal(err)
 	}
 	f.candidate(selD, 8*time.Millisecond, 20*time.Millisecond)
@@ -980,12 +973,7 @@ func TestSelectionSweepGrace(t *testing.T) {
 		f := newSelFixture(t)
 		f.sel.cfg.Window = 50 * time.Millisecond
 		insertCandidate := func(name addr.IA) *links.Link {
-			l := &links.Link{
-				NeighborIA: name,
-				Local:      netip.MustParseAddrPort("127.0.0.1:40001"),
-				Remote:     netip.MustParseAddrPort("127.0.0.1:40002"),
-				State:      links.StateCandidate,
-			}
+			l := neighborLink(name, links.StateCandidate)
 			if err := f.store.Insert(context.Background(), l); err != nil {
 				t.Fatal(err)
 			}

@@ -430,15 +430,14 @@ func liveLink(ia addr.IA, port uint16) *links.Link {
 }
 
 // retiredLink returns a retired entry of the neighbor recording the
-// rendezvous address.
-func retiredLink(ia addr.IA, rendezvous netip.AddrPort) *links.Link {
-	return &links.Link{
-		NeighborIA: ia,
-		Local:      netip.MustParseAddrPort("127.0.0.1:40001"),
-		Remote:     netip.MustParseAddrPort("127.0.0.1:40002"),
-		Rendezvous: rendezvous,
-		State:      links.StateRetired,
-	}
+// rendezvous address, its link addresses at the port and the next: a
+// revival's dial claims the local one, and the acceptor holds one serving
+// entry per remote address.
+func retiredLink(ia addr.IA, rendezvous netip.AddrPort, port uint16) *links.Link {
+	l := liveLink(ia, port)
+	l.Rendezvous = rendezvous
+	l.State = links.StateRetired
+	return l
 }
 
 // statesOf returns the states of the neighbor's entries.
@@ -473,7 +472,7 @@ func TestStrandedRedialRespectsTable(t *testing.T) {
 
 	t.Run("a live neighbor", func(t *testing.T) {
 		z, store := strandedDialer(t, addr.MustIAFrom(20, 0xfd0000000071),
-			retiredLink(rendezvousIA, f.addr), liveLink(rendezvousIA, 40011))
+			retiredLink(rendezvousIA, f.addr, 40001), liveLink(rendezvousIA, 40011))
 		z.dialJoins(context.Background())
 		want := []links.State{links.StateEstablished, links.StateRetired}
 		if got := statesOf(t, store, rendezvousIA); !slices.Equal(got, want) {
@@ -482,7 +481,7 @@ func TestStrandedRedialRespectsTable(t *testing.T) {
 	})
 
 	t.Run("the cap", func(t *testing.T) {
-		entries := []*links.Link{retiredLink(rendezvousIA, f.addr)}
+		entries := []*links.Link{retiredLink(rendezvousIA, f.addr, 40003)}
 		for i := range MaxNeighbors {
 			entries = append(entries,
 				liveLink(addr.MustIAFrom(20, 0xfd0000000080+addr.AS(i)), uint16(40100+2*i)))
@@ -496,7 +495,7 @@ func TestStrandedRedialRespectsTable(t *testing.T) {
 
 	t.Run("an answer naming a live neighbor", func(t *testing.T) {
 		z, store := strandedDialer(t, addr.MustIAFrom(20, 0xfd0000000073),
-			retiredLink(other, f.addr), liveLink(rendezvousIA, 40011))
+			retiredLink(other, f.addr, 40005), liveLink(rendezvousIA, 40011))
 		z.dialJoins(context.Background())
 		if got := statesOf(t, store, other); !slices.Equal(got, retired) {
 			t.Errorf("the entry answered by a live neighbor = %v, want %v", got, retired)
@@ -508,7 +507,7 @@ func TestStrandedRedialRespectsTable(t *testing.T) {
 
 	t.Run("two retired entries of one neighbor", func(t *testing.T) {
 		z, store := strandedDialer(t, addr.MustIAFrom(20, 0xfd0000000074),
-			retiredLink(rendezvousIA, f.addr), retiredLink(rendezvousIA, f.addr))
+			retiredLink(rendezvousIA, f.addr, 40007), retiredLink(rendezvousIA, f.addr, 40009))
 		z.dialJoins(context.Background())
 		want := []links.State{links.StateCandidate, links.StateRetired}
 		if got := statesOf(t, store, rendezvousIA); !slices.Equal(got, want) {

@@ -101,8 +101,10 @@ func (l *Link) Serving() bool {
 // DB is the database of neighbor table entries. Lookup methods report
 // absence as a nil entry with a nil error. A write that would leave two
 // live entries naming one neighbor is refused with ErrDuplicateNeighbor,
-// the check running inside the write: writers that each looked the
-// neighbor up and found none cannot both record it.
+// and one that would leave two serving entries with one remote address
+// with ErrDuplicateRemote. The checks run inside the write: writers that
+// each looked the neighbor up and found none cannot both record it, and the
+// table never holds a link set the data plane refuses.
 type DB interface {
 	// Insert stores a new entry, stamping Created and Updated. An entry
 	// carrying no interface ID is allocated one monotonically from a
@@ -124,21 +126,36 @@ type DB interface {
 	Close() error
 }
 
-// ErrDuplicateNeighbor refuses a write that would leave two live entries
-// naming one neighbor.
-var ErrDuplicateNeighbor = errors.New("a live entry already names the neighbor")
+var (
+	// ErrDuplicateNeighbor refuses a write that would leave two live
+	// entries naming one neighbor.
+	ErrDuplicateNeighbor = errors.New("a live entry already names the neighbor")
+	// ErrDuplicateRemote refuses a write that would leave two serving
+	// entries with one remote address: the data plane carries one link per
+	// remote address and builds no generation from two.
+	ErrDuplicateRemote = errors.New("a serving entry already holds the remote address")
+)
 
-// CheckNeighbor returns ErrDuplicateNeighbor when l is live and names a
-// neighbor that a live entry of entries, other than l's own interface ID,
-// names too — the check each store runs inside the write it guards.
-// Unnamed and retired entries are bound by nothing.
-func CheckNeighbor(entries []*Link, l *Link) error {
-	if !l.Live() || l.NeighborIA.IsZero() {
-		return nil
+// Check returns the error a store refuses l with, given the stored entries
+// other than l's own interface ID — the check each store runs inside the
+// write it guards. ErrDuplicateNeighbor reports a live entry naming the live
+// l's neighbor; unnamed entries name none. ErrDuplicateRemote reports a
+// serving entry holding the serving l's remote address. The neighbor rule
+// reports first: a writer that lost the race to record a neighbor retries
+// on it.
+func Check(entries []*Link, l *Link) error {
+	if l.Live() && !l.NeighborIA.IsZero() {
+		for _, e := range entries {
+			if e.IfID != l.IfID && e.Live() && e.NeighborIA.Equal(l.NeighborIA) {
+				return fmt.Errorf("neighbor %s: %w", l.NeighborIA, ErrDuplicateNeighbor)
+			}
+		}
 	}
-	for _, e := range entries {
-		if e.IfID != l.IfID && e.Live() && e.NeighborIA.Equal(l.NeighborIA) {
-			return fmt.Errorf("neighbor %s: %w", l.NeighborIA, ErrDuplicateNeighbor)
+	if l.Serving() {
+		for _, e := range entries {
+			if e.IfID != l.IfID && e.Serving() && e.Remote == l.Remote {
+				return fmt.Errorf("remote %s: %w", l.Remote, ErrDuplicateRemote)
+			}
 		}
 	}
 	return nil

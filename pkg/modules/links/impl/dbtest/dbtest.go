@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"net/netip"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -29,13 +30,14 @@ type TestableDB interface {
 // has at least one test that calls this suite.
 func Run(t *testing.T, db TestableDB) {
 	tests := map[string]func(*testing.T, TestableDB){
-		"insert and read":       testInsertRead,
-		"update":                testUpdate,
-		"lookups":               testLookups,
-		"allocate skips live":   testAllocateSkipsLive,
-		"preset interface id":   testPresetIfID,
-		"persist across open":   testPersist,
-		"one live per neighbor": testOneLivePerNeighbor,
+		"insert and read":        testInsertRead,
+		"update":                 testUpdate,
+		"lookups":                testLookups,
+		"allocate skips live":    testAllocateSkipsLive,
+		"preset interface id":    testPresetIfID,
+		"persist across open":    testPersist,
+		"one live per neighbor":  testOneLivePerNeighbor,
+		"one serving per remote": testOneServingPerRemote,
 	}
 	for name, test := range tests {
 		t.Run("DB: "+name, func(t *testing.T) {
@@ -57,12 +59,17 @@ var (
 	iaC = addr.MustIAFrom(20, 0xfd0000000003)
 )
 
-// link builds an entry fixture.
+// fixtures counts the entry fixtures built, each taking its own pair of
+// link addresses: the table refuses two serving entries with one remote.
+var fixtures atomic.Uint32
+
+// link builds an entry fixture with link addresses no other fixture holds.
 func link(ia addr.IA, state links.State) *links.Link {
+	port := uint16(40000 + 2*fixtures.Add(1))
 	return &links.Link{
 		NeighborIA: ia,
-		Local:      netip.MustParseAddrPort("127.0.0.1:40001"),
-		Remote:     netip.MustParseAddrPort("127.0.0.1:40002"),
+		Local:      netip.AddrPortFrom(netip.MustParseAddr("127.0.0.1"), port),
+		Remote:     netip.AddrPortFrom(netip.MustParseAddr("127.0.0.1"), port+1),
 		State:      state,
 	}
 }
@@ -306,5 +313,55 @@ func testOneLivePerNeighbor(t *testing.T, db TestableDB) {
 	}
 	if err := db.Update(ctx, &named); err != nil {
 		t.Errorf("naming an entry after a retired neighbor: %v", err)
+	}
+}
+
+// testOneServingPerRemote checks the table's other rule: an insert or an
+// update that would leave two serving entries with one remote address is
+// refused with ErrDuplicateRemote and changes nothing, while an entry's own
+// update passes and a retired entry frees its address.
+func testOneServingPerRemote(t *testing.T, db TestableDB) {
+	ctx := context.Background()
+	a := link(iaA, links.StateEstablished)
+	if err := db.Insert(ctx, a); err != nil {
+		t.Fatal(err)
+	}
+	b := link(iaB, links.StateCandidate)
+	b.Remote = a.Remote
+	if err := db.Insert(ctx, b); !errors.Is(err, links.ErrDuplicateRemote) {
+		t.Errorf("a second serving entry of %v inserted with %v, want ErrDuplicateRemote",
+			a.Remote, err)
+	}
+	c := link(iaC, links.StateCandidate)
+	if err := db.Insert(ctx, c); err != nil {
+		t.Fatal(err)
+	}
+	moved := *c
+	moved.Remote = a.Remote
+	if err := db.Update(ctx, &moved); !errors.Is(err, links.ErrDuplicateRemote) {
+		t.Errorf("an update onto %v returned %v, want ErrDuplicateRemote", a.Remote, err)
+	}
+	if got, err := db.ByNeighbor(ctx, iaB); err != nil || got != nil {
+		t.Errorf("the refused insert left %+v (%v), want nothing", got, err)
+	}
+	got, err := db.ByNeighbor(ctx, iaC)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got == nil || got.Remote != c.Remote {
+		t.Fatalf("the entry after the refused update = %+v, want its remote %v", got, c.Remote)
+	}
+
+	a.RemoteIfID = 7
+	if err := db.Update(ctx, a); err != nil {
+		t.Errorf("updating the address holder's own entry: %v", err)
+	}
+	a.State = links.StateRetired
+	a.Retired = time.Now()
+	if err := db.Update(ctx, a); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Update(ctx, &moved); err != nil {
+		t.Errorf("moving onto a retired entry's address: %v", err)
 	}
 }

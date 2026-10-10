@@ -131,8 +131,8 @@ func New(path string, opts *bbolt.Options) (links.DB, error) {
 // Insert stores a new entry: an entry carrying no interface ID is allocated
 // one monotonically from the persisted counter — IDs of live entries and of
 // entries retired within the holdback are skipped — and one carrying an ID
-// takes it, refused when the ID is held. A live entry naming a neighbor
-// another live entry names is refused.
+// takes it, refused when the ID is held or when links.Check refuses the
+// entry.
 func (b *bboltDB) Insert(ctx context.Context, l *links.Link) error {
 	return b.db.Update(func(tx *bbolt.Tx) error {
 		linksB := tx.Bucket([]byte(linksBucket))
@@ -141,7 +141,7 @@ func (b *bboltDB) Insert(ctx context.Context, l *links.Link) error {
 		if err != nil {
 			return err
 		}
-		if err := checkNeighbor(linksB, l); err != nil {
+		if err := check(linksB, l); err != nil {
 			return err
 		}
 		id := l.IfID
@@ -170,8 +170,7 @@ func (b *bboltDB) Insert(ctx context.Context, l *links.Link) error {
 }
 
 // Update replaces the stored entry with the same interface ID, stamping
-// Updated; refused when the replacement is live and names a neighbor
-// another live entry names.
+// Updated; refused when links.Check refuses the replacement.
 func (b *bboltDB) Update(ctx context.Context, l *links.Link) error {
 	return b.db.Update(func(tx *bbolt.Tx) error {
 		linksB := tx.Bucket([]byte(linksBucket))
@@ -179,7 +178,7 @@ func (b *bboltDB) Update(ctx context.Context, l *links.Link) error {
 		if linksB.Get(key) == nil {
 			return fmt.Errorf("no stored link with interface ID %d", l.IfID)
 		}
-		if err := checkNeighbor(linksB, l); err != nil {
+		if err := check(linksB, l); err != nil {
 			return err
 		}
 		l.Updated = time.Now()
@@ -255,14 +254,14 @@ func decodeAll(linksB *bbolt.Bucket) ([]*links.Link, error) {
 	return out, nil
 }
 
-// checkNeighbor refuses an entry that would leave two live entries naming
-// one neighbor, reading the stored entries in the write's transaction.
-func checkNeighbor(linksB *bbolt.Bucket, l *links.Link) error {
+// check runs links.Check over the stored entries, inside the write's
+// transaction.
+func check(linksB *bbolt.Bucket, l *links.Link) error {
 	stored, err := decodeAll(linksB)
 	if err != nil {
 		return err
 	}
-	return links.CheckNeighbor(stored, l)
+	return links.Check(stored, l)
 }
 
 // heldIfIDs returns the IDs no new entry may take — those of live entries

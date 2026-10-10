@@ -195,6 +195,40 @@ func TestRendezvousLosesRecordRace(t *testing.T) {
 	}
 }
 
+// TestRendezvousRefusesTakenRemote checks a claim at another neighbor's
+// link address: the store refuses a second serving entry with one remote,
+// so a claim minting a candidate there, or retargeting an unproven entry
+// onto it, is turned away and leaves the table as it was — a request no one
+// authenticates cannot hand the data plane a link set it refuses.
+func TestRendezvousRefusesTakenRemote(t *testing.T) {
+	f := newRendezvousFixture(t, nil)
+	taken := liveLink(rendezvousIA, 40001)
+	unproven := liveLink(strangerKeyIA, 40003)
+	unproven.State = links.StateCandidate
+	for _, l := range []*links.Link{taken, unproven} {
+		if err := f.store.Insert(context.Background(), l); err != nil {
+			t.Fatal(err)
+		}
+	}
+	fresh := addr.MustIAFrom(20, 0xfd0000000025)
+	for _, ia := range []addr.IA{fresh, strangerKeyIA} {
+		req := RendezvousRequest{IA: ia, LinkAddr: taken.Remote}
+		_, err := f.handle(req.Marshal(), net.UDPAddrFromAddrPort(taken.Remote))
+		if !errors.Is(err, links.ErrDuplicateRemote) {
+			t.Errorf("a claim of %s at a taken address returned %v, want ErrDuplicateRemote",
+				ia, err)
+		}
+	}
+	if got := statesOf(t, f.store, fresh); len(got) != 0 {
+		t.Errorf("the refused claim left entries %v", got)
+	}
+	got, err := f.store.ByNeighbor(context.Background(), strangerKeyIA)
+	if err != nil || got == nil || got.Remote != unproven.Remote {
+		t.Errorf("the unproven entry after the refused retarget = %+v (%v), want its remote %v",
+			got, err, unproven.Remote)
+	}
+}
+
 // TestRendezvousNoReplyAllocatesNothing checks the negative: a request
 // whose nonce echo never returns allocates nothing on the joiner's side —
 // and a dial to a silent port allocates nothing anywhere.

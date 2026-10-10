@@ -311,7 +311,9 @@ func (r *Rendezvous) Run(ctx context.Context) {
 // reply only ever reaches the socket the request came from. The exchange
 // carries no cryptography — the claim names no identity the acceptor can
 // check — so a claim only ever mints, names, or retargets a candidate: an
-// established entry answers with its recorded side untouched.
+// established entry answers with its recorded side untouched, and a claim
+// at an address another serving link holds is turned away, the store
+// refusing the second.
 func (r *Rendezvous) handle(raw []byte, src *net.UDPAddr) ([]byte, error) {
 	req, err := ParseRendezvousRequest(raw)
 	if err != nil {
