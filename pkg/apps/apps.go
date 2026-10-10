@@ -84,7 +84,8 @@ type Environment struct {
 	// cores submit: the founder's own gates, the pin of what verifies as
 	// submitted, and the sensitive vote it casts on its admission policy's
 	// allow. Nil on every node but the founding core, the one role the
-	// voting application loads on.
+	// voting application loads on; the application refuses to load
+	// without it.
 	TRCDecision voting.Decider
 	// MountControlEndpoint mounts one of the application's handlers on the
 	// node's control endpoint, behind the peer-identity middleware, beside

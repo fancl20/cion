@@ -65,8 +65,7 @@ func newFounderRotationFixture(t *testing.T) *founderRotationFixture {
 		IA:              coreIATest,
 		DB:              f.db,
 		State:           f.dir,
-		Decider:         decider,
-		Issuer:          f.issuer,
+		Roll:            FounderRoll(decider, f.issuer),
 		RetryInterval:   time.Millisecond,
 		InspectInterval: 7 * time.Minute,
 	}
@@ -324,6 +323,10 @@ type authoritativeRotationFixture struct {
 	issuer    *trust.Issuer
 	founderDB trustdb.DB
 	decider   *TRCDecider
+	// remote and caster are the roll's: the founder's TRCs, and the
+	// submission through the founder's decision.
+	remote trust.Remote
+	caster trust.TRCCaster
 	// auth records the founder's admission questions from the onboarding
 	// on: the onboarding's own is cleared.
 	auth *askAuthorizer
@@ -394,17 +397,18 @@ func newAuthoritativeRotationFixture(t *testing.T) *authoritativeRotationFixture
 			t.Fatal(err)
 		}
 	}
+	remote := trcRemote{db: f.db}
+	caster := deciderCaster{decider: decider, presenter: joinerIATest}
 	cfg := RotationConfig{
 		IA:              joinerIATest,
 		DB:              db,
 		State:           state,
-		Remote:          trcRemote{db: f.db},
-		Caster:          deciderCaster{decider: decider, presenter: joinerIATest},
+		Roll:            AuthoritativeRoll(remote, caster),
 		RetryInterval:   time.Millisecond,
 		InspectInterval: 7 * time.Minute,
 	}
 	return &authoritativeRotationFixture{
-		db: db, state: state, cfg: cfg,
+		db: db, state: state, cfg: cfg, remote: remote, caster: caster,
 		issuer: f.issuer, founderDB: f.db, decider: decider, auth: auth,
 	}
 }
@@ -490,8 +494,8 @@ func TestAuthoritativeRotationLostAnswer(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		f := newAuthoritativeRotationFixture(t)
 		ctx := context.Background()
-		caster := &losingCaster{TRCCaster: f.cfg.Caster}
-		f.cfg.Caster = caster
+		caster := &losingCaster{TRCCaster: f.caster}
+		f.cfg.Roll = AuthoritativeRoll(f.remote, caster)
 
 		time.Sleep(trust.VotingValidity - trust.RotationThreshold + time.Minute)
 		f.enroll(t)

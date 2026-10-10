@@ -5,7 +5,6 @@ import (
 	"crypto"
 	"crypto/x509"
 	"encoding/hex"
-	"errors"
 	"log/slog"
 	"slices"
 	"sync"
@@ -34,8 +33,8 @@ type TRCDecider struct {
 	// IA is the founding core's ISD-AS, the ISD the updates belong to.
 	IA addr.IA
 	// Sensitive casts the founder's vote with the sensitive voting key of
-	// the newest pinned TRC's certificate set. Nil where this node decides
-	// nothing — every node but the founding core.
+	// the newest pinned TRC's certificate set. The decision exists on the
+	// founding core alone, built with its sensitive key.
 	Sensitive crypto.Signer
 	// Authorizer is the policy asked before the founder's sensitive vote on
 	// a submission. Nil denies every such vote: the run arguments left the
@@ -67,10 +66,6 @@ func (c *TRCDecider) DecideTRC(
 
 	c.mtx.Lock()
 	defer c.mtx.Unlock()
-	if c.Sensitive == nil {
-		return cppki.SignedTRC{}, errors.New("this control plane casts no TRC updates: " +
-			"the founding core alone holds the sensitive key")
-	}
 	if presenter.IsZero() {
 		return cppki.SignedTRC{}, serrors.New("the submission carries no verified presenter")
 	}
@@ -257,10 +252,6 @@ func (c *TRCDecider) CastLocal(
 
 	c.mtx.Lock()
 	defer c.mtx.Unlock()
-	if c.Sensitive == nil {
-		return errors.New("this control plane casts no TRC updates: " +
-			"the founding core alone holds the sensitive key")
-	}
 	newest, err := c.newestTRC(ctx)
 	if err != nil {
 		return err

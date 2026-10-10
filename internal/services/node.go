@@ -316,11 +316,11 @@ func (n *node) start(gen *generation) {
 	})
 	if n.cfg.role == trust.ASTypeCore {
 		g.Go("core enrollment", supervise.Fatal, func(ctx context.Context) error {
-			return controlplane.RunCoreEnrollment(ctx, controlplane.EnrollmentConfig{
+			return controlplane.RunEnrollment(ctx, controlplane.EnrollmentConfig{
 				IA:            n.ident.ia,
 				DB:            n.trustDB,
 				Key:           n.asKey,
-				Issuer:        n.issuer,
+				Renewal:       controlplane.FounderRenewal(n.issuer),
 				RetryInterval: n.cfg.Pacing.Enrollment,
 			})
 		})
@@ -332,8 +332,7 @@ func (n *node) start(gen *generation) {
 				IA:              n.ident.ia,
 				DB:              n.trustDB,
 				State:           n.cfg.State,
-				Decider:         n.decider,
-				Issuer:          n.issuer,
+				Roll:            controlplane.FounderRoll(n.decider, n.issuer),
 				Threshold:       n.cfg.Pacing.RotationThreshold,
 				RetryInterval:   n.cfg.Pacing.Enrollment,
 				InspectInterval: n.cfg.Pacing.Enrollment,
@@ -341,22 +340,15 @@ func (n *node) start(gen *generation) {
 			return nil
 		})
 	} else {
-		enrollment := controlplane.EnrollmentConfig{
-			IA:            n.ident.ia,
-			DB:            n.trustDB,
-			Key:           n.asKey,
-			Remote:        n.coreClt,
-			RetryInterval: n.cfg.Pacing.Enrollment,
-		}
+		renewal := controlplane.NormalRenewal(n.coreClt)
 		if n.votingKey != nil {
 			// The joining core's loop casts its voting material: once the
 			// chain is issued, it submits the onboarding update to the
 			// core's voting application — over the verified peer channel,
 			// the submission identified by the node's chain.
 			caster := voting.NewSubmitter(n.peerClt.VerifiedClient(), n.coreRoute)
-			enrollment.VotingKey = n.votingKey
-			enrollment.VotingCert = n.votingCert
-			enrollment.Caster = caster
+			renewal = controlplane.AuthoritativeRenewal(n.coreClt, caster,
+				n.votingKey, n.votingCert)
 			// The authoritative core's rotation watch: its certificate rolls
 			// through the same channel its join used, by a regular update
 			// its current key votes on.
@@ -365,8 +357,7 @@ func (n *node) start(gen *generation) {
 					IA:              n.ident.ia,
 					DB:              n.trustDB,
 					State:           n.cfg.State,
-					Remote:          n.coreClt,
-					Caster:          caster,
+					Roll:            controlplane.AuthoritativeRoll(n.coreClt, caster),
 					Threshold:       n.cfg.Pacing.RotationThreshold,
 					RetryInterval:   n.cfg.Pacing.Enrollment,
 					InspectInterval: n.cfg.Pacing.Enrollment,
@@ -377,7 +368,13 @@ func (n *node) start(gen *generation) {
 		// The joining core's onboarding failure is terminal: the loop
 		// returns it, and the node stops with it as the cause.
 		g.Go("enrollment", supervise.Fatal, func(ctx context.Context) error {
-			return controlplane.RunEnrollment(ctx, enrollment)
+			return controlplane.RunEnrollment(ctx, controlplane.EnrollmentConfig{
+				IA:            n.ident.ia,
+				DB:            n.trustDB,
+				Key:           n.asKey,
+				Renewal:       renewal,
+				RetryInterval: n.cfg.Pacing.Enrollment,
+			})
 		})
 	}
 	slog.Info("Serving control endpoint", "port", controlplane.EndpointPort)

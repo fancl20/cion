@@ -407,23 +407,20 @@ func TestTRCDeciderRefusesUnsigned(t *testing.T) {
 	}
 }
 
-// TestTRCDeciderWithoutSensitiveKey checks the node that decides nothing:
-// every submission is refused.
-func TestTRCDeciderWithoutSensitiveKey(t *testing.T) {
+// TestTRCDeciderRefusesUnverifiedPresenter checks the submission no channel
+// verified: a zero presenter is refused, pinning nothing.
+func TestTRCDeciderRefusesUnverifiedPresenter(t *testing.T) {
 	c := newDeciderFixture(t, true)
-	c.decider = &TRCDecider{DB: c.db, IA: coreIATest}
 
-	if _, err := c.decider.DecideTRC(context.Background(), c.joiner.ia,
+	if _, err := c.decider.DecideTRC(context.Background(), addr.IA(0),
 		c.submission(t, c.pred, func() (crypto.Signer, *x509.Certificate) {
 			return c.joiner.key, c.joiner.cert
 		})); err == nil {
 
-		t.Error("a node without the sensitive key decided a submission")
-	}
-	if _, err := c.decider.DecideTRC(context.Background(), addr.IA(0),
-		c.pred); err == nil {
-
 		t.Error("a submission without a verified presenter was decided")
+	}
+	if stored := pinnedAt(t, c.db, 2); !stored.IsZero() {
+		t.Error("the unverified submission pinned something")
 	}
 }
 

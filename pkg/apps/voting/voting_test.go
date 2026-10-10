@@ -150,10 +150,13 @@ func TestSubmitHandsToDecision(t *testing.T) {
 }
 
 // TestSubmitRefusals checks the application's doors: no verified presenter,
-// no TRC, a decision that refuses, and a node whose control plane decides
-// nothing.
+// no TRC, and a decision that refuses. The doors refuse a submission a
+// decision would have allowed.
 func TestSubmitRefusals(t *testing.T) {
 	trc := fixtureTRC(t)
+	allowing := decideFunc(func(context.Context, addr.IA, cppki.SignedTRC) (cppki.SignedTRC, error) {
+		return trc, nil
+	})
 	cases := []struct {
 		name   string
 		ctx    context.Context
@@ -162,11 +165,11 @@ func TestSubmitRefusals(t *testing.T) {
 		want   connect.Code
 	}{
 		{
-			"no verified presenter", context.Background(), nil, trc,
+			"no verified presenter", context.Background(), allowing, trc,
 			connect.CodePermissionDenied,
 		},
 		{
-			"no TRC", presenterContext(joinerIA), nil, cppki.SignedTRC{},
+			"no TRC", presenterContext(joinerIA), allowing, cppki.SignedTRC{},
 			connect.CodeInvalidArgument,
 		},
 		{
@@ -174,10 +177,6 @@ func TestSubmitRefusals(t *testing.T) {
 			decideFunc(func(context.Context, addr.IA, cppki.SignedTRC) (cppki.SignedTRC, error) {
 				return cppki.SignedTRC{}, errors.New("refused")
 			}), trc, connect.CodeFailedPrecondition,
-		},
-		{
-			"no decision on this node", presenterContext(joinerIA), nil, trc,
-			connect.CodeUnimplemented,
 		},
 	}
 	for _, tc := range cases {
@@ -188,6 +187,25 @@ func TestSubmitRefusals(t *testing.T) {
 				t.Errorf("the refusal = %v, want %v", err, tc.want)
 			}
 		})
+	}
+}
+
+// TestNewRefusesNilDecision checks the application refuses to load without
+// the control plane's decision, mounting nothing.
+func TestNewRefusesNilDecision(t *testing.T) {
+	mounted := false
+	_, err := New(Config{
+		IA: coreIA,
+		MountControlEndpoint: func(string, http.Handler) error {
+			mounted = true
+			return nil
+		},
+	})
+	if err == nil {
+		t.Fatal("the application loaded without a decision")
+	}
+	if mounted {
+		t.Error("the refused application mounted its service")
 	}
 }
 

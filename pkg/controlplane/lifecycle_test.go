@@ -96,7 +96,7 @@ func newLifecycleFixture(t *testing.T, f *trustFixture) *lifecycleFixture {
 		IA:            nodeIATest,
 		DB:            db,
 		Key:           key,
-		Remote:        lf.core,
+		Renewal:       NormalRenewal(lf.core),
 		RetryInterval: time.Millisecond,
 	}
 	return lf
@@ -156,7 +156,7 @@ func TestEnrollmentStopsWithoutVotingApp(t *testing.T) {
 			t.Fatal(err)
 		}
 		cfg := lf.cfg
-		cfg.VotingKey, cfg.VotingCert, cfg.Caster = key, cert, absentVoting{}
+		cfg.Renewal = AuthoritativeRenewal(lf.core, absentVoting{}, key, cert)
 
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
@@ -260,9 +260,10 @@ func (unreadableChainsDB) Chains(
 	return nil, errors.New("the chains bucket is unreadable")
 }
 
-// TestEnrollmentPassUnreadableChains checks both loops' pass on a chain read
-// that fails: the pass asks for the retry cadence with nothing enrolled or
-// self-issued, so the loop reads again instead of ending.
+// TestEnrollmentPassUnreadableChains checks the pass on a chain read that
+// fails, under the normal node's renewal and the founder's: the pass asks
+// for the retry cadence with nothing enrolled or self-issued, so the loop
+// reads again instead of ending.
 func TestEnrollmentPassUnreadableChains(t *testing.T) {
 	f := newTrustFixture(t)
 	lf := newLifecycleFixture(t, f)
@@ -276,9 +277,9 @@ func TestEnrollmentPassUnreadableChains(t *testing.T) {
 	if got := lf.core.renewals(); got != 0 {
 		t.Errorf("renewals = %d, want none without a readable chain", got)
 	}
-	cfg.Issuer = f.issuer
-	if got := cfg.corePass(ctx); got != time.Millisecond {
-		t.Errorf("core pass interval = %v, want the retry interval", got)
+	cfg.Renewal = FounderRenewal(f.issuer)
+	if got := enrollPassOf(t, ctx, cfg); got != time.Millisecond {
+		t.Errorf("founder's pass interval = %v, want the retry interval", got)
 	}
 	chains, err := lf.db.Chains(ctx, trustdb.ChainQuery{IA: nodeIATest})
 	if err != nil {
@@ -289,7 +290,7 @@ func TestEnrollmentPassUnreadableChains(t *testing.T) {
 	}
 }
 
-// TestChainSweepPass checks one sweep pass of the enrollment loops' trust
+// TestChainSweepPass checks one sweep pass of the enrollment loop's trust
 // database sweep in a fake-time bubble: a chain still within its validity is
 // never deleted by however many sweeps pass; past expiry and the retention
 // window it leaves, the store answers every valid query exactly as before, and
@@ -428,22 +429,24 @@ func TestBeaconingRunReturnsOnCancel(t *testing.T) {
 	})
 }
 
-// TestCoreEnrollmentPass checks the core's loop: it self-issues on the same
-// rule, keeping a valid chain for the node's lifetime.
+// TestCoreEnrollmentPass checks the pass on the founder's renewal: it
+// self-issues on the same rule, keeping a valid chain for the node's
+// lifetime.
 func TestCoreEnrollmentPass(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		f := newTrustFixture(t)
 		lf := newLifecycleFixture(t, f)
+		ctx := context.Background()
 		cfg := EnrollmentConfig{
 			IA:            nodeIATest,
 			DB:            lf.db,
 			Key:           lf.key,
-			Issuer:        f.issuer,
+			Renewal:       FounderRenewal(f.issuer),
 			RetryInterval: time.Millisecond,
 		}
 
 		// No chain yet: self-issue immediately.
-		if got := cfg.corePass(context.Background()); got != time.Millisecond {
+		if got := enrollPassOf(t, ctx, cfg); got != time.Millisecond {
 			t.Errorf("pass interval = %v, want the retry interval without a chain", got)
 		}
 		chain, err := trust.NewestChain(context.Background(), lf.db, nodeIATest, time.Now())
@@ -452,13 +455,13 @@ func TestCoreEnrollmentPass(t *testing.T) {
 		}
 
 		// Valid for three days: settle to the inspection interval.
-		if got := cfg.corePass(context.Background()); got != cfg.interval(0, ChainInspectInterval) {
+		if got := enrollPassOf(t, ctx, cfg); got != cfg.interval(0, ChainInspectInterval) {
 			t.Errorf("pass interval = %v, want the default inspection interval", got)
 		}
 
 		// Approaching expiry: self-issue again.
 		time.Sleep(trust.ASValidity - trust.ChainRenewalThreshold + time.Minute)
-		if got := cfg.corePass(context.Background()); got != time.Millisecond {
+		if got := enrollPassOf(t, ctx, cfg); got != time.Millisecond {
 			t.Errorf("pass interval = %v, want the retry interval below the threshold", got)
 		}
 		chains, err := lf.db.Chains(context.Background(), trustdb.ChainQuery{IA: nodeIATest})

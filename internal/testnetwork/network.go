@@ -618,27 +618,21 @@ func StartNode(t *testing.T, cfg NodeConfig) *Node {
 		}
 	}()
 
+	var renewal controlplane.Renewal
 	if core {
-		go func() {
-			defer handlePanic()
-			if err := controlplane.RunCoreEnrollment(ctx, controlplane.EnrollmentConfig{
-				IA: ia, DB: trustDB, Key: asKey, Issuer: issuer,
-				RetryInterval: EnrollRetry, Timeout: time.Second,
-			}); err != nil {
-				slog.Error("core enrollment exited", "err", err)
-			}
-		}()
+		renewal = controlplane.FounderRenewal(issuer)
 	} else {
-		go func() {
-			defer handlePanic()
-			if err := controlplane.RunEnrollment(ctx, controlplane.EnrollmentConfig{
-				IA: ia, DB: trustDB, Key: asKey, Remote: coreClt,
-				RetryInterval: EnrollRetry, Timeout: time.Second,
-			}); err != nil {
-				slog.Error("enrollment exited", "err", err)
-			}
-		}()
+		renewal = controlplane.NormalRenewal(coreClt)
 	}
+	go func() {
+		defer handlePanic()
+		if err := controlplane.RunEnrollment(ctx, controlplane.EnrollmentConfig{
+			IA: ia, DB: trustDB, Key: asKey, Renewal: renewal,
+			RetryInterval: EnrollRetry, Timeout: time.Second,
+		}); err != nil {
+			slog.Error("enrollment exited", "err", err)
+		}
+	}()
 	go func() {
 		defer handlePanic()
 		beaconer.Run(ctx)

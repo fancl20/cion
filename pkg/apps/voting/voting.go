@@ -43,8 +43,7 @@ type Config struct {
 	// IA is the node's ISD-AS.
 	IA addr.IA
 	// Decide is the control plane's decision the submissions are handed
-	// to. Nil where the node decides none — every node but the founding
-	// core — and the application answers each submission with its refusal.
+	// to: the founding core's, the one role the application loads on.
 	Decide Decider
 	// MountControlEndpoint mounts one of the application's handlers on the
 	// node's control endpoint, behind the peer-identity middleware.
@@ -66,6 +65,10 @@ var _ interface {
 
 // New mounts the application's submission service on the control endpoint.
 func New(cfg Config) (*App, error) {
+	if cfg.Decide == nil {
+		return nil, errors.New("the voting application needs the control plane's decision " +
+			"to hand the submissions to")
+	}
 	if cfg.MountControlEndpoint == nil {
 		return nil, errors.New("the voting application needs the control endpoint to mount on")
 	}
@@ -116,11 +119,6 @@ func (s *service) Submit(
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInvalidArgument,
 			serrors.Wrap("parsing the submitted TRC", err))
-	}
-	if s.decide == nil {
-		return nil, connect.NewError(connect.CodeUnimplemented,
-			errors.New("this node's control plane casts no TRC updates: "+
-				"the founding core alone holds the sensitive key"))
 	}
 	pinned, err := s.decide.DecideTRC(ctx, presenter, trc)
 	if err != nil {

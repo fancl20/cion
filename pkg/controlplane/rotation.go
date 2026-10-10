@@ -16,13 +16,12 @@ import (
 )
 
 // RotationConfig configures the rotation watch of a core: the loop beside
-// the enrollment loops that rolls the trust material the node itself holds —
+// the enrollment loop that rolls the trust material the node itself holds —
 // the founder's sensitive and regular voting certificates and its root
 // certificate, an authoritative core's regular one — before the earliest
 // expiry among them crosses the threshold, or the moment the live keys and
-// the newest TRC's certificates disagree, whatever the calendar says.
-// The founder casts its roll alone, serialized on the decision; the
-// authoritative submits through the channel its join used.
+// the newest TRC's certificates disagree, whatever the calendar says. The
+// Roll carries what the holder adds to the watch.
 type RotationConfig struct {
 	// IA is the core's ISD-AS.
 	IA addr.IA
@@ -35,19 +34,9 @@ type RotationConfig struct {
 	// replacement of the material, such as the eviction of a compromised
 	// key, is seen at the next pass.
 	State string
-	// Decider serializes the founder's own cast and holds the sensitive
-	// signer the roll swaps; the founder's watch alone. Nil on the
-	// authoritative core, whose roll rides the submission channel instead.
-	Decider *TRCDecider
-	// Issuer rekeys under the successor's fresh root; the founder's watch
-	// alone.
-	Issuer *trust.Issuer
-	// Remote resolves the founder's newest TRC; the authoritative's watch
-	// alone.
-	Remote trust.Remote
-	// Caster submits the roll to the founder's voting application; the
-	// authoritative's watch alone.
-	Caster trust.TRCCaster
+	// Roll is the holder's part of the watch: FounderRoll or
+	// AuthoritativeRoll.
+	Roll Roll
 
 	// Threshold overrides trust.RotationThreshold; zero keeps it.
 	Threshold time.Duration
@@ -71,6 +60,117 @@ func (cfg RotationConfig) threshold() time.Duration {
 		return trust.RotationThreshold
 	}
 	return cfg.Threshold
+}
+
+// Roll is a holder's part of the rotation watch RunRotation runs: whether
+// the live material agrees with the certificates the newest TRC names for
+// the node, and how the holder rolls it. FounderRoll and AuthoritativeRoll
+// build the two.
+type Roll interface {
+	// check reads the live material: mismatch reports a live key the
+	// newest TRC's certificate no longer covers, lost a live sensitive key
+	// the newest TRC's sensitive certificate no longer covers.
+	check(cfg RotationConfig, owned []*x509.Certificate) (mismatch, lost bool, err error)
+	// roll performs one roll attempt.
+	roll(ctx context.Context, cfg RotationConfig) error
+}
+
+// FounderRoll is the founding core's roll: its sensitive, regular, and root
+// keys checked, and the roll of all three cast alone inside the decision's
+// CastLocal, serialized with the submissions; once it pins, the decision
+// votes with the fresh sensitive key and the issuer issues under the fresh
+// root.
+func FounderRoll(decider *TRCDecider, issuer *trust.Issuer) Roll {
+	return founderRoll{decider: decider, issuer: issuer}
+}
+
+type founderRoll struct {
+	decider *TRCDecider
+	issuer  *trust.Issuer
+}
+
+func (founderRoll) check(cfg RotationConfig, owned []*x509.Certificate) (bool, bool, error) {
+	keys, err := trust.LoadOrCreateCoreKeys(cfg.State)
+	if err != nil {
+		return false, false, err
+	}
+	var mismatch, lost bool
+	for _, cert := range owned {
+		ct, err := cppki.ValidateCert(cert)
+		if err != nil {
+			return false, false, err
+		}
+		var key crypto.Signer
+		switch ct {
+		case cppki.Sensitive:
+			key = keys.Sensitive
+		case cppki.Regular:
+			key = keys.Regular
+		case cppki.Root:
+			key = keys.Root
+		}
+		if key != nil && !trust.KeyMatchesCert(key, cert) {
+			if ct == cppki.Sensitive {
+				lost = true
+			} else {
+				mismatch = true
+			}
+		}
+	}
+	return mismatch, lost, nil
+}
+
+func (r founderRoll) roll(ctx context.Context, cfg RotationConfig) error {
+	return r.decider.CastLocal(ctx, func(newest cppki.SignedTRC) error {
+		keys, completed, err := trust.RotateCoreKeys(ctx, cfg.DB, cfg.State,
+			cfg.IA, newest)
+		if err != nil {
+			return err
+		}
+		// The node signs with the material the pin names before the disk
+		// catches up: the decision votes with the fresh sensitive key, the
+		// assignment made under the mutex the cast holds, and the issuer
+		// issues under the fresh root. A promotion that fails here
+		// completes at the next pass.
+		r.decider.Sensitive = keys.Sensitive
+		if err := r.issuer.Rekey(keys, completed); err != nil {
+			return err
+		}
+		_, err = trust.PromoteStaged(cfg.State, cfg.IA, completed.TRC)
+		return err
+	})
+}
+
+// AuthoritativeRoll is the authoritative core's roll: its regular voting
+// key checked, and the roll submitted through the caster to the founder's
+// voting application, the channel its join used, the founder's newest TRC
+// resolved through the remote.
+func AuthoritativeRoll(remote trust.Remote, caster trust.TRCCaster) Roll {
+	return authoritativeRoll{remote: remote, caster: caster}
+}
+
+type authoritativeRoll struct {
+	remote trust.Remote
+	caster trust.TRCCaster
+}
+
+func (authoritativeRoll) check(cfg RotationConfig, owned []*x509.Certificate) (bool, bool, error) {
+	key, err := trust.LoadOrCreateVotingKey(cfg.State)
+	if err != nil {
+		return false, false, err
+	}
+	for _, cert := range owned {
+		if ct, err := cppki.ValidateCert(cert); err == nil && ct == cppki.Regular &&
+			!trust.KeyMatchesCert(key, cert) {
+
+			return true, false, nil
+		}
+	}
+	return false, false, nil
+}
+
+func (r authoritativeRoll) roll(ctx context.Context, cfg RotationConfig) error {
+	return trust.RollVotingKey(ctx, cfg.DB, r.remote, r.caster, cfg.IA, cfg.State)
 }
 
 // RunRotation runs the rotation watch of a core: a calm inspection interval
@@ -140,7 +240,7 @@ func (cfg RotationConfig) rotationPass(ctx context.Context) time.Duration {
 		slog.Warn("Voting material approaching expiry; rolling",
 			"isd_as", cfg.IA, "remaining", due.remaining)
 	}
-	if err := cfg.roll(ctx); err != nil {
+	if err := cfg.attemptRoll(ctx); err != nil {
 		slog.Warn("Rolling voting material", "isd_as", cfg.IA, "err", err)
 	} else {
 		slog.Info("Rolled voting material", "isd_as", cfg.IA)
@@ -167,84 +267,31 @@ type materialState struct {
 // materialDue reads the live voting material and reports its state against
 // the certificates the newest TRC names for the node.
 func (cfg RotationConfig) materialDue(owned []*x509.Certificate) (materialState, error) {
-	state := materialState{remaining: time.Until(owned[0].NotAfter)}
+	mismatch, lost, err := cfg.Roll.check(cfg, owned)
+	if err != nil {
+		return materialState{}, err
+	}
+	state := materialState{
+		remaining: time.Until(owned[0].NotAfter),
+		mismatch:  mismatch,
+		lost:      lost,
+	}
 	for _, cert := range owned[1:] {
 		if remaining := time.Until(cert.NotAfter); remaining < state.remaining {
 			state.remaining = remaining
 		}
 	}
-	if cfg.Decider != nil {
-		keys, err := trust.LoadOrCreateCoreKeys(cfg.State)
-		if err != nil {
-			return materialState{}, err
-		}
-		for _, cert := range owned {
-			ct, err := cppki.ValidateCert(cert)
-			if err != nil {
-				return materialState{}, err
-			}
-			var key crypto.Signer
-			switch ct {
-			case cppki.Sensitive:
-				key = keys.Sensitive
-			case cppki.Regular:
-				key = keys.Regular
-			case cppki.Root:
-				key = keys.Root
-			}
-			if key != nil && !trust.KeyMatchesCert(key, cert) {
-				if ct == cppki.Sensitive {
-					state.lost = true
-				} else {
-					state.mismatch = true
-				}
-			}
-		}
-		return state, nil
-	}
-	key, err := trust.LoadOrCreateVotingKey(cfg.State)
-	if err != nil {
-		return materialState{}, err
-	}
-	for _, cert := range owned {
-		if ct, err := cppki.ValidateCert(cert); err == nil && ct == cppki.Regular &&
-			!trust.KeyMatchesCert(key, cert) {
-
-			state.mismatch = true
-		}
-	}
 	return state, nil
 }
 
-// roll performs one roll attempt, bounded like an enrollment attempt: the
-// founder's cast serialized on the decision, the authoritative's submission
-// through the channel its join used.
-func (cfg RotationConfig) roll(ctx context.Context) error {
+// attemptRoll performs one roll attempt the Roll's way, bounded like an
+// enrollment attempt.
+func (cfg RotationConfig) attemptRoll(ctx context.Context) error {
 	timeout := cfg.Timeout
 	if timeout == 0 {
 		timeout = trust.RollTimeout
 	}
 	attemptCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	if cfg.Decider != nil {
-		return cfg.Decider.CastLocal(attemptCtx, func(newest cppki.SignedTRC) error {
-			keys, completed, err := trust.RotateCoreKeys(attemptCtx, cfg.DB, cfg.State,
-				cfg.IA, newest)
-			if err != nil {
-				return err
-			}
-			// The node signs with the material the pin names before the disk
-			// catches up: the decision votes with the fresh sensitive key, the
-			// assignment made under the mutex the cast holds, and the issuer
-			// issues under the fresh root. A promotion that fails here
-			// completes at the next pass.
-			cfg.Decider.Sensitive = keys.Sensitive
-			if err := cfg.Issuer.Rekey(keys, completed); err != nil {
-				return err
-			}
-			_, err = trust.PromoteStaged(cfg.State, cfg.IA, completed.TRC)
-			return err
-		})
-	}
-	return trust.RollVotingKey(attemptCtx, cfg.DB, cfg.Remote, cfg.Caster, cfg.IA, cfg.State)
+	return cfg.Roll.roll(attemptCtx, cfg)
 }
