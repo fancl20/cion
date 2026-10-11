@@ -105,7 +105,11 @@ func dialNoise(t *testing.T, addr string, roots *x509.CertPool,
 }
 
 // noiseHTTP dials the noise channel and wraps it in an HTTP client speaking
-// HTTP/2 over it, the protocol's own grammar.
+// HTTP/2 over it, the protocol's own grammar. The client is one HTTP/2
+// connection over the one noise conn: a pooling transport dials again when a
+// request finds its pool empty, which a fresh connection's delivery can race,
+// and HTTP/2 closes the dialed conn it does not need — here the noise conn
+// itself.
 func noiseHTTP(t *testing.T, addr string, roots *x509.CertPool,
 	control key.MachinePublic) *http.Client {
 
@@ -125,7 +129,12 @@ func noiseHTTP(t *testing.T, addr string, roots *x509.CertPool,
 			return conn, nil
 		},
 	}
-	return &http.Client{Transport: transport}
+	cc, err := transport.NewClientConn(context.Background(), "http", TestDomain+":80")
+	if err != nil {
+		t.Fatalf("opening HTTP/2 over the noise channel: %v", err)
+	}
+	t.Cleanup(func() { _ = cc.Close() })
+	return &http.Client{Transport: cc}
 }
 
 // register posts one registration over the noise channel, returning the
