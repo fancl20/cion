@@ -127,3 +127,20 @@ decorator would signal nothing.
 *   **Integration:** the labs' generation swaps stand as they are: the
     static lab's link removal and the rendezvous labs' joins and promotions
     each land as swaps the traffic survives.
+
+## Implementation history
+
+*   Landed in one commit, as planned: `links.Notifying` beside the
+    contract's helpers ([links.go](/pkg/modules/links/links.go)), the node's
+    store wrapped where it opens it
+    ([controlplane.go](/internal/services/controlplane.go)), and the
+    snapshot without its TTL ([dataplane.go](/internal/services/dataplane.go)).
+*   The selection's `admit` stops returning whether it landed a promotion
+    as well, for its result fed only `promote`'s; `establish` keeps its
+    result, which reports whether the link landed.
+*   The snapshot builds when none is built yet as well as when the version
+    moved, for the version starts at zero: a restart's persisted entries
+    serve at the first read, which `TestLinkTableServesPersistedLinks`
+    checks beside `TestLinkStoreWritesSignal`
+    ([node_test.go](/internal/services/node_test.go)). The decorator's
+    episodes live in [links_test.go](/pkg/modules/links/links_test.go).

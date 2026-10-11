@@ -66,9 +66,6 @@ type Config struct {
 	// CoreRoute resolves the core's endpoint, which the directory's client
 	// rides on non-core nodes.
 	CoreRoute func() *scion.Addr
-	// Notify signals a store change — every mutation lands as a data plane
-	// generation swap.
-	Notify func()
 
 	// Pacing shortens the loops' periods; zero values keep the production
 	// constants. The daemon never sets it — the integration tests do.
@@ -284,7 +281,6 @@ func (z *Provider) Seed(ctx context.Context) error {
 				return err
 			}
 			entries = append(entries, seed)
-			z.notify()
 			slog.Info("Seeded the bootstrapped neighbor", "neighbor", b.reply.IA,
 				"rendezvous", rendezvous)
 			continue
@@ -302,7 +298,6 @@ func (z *Provider) Seed(ctx context.Context) error {
 			return err
 		}
 		entries = append(entries, seed)
-		z.notify()
 		slog.Info("Seeded a bootstrap neighbor", "rendezvous", rendezvous)
 	}
 	return nil
@@ -325,7 +320,6 @@ func (z *Provider) assemble() error {
 		Store:       z.pcs.Store,
 		MaxLinks:    MaxNeighbors,
 		LinkHost:    z.cfg.ControlHost,
-		Changed:     z.cfg.Notify,
 	})
 	if err != nil {
 		return err
@@ -336,7 +330,6 @@ func (z *Provider) assemble() error {
 		MaxLinks:    MaxNeighbors,
 		LinkHost:    z.cfg.ControlHost,
 		MinInterval: z.cfg.Pacing.RendezvousRate,
-		Changed:     z.cfg.Notify,
 	}
 	directoryCfg := NodeDirectoryConfig{
 		IA:              z.pcs.IA,
@@ -448,16 +441,9 @@ func (z *Provider) selectionConfig() SelectionConfig {
 		Link:        &linkClient{peer: z.pcs.Peer},
 		Learn:       z.learn,
 		Evidence:    z.cfg.Evidence,
-		Changed:     z.cfg.Notify,
 		Stranded:    &z.stranded,
 		Interval:    z.cfg.Pacing.Selection,
 		Window:      z.cfg.Pacing.CandidateWindow,
-	}
-}
-
-func (z *Provider) notify() {
-	if z.cfg.Notify != nil {
-		z.cfg.Notify()
 	}
 }
 
@@ -553,7 +539,6 @@ func (z *Provider) dialJoins(ctx context.Context) {
 				slog.Error("Retiring a redundant entry", "err", err)
 				continue
 			}
-			z.notify()
 			slog.Info("Retired an entry whose rendezvous answered for a live neighbor",
 				"neighbor", l.NeighborIA, "interface", l.IfID)
 			continue
@@ -562,7 +547,6 @@ func (z *Provider) dialJoins(ctx context.Context) {
 			slog.Error("Retargeting a seeded neighbor", "err", err)
 			continue
 		}
-		z.notify()
 		slog.Info("Joined a neighbor by rendezvous",
 			"neighbor", l.NeighborIA, "local", l.Local, "remote", l.Remote,
 			"interface", l.IfID)

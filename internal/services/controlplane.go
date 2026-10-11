@@ -19,6 +19,7 @@ import (
 	"github.com/fancl20/cion/internal/supervise"
 	"github.com/fancl20/cion/pkg/apps/voting"
 	"github.com/fancl20/cion/pkg/controlplane"
+	"github.com/fancl20/cion/pkg/modules/links"
 	linkbbolt "github.com/fancl20/cion/pkg/modules/links/impl/bbolt"
 	"github.com/fancl20/cion/pkg/modules/pathdb"
 	pathdbbbolt "github.com/fancl20/cion/pkg/modules/pathdb/impl/bbolt"
@@ -94,7 +95,9 @@ func (n *node) openState(ctx context.Context) error {
 		return fmt.Errorf("opening link DB: %w", err)
 	}
 	n.group.Own("link database", linkStore.Close)
-	n.linkStore = linkStore
+	// Every write to the store, whoever makes it, signals the generation
+	// swap and the link table snapshot's rebuild.
+	n.linkStore = links.Notifying(linkStore, n.notifyLinkChange)
 	return nil
 }
 

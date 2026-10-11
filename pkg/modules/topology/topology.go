@@ -77,7 +77,9 @@ type Pieces struct {
 	IA addr.IA
 	// Store is the neighbor table — the provider's decisions land in it, and
 	// its snapshot is the identity its loops read: the neighbor an
-	// establishment names is the one the link serves.
+	// establishment names is the one the link serves. A write is all it
+	// takes to land a decision: the node's store signals every write, and
+	// the node applies it as a data plane generation swap.
 	Store links.DB
 	// Peer is the channel's client; the in-band link requests ride its
 	// mutually verified side.

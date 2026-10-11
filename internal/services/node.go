@@ -48,8 +48,8 @@ type node struct {
 	// services on the endpoint, and runs its loops under start.
 	topology topology.Provider
 
-	// Link state: the neighbor table as the one source of truth, and the
-	// change signal every mutation lands as a generation swap.
+	// Link state: the neighbor table as the one source of truth, wrapped so
+	// that every write signals linkChanges and lands as a generation swap.
 	linkStore   links.DB
 	linkChanges chan struct{}
 
@@ -66,7 +66,6 @@ type node struct {
 	tableMtx      sync.Mutex
 	tableVersion  uint64
 	tableBuilt    uint64
-	tableAt       time.Time
 	tableSnapshot map[uint16]addr.IA
 
 	// Control plane, assembled by setupControlPlane's phases.
@@ -176,7 +175,6 @@ func (n *node) selectProvider() error {
 		n.topology = filesource.New(filesource.Config{
 			Core:          founding,
 			Path:          n.cfg.LinkSet,
-			Notify:        n.notifyLinkChange,
 			WatchInterval: n.cfg.Pacing.LinkSetPoll,
 		})
 		return nil
@@ -191,7 +189,6 @@ func (n *node) selectProvider() error {
 		},
 		Evidence:  n.linkEvidence,
 		CoreRoute: n.coreRoute,
-		Notify:    n.notifyLinkChange,
 		Pacing: measured.Pacing{
 			RendezvousRate:  n.cfg.Pacing.RendezvousRate,
 			Directory:       n.cfg.Pacing.Directory,

@@ -23,10 +23,12 @@ var (
 	fileIA3 = addr.MustIAFrom(20, 0xfd0000000063)
 )
 
-// fileFixture is a file provider over a memory store and a link-set file.
+// fileFixture is a file provider over a memory store and a link-set file;
+// writes counts the provider's writes, signaled as the node's store
+// signals them.
 type fileFixture struct {
 	store  *memory.DB
-	notify int
+	writes int
 	path   string
 	*Provider
 }
@@ -58,9 +60,9 @@ func newFileFixture(t *testing.T, entries ...Entry) *fileFixture {
 		store: memory.New(),
 		path:  filepath.Join(t.TempDir(), "link-set.json"),
 	}
-	f.Provider = New(Config{Path: f.path, Notify: func() { f.notify++ }})
+	f.Provider = New(Config{Path: f.path})
 	writeLinkSet(t, f.path, entries...)
-	f.Wire(topology.Pieces{Store: f.store})
+	f.Wire(topology.Pieces{Store: links.Notifying(f.store, func() { f.writes++ })})
 	return f
 }
 
@@ -173,8 +175,8 @@ func TestFileSeedEstablishes(t *testing.T) {
 	if err := f.Seed(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if f.notify != 1 {
-		t.Errorf("notifications = %d, want the one for the file's two entries", f.notify)
+	if f.writes != 2 {
+		t.Errorf("writes = %d, want one for each of the file's two entries", f.writes)
 	}
 	e := f.entry(t, fileIA)
 	if e == nil || e.State != links.StateEstablished ||
@@ -190,7 +192,7 @@ func TestFileSeedEstablishes(t *testing.T) {
 // TestFileReconcileChanges checks the poll's reconciliation: an unchanged
 // file writes nothing, an address change is recorded without a new
 // interface ID, an entry absent from the file retires with its interface ID
-// held back, and a changed file notifies exactly one generation swap.
+// held back, and a changed file writes once per change.
 func TestFileReconcileChanges(t *testing.T) {
 	f := newFileFixture(t,
 		Entry{IA: fileIA.String(), Local: "192.0.2.7:5001", Remote: "192.0.2.8:5001"},
@@ -199,6 +201,7 @@ func TestFileReconcileChanges(t *testing.T) {
 		t.Fatal(err)
 	}
 	updated := f.entry(t, fileIA).Updated
+	seeded := f.writes
 
 	// An unchanged file writes nothing — the comparison is the entry's own
 	// addresses against the file's, never a clock, so an immediate pass
@@ -206,15 +209,15 @@ func TestFileReconcileChanges(t *testing.T) {
 	if err := f.reconcile(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if f.notify != 1 {
-		t.Errorf("an unchanged file notified %d more times", f.notify-1)
+	if f.writes != seeded {
+		t.Errorf("an unchanged file wrote %d times", f.writes-seeded)
 	}
 	if got := f.entry(t, fileIA); got.Updated != updated {
 		t.Error("an unchanged file rewrote the entry")
 	}
 
-	// A changed file notifies exactly once and retires the absent entry,
-	// the changed one's addresses recorded without a new interface ID.
+	// A changed file retires the absent entry and records the changed one's
+	// addresses without a new interface ID, one write each.
 	id := f.entry(t, fileIA).IfID
 	id2 := f.entry(t, fileIA2).IfID
 	writeLinkSet(t, f.path,
@@ -225,8 +228,9 @@ func TestFileReconcileChanges(t *testing.T) {
 	if err := f.reconcile(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if f.notify != 2 {
-		t.Errorf("notifications after the change = %d, want exactly one more", f.notify)
+	if got := f.writes - seeded; got != 2 {
+		t.Errorf("writes after the change = %d, want the retirement and the address change",
+			got)
 	}
 	e := f.entry(t, fileIA)
 	if e.State != links.StateEstablished ||

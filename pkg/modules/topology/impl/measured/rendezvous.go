@@ -233,8 +233,6 @@ type RendezvousConfig struct {
 	MaxLinks int
 	// LinkHost is the host link addresses are allocated on.
 	LinkHost netip.Addr
-	// Changed is called after each store mutation.
-	Changed func()
 }
 
 // NewRendezvous binds the rendezvous address.
@@ -380,7 +378,6 @@ func (r *Rendezvous) admit(req RendezvousRequest) (*links.Link, error) {
 				if err := r.cfg.Store.Update(context.Background(), byRemote); err != nil {
 					return nil, err
 				}
-				r.changed()
 				slog.Info("Rendezvous named a candidate", "neighbor", req.IA,
 					"remote", byRemote.Remote, "interface", byRemote.IfID)
 				entry = byRemote
@@ -408,7 +405,6 @@ func (r *Rendezvous) admit(req RendezvousRequest) (*links.Link, error) {
 		if err := r.cfg.Store.Insert(context.Background(), entry); err != nil {
 			return nil, err
 		}
-		r.changed()
 		slog.Info("Rendezvous admitted a candidate", "neighbor", req.IA,
 			"local", entry.Local, "remote", entry.Remote, "interface", entry.IfID)
 	} else if entry.State == links.StateCandidate && entry.Remote != req.LinkAddr {
@@ -418,7 +414,6 @@ func (r *Rendezvous) admit(req RendezvousRequest) (*links.Link, error) {
 		if err := r.cfg.Store.Update(context.Background(), entry); err != nil {
 			return nil, err
 		}
-		r.changed()
 	}
 	return entry, nil
 }
@@ -445,12 +440,6 @@ func (r *Rendezvous) countLinks(keep func(*links.Link) bool) (int, error) {
 		}
 	}
 	return live, nil
-}
-
-func (r *Rendezvous) changed() {
-	if r.cfg.Changed != nil {
-		r.cfg.Changed()
-	}
 }
 
 // RendezvousEcho sends one request run to the target and returns the reply

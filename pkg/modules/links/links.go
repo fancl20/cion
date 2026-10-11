@@ -202,3 +202,34 @@ func Serving(entries []*Link) []*Link {
 	}
 	return out
 }
+
+// Notifying returns db with every successful write signaled: notify runs
+// after each Insert or Update that returns no error, and a refused write,
+// a read, and Close run it never. The node wraps its store with the signal
+// that rebuilds the data plane, so whatever writes the store reloads the
+// node; no writer signals on its own.
+func Notifying(db DB, notify func()) DB {
+	return &notifying{DB: db, notify: notify}
+}
+
+// notifying is the store Notifying returns.
+type notifying struct {
+	DB
+	notify func()
+}
+
+func (n *notifying) Insert(ctx context.Context, l *Link) error {
+	if err := n.DB.Insert(ctx, l); err != nil {
+		return err
+	}
+	n.notify()
+	return nil
+}
+
+func (n *notifying) Update(ctx context.Context, l *Link) error {
+	if err := n.DB.Update(ctx, l); err != nil {
+		return err
+	}
+	n.notify()
+	return nil
+}

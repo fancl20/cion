@@ -38,8 +38,6 @@ type LinkService struct {
 	// MinInterval is the least pause between admissions of one peer; zero
 	// uses the default.
 	MinInterval time.Duration
-	// Changed is called after each store mutation.
-	Changed func()
 
 	limiterOnce sync.Once
 	limiter     sourceLimiter[addr.IA]
@@ -107,7 +105,6 @@ func (s *LinkService) Request(
 	if err != nil {
 		return nil, err
 	}
-	s.changed()
 	slog.Info("Link established", "neighbor", peer, "local", entry.Local,
 		"remote", entry.Remote, "interface", entry.IfID)
 	return connect.NewResponse(&nodev1.LinkReply{
@@ -173,10 +170,4 @@ func liveLinks(entries []*links.Link) int {
 		}
 	}
 	return live
-}
-
-func (s *LinkService) changed() {
-	if s.Changed != nil {
-		s.Changed()
-	}
 }

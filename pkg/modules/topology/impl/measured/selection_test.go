@@ -41,8 +41,10 @@ type selFixture struct {
 	// unset route goes unanswered.
 	echoes      map[string]time.Duration
 	established []addr.IA // the promoted candidates, in order
-	changed     int
-	sel         *selection
+	// writes counts the loop's own writes, signaled through its store as
+	// the node's store signals them; the fixture's writes bypass it.
+	writes int
+	sel    *selection
 }
 
 var (
@@ -105,10 +107,9 @@ func newSelFixture(t *testing.T, neighbors ...addr.IA) *selFixture {
 	}
 	f.sel = &selection{
 		cfg: SelectionConfig{
-			IA:      selIA,
-			Store:   f.store,
-			Changed: func() { f.changed++ },
-			Window:  time.Hour, // the candidate sweep never retires in these
+			IA:     selIA,
+			Store:  links.Notifying(f.store, func() { f.writes++ }),
+			Window: time.Hour, // the candidate sweep never retires in these
 			// The viewer sits on loopback, so the loopback entries below
 			// share its scope and pass the loop's filter.
 			ControlAddr: netip.MustParseAddrPort("127.0.0.1:30042"),
@@ -987,8 +988,8 @@ func TestSelectionNoAction(t *testing.T) {
 	if len(entries) != 2 {
 		t.Fatalf("the table changed on neutral evidence: %v", entries)
 	}
-	if f.changed != 0 {
-		t.Errorf("change notifications = %d, want 0", f.changed)
+	if f.writes != 0 {
+		t.Errorf("the loop wrote %d times on neutral evidence, want none", f.writes)
 	}
 }
 

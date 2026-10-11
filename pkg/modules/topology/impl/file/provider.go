@@ -31,9 +31,6 @@ type Config struct {
 	Core bool
 	// Path is the link-set file's path.
 	Path string
-	// Notify signals a store change — every mutation lands as a data plane
-	// generation swap.
-	Notify func()
 	// WatchInterval overrides the modification-time poll; zero keeps the
 	// constant. The integration tests pace it.
 	WatchInterval time.Duration
@@ -42,12 +39,11 @@ type Config struct {
 // Provider is the static topology provider: a link-set file the operator
 // vouches for, reconciled into the store — an entry named in the file
 // established with its pinned addresses, an entry absent from it retired,
-// every change a data plane generation swap the node already performs. It
-// runs none of
-// the measured machinery: no rendezvous acceptor, no node directory, no
-// selection loop; the entries arrive named and established — the operator's
-// vouch — so liveness and beaconing treat a static link exactly as a
-// measured one, the drafts' exchanges alone crossing the wire.
+// every write a data plane generation swap the node's store signals. It
+// runs none of the measured machinery: no rendezvous acceptor, no node
+// directory, no selection loop; the entries arrive named and established —
+// the operator's vouch — so liveness and beaconing treat a static link
+// exactly as a measured one, the drafts' exchanges alone crossing the wire.
 type Provider struct {
 	cfg Config
 	pcs topology.Pieces
@@ -247,13 +243,12 @@ func (f *Provider) Close() error { return nil }
 // An entry named in the file is then established with its addresses — an
 // unchanged one untouched, an address change recorded without a new
 // interface ID, the ID being the store's key. A pass that changed nothing
-// writes nothing; one that did notifies exactly one generation swap.
+// writes nothing.
 func (f *Provider) reconcile(ctx context.Context) error {
 	store := f.pcs.Store
 	if store == nil {
 		return errors.New("the file provider was wired with no store")
 	}
-	changed := false
 	named := make(map[addr.IA]bool, len(f.entries))
 	for _, e := range f.entries {
 		named[e.ia] = true
@@ -272,7 +267,6 @@ func (f *Provider) reconcile(ctx context.Context) error {
 		if err := store.Update(ctx, l); err != nil {
 			return err
 		}
-		changed = true
 		slog.Info("Retired a link absent from the link-set", "neighbor", l.NeighborIA,
 			"interface", l.IfID)
 	}
@@ -291,7 +285,6 @@ func (f *Provider) reconcile(ctx context.Context) error {
 			}); err != nil {
 				return err
 			}
-			changed = true
 			slog.Info("Established a vouched link", "neighbor", e.ia,
 				"local", e.local, "remote", e.remote)
 			continue
@@ -312,12 +305,8 @@ func (f *Provider) reconcile(ctx context.Context) error {
 		if err := store.Update(ctx, entry); err != nil {
 			return err
 		}
-		changed = true
 		slog.Info("Recorded the link-set's addresses", "neighbor", e.ia,
 			"local", e.local, "remote", e.remote)
-	}
-	if changed && f.cfg.Notify != nil {
-		f.cfg.Notify()
 	}
 	return nil
 }

@@ -103,8 +103,6 @@ type SelectionConfig struct {
 	// verified beacon or an enrollment the node has seen — or the failure of
 	// the read that would tell, which leaves the candidate to the next pass.
 	Evidence func(*links.Link) (bool, error)
-	// Changed is called once per pass that changed the table.
-	Changed func()
 	// Stranded, when set, records the window's finding that the node holds
 	// fewer up links than the floor and no directory candidate answered its
 	// probe — the flag the joiner's dial loop reads to re-dial the
@@ -215,7 +213,7 @@ func (s *selection) pass(ctx context.Context) {
 		slog.Error("Selection reading the link store", "err", err)
 		return
 	}
-	changed := s.sweep(ctx, entries)
+	s.sweep(ctx, entries)
 
 	neighbors := s.neighbors(entries) // established, by IA
 	directory := s.directory()
@@ -269,11 +267,8 @@ func (s *selection) pass(ctx context.Context) {
 		}
 	}
 	s.upLeft = false
-	changed = s.promote(ctx, entries, neighbors, candidates, samples, ts) || changed
-	changed = s.prune(ctx, entries, samples, ts) || changed
-	if changed && s.cfg.Changed != nil {
-		s.cfg.Changed()
-	}
+	s.promote(ctx, entries, neighbors, candidates, samples, ts)
+	s.prune(ctx, entries, samples, ts)
 }
 
 // sweep settles the candidate entries: proven peers are established, and
@@ -286,12 +281,11 @@ func (s *selection) pass(ctx context.Context) {
 // it is spent on named candidates alone — the unnamed entries the probes
 // themselves mint on their targets retire with the window, or the cap they
 // bound would fill with them.
-func (s *selection) sweep(ctx context.Context, entries []*links.Link) bool {
+func (s *selection) sweep(ctx context.Context, entries []*links.Link) {
 	window := s.cfg.Window
 	if window == 0 {
 		window = CandidateWindow
 	}
-	changed := false
 	now := time.Now()
 	for _, l := range entries {
 		if l.State != links.StateCandidate {
@@ -311,17 +305,14 @@ func (s *selection) sweep(ctx context.Context, entries []*links.Link) bool {
 			delete(s.streaks, l.NeighborIA)
 			slog.Info("Candidate proven; link established",
 				"neighbor", l.NeighborIA, "interface", l.IfID)
-			changed = true
 		} else if now.Sub(l.Created) > window {
 			// An echo the context's end cut short is no silence.
 			if s.candidateAlive(ctx, l) || ctx.Err() != nil {
 				continue
 			}
 			s.retire(ctx, l, "candidate window elapsed without a proven peer")
-			changed = true
 		}
 	}
-	return changed
 }
 
 // proven reads the candidate's evidence; without an evidence source no
@@ -652,7 +643,7 @@ func (s *selection) promote(
 	candidates []DirectoryEntry,
 	samples map[addr.IA]sample,
 	ts []tier,
-) bool {
+) {
 
 	live := s.upCount(neighbors)
 	// Rank the reachable candidates: fastest first.
@@ -672,9 +663,10 @@ func (s *selection) promote(
 		if len(reachable) == 0 {
 			slog.Warn("Redundancy floor unmet; no reachable candidate",
 				"neighbors", live, "floor", NeighborFloor)
-			return false
+			return
 		}
-		return s.admit(ctx, entries, neighbors, ts, samples, reachable[0], "the redundancy floor")
+		s.admit(ctx, entries, neighbors, ts, samples, reachable[0], "the redundancy floor")
+		return
 	}
 
 	// A stranded tier: its fastest reachable member, at once. The fastest
@@ -688,7 +680,8 @@ func (s *selection) promote(
 		}
 	}
 	if rescue != nil {
-		return s.admit(ctx, entries, neighbors, ts, samples, *rescue, "its stranded tier")
+		s.admit(ctx, entries, neighbors, ts, samples, *rescue, "its stranded tier")
+		return
 	}
 
 	// The priced cases, sustained — a second route for a single-route tier
@@ -701,7 +694,8 @@ func (s *selection) promote(
 		}
 		if s.streak(e.IA).promote >= PromoteWindows &&
 			samples[e.IA].m.direct <= ratioOf(t.price, DemotionRatio) {
-			return s.admit(ctx, entries, neighbors, ts, samples, e, "a second route for its tier")
+			s.admit(ctx, entries, neighbors, ts, samples, e, "a second route for its tier")
+			return
 		}
 	}
 	for _, e := range reachable {
@@ -709,9 +703,9 @@ func (s *selection) promote(
 			!s.qualifies(e.IA, samples, ts) {
 			continue
 		}
-		return s.admit(ctx, entries, neighbors, ts, samples, e, "its direct link beats its tier's price")
+		s.admit(ctx, entries, neighbors, ts, samples, e, "its direct link beats its tier's price")
+		return
 	}
-	return false
 }
 
 // qualifies reports whether the candidate's sample earns promotion under
@@ -740,7 +734,7 @@ func (s *selection) admit(
 	samples map[addr.IA]sample,
 	e DirectoryEntry,
 	why string,
-) bool {
+) {
 
 	cap := s.cfg.MaxLinks
 	if cap == 0 {
@@ -749,15 +743,15 @@ func (s *selection) admit(
 	if namedLive(entries) >= cap {
 		victim := s.evict(neighbors, ts, samples)
 		if victim == nil {
-			return false
+			return
 		}
 		up := s.linkUp(victim.IfID)
 		if !s.retire(ctx, victim, "displaced by the least-harm eviction") {
-			return false
+			return
 		}
 		s.upLeft = s.upLeft || up
 	}
-	return s.establish(ctx, e, why)
+	s.establish(ctx, e, why)
 }
 
 // evict returns the cap's victim among the retirement-qualified neighbors:
@@ -856,9 +850,8 @@ func (s *selection) prune(
 	entries []*links.Link,
 	samples map[addr.IA]sample,
 	ts []tier,
-) bool {
+) {
 
-	changed := false
 	up := 0
 	for _, l := range entries {
 		if l.State != links.StateEstablished {
@@ -868,13 +861,12 @@ func (s *selection) prune(
 			up++
 			continue
 		}
-		if s.streak(l.NeighborIA).down >= DemoteWindows &&
-			s.retire(ctx, l, "its verdict stayed down") {
-			changed = true
+		if s.streak(l.NeighborIA).down >= DemoteWindows {
+			s.retire(ctx, l, "its verdict stayed down")
 		}
 	}
 	if s.upLeft || up <= NeighborFloor {
-		return changed
+		return
 	}
 	var worst *links.Link
 	var worstHarm, worstDirect time.Duration
@@ -896,9 +888,7 @@ func (s *selection) prune(
 	}
 	if worst != nil && s.retire(ctx, worst, "its tier served no worse without it") {
 		s.upLeft = true
-		changed = true
 	}
-	return changed
 }
 
 // streak returns the peer's damping counters.

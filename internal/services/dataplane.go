@@ -204,21 +204,16 @@ func (n *node) servingLinks(ctx context.Context) ([]*links.Link, error) {
 	return links.Serving(entries), nil
 }
 
-// tableTTL bounds how long a cached link snapshot serves between the
-// change notifications: the writes that do not notify still surface within
-// it.
-const tableTTL = time.Second
-
 // linkTable snapshots the live links' interface IDs and neighbors — the
 // source every consumer of the link set reads: the beaconer's checks and
 // targets, the connections' one-hop egress resolution, and the core
-// route's one-hop shortcut. The snapshot caches: a one-hop send reads it
-// per packet, and every mutation is one notification away; the TTL covers
-// the writes that are not.
+// route's one-hop shortcut. The snapshot caches, for a one-hop send reads
+// it per packet, and rebuilds once the store's signal moved its version:
+// every write to the node's store signals.
 func (n *node) linkTable() map[uint16]addr.IA {
 	n.tableMtx.Lock()
 	defer n.tableMtx.Unlock()
-	if n.tableBuilt == n.tableVersion && time.Since(n.tableAt) < tableTTL {
+	if n.tableSnapshot != nil && n.tableBuilt == n.tableVersion {
 		return n.tableSnapshot
 	}
 	entries, err := n.linkStore.All(context.Background())
@@ -231,7 +226,6 @@ func (n *node) linkTable() map[uint16]addr.IA {
 	}
 	n.tableSnapshot = links.Links(entries)
 	n.tableBuilt = n.tableVersion
-	n.tableAt = time.Now()
 	return n.tableSnapshot
 }
 
@@ -305,8 +299,10 @@ func (n *node) setGeneration(g *generation) {
 	n.gen = g
 }
 
-// notifyLinkChange signals the supervisor a link-store change — every
-// mutation lands as a generation swap — and refreshes the cached snapshot.
+// notifyLinkChange is the link store's signal, run after every write: it
+// moves the cached snapshot's version and wakes the data plane loop, which
+// lands the write as a generation swap. A burst of writes coalesces in the
+// one-slot channel.
 func (n *node) notifyLinkChange() {
 	n.tableMtx.Lock()
 	n.tableVersion++

@@ -2,13 +2,17 @@ package services
 
 import (
 	"errors"
+	"net/netip"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
+	"github.com/scionproto/scion/pkg/addr"
 
 	"github.com/fancl20/cion/internal/supervise"
 	"github.com/fancl20/cion/pkg/controlplane"
 	"github.com/fancl20/cion/pkg/modules/enrollauth"
+	"github.com/fancl20/cion/pkg/modules/links"
+	"github.com/fancl20/cion/pkg/modules/links/impl/memory"
 )
 
 // setupFounderNode assembles a founding core from the minimal run arguments
@@ -115,5 +119,61 @@ func TestSetupFounderRunsTheAuthorizer(t *testing.T) {
 	want := []string{"enrollment", "rotation watch", "enrollment authorizer"}
 	if diff := cmp.Diff(want, roleLoopNames(n)); diff != "" {
 		t.Errorf("the founder's loops (-want +got):\n%s", diff)
+	}
+}
+
+// TestLinkStoreWritesSignal checks the node's link store: a write through
+// it, whoever makes it, wakes the data plane loop, and the entry it writes
+// appears in the link table's next read with no wait.
+func TestLinkStoreWritesSignal(t *testing.T) {
+	n := setupFounderNode(t, func(*NodeConfig) {})
+	if table := n.linkTable(); len(table) != 0 {
+		t.Fatalf("the founder's link table = %v, want empty", table)
+	}
+	select {
+	case <-n.linkChanges:
+	default:
+	}
+	neighbor := addr.MustIAFrom(n.ident.ia.ISD(), 0xfd0000000099)
+	l := &links.Link{
+		NeighborIA: neighbor,
+		Local:      netip.MustParseAddrPort("127.0.0.124:31001"),
+		Remote:     netip.MustParseAddrPort("127.0.0.124:31002"),
+		State:      links.StateEstablished,
+	}
+	if err := n.linkStore.Insert(t.Context(), l); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-n.linkChanges:
+	default:
+		t.Error("the write did not wake the data plane loop")
+	}
+	if got, ok := n.linkTable()[l.IfID]; !ok || !got.Equal(neighbor) {
+		t.Errorf("the link table after the write = %v, want interface %d naming %v",
+			n.linkTable(), l.IfID, neighbor)
+	}
+}
+
+// TestLinkTableServesPersistedLinks checks the link table's first read: the
+// entries a store holds before any write signals, a restart's persisted
+// table, serve at once.
+func TestLinkTableServesPersistedLinks(t *testing.T) {
+	persisted := memory.New()
+	neighbor := addr.MustIAFrom(20, 0xfd0000000099)
+	l := &links.Link{
+		NeighborIA: neighbor,
+		Local:      netip.MustParseAddrPort("127.0.0.124:31001"),
+		Remote:     netip.MustParseAddrPort("127.0.0.124:31002"),
+		State:      links.StateEstablished,
+	}
+	if err := persisted.Insert(t.Context(), l); err != nil {
+		t.Fatal(err)
+	}
+	n := &node{linkChanges: make(chan struct{}, 1)}
+	n.linkStore = links.Notifying(persisted, n.notifyLinkChange)
+	if got, ok := n.linkTable()[l.IfID]; !ok || !got.Equal(neighbor) {
+		t.Errorf("the first link table = %v, want interface %d naming %v",
+			n.linkTable(), l.IfID, neighbor)
 	}
 }
