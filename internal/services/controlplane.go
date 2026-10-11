@@ -267,7 +267,7 @@ func (n *node) setupAuthoritative(ctx context.Context) error {
 }
 
 // setupNormal builds the normal node's one part, the core client. Its loop
-// renews remotely, reporting the pinned TRC's validity.
+// renews remotely.
 func (n *node) setupNormal() error {
 	coreClt, err := n.coreClient()
 	if err != nil {

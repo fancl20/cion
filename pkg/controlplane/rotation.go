@@ -192,9 +192,8 @@ func RunRotation(ctx context.Context, cfg RotationConfig) {
 // rotationPass runs one watch inspection: it returns how long to wait before
 // the next one — the calm inspection interval while the node's material is
 // beyond the threshold and agrees with the pin, the retry cadence while a
-// roll is due or failing, or a promotion is. Beyond the threshold the pass
-// reports what logTRCValidity reports; within it the holder rolls, the report
-// escalating with the expiry while the casts fail.
+// roll is due or failing, or a promotion is. Within the threshold the holder
+// rolls, its log escalating with the expiry while the casts fail.
 func (cfg RotationConfig) rotationPass(ctx context.Context) time.Duration {
 	newest, err := cfg.DB.SignedTRC(ctx, cppki.TRCID{
 		ISD:    cfg.IA.ISD(),

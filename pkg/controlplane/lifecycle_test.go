@@ -8,7 +8,9 @@ import (
 	"crypto/rand"
 	"crypto/x509"
 	"errors"
+	"log/slog"
 	"path/filepath"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -478,5 +480,99 @@ func TestCoreEnrollmentPass(t *testing.T) {
 		if !fresh[0].NotAfter.Equal(chain[0].NotAfter) && !fresh[0].NotAfter.After(chain[0].NotAfter) {
 			t.Error("core chain was not renewed")
 		}
+	})
+}
+
+// recorder is a slog handler keeping every record's level and message.
+type recorder struct {
+	mu      sync.Mutex
+	records []record
+}
+
+// record is one kept log record.
+type record struct {
+	Level   slog.Level
+	Message string
+}
+
+// recordLogs makes a recorder the default logger until the test ends.
+func recordLogs(t *testing.T) *recorder {
+	rec := &recorder{}
+	previous := slog.Default()
+	slog.SetDefault(slog.New(rec))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+	return rec
+}
+
+func (r *recorder) Enabled(context.Context, slog.Level) bool { return true }
+
+func (r *recorder) Handle(_ context.Context, rec slog.Record) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.records = append(r.records, record{Level: rec.Level, Message: rec.Message})
+	return nil
+}
+
+func (r *recorder) WithAttrs([]slog.Attr) slog.Handler { return r }
+
+func (r *recorder) WithGroup(string) slog.Handler { return r }
+
+// logged reports whether a record with the level and message was kept.
+func (r *recorder) logged(level slog.Level, msg string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return slices.Contains(r.records, record{Level: level, Message: msg})
+}
+
+// TestEnrollmentPassReportsTRCValidity checks that every role's pass reports
+// the newest pinned TRC's validity: within a day of its expiry the founder's,
+// the authoritative core's, and the normal node's passes each warn, and past
+// it each logs the error. The TRC's validity is walked through in a fake-time
+// bubble.
+func TestEnrollmentPassReportsTRCValidity(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		f := newTrustFixture(t)
+		ctx := context.Background()
+		state := t.TempDir()
+		votingKey, err := trust.LoadOrCreateVotingKey(state)
+		if err != nil {
+			t.Fatal(err)
+		}
+		votingCert, err := trust.LoadOrCreateVotingCert(state, nodeIATest, votingKey)
+		if err != nil {
+			t.Fatal(err)
+		}
+		core := &fakeCore{issuer: f.issuer, trc: f.trc}
+		roles := []struct {
+			name    string
+			renewal Renewal
+		}{
+			{"founder", FounderRenewal(f.issuer)},
+			{"authoritative core", AuthoritativeRenewal(core, absentVoting{}, votingKey, votingCert)},
+			{"normal node", NormalRenewal(core)},
+		}
+		// passes runs one pass of each role on a database holding the TRC
+		// and no chain, and fails the test unless each logs the message.
+		passes := func(level slog.Level, msg string) {
+			t.Helper()
+			for _, role := range roles {
+				lf := newLifecycleFixture(t, f)
+				if _, err := lf.db.InsertTRC(ctx, f.trc); err != nil {
+					t.Fatal(err)
+				}
+				cfg := lf.cfg
+				cfg.Renewal = role.renewal
+				rec := recordLogs(t)
+				enrollPassOf(t, ctx, cfg)
+				if !rec.logged(level, msg) {
+					t.Errorf("the %s's pass did not log %q at %v", role.name, msg, level)
+				}
+			}
+		}
+
+		time.Sleep(time.Until(f.trc.TRC.Validity.NotAfter) - trust.ChainRenewalThreshold/2)
+		passes(slog.LevelWarn, "Pinned TRC approaching expiry")
+		time.Sleep(trust.ChainRenewalThreshold)
+		passes(slog.LevelError, "Pinned TRC expired")
 	})
 }
