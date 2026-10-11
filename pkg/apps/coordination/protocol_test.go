@@ -37,8 +37,7 @@ func serveCoordination(t *testing.T, a *App, tlsCfg *tls.Config) string {
 	t.Helper()
 	clone := tlsCfg.Clone()
 	clone.NextProtos = []string{"http/1.1"}
-	listener, err := tls.Listen("tcp",
-		fmt.Sprintf("127.0.0.1:%d", freePort(t)), clone)
+	listener, err := tls.Listen("tcp", "127.0.0.1:0", clone)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -46,8 +46,7 @@ func startDownNode(t *testing.T) (n *node, key []byte) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	local := addr.HostIP(netip.MustParseAddr("127.0.0.1"))
-	d, err := NewDataPlane(ia, local, key, provider, []Link{il, el})
+	d, err := NewDataPlane(ia, addr.HostIP(testHost), key, provider, []Link{il, el})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -79,7 +78,7 @@ func TestEgressDownAnswersInterfaceDown(t *testing.T) {
 	a, key := startDownNode(t)
 	bia := addr.MustIAFrom(1, 0xff0000000002)
 
-	app, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	app, err := net.ListenUDP("udp4", net.UDPAddrFromAddrPort(netip.AddrPortFrom(testHost, 0)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -140,7 +139,7 @@ func TestEgressDownNotificationCap(t *testing.T) {
 	a, key := startDownNode(t)
 	bia := addr.MustIAFrom(1, 0xff0000000002)
 
-	app, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	app, err := net.ListenUDP("udp4", net.UDPAddrFromAddrPort(netip.AddrPortFrom(testHost, 0)))
 	if err != nil {
 		t.Fatal(err)
 	}

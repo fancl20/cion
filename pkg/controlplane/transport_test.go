@@ -24,19 +24,18 @@ const (
 
 var testMACKeyBytes = []byte(testMACKey)
 
-// freeUDPAddr returns a loopback UDP address with a port picked by the
-// kernel, so that concurrent test runs do not collide on fixed ports.
+// testHost is a loopback host no other package's tests bind, for the
+// package's fixed-port binds and the ports freeUDPAddr reserves: go test
+// runs the packages in parallel, and on a shared host the endpoint port
+// would collide across packages and a released reservation could be taken
+// before its rebind.
+var testHost = netip.MustParseAddr("127.0.0.125")
+
+// freeUDPAddr returns a UDP address on testHost with a port picked by the
+// kernel and released for the caller's bind.
 func freeUDPAddr(t *testing.T) string {
 	t.Helper()
-	return freeUDPAddrOn(t, netip.MustParseAddr("127.0.0.1"))
-}
-
-// freeUDPAddrOn returns an unused port on the given local address; distinct
-// loopback addresses let several nodes share one test host even with fixed
-// ports.
-func freeUDPAddrOn(t *testing.T, ip netip.Addr) string {
-	t.Helper()
-	c, err := net.ListenUDP("udp4", net.UDPAddrFromAddrPort(netip.AddrPortFrom(ip, 0)))
+	c, err := net.ListenUDP("udp4", net.UDPAddrFromAddrPort(netip.AddrPortFrom(testHost, 0)))
 	if err != nil {
 		t.Fatal(err)
 	}

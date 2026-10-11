@@ -114,16 +114,10 @@ func TestAssembleHTTPSBind(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(app.Close)
-	reserved, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	addr := reserved.Addr().String()
-	_ = reserved.Close()
 	group, _ := supervise.New(context.Background())
 	defer func() { _ = group.Stop() }()
 	n := resolvedNode(t, func(c *NodeConfig) {
-		c.Coordination = &CoordinationOptions{Addr: addr}
+		c.Coordination = &CoordinationOptions{Addr: "127.0.0.1:0"}
 	})
 	n.certMgr = staticCertMgr(t)
 	n.apps = []apps.Loaded{{Name: "coordination", App: app}}

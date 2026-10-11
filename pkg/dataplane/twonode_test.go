@@ -15,11 +15,18 @@ import (
 	"github.com/scionproto/scion/pkg/slayers/path/scion"
 )
 
-// freeUDPAddr returns a loopback UDP address with a port picked by the
-// kernel, so that concurrent test runs do not collide on fixed ports.
+// testHost is a loopback host no other package's tests bind, for the
+// package's fixed-port binds and the ports freeUDPAddr reserves: go test
+// runs the packages in parallel, and on a shared host the endhost port
+// would collide across packages and a released reservation could be taken
+// before its rebind.
+var testHost = netip.MustParseAddr("127.0.0.126")
+
+// freeUDPAddr returns a UDP address on testHost with a port picked by the
+// kernel and released for the caller's bind.
 func freeUDPAddr(tb testing.TB) string {
 	tb.Helper()
-	c, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	c, err := net.ListenUDP("udp4", net.UDPAddrFromAddrPort(netip.AddrPortFrom(testHost, 0)))
 	if err != nil {
 		tb.Fatal(err)
 	}
@@ -35,9 +42,10 @@ type node struct {
 	internal string
 }
 
-// startTwoNodes brings up two directly connected CION nodes:
+// startTwoNodes brings up two directly connected CION nodes, each socket on
+// a free port of testHost:
 //
-//	AS 1-ff00:0:1 (A)  if1 127.0.0.1:31151  if1 127.0.0.1:31152  (B) AS 1-ff00:0:2
+//	AS 1-ff00:0:1 (A)  if1 <---> if1  (B) AS 1-ff00:0:2
 //
 // Both routers use the same forwarding key, as if the key distribution via
 // the control plane had already happened.
@@ -64,8 +72,7 @@ func startTwoNodes(t *testing.T) (a, b *node) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		local := addr.HostIP(netip.MustParseAddr("127.0.0.1"))
-		d, err := NewDataPlane(ia, local, key, provider, []Link{il, el})
+		d, err := NewDataPlane(ia, addr.HostIP(testHost), key, provider, []Link{il, el})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -151,10 +158,10 @@ func scmpPacket(
 		SrcIA:    srcIA,
 		DstIA:    dstIA,
 	}
-	if err := scn.SetSrcAddr(addr.HostIP(netip.MustParseAddr("127.0.0.1"))); err != nil {
+	if err := scn.SetSrcAddr(addr.HostIP(testHost)); err != nil {
 		t.Fatal(err)
 	}
-	if err := scn.SetDstAddr(addr.HostIP(netip.MustParseAddr("127.0.0.1"))); err != nil {
+	if err := scn.SetDstAddr(addr.HostIP(testHost)); err != nil {
 		t.Fatal(err)
 	}
 	scmpL := &slayers.SCMP{TypeCode: slayers.CreateSCMPTypeCode(echoType, 0)}
@@ -176,10 +183,11 @@ func TestTwoNodeSCMPEcho(t *testing.T) {
 	key := []byte("0123456789abcdef")
 	a, b := startTwoNodes(t)
 
-	// The echo server in AS B listens on the endhost port; SCMP echo requests
-	// are delivered to the port carried in the echo identifier.
+	// The echo server in AS B listens on the endhost port, where the data
+	// plane delivers SCMP echo requests; replies go to the port the echo
+	// identifier carries.
 	appB, err := net.ListenUDP("udp4",
-		&net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: EndhostPort})
+		net.UDPAddrFromAddrPort(netip.AddrPortFrom(testHost, EndhostPort)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -187,7 +195,7 @@ func TestTwoNodeSCMPEcho(t *testing.T) {
 
 	// The client in AS A binds an ephemeral port and uses it as echo
 	// identifier so that the reply can be delivered.
-	appA, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	appA, err := net.ListenUDP("udp4", net.UDPAddrFromAddrPort(netip.AddrPortFrom(testHost, 0)))
 	if err != nil {
 		t.Fatal(err)
 	}

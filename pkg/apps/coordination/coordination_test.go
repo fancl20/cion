@@ -102,19 +102,6 @@ func certKeyPEM(t *testing.T, key *ecdsa.PrivateKey) []byte {
 	return pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: der})
 }
 
-// freePort reserves an ephemeral port and releases it for the listener —
-// the port only needs to be free at bind.
-func freePort(t *testing.T) uint16 {
-	t.Helper()
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	port := l.Addr().(*net.TCPAddr).Port
-	_ = l.Close()
-	return uint16(port)
-}
-
 // testNode is one node entry of a test registry.
 func testNode(ia addr.IA, subnet string, endpoint string) wireguard.Entry {
 	return wireguard.Entry{

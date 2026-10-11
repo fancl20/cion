@@ -155,6 +155,23 @@ func (r *recordingRegs) registered(svc addr.SVC) (uint16, bool) {
 	return port, ok
 }
 
+// testHost is a loopback host no other package's tests bind, for the host
+// ports the episodes reserve: go test runs the packages in parallel, and on
+// a shared host a released reservation could be taken before New binds it.
+var testHost = netip.MustParseAddr("127.0.0.128")
+
+// freeHostPort returns a port on testHost picked by the kernel and released
+// for New to bind as the shared host port.
+func freeHostPort(t *testing.T) uint16 {
+	t.Helper()
+	c, err := net.ListenUDP("udp", net.UDPAddrFromAddrPort(netip.AddrPortFrom(testHost, 0)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = c.Close() }()
+	return uint16(c.LocalAddr().(*net.UDPAddr).Port)
+}
+
 // newTestWireguard assembles an application around throwaway sockets: a SCION conn
 // submitting to a sink, the shared host port on an ephemeral one, and the
 // core's store-side directory. The mutations edit the configuration before
@@ -168,21 +185,13 @@ func newTestWireguard(
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = internal.Close() })
-	// Reserve an ephemeral host port, then release it for the application
-	// to bind — the port only needs to be free at construction.
-	hostPort, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
-	if err != nil {
-		t.Fatal(err)
-	}
-	listenPort := uint16(hostPort.LocalAddr().(*net.UDPAddr).Port)
-	_ = hostPort.Close()
 	provider := &scion.PathProvider{IA: ia, DB: &memDB{}}
 	directory := &recordingDirectory{published: make(chan Entry, 16)}
 	regs := &recordingRegs{}
 	cfg := Config{
 		IA:         ia,
-		ListenHost: netip.MustParseAddr("127.0.0.1"),
-		ListenPort: listenPort,
+		ListenHost: testHost,
+		ListenPort: freeHostPort(t),
 		StateDir:   t.TempDir(),
 		Provider:   provider,
 		Engine:     trust.NewEngine(ia, nil, &trust.NetworkProvider{DB: db}),
@@ -477,7 +486,7 @@ func TestWireguardRunJoinsItsLoops(t *testing.T) {
 		}
 	}
 	assertReadsClosed(t, "the directory socket after Run", a.dirServe)
-	hostAddr := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: int(a.HostPort())}
+	hostAddr := net.UDPAddrFromAddrPort(netip.AddrPortFrom(testHost, a.HostPort()))
 	if held, err := net.ListenUDP("udp", hostAddr); err == nil {
 		_ = held.Close()
 		t.Error("Run released the host port New bound")
@@ -528,17 +537,10 @@ func TestWireguardValidatesConfig(t *testing.T) {
 	t.Cleanup(func() { _ = internal.Close() })
 	// An ephemeral host port: the episode validates the configuration's
 	// shape, not the conventional port the run arguments default.
-	held, err := net.ListenUDP("udp",
-		&net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
-	if err != nil {
-		t.Fatal(err)
-	}
-	port := uint16(held.LocalAddr().(*net.UDPAddr).Port)
-	_ = held.Close()
 	base := Config{
 		IA:         ia,
-		ListenHost: netip.MustParseAddr("127.0.0.1"),
-		ListenPort: port,
+		ListenHost: testHost,
+		ListenPort: freeHostPort(t),
 		StateDir:   t.TempDir(),
 		Provider:   &scion.PathProvider{IA: ia},
 		Engine:     trust.NewEngine(ia, nil, nil),

@@ -113,12 +113,18 @@ func (n *testNode) newConn(t *testing.T, port uint16) *Conn {
 	return conn
 }
 
-// freeUDPAddr returns a loopback UDP address with a port picked by the
-// kernel.
+// testHost is a loopback host no other package's tests bind, for the
+// package's fixed-port binds and the ports freeUDPAddr reserves: go test
+// runs the packages in parallel, and on a shared host the endhost port
+// would collide across packages and a released reservation could be taken
+// before its rebind.
+var testHost = netip.MustParseAddr("127.0.0.127")
+
+// freeUDPAddr returns a UDP address on testHost with a port picked by the
+// kernel and released for the caller's bind.
 func freeUDPAddr(t *testing.T) string {
 	t.Helper()
-	c, err := net.ListenUDP("udp4",
-		net.UDPAddrFromAddrPort(netip.AddrPortFrom(netip.MustParseAddr("127.0.0.1"), 0)))
+	c, err := net.ListenUDP("udp4", net.UDPAddrFromAddrPort(netip.AddrPortFrom(testHost, 0)))
 	if err != nil {
 		t.Fatal(err)
 	}

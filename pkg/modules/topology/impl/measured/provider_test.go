@@ -161,8 +161,8 @@ func TestZeroconfMounts(t *testing.T) {
 	}
 	linkPath := "/" + nodev1connect.LinkServiceName + "/"
 	directoryPath := "/" + nodev1connect.DirectoryServiceName + "/"
-	// Hosts no integration lab takes: the testnetwork slots stop at 0x76,
-	// so the package-parallel run holds no rendezvous collision.
+	// Hosts no integration lab takes: the testnetwork pool starts above
+	// 127.0.0.0/24, so the package-parallel run holds no rendezvous collision.
 	if got := joined(t, "127.0.0.119", false); len(got) != 1 || got[0] != linkPath {
 		t.Errorf("a non-core's mounts = %v, want the link service's alone", got)
 	}
