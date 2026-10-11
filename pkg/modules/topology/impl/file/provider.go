@@ -241,11 +241,12 @@ func (f *Provider) Run(ctx context.Context) {
 // Close releases nothing: the provider holds no sockets.
 func (f *Provider) Close() error { return nil }
 
-// reconcile lands the file's link-set in the store: an entry named in the
-// file is established with its addresses — an unchanged one untouched, an
-// address change recorded without a new interface ID, the ID being the
-// store's key — and an entry absent from the file retires, its interface ID
-// held back by the store's existing rule. A pass that changed nothing
+// reconcile lands the file's link-set in the store. An entry absent from
+// the file retires first, its interface ID held back by the store's
+// existing rule, so the addresses it held are free for the file's entries.
+// An entry named in the file is then established with its addresses — an
+// unchanged one untouched, an address change recorded without a new
+// interface ID, the ID being the store's key. A pass that changed nothing
 // writes nothing; one that did notifies exactly one generation swap.
 func (f *Provider) reconcile(ctx context.Context) error {
 	store := f.pcs.Store
@@ -256,6 +257,26 @@ func (f *Provider) reconcile(ctx context.Context) error {
 	named := make(map[addr.IA]bool, len(f.entries))
 	for _, e := range f.entries {
 		named[e.ia] = true
+	}
+	existing, err := store.All(ctx)
+	if err != nil {
+		return err
+	}
+	now := time.Now()
+	for _, l := range existing {
+		if !l.Live() || named[l.NeighborIA] {
+			continue
+		}
+		l.State = links.StateRetired
+		l.Retired = now
+		if err := store.Update(ctx, l); err != nil {
+			return err
+		}
+		changed = true
+		slog.Info("Retired a link absent from the link-set", "neighbor", l.NeighborIA,
+			"interface", l.IfID)
+	}
+	for _, e := range f.entries {
 		entry, err := store.ByNeighbor(ctx, e.ia)
 		if err != nil {
 			return err
@@ -294,24 +315,6 @@ func (f *Provider) reconcile(ctx context.Context) error {
 		changed = true
 		slog.Info("Recorded the link-set's addresses", "neighbor", e.ia,
 			"local", e.local, "remote", e.remote)
-	}
-	existing, err := store.All(ctx)
-	if err != nil {
-		return err
-	}
-	now := time.Now()
-	for _, l := range existing {
-		if !l.Live() || named[l.NeighborIA] {
-			continue
-		}
-		l.State = links.StateRetired
-		l.Retired = now
-		if err := store.Update(ctx, l); err != nil {
-			return err
-		}
-		changed = true
-		slog.Info("Retired a link absent from the link-set", "neighbor", l.NeighborIA,
-			"interface", l.IfID)
 	}
 	if changed && f.cfg.Notify != nil {
 		f.cfg.Notify()

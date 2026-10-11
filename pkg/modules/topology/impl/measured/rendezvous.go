@@ -343,12 +343,13 @@ func (r *Rendezvous) handle(raw []byte, src *net.UDPAddr) ([]byte, error) {
 	// requests for one peer re-answer the first's entry instead of racing
 	// a second into the table. The in-band link service and the selection's
 	// establishment record entries too; the store refuses a neighbor's
-	// second live entry, and a claim that loses that race looks again and
-	// answers with the winner's entry.
+	// second live entry and a second live entry on one local address, and a
+	// claim that loses either race looks again: it answers with the winner's
+	// entry, or mints its own on a fresh address.
 	r.mtx.Lock()
 	defer r.mtx.Unlock()
 	entry, err := r.admit(req)
-	if errors.Is(err, links.ErrDuplicateNeighbor) {
+	if errors.Is(err, links.ErrDuplicateNeighbor) || errors.Is(err, links.ErrDuplicateLocal) {
 		entry, err = r.admit(req)
 	}
 	if err != nil {

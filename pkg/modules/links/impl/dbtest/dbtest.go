@@ -38,6 +38,7 @@ func Run(t *testing.T, db TestableDB) {
 		"persist across open":    testPersist,
 		"one live per neighbor":  testOneLivePerNeighbor,
 		"one serving per remote": testOneServingPerRemote,
+		"one live per local":     testOneLivePerLocal,
 	}
 	for name, test := range tests {
 		t.Run("DB: "+name, func(t *testing.T) {
@@ -363,5 +364,71 @@ func testOneServingPerRemote(t *testing.T, db TestableDB) {
 	}
 	if err := db.Update(ctx, &moved); err != nil {
 		t.Errorf("moving onto a retired entry's address: %v", err)
+	}
+}
+
+// testOneLivePerLocal checks the table's third rule: an insert or an update
+// that would leave two live entries with one local address is refused with
+// ErrDuplicateLocal and changes nothing, while an entry's own update passes,
+// a retired entry frees its address, and the neighbor and remote rules
+// report first.
+func testOneLivePerLocal(t *testing.T, db TestableDB) {
+	ctx := context.Background()
+	a := link(iaA, links.StateEstablished)
+	if err := db.Insert(ctx, a); err != nil {
+		t.Fatal(err)
+	}
+	// A seeded entry holds its local address before its remote arrives.
+	b := link(iaB, links.StateCandidate)
+	b.Local, b.Remote = a.Local, netip.AddrPort{}
+	if err := db.Insert(ctx, b); !errors.Is(err, links.ErrDuplicateLocal) {
+		t.Errorf("a second live entry on %v inserted with %v, want ErrDuplicateLocal",
+			a.Local, err)
+	}
+	c := link(iaC, links.StateCandidate)
+	if err := db.Insert(ctx, c); err != nil {
+		t.Fatal(err)
+	}
+	moved := *c
+	moved.Local = a.Local
+	if err := db.Update(ctx, &moved); !errors.Is(err, links.ErrDuplicateLocal) {
+		t.Errorf("an update onto %v returned %v, want ErrDuplicateLocal", a.Local, err)
+	}
+	if got, err := db.ByNeighbor(ctx, iaB); err != nil || got != nil {
+		t.Errorf("the refused insert left %+v (%v), want nothing", got, err)
+	}
+	got, err := db.ByNeighbor(ctx, iaC)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got == nil || got.Local != c.Local {
+		t.Fatalf("the entry after the refused update = %+v, want its local %v", got, c.Local)
+	}
+
+	// The neighbor rule reports first, then the remote rule.
+	twin := link(iaA, links.StateCandidate)
+	twin.Local = a.Local
+	if err := db.Insert(ctx, twin); !errors.Is(err, links.ErrDuplicateNeighbor) {
+		t.Errorf("a second entry of %s on its local address inserted with %v, "+
+			"want ErrDuplicateNeighbor", iaA, err)
+	}
+	both := link(iaB, links.StateCandidate)
+	both.Local, both.Remote = a.Local, a.Remote
+	if err := db.Insert(ctx, both); !errors.Is(err, links.ErrDuplicateRemote) {
+		t.Errorf("an entry on both of %s's addresses inserted with %v, want ErrDuplicateRemote",
+			iaA, err)
+	}
+
+	a.RemoteIfID = 7
+	if err := db.Update(ctx, a); err != nil {
+		t.Errorf("updating the address holder's own entry: %v", err)
+	}
+	a.State = links.StateRetired
+	a.Retired = time.Now()
+	if err := db.Update(ctx, a); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Insert(ctx, b); err != nil {
+		t.Errorf("a new entry on a retired entry's address: %v", err)
 	}
 }

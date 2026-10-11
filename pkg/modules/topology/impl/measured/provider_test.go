@@ -562,3 +562,71 @@ func TestJoinDialRetiresRedundantEntry(t *testing.T) {
 			got, want)
 	}
 }
+
+// TestStrandedRedialFreshAddress checks a revival's local address: a
+// retired entry whose address a live entry now holds — a later allocation
+// drew the retired entry's port — revives on a fresh address, the one its
+// re-dial claims and the acceptor records, while one whose address no live
+// entry holds revives on it.
+func TestStrandedRedialFreshAddress(t *testing.T) {
+	f := newRendezvousFixture(t, func(cfg *RendezvousConfig) {
+		cfg.IA = rendezvousIA
+	})
+	// revive runs a stranded dial pass over the entries and returns the
+	// retired entry as the pass left it and the acceptor's entry for the
+	// dialer.
+	revive := func(t *testing.T, dialer addr.IA, retired *links.Link,
+		others ...*links.Link) (*links.Link, *links.Link) {
+		t.Helper()
+		z, store := strandedDialer(t, dialer, append([]*links.Link{retired}, others...)...)
+		z.dialJoins(context.Background())
+		entries, err := store.All(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		var revived *links.Link
+		for _, l := range entries {
+			if l.IfID == retired.IfID {
+				revived = l
+			}
+		}
+		if revived == nil {
+			t.Fatal("the retired entry vanished")
+		}
+		accepted, err := f.store.ByNeighbor(context.Background(), dialer)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return revived, accepted
+	}
+
+	t.Run("held", func(t *testing.T) {
+		retired := retiredLink(rendezvousIA, f.addr, 40001)
+		holder := liveLink(addr.MustIAFrom(20, 0xfd0000000076), 40031)
+		holder.Local = retired.Local
+		revived, accepted := revive(t, addr.MustIAFrom(20, 0xfd0000000077), retired, holder)
+		if revived.State != links.StateCandidate {
+			t.Fatalf("the revived entry's state = %v, want a candidate", revived.State)
+		}
+		if !revived.Local.IsValid() || revived.Local == retired.Local {
+			t.Errorf("the revived entry lies on %v, want a fresh address, not the held %v",
+				revived.Local, retired.Local)
+		}
+		if accepted == nil || accepted.Remote != revived.Local {
+			t.Errorf("the acceptor's entry = %+v, want it aimed at the revived %v",
+				accepted, revived.Local)
+		}
+	})
+
+	t.Run("free", func(t *testing.T) {
+		retired := retiredLink(rendezvousIA, f.addr, 40003)
+		revived, accepted := revive(t, addr.MustIAFrom(20, 0xfd0000000078), retired)
+		if revived.State != links.StateCandidate || revived.Local != retired.Local {
+			t.Errorf("the revived entry = %v on %v, want a candidate on its own %v",
+				revived.State, revived.Local, retired.Local)
+		}
+		if accepted == nil || accepted.Remote != retired.Local {
+			t.Errorf("the acceptor's entry = %+v, want it aimed at %v", accepted, retired.Local)
+		}
+	})
+}

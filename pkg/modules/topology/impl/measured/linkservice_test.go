@@ -114,6 +114,79 @@ func TestLinkServiceLosesRecordRace(t *testing.T) {
 	}
 }
 
+// squattedStore is a memory link store whose next insert of an entry with
+// a local address finds the address taken once armed: the view of a writer
+// that drew a port another writer recorded between the draw and the insert.
+// The squatter is a seeded entry, live with no remote, so only the local
+// rule refuses the writer.
+type squattedStore struct {
+	*memory.DB
+	armed    atomic.Bool
+	squatter *links.Link
+}
+
+func (s *squattedStore) Insert(ctx context.Context, l *links.Link) error {
+	if l.Local.IsValid() && s.armed.CompareAndSwap(true, false) {
+		s.squatter = &links.Link{Local: l.Local, State: links.StateCandidate}
+		if err := s.DB.Insert(ctx, s.squatter); err != nil {
+			return err
+		}
+	}
+	return s.DB.Insert(ctx, l)
+}
+
+// lostPortRace checks the outcome of a writer's lost race for the port it
+// drew: the squatter's entry stands on the address, and the neighbor's
+// entry, the one the writer answered with, lies on another.
+func lostPortRace(t *testing.T, store *squattedStore, ia addr.IA, answered netip.AddrPort) {
+	t.Helper()
+	if store.squatter == nil {
+		t.Fatal("the writer inserted no entry on a drawn address")
+	}
+	entries, err := store.All(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var squatter, entry *links.Link
+	for _, l := range entries {
+		switch {
+		case l.IfID == store.squatter.IfID:
+			squatter = l
+		case l.Live() && l.NeighborIA.Equal(ia):
+			entry = l
+		}
+	}
+	if squatter == nil || !squatter.Live() || squatter.Local != store.squatter.Local {
+		t.Errorf("the squatter's entry = %+v, want it live on %v", squatter, store.squatter.Local)
+	}
+	if entry == nil {
+		t.Fatalf("no live entry of %s", ia)
+	}
+	if !entry.Local.IsValid() || entry.Local == store.squatter.Local {
+		t.Errorf("the entry of %s lies on %v, want another address than the squatter's",
+			ia, entry.Local)
+	}
+	if answered != entry.Local {
+		t.Errorf("the writer answered %v, want its entry's %v", answered, entry.Local)
+	}
+}
+
+// TestLinkServiceLosesPortRace checks a request that loses the race for
+// the port it drew: another writer records an entry on that address
+// between the service's draw and its insert, the store refuses a second
+// live entry on it, and the request records its own entry on a fresh
+// address.
+func TestLinkServiceLosesPortRace(t *testing.T) {
+	store := &squattedStore{DB: memory.New()}
+	svc := newLinkService(t, func(s *LinkService) { s.Store = store })
+	store.armed.Store(true)
+	reply, err := linkRequest(context.Background(), svc, linkIA, "127.0.0.1:4242", 9)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lostPortRace(t, store, linkIA, netip.MustParseAddrPort(reply.LocalAddr))
+}
+
 // TestLinkServiceAdmits checks the in-band establishment: the authenticated
 // peer's link is recorded as established with both sides' addresses, the
 // reply carrying the acceptor's. The rate cap reads the clock, so the test

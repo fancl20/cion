@@ -1216,11 +1216,15 @@ func TestSelectionRendezvousGuard(t *testing.T) {
 			Learn:    func(host netip.Addr) { learned = append(learned, host) },
 		},
 	}
+	// Each entry takes its own local address: the store refuses two live
+	// entries on one.
+	port := uint16(40000)
 	entry := func(t *testing.T, claimed addr.IA) *links.Link {
 		t.Helper()
+		port++
 		l := &links.Link{
 			NeighborIA: claimed,
-			Local:      netip.MustParseAddrPort("127.0.0.1:40001"),
+			Local:      netip.AddrPortFrom(netip.MustParseAddr("127.0.0.1"), port),
 			State:      links.StateCandidate,
 		}
 		if err := s.cfg.Store.Insert(context.Background(), l); err != nil {
@@ -1290,4 +1294,23 @@ func TestSelectionLosesRecordRace(t *testing.T) {
 	if got := statesOf(t, store.DB, selA); !slices.Equal(got, want) {
 		t.Errorf("the neighbor's entries = %v, want the recorded one alone", got)
 	}
+}
+
+// TestSelectionLosesPortRace checks a promotion that loses the race for
+// the port it drew: another writer records an entry on that address
+// between the selection's draw and its insert, the store refuses a second
+// live entry on it, and the promotion records its own entry on a fresh
+// address.
+func TestSelectionLosesPortRace(t *testing.T) {
+	store := &squattedStore{DB: memory.New()}
+	s := &selection{cfg: SelectionConfig{
+		Store:    store,
+		LinkHost: netip.MustParseAddr("127.0.0.1"),
+	}}
+	store.armed.Store(true)
+	entry, err := s.ownEntry(context.Background(), entryOf(selA))
+	if err != nil {
+		t.Fatal(err)
+	}
+	lostPortRace(t, store, selA, entry.Local)
 }

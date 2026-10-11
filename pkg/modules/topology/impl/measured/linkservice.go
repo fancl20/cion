@@ -94,12 +94,14 @@ func (s *LinkService) Request(
 	}
 
 	// The rendezvous acceptor and the selection's establishment record
-	// entries too; the store refuses a neighbor's second live entry, and a
-	// request that loses that race looks again and refreshes the winner's.
+	// entries too; the store refuses a neighbor's second live entry and a
+	// second live entry on one local address, and a request that loses
+	// either race looks again: it refreshes the winner's entry, or records
+	// its own on a fresh address.
 	s.mtx.Lock()
 	defer s.mtx.Unlock()
 	entry, err := s.record(ctx, peer, linkAddr, uint16(req.Msg.IfId))
-	if errors.Is(err, links.ErrDuplicateNeighbor) {
+	if errors.Is(err, links.ErrDuplicateNeighbor) || errors.Is(err, links.ErrDuplicateLocal) {
 		entry, err = s.record(ctx, peer, linkAddr, uint16(req.Msg.IfId))
 	}
 	if err != nil {

@@ -101,10 +101,11 @@ func (l *Link) Serving() bool {
 // DB is the database of neighbor table entries. Lookup methods report
 // absence as a nil entry with a nil error. A write that would leave two
 // live entries naming one neighbor is refused with ErrDuplicateNeighbor,
-// and one that would leave two serving entries with one remote address
-// with ErrDuplicateRemote. The checks run inside the write: writers that
-// each looked the neighbor up and found none cannot both record it, and the
-// table never holds a link set the data plane refuses.
+// one that would leave two serving entries with one remote address with
+// ErrDuplicateRemote, and one that would leave two live entries with one
+// local address with ErrDuplicateLocal. The checks run inside the write:
+// writers that each looked the neighbor up and found none cannot both
+// record it, and the table never holds a link set the data plane refuses.
 type DB interface {
 	// Insert stores a new entry, stamping Created and Updated. An entry
 	// carrying no interface ID is allocated one monotonically from a
@@ -134,15 +135,22 @@ var (
 	// entries with one remote address: the data plane carries one link per
 	// remote address and builds no generation from two.
 	ErrDuplicateRemote = errors.New("a serving entry already holds the remote address")
+	// ErrDuplicateLocal refuses a write that would leave two live entries
+	// with one local address: every generation binds each serving entry's
+	// local address, and a seeded entry holds its own before its remote
+	// arrives.
+	ErrDuplicateLocal = errors.New("a live entry already holds the local address")
 )
 
 // Check returns the error a store refuses l with, given the stored entries
 // other than l's own interface ID — the check each store runs inside the
 // write it guards. ErrDuplicateNeighbor reports a live entry naming the live
 // l's neighbor; unnamed entries name none. ErrDuplicateRemote reports a
-// serving entry holding the serving l's remote address. The neighbor rule
-// reports first: a writer that lost the race to record a neighbor retries
-// on it.
+// serving entry holding the serving l's remote address. ErrDuplicateLocal
+// reports a live entry holding the live l's local address. The rules report
+// in that order: a writer that lost the race to record a neighbor retries on
+// it, a claim on a held remote is refused whatever its local address, and a
+// writer that drew a local address another recorded first draws again.
 func Check(entries []*Link, l *Link) error {
 	if l.Live() && !l.NeighborIA.IsZero() {
 		for _, e := range entries {
@@ -155,6 +163,13 @@ func Check(entries []*Link, l *Link) error {
 		for _, e := range entries {
 			if e.IfID != l.IfID && e.Serving() && e.Remote == l.Remote {
 				return fmt.Errorf("remote %s: %w", l.Remote, ErrDuplicateRemote)
+			}
+		}
+	}
+	if l.Live() && l.Local.IsValid() {
+		for _, e := range entries {
+			if e.IfID != l.IfID && e.Live() && e.Local == l.Local {
+				return fmt.Errorf("local %s: %w", l.Local, ErrDuplicateLocal)
 			}
 		}
 	}

@@ -1014,11 +1014,12 @@ func (s *selection) establishByRendezvous(
 // ownEntry returns the local side of a promoted candidate, allocating the
 // link address and interface ID of a new one. The rendezvous acceptor and
 // the in-band link service record entries too; the store refuses a
-// neighbor's second live entry, and a promotion that loses that race looks
-// again and proceeds on the winner's.
+// neighbor's second live entry and a second live entry on one local
+// address, and a promotion that loses either race looks again: it proceeds
+// on the winner's entry, or records its own on a fresh address.
 func (s *selection) ownEntry(ctx context.Context, e DirectoryEntry) (*links.Link, error) {
 	entry, err := s.recordEntry(ctx, e)
-	if errors.Is(err, links.ErrDuplicateNeighbor) {
+	if errors.Is(err, links.ErrDuplicateNeighbor) || errors.Is(err, links.ErrDuplicateLocal) {
 		entry, err = s.recordEntry(ctx, e)
 	}
 	return entry, err

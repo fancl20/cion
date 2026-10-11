@@ -476,12 +476,17 @@ func (z *Provider) runJoinDials(ctx context.Context) {
 // retired entry revivable admits re-dials its peer's rendezvous socket too,
 // and an answered re-dial revives the entry as a candidate, the state flip
 // and the recorded sides, for the sweep to settle by the peer's evidence,
-// exactly as it settles a joiner's. An answer naming a neighbor the table
-// holds live revives nothing, and the store refuses to name a live entry
-// after it: that entry retires, for its re-dials would retarget the peer's
-// unproven entry for this node to an address no generation serves. Each
-// check reads the table as the pass's earlier revivals left it. An
-// unanswered re-dial costs a UDP round trip and changes nothing.
+// exactly as it settles a joiner's. A revival keeps the entry's local
+// address unless a live entry now holds it — a later allocation drew the
+// retired entry's port — and then claims a fresh one, the address the
+// revived entry serves. An answer naming a neighbor the table holds live
+// revives nothing, and the store refuses to name a live entry after it:
+// that entry retires, for its re-dials would retarget the peer's unproven
+// entry for this node to an address no generation serves. A revival the
+// store refuses — its neighbor or its address recorded live meanwhile —
+// waits for the next pass. Each check reads the table as the pass's earlier
+// revivals left it. An unanswered re-dial costs a UDP round trip and
+// changes nothing.
 func (z *Provider) dialJoins(ctx context.Context) {
 	entries, err := z.pcs.Store.All(ctx)
 	if err != nil {
@@ -494,25 +499,35 @@ func (z *Provider) dialJoins(ctx context.Context) {
 		if !target.IsValid() {
 			continue
 		}
-		if l.Live() {
+		revival := !l.Live()
+		if !revival {
 			if l.Remote.IsValid() {
 				continue // retargeted already: waiting on the peer's evidence
 			}
 		} else if !stranded || !revivable(entries, l) {
 			continue
 		}
-		reply, _, err := RendezvousEcho(ctx, z.cfg.ControlHost, target, z.pcs.IA, l.Local)
+		local := l.Local
+		if revival && localHeld(entries, l) {
+			fresh, err := AllocateLinkAddr(z.cfg.ControlHost)
+			if err != nil {
+				slog.Error("Allocating a revived entry's link address", "err", err)
+				continue
+			}
+			local = fresh
+		}
+		reply, _, err := RendezvousEcho(ctx, z.cfg.ControlHost, target, z.pcs.IA, local)
 		if err != nil {
 			slog.Debug("Rendezvous dial", "rendezvous", target, "err", err)
 			continue
 		}
 		z.learn(reply.Observed.Addr())
-		revival := !l.Live()
 		if revival && liveNeighbor(entries, reply.IA) {
 			slog.Debug("Rendezvous revival answered by a live neighbor",
 				"rendezvous", target, "neighbor", reply.IA)
 			continue
 		}
+		l.Local = local
 		l.NeighborIA = reply.IA
 		l.Remote = reply.LinkAddr
 		l.RemoteIfID = reply.IfID
@@ -520,10 +535,11 @@ func (z *Provider) dialJoins(ctx context.Context) {
 			l.State = links.StateCandidate
 		}
 		err = z.pcs.Store.Update(ctx, l)
+		if revival && (errors.Is(err, links.ErrDuplicateNeighbor) ||
+			errors.Is(err, links.ErrDuplicateLocal)) {
+			continue
+		}
 		if errors.Is(err, links.ErrDuplicateNeighbor) {
-			if revival {
-				continue
-			}
 			l.State = links.StateRetired
 			l.Retired = time.Now()
 			if err := z.pcs.Store.Update(ctx, l); err != nil {
@@ -560,6 +576,17 @@ func revivable(entries []*links.Link, l *links.Link) bool {
 		return l.Rendezvous.IsValid()
 	}
 	return !liveNeighbor(entries, l.NeighborIA)
+}
+
+// localHeld reports whether a live entry other than l holds l's local
+// address.
+func localHeld(entries []*links.Link, l *links.Link) bool {
+	for _, e := range entries {
+		if e.IfID != l.IfID && e.Live() && e.Local == l.Local {
+			return true
+		}
+	}
+	return false
 }
 
 // linkClient establishes links in-band over the peer client's mutually

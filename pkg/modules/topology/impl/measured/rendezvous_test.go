@@ -195,6 +195,32 @@ func TestRendezvousLosesRecordRace(t *testing.T) {
 	}
 }
 
+// TestRendezvousLosesPortRace checks a claim that loses the race for the
+// port it drew: another writer records an entry on that address between
+// the acceptor's draw and its insert, the store refuses a second live entry
+// on it, and the claim mints its candidate on a fresh address, the one the
+// reply carries. The test calls the handler: a dial would resend a refused
+// request and mask the handler's own retry.
+func TestRendezvousLosesPortRace(t *testing.T) {
+	var store *squattedStore
+	f := newRendezvousFixture(t, func(cfg *RendezvousConfig) {
+		store = &squattedStore{DB: cfg.Store.(*memory.DB)}
+		cfg.Store = store
+	})
+	store.armed.Store(true)
+	claim := netip.MustParseAddrPort("127.0.0.1:4242")
+	req := RendezvousRequest{IA: rendezvousIA, LinkAddr: claim}
+	raw, err := f.handle(req.Marshal(), net.UDPAddrFromAddrPort(claim))
+	if err != nil {
+		t.Fatal(err)
+	}
+	reply, err := ParseRendezvousReply(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lostPortRace(t, store, rendezvousIA, reply.LinkAddr)
+}
+
 // TestRendezvousRefusesTakenRemote checks a claim at another neighbor's
 // link address: the store refuses a second serving entry with one remote,
 // so a claim minting a candidate there, or retargeting an unproven entry

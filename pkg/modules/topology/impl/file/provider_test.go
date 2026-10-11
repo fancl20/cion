@@ -2,6 +2,7 @@ package file
 
 import (
 	"context"
+	"errors"
 	"net/netip"
 	"os"
 	"path/filepath"
@@ -302,6 +303,52 @@ func TestFileSilentPeerKeepsEntry(t *testing.T) {
 	}
 	if err := f.Close(); err != nil {
 		t.Errorf("the file provider's close = %v, want nil", err)
+	}
+}
+
+// TestFileReconcileMovesAddresses checks an edit that moves a link's
+// addresses from a removed neighbor to a new one: the removed entry retires
+// before the new one is recorded, so the pass lands in one reconciliation.
+// A link-set naming one local address twice is refused at the write, and
+// the stored set stays as it was.
+func TestFileReconcileMovesAddresses(t *testing.T) {
+	f := newFileFixture(t,
+		Entry{IA: fileIA.String(), Local: "192.0.2.7:5001", Remote: "192.0.2.8:5001"})
+	if err := f.Seed(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	writeLinkSet(t, f.path,
+		Entry{IA: fileIA2.String(), Local: "192.0.2.7:5001", Remote: "192.0.2.8:5001"})
+	if err := f.load(); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.reconcile(context.Background()); err != nil {
+		t.Fatalf("moving the addresses to a new neighbor: %v", err)
+	}
+	if e := f.entry(t, fileIA); e == nil || e.State != links.StateRetired {
+		t.Errorf("the removed neighbor's entry = %+v, want retired", e)
+	}
+	moved := f.liveEntry(t, fileIA2)
+	if moved == nil || moved.Local != netip.MustParseAddrPort("192.0.2.7:5001") ||
+		moved.Remote != netip.MustParseAddrPort("192.0.2.8:5001") {
+		t.Fatalf("the new neighbor's entry = %+v, want the moved addresses", moved)
+	}
+
+	writeLinkSet(t, f.path,
+		Entry{IA: fileIA2.String(), Local: "192.0.2.7:5001", Remote: "192.0.2.8:5001"},
+		Entry{IA: fileIA3.String(), Local: "192.0.2.7:5001", Remote: "192.0.2.9:5003"})
+	if err := f.load(); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.reconcile(context.Background()); !errors.Is(err, links.ErrDuplicateLocal) {
+		t.Errorf("a link-set naming one local address twice reconciled with %v, "+
+			"want ErrDuplicateLocal", err)
+	}
+	if e := f.entry(t, fileIA3); e != nil {
+		t.Errorf("the refused link-set recorded %+v", e)
+	}
+	if e := f.liveEntry(t, fileIA2); e == nil || e.IfID != moved.IfID || e.Local != moved.Local {
+		t.Errorf("the served entry after the refusal = %+v, want the kept %+v", e, moved)
 	}
 }
 
