@@ -193,7 +193,9 @@ func (z *Provider) CompleteIdentity(ctx context.Context, ia addr.IA) (addr.IA, e
 		// Unreachable: a non-core's first start carries a neighbor.
 		return ia, fmt.Errorf("a non-core's first start needs at least one --topology.neighbor")
 	}
-	local, err := AllocateLinkAddr(z.cfg.ControlHost)
+	// The store opens after the completed identity persists, and a first
+	// start's table holds nothing: no entry holds a port yet.
+	local, err := AllocateLinkAddr(z.cfg.ControlHost, nil)
 	if err != nil {
 		return ia, err
 	}
@@ -241,8 +243,9 @@ func (z *Provider) Wire(pcs topology.Pieces) {
 
 // Seed seeds the store with an entry per --topology.neighbor, aimed at
 // the given rendezvous address and idempotent by it: the joiner's dial loop retargets
-// the entry when the reply arrives. A non-core that holds no entry and names
-// no neighbor could never link; it refuses to start.
+// the entry when the reply arrives. Each seed's link address is drawn
+// against the table as the earlier seeds left it. A non-core that holds no
+// entry and names no neighbor could never link; it refuses to start.
 func (z *Provider) Seed(ctx context.Context) error {
 	entries, err := z.pcs.Store.All(ctx)
 	if err != nil {
@@ -269,32 +272,36 @@ func (z *Provider) Seed(ctx context.Context) error {
 		if b := z.bootstrap; b != nil && b.target == rendezvous {
 			// The bootstrap's dial already taught both sides: the seed lands
 			// retargeted, the data plane's first generation serving it.
-			if err := z.pcs.Store.Insert(ctx, &links.Link{
+			seed := &links.Link{
 				NeighborIA: b.reply.IA,
 				Local:      b.local,
 				Remote:     b.reply.LinkAddr,
 				RemoteIfID: b.reply.IfID,
 				Rendezvous: rendezvous,
 				State:      links.StateCandidate,
-			}); err != nil {
+			}
+			if err := z.pcs.Store.Insert(ctx, seed); err != nil {
 				return err
 			}
+			entries = append(entries, seed)
 			z.notify()
 			slog.Info("Seeded the bootstrapped neighbor", "neighbor", b.reply.IA,
 				"rendezvous", rendezvous)
 			continue
 		}
-		local, err := AllocateLinkAddr(z.cfg.ControlHost)
+		local, err := AllocateLinkAddr(z.cfg.ControlHost, entries)
 		if err != nil {
 			return err
 		}
-		if err := z.pcs.Store.Insert(ctx, &links.Link{
+		seed := &links.Link{
 			Local:      local,
 			Rendezvous: rendezvous,
 			State:      links.StateCandidate,
-		}); err != nil {
+		}
+		if err := z.pcs.Store.Insert(ctx, seed); err != nil {
 			return err
 		}
+		entries = append(entries, seed)
 		z.notify()
 		slog.Info("Seeded a bootstrap neighbor", "rendezvous", rendezvous)
 	}
@@ -509,7 +516,7 @@ func (z *Provider) dialJoins(ctx context.Context) {
 		}
 		local := l.Local
 		if revival && localHeld(entries, l) {
-			fresh, err := AllocateLinkAddr(z.cfg.ControlHost)
+			fresh, err := AllocateLinkAddr(z.cfg.ControlHost, entries)
 			if err != nil {
 				slog.Error("Allocating a revived entry's link address", "err", err)
 				continue

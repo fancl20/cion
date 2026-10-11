@@ -1035,7 +1035,11 @@ func (s *selection) recordEntry(ctx context.Context, e DirectoryEntry) (*links.L
 	if entry != nil {
 		return entry, nil
 	}
-	local, err := AllocateLinkAddr(s.cfg.LinkHost)
+	entries, err := s.cfg.Store.All(ctx)
+	if err != nil {
+		return nil, err
+	}
+	local, err := AllocateLinkAddr(s.cfg.LinkHost, entries)
 	if err != nil {
 		return nil, err
 	}

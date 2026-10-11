@@ -153,6 +153,23 @@ func entryOf(n *assemblyNode, ia addr.IA) *links.Link {
 	return nil
 }
 
+// linkPortsInBand checks that every entry of the node holds its local
+// address in the link band, where no bind of port 0 lands.
+func linkPortsInBand(t *testing.T, n *assemblyNode) {
+	t.Helper()
+	entries, err := n.app.Links().All(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, l := range entries {
+		if p := l.Local.Port(); p < measured.LinkPortBase ||
+			p >= measured.LinkPortBase+measured.LinkPortSpan {
+			t.Errorf("%v's entry for %v lies on %v, outside the link band",
+				n.app.IA(), l.NeighborIA, l.Local)
+		}
+	}
+}
+
 // establishedTo reports whether the node holds an established entry of the
 // neighbor: re-establishment past a retirement mints a second entry beside
 // the retired first, so the live one is what the polls want.
@@ -249,6 +266,10 @@ func TestJoinByRendezvous(t *testing.T) {
 		e := entryOf(a, c.app.IA())
 		return e != nil && e.State == links.StateEstablished
 	})
+	// Every link the joins and the promotion allocated lies in the band.
+	for _, n := range []*assemblyNode{a, b, c} {
+		linkPortsInBand(t, n)
+	}
 
 	// The traffic of the swap survives: echo runs before and after the
 	// promotion answer across the swap's bounded loss burst — a request
@@ -313,6 +334,7 @@ func TestJoinByRendezvous(t *testing.T) {
 		e := entryOf(b2, a.app.IA())
 		return e != nil && e.State == links.StateEstablished
 	})
+	linkPortsInBand(t, b2)
 	Poll(t, "the restarted B reaches A", func() bool {
 		return pingFrom(ctx, b2, a.app.IA(), a.host)
 	})

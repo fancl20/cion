@@ -183,3 +183,21 @@ does.
     band with two free ports take both.
 *   **Integration:** in the restart lab, `TestJoinByRendezvous`, every
     entry's local port lies in the band before and after the bare restart.
+
+## Implementation history
+
+*   Landed in two commits, one per step: 3282206, the store's rule in
+    `links.Check` ([links.go](/pkg/modules/links/links.go)), the writers'
+    retry, the file provider's order, and the revival's fresh address,
+    whose check is `localHeld`
+    ([provider.go](/pkg/modules/topology/impl/measured/provider.go)); and
+    the commit that draws link ports from the band and appends this record.
+    The band's constants and `AllocateLinkAddr` moved to
+    [linkports.go](/pkg/modules/topology/impl/measured/linkports.go).
+*   The race episodes run over `squattedStore`, which records a seeded
+    entry on the drawn address before the writer's insert. The band's
+    episodes bind on 127.0.0.123, and the kernel's range is checked by a
+    test of its own; the seeds' episode repeats over ten draws, whose
+    offsets are random. The restart lab checks every node's entries
+    through `linkPortsInBand`
+    ([join_test.go](/internal/testnetwork/join_test.go)).

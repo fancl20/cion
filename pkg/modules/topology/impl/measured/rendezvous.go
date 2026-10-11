@@ -196,22 +196,6 @@ func (r *binReader) read(dst *[16]byte) {
 	}
 }
 
-// AllocateLinkAddr allocates a link's local underlay address: an ephemeral
-// port on the given host, bound once to reserve it and released for the data
-// plane generation to rebind. Every generation rebinds the recorded address
-// identically, which is what makes a swap invisible to the peer.
-func AllocateLinkAddr(host netip.Addr) (netip.AddrPort, error) {
-	c, err := net.ListenUDP("udp", net.UDPAddrFromAddrPort(netip.AddrPortFrom(host, 0)))
-	if err != nil {
-		return netip.AddrPort{}, fmt.Errorf("allocating a link address: %w", err)
-	}
-	addr := c.LocalAddr().(*net.UDPAddr).AddrPort()
-	if err := c.Close(); err != nil {
-		return netip.AddrPort{}, err
-	}
-	return addr, nil
-}
-
 // Rendezvous is the acceptor every node runs on its advertised rendezvous
 // address: one unconnected UDP socket answering first-contact requests. The
 // entries it creates start as candidates — a peer that produces no verified
@@ -404,14 +388,14 @@ func (r *Rendezvous) admit(req RendezvousRequest) (*links.Link, error) {
 		}
 	}
 	if entry == nil {
-		live, err := r.namedLinks()
+		entries, err := r.cfg.Store.All(context.Background())
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("reading the link store: %w", err)
 		}
-		if live >= r.cfg.MaxLinks {
+		if live := namedLive(entries); live >= r.cfg.MaxLinks {
 			return nil, fmt.Errorf("link cap reached (%d)", live)
 		}
-		local, err := AllocateLinkAddr(r.cfg.LinkHost)
+		local, err := AllocateLinkAddr(r.cfg.LinkHost, entries)
 		if err != nil {
 			return nil, err
 		}
@@ -446,12 +430,6 @@ func (r *Rendezvous) unnamedLinks() (int, error) {
 	return r.countLinks(func(l *links.Link) bool {
 		return l.Live() && l.NeighborIA.IsZero()
 	})
-}
-
-// namedLinks counts the live entries that name a neighbor — the ones the
-// link cap bounds.
-func (r *Rendezvous) namedLinks() (int, error) {
-	return r.countLinks(named)
 }
 
 // countLinks counts the entries a predicate keeps.

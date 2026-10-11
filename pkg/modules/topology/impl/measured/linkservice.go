@@ -127,15 +127,16 @@ func (s *LinkService) record(
 		return nil, connect.NewError(connect.CodeInternal, err)
 	}
 	if entry == nil {
-		live, err := s.liveLinks(ctx)
+		entries, err := s.Store.All(ctx)
 		if err != nil {
-			return nil, connect.NewError(connect.CodeInternal, err)
+			return nil, connect.NewError(connect.CodeInternal,
+				fmt.Errorf("reading the link store: %w", err))
 		}
-		if live >= s.MaxLinks {
+		if live := liveLinks(entries); live >= s.MaxLinks {
 			return nil, connect.NewError(connect.CodeResourceExhausted,
 				fmt.Errorf("link cap reached (%d)", live))
 		}
-		local, err := AllocateLinkAddr(s.LinkHost)
+		local, err := AllocateLinkAddr(s.LinkHost, entries)
 		if err != nil {
 			return nil, connect.NewError(connect.CodeInternal, err)
 		}
@@ -163,18 +164,15 @@ func (s *LinkService) record(
 	return entry, nil
 }
 
-func (s *LinkService) liveLinks(ctx context.Context) (int, error) {
-	entries, err := s.Store.All(ctx)
-	if err != nil {
-		return 0, fmt.Errorf("reading the link store: %w", err)
-	}
+// liveLinks counts the live entries, the ones the service's cap bounds.
+func liveLinks(entries []*links.Link) int {
 	live := 0
 	for _, l := range entries {
 		if l.Live() {
 			live++
 		}
 	}
-	return live, nil
+	return live
 }
 
 func (s *LinkService) changed() {
