@@ -36,12 +36,17 @@ func macFactory() func() hash.Hash {
 }
 
 // fakeSender records the beacon and registration RPCs the beaconer sends; a
-// peer in failFor answers with a dial's failure.
+// peer in failFor answers with a dial's failure, and an RPC to a peer in
+// dark waits until the peer's channel closes or the RPC's deadline passes —
+// a peer gone silent. attempts counts every RPC per peer, the waiting ones
+// included.
 type fakeSender struct {
 	mtx           sync.Mutex
 	beacons       []sentBeacon
 	registrations []sentRegistration
 	failFor       map[addr.IA]error
+	dark          map[addr.IA]chan struct{}
+	attempts      map[addr.IA]int
 }
 
 type sentBeacon struct {
@@ -55,6 +60,9 @@ type sentRegistration struct {
 }
 
 func (s *fakeSender) Beacon(ctx context.Context, peer *scion.Addr, pcb *cppb.PathSegment) error {
+	if err := s.attempt(ctx, peer.IA); err != nil {
+		return err
+	}
 	s.mtx.Lock()
 	defer s.mtx.Unlock()
 	s.beacons = append(s.beacons, sentBeacon{peer: peer, pcb: pcb})
@@ -64,6 +72,9 @@ func (s *fakeSender) Beacon(ctx context.Context, peer *scion.Addr, pcb *cppb.Pat
 func (s *fakeSender) RegisterSegments(
 	ctx context.Context, peer *scion.Addr, segments []*cppb.PathSegment) error {
 
+	if err := s.attempt(ctx, peer.IA); err != nil {
+		return err
+	}
 	s.mtx.Lock()
 	defer s.mtx.Unlock()
 	if err := s.failFor[peer.IA]; err != nil {
@@ -71,6 +82,27 @@ func (s *fakeSender) RegisterSegments(
 	}
 	s.registrations = append(s.registrations, sentRegistration{peer: peer, segments: segments})
 	return nil
+}
+
+// attempt counts an RPC to the peer and, for a dark peer, waits until it
+// recovers or the RPC's deadline passes.
+func (s *fakeSender) attempt(ctx context.Context, ia addr.IA) error {
+	s.mtx.Lock()
+	if s.attempts == nil {
+		s.attempts = make(map[addr.IA]int)
+	}
+	s.attempts[ia]++
+	dark := s.dark[ia]
+	s.mtx.Unlock()
+	if dark == nil {
+		return nil
+	}
+	select {
+	case <-dark:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // beaconFixture is a three-AS line — the core A, the middle B under test,
@@ -419,6 +451,7 @@ func TestHandleBeaconNonCoreOrigin(t *testing.T) {
 	// The refusal is the whole of it: a stored nothing terminates into
 	// nothing, and no up segment ever reaches the path database.
 	f.beaconer.registerOnce(context.Background())
+	f.beaconer.sends.Wait()
 	ups, err := f.pathDB.Get(context.Background(), pathdb.Query{Type: pathdb.SegmentTypeUp})
 	if err != nil {
 		t.Fatal(err)
@@ -688,6 +721,7 @@ func TestPropagateOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 	f.beaconer.propagateOnce(ctx)
+	f.beaconer.sends.Wait()
 
 	f.sender.mtx.Lock()
 	defer f.sender.mtx.Unlock()
@@ -746,6 +780,7 @@ func TestBeaconerReturnsTrustDBFailures(t *testing.T) {
 		t.Error("a beacon was accepted with the trust database unreadable")
 	}
 	f.beaconer.propagateOnce(ctx)
+	f.beaconer.sends.Wait()
 	f.beaconer.registerCoreOnce(ctx)
 	f.sender.mtx.Lock()
 	defer f.sender.mtx.Unlock()
@@ -770,6 +805,7 @@ func TestPropagateOnceDeclaresLatency(t *testing.T) {
 		t.Fatal(err)
 	}
 	f.beaconer.propagateOnce(ctx)
+	f.beaconer.sends.Wait()
 
 	// sentBeacons snapshots the sent beacons.
 	sentBeacons := func() []*cppb.PathSegment {
@@ -811,6 +847,7 @@ func TestPropagateOnceDeclaresLatency(t *testing.T) {
 	f.sender.beacons = nil
 	f.sender.mtx.Unlock()
 	f.beaconer.propagateOnce(ctx)
+	f.beaconer.sends.Wait()
 	sent = sentBeacons()
 	if len(sent) != 1 {
 		t.Fatalf("sent beacons = %d, want 1", len(sent))
@@ -837,6 +874,7 @@ func TestRegisterOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 	f.beaconer.registerOnce(ctx)
+	f.beaconer.sends.Wait()
 
 	ups, err := f.pathDB.Get(ctx, pathdb.Query{Type: pathdb.SegmentTypeUp})
 	if err != nil {
@@ -902,6 +940,7 @@ func TestCoreTierBeaconerRunsTheCoreLoops(t *testing.T) {
 	// own sentence for cores, which originate over core and parent-child
 	// links alike.
 	core.originateOnce(ctx)
+	core.sends.Wait()
 	originated := snapshotBeacons(t, f)
 	peers := make(map[addr.IA]bool)
 	for _, sent := range originated {
@@ -938,6 +977,7 @@ func TestCoreTierBeaconerRunsTheCoreLoops(t *testing.T) {
 		t.Fatalf("handle core beacon: %v", err)
 	}
 	core.propagateOnce(ctx)
+	core.sends.Wait()
 	propagated := snapshotBeacons(t, f)[len(originated):]
 	if len(propagated) != 1 {
 		t.Fatalf("propagated %d beacons, want 1 to the non-core neighbor alone", len(propagated))
@@ -1006,6 +1046,7 @@ func TestRegisterOnceRegistersPerOrigin(t *testing.T) {
 		t.Fatal(err)
 	}
 	f.beaconer.registerOnce(ctx)
+	f.beaconer.sends.Wait()
 
 	// The up segments store inside the same pass: both origins stand in the
 	// database the registrations dial through.
@@ -1064,6 +1105,7 @@ func TestRegisterOnceRegistersPerOrigin(t *testing.T) {
 	f.sender.registrations = nil
 	f.sender.mtx.Unlock()
 	f.beaconer.registerOnce(ctx)
+	f.beaconer.sends.Wait()
 	f.sender.mtx.Lock()
 	regs = append([]sentRegistration(nil), f.sender.registrations...)
 	f.sender.failFor = nil
@@ -1073,11 +1115,124 @@ func TestRegisterOnceRegistersPerOrigin(t *testing.T) {
 		t.Fatalf("registrations under one failed dial = %v, want the other core's alone", regs)
 	}
 	f.beaconer.registerOnce(ctx)
+	f.beaconer.sends.Wait()
 	f.sender.mtx.Lock()
 	regs = append([]sentRegistration(nil), f.sender.registrations...)
 	f.sender.mtx.Unlock()
 	if len(regs) != 2 {
 		t.Fatalf("registrations after the retry = %d, want both origins' again", len(regs))
+	}
+}
+
+// TestOriginationSkipsASilentNeighbor checks the per-neighbor sends: a
+// neighbor gone silent before its verdict turns — its beacon RPC waiting
+// out the deadline — holds its own slot alone. Two passes return at once,
+// the live neighbor's beacons leave regardless, and the silent neighbor
+// gets one attempt in all, delivered once it answers again.
+func TestOriginationSkipsASilentNeighbor(t *testing.T) {
+	f := newBeaconFixture(t)
+	ctx := context.Background()
+	silent := make(chan struct{})
+	f.sender.dark = map[addr.IA]chan struct{}{nodeIATest: silent}
+	core, err := NewBeaconer(BeaconerConfig{
+		IA:     coreIATest,
+		Engine: f.engines[coreIATest],
+		MACKey: []byte(testMACKey),
+		Store:  NewBeaconStore(),
+		DB:     f.pathDB,
+		Links: func() map[uint16]addr.IA {
+			return map[uint16]addr.IA{1: nodeIATest, 2: iaCore2Test}
+		},
+		Sender: f.sender,
+		Core:   true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	start := time.Now()
+	core.originateOnce(ctx)
+	core.originateOnce(ctx)
+	if took := time.Since(start); took >= SendTimeout {
+		t.Errorf("two passes took %v, want them back before the silent neighbor's deadline", took)
+	}
+	close(silent)
+	core.sends.Wait()
+
+	delivered := make(map[addr.IA]int)
+	for _, sent := range snapshotBeacons(t, f) {
+		delivered[sent.peer.IA]++
+	}
+	f.sender.mtx.Lock()
+	attempts := f.sender.attempts[nodeIATest]
+	f.sender.mtx.Unlock()
+	if attempts != 1 || delivered[nodeIATest] != 1 {
+		t.Errorf("the silent neighbor got %d attempts, %d delivered; want its one outstanding beacon",
+			attempts, delivered[nodeIATest])
+	}
+	if delivered[iaCore2Test] == 0 {
+		t.Error("the live neighbor got no beacon while the other was silent")
+	}
+}
+
+// TestRegistrationSkipsASilentCore checks the per-origin registrations: a
+// core whose registration waits on a route gone silent holds its own slot
+// alone. The next pass returns at once with the candidate that arrived
+// meanwhile stored, the other core's registration leaves regardless, and
+// the silent core gets one attempt in all, delivered once it answers again.
+func TestRegistrationSkipsASilentCore(t *testing.T) {
+	f := newBeaconFixture(t)
+	ctx := context.Background()
+	silent := make(chan struct{})
+	f.sender.dark = map[addr.IA]chan struct{}{coreIATest: silent}
+
+	// B stands under two cores: [A] over link 1, [A2] over link 3.
+	if err := f.beaconer.HandleBeacon(ctx,
+		lineBeacon(t, f, time.Now().Add(-time.Minute)), 1); err != nil {
+
+		t.Fatal(err)
+	}
+	if err := f.beaconer.HandleBeacon(ctx, core2Beacon(t, f, time.Now()), 3); err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	f.beaconer.registerOnce(ctx)
+	fresher := lineBeacon(t, f, time.Now())
+	if err := f.beaconer.HandleBeacon(ctx, fresher, 1); err != nil {
+		t.Fatal(err)
+	}
+	f.beaconer.registerOnce(ctx)
+	if took := time.Since(start); took >= SendTimeout {
+		t.Errorf("two passes took %v, want them back before the silent core's deadline", took)
+	}
+	ups, err := f.pathDB.Get(ctx, pathdb.Query{Type: pathdb.SegmentTypeUp})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stored := false
+	for _, up := range ups {
+		if up.FirstIA().Equal(coreIATest) && up.PCB.Timestamp().Equal(fresher.Timestamp()) {
+			stored = true
+		}
+	}
+	if !stored {
+		t.Error("the candidate that arrived during the silent registration has no up segment")
+	}
+	close(silent)
+	f.beaconer.sends.Wait()
+
+	f.sender.mtx.Lock()
+	defer f.sender.mtx.Unlock()
+	registered := make(map[addr.IA]int)
+	for _, reg := range f.sender.registrations {
+		registered[reg.peer.IA]++
+	}
+	if attempts := f.sender.attempts[coreIATest]; attempts != 1 || registered[coreIATest] != 1 {
+		t.Errorf("the silent core got %d attempts, %d delivered; want its one outstanding registration",
+			attempts, registered[coreIATest])
+	}
+	if registered[iaCore2Test] == 0 {
+		t.Error("the other core got no registration while one was silent")
 	}
 }
 
@@ -1208,6 +1363,7 @@ func TestBeaconerPausesOnDownInterface(t *testing.T) {
 		t.Fatal(err)
 	}
 	f.beaconer.propagateOnce(ctx)
+	f.beaconer.sends.Wait()
 	f.sender.mtx.Lock()
 	sent := len(f.sender.beacons)
 	f.sender.mtx.Unlock()
@@ -1231,6 +1387,7 @@ func TestBeaconerPausesOnDownInterface(t *testing.T) {
 		t.Fatal(err)
 	}
 	core.originateOnce(ctx)
+	core.sends.Wait()
 	f.sender.mtx.Lock()
 	sent = len(f.sender.beacons)
 	f.sender.mtx.Unlock()
@@ -1242,6 +1399,7 @@ func TestBeaconerPausesOnDownInterface(t *testing.T) {
 	// treats the link as up, as a node restarts with every link up.
 	f.beaconer.verdicts = func() map[uint16]bool { return map[uint16]bool{} }
 	f.beaconer.propagateOnce(ctx)
+	f.beaconer.sends.Wait()
 	f.sender.mtx.Lock()
 	sent = len(f.sender.beacons)
 	f.sender.mtx.Unlock()

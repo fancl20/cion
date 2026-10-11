@@ -35,8 +35,8 @@ const (
 	// termination (no policy engine, no per-policy configuration).
 	BestSetSize = 5
 
-	// SendTimeout bounds each beacon and registration RPC: a wedged
-	// connection must not stall the loop that sends it.
+	// SendTimeout bounds each beacon and registration RPC, and with it how
+	// long a peer that went dark holds its slot.
 	SendTimeout = 5 * time.Second
 )
 
@@ -92,6 +92,31 @@ type Beaconer struct {
 	bootstraps       map[addr.IA]*segment.PCB
 	bootstrapIngress map[addr.IA]uint16
 	bootstrapTurn    int
+
+	// sends joins the RPCs the passes run off their loops, and busy holds
+	// the slots whose RPCs are outstanding. A pass skips a busy slot, so a
+	// peer that went dark holds only its own, for up to SendTimeout, while
+	// every loop keeps its cadence for the other peers.
+	sends   sync.WaitGroup
+	busyMtx sync.Mutex
+	busy    map[sendTarget]bool
+}
+
+// sendKind names the pass an RPC belongs to. Each pass holds its own slot
+// per peer, so origination, propagation, and registration never wait on
+// one another.
+type sendKind uint8
+
+const (
+	originating sendKind = iota
+	propagating
+	registering
+)
+
+// sendTarget is one pass's slot for one peer.
+type sendTarget struct {
+	kind sendKind
+	peer addr.IA
 }
 
 // BeaconerConfig configures a Beaconer.
@@ -164,6 +189,7 @@ func NewBeaconer(cfg BeaconerConfig) (*Beaconer, error) {
 		registration:     registration,
 		bootstraps:       make(map[addr.IA]*segment.PCB),
 		bootstrapIngress: make(map[addr.IA]uint16),
+		busy:             make(map[sendTarget]bool),
 	}, nil
 }
 
@@ -198,8 +224,9 @@ func (b *Beaconer) linkTable() map[uint16]addr.IA {
 // Run executes the beaconing loops until the context is canceled:
 // propagation on every tier, origination and core-beacon termination on the
 // core tiers, down-segment registration on the others, and the expired-
-// segment sweep of the path database. It returns once every loop has exited,
-// so a caller that waits for Run closes no store beneath an in-flight pass.
+// segment sweep of the path database. It returns once every loop has exited
+// and every RPC a pass started has returned, so a caller that waits for Run
+// closes no store beneath an in-flight pass.
 func (b *Beaconer) Run(ctx context.Context) {
 	var wg sync.WaitGroup
 	loop := func(interval time.Duration, f func(context.Context)) {
@@ -217,6 +244,7 @@ func (b *Beaconer) Run(ctx context.Context) {
 	loop(b.registration, b.sweepOnce)
 	<-ctx.Done()
 	wg.Wait()
+	b.sends.Wait()
 }
 
 func (b *Beaconer) loop(ctx context.Context, interval time.Duration, f func(context.Context)) {
@@ -230,6 +258,31 @@ func (b *Beaconer) loop(ctx context.Context, interval time.Duration, f func(cont
 			f(ctx)
 		}
 	}
+}
+
+// pending reports whether the slot's previous RPCs are still outstanding;
+// the pass skips the slot this round.
+func (b *Beaconer) pending(t sendTarget) bool {
+	b.busyMtx.Lock()
+	defer b.busyMtx.Unlock()
+	return b.busy[t]
+}
+
+// goSend runs the slot's RPCs off the loop, the slot busy until they
+// return. Only the slot's own pass sends for it, and that pass checked
+// pending first, so the slot is free here.
+func (b *Beaconer) goSend(t sendTarget, rpcs func()) {
+	b.busyMtx.Lock()
+	b.busy[t] = true
+	b.busyMtx.Unlock()
+	b.sends.Go(func() {
+		defer func() {
+			b.busyMtx.Lock()
+			delete(b.busy, t)
+			b.busyMtx.Unlock()
+		}()
+		rpcs()
+	})
 }
 
 // HandleBeacon applies the reception checks of Section 2.3.1 to the received
@@ -488,7 +541,8 @@ func (b *Beaconer) coreASes() (map[addr.IA]bool, error) {
 // signed AS entry, delivered to the neighbor's beacon service — the
 // neighbor's control service as a service destination on the one-hop path,
 // the drafts' own control-traffic pattern, the neighbor's ISD-AS read from
-// the store's snapshot.
+// the store's snapshot. Each neighbor's send runs off the loop; a neighbor
+// whose previous beacon is still in flight gets none this round.
 func (b *Beaconer) originateOnce(ctx context.Context) {
 	for ifID, neighborIA := range b.linkTable() {
 		if neighborIA.IsZero() {
@@ -496,6 +550,10 @@ func (b *Beaconer) originateOnce(ctx context.Context) {
 		}
 		if !b.linkUp(ifID) {
 			continue // a down interface originates nothing
+		}
+		target := sendTarget{originating, neighborIA}
+		if b.pending(target) {
+			continue
 		}
 		pcb, err := segment.NewPCB(time.Now())
 		if err != nil {
@@ -511,9 +569,11 @@ func (b *Beaconer) originateOnce(ctx context.Context) {
 			continue
 		}
 		peer := &scion.Addr{IA: neighborIA, Service: addr.SvcCS}
-		if err := b.sendBeacon(ctx, peer, pcb.PB); err != nil {
-			slog.Warn("Propagating origin beacon", "interface", ifID, "err", err)
-		}
+		b.goSend(target, func() {
+			if err := b.sendBeacon(ctx, peer, pcb.PB); err != nil {
+				slog.Warn("Propagating origin beacon", "interface", ifID, "err", err)
+			}
+		})
 	}
 }
 
@@ -522,26 +582,34 @@ func (b *Beaconer) originateOnce(ctx context.Context) {
 // except the one the beacon arrived on and except interfaces whose neighbor
 // the TRC names as a core — beacons never travel toward a core (Section
 // 2.3.5). The propagation targets are the neighbors' control services as
-// service destinations on the one-hop paths.
+// service destinations on the one-hop paths. Each neighbor's beacons go out
+// off the loop in candidate order; a neighbor whose previous beacons are
+// still in flight gets none this round.
 func (b *Beaconer) propagateOnce(ctx context.Context) {
 	cores, err := b.coreASes()
 	if err != nil {
 		slog.Error("Propagating beacons", "err", err)
 		return
 	}
-	for _, cand := range b.store.BestSet(BestSetSize) {
-		for egress, neighborIA := range b.linkTable() {
+	cands := b.store.BestSet(BestSetSize)
+	for egress, neighborIA := range b.linkTable() {
+		if neighborIA.IsZero() {
+			continue // a link whose neighbor establishment has not named
+		}
+		if cores[neighborIA] {
+			continue
+		}
+		if !b.linkUp(egress) {
+			continue // a down interface propagates nothing
+		}
+		target := sendTarget{propagating, neighborIA}
+		if b.pending(target) {
+			continue
+		}
+		var beacons []*control_plane.PathSegment
+		for _, cand := range cands {
 			if egress == cand.Ingress {
 				continue
-			}
-			if neighborIA.IsZero() {
-				continue // a link whose neighbor establishment has not named
-			}
-			if cores[neighborIA] {
-				continue
-			}
-			if !b.linkUp(egress) {
-				continue // a down interface propagates nothing
 			}
 			extended, err := cand.PCB.Clone()
 			if err != nil {
@@ -557,11 +625,19 @@ func (b *Beaconer) propagateOnce(ctx context.Context) {
 				slog.Error("Extending beacon", "interface", egress, "err", err)
 				continue
 			}
-			peer := &scion.Addr{IA: neighborIA, Service: addr.SvcCS}
-			if err := b.sendBeacon(ctx, peer, extended.PB); err != nil {
-				slog.Warn("Propagating beacon", "interface", egress, "err", err)
-			}
+			beacons = append(beacons, extended.PB)
 		}
+		if len(beacons) == 0 {
+			continue
+		}
+		peer := &scion.Addr{IA: neighborIA, Service: addr.SvcCS}
+		b.goSend(target, func() {
+			for _, pb := range beacons {
+				if err := b.sendBeacon(ctx, peer, pb); err != nil {
+					slog.Warn("Propagating beacon", "interface", egress, "err", err)
+				}
+			}
+		})
 	}
 }
 
@@ -572,8 +648,11 @@ func (b *Beaconer) propagateOnce(ctx context.Context) {
 // originated the PCBs (Sections 3.1.2, 3.1.3, and 3.3). The peer is named by
 // ISD-AS and service alone: the peer client's dial resolves the route per
 // destination — one hop over the link to a neighboring core, else the
-// freshest up segment's reversal, stored by this same pass. A dial that
-// fails logs and the next pass retries.
+// freshest up segment's reversal, stored by this same pass. Each origin's
+// registration runs off the loop, so the next pass stores newly arrived up
+// segments on time whatever a registration waits on; an origin whose
+// previous registration is still in flight is skipped this round, and a
+// dial that fails logs and a later pass retries.
 func (b *Beaconer) registerOnce(ctx context.Context) {
 	peers := make(map[addr.IA][]*control_plane.PathSegment)
 	for _, cand := range b.store.BestSet(BestSetSize) {
@@ -593,10 +672,16 @@ func (b *Beaconer) registerOnce(ctx context.Context) {
 		peers[terminated.FirstIA()] = append(peers[terminated.FirstIA()], terminated.PB)
 	}
 	for origin, segments := range peers {
-		peer := &scion.Addr{IA: origin, Service: addr.SvcCS}
-		if err := b.sendRegistration(ctx, peer, segments); err != nil {
-			slog.Warn("Registering down segments", "core", origin, "err", err)
+		target := sendTarget{registering, origin}
+		if b.pending(target) {
+			continue
 		}
+		peer := &scion.Addr{IA: origin, Service: addr.SvcCS}
+		b.goSend(target, func() {
+			if err := b.sendRegistration(ctx, peer, segments); err != nil {
+				slog.Warn("Registering down segments", "core", origin, "err", err)
+			}
+		})
 	}
 }
 
