@@ -198,6 +198,9 @@ func RenewChain(
 	// under a fresh root verifies against the successor and not the
 	// predecessor the node still holds; the pool carries the predecessor
 	// beside it while the successor's grace window runs.
+	if _, err := pullNewestTRC(ctx, db, remote, ia.ISD()); err != nil {
+		return nil, err
+	}
 	pool, err := anchorPool(ctx, db, remote, ia.ISD())
 	if err != nil {
 		return nil, err
@@ -265,18 +268,37 @@ func fetchTRC(
 	if remote == nil {
 		return cppki.SignedTRC{}, nil
 	}
+	if id.Base.IsLatest() {
+		return pullNewestTRC(ctx, db, remote, id.ISD)
+	}
 	trc, err := remote.TRC(ctx, id)
 	if err != nil {
 		return cppki.SignedTRC{}, serrors.Wrap("fetching TRC from remote", err, "id", id)
 	}
-	if id.Base.IsLatest() {
-		if trc.TRC.ID.ISD != id.ISD {
-			return cppki.SignedTRC{}, serrors.New("fetched TRC is for another ISD",
-				"expected", id.ISD, "actual", trc.TRC.ID.ISD)
-		}
-	} else if trc.TRC.ID != id {
+	if trc.TRC.ID != id {
 		return cppki.SignedTRC{}, serrors.New("fetched TRC has unexpected ID",
 			"expected", id, "actual", trc.TRC.ID)
+	}
+	return verifyAndPinTRC(ctx, db, remote, trc)
+}
+
+// pullNewestTRC asks the Remote for the ISD's newest TRC — the drafts'
+// numbers-less request — whatever the DB holds, and pins it once it
+// verifies, fetching the predecessors it stands on.
+func pullNewestTRC(
+	ctx context.Context,
+	db trustdb.DB,
+	remote Remote,
+	isd addr.ISD,
+) (cppki.SignedTRC, error) {
+
+	trc, err := remote.TRC(ctx, newestTRCID(isd))
+	if err != nil {
+		return cppki.SignedTRC{}, serrors.Wrap("fetching the newest TRC", err, "isd", isd)
+	}
+	if trc.TRC.ID.ISD != isd {
+		return cppki.SignedTRC{}, serrors.New("fetched TRC is for another ISD",
+			"expected", isd, "actual", trc.TRC.ID.ISD)
 	}
 	return verifyAndPinTRC(ctx, db, remote, trc)
 }

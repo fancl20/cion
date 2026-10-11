@@ -8,6 +8,7 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/scionproto/scion/pkg/addr"
 	"github.com/scionproto/scion/pkg/scrypto/cppki"
 
 	"github.com/fancl20/cion/pkg/modules/trustdb"
@@ -223,6 +224,80 @@ func TestEnrollRejectsUnanchoredChain(t *testing.T) {
 	}
 	// The bogus chain must not be stored.
 	chains, err := db.Chains(context.Background(), trustdb.ChainQuery{IA: nodeIA})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(chains) != 0 {
+		t.Errorf("stored chains = %d, want 0", len(chains))
+	}
+}
+
+// TestRenewChainPullsTheNewestTRC checks the renewal's pull: a node holding
+// only the base renews from a founder that rolled its root since, and the
+// chain issued under the fresh root verifies against the successor the
+// renewal pulled and pinned.
+func TestRenewChainPullsTheNewestTRC(t *testing.T) {
+	ctx := context.Background()
+	f := newGenesisFixture(t)
+	issuer, err := NewIssuer(coreIA, f.keys, f.trc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fresh, completed, err := RotateCoreKeys(ctx, f.db, f.dir, coreIA, f.trc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := issuer.Rekey(fresh, completed); err != nil {
+		t.Fatal(err)
+	}
+	remote := &fakeRemote{trc: completed, issuer: issuer, byID: map[cppki.TRCID]cppki.SignedTRC{
+		f.trc.TRC.ID: f.trc, completed.TRC.ID: completed,
+	}}
+	db := newTestDB(t)
+	if _, err := db.InsertTRC(ctx, f.trc); err != nil {
+		t.Fatal(err)
+	}
+
+	chain, err := RenewChain(ctx, db, remote, nodeIA, newTestASKey(t))
+	if err != nil {
+		t.Fatalf("renewing under the fresh root: %v", err)
+	}
+	if err := cppki.VerifyChain(chain, cppki.VerifyOptions{
+		TRC: []*cppki.TRC{&completed.TRC},
+	}); err != nil {
+		t.Errorf("the renewed chain does not verify against the successor: %v", err)
+	}
+	if pinned, err := db.SignedTRC(ctx, completed.TRC.ID); err != nil ||
+		!bytes.Equal(pinned.Raw, completed.Raw) {
+		t.Errorf("the renewal did not pin the successor it pulled (%v)", err)
+	}
+}
+
+// TestRenewChainRefusesAForeignNewestTRC checks the pull's ISD check: a
+// remote answering the numbers-less ask with another ISD's TRC fails the
+// renewal, which stores no chain and pins nothing, where verification alone
+// would pin a base TRC, which vouches for itself.
+func TestRenewChainRefusesAForeignNewestTRC(t *testing.T) {
+	ctx := context.Background()
+	remote := newFakeRemote(t)
+	db := newTestDB(t)
+	if _, err := db.InsertTRC(ctx, remote.trc); err != nil {
+		t.Fatal(err)
+	}
+	foreign, err := Genesis(ctx, newTestDB(t), addr.MustIAFrom(21, coreIA.AS()),
+		newTestCoreKeys(t, t.TempDir()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	remote.trc = foreign
+
+	if _, err := RenewChain(ctx, db, remote, nodeIA, newTestASKey(t)); err == nil {
+		t.Error("the renewal succeeded on another ISD's newest TRC, want refusal")
+	}
+	if pinned, err := db.SignedTRC(ctx, foreign.TRC.ID); err != nil || !pinned.IsZero() {
+		t.Errorf("the foreign TRC pinned (%v)", err)
+	}
+	chains, err := db.Chains(ctx, trustdb.ChainQuery{IA: nodeIA})
 	if err != nil {
 		t.Fatal(err)
 	}

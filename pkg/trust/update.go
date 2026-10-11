@@ -180,11 +180,7 @@ func JoinCore(
 	cert *x509.Certificate,
 ) error {
 
-	fresh, err := remote.TRC(ctx, newestTRCID(ia.ISD()))
-	if err != nil {
-		return serrors.Wrap("fetching the founder's newest TRC", err, "isd_as", ia)
-	}
-	newest, err := verifyAndPinTRC(ctx, db, remote, fresh)
+	newest, err := pullNewestTRC(ctx, db, remote, ia.ISD())
 	if err != nil {
 		return err
 	}

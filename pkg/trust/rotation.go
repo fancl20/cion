@@ -212,11 +212,7 @@ func RollVotingKey(
 	stateDir string,
 ) error {
 
-	freshTRC, err := remote.TRC(ctx, newestTRCID(ia.ISD()))
-	if err != nil {
-		return serrors.Wrap("fetching the founder's newest TRC", err, "isd_as", ia)
-	}
-	newest, err := verifyAndPinTRC(ctx, db, remote, freshTRC)
+	newest, err := pullNewestTRC(ctx, db, remote, ia.ISD())
 	if err != nil {
 		return err
 	}
