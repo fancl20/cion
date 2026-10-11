@@ -184,7 +184,11 @@ func TestSignResponseConcurrentRekey(t *testing.T) {
 		}
 	})
 	for range 20 {
-		res, err := issuer.SignResponse([]byte("renewal"))
+		ca, err := issuer.CA()
+		if err != nil {
+			t.Fatal(err)
+		}
+		res, err := ca.SignResponse([]byte("renewal"))
 		if err != nil {
 			t.Fatal(err)
 		}

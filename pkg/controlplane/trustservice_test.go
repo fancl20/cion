@@ -264,6 +264,52 @@ func TestTrustServiceChainRenewal(t *testing.T) {
 	})
 }
 
+// rekeyingDB rekeys the issuer as it stores an issued chain: the window
+// between the renewal's issuance and its response's signature.
+type rekeyingDB struct {
+	trustdb.DB
+	rekey func() error
+}
+
+func (d rekeyingDB) InsertChain(ctx context.Context, chain []*x509.Certificate) (bool, error) {
+	if err := d.rekey(); err != nil {
+		return false, err
+	}
+	return d.DB.InsertChain(ctx, chain)
+}
+
+// TestChainRenewalRekeyBetweenIssueAndSign checks the renewal's one CA
+// snapshot: a rekey landing between the chain's issuance and the
+// response's signature leaves the response signed by the CA certificate its
+// chain carries, the check the client makes.
+func TestChainRenewalRekeyBetweenIssueAndSign(t *testing.T) {
+	f := newTrustFixture(t)
+	db := rekeyingDB{DB: f.db, rekey: func() error {
+		ca, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+		if err != nil {
+			return err
+		}
+		keys := f.keys
+		keys.CA = ca
+		return f.issuer.Rekey(keys, f.trc)
+	}}
+	svc := &TrustService{DB: db, Issuer: f.issuer}
+
+	csr, key := newCSR(t, nodeIATest)
+	req, err := trust.BuildRenewalRequest(csr, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := svc.ChainRenewal(context.Background(), connect.NewRequest(
+		&cppb.ChainRenewalRequest{CmsSignedRequest: req}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := trust.ParseRenewalResponse(resp.Msg.CmsSignedResponse); err != nil {
+		t.Errorf("the client refuses the response a rekey interleaved: %v", err)
+	}
+}
+
 // askAuthorizer records the facts the trust service asked with and answers
 // the verdict it was told to.
 type askAuthorizer struct {

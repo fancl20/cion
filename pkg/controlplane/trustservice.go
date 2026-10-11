@@ -313,7 +313,15 @@ func (s *TrustService) ChainRenewal(
 		}
 	}
 
-	chain, err := s.Issuer.IssueChain(csr)
+	// The chain and the response carrying it come from one snapshot of the
+	// CA material: the client requires the response signed by the chain's
+	// CA certificate, which a rekey between the two would replace.
+	ca, err := s.Issuer.CA()
+	if err != nil {
+		return nil, connect.NewError(connect.CodeInternal,
+			serrors.Wrap("reading the CA material", err))
+	}
+	chain, err := ca.IssueChain(csr)
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInvalidArgument,
 			serrors.Wrap("issuing chain", err))
@@ -328,7 +336,7 @@ func (s *TrustService) ChainRenewal(
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInternal, err)
 	}
-	cmsRes, err := s.Issuer.SignResponse(respBody)
+	cmsRes, err := ca.SignResponse(respBody)
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInternal,
 			serrors.Wrap("signing renewal response", err))

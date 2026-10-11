@@ -38,7 +38,7 @@ func NewIssuer(ia addr.IA, keys CoreKeys, trc cppki.SignedTRC) (*Issuer, error) 
 		return nil, err
 	}
 	i := &Issuer{IA: ia, RootKey: keys.Root, CAKey: keys.CA, TRC: trc}
-	caCert, err := createCACert(ia, keys.CA, rootCert, keys.Root, i.signingTime())
+	caCert, err := createCACert(ia, keys.CA, rootCert, keys.Root, signingTime())
 	if err != nil {
 		return nil, err
 	}
@@ -49,14 +49,47 @@ func NewIssuer(ia addr.IA, keys CoreKeys, trc cppki.SignedTRC) (*Issuer, error) 
 // signingTime is the base time for certificate validity: backdated to
 // tolerate clock skew between nodes and truncated to whole seconds so
 // certificates and their containers line up exactly.
-func (i *Issuer) signingTime() time.Time {
+func signingTime() time.Time {
 	return time.Now().UTC().Add(signingBackdate).Truncate(time.Second)
+}
+
+// IssueChain creates a certificate chain for the subject of the CSR from the
+// issuer's current CA material.
+func (i *Issuer) IssueChain(csr *x509.CertificateRequest) ([]*x509.Certificate, error) {
+	ca, err := i.CA()
+	if err != nil {
+		return nil, err
+	}
+	return ca.IssueChain(csr)
+}
+
+// CA is one snapshot of an issuer's CA material: the CA certificate, the
+// key signing with it, and the TRC anchoring them, read as one set. A
+// renewal issues its chain and signs its response from one snapshot, for
+// the client requires the response signed by the chain's CA certificate.
+type CA struct {
+	ia   addr.IA
+	cert *x509.Certificate
+	key  crypto.Signer
+	trc  cppki.SignedTRC
+}
+
+// CA snapshots the issuer's current CA material under the mutex — the
+// rotation's rekey swaps all three as a set.
+func (i *Issuer) CA() (*CA, error) {
+	i.mtx.Lock()
+	defer i.mtx.Unlock()
+	caCert, err := i.ensureCACertLocked()
+	if err != nil {
+		return nil, err
+	}
+	return &CA{ia: i.IA, cert: caCert, key: i.CAKey, trc: i.TRC}, nil
 }
 
 // IssueChain creates a certificate chain for the subject of the CSR. The CSR
 // must be self-signed (proof of possession of the subject key, PKI draft,
 // Section 4.3) and its subject ISD-AS must be in the same ISD as the issuer.
-func (i *Issuer) IssueChain(csr *x509.CertificateRequest) ([]*x509.Certificate, error) {
+func (c *CA) IssueChain(csr *x509.CertificateRequest) ([]*x509.Certificate, error) {
 	if err := csr.CheckSignature(); err != nil {
 		return nil, serrors.Wrap("CSR is not self-signed", err)
 	}
@@ -64,22 +97,18 @@ func (i *Issuer) IssueChain(csr *x509.CertificateRequest) ([]*x509.Certificate, 
 	if err != nil {
 		return nil, serrors.Wrap("extracting subject ISD-AS from CSR", err)
 	}
-	if ia.ISD() != i.IA.ISD() {
+	if ia.ISD() != c.ia.ISD() {
 		return nil, serrors.New("CSR ISD does not match core ISD",
-			"csr_isd", ia.ISD(), "core_isd", i.IA.ISD())
+			"csr_isd", ia.ISD(), "core_isd", c.ia.ISD())
 	}
 	if err := validateISD(ia); err != nil {
 		return nil, err
 	}
-	caCert, caKey, trc, err := i.caMaterial()
-	if err != nil {
-		return nil, err
-	}
 	policy := cppki.CAPolicy{
 		Validity:    ASValidity,
-		Certificate: caCert,
-		Signer:      caKey,
-		CurrentTime: i.signingTime(),
+		Certificate: c.cert,
+		Signer:      c.key,
+		CurrentTime: signingTime(),
 	}
 	chain, err := policy.CreateChain(csr)
 	if err != nil {
@@ -88,7 +117,7 @@ func (i *Issuer) IssueChain(csr *x509.CertificateRequest) ([]*x509.Certificate, 
 	// Verify at signing time, not wall-clock time: the CA certificate is
 	// valid from the (possibly backdated) signing time.
 	if err := cppki.VerifyChain(chain, cppki.VerifyOptions{
-		TRC:         []*cppki.TRC{&trc.TRC},
+		TRC:         []*cppki.TRC{&c.trc.TRC},
 		CurrentTime: time.Now(),
 	}); err != nil {
 		return nil, serrors.Wrap("generated chain does not verify against TRC", err)
@@ -96,17 +125,10 @@ func (i *Issuer) IssueChain(csr *x509.CertificateRequest) ([]*x509.Certificate, 
 	return chain, nil
 }
 
-// caMaterial returns the CA certificate, the key signing with it, and the TRC
-// anchoring the issued chains, snapshotted under the mutex — the rotation's
-// rekey swaps all three as a set.
-func (i *Issuer) caMaterial() (*x509.Certificate, crypto.Signer, cppki.SignedTRC, error) {
-	i.mtx.Lock()
-	defer i.mtx.Unlock()
-	caCert, err := i.ensureCACertLocked()
-	if err != nil {
-		return nil, nil, cppki.SignedTRC{}, err
-	}
-	return caCert, i.CAKey, i.TRC, nil
+// SignResponse wraps msg in a CMS SignedData signed with the snapshot's CA
+// certificate, as the chain renewal response requires.
+func (c *CA) SignResponse(msg []byte) ([]byte, error) {
+	return SignCMS(msg, []*x509.Certificate{c.cert}, c.key)
 }
 
 // ensureCACert returns a CP CA certificate whose validity covers a full AS
@@ -131,7 +153,7 @@ func (i *Issuer) ensureCACertLocked() (*x509.Certificate, error) {
 	if err != nil {
 		return nil, err
 	}
-	caCert, err := createCACert(i.IA, i.CAKey, rootCert, i.RootKey, i.signingTime())
+	caCert, err := createCACert(i.IA, i.CAKey, rootCert, i.RootKey, signingTime())
 	if err != nil {
 		return nil, err
 	}
@@ -151,7 +173,7 @@ func (i *Issuer) Rekey(keys CoreKeys, trc cppki.SignedTRC) error {
 	if err != nil {
 		return err
 	}
-	caCert, err := createCACert(i.IA, keys.CA, rootCert, keys.Root, i.signingTime())
+	caCert, err := createCACert(i.IA, keys.CA, rootCert, keys.Root, signingTime())
 	if err != nil {
 		return err
 	}
@@ -162,18 +184,6 @@ func (i *Issuer) Rekey(keys CoreKeys, trc cppki.SignedTRC) error {
 // CACert returns the currently active CP CA certificate.
 func (i *Issuer) CACert() (*x509.Certificate, error) {
 	return i.ensureCACert()
-}
-
-// SignResponse wraps msg in a CMS SignedData signed with the CP CA
-// certificate, as the chain renewal response requires. The certificate and
-// its key come from one snapshot, so a concurrent rekey never pairs one
-// set's certificate with the other's key.
-func (i *Issuer) SignResponse(msg []byte) ([]byte, error) {
-	caCert, caKey, _, err := i.caMaterial()
-	if err != nil {
-		return nil, err
-	}
-	return SignCMS(msg, []*x509.Certificate{caCert}, caKey)
 }
 
 // rootCertificate extracts the CP root certificate from the TRC, which must
