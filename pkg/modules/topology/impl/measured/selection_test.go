@@ -11,11 +11,15 @@ import (
 	"testing/synctest"
 	"time"
 
+	"github.com/gopacket/gopacket"
 	"github.com/scionproto/scion/pkg/addr"
+	"github.com/scionproto/scion/pkg/slayers"
+	"github.com/scionproto/scion/pkg/slayers/path/empty"
 
 	"github.com/fancl20/cion/pkg/controlplane"
 	"github.com/fancl20/cion/pkg/modules/links"
 	"github.com/fancl20/cion/pkg/modules/links/impl/memory"
+	"github.com/fancl20/cion/pkg/modules/pathdb"
 	"github.com/fancl20/cion/pkg/scion"
 	"github.com/fancl20/cion/pkg/segment"
 )
@@ -1140,6 +1144,157 @@ func TestEchoRTTEndsWithItsContext(t *testing.T) {
 	// short holds the probe a full ProbeWait.
 	if held := time.Since(start); held >= ProbeWait {
 		t.Errorf("echoRTT returned after %v, want under ProbeWait", held)
+	}
+}
+
+// interfaceDownAnswer builds the data plane's refusal of a down egress: an
+// SCMP External Interface Down quoting the refused packet.
+func interfaceDownAnswer(quoted []byte) ([]byte, error) {
+	host := addr.HostIP(netip.MustParseAddr("127.0.0.1"))
+	scn := &slayers.SCION{
+		NextHdr:  slayers.L4SCMP,
+		PathType: empty.PathType,
+		Path:     &empty.Path{},
+		SrcIA:    selIA,
+		DstIA:    selIA,
+	}
+	if err := scn.SetSrcAddr(host); err != nil {
+		return nil, err
+	}
+	if err := scn.SetDstAddr(host); err != nil {
+		return nil, err
+	}
+	scmp := &slayers.SCMP{TypeCode: slayers.CreateSCMPTypeCode(
+		slayers.SCMPTypeExternalInterfaceDown, 0)}
+	scmp.SetNetworkLayerForChecksum(scn)
+	buffer := gopacket.NewSerializeBuffer()
+	err := gopacket.SerializeLayers(buffer, gopacket.SerializeOptions{
+		FixLengths:       true,
+		ComputeChecksums: true,
+	}, scn, scmp, &slayers.SCMPExternalInterfaceDown{IA: selIA, IfID: 1},
+		gopacket.Payload(quoted))
+	return buffer.Bytes(), err
+}
+
+// TestEchoRTTEndsAtTheInterfaceDownSignal checks the refused run: a router
+// answering every request with an interface-down signal quoting it — the
+// data plane refusing a down egress — ends each run at once, so the probe
+// reports no round trip well inside one ProbeWait rather than after
+// ProbeRuns of them.
+func TestEchoRTTEndsAtTheInterfaceDownSignal(t *testing.T) {
+	host := netip.MustParseAddr("127.0.0.1")
+	router, err := net.ListenUDP("udp", net.UDPAddrFromAddrPort(netip.AddrPortFrom(host, 0)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = router.Close() }()
+	conn, err := scion.NewConn(scion.ConnConfig{
+		IA:           selIA,
+		Bind:         netip.AddrPortFrom(host, 0).String(),
+		InternalAddr: router.LocalAddr().String(),
+		MACKey:       make([]byte, 16),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = conn.Close() }()
+	s := &selection{cfg: SelectionConfig{Conn: conn}}
+
+	refused := make(chan error, 1)
+	go func() {
+		buf := make([]byte, 2048)
+		for {
+			n, from, err := router.ReadFromUDP(buf)
+			if err != nil {
+				refused <- nil // the episode closed the router
+				return
+			}
+			answer, err := interfaceDownAnswer(buf[:n])
+			if err == nil {
+				_, err = router.WriteToUDP(answer, from)
+			}
+			if err != nil {
+				refused <- err
+				return
+			}
+		}
+	}()
+	start := time.Now()
+	rtt := s.echoRTT(context.Background(), &scion.Addr{
+		IA:   selPeer,
+		Addr: netip.AddrPortFrom(host, 30041),
+		IfID: 1,
+	})
+	held := time.Since(start)
+	_ = router.Close()
+	if err := <-refused; err != nil {
+		t.Fatal(err)
+	}
+	if rtt != 0 {
+		t.Errorf("echoRTT = %v over refused runs, want no round trip", rtt)
+	}
+	if held >= ProbeWait {
+		t.Errorf("echoRTT returned after %v, want under one ProbeWait", held)
+	}
+}
+
+// emptyPathDB is a path database holding no segment; Get is all a probe's
+// enumeration reads.
+type emptyPathDB struct{ pathdb.DB }
+
+func (emptyPathDB) Get(context.Context, pathdb.Query) ([]*pathdb.Segment, error) {
+	return nil, nil
+}
+
+// TestProbeSkipsADownNeighborsEcho checks the direct side's skip: an
+// established neighbor whose verdict is down gets no echo — the data plane
+// would lose it on the one-hop path without a signal — so the probe sends
+// the router nothing and returns no direct sample at once.
+func TestProbeSkipsADownNeighborsEcho(t *testing.T) {
+	host := netip.MustParseAddr("127.0.0.1")
+	router, err := net.ListenUDP("udp", net.UDPAddrFromAddrPort(netip.AddrPortFrom(host, 0)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = router.Close() }()
+	conn, err := scion.NewConn(scion.ConnConfig{
+		IA:           selIA,
+		Bind:         netip.AddrPortFrom(host, 0).String(),
+		InternalAddr: router.LocalAddr().String(),
+		MACKey:       make([]byte, 16),
+		Links:        func() map[uint16]addr.IA { return map[uint16]addr.IA{1: selPeer} },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = conn.Close() }()
+	s := &selection{cfg: SelectionConfig{
+		Conn:     conn,
+		Verdicts: func() map[uint16]bool { return map[uint16]bool{1: false} },
+		Provider: &scion.PathProvider{
+			IA:     selIA,
+			DB:     emptyPathDB{},
+			Lookup: func(context.Context, addr.IA) []*pathdb.Segment { return nil },
+		},
+	}}
+
+	start := time.Now()
+	sm := s.probe(context.Background(),
+		DirectoryEntry{IA: selPeer, ControlAddr: netip.AddrPortFrom(host, 30042)},
+		&links.Link{NeighborIA: selPeer, IfID: 1, State: links.StateEstablished})
+	if held := time.Since(start); held >= ProbeWait {
+		t.Errorf("the probe returned after %v, want under one ProbeWait", held)
+	}
+	if sm.m.direct != 0 {
+		t.Errorf("direct sample = %v, want none for the down neighbor", sm.m.direct)
+	}
+	// A request the probe sent is queued at the router by now; the deadline
+	// bounds the read when none was.
+	if err := router.SetReadDeadline(time.Now().Add(100 * time.Millisecond)); err != nil {
+		t.Fatal(err)
+	}
+	if n, _, err := router.ReadFromUDP(make([]byte, 2048)); err == nil {
+		t.Errorf("the probe sent %d bytes toward the down neighbor", n)
 	}
 }
 

@@ -160,18 +160,14 @@ func NewConn(cfg ConnConfig) (*Conn, error) {
 
 // recordInterfaceDown recognizes an interface-down signal in a received
 // packet — the drafts' error the library's receive paths once dropped
-// silently — and enters it in the shared cache. Reports whether one was
-// recognized.
-func (c *Conn) recordInterfaceDown(raw []byte) bool {
-	if c.ifDown == nil {
-		return false
-	}
+// silently — and enters it in the shared cache when the conn has one.
+// Reports the signal and whether one was recognized.
+func (c *Conn) recordInterfaceDown(raw []byte) (InterfaceDownSignal, bool) {
 	sig, ok := parseInterfaceDownPacket(raw)
-	if !ok {
-		return false
+	if ok && c.ifDown != nil {
+		c.ifDown.Record(sig)
 	}
-	c.ifDown.Record(sig)
-	return true
+	return sig, ok
 }
 
 // LocalPort returns the bound underlay port. An SCMP echo request sent by

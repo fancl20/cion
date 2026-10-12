@@ -138,25 +138,20 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 	return report, nil
 }
 
-// awaitReply reads echo messages until the one matching the sequence arrives
-// or the wait elapses.
+// awaitReply reads the reply matching the sequence; the wait elapsing or a
+// router refusing the request with an interface-down signal loses it.
 func awaitReply(cfg Config, sent time.Time, seq uint16) (ReplyStat, bool) {
 	if err := cfg.Conn.SetReadDeadline(sent.Add(cfg.Wait)); err != nil {
 		return ReplyStat{}, false
 	}
-	for {
-		echo, from, err := cfg.Conn.ReadEchoFrom()
-		if err != nil {
-			return ReplyStat{}, false // the wait elapsed: lost
-		}
-		if !echo.Reply || echo.Identifier != cfg.Conn.LocalPort() || echo.Seq != seq {
-			continue
-		}
-		stat := ReplyStat{Seq: seq, RTT: time.Since(sent), Hops: 1, Segments: 1}
-		if from.Path != nil {
-			stat.Hops = len(from.Path.HopFields)
-			stat.Segments = len(from.Path.InfoFields)
-		}
-		return stat, true
+	_, from, err := cfg.Conn.ReadEchoReply(seq)
+	if err != nil {
+		return ReplyStat{}, false
 	}
+	stat := ReplyStat{Seq: seq, RTT: time.Since(sent), Hops: 1, Segments: 1}
+	if from.Path != nil {
+		stat.Hops = len(from.Path.HopFields)
+		stat.Segments = len(from.Path.InfoFields)
+	}
+	return stat, true
 }

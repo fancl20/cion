@@ -100,9 +100,16 @@ func interfaceDownPacket(
 	return buffer.Bytes()
 }
 
-// quotedEchoRequest builds the packet a signal quotes: a plain SCMP echo
-// request from the leaf toward the far side.
-func quotedEchoRequest(t *testing.T, srcIA, dstIA addr.IA) []byte {
+// echoPacket builds a packet a signal quotes: a plain SCMP echo message of
+// the given type, identifier, and sequence from the source toward the
+// destination.
+func echoPacket(
+	t *testing.T,
+	srcIA, dstIA addr.IA,
+	typ slayers.SCMPType,
+	id, seq uint16,
+) []byte {
+
 	t.Helper()
 	scn := &slayers.SCION{
 		NextHdr:  slayers.L4SCMP,
@@ -117,10 +124,9 @@ func quotedEchoRequest(t *testing.T, srcIA, dstIA addr.IA) []byte {
 	if err := scn.SetDstAddr(scmpDstHost); err != nil {
 		t.Fatal(err)
 	}
-	scmp := &slayers.SCMP{TypeCode: slayers.CreateSCMPTypeCode(
-		slayers.SCMPTypeEchoRequest, 0)}
+	scmp := &slayers.SCMP{TypeCode: slayers.CreateSCMPTypeCode(typ, 0)}
 	scmp.SetNetworkLayerForChecksum(scn)
-	echo := &slayers.SCMPEcho{Identifier: 40441, SeqNumber: 1}
+	echo := &slayers.SCMPEcho{Identifier: id, SeqNumber: seq}
 	buffer := gopacket.NewSerializeBuffer()
 	err := gopacket.SerializeLayers(buffer, gopacket.SerializeOptions{
 		FixLengths:       true,
@@ -134,10 +140,11 @@ func quotedEchoRequest(t *testing.T, srcIA, dstIA addr.IA) []byte {
 
 // TestParseInterfaceDownPacket checks the recognition: a type-5 error names
 // the signaled ISD-AS and interface, and the quote names whose cached path
-// just failed; every other packet is not one — a forged signal from any
-// speaker on a path is worth no more than one cache entry.
+// just failed and the echo request it carried; every other packet is not
+// one — a forged signal from any speaker on a path is worth no more than
+// one cache entry.
 func TestParseInterfaceDownPacket(t *testing.T) {
-	quoted := quotedEchoRequest(t, iaLeaf, iaMid)
+	quoted := echoPacket(t, iaLeaf, iaMid, slayers.SCMPTypeEchoRequest, 40441, 1)
 	raw := interfaceDownPacket(t, iaMid, iaLeaf, iaMid, testIfID, quoted)
 
 	sig, ok := parseInterfaceDownPacket(raw)
@@ -152,6 +159,24 @@ func TestParseInterfaceDownPacket(t *testing.T) {
 	}
 	if sig.DstHost != scmpDstHost.IP() {
 		t.Errorf("quoted destination host = %v, want %v", sig.DstHost, scmpDstHost.IP())
+	}
+	if sig.Echo == nil || sig.Echo.Reply || sig.Echo.Identifier != 40441 || sig.Echo.Seq != 1 {
+		t.Errorf("quoted echo = %+v, want the request 40441/1", sig.Echo)
+	}
+
+	// A quoted reply carries no request, and neither does a quote cut short
+	// before the request's sequence.
+	reply := echoPacket(t, iaMid, iaLeaf, slayers.SCMPTypeEchoReply, 40441, 1)
+	for name, quote := range map[string][]byte{
+		"reply":     reply,
+		"truncated": quoted[:len(quoted)-2],
+	} {
+		sig, ok := parseInterfaceDownPacket(
+			interfaceDownPacket(t, iaMid, iaLeaf, iaMid, testIfID, quote))
+		if !ok || sig.Echo != nil {
+			t.Errorf("the %s quote = %+v (recognized %v), want a signal with no request",
+				name, sig.Echo, ok)
+		}
 	}
 
 	// An echo request is not a signal; neither is a truncated one.

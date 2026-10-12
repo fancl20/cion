@@ -429,12 +429,8 @@ func TestLineCutHeals(t *testing.T) {
 	})
 
 	// The dead link retires once the new segments serve the tier: the
-	// verdict stayed down across the sustained window. Each of the
-	// DemoteWindows windows the retirement counts waits out the dead
-	// neighbor's direct and baseline echo runs unanswered, whatever the
-	// lab's selection pacing, so the poll's budget adds them.
-	retirement := measured.DemoteWindows * 2 * measured.ProbeRuns * measured.ProbeWait
-	PollFor(t, TestTimeout+retirement, "the dead link to retire", func() bool {
+	// verdict stayed down across the sustained window.
+	Poll(t, "the dead link to retire", func() bool {
 		e := entryOf(c, b.app.IA())
 		return e != nil && e.State == links.StateRetired
 	})

@@ -17,9 +17,10 @@ import (
 const IfDownCacheTTL = 10 * time.Second
 
 // InterfaceDownSignal is one recognized SCMP External Interface Down
-// message: the signaled ISD-AS and interface entering the cache, and the
-// quoted packet's destination — whose cached path just failed, the
-// WireGuard bind's drop key.
+// message: the signaled ISD-AS and interface entering the cache, the quoted
+// packet's destination — whose cached path just failed, the WireGuard
+// bind's drop key — and the quoted echo request, whose sender waits for a
+// reply that will not come.
 type InterfaceDownSignal struct {
 	// IA is the ISD-AS whose interface is signaled down.
 	IA addr.IA
@@ -30,6 +31,9 @@ type InterfaceDownSignal struct {
 	Dst addr.IA
 	// DstHost is the quoted packet's destination host.
 	DstHost netip.Addr
+	// Echo is the quoted packet's SCMP echo request; nil when the quote
+	// carries none.
+	Echo *Echo
 }
 
 // InterfaceDownCache is the node's short negative cache of SCMP
@@ -128,8 +132,8 @@ func (c *InterfaceDownCache) HoldsAny() bool {
 
 // parseInterfaceDownPacket recognizes an SCMP External Interface Down
 // error in a received packet: the signaled ISD-AS and interface from the
-// message, the failed destination from the quote. Anything else — every
-// packet that is not a type-5 error — reports false.
+// message, the failed destination and any echo request from the quote.
+// Anything else — every packet that is not a type-5 error — reports false.
 func parseInterfaceDownPacket(raw []byte) (InterfaceDownSignal, bool) {
 	pkt := gopacket.NewPacket(raw, slayers.LayerTypeSCION, gopacket.NoCopy)
 	scmpL := pkt.Layer(slayers.LayerTypeSCMP)
@@ -157,7 +161,30 @@ func parseInterfaceDownPacket(raw []byte) (InterfaceDownSignal, bool) {
 			if dst, err := scn.DstAddr(); err == nil && dst.Type() == addr.HostTypeIP {
 				sig.DstHost = dst.IP()
 			}
+			sig.Echo = quotedEcho(&scn)
 		}
 	}
 	return sig, true
+}
+
+// quotedEcho decodes the SCMP echo request a quoted packet carries: its
+// identifier and sequence, which name the requesting socket and its
+// request. Nil for any other packet, and for a quote cut short before the
+// sequence.
+func quotedEcho(scn *slayers.SCION) *Echo {
+	if scn.NextHdr != slayers.L4SCMP {
+		return nil
+	}
+	var scmp slayers.SCMP
+	if err := scmp.DecodeFromBytes(scn.LayerPayload(), gopacket.NilDecodeFeedback); err != nil {
+		return nil
+	}
+	if scmp.TypeCode.Type() != slayers.SCMPTypeEchoRequest {
+		return nil
+	}
+	var echo slayers.SCMPEcho
+	if err := echo.DecodeFromBytes(scmp.LayerPayload(), gopacket.NilDecodeFeedback); err != nil {
+		return nil
+	}
+	return &Echo{Identifier: echo.Identifier, Seq: echo.SeqNumber}
 }

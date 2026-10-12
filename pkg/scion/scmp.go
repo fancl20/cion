@@ -2,6 +2,7 @@ package scion
 
 import (
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/gopacket/gopacket"
@@ -99,6 +100,46 @@ func (c *Conn) ReadEchoFrom() (Echo, *Addr, error) {
 			continue
 		}
 		return echo, from, nil
+	}
+}
+
+// EchoLostError reports one of the conn's own echo requests refused by a
+// router: an interface-down signal quoting it arrived, so no reply comes.
+type EchoLostError struct {
+	// Seq is the lost request's sequence number.
+	Seq uint16
+	// Signal is the router's signal.
+	Signal InterfaceDownSignal
+}
+
+func (e *EchoLostError) Error() string {
+	return fmt.Sprintf("echo request %d lost: interface %d of %s is down",
+		e.Seq, e.Signal.IfID, e.Signal.IA)
+}
+
+// ReadEchoReply reads until the reply to the conn's own echo request seq
+// arrives, returning it with the sender's address as ReadEchoFrom does. An
+// interface-down signal quoting that request fails the read with an
+// *EchoLostError: the router that sent it dropped the request. Every other
+// packet is dropped, an interface-down signal entering the cache first.
+func (c *Conn) ReadEchoReply(seq uint16) (Echo, *Addr, error) {
+	own := func(e Echo) bool { return e.Identifier == c.LocalPort() && e.Seq == seq }
+	buf := make([]byte, dataplane.BufferSize)
+	for {
+		n, _, err := c.conn.ReadFromUDP(buf)
+		if err != nil {
+			return Echo{}, nil, err
+		}
+		echo, from, err := parseEchoPacket(buf[:n])
+		if err == nil {
+			if echo.Reply && own(echo) {
+				return echo, from, nil
+			}
+			continue
+		}
+		if sig, ok := c.recordInterfaceDown(buf[:n]); ok && sig.Echo != nil && own(*sig.Echo) {
+			return Echo{}, nil, &EchoLostError{Seq: seq, Signal: sig}
+		}
 	}
 }
 

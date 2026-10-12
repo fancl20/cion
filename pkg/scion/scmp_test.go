@@ -1,6 +1,9 @@
 package scion
 
 import (
+	"errors"
+	"net"
+	"net/netip"
 	"testing"
 	"time"
 
@@ -136,5 +139,98 @@ func TestEchoExchange(t *testing.T) {
 	}
 	if string(echo.Payload) != "probe" {
 		t.Errorf("reply payload = %q, want %q", echo.Payload, "probe")
+	}
+}
+
+// TestReadEchoReply checks the requester's read: the reply to its own
+// request returns past every other echo message, and an interface-down
+// signal quoting that request fails the read with an EchoLostError, past
+// the signals quoting another socket's request or an earlier one. Each
+// signal names its own interface, telling which one ended the read.
+func TestReadEchoReply(t *testing.T) {
+	router, err := net.ListenUDP("udp4", net.UDPAddrFromAddrPort(netip.AddrPortFrom(testHost, 0)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = router.Close() }()
+	newConn := func(ia, peer addr.IA) *Conn {
+		t.Helper()
+		conn, err := NewConn(ConnConfig{
+			IA:           ia,
+			Bind:         netip.AddrPortFrom(testHost, 0).String(),
+			InternalAddr: router.LocalAddr().String(),
+			MACKey:       testMACKeyBytes,
+			Links:        func() map[uint16]addr.IA { return map[uint16]addr.IA{testIfID: peer} },
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = conn.Close() })
+		return conn
+	}
+	conn := newConn(iaLeaf, iaMid)
+	// The peer only serializes the echoes the router delivers to conn.
+	peer := newConn(iaMid, iaLeaf)
+	local := conn.LocalAddr().(*Addr).Addr
+	own := conn.LocalPort()
+
+	echo := func(typ slayers.SCMPType, id, seq uint16) []byte {
+		t.Helper()
+		raw, err := peer.writePacket(&Addr{IA: iaLeaf, Addr: local}, slayers.L4SCMP,
+			func(scn *slayers.SCION) ([]byte, error) {
+				return serializeEcho(scn, typ, id, seq, []byte("probe"))
+			})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return raw
+	}
+	refusal := func(ifID, id, seq uint16) []byte {
+		return interfaceDownPacket(t, iaMid, iaLeaf, iaMid, ifID,
+			echoPacket(t, iaLeaf, iaMid, slayers.SCMPTypeEchoRequest, id, seq))
+	}
+	deliver := func(packets ...[]byte) {
+		t.Helper()
+		for _, raw := range packets {
+			if _, err := router.WriteToUDP(raw, net.UDPAddrFromAddrPort(local)); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if err := conn.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+
+	// The read for request 7 passes every other message and fails on its
+	// own refusal.
+	deliver(
+		echo(slayers.SCMPTypeEchoReply, own, 6),   // an earlier request's reply
+		echo(slayers.SCMPTypeEchoReply, own+1, 7), // another socket's reply
+		echo(slayers.SCMPTypeEchoRequest, own, 7), // a request, not a reply
+		refusal(3, own+1, 7),                      // another socket's request
+		refusal(2, own, 6),                        // an earlier request
+		refusal(testIfID, own, 7),
+	)
+	_, _, err = conn.ReadEchoReply(7)
+	var lost *EchoLostError
+	if !errors.As(err, &lost) {
+		t.Fatalf("ReadEchoReply(7) = %v, want an EchoLostError", err)
+	}
+	if lost.Seq != 7 || !lost.Signal.IA.Equal(iaMid) || lost.Signal.IfID != testIfID {
+		t.Errorf("lost request %d at %v/%d, want 7 at %v/%d",
+			lost.Seq, lost.Signal.IA, lost.Signal.IfID, iaMid, testIfID)
+	}
+
+	// The read for request 8 returns its reply past a late refusal of 7.
+	deliver(refusal(testIfID, own, 7), echo(slayers.SCMPTypeEchoReply, own, 8))
+	reply, from, err := conn.ReadEchoReply(8)
+	if err != nil {
+		t.Fatalf("ReadEchoReply(8) = %v, want the reply", err)
+	}
+	if !reply.Reply || reply.Identifier != own || reply.Seq != 8 || string(reply.Payload) != "probe" {
+		t.Errorf("reply = %+v, want the reply to %d/8", reply, own)
+	}
+	if !from.IA.Equal(iaMid) {
+		t.Errorf("reply source = %v, want %v", from.IA, iaMid)
 	}
 }

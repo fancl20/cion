@@ -519,21 +519,26 @@ func (s *selection) establish(ctx context.Context, e DirectoryEntry, why string)
 // one-hop write does, the responder in the peer's core answering on the
 // reversed arrival path — and a candidate's (a demoted neighbor included)
 // by the rendezvous echo that reaches where no path and no interface exist.
-// The baseline is the same SCMP echo instrument over the freshest clean
-// composed route of the enumeration the probe keeps beside the sample, the
-// route recorded as the sample's carrier: one destination, two routes, the
-// same median-of-runs discipline, and no clean route leaves the baseline
-// unmeasured for the window rather than measured over a route the network
-// would not serve. The rendezvous echo claims the zero ISD-AS — a probe
-// mints no entry a candidate sweep could mistake for a peer — deduplicated
-// by the control address it claims.
+// A neighbor whose verdict is down gets no direct echo: the data plane
+// forwards a one-hop path without checking its egress, so the echo would be
+// lost without a signal after its waits, and the zero sample is what it
+// would measure. The baseline is the same SCMP echo instrument over the
+// freshest clean composed route of the enumeration the probe keeps beside
+// the sample, the route recorded as the sample's carrier: one destination,
+// two routes, the same median-of-runs discipline, and no clean route leaves
+// the baseline unmeasured for the window rather than measured over a route
+// the network would not serve. The rendezvous echo claims the zero ISD-AS —
+// a probe mints no entry a candidate sweep could mistake for a peer —
+// deduplicated by the control address it claims.
 func (s *selection) probe(ctx context.Context, e DirectoryEntry, l *links.Link) sample {
 	var m measurement
 	if l != nil {
-		m.direct = s.echoRTT(ctx, &scion.Addr{
-			IA:   e.IA,
-			Addr: netip.AddrPortFrom(e.ControlAddr.Addr(), dataplane.EndhostPort),
-		})
+		if s.linkUp(l.IfID) {
+			m.direct = s.echoRTT(ctx, &scion.Addr{
+				IA:   e.IA,
+				Addr: netip.AddrPortFrom(e.ControlAddr.Addr(), dataplane.EndhostPort),
+			})
+		}
 	} else if _, rtt, err := s.echo(ctx, s.cfg.ControlAddr.Addr(),
 		e.RendezvousAddr, addr.IA(0), s.cfg.ControlAddr); err == nil {
 		m.direct = rtt
@@ -586,10 +591,11 @@ func (s *selection) declare(neighbors map[addr.IA]*links.Link, samples map[addr.
 
 // echoRTT takes the median SCMP echo round trip to the destination — over
 // the one-hop path the conn resolves for a neighbor, over the supplied path
-// for the baseline. Zero without a probe conn. The context's end moves the
-// read deadline to the past, ending a wait in flight; each run reads the
-// context after setting its own deadline, so no run overrides the move
-// unseen.
+// for the baseline. Zero without a probe conn. A run whose request a router
+// refuses with an interface-down signal is lost at the signal rather than
+// at ProbeWait. The context's end moves the read deadline to the past,
+// ending a wait in flight; each run reads the context after setting its own
+// deadline, so no run overrides the move unseen.
 func (s *selection) echoRTT(ctx context.Context, dst *scion.Addr) time.Duration {
 	if s.cfg.Conn == nil {
 		return 0
@@ -608,16 +614,10 @@ func (s *selection) echoRTT(ctx context.Context, dst *scion.Addr) time.Duration 
 		if err := s.cfg.Conn.WriteEchoRequestTo(dst, seq, nil); err != nil {
 			continue
 		}
-		for {
-			echo, _, err := s.cfg.Conn.ReadEchoFrom()
-			if err != nil {
-				break // the wait elapsed or the context ended: lost
-			}
-			if !echo.Reply || echo.Identifier != s.cfg.Conn.LocalPort() || echo.Seq != seq {
-				continue
-			}
+		// The wait elapsing, the context ending, or a router refusing the
+		// request loses the run.
+		if _, _, err := s.cfg.Conn.ReadEchoReply(seq); err == nil {
 			rtts = append(rtts, time.Since(sent))
-			break
 		}
 	}
 	return median(rtts)
