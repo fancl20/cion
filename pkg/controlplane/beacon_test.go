@@ -17,6 +17,7 @@ import (
 	"github.com/scionproto/scion/pkg/addr"
 	cppb "github.com/scionproto/scion/pkg/proto/control_plane"
 	"github.com/scionproto/scion/pkg/scrypto"
+	"github.com/scionproto/scion/pkg/scrypto/cppki"
 
 	"github.com/fancl20/cion/pkg/modules/pathdb"
 	pathdbbbolt "github.com/fancl20/cion/pkg/modules/pathdb/impl/bbolt"
@@ -591,7 +592,8 @@ func TestHandleBeaconChecks(t *testing.T) {
 
 // TestHandleBeaconWithoutTRC checks the bootstrapping subtlety: a node that
 // has not pinned the TRC records the beacon as its enrollment route but
-// never stores it.
+// never stores it, and the route serves only while the link table holds the
+// interface the beacon arrived on.
 func TestHandleBeaconWithoutTRC(t *testing.T) {
 	f := newBeaconFixture(t)
 	ctx := context.Background()
@@ -607,13 +609,14 @@ func TestHandleBeaconWithoutTRC(t *testing.T) {
 		t.Fatal(err)
 	}
 	fresh := trust.NewEngine(nodeIATest, key, &trust.NetworkProvider{DB: freshDB})
+	table := map[uint16]addr.IA{1: coreIATest}
 	beaconer, err := NewBeaconer(BeaconerConfig{
 		IA:     nodeIATest,
 		Engine: fresh,
 		MACKey: []byte(testMACKey),
 		Store:  f.store,
 		DB:     f.pathDB,
-		Links:  func() map[uint16]addr.IA { return map[uint16]addr.IA{1: coreIATest} },
+		Links:  func() map[uint16]addr.IA { return table },
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -643,6 +646,12 @@ func TestHandleBeaconWithoutTRC(t *testing.T) {
 	// The node's own hop leads, so its router can verify and forward it.
 	if route.HopFields[0].ExpTime != segment.HopExpTime {
 		t.Error("bootstrap route does not start with the node's own hop")
+	}
+	// The link to the core moves to a fresh interface: the data plane
+	// carries the beacon's arrival interface no more, so the route goes.
+	table = map[uint16]addr.IA{2: coreIATest}
+	if beaconer.BootstrapRoute(coreIATest) != nil {
+		t.Error("bootstrap route served over an interface the link table no longer holds")
 	}
 }
 
@@ -706,6 +715,107 @@ func TestBootstrapAlternatesOrigins(t *testing.T) {
 	}
 	if beaconer.BootstrapRoute(iaLineC) != nil {
 		t.Error("a bootstrap route served an origin no beacon named")
+	}
+}
+
+// TestBootstrapRouteFollowsVerifiedBeacons checks the slots across the pin:
+// a slot opened before it follows the core's verified beacons after it, so
+// a link the core moved to a fresh interface on its own side — the node's
+// interface unchanged — re-routes with the core's next beacon, and an origin
+// first heard after the pin opens no slot.
+func TestBootstrapRouteFollowsVerifiedBeacons(t *testing.T) {
+	f := newBeaconFixture(t)
+	ctx := context.Background()
+	now := time.Now()
+
+	// A fresh node's engine, pinned once the core's first beacon opened its
+	// slot.
+	freshDB, err := bbolt.New(filepath.Join(t.TempDir(), "trust.db"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = freshDB.Close() }()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fresh := trust.NewEngine(nodeIATest, key, &trust.NetworkProvider{DB: freshDB})
+	beaconer, err := NewBeaconer(BeaconerConfig{
+		IA:     nodeIATest,
+		Engine: fresh,
+		MACKey: []byte(testMACKey),
+		Store:  f.store,
+		DB:     f.pathDB,
+		Links: func() map[uint16]addr.IA {
+			return map[uint16]addr.IA{1: coreIATest, 3: iaCore2Test}
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// coreBeacon builds the core's beacon [A] leaving on the given
+	// interface.
+	coreBeacon := func(created time.Time, egress uint16) *segment.PCB {
+		pcb, err := segment.NewPCB(created)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := pcb.AppendEntry(ctx, coreIATest, segment.EntryOptions{
+			Next:       nodeIATest,
+			EgressIfID: egress,
+		}, macFactory(), f.engines[coreIATest]); err != nil {
+			t.Fatal(err)
+		}
+		return pcb
+	}
+	// coreEgress reads the core's hop off the route, the reversal's last.
+	coreEgress := func() uint16 {
+		route := beaconer.BootstrapRoute(coreIATest)
+		if route == nil {
+			t.Fatal("no bootstrap route to the core")
+		}
+		return route.HopFields[len(route.HopFields)-1].ConsEgress
+	}
+
+	if err := beaconer.HandleBeacon(ctx, coreBeacon(now.Add(-2*time.Second), 1), 1); err != nil {
+		t.Fatal(err)
+	}
+	// The pin: the fixture's TRC and the two cores' chains.
+	trc, err := f.db.SignedTRC(ctx, cppki.TRCID{ISD: coreIATest.ISD(), Base: 1, Serial: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := freshDB.InsertTRC(ctx, trc); err != nil {
+		t.Fatal(err)
+	}
+	for _, ia := range []addr.IA{coreIATest, iaCore2Test} {
+		chains, err := f.db.Chains(ctx, trustdb.ChainQuery{IA: ia})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, chain := range chains {
+			if _, err := freshDB.InsertChain(ctx, chain); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if got := coreEgress(); got != 1 {
+		t.Fatalf("bootstrap route enters the core on %d, want 1", got)
+	}
+
+	// The core re-links on its interface 7; the node's side stays on 1.
+	if err := beaconer.HandleBeacon(ctx, coreBeacon(now.Add(-time.Second), 7), 1); err != nil {
+		t.Fatal(err)
+	}
+	if got := coreEgress(); got != 7 {
+		t.Errorf("bootstrap route enters the core on %d, want its fresh interface 7", got)
+	}
+	// The fellow core, first heard after the pin, opens no slot.
+	if err := beaconer.HandleBeacon(ctx, core2Beacon(t, f, now), 3); err != nil {
+		t.Fatal(err)
+	}
+	if beaconer.BootstrapRoute(iaCore2Test) != nil {
+		t.Error("an origin first heard after the pin opened a bootstrap slot")
 	}
 }
 

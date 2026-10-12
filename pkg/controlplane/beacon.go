@@ -80,14 +80,16 @@ type Beaconer struct {
 	propagation  time.Duration
 	registration time.Duration
 
-	// bootstrap keeps each origin's freshest unverified beacon and the
-	// interface it arrived on: a fresh node receives beacons before it has
-	// pinned the TRC and may use their reversed path — extended with its
-	// own hop — as the route for its enrollment fetch; never for storing,
-	// propagating, or registering. BootstrapCore alternates across the
-	// origins, freshest first, so a retrying enrollment reaches every
-	// origin the beacons name — one core's fresher beacons cannot starve
-	// another's route.
+	// bootstrap keeps the freshest beacon of each origin the node heard
+	// before it pinned the TRC, and the interface it arrived on — unverified
+	// until the pin, verified after: a fresh node receives beacons before it
+	// has pinned the TRC and may use their reversed path — extended with its
+	// own hop — as the route for its enrollment fetch, and a core tier,
+	// which stores no up segments, keeps riding it to its neighboring cores;
+	// never for storing, propagating, or registering. BootstrapCore
+	// alternates across the origins, freshest first, so a retrying
+	// enrollment reaches every origin the beacons name — one core's fresher
+	// beacons cannot starve another's route.
 	bootstrapMtx     sync.Mutex
 	bootstraps       map[addr.IA]*segment.PCB
 	bootstrapIngress map[addr.IA]uint16
@@ -288,7 +290,10 @@ func (b *Beaconer) goSend(t sendTarget, rpcs func()) {
 // HandleBeacon applies the reception checks of Section 2.3.1 to the received
 // PCB and stores it as a candidate. A node that has not pinned the TRC
 // cannot verify beacons; it records the freshest one as its bootstrap route
-// for the enrollment fetch instead.
+// for the enrollment fetch instead. A pinned node refreshes the slots it
+// holds with each verified one, so their routes name the interfaces the
+// link's two ends use now, and opens none: the cores BootstrapCore
+// alternates over stay the ones the node heard before its pin.
 func (b *Beaconer) HandleBeacon(
 	ctx context.Context,
 	pcb *segment.PCB,
@@ -303,13 +308,14 @@ func (b *Beaconer) HandleBeacon(
 		return err
 	}
 	if !pinned {
-		b.recordBootstrap(ingress, pcb)
+		b.recordBootstrap(ingress, pcb, true)
 		return nil
 	}
 	if err := b.verifySignatures(ctx, pcb); err != nil {
 		return err
 	}
 	b.store.Insert(ingress, pcb)
+	b.recordBootstrap(ingress, pcb, false)
 	return nil
 }
 
@@ -340,13 +346,17 @@ func (b *Beaconer) HandleRegistration(
 	return nil
 }
 
-// BootstrapRoute returns the reversed data-plane path of the freshest
-// unverified beacon originating at dst, extended with the node's own
-// unsigned hop — the route of a node that has not yet verified any up
-// segment to that core: its enrollment fetch and the trust fetches around
-// it ride it, all protected by the WebPKI-authenticated channel. It is
+// BootstrapRoute returns the reversed data-plane path of the freshest beacon
+// originating at dst, extended with the node's own unsigned hop — the route
+// of a node that has not verified any up segment to that core: a fresh
+// node's enrollment fetch and the trust fetches around it ride it, all
+// protected by the WebPKI-authenticated channel, and a core tier, which
+// stores no up segments, keeps riding it to its neighboring cores. It is
 // never stored, propagated, or registered, serves only its originating
-// core, and verified up segments take over the moment one exists.
+// core, and verified up segments take over the moment one exists. A beacon
+// whose arrival interface the link table no longer holds serves none: the
+// data plane carries no such interface, and a beacon over the link's new
+// interface takes over once one arrives.
 func (b *Beaconer) BootstrapRoute(dst addr.IA) *spath.Decoded {
 	b.bootstrapMtx.Lock()
 	defer b.bootstrapMtx.Unlock()
@@ -354,33 +364,42 @@ func (b *Beaconer) BootstrapRoute(dst addr.IA) *spath.Decoded {
 	if !ok || !pcb.Expiration().After(time.Now()) {
 		return nil
 	}
+	ingress := b.bootstrapIngress[dst]
+	if _, live := b.linkTable()[ingress]; !live {
+		return nil
+	}
 	route, err := pcb.Clone()
 	if err != nil {
 		panic(fmt.Sprintf("cloning the bootstrap beacon: %v", err))
 	}
 	if _, err := route.AppendRouteHop(b.ia, segment.EntryOptions{
-		IngressIfID: b.bootstrapIngress[dst],
+		IngressIfID: ingress,
 	}, b.macFactory); err != nil {
 		panic(fmt.Sprintf("extending the bootstrap beacon: %v", err))
 	}
 	return route.ReversePath()
 }
 
-func (b *Beaconer) recordBootstrap(ingress uint16, pcb *segment.PCB) {
+// recordBootstrap keeps the beacon in its origin's slot when it is fresher
+// than the one the slot holds; an origin without a slot gains one only when
+// add is set.
+func (b *Beaconer) recordBootstrap(ingress uint16, pcb *segment.PCB, add bool) {
 	b.bootstrapMtx.Lock()
 	defer b.bootstrapMtx.Unlock()
 	origin := pcb.FirstIA()
-	if existing, ok := b.bootstraps[origin]; ok &&
-		!pcb.Timestamp().After(existing.Timestamp()) {
-
+	existing, ok := b.bootstraps[origin]
+	if !ok && !add {
+		return
+	}
+	if ok && !pcb.Timestamp().After(existing.Timestamp()) {
 		return
 	}
 	b.bootstraps[origin] = pcb
 	b.bootstrapIngress[origin] = ingress
 }
 
-// BootstrapCore returns the ISD-AS a freshest unverified beacon originated —
-// the freshest origin first, alternating across calls, so the destination a
+// BootstrapCore returns the ISD-AS a bootstrap beacon originated — the
+// freshest origin first, alternating across calls, so the destination a
 // node that has not pinned the TRC aims its core route at reaches every
 // origin the beacons name: one origin's fresher beacons cannot starve
 // another's route, and the issuer's is the one a retrying enrollment
