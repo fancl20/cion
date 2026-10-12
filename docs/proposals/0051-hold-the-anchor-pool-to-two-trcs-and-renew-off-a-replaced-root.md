@@ -152,9 +152,7 @@ at their enrollment pace, and production keeps the defaults.
     ([config.go](/internal/services/config.go),
     [controlplane.go](/internal/services/controlplane.go)). Only the
     rotation lab sets it, so the labs that never roll a root keep the
-    one-minute inspection. Paced by `NodePacing.Enrollment`, every lab node
-    inspected its chain ten times a second, and two of four full runs failed
-    `TestBFDLivenessEpisode` before its line stood.
+    one-minute inspection.
 *   A failed read of the newest pinned TRC ends the pass at the retry
     cadence, as a failed chain read does; the report used to pass over it.
 *   The rotation lab finds the pre-pin chain by the root it verifies under,
