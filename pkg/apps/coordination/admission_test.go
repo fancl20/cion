@@ -51,67 +51,70 @@ const rateRefused = "registration exceeds the admission rate\n"
 // ask inside the source interval is refused without the seam being asked —
 // the ask recorder proves the door — the overall interval refuses across
 // distinct sources, past the interval the asks pass again, and the record's
-// idempotent answer never asks at all.
+// idempotent answer never asks at all. The interval passes in a fake-time
+// bubble.
 func TestRegisterRateCaps(t *testing.T) {
-	store := &dbtest.MemStore{}
-	store.Seed(testNode(mustIA("1-ff00:0:1"), "100.64.1.0/24", "198.51.100.10:51820"))
-	auth := &askAuthorizer{
-		answer: enrollauth.AdmissionAnswer{Admission: enrollauth.AdmissionAllow},
-	}
-	a := testApp(t, Config{Store: store, Authorizer: auth})
-	member := key.NewMachine()
-	joiner := key.NewNode()
+	synctest.Test(t, func(t *testing.T) {
+		store := &dbtest.MemStore{}
+		store.Seed(testNode(mustIA("1-ff00:0:1"), "100.64.1.0/24", "198.51.100.10:51820"))
+		auth := &askAuthorizer{
+			answer: enrollauth.AdmissionAnswer{Admission: enrollauth.AdmissionAllow},
+		}
+		a := testApp(t, Config{Store: store, Authorizer: auth})
+		member := key.NewMachine()
+		joiner := key.NewNode()
 
-	if w := postRegister(a, "192.0.2.10:1111", member, joiner); w.Code != http.StatusOK {
-		t.Fatalf("the first ask's status = %d, want 200", w.Code)
-	}
-	if asks := auth.asks(); len(asks) != 1 {
-		t.Fatalf("the seam was asked %d times, want the one", len(asks))
-	}
+		if w := postRegister(a, "192.0.2.10:1111", member, joiner); w.Code != http.StatusOK {
+			t.Fatalf("the first ask's status = %d, want 200", w.Code)
+		}
+		if asks := auth.asks(); len(asks) != 1 {
+			t.Fatalf("the seam was asked %d times, want the one", len(asks))
+		}
 
-	// The same source inside the interval — from another port, for the cap
-	// keys the address, an internet source's port being ephemeral: refused,
-	// the seam never asked.
-	if w := postRegister(a, "192.0.2.10:2222", member, key.NewNode()); w.Code != http.StatusServiceUnavailable ||
-		w.Body.String() != rateRefused {
-		t.Errorf("a second ask inside the source interval = %d %q, want the rate's %d %q",
-			w.Code, w.Body.String(), http.StatusServiceUnavailable, rateRefused)
-	}
-	if asks := auth.asks(); len(asks) != 1 {
-		t.Fatalf("the seam was asked %d times inside the interval, want the one",
-			len(asks))
-	}
+		// The same source inside the interval — from another port, for the cap
+		// keys the address, an internet source's port being ephemeral: refused,
+		// the seam never asked.
+		if w := postRegister(a, "192.0.2.10:2222", member, key.NewNode()); w.Code != http.StatusServiceUnavailable ||
+			w.Body.String() != rateRefused {
+			t.Errorf("a second ask inside the source interval = %d %q, want the rate's %d %q",
+				w.Code, w.Body.String(), http.StatusServiceUnavailable, rateRefused)
+		}
+		if asks := auth.asks(); len(asks) != 1 {
+			t.Fatalf("the seam was asked %d times inside the interval, want the one",
+				len(asks))
+		}
 
-	// The overall interval refuses across distinct sources: many slow
-	// sources bound the door as one.
-	if w := postRegister(a, "192.0.2.20:3333", key.NewMachine(), key.NewNode()); w.Code != http.StatusServiceUnavailable ||
-		w.Body.String() != rateRefused {
-		t.Errorf("an ask from a second source inside the overall interval = %d %q, want the rate's %d %q",
-			w.Code, w.Body.String(), http.StatusServiceUnavailable, rateRefused)
-	}
-	if asks := auth.asks(); len(asks) != 1 {
-		t.Fatalf("the seam was asked %d times inside the overall interval, want the one",
-			len(asks))
-	}
+		// The overall interval refuses across distinct sources: many slow
+		// sources bound the door as one.
+		if w := postRegister(a, "192.0.2.20:3333", key.NewMachine(), key.NewNode()); w.Code != http.StatusServiceUnavailable ||
+			w.Body.String() != rateRefused {
+			t.Errorf("an ask from a second source inside the overall interval = %d %q, want the rate's %d %q",
+				w.Code, w.Body.String(), http.StatusServiceUnavailable, rateRefused)
+		}
+		if asks := auth.asks(); len(asks) != 1 {
+			t.Fatalf("the seam was asked %d times inside the overall interval, want the one",
+				len(asks))
+		}
 
-	// The record's idempotent answer passes uncapped, inside the interval:
-	// the re-registering member's read is what the registry owes it.
-	if w := postRegister(a, "192.0.2.99:4444", member, joiner); w.Code != http.StatusOK {
-		t.Errorf("the idempotent re-registration inside the interval = %d, want 200",
-			w.Code)
-	}
-	if asks := auth.asks(); len(asks) != 1 {
-		t.Fatalf("the idempotent answer asked the seam %d times, want never", len(asks))
-	}
+		// The record's idempotent answer passes uncapped, inside the interval:
+		// the re-registering member's read is what the registry owes it.
+		if w := postRegister(a, "192.0.2.99:4444", member, joiner); w.Code != http.StatusOK {
+			t.Errorf("the idempotent re-registration inside the interval = %d, want 200",
+				w.Code)
+		}
+		if asks := auth.asks(); len(asks) != 1 {
+			t.Fatalf("the idempotent answer asked the seam %d times, want never", len(asks))
+		}
 
-	// Past the interval the asks pass again.
-	time.Sleep(admissionMinInterval)
-	if w := postRegister(a, "192.0.2.20:3333", key.NewMachine(), key.NewNode()); w.Code != http.StatusOK {
-		t.Errorf("an ask past the interval = %d, want 200", w.Code)
-	}
-	if asks := auth.asks(); len(asks) != 2 {
-		t.Fatalf("the seam was asked %d times past the interval, want 2", len(asks))
-	}
+		// Past the interval the asks pass again.
+		time.Sleep(admissionMinInterval)
+		if w := postRegister(a, "192.0.2.20:3333", key.NewMachine(), key.NewNode()); w.Code != http.StatusOK {
+			t.Errorf("an ask past the interval = %d, want 200", w.Code)
+		}
+		if asks := auth.asks(); len(asks) != 2 {
+			t.Fatalf("the seam was asked %d times past the interval, want 2", len(asks))
+		}
+	})
 }
 
 // TestSourceLimiterCap checks the limiter's bound in a fake-time bubble: it

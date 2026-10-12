@@ -36,9 +36,9 @@ type sentDatagram struct {
 }
 
 func (d *relayDouble) Recv() (derp.ReceivedMessage, error) {
-	// Nothing arrives on the double's leg; the test feeds datagrams
-	// through the socket directly, as the receive loop would.
-	time.Sleep(time.Hour)
+	// Nothing reads the double: the bridge's receive loop reads the relay
+	// client it dials, and the test feeds datagrams through the socket
+	// directly, as that loop would.
 	return nil, net.ErrClosed
 }
 
