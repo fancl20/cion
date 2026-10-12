@@ -283,7 +283,7 @@ func (r *Rendezvous) Run(ctx context.Context) {
 			}
 			return
 		}
-		reply, err := r.handle(buf[:n], src)
+		reply, err := r.handle(ctx, buf[:n], src)
 		if err != nil {
 			slog.Debug("Rendezvous request refused", "src", src, "err", err)
 			continue
@@ -301,8 +301,8 @@ func (r *Rendezvous) Run(ctx context.Context) {
 // check — so a claim only ever mints, names, or retargets a candidate: an
 // established entry answers with its recorded side untouched, and a claim
 // at an address another serving link holds is turned away, the store
-// refusing the second.
-func (r *Rendezvous) handle(raw []byte, src *net.UDPAddr) ([]byte, error) {
+// refusing the second. The store calls run under ctx, the loop's.
+func (r *Rendezvous) handle(ctx context.Context, raw []byte, src *net.UDPAddr) ([]byte, error) {
 	req, err := ParseRendezvousRequest(raw)
 	if err != nil {
 		return nil, err
@@ -311,7 +311,7 @@ func (r *Rendezvous) handle(raw []byte, src *net.UDPAddr) ([]byte, error) {
 		if !r.byAddr.admit(req.LinkAddr) {
 			return nil, fmt.Errorf("claim %s exceeds the admission rate", req.LinkAddr)
 		}
-		unnamed, err := r.unnamedLinks()
+		unnamed, err := r.unnamedLinks(ctx)
 		if err != nil {
 			return nil, err
 		}
@@ -330,9 +330,9 @@ func (r *Rendezvous) handle(raw []byte, src *net.UDPAddr) ([]byte, error) {
 	// entry, or mints its own on a fresh address.
 	r.mtx.Lock()
 	defer r.mtx.Unlock()
-	entry, err := r.admit(req)
+	entry, err := r.admit(ctx, req)
 	if errors.Is(err, links.ErrDuplicateNeighbor) || errors.Is(err, links.ErrDuplicateLocal) {
-		entry, err = r.admit(req)
+		entry, err = r.admit(ctx, req)
 	}
 	if err != nil {
 		return nil, err
@@ -349,18 +349,18 @@ func (r *Rendezvous) handle(raw []byte, src *net.UDPAddr) ([]byte, error) {
 
 // admit returns the claim's entry: the one the table holds for it, an
 // unnamed one a named claim adopts, or a candidate it mints under the cap.
-func (r *Rendezvous) admit(req RendezvousRequest) (*links.Link, error) {
+func (r *Rendezvous) admit(ctx context.Context, req RendezvousRequest) (*links.Link, error) {
 	var entry *links.Link
 	var err error
 	if req.IA.IsZero() {
 		// An unnamed claim — a probe, or a bootstrap joiner whose identity
 		// is not final — deduplicates by the address it claims.
-		entry, err = r.cfg.Store.ByRemote(context.Background(), req.LinkAddr)
+		entry, err = r.cfg.Store.ByRemote(ctx, req.LinkAddr)
 		if err != nil {
 			return nil, err
 		}
 	} else {
-		entry, err = r.cfg.Store.ByNeighbor(context.Background(), req.IA)
+		entry, err = r.cfg.Store.ByNeighbor(ctx, req.IA)
 		if err != nil {
 			return nil, err
 		}
@@ -369,13 +369,13 @@ func (r *Rendezvous) admit(req RendezvousRequest) (*links.Link, error) {
 			// the bootstrap joiner's second dial, its identity completed —
 			// names that entry instead of minting a second one: adoption is
 			// the request's own act.
-			byRemote, err := r.cfg.Store.ByRemote(context.Background(), req.LinkAddr)
+			byRemote, err := r.cfg.Store.ByRemote(ctx, req.LinkAddr)
 			if err != nil {
 				return nil, err
 			}
 			if byRemote != nil && byRemote.NeighborIA.IsZero() {
 				byRemote.NeighborIA = req.IA
-				if err := r.cfg.Store.Update(context.Background(), byRemote); err != nil {
+				if err := r.cfg.Store.Update(ctx, byRemote); err != nil {
 					return nil, err
 				}
 				slog.Info("Rendezvous named a candidate", "neighbor", req.IA,
@@ -385,7 +385,7 @@ func (r *Rendezvous) admit(req RendezvousRequest) (*links.Link, error) {
 		}
 	}
 	if entry == nil {
-		entries, err := r.cfg.Store.All(context.Background())
+		entries, err := r.cfg.Store.All(ctx)
 		if err != nil {
 			return nil, fmt.Errorf("reading the link store: %w", err)
 		}
@@ -402,7 +402,7 @@ func (r *Rendezvous) admit(req RendezvousRequest) (*links.Link, error) {
 			Remote:     req.LinkAddr,
 			State:      links.StateCandidate,
 		}
-		if err := r.cfg.Store.Insert(context.Background(), entry); err != nil {
+		if err := r.cfg.Store.Insert(ctx, entry); err != nil {
 			return nil, err
 		}
 		slog.Info("Rendezvous admitted a candidate", "neighbor", req.IA,
@@ -411,7 +411,7 @@ func (r *Rendezvous) admit(req RendezvousRequest) (*links.Link, error) {
 		// The claim retargets an unnamed or unproven entry only; an
 		// established link keeps the address its peer's request recorded.
 		entry.Remote = req.LinkAddr
-		if err := r.cfg.Store.Update(context.Background(), entry); err != nil {
+		if err := r.cfg.Store.Update(ctx, entry); err != nil {
 			return nil, err
 		}
 	}
@@ -421,15 +421,15 @@ func (r *Rendezvous) admit(req RendezvousRequest) (*links.Link, error) {
 // unnamedLinks counts the live entries without a neighbor name — probes and
 // bootstrap claims, bounded by the same cap until the candidate window
 // retires them.
-func (r *Rendezvous) unnamedLinks() (int, error) {
-	return r.countLinks(func(l *links.Link) bool {
+func (r *Rendezvous) unnamedLinks(ctx context.Context) (int, error) {
+	return r.countLinks(ctx, func(l *links.Link) bool {
 		return l.Live() && l.NeighborIA.IsZero()
 	})
 }
 
 // countLinks counts the entries a predicate keeps.
-func (r *Rendezvous) countLinks(keep func(*links.Link) bool) (int, error) {
-	entries, err := r.cfg.Store.All(context.Background())
+func (r *Rendezvous) countLinks(ctx context.Context, keep func(*links.Link) bool) (int, error) {
+	entries, err := r.cfg.Store.All(ctx)
 	if err != nil {
 		return 0, fmt.Errorf("reading the link store: %w", err)
 	}

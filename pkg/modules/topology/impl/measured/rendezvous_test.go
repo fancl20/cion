@@ -177,7 +177,7 @@ func TestRendezvousLosesRecordRace(t *testing.T) {
 	}
 	store.armed.Store(true)
 	req := RendezvousRequest{IA: rendezvousIA, LinkAddr: recorded.Remote}
-	raw, err := f.handle(req.Marshal(), net.UDPAddrFromAddrPort(recorded.Remote))
+	raw, err := f.handle(context.Background(), req.Marshal(), net.UDPAddrFromAddrPort(recorded.Remote))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -210,7 +210,7 @@ func TestRendezvousLosesPortRace(t *testing.T) {
 	store.armed.Store(true)
 	claim := netip.MustParseAddrPort("127.0.0.1:4242")
 	req := RendezvousRequest{IA: rendezvousIA, LinkAddr: claim}
-	raw, err := f.handle(req.Marshal(), net.UDPAddrFromAddrPort(claim))
+	raw, err := f.handle(context.Background(), req.Marshal(), net.UDPAddrFromAddrPort(claim))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -239,7 +239,7 @@ func TestRendezvousRefusesTakenRemote(t *testing.T) {
 	fresh := addr.MustIAFrom(20, 0xfd0000000025)
 	for _, ia := range []addr.IA{fresh, strangerKeyIA} {
 		req := RendezvousRequest{IA: ia, LinkAddr: taken.Remote}
-		_, err := f.handle(req.Marshal(), net.UDPAddrFromAddrPort(taken.Remote))
+		_, err := f.handle(context.Background(), req.Marshal(), net.UDPAddrFromAddrPort(taken.Remote))
 		if !errors.Is(err, links.ErrDuplicateRemote) {
 			t.Errorf("a claim of %s at a taken address returned %v, want ErrDuplicateRemote",
 				ia, err)
