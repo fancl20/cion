@@ -138,19 +138,45 @@ func pingOver(ctx context.Context, n *assemblyNode, provider *scion.PathProvider
 	return err == nil && report.Received == 1
 }
 
-// entryOf returns the node's link entry of a neighbor, retired ones
-// included.
+// entryOf returns the node's link entry of a neighbor: its live one, the
+// store holding at most one, else a retired one.
 func entryOf(n *assemblyNode, ia addr.IA) *links.Link {
 	entries, err := n.app.Links().All(context.Background())
 	if err != nil {
 		return nil
 	}
+	var retired *links.Link
 	for _, l := range entries {
-		if l.NeighborIA.Equal(ia) {
+		if !l.NeighborIA.Equal(ia) {
+			continue
+		}
+		if l.Live() {
 			return l
 		}
+		retired = l
 	}
-	return nil
+	return retired
+}
+
+// markedDown reports whether the node treats the interface's link as down:
+// its BFD verdict is down, or the link left the serving set. The monitor
+// drops a departed link's session and reports an interface it holds no
+// session for as up, so a link that retires before a poll reads its verdict
+// reads as up from then on.
+func markedDown(n *assemblyNode, ifID uint16) bool {
+	if !n.app.Monitor().Up(ifID) {
+		return true
+	}
+	entries, err := n.app.Links().All(context.Background())
+	if err != nil {
+		return false
+	}
+	for _, l := range entries {
+		if l.IfID == ifID && l.Serving() {
+			return false
+		}
+	}
+	return true
 }
 
 // linkPortsInBand checks that every entry of the node holds its local
@@ -304,13 +330,13 @@ func TestJoinByRendezvous(t *testing.T) {
 	})
 
 	// Killing B leaves C connected through A.
+	cbIfID := entryOf(c, b.app.IA()).IfID
 	b.stop(t)
-	// C's BFD verdict on its link to B turns down — the condition the wait
-	// wants, not a fixed multiple of the transmission interval — so the
-	// composed route crosses no link the monitor distrusts.
-	cbEntry := entryOf(c, b.app.IA())
+	// C marks its link to B down — the condition the wait wants, not a
+	// fixed multiple of the transmission interval — so the composed route
+	// crosses no link the monitor distrusts or the node no longer serves.
 	Poll(t, "C to mark the C–B link down", func() bool {
-		return !c.app.Monitor().Up(cbEntry.IfID)
+		return markedDown(c, cbIfID)
 	})
 	deadline := time.Now().Add(10 * time.Second)
 	for !pingFrom(ctx, c, a.app.IA(), a.host) {
@@ -380,10 +406,10 @@ func TestLineCutHeals(t *testing.T) {
 	})
 
 	// Killing B strands C: every route from C to A crossed the dead link.
+	cbIfID := entryOf(c, b.app.IA()).IfID
 	b.stop(t)
-	cbEntry := entryOf(c, b.app.IA())
 	Poll(t, "C to mark the C–B link down", func() bool {
-		return !c.app.Monitor().Up(cbEntry.IfID)
+		return markedDown(c, cbIfID)
 	})
 
 	// C promotes A below the floor of up links — reachability outranking
