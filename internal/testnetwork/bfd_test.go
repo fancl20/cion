@@ -35,11 +35,14 @@ func TestBFDLivenessEpisode(t *testing.T) {
 	a, b, c := bootRendezvousLine(t, wpki, ipA, ipB, ipC)
 	ctx := context.Background()
 
-	// The line stands: A–B and B–C established, everyone enrolled and
-	// answering end to end.
+	// The line stands: A–B established at both ends and C's end of B–C,
+	// everyone enrolled and answering end to end. B's end of B–C stays a
+	// candidate until C holds a second link: B proves C by a verified
+	// beacon carrying C's entry, and C propagates no beacon back over the
+	// link it arrived on.
 	Poll(t, "the line to stand", func() bool {
 		return establishedOf(a, b.app.IA()) && establishedOf(b, a.app.IA()) &&
-			establishedOf(b, c.app.IA()) && establishedOf(c, b.app.IA())
+			establishedOf(c, b.app.IA())
 	})
 	abEntry := entryOf(a, b.app.IA())
 	abIfID := abEntry.IfID
@@ -56,6 +59,10 @@ func TestBFDLivenessEpisode(t *testing.T) {
 	acIfID := entryOf(a, c.app.IA()).IfID
 	Poll(t, "A to reach C directly", func() bool {
 		return echoVia(ctx, t, a, c.app.IA(), c.host, acIfID, time.Second)
+	})
+	// C now propagates A's beacons to B, and B proves C.
+	Poll(t, "B's link to C", func() bool {
+		return establishedOf(b, c.app.IA())
 	})
 
 	session := a.app.Monitor().Session(abEntry)
