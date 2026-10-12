@@ -75,7 +75,7 @@ type Config struct {
 // Pacing carries the test pacing of the provider's loops.
 type Pacing struct {
 	RendezvousRate  time.Duration // admission rate caps
-	Directory       time.Duration // directory publish and fetch
+	Directory       time.Duration // directory publish, its retry, and fetch
 	Selection       time.Duration // selection evaluation window
 	CandidateWindow time.Duration // unproven candidate lifetime
 }
@@ -337,6 +337,7 @@ func (z *Provider) assemble() error {
 		Engine:          z.pcs.Engine,
 		Provider:        z.pcs.Provider,
 		PublishInterval: z.cfg.Pacing.Directory,
+		PublishRetry:    z.cfg.Pacing.Directory,
 		FetchInterval:   z.cfg.Pacing.Directory,
 	}
 	if z.cfg.Core {
