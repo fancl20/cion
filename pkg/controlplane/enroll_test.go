@@ -157,22 +157,23 @@ func enrollNode(
 	key crypto.Signer,
 ) error {
 
-	client, err := webpki.NewCoreClient(webpki.CoreClientConfig{
-		Domain:  domain,
-		Conn:    n.newConn(t, 0),
-		RootCAs: rootCAs,
-	})
-	if err != nil {
-		return err
-	}
-	defer func() { _ = client.Close() }()
 	resolved, err := ResolveService(ctx, n.newConn(t, 0),
 		&scion.Addr{IA: n.neighbor, Service: addr.SvcCS})
 	if err != nil {
 		return err
 	}
-	client.SetCore(n.neighbor, resolved)
-	_, enrollErr := trust.Enroll(ctx, db, client, n.ia, key)
+	core := &scion.Addr{IA: n.neighbor, Addr: resolved}
+	client, err := webpki.NewCoreClient(webpki.CoreClientConfig{
+		Domain:  domain,
+		Conn:    n.newConn(t, 0),
+		RootCAs: rootCAs,
+		Locator: func() *scion.Addr { return core },
+	})
+	if err != nil {
+		return err
+	}
+	defer func() { _ = client.Close() }()
+	_, enrollErr := trust.RenewChain(ctx, db, client, n.ia, key)
 	return enrollErr
 }
 

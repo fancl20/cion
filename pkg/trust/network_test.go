@@ -158,14 +158,14 @@ func TestGetChainsVerifiesStoredChains(t *testing.T) {
 	}
 }
 
-// TestEnroll checks the enrollment round trip against a fake remote: TRC
-// fetch, chain request, verification, and storage; a second run is a no-op.
-func TestEnroll(t *testing.T) {
+// TestRenewChain checks the renewal round trip against a fake remote: the
+// chain request, the TRC pull, verification, and storage.
+func TestRenewChain(t *testing.T) {
 	remote := newFakeRemote(t)
 	db := newTestDB(t)
 	key := newTestASKey(t)
 
-	chain, err := Enroll(context.Background(), db, remote, nodeIA, key)
+	chain, err := RenewChain(context.Background(), db, remote, nodeIA, key)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -192,21 +192,12 @@ func TestEnroll(t *testing.T) {
 	if len(chains) != 1 {
 		t.Fatalf("stored chains = %d, want 1", len(chains))
 	}
-
-	// A still-valid chain short-circuits the round trip.
-	remote.failFollowing = true
-	if _, err := Enroll(context.Background(), db, remote, nodeIA, key); err != nil {
-		t.Fatalf("re-enrollment with valid chain failed: %v", err)
-	}
-	if remote.renewalReqs != 1 {
-		t.Errorf("renewal requests after no-op = %d, want 1", remote.renewalReqs)
-	}
 }
 
-// TestEnrollRejectsUnanchoredChain checks that a chain the fake remote's TRC
-// does not anchor is refused: "stale or mismatched trust material is
-// refused".
-func TestEnrollRejectsUnanchoredChain(t *testing.T) {
+// TestRenewChainRejectsUnanchoredChain checks that a chain the fake
+// remote's TRC does not anchor is refused: "stale or mismatched trust
+// material is refused".
+func TestRenewChainRejectsUnanchoredChain(t *testing.T) {
 	remote := newFakeRemote(t)
 	db := newTestDB(t)
 
@@ -219,8 +210,8 @@ func TestEnrollRejectsUnanchoredChain(t *testing.T) {
 	}
 	remote.issuer = otherIssuer
 
-	if _, err := Enroll(context.Background(), db, remote, nodeIA, newTestASKey(t)); err == nil {
-		t.Error("enrollment with unanchored chain succeeded, want rejection")
+	if _, err := RenewChain(context.Background(), db, remote, nodeIA, newTestASKey(t)); err == nil {
+		t.Error("renewal with unanchored chain succeeded, want rejection")
 	}
 	// The bogus chain must not be stored.
 	chains, err := db.Chains(context.Background(), trustdb.ChainQuery{IA: nodeIA})

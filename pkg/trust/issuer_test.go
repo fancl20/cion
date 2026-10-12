@@ -119,14 +119,14 @@ func TestIssuerReissuesCACert(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		first, err := issuer.CACert()
+		first, err := issuer.ensureCACert()
 		if err != nil {
 			t.Fatal(err)
 		}
 		// Move time forward beyond the CA certificate's remaining usefulness
 		// for a three-day AS certificate — a fake-time sleep in the bubble.
 		time.Sleep(CAValidity - ASValidity + time.Hour)
-		second, err := issuer.CACert()
+		second, err := issuer.ensureCACert()
 		if err != nil {
 			t.Fatal(err)
 		}

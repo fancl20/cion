@@ -46,8 +46,8 @@ type TrustService struct {
 
 	// DB serves trust material from the local trust database.
 	DB trustdb.DB
-	// Issuer signs certificate chains. It is nil on nodes that do not issue
-	// chains — everything but the founding core, in this milestone.
+	// Issuer signs certificate chains. It is nil on every node but the
+	// founding core, the ISD's sole issuer.
 	Issuer *trust.Issuer
 	// Authorizer gates first issuance: it is asked exactly when possession is
 	// verified and no chain exists for the name, never on a same-key renewal. The

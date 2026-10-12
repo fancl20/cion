@@ -17,13 +17,11 @@ import (
 	"net/http"
 	"net/netip"
 	"strings"
-	"sync"
 	"time"
 
 	"connectrpc.com/connect"
 	"github.com/quic-go/quic-go"
 	"github.com/quic-go/quic-go/http3"
-	"github.com/scionproto/scion/pkg/addr"
 	cppb "github.com/scionproto/scion/pkg/proto/control_plane"
 	"github.com/scionproto/scion/pkg/proto/control_plane/v1/control_planeconnect"
 	"github.com/scionproto/scion/pkg/scrypto/cppki"
@@ -65,9 +63,6 @@ type CoreClient struct {
 	// resolve maps a service-destined locator to the QUIC transport address
 	// the drafts' service resolution returns; nil dials the locator as named.
 	resolve func(ctx context.Context, peer *scion.Addr) (netip.AddrPort, error)
-
-	mtx  sync.Mutex
-	core *scion.Addr
 }
 
 // CoreClientConfig configures a CoreClient.
@@ -82,7 +77,7 @@ type CoreClientConfig struct {
 	// core's control service as a service destination, or an underlay address —
 	// and path — the one-hop path when the core is a neighbor, else the reversed
 	// freshest up segment. It is consulted at dial time, so later dials pick up
-	// fresh paths. Nil falls back to SetCore.
+	// fresh paths, and a nil address means the locator is unknown yet.
 	Locator func() *scion.Addr
 	// ResolveService resolves a service-destined locator through the drafts'
 	// service discovery (control plane draft, Section 5): the request the
@@ -150,23 +145,10 @@ func NewCoreClient(cfg CoreClientConfig) (*CoreClient, error) {
 	return c, nil
 }
 
-// SetCore sets the SCION locator of the core: its IA and the underlay
-// address of its control endpoint.
-func (c *CoreClient) SetCore(ia addr.IA, addr netip.AddrPort) {
-	c.mtx.Lock()
-	defer c.mtx.Unlock()
-	c.core = &scion.Addr{IA: ia, Addr: addr}
-}
-
-// coreAddr resolves the core's current address: the locator when configured,
-// else the address set with SetCore. Nil means the locator is unknown.
+// coreAddr resolves the core's current address through the locator. Nil
+// means the locator is unknown.
 func (c *CoreClient) coreAddr() *scion.Addr {
-	if c.locator != nil {
-		return c.locator()
-	}
-	c.mtx.Lock()
-	defer c.mtx.Unlock()
-	return c.core
+	return c.locator()
 }
 
 // Close releases the underlying QUIC transport.

@@ -140,35 +140,10 @@ func (p *NetworkProvider) NotifyTRC(ctx context.Context, id cppki.TRCID, opts ..
 	return err
 }
 
-// Enroll obtains an AS certificate chain for the node's key from the core
-// via the Remote and stores it in the DB. A chain that is still valid in the
-// DB short-circuits the round trip. The ISD's newest TRC is fetched and
-// verified if not yet known, and the issued chain is verified against it
-// before it is stored.
-func Enroll(
-	ctx context.Context,
-	db trustdb.DB,
-	remote Remote,
-	ia addr.IA,
-	key crypto.Signer,
-) ([]*x509.Certificate, error) {
-
-	now := time.Now()
-	if chains, err := db.Chains(ctx, trustdb.ChainQuery{
-		IA:       ia,
-		Validity: cppki.Validity{NotBefore: now, NotAfter: now},
-	}); err != nil {
-		return nil, err
-	} else if len(chains) != 0 {
-		return chains[0], nil
-	}
-	return RenewChain(ctx, db, remote, ia, key)
-}
-
 // RenewChain requests a fresh chain for the node's key from the core and
-// stores it, without regard to chains still valid in the DB: the enrollment
-// loop calls it once a chain's remaining validity drops below the renewal
-// threshold.
+// stores it, whatever chains the DB holds: the enrollment loop calls it when
+// the node holds no valid chain, when the chain nears its expiry, and when
+// the chain no longer anchors in the newest pinned TRC.
 func RenewChain(
 	ctx context.Context,
 	db trustdb.DB,

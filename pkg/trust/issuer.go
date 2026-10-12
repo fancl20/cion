@@ -181,11 +181,6 @@ func (i *Issuer) Rekey(keys CoreKeys, trc cppki.SignedTRC) error {
 	return nil
 }
 
-// CACert returns the currently active CP CA certificate.
-func (i *Issuer) CACert() (*x509.Certificate, error) {
-	return i.ensureCACert()
-}
-
 // rootCertificate extracts the CP root certificate from the TRC, which must
 // contain exactly one.
 func rootCertificate(trc cppki.SignedTRC) (*x509.Certificate, error) {
