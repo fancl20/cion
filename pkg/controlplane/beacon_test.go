@@ -660,6 +660,7 @@ func TestHandleBeaconWithoutTRC(t *testing.T) {
 // origin's freshest unverified beacon, BootstrapCore alternates across the
 // origins with the freshest first, and BootstrapRoute serves each origin
 // its own route — one origin's fresher beacons cannot starve the other's.
+// Once the TRC is pinned, the turns go to the issuer alone.
 func TestBootstrapAlternatesOrigins(t *testing.T) {
 	f := newBeaconFixture(t)
 	ctx := context.Background()
@@ -715,6 +716,21 @@ func TestBootstrapAlternatesOrigins(t *testing.T) {
 	}
 	if beaconer.BootstrapRoute(iaLineC) != nil {
 		t.Error("a bootstrap route served an origin no beacon named")
+	}
+
+	// The pin: the TRC names the founder's root alone, so the fellow core
+	// takes no more turns.
+	trc, err := f.db.SignedTRC(ctx, cppki.TRCID{ISD: coreIATest.ISD(), Base: 1, Serial: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := freshDB.InsertTRC(ctx, trc); err != nil {
+		t.Fatal(err)
+	}
+	for i := range 3 {
+		if got := beaconer.BootstrapCore(); !got.Equal(coreIATest) {
+			t.Errorf("pinned bootstrap core %d = %v, want the issuer %v", i, got, coreIATest)
+		}
 	}
 }
 

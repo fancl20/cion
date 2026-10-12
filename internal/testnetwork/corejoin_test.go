@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/scionproto/scion/pkg/addr"
+	"github.com/scionproto/scion/pkg/scrypto"
 	"github.com/scionproto/scion/pkg/scrypto/cppki"
 
 	"github.com/fancl20/cion/internal/services"
@@ -142,6 +143,72 @@ func TestCoreJoinsBySensitiveUpdate(t *testing.T) {
 	// nothing, and lands on the founder.
 	Poll(t, "the node below the joining core enrolled", func() bool {
 		return holdsAssemblyChain(t, d, d.app.IA())
+	})
+}
+
+// TestCoreJoinsThroughAnAuthoritative checks the onboarding's route when a
+// joining core's one neighbor is an onboarded authoritative core: the
+// joiner holds both cores' beacons from before its pin, and its submission
+// reaches the founder past the authoritative. The founder alone hosts the
+// voting application, and a submission the authoritative refused would stop
+// the joiner.
+func TestCoreJoinsThroughAnAuthoritative(t *testing.T) {
+	t.Parallel()
+	wpki := NewWebPKI(t)
+	ipA, ipB, ipE := hostSlot(t), hostSlot(t), hostSlot(t)
+
+	// The founding core, and the authoritative onboarded through it.
+	a := bootAssembly(t, func(cfg *services.NodeConfig) {
+		cfg.Core = true
+		cfg.State = t.TempDir()
+		cfg.Internal = PinnedUDPAddrOn(t, ipA)
+		cfg.Control = FreeUDPAddrOn(t, ipA)
+		cfg.CertFile = wpki.certFile
+		cfg.KeyFile = wpki.keyFile
+		cfg.EnrollAuth = votingAuth
+	})
+	b := bootAssembly(t, func(cfg *services.NodeConfig) {
+		cfg.Core = true
+		cfg.State = t.TempDir()
+		cfg.Internal = PinnedUDPAddrOn(t, ipB)
+		cfg.Control = FreeUDPAddrOn(t, ipB)
+		cfg.Neighbors = []string{a.rendezvousOf()}
+		cfg.RootCAs = wpki.pool
+	})
+	ctx := context.Background()
+	// onboarded reports whether the node's newest pinned TRC names it a
+	// core.
+	onboarded := func(n *assemblyNode) bool {
+		trc, err := n.app.TrustDB().SignedTRC(ctx, cppki.TRCID{
+			ISD:    n.app.IA().ISD(),
+			Base:   scrypto.LatestVer,
+			Serial: scrypto.LatestVer,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return !trc.IsZero() && trust.CoreNamed(trc.TRC, n.app.IA())
+	}
+	Poll(t, "the authoritative onboarded", func() bool { return onboarded(b) })
+
+	// The joining core, the authoritative its one neighbor.
+	e := bootAssembly(t, func(cfg *services.NodeConfig) {
+		cfg.Core = true
+		cfg.State = t.TempDir()
+		cfg.Internal = PinnedUDPAddrOn(t, ipE)
+		cfg.Control = FreeUDPAddrOn(t, ipE)
+		cfg.Neighbors = []string{b.rendezvousOf()}
+		cfg.RootCAs = wpki.pool
+	})
+	stopped := make(chan error, 1)
+	go func() { stopped <- e.app.Wait() }()
+	Poll(t, "the joining core onboarded through the authoritative", func() bool {
+		select {
+		case err := <-stopped:
+			t.Fatalf("the joining core stopped: %v", err)
+		default:
+		}
+		return onboarded(e)
 	})
 }
 
