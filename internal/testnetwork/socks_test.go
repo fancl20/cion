@@ -93,17 +93,13 @@ func socksDial(t *testing.T, srv *tsnet.Server, exit netip.Addr) net.Conn {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), TestTimeout)
 	defer cancel()
-	deadline := time.Now().Add(TestTimeout)
-	for {
-		conn, err := srv.Dial(ctx, "tcp", socksPort(exit).String())
-		if err == nil {
-			return conn
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("the host's SOCKS dial of %s never connected: %v", exit, err)
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
+	var conn net.Conn
+	PollErr(t, "the host's SOCKS dial of "+exit.String(), func() error {
+		var err error
+		conn, err = srv.Dial(ctx, "tcp", socksPort(exit).String())
+		return err
+	})
+	return conn
 }
 
 // TestEgressSocksService is the SOCKS egress proof on the coordination lab:

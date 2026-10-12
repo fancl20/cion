@@ -301,13 +301,9 @@ func TestJoinByRendezvous(t *testing.T) {
 	// promotion answer across the swap's bounded loss burst — a request
 	// landing inside it is retried, as QUIC retransmits through any
 	// internet loss.
-	pingDeadline := time.Now().Add(10 * time.Second)
-	for !pingFrom(ctx, c, a.app.IA(), a.host) {
-		if time.Now().After(pingDeadline) {
-			t.Fatal("C's echo to A never answered after the generation swap")
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
+	PollFor(t, 10*time.Second, "C's echo to A after the generation swap", func() bool {
+		return pingFrom(ctx, c, a.app.IA(), a.host)
+	})
 
 	// The precondition of the episode below: A's beacons over the direct
 	// link have reached C and terminated into a direct up segment — the
@@ -338,15 +334,11 @@ func TestJoinByRendezvous(t *testing.T) {
 	Poll(t, "C to mark the C–B link down", func() bool {
 		return markedDown(c, cbIfID)
 	})
-	deadline := time.Now().Add(10 * time.Second)
-	for !pingFrom(ctx, c, a.app.IA(), a.host) {
-		// The freshest up segment — A's beacon over the direct link — takes
-		// over from the one through the dead B.
-		if time.Now().After(deadline) {
-			t.Fatal("C lost its path to A after B died")
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
+	// The freshest up segment — A's beacon over the direct link — takes
+	// over from the one through the dead B.
+	PollFor(t, 10*time.Second, "C's path to A after B died", func() bool {
+		return pingFrom(ctx, c, a.app.IA(), a.host)
+	})
 
 	// A bare restart — the same state directory, no rendezvous — serves from
 	// the persisted link store.
@@ -419,13 +411,9 @@ func TestLineCutHeals(t *testing.T) {
 	Poll(t, "A's link to C", func() bool { return establishedTo(a, c.app.IA()) })
 
 	// The traffic of the generation swaps survives.
-	deadline := time.Now().Add(10 * time.Second)
-	for !pingFrom(ctx, c, a.app.IA(), a.host) {
-		if time.Now().After(deadline) {
-			t.Fatal("C's echo to A never answered after the cut healed")
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
+	PollFor(t, 10*time.Second, "C's echo to A after the cut healed", func() bool {
+		return pingFrom(ctx, c, a.app.IA(), a.host)
+	})
 
 	// The dead link retires once the new segments serve the tier: the
 	// verdict stayed down across the sustained window. Each of the

@@ -213,6 +213,21 @@ func Poll(t *testing.T, what string, cond func() bool) {
 	PollFor(t, TestTimeout, what, cond)
 }
 
+// PollErr waits for attempt to return nil, failing the test at the timeout
+// with the last error attempt returned.
+func PollErr(t *testing.T, what string, attempt func() error) {
+	t.Helper()
+	var last error
+	deadline := time.Now().Add(TestTimeout)
+	for time.Now().Before(deadline) {
+		if last = attempt(); last == nil {
+			return
+		}
+		time.Sleep(30 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for %s: %v", what, last)
+}
+
 // PollFor is Poll under an explicit budget, for labs whose convergence
 // outgrows TestTimeout on a loaded runner.
 func PollFor(t *testing.T, budget time.Duration, what string, cond func() bool) {

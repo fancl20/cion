@@ -15,8 +15,8 @@ import (
 func mintedInvitation(t *testing.T, bot *operatorBot) string {
 	t.Helper()
 	bot.say("invite")
-	deadline := time.Now().Add(TestTimeout)
-	for time.Now().Before(deadline) {
+	var invitation string
+	Poll(t, "the bot to answer with an invitation", func() bool {
 		bot.mtx.Lock()
 		prompts := append([]map[string]any(nil), bot.prompts...)
 		bot.mtx.Unlock()
@@ -24,14 +24,14 @@ func mintedInvitation(t *testing.T, bot *operatorBot) string {
 			text, _ := m["text"].(string)
 			for line := range strings.SplitSeq(text, "\n") {
 				if strings.HasPrefix(line, "cion-") {
-					return line
+					invitation = line
+					return true
 				}
 			}
 		}
-		time.Sleep(50 * time.Millisecond)
-	}
-	t.Fatal("the bot never answered with an invitation")
-	return ""
+		return false
+	})
+	return invitation
 }
 
 // TestCoordinationInvitationJoin is the invitation join's proof: the

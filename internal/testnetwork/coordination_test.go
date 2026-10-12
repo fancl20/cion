@@ -254,19 +254,12 @@ func echoOverTailnet(t *testing.T, dst *tsnet.Server, dstAddr netip.Addr,
 	ctx, cancel := context.WithTimeout(context.Background(), TestTimeout)
 	defer cancel()
 	var conn net.Conn
-	deadline := time.Now().Add(TestTimeout)
-	for {
+	PollErr(t, "the source host's dial through the tunnel", func() error {
 		// The dial rides the source host's own stack — the vendored
 		// client engine's tunnel, the whole path under proof.
 		conn, err = src.Dial(ctx, "tcp", echoAddr.String())
-		if err == nil {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("the source host's dial through the tunnel failed: %v", err)
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
+		return err
+	})
 	defer func() { _ = conn.Close() }()
 	if _, err := conn.Write([]byte(payload)); err != nil {
 		t.Fatal(err)
