@@ -85,8 +85,12 @@ func NewServer(svc ControlPlane) *Server {
 var quicConfig = &quic.Config{InitialPacketSize: 1200}
 
 // ServeHTTP3 serves the handler with HTTP/3 (QUIC) on conn, answering the
-// drafts' service resolution beside it (control plane draft, Section 5). The
-// TLS configuration must carry the certificate for the served domain.
+// drafts' service resolution beside it (control plane draft, Section 5),
+// until conn closes. It returns once every request's handler has returned:
+// conn's close ends every connection, canceling its requests' contexts, and
+// the server's Close waits for their handlers, so a caller releasing what
+// the handlers use after the return finds none still running. The TLS
+// configuration must carry the certificate for the served domain.
 func ServeHTTP3(conn *scion.Conn, handler http.Handler, tlsConf *tls.Config) error {
 	transport := &quic.Transport{Conn: &resolutionConn{conn: conn}}
 	ln, err := transport.Listen(tlsConf, quicConfig)
@@ -98,7 +102,11 @@ func ServeHTTP3(conn *scion.Conn, handler http.Handler, tlsConf *tls.Config) err
 		TLSConfig:  tlsConf,
 		QUICConfig: quicConfig,
 	}
-	return server.ServeListener(ln)
+	err = server.ServeListener(ln)
+	// Close fails only on listeners the server opened itself, and it opened
+	// none.
+	_ = server.Close()
+	return err
 }
 
 // resolutionConn demuxes the endpoint's socket: QUIC datagrams pass to the
