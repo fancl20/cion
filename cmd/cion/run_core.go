@@ -7,11 +7,10 @@ import (
 	"github.com/fancl20/cion/internal/services"
 )
 
-// addCoreNodeFlags registers the core role's arguments — its own domain
-// when it founds, the network's when it joins, and the issuance surface
-// beside them — presetting the role in the configuration they build.
+// addCoreNodeFlags registers the core role's arguments: its own domain when
+// it founds, the network's when it joins, and the issuance surface beside
+// them.
 func addCoreNodeFlags(flags *pflag.FlagSet, opts *services.NodeConfig) {
-	opts.Core = true
 	flags.StringSliceVar(&opts.Neighbors, "topology.neighbor", nil,
 		"an existing node's rendezvous underlay address; set, the core joins the "+
 			"neighbor's ISD as an authoritative core instead of founding its own")
@@ -34,10 +33,11 @@ func addCoreNodeFlags(flags *pflag.FlagSet, opts *services.NodeConfig) {
 // newRunCoreCommand builds `cion run core`: the founding core without a
 // neighbor — TRC genesis, the issuer every node's chain descends from, and
 // self-enrollment, serving its own domain — and, with a neighbor, the
-// authoritative core joining it.
+// authoritative core joining it. The configuration it builds presets the
+// core role.
 func newRunCoreCommand() *cobra.Command {
-	opts := &services.NodeConfig{}
-	tuning := &runOptions{}
+	opts := &services.NodeConfig{Core: true}
+	tuning := &services.DataplaneOptions{}
 	cmd := &cobra.Command{
 		Use:   "core",
 		Short: "Run a core: founding without a neighbor, joining as an authoritative core with one",
@@ -49,7 +49,7 @@ func newRunCoreCommand() *cobra.Command {
 			"core's --trust.domain and, to join, a bootstrap neighbor.",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runDaemon(cmd.Context(), *opts, tuning)
+			return runDaemon(cmd.Context(), *opts, *tuning)
 		},
 	}
 	cmd.Flags().SortFlags = false

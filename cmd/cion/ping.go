@@ -29,7 +29,7 @@ func newPingCommand() *cobra.Command {
 	opts := &services.NodeConfig{}
 	pingOpts := &pingOptions{}
 	cmd := &cobra.Command{
-		Use:   "ping isd-as,[host]",
+		Use:   "ping isd-as,host",
 		Short: "Ping a destination ISD-AS over the node's own data and control plane",
 		Long: "Ping a destination ISD-AS over the node's own assembled data and control plane: " +
 			"boots a local node in place of serving from the state directory and the " +
@@ -99,7 +99,7 @@ func runPing(ctx context.Context, cfg services.NodeConfig, target string, opts *
 func parsePingTarget(s string) (dst addr.IA, host netip.Addr, err error) {
 	iaStr, hostStr, ok := strings.Cut(s, ",")
 	if !ok {
-		return dst, host, fmt.Errorf("destination %q must be isd-as,[host]", s)
+		return dst, host, fmt.Errorf("destination %q must be isd-as,host", s)
 	}
 	dst, err = addr.ParseIA(iaStr)
 	if err != nil {

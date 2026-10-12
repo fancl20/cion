@@ -16,7 +16,7 @@ import (
 func parseNodeArgs(t *testing.T, use string, args ...string) (*services.NodeConfig, error) {
 	t.Helper()
 	opts := &services.NodeConfig{}
-	tuning := &runOptions{}
+	tuning := &services.DataplaneOptions{}
 	flags := pflag.NewFlagSet(use, pflag.ContinueOnError)
 	addSharedNodeFlags(flags, opts)
 	if use == "core" {
@@ -31,9 +31,8 @@ func parseNodeArgs(t *testing.T, use string, args ...string) (*services.NodeConf
 }
 
 // TestRunArgumentsParse checks the run commands' surfaces: the shared
-// arguments parse on both, the role's arguments on theirs, the role arrives
-// preset in the configuration the core's registration builds, and the
-// commands themselves register the partitions.
+// arguments parse on both, the role's arguments on theirs, and the commands
+// themselves register the partitions.
 func TestRunArgumentsParse(t *testing.T) {
 	opts, err := parseNodeArgs(t, "core",
 		"--trust.domain", "core.example.org",
@@ -46,9 +45,6 @@ func TestRunArgumentsParse(t *testing.T) {
 	)
 	if err != nil {
 		t.Fatalf("parsing the core's arguments: %v", err)
-	}
-	if !opts.Core {
-		t.Error("the core's registration left the role unset")
 	}
 	if opts.Domain != "core.example.org" {
 		t.Errorf("--trust.domain = %q", opts.Domain)
@@ -80,9 +76,6 @@ func TestRunArgumentsParse(t *testing.T) {
 	)
 	if err != nil {
 		t.Fatalf("parsing the local command's arguments: %v", err)
-	}
-	if opts.Core {
-		t.Error("the local registration preset the core role")
 	}
 	if opts.Domain != "core.example.org" {
 		t.Errorf("--trust.domain = %q", opts.Domain)

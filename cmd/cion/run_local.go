@@ -22,7 +22,7 @@ func addLocalNodeFlags(flags *pflag.FlagSet, opts *services.NodeConfig) {
 // network through its core.
 func newRunLocalCommand() *cobra.Command {
 	opts := &services.NodeConfig{}
-	tuning := &runOptions{}
+	tuning := &services.DataplaneOptions{}
 	cmd := &cobra.Command{
 		Use:   "local",
 		Short: "Run a local node, joining an existing network through its core",
@@ -33,7 +33,7 @@ func newRunLocalCommand() *cobra.Command {
 			"core --trust.domain.",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runDaemon(cmd.Context(), *opts, tuning)
+			return runDaemon(cmd.Context(), *opts, *tuning)
 		},
 	}
 	cmd.Flags().SortFlags = false

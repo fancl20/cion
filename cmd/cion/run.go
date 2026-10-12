@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
@@ -31,7 +32,17 @@ func addSharedNodeFlags(flags *pflag.FlagSet, opts *services.NodeConfig) {
 		"the resident applications the node runs, comma-separated and "+
 			"repeatable: unset loads what the arguments imply, the empty value "+
 			"loads none — the deliberate core — and a list loads exactly the "+
-			"named (wireguard, coordination, socks, voting)")
+			"named ("+applicationNames()+")")
+}
+
+// applicationNames lists the resident applications' names in table order,
+// comma-separated.
+func applicationNames() string {
+	names := make([]string, 0, len(apps.Table))
+	for _, entry := range apps.Table {
+		names = append(names, entry.Name)
+	}
+	return strings.Join(names, ", ")
 }
 
 // addApplicationFlags registers the resident applications' own run
@@ -41,48 +52,37 @@ func addApplicationFlags(flags *pflag.FlagSet, opts *services.NodeConfig) {
 	apps.RegisterFlags(flags, &opts.AppArguments)
 }
 
-// runOptions carries the run commands' data-plane tuning flags.
-type runOptions struct {
-	processors int
-	batchSize  int
-	queueSize  int
-}
-
 // addTuningFlags registers the data-plane tuning flags the run commands
 // carry, from the dataplane defaults.
-func addTuningFlags(flags *pflag.FlagSet, tuning *runOptions) {
+func addTuningFlags(flags *pflag.FlagSet, tuning *services.DataplaneOptions) {
 	defaults := services.DefaultDataplaneOptions()
-	flags.IntVar(&tuning.processors, "dataplane.processors", defaults.Processors,
+	flags.IntVar(&tuning.Processors, "dataplane.processors", defaults.Processors,
 		"number of fast-path packet processors")
-	flags.IntVar(&tuning.batchSize, "dataplane.batch-size", defaults.BatchSize,
+	flags.IntVar(&tuning.BatchSize, "dataplane.batch-size", defaults.BatchSize,
 		"receive batch size per underlay socket")
-	flags.IntVar(&tuning.queueSize, "dataplane.queue-size", defaults.QueueSize,
+	flags.IntVar(&tuning.QueueSize, "dataplane.queue-size", defaults.QueueSize,
 		"queue depth of the internal and external links")
 }
 
 // runDaemon is the body both run commands share: the tuning sanity checks
 // and the services.Run call over the node configuration the command
 // assembled, so the two differ in their arguments and nothing else.
-func runDaemon(ctx context.Context, cfg services.NodeConfig, tuning *runOptions) error {
+func runDaemon(ctx context.Context, cfg services.NodeConfig, tuning services.DataplaneOptions) error {
 	// A zero processor count or batch size would panic deep inside
 	// Serve, which divides by them; fail at the flag instead.
 	for _, check := range []struct {
 		name  string
 		value int
 	}{
-		{"dataplane.processors", tuning.processors},
-		{"dataplane.batch-size", tuning.batchSize},
-		{"dataplane.queue-size", tuning.queueSize},
+		{"dataplane.processors", tuning.Processors},
+		{"dataplane.batch-size", tuning.BatchSize},
+		{"dataplane.queue-size", tuning.QueueSize},
 	} {
 		if check.value < 1 {
 			return fmt.Errorf("--%s must be at least 1", check.name)
 		}
 	}
-	return services.Run(ctx, cfg, services.DataplaneOptions{
-		Processors: tuning.processors,
-		BatchSize:  tuning.batchSize,
-		QueueSize:  tuning.queueSize,
-	})
+	return services.Run(ctx, cfg, tuning)
 }
 
 // newRunCommand builds `cion run`: the daemon's two roles as subcommands.
