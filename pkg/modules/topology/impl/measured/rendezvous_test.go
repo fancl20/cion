@@ -471,13 +471,15 @@ func TestRendezvousEchoEndsWithItsContext(t *testing.T) {
 
 // TestRendezvousRunReleasesOnCancel checks the acceptor's stop: once its
 // context ends, Run returns with its socket closed and released, and the
-// address binds again at once.
+// address binds again at once. The acceptor binds on the loopback host the
+// provider's release check uses, where only a wildcard bind can take the
+// released port.
 func TestRendezvousRunReleasesOnCancel(t *testing.T) {
 	r, err := NewRendezvous(RendezvousConfig{
-		Bind:     "127.0.0.1:0",
+		Bind:     "127.0.0.122:0",
 		Store:    memory.New(),
 		MaxLinks: 8,
-		LinkHost: netip.MustParseAddr("127.0.0.1"),
+		LinkHost: netip.MustParseAddr("127.0.0.122"),
 	})
 	if err != nil {
 		t.Fatal(err)

@@ -167,7 +167,9 @@ func TestServeHTTPSReleasesOnCancel(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ln, err := manager.ListenHTTPS("127.0.0.1:0")
+	// The package's own loopback host, where only a wildcard bind can take
+	// the port between the release and the rebind below.
+	ln, err := manager.ListenHTTPS("127.0.0.129:0")
 	if err != nil {
 		t.Fatal(err)
 	}

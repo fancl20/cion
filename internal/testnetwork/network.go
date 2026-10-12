@@ -164,6 +164,27 @@ const (
 // pinnedPortDraws names the band's next port, so concurrent draws differ.
 var pinnedPortDraws atomic.Uint32
 
+// PinnedTCPAddrOn returns a TCP address on the given host for a listener to
+// bind: the band's next free port, probed by listening on it and released
+// for the listener's own bind, safe for the same reason as PinnedUDPAddrOn.
+func PinnedTCPAddrOn(t *testing.T, ip netip.Addr) string {
+	t.Helper()
+	for range pinnedPortSpan {
+		addr := netip.AddrPortFrom(ip, pinnedPortBase+uint16(pinnedPortDraws.Add(1)%pinnedPortSpan))
+		l, err := net.Listen("tcp4", addr.String())
+		if errors.Is(err, syscall.EADDRINUSE) {
+			continue
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = l.Close()
+		return addr.String()
+	}
+	t.Fatalf("the pinned port band on %v is drawn dry", ip)
+	return ""
+}
+
 // PinnedUDPAddrOn returns a UDP address on the given host for the node to
 // rebind: the band's next free port, probed by binding it and released for
 // the node's own bind. The release is safe — nothing that binds :0 draws

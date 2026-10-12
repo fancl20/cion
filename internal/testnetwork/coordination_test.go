@@ -44,24 +44,12 @@ type coordinationPlacement struct {
 	derpURL string
 }
 
-// freeTCPAddr reserves an ephemeral TCP port on the loopback host and
-// releases it for the endpoint — the port only needs to be free at bind.
-func freeTCPAddr(t *testing.T, host netip.Addr) string {
-	t.Helper()
-	l, err := net.Listen("tcp", netip.AddrPortFrom(host, 0).String())
-	if err != nil {
-		t.Fatal(err)
-	}
-	addr := l.Addr().String()
-	_ = l.Close()
-	return addr
-}
-
 // placeCoordination reserves the placement for the core's coordination
-// endpoint.
+// endpoint: a pinned port on 127.0.0.1, the address the lab certificate
+// names.
 func placeCoordination(t *testing.T) coordinationPlacement {
 	t.Helper()
-	addr := freeTCPAddr(t, netip.MustParseAddr("127.0.0.1"))
+	addr := PinnedTCPAddrOn(t, netip.MustParseAddr("127.0.0.1"))
 	return coordinationPlacement{
 		addr:       addr,
 		controlURL: "https://" + addr,

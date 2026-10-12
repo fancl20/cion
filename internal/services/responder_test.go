@@ -12,12 +12,13 @@ import (
 
 // TestResponderReleasesOnCancel checks the responder's stop: once its
 // context ends, Run returns nil with its socket closed and released, and
-// the address binds again at once.
+// the address binds again at once. The socket binds on the package's own
+// loopback host, where only a wildcard bind can take the released port.
 func TestResponderReleasesOnCancel(t *testing.T) {
 	conn, err := scion.NewConn(scion.ConnConfig{
 		IA:           addr.MustIAFrom(1, 0xff0000000110),
-		Bind:         "127.0.0.1:0",
-		InternalAddr: "127.0.0.1:9",
+		Bind:         "127.0.0.124:0",
+		InternalAddr: "127.0.0.124:9",
 		MACKey:       make([]byte, 16),
 	})
 	if err != nil {

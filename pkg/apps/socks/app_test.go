@@ -216,10 +216,11 @@ func udpEcho(t *testing.T) netip.AddrPort {
 }
 
 // refusedTCPAddr reserves and releases a TCP port, so connecting to it
-// refuses.
+// refuses. The host is the package's own loopback address, where only a
+// wildcard bind can take the released port.
 func refusedTCPAddr(t *testing.T) string {
 	t.Helper()
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	listener, err := net.Listen("tcp", "127.0.0.130:0")
 	if err != nil {
 		t.Fatal(err)
 	}
