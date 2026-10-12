@@ -63,8 +63,9 @@ func (b *operatorBot) handle(w http.ResponseWriter, r *http.Request) {
 		}
 		b.mtx.Lock()
 		b.prompts = append(b.prompts, m)
+		id := len(b.prompts)
 		b.mtx.Unlock()
-		b.reply(w, map[string]any{"message_id": len(b.prompts)})
+		b.reply(w, map[string]any{"message_id": id})
 	case "/bot7:test/getUpdates":
 		b.mtx.Lock()
 		waiting := b.waiting
