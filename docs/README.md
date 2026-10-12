@@ -39,8 +39,8 @@ one question:
     test episodes that prove it. A proposal does not re-argue what its
     ADR decided.
 3.  **Implementation — the code.** The landing, cited back: the commit
-    names its proposal, and the code carries the deciding record's
-    number where the decision shows.
+    names its proposal, and the proposal's implementation history names
+    where the code lives.
 
 ## When a record is required
 
@@ -132,8 +132,9 @@ or the plan left the location unnamed.
 
 ## Code and commit conventions
 
-*   Code cites the deciding record where the decision shows, one line:
-    `// (ADR-NNNN)`, `// (proposal NNNN)`.
+*   Code comments cite no record: a comment states what the code does
+    and the facts a reader cannot derive from it, and the commit and the
+    implementation history tie the code to its decision.
 *   Commit messages follow
     [conventional commits](/docs/styles/conventionalcommits.md), one
     one-line summary, with `(proposal NNNN)` naming the implemented

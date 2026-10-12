@@ -101,8 +101,8 @@ func (x *Entry) GetHostEndpoint() string {
 	return ""
 }
 
-// HostEntry is one host's registry entry (ADR-0011): the record the
-// coordination service's gate allocates and the directory distributes. The
+// HostEntry is one host's registry entry: the record the coordination
+// service's gate allocates and the directory distributes. The
 // host's key is its identity; the address, the owning node, and the
 // approving plugin's note ride beside it.
 type HostEntry struct {

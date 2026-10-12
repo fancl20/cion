@@ -107,7 +107,6 @@ type DirectoryStore interface {
 // free /24 of the range by address order — unique by construction, stable per
 // ISD-AS, idempotent to repeat, nothing ever freed. A publisher cannot take
 // another node's slice; it cannot take any slice, only receive its own.
-// (proposal 0029)
 func AssignSlice(ia addr.IA, entries []Entry) (netip.Prefix, error) {
 	var held []netip.Prefix
 	for _, e := range entries {
