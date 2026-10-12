@@ -214,13 +214,9 @@ func RenewChain(
 	return chain, nil
 }
 
-// anchorPool resolves the TRCs whose root pools anchor chain verification:
-// the ISD's newest, plus the predecessors it carries — each successor
-// holding its own inside its grace period, the window the draft's Section
-// 3.2.4 defines for updates, in which a chain issued under the replaced
-// material keeps verifying. The walk compounds while one rung's window still
-// covers the present, so a ladder whose rungs landed close together carries
-// every root still anchoring unexpired chains.
+// anchorPool resolves the active TRCs that anchor chain verification, as
+// activePool reads them: the ISD's newest and, inside its grace period, its
+// predecessor, each from the DB or the Remote.
 func anchorPool(
 	ctx context.Context,
 	db trustdb.DB,
@@ -232,22 +228,35 @@ func anchorPool(
 	if err != nil {
 		return nil, err
 	}
+	return activePool(newest, func(id cppki.TRCID) (cppki.SignedTRC, error) {
+		return fetchTRC(ctx, db, remote, id)
+	})
+}
+
+// activePool returns the active TRCs the draft's Section 3.4 builds the
+// trust anchor pool from: the newest, and its predecessor beside it while the
+// newest is within its grace period, the window in which a chain issued under
+// the replaced material keeps verifying. No TRC before the predecessor is
+// active: a successor landing inside its predecessor's window resets the
+// window (Section 3.2.4). lookup resolves the predecessor; one it does not
+// find leaves the newest alone.
+func activePool(
+	newest cppki.SignedTRC,
+	lookup func(cppki.TRCID) (cppki.SignedTRC, error),
+) ([]*cppki.TRC, error) {
+
 	pool := []*cppki.TRC{&newest.TRC}
-	// The walk holds its own copy, so the pointer the pool keeps into the
-	// newest is not overwritten by the predecessors it moves through.
-	cur := newest
-	for !cur.TRC.ID.IsBase() && cur.TRC.InGracePeriod(time.Now()) {
-		pred, err := fetchTRC(ctx, db, remote, predecessorID(cur.TRC.ID))
-		if err != nil {
-			return nil, err
-		}
-		if pred.IsZero() {
-			break
-		}
-		pool = append(pool, &pred.TRC)
-		cur = pred
+	if newest.TRC.ID.IsBase() || !newest.TRC.InGracePeriod(time.Now()) {
+		return pool, nil
 	}
-	return pool, nil
+	pred, err := lookup(predecessorID(newest.TRC.ID))
+	if err != nil {
+		return nil, err
+	}
+	if pred.IsZero() {
+		return pool, nil
+	}
+	return append(pool, &pred.TRC), nil
 }
 
 // fetchTRC returns the TRC with the given ID — the newest of the ISD when the

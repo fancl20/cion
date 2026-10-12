@@ -331,11 +331,12 @@ func (n *node) submitter() *voting.Submitter {
 // enrollment configures the node's chain lifecycle with the role's renewal.
 func (n *node) enrollment(renewal controlplane.Renewal) controlplane.EnrollmentConfig {
 	return controlplane.EnrollmentConfig{
-		IA:            n.ident.ia,
-		DB:            n.trustDB,
-		Key:           n.asKey,
-		Renewal:       renewal,
-		RetryInterval: n.cfg.Pacing.Enrollment,
+		IA:              n.ident.ia,
+		DB:              n.trustDB,
+		Key:             n.asKey,
+		Renewal:         renewal,
+		RetryInterval:   n.cfg.Pacing.Enrollment,
+		InspectInterval: n.cfg.Pacing.EnrollmentInspect,
 	}
 }
 

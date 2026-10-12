@@ -10,6 +10,7 @@ import (
 	"testing/synctest"
 	"time"
 
+	"github.com/google/go-cmp/cmp"
 	"github.com/scionproto/scion/pkg/addr"
 	"github.com/scionproto/scion/pkg/scrypto/cppki"
 
@@ -652,9 +653,10 @@ func stagedVotingCert(t *testing.T, state string) *x509.Certificate {
 // TestAnchorPoolRidesGrace checks the anchor pool the draft's grace defines:
 // while the successor is within its grace period the predecessor's roots
 // anchor chains beside the successor's — a chain issued under the replaced
-// root keeps verifying — and past the window only the successor's do; a
-// later rung stands on its own predecessor the same way, and the chains
-// issue under the fresh root from the pin on.
+// root keeps verifying — and past the window only the successor's do. A
+// later rung inside the window resets it: its pool holds it and the rung
+// before it, and no TRC before that. The chains issue under the fresh root
+// from the pin on, and the engine's local pool matches at every step.
 func TestAnchorPoolRidesGrace(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		f := newGenesisFixture(t)
@@ -663,8 +665,25 @@ func TestAnchorPoolRidesGrace(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		// The chain issued under the replaced-to-be root, and its holder's
-		// empty database.
+		engine := NewEngine(coreIA, newTestASKey(t), &NetworkProvider{DB: f.db})
+		// anchors returns the anchor pool, failing the test unless the
+		// engine's local pool holds the same TRCs.
+		anchors := func() []*cppki.TRC {
+			t.Helper()
+			pool, err := anchorPool(ctx, f.db, nil, coreIA.ISD())
+			if err != nil {
+				t.Fatal(err)
+			}
+			local, err := engine.AnchorPool()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if diff := cmp.Diff(trcIDs(pool), trcIDs(local)); diff != "" {
+				t.Errorf("the engine's local pool differs (-provider +local):\n%s", diff)
+			}
+			return pool
+		}
+		// The chain issued under the replaced-to-be root.
 		oldCSR, _ := newChainCSR(t, nodeIA)
 		oldChain, err := issuer.IssueChain(oldCSR)
 		if err != nil {
@@ -681,10 +700,7 @@ func TestAnchorPoolRidesGrace(t *testing.T) {
 
 		// In grace: the pool carries the predecessor beside the successor,
 		// and the old chain verifies against it.
-		pool, err := anchorPool(ctx, f.db, nil, coreIA.ISD())
-		if err != nil {
-			t.Fatal(err)
-		}
+		pool := anchors()
 		if len(pool) != 2 {
 			t.Fatalf("the in-grace pool holds %d TRCs, want the successor and its predecessor",
 				len(pool))
@@ -704,9 +720,10 @@ func TestAnchorPoolRidesGrace(t *testing.T) {
 			t.Errorf("the chain under the fresh root does not verify against the successor: %v", err)
 		}
 
-		// A later rung lands inside the first window: the windows compound,
-		// so its pool carries every predecessor whose own grace still runs —
-		// the rung-1 chain and the base-root chain both verify through it.
+		// A later rung lands inside the first window and resets it: its pool
+		// holds it and the rung before it, so the rung-1 chain verifies
+		// through it, and the base-root chain, a day short of its expiry, no
+		// longer does.
 		time.Sleep(2 * 24 * time.Hour)
 		fresh2, completed2, err := RotateCoreKeys(ctx, f.db, f.dir, coreIA, completed)
 		if err != nil {
@@ -715,39 +732,40 @@ func TestAnchorPoolRidesGrace(t *testing.T) {
 		if err := issuer.Rekey(fresh2, completed2); err != nil {
 			t.Fatal(err)
 		}
-		pool, err = anchorPool(ctx, f.db, nil, coreIA.ISD())
-		if err != nil {
-			t.Fatal(err)
-		}
-		if len(pool) != 3 {
-			t.Fatalf("the later rung's pool holds %d TRCs, want it and both its predecessors",
-				len(pool))
+		pool = anchors()
+		if diff := cmp.Diff([]cppki.TRCID{completed2.TRC.ID, completed.TRC.ID},
+			trcIDs(pool)); diff != "" {
+			t.Fatalf("the later rung's pool, want it and the rung before it (-want +got):\n%s",
+				diff)
 		}
 		if err := cppki.VerifyChain(newChain, cppki.VerifyOptions{TRC: pool}); err != nil {
 			t.Errorf("the rung-1 chain does not verify through the later rung's grace: %v", err)
 		}
-		if err := cppki.VerifyChain(oldChain, cppki.VerifyOptions{TRC: pool}); err != nil {
-			t.Errorf("the base-root chain does not verify through the compounded window: %v", err)
+		if err := cppki.VerifyChain(oldChain, cppki.VerifyOptions{TRC: pool}); err == nil {
+			t.Error("the base-root chain verified past the later rung, want the window reset")
 		}
 
-		// Past the later rung's grace window: the predecessors' roots anchor
-		// nothing, and the old chains no longer verify — by then they have
+		// Past the later rung's grace window: the predecessor's roots anchor
+		// nothing, and the rung-1 chain no longer verifies — by then it has
 		// expired as well, the arithmetic closing by construction.
 		time.Sleep(ASValidity + time.Minute)
-		pool, err = anchorPool(ctx, f.db, nil, coreIA.ISD())
-		if err != nil {
-			t.Fatal(err)
-		}
+		pool = anchors()
 		if len(pool) != 1 {
 			t.Fatalf("the past-grace pool holds %d TRCs, want the successor alone", len(pool))
-		}
-		if err := cppki.VerifyChain(oldChain, cppki.VerifyOptions{TRC: pool}); err == nil {
-			t.Error("the chain under the replaced root verified past the grace window")
 		}
 		if err := cppki.VerifyChain(newChain, cppki.VerifyOptions{TRC: pool}); err == nil {
 			t.Error("the rung-1 chain outlived the window that carried it")
 		}
 	})
+}
+
+// trcIDs returns the IDs of the TRCs, in order.
+func trcIDs(trcs []*cppki.TRC) []cppki.TRCID {
+	ids := make([]cppki.TRCID, 0, len(trcs))
+	for _, trc := range trcs {
+		ids = append(ids, trc.ID)
+	}
+	return ids
 }
 
 // newChainCSR returns a CSR for a freshly generated AS key naming the IA.

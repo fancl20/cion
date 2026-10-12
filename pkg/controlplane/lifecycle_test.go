@@ -576,3 +576,71 @@ func TestEnrollmentPassReportsTRCValidity(t *testing.T) {
 		passes(slog.LevelError, "Pinned TRC expired")
 	})
 }
+
+// TestEnrollmentPassReanchors checks the pass on a chain the newest pinned
+// TRC no longer anchors, in a fake-time bubble: once the founder rolls its
+// root, a normal node whose chain, far from its threshold, verifies only
+// through the predecessor renews through the remote, and the founder's own
+// pass self-issues on the same rule. Each chain stored verifies against the
+// newest alone, and the next pass renews nothing.
+func TestEnrollmentPassReanchors(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		f := newTrustFixture(t)
+		ctx := context.Background()
+		node := newLifecycleFixture(t, f)
+		founder := newLifecycleFixture(t, f)
+		founderCfg := founder.cfg
+		founderCfg.Renewal = FounderRenewal(f.issuer)
+		for _, lf := range []*lifecycleFixture{node, founder} {
+			if _, err := lf.db.InsertTRC(ctx, f.trc); err != nil {
+				t.Fatal(err)
+			}
+			lf.enroll(t)
+		}
+
+		// The founder rolls its root an hour on: the successor pins, the
+		// issuer rekeys, and both databases hold the successor.
+		time.Sleep(time.Hour)
+		keys, rolled, err := trust.RotateCoreKeys(ctx, f.db, f.dir, coreIATest, f.trc)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := f.issuer.Rekey(keys, rolled); err != nil {
+			t.Fatal(err)
+		}
+		node.core.trc = rolled
+		for _, lf := range []*lifecycleFixture{node, founder} {
+			if _, err := lf.db.InsertTRC(ctx, rolled); err != nil {
+				t.Fatal(err)
+			}
+		}
+		// anchored fails the test unless the database's newest chain
+		// verifies against the successor alone.
+		anchored := func(db trustdb.DB, who string) {
+			t.Helper()
+			chain, err := trust.NewestChain(ctx, db, nodeIATest, time.Now())
+			if err != nil || chain == nil {
+				t.Fatalf("the %s holds no chain (%v)", who, err)
+			}
+			if err := cppki.VerifyChain(chain, cppki.VerifyOptions{
+				TRC: []*cppki.TRC{&rolled.TRC},
+			}); err != nil {
+				t.Errorf("the %s's chain does not verify against the successor alone: %v",
+					who, err)
+			}
+		}
+
+		enrollPassOf(t, ctx, node.cfg)
+		if got := node.core.renewals(); got != 1 {
+			t.Fatalf("renewals = %d, want 1 for a chain under the replaced root", got)
+		}
+		anchored(node.db, "normal node")
+		enrollPassOf(t, ctx, node.cfg)
+		if got := node.core.renewals(); got != 1 {
+			t.Errorf("renewals = %d after the chain moved to the fresh root, want 1", got)
+		}
+
+		enrollPassOf(t, ctx, founderCfg)
+		anchored(founder.db, "founder")
+	})
+}

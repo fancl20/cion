@@ -310,13 +310,13 @@ func persistCertFile(t *testing.T, state, name string, cert *x509.Certificate) {
 // founder and an authoritative core whose state is pre-seeded so each
 // holder's material approaches expiry — the founder's watch casts its own
 // roll by sensitive update, the authoritative's submits its own by regular
-// update, both pin, and the ladder's serials stay monotone; a third node
-// discovers the successors from the founder's signed messages and a node
-// enrolled after the founder's pin holds a chain under the fresh root, while
-// the founder's own pre-pin chain keeps verifying through the grace;
-// replacing the authoritative's live voting pair fires the mismatch roll at
-// the next pass, a sensitive update the founder votes on at its admission
-// policy's allow.
+// update, both pin, and the ladder's serials stay monotone; the founder's
+// pre-pin chain verifies through the window its rung opened; a third node
+// discovers the successors from the founder's signed messages, and it and
+// the founder leave the replaced root; a node enrolled after the founder's
+// pin holds a chain under the fresh root; replacing the authoritative's live
+// voting pair fires the mismatch roll at the next pass, a sensitive update
+// the founder votes on at its admission policy's allow.
 func TestCoresRotateByTRCUpdate(t *testing.T) {
 	t.Parallel()
 	wpki := NewWebPKI(t)
@@ -336,7 +336,9 @@ func TestCoresRotateByTRCUpdate(t *testing.T) {
 
 	// The founding core, its material pre-seeded: the founder's watch rolls
 	// its own three inside the cast it signs itself, and its admission
-	// policy allows the vote the mismatch roll below asks for.
+	// policy allows the vote the mismatch roll below asks for. It and the
+	// two nodes below inspect their chains at the enrollment pace, so each
+	// leaves the replaced root within the lab's polls.
 	a := bootAssembly(t, func(cfg *services.NodeConfig) {
 		cfg.Core = true
 		cfg.State = founderState
@@ -345,6 +347,7 @@ func TestCoresRotateByTRCUpdate(t *testing.T) {
 		cfg.CertFile = wpki.certFile
 		cfg.KeyFile = wpki.keyFile
 		cfg.EnrollAuth = votingAuth
+		cfg.Pacing.EnrollmentInspect = EnrollRetry
 	})
 	// The authoritative core, its material pre-seeded and already named by
 	// the seeded base: its watch submits its own roll through the channel
@@ -356,6 +359,7 @@ func TestCoresRotateByTRCUpdate(t *testing.T) {
 		cfg.Control = FreeUDPAddrOn(t, ipB)
 		cfg.Neighbors = []string{a.rendezvousOf()}
 		cfg.RootCAs = wpki.pool
+		cfg.Pacing.EnrollmentInspect = EnrollRetry
 	})
 	// A third node joining the founder, to watch the successors spread.
 	c := bootAssembly(t, func(cfg *services.NodeConfig) {
@@ -364,16 +368,14 @@ func TestCoresRotateByTRCUpdate(t *testing.T) {
 		cfg.Control = FreeUDPAddrOn(t, ipC)
 		cfg.Neighbors = []string{a.rendezvousOf()}
 		cfg.RootCAs = wpki.pool
+		cfg.Pacing.EnrollmentInspect = EnrollRetry
 	})
 
-	// The founder's own chain — issued synchronously at boot, under the
-	// seeded root — is the chain issued before the pin.
-	preChain := ownChain(t, a)
-	if err := cppki.VerifyChain(preChain, cppki.VerifyOptions{
-		TRC: []*cppki.TRC{&base.TRC}, CurrentTime: time.Now(),
-	}); err != nil {
-		t.Fatalf("the founder's pre-pin chain does not verify against the base: %v", err)
-	}
+	// The founder's own chain issued synchronously at boot, under the seeded
+	// root, is the chain issued before the pin. The founder leaves that root
+	// at its first pass after its roll, so its newest chain may already be
+	// under the fresh one.
+	preChain := chainUnder(t, a, base)
 
 	// Both holders roll their own material: the founder's three inside its
 	// own cast, the authoritative's one through its submission.
@@ -384,7 +386,9 @@ func TestCoresRotateByTRCUpdate(t *testing.T) {
 	// roller: every successor the rollers pinned verifies against the pin
 	// before it, a rung that changes the founder's certificates is a
 	// sensitive update, and one that changes only the authoritative's is a
-	// regular update its old key voted on.
+	// regular update its old key voted on. The founder's rung is the one
+	// that replaced the root.
+	var founderRung, founderPred cppki.SignedTRC
 	pred := base
 	top := max(founderRolled.TRC.ID.Serial, authRolled.TRC.ID.Serial)
 	for serial := scrypto.Version(2); serial <= top; serial++ {
@@ -397,11 +401,15 @@ func TestCoresRotateByTRCUpdate(t *testing.T) {
 			trust.CertsOf(pred.TRC, founderIA), (*x509.Certificate).Equal) {
 
 			want = cppki.SensitiveUpdate
+			founderRung, founderPred = successor, pred
 		}
 		if got := updateType(t, successor, pred); got != want {
 			t.Errorf("rung %d is a %v update, want a %v one", serial, got, want)
 		}
 		pred = successor
+	}
+	if founderRung.IsZero() {
+		t.Fatal("no rung of the ladder changes the founder's certificates")
 	}
 	// The rolls promoted: each holder's live files hold the keys its
 	// successor's certificates cover, and no staged file remains. A roll
@@ -435,20 +443,32 @@ func TestCoresRotateByTRCUpdate(t *testing.T) {
 		return len(cert) == 1 && trust.KeyMatchesCert(key, cert[0])
 	})
 
-	// The third node discovers the successors from the founder's signed
-	// messages — the cited TRC the verifier reports — and the grace carries
-	// the pre-pin chain: it verifies against the newest beside its
-	// predecessor, and against the newest alone it does not.
-	newest := pollDiscovered(t, c, founderIA.ISD(), base)
+	// The founder's rung opened a grace window for the replaced root: the
+	// pre-pin chain verifies against the rung beside its predecessor, and
+	// against the rung alone it does not.
 	if err := cppki.VerifyChain(preChain, cppki.VerifyOptions{
-		TRC: []*cppki.TRC{&newest.TRC, &base.TRC}, CurrentTime: time.Now(),
+		TRC: []*cppki.TRC{&founderRung.TRC, &founderPred.TRC}, CurrentTime: time.Now(),
 	}); err != nil {
-		t.Errorf("the pre-pin chain does not verify through the grace: %v", err)
+		t.Errorf("the pre-pin chain does not verify through the founder's window: %v", err)
 	}
 	if err := cppki.VerifyChain(preChain, cppki.VerifyOptions{
-		TRC: []*cppki.TRC{&newest.TRC}, CurrentTime: time.Now(),
+		TRC: []*cppki.TRC{&founderRung.TRC}, CurrentTime: time.Now(),
 	}); err == nil {
-		t.Error("the pre-pin chain verified against the successor alone, want the grace carrying it")
+		t.Error("the pre-pin chain verified against the founder's rung alone, want the window carrying it")
+	}
+
+	// The third node discovers the successors from the founder's signed
+	// messages — the cited TRC the verifier reports — and both it and the
+	// founder leave the replaced root: their own chains verify against their
+	// newest pinned TRC alone.
+	pollDiscovered(t, c, founderIA.ISD(), base)
+	for _, n := range []struct {
+		name string
+		node *assemblyNode
+	}{{"founder", a}, {"third node", c}} {
+		Poll(t, "the "+n.name+"'s chain to leave the replaced root", func() bool {
+			return anchoredInNewest(t, n.node, base)
+		})
 	}
 
 	// A node enrolled after the founder's pin holds a chain under the fresh
@@ -675,6 +695,54 @@ func ownChain(t *testing.T, n *assemblyNode) []*x509.Certificate {
 		return chain != nil
 	})
 	return chain
+}
+
+// chainUnder returns the node's own chain that verifies against the TRC's
+// roots, polling until the node holds one.
+func chainUnder(t *testing.T, n *assemblyNode, trc cppki.SignedTRC) []*x509.Certificate {
+	t.Helper()
+	var chain []*x509.Certificate
+	Poll(t, "the node's chain under the TRC's roots", func() bool {
+		chains, err := n.app.TrustDB().Chains(context.Background(), trustdb.ChainQuery{
+			IA: n.app.IA(),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, c := range chains {
+			if cppki.VerifyChain(c, cppki.VerifyOptions{
+				TRC: []*cppki.TRC{&trc.TRC}, CurrentTime: time.Now(),
+			}) == nil {
+				chain = c
+				return true
+			}
+		}
+		return false
+	})
+	return chain
+}
+
+// anchoredInNewest reports whether the node's newest chain verifies against
+// its newest pinned TRC alone, once that TRC is a successor of the base.
+func anchoredInNewest(t *testing.T, n *assemblyNode, base cppki.SignedTRC) bool {
+	t.Helper()
+	ctx := context.Background()
+	newest, err := n.app.TrustDB().SignedTRC(ctx, cppki.TRCID{
+		ISD: base.TRC.ID.ISD, Base: scrypto.LatestVer, Serial: scrypto.LatestVer,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if newest.TRC.ID.Serial <= base.TRC.ID.Serial {
+		return false
+	}
+	chain, err := trust.NewestChain(ctx, n.app.TrustDB(), n.app.IA(), time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return chain != nil && cppki.VerifyChain(chain, cppki.VerifyOptions{
+		TRC: []*cppki.TRC{&newest.TRC}, CurrentTime: time.Now(),
+	}) == nil
 }
 
 // covers reports whether one of the core keys covers the certificate.

@@ -139,3 +139,31 @@ at their enrollment pace, and production keeps the defaults.
     chain verifies against the founder's rung beside its predecessor, and
     not against the founder's rung alone. The mismatch roll lands over the
     verified peer channel, whichever holder's rung came first.
+
+## Implementation history
+
+*   Landed in one commit. `activePool` holds the pool's rule, and
+    `anchorPool` and `Engine.AnchorPool` share it
+    ([network.go](/pkg/trust/network.go), [engine.go](/pkg/trust/engine.go)).
+    The renewal off a replaced root is a case of `enrollPass`
+    ([lifecycle.go](/pkg/controlplane/lifecycle.go)).
+*   The pass's inspection takes a pacing field of its own,
+    `NodePacing.EnrollmentInspect`, rather than `NodePacing.Enrollment`
+    ([config.go](/internal/services/config.go),
+    [controlplane.go](/internal/services/controlplane.go)). Only the
+    rotation lab sets it, so the labs that never roll a root keep the
+    one-minute inspection. Paced by `NodePacing.Enrollment`, every lab node
+    inspected its chain ten times a second, and two of four full runs failed
+    `TestBFDLivenessEpisode` before its line stood.
+*   A failed read of the newest pinned TRC ends the pass at the retry
+    cadence, as a failed chain read does; the report used to pass over it.
+*   The rotation lab finds the pre-pin chain by the root it verifies under,
+    and the founder's rung by walking the ladder
+    ([rotation_test.go](/internal/testnetwork/rotation_test.go)). The
+    founder leaves the replaced root at its first pass after its roll, so
+    its newest chain may already be a fresh one, and the newest TRC when the
+    roll's poll sees it may be a later rung.
+*   The pass's episodes are `TestEnrollmentPassReanchors`
+    ([lifecycle_test.go](/pkg/controlplane/lifecycle_test.go)), and the
+    pool's stay in `TestAnchorPoolRidesGrace`
+    ([rotation_test.go](/pkg/trust/rotation_test.go)).

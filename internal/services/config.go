@@ -131,7 +131,8 @@ type DERPOptions struct {
 type NodePacing struct {
 	Propagation       time.Duration // beacon origination and propagation
 	Registration      time.Duration // segment registration
-	Enrollment        time.Duration // enrollment retry
+	Enrollment        time.Duration // enrollment retry; the rotation watch's retry and inspection
+	EnrollmentInspect time.Duration // enrollment inspection of a valid chain
 	Selection         time.Duration // selection evaluation window
 	CandidateWindow   time.Duration // unproven candidate lifetime
 	Directory         time.Duration // directory publish and fetch

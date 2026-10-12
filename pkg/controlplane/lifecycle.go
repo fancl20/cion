@@ -196,14 +196,15 @@ func onboarded(ctx context.Context, cfg EnrollmentConfig) bool {
 }
 
 // RunEnrollment runs a node's chain lifecycle: each pass reads the newest
-// chain's remaining validity, reports the newest pinned TRC's, renews the
-// Renewal's way when the chain's drops below the renewal threshold or when
-// no valid chain exists, and with a valid chain does the work the role still
-// owes. It also runs the trust database's expired-chain sweep on its own
-// interval. The founding core's synchronous startup self-enrollment is its
-// first pass. It returns nil once the context ends, and the owed work's
-// terminal failure — a joining core's trust.ErrNoVotingApp — with the sweep
-// stopped.
+// chain's remaining validity and reports the newest pinned TRC's. It renews
+// the Renewal's way when no valid chain exists, when the chain's validity
+// drops below the renewal threshold, or when the chain does not verify
+// against the newest pinned TRC alone — anchored in a root the TRC replaced
+// — and with a valid chain does the work the role still owes. It also runs
+// the trust database's expired-chain sweep on its own interval. The founding
+// core's synchronous startup self-enrollment is its first pass. It returns
+// nil once the context ends, and the owed work's terminal failure — a
+// joining core's trust.ErrNoVotingApp — with the sweep stopped.
 func RunEnrollment(ctx context.Context, cfg EnrollmentConfig) error {
 	sweepCtx, stopSweep := context.WithCancel(ctx)
 	var sweep sync.WaitGroup
@@ -227,15 +228,25 @@ func RunEnrollment(ctx context.Context, cfg EnrollmentConfig) error {
 
 // enrollPass runs one inspection: it returns how long to wait before the
 // next one — the fast retry cadence while unenrolled, renewing, doing owed
-// work, or failing to read the chain, the calm inspection interval with a
-// valid chain and nothing owed — or the owed work's terminal failure.
+// work, or failing to read the chain or the newest pinned TRC, the calm
+// inspection interval with a valid chain and nothing owed — or the owed
+// work's terminal failure.
 func (cfg EnrollmentConfig) enrollPass(ctx context.Context) (time.Duration, error) {
 	chain, remaining, err := newestChain(ctx, cfg)
 	if err != nil {
 		slog.Error("Inspecting the chain", "isd_as", cfg.IA, "err", err)
 		return cfg.interval(cfg.RetryInterval, EnrollmentRetryInterval), nil
 	}
-	logTRCValidity(ctx, cfg)
+	newest, err := cfg.DB.SignedTRC(ctx, cppki.TRCID{
+		ISD:    cfg.IA.ISD(),
+		Base:   scrypto.LatestVer,
+		Serial: scrypto.LatestVer,
+	})
+	if err != nil {
+		slog.Error("Reading the newest pinned TRC", "isd_as", cfg.IA, "err", err)
+		return cfg.interval(cfg.RetryInterval, EnrollmentRetryInterval), nil
+	}
+	logTRCValidity(cfg.IA, newest)
 	switch {
 	case chain == nil:
 		slog.Warn("No valid chain; enrolling", "isd_as", cfg.IA)
@@ -248,6 +259,10 @@ func (cfg EnrollmentConfig) enrollPass(ctx context.Context) (time.Duration, erro
 		slog.Warn("Chain approaching expiry; re-enrolling",
 			"isd_as", cfg.IA, "remaining", remaining)
 		cfg.attemptRenewal(ctx)
+	case !newest.IsZero() && !anchoredIn(chain, newest):
+		slog.Warn("Chain does not anchor in the newest TRC; re-enrolling",
+			"isd_as", cfg.IA, "trc", newest.TRC.ID)
+		cfg.attemptRenewal(ctx)
 	default:
 		owed, err := cfg.Renewal.owed(ctx, cfg)
 		if err != nil {
@@ -258,6 +273,12 @@ func (cfg EnrollmentConfig) enrollPass(ctx context.Context) (time.Duration, erro
 		}
 	}
 	return cfg.interval(cfg.RetryInterval, EnrollmentRetryInterval), nil
+}
+
+// anchoredIn reports whether the chain verifies against the TRC's roots
+// alone.
+func anchoredIn(chain []*x509.Certificate, trc cppki.SignedTRC) bool {
+	return cppki.VerifyChain(chain, cppki.VerifyOptions{TRC: []*cppki.TRC{&trc.TRC}}) == nil
 }
 
 // attemptRenewal performs one renewal attempt the Renewal's way, bounded so
@@ -292,25 +313,19 @@ func newestChain(
 // logTRCValidity logs the newest pinned TRC's validity once it approaches
 // expiry, log only: the holders' rotation watches cast the successors that
 // extend it, and a certificate whose holder never rolls caps it for every
-// role.
-func logTRCValidity(ctx context.Context, cfg EnrollmentConfig) {
-	now := time.Now()
-	trc, err := cfg.DB.SignedTRC(ctx, cppki.TRCID{
-		ISD:    cfg.IA.ISD(),
-		Base:   scrypto.LatestVer,
-		Serial: scrypto.LatestVer,
-	})
-	if err != nil || trc.IsZero() {
+// role. The zero TRC, nothing pinned yet, reports nothing.
+func logTRCValidity(ia addr.IA, trc cppki.SignedTRC) {
+	if trc.IsZero() {
 		return
 	}
-	remaining := trc.TRC.Validity.NotAfter.Sub(now)
+	remaining := time.Until(trc.TRC.Validity.NotAfter)
 	switch {
 	case remaining <= 0:
 		slog.Error("Pinned TRC expired",
-			"isd_as", cfg.IA, "expired_for", -remaining)
+			"isd_as", ia, "expired_for", -remaining)
 	case remaining < trust.ChainRenewalThreshold:
 		slog.Warn("Pinned TRC approaching expiry",
-			"isd_as", cfg.IA, "remaining", remaining)
+			"isd_as", ia, "remaining", remaining)
 	}
 }
 
