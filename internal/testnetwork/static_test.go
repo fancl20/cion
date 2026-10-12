@@ -11,7 +11,6 @@ import (
 	"github.com/scionproto/scion/pkg/addr"
 
 	"github.com/fancl20/cion/internal/services"
-	"github.com/fancl20/cion/pkg/controlplane"
 	"github.com/fancl20/cion/pkg/modules/links"
 )
 
@@ -128,11 +127,10 @@ type staticTopology struct {
 	mutate func(*services.NodeConfig)
 }
 
-// bootTopology boots a static topology through the node's own assembly,
-// each node on the production BFD interval. Each node's ISD-AS is written
-// to its state before any boot, so every node's link set names its
-// neighbors up front, each link's addresses drawn from its two nodes'
-// hosts; the founding core, if any, boots first.
+// bootTopology boots a static topology through the node's own assembly.
+// Each node's ISD-AS is written to its state before any boot, so every
+// node's link set names its neighbors up front, each link's addresses drawn
+// from its two nodes' hosts; the founding core, if any, boots first.
 func bootTopology(t *testing.T, wpki *WebPKI, topo staticTopology) map[addr.IA]*staticNode {
 	t.Helper()
 	hosts := make(map[addr.IA]netip.Addr, len(topo.nodes))
@@ -161,31 +159,17 @@ func bootTopology(t *testing.T, wpki *WebPKI, topo staticTopology) map[addr.IA]*
 		sets[ia] = linkSetPath(t)
 		writeStaticSet(t, sets[ia], entries[ia]...)
 	}
-	mutate := func(cfg *services.NodeConfig) {
-		productionBFD(cfg)
-		if topo.mutate != nil {
-			topo.mutate(cfg)
-		}
-	}
 	nodes := make(map[addr.IA]*staticNode, len(topo.nodes))
 	if !topo.core.IsZero() {
 		nodes[topo.core] = bootStaticNode(t, wpki, hosts[topo.core], true,
-			states[topo.core], sets[topo.core], mutate)
+			states[topo.core], sets[topo.core], topo.mutate)
 	}
 	for _, ia := range topo.nodes {
 		if ia != topo.core {
-			nodes[ia] = bootStaticNode(t, wpki, hosts[ia], false, states[ia], sets[ia], mutate)
+			nodes[ia] = bootStaticNode(t, wpki, hosts[ia], false, states[ia], sets[ia], topo.mutate)
 		}
 	}
 	return nodes
-}
-
-// productionBFD boots a node on the production BFD interval. The builder's
-// labs prove carriage, not liveness, and the production interval's
-// detection time rides out the stalls of a loaded runner, which at lab
-// pacing take every link down and lose the echoes in flight.
-func productionBFD(cfg *services.NodeConfig) {
-	cfg.Pacing.BFD = controlplane.BFDTransmissionInterval
 }
 
 // TestStaticLabByLinkSet is the file provider's integration proof: a

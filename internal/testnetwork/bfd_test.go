@@ -17,6 +17,19 @@ import (
 	"github.com/fancl20/cion/pkg/segment"
 )
 
+// bfdSelection paces the BFD lab's selection windows. The episode holds A's
+// dead link established through its steps after the down verdict, which take
+// seconds at the production BFD interval, and the selection retires a link
+// whose verdict stays down for DemoteWindows windows. A neighbor missing
+// from the selection's directory snapshot is never probed, so the windows
+// run at the bare interval.
+const bfdSelection = 5 * time.Second
+
+// bfdPacing gives a BFD lab node the lab's selection windows.
+func bfdPacing(cfg *services.NodeConfig) {
+	cfg.Pacing.Selection = bfdSelection
+}
+
 // TestBFDLivenessEpisode is the BFD integration proof: a three-node
 // line — the core A, the middle B, and C below — where killing B is the
 // blackhole on the A–B link's sockets. A holds the floor of up links through
@@ -32,7 +45,7 @@ func TestBFDLivenessEpisode(t *testing.T) {
 	t.Parallel()
 	wpki := NewWebPKI(t)
 	ipA, ipB, ipC := hostSlot(t), hostSlot(t), hostSlot(t)
-	a, b, c := bootRendezvousLine(t, wpki, ipA, ipB, ipC)
+	a, b, c := bootRendezvousLine(t, wpki, ipA, ipB, ipC, bfdPacing)
 	ctx := context.Background()
 
 	// The line stands: A–B established at both ends and C's end of B–C,
@@ -104,6 +117,7 @@ func TestBFDLivenessEpisode(t *testing.T) {
 		cfg.Internal = PinnedUDPAddrOn(t, ipB)
 		cfg.Control = FreeUDPAddrOn(t, ipB)
 		cfg.RootCAs = wpki.pool
+		bfdPacing(cfg)
 	})
 	_ = b2
 	Poll(t, "A's link to B to return up", func() bool {

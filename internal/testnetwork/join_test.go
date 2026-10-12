@@ -13,6 +13,7 @@ import (
 	"github.com/fancl20/cion/internal/services"
 	"github.com/fancl20/cion/pkg/apps"
 	"github.com/fancl20/cion/pkg/apps/ping"
+	"github.com/fancl20/cion/pkg/controlplane"
 	"github.com/fancl20/cion/pkg/modules/links"
 	"github.com/fancl20/cion/pkg/modules/pathdb"
 	"github.com/fancl20/cion/pkg/modules/topology/impl/measured"
@@ -20,7 +21,10 @@ import (
 	"github.com/fancl20/cion/pkg/trust"
 )
 
-// fastPacing paces the assembly's loops for the integration tests.
+// fastPacing paces the assembly's loops for the integration tests. BFD keeps
+// the production interval: its detection time rides out the stalls of a
+// loaded runner, which at a lab interval take every link down, lose the
+// echoes in flight, and leave the selection to retire live links.
 var fastPacing = services.NodePacing{
 	Propagation:     Propagation,
 	Registration:    Registration,
@@ -30,7 +34,7 @@ var fastPacing = services.NodePacing{
 	Directory:       100 * time.Millisecond,
 	RendezvousRate:  10 * time.Millisecond,
 	LinkSetPoll:     100 * time.Millisecond,
-	BFD:             200 * time.Millisecond,
+	BFD:             controlplane.BFDTransmissionInterval,
 }
 
 // assemblyNode is a node booted through the run command's own assembly.
@@ -214,11 +218,17 @@ func establishedTo(n *assemblyNode, ia addr.IA) bool {
 
 // bootRendezvousLine brings up the assembly's three-node line — the
 // founding core A, the middle B joined to it by rendezvous, and C below
-// joined to B — on the given loopback hosts.
-func bootRendezvousLine(t *testing.T, wpki *WebPKI,
-	ipA, ipB, ipC netip.Addr) (a, b, c *assemblyNode) {
+// joined to B — on the given loopback hosts, each node's run arguments
+// taking the mutation last when one is set.
+func bootRendezvousLine(t *testing.T, wpki *WebPKI, ipA, ipB, ipC netip.Addr,
+	mutate func(*services.NodeConfig)) (a, b, c *assemblyNode) {
 
 	t.Helper()
+	last := func(cfg *services.NodeConfig) {
+		if mutate != nil {
+			mutate(cfg)
+		}
+	}
 	// The founding core; its certificate files are the offline fallback the
 	// tests always take.
 	a = bootAssembly(t, func(cfg *services.NodeConfig) {
@@ -228,6 +238,7 @@ func bootRendezvousLine(t *testing.T, wpki *WebPKI,
 		cfg.Control = FreeUDPAddrOn(t, ipA)
 		cfg.CertFile = wpki.certFile
 		cfg.KeyFile = wpki.keyFile
+		last(cfg)
 	})
 	// B joins the core by rendezvous.
 	b = bootAssembly(t, func(cfg *services.NodeConfig) {
@@ -236,6 +247,7 @@ func bootRendezvousLine(t *testing.T, wpki *WebPKI,
 		cfg.Control = FreeUDPAddrOn(t, ipB)
 		cfg.Neighbors = []string{a.rendezvousOf()}
 		cfg.RootCAs = wpki.pool
+		last(cfg)
 	})
 	// C joins B — a non-core neighbor — with the core's domain.
 	c = bootAssembly(t, func(cfg *services.NodeConfig) {
@@ -244,6 +256,7 @@ func bootRendezvousLine(t *testing.T, wpki *WebPKI,
 		cfg.Control = FreeUDPAddrOn(t, ipC)
 		cfg.Neighbors = []string{b.rendezvousOf()}
 		cfg.RootCAs = wpki.pool
+		last(cfg)
 	})
 	return a, b, c
 }
@@ -259,7 +272,7 @@ func TestJoinByRendezvous(t *testing.T) {
 	t.Parallel()
 	wpki := NewWebPKI(t)
 	ipA, ipB, ipC := hostSlot(t), hostSlot(t), hostSlot(t)
-	a, b, c := bootRendezvousLine(t, wpki, ipA, ipB, ipC)
+	a, b, c := bootRendezvousLine(t, wpki, ipA, ipB, ipC, nil)
 	ctx := context.Background()
 
 	// The joins land: both sides of each link hold an entry, each naming
@@ -368,7 +381,7 @@ func TestLineCutHeals(t *testing.T) {
 	t.Parallel()
 	wpki := NewWebPKI(t)
 	ipA, ipB, ipC := hostSlot(t), hostSlot(t), hostSlot(t)
-	a, b, c := bootRendezvousLine(t, wpki, ipA, ipB, ipC)
+	a, b, c := bootRendezvousLine(t, wpki, ipA, ipB, ipC, nil)
 	ctx := context.Background()
 
 	// The joins land and C enrolls through the line.
