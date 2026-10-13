@@ -76,8 +76,9 @@ type CoreClientConfig struct {
 	// Locator resolves the core's SCION address: its IA, the destination — the
 	// core's control service as a service destination, or an underlay address —
 	// and path — the one-hop path when the core is a neighbor, else the reversed
-	// freshest up segment. It is consulted at dial time, so later dials pick up
-	// fresh paths, and a nil address means the locator is unknown yet.
+	// freshest up segment. It is consulted at dial time and only then, so later
+	// dials pick up fresh paths and a locator taking turns among cores turns
+	// once per dial, and a nil address means the locator is unknown yet.
 	Locator func() *scion.Addr
 	// ResolveService resolves a service-destined locator through the drafts'
 	// service discovery (control plane draft, Section 5): the request the
@@ -118,7 +119,7 @@ func NewCoreClient(cfg CoreClientConfig) (*CoreClient, error) {
 		Dial: func(ctx context.Context, _ string, tlsCfg *tls.Config,
 			cfg *quic.Config) (*quic.Conn, error) {
 
-			peer := c.coreAddr()
+			peer := c.locator()
 			if peer == nil {
 				return nil, errors.New("core locator unknown")
 			}
@@ -145,12 +146,6 @@ func NewCoreClient(cfg CoreClientConfig) (*CoreClient, error) {
 	return c, nil
 }
 
-// coreAddr resolves the core's current address through the locator. Nil
-// means the locator is unknown.
-func (c *CoreClient) coreAddr() *scion.Addr {
-	return c.locator()
-}
-
 // Close releases the underlying QUIC transport.
 func (c *CoreClient) Close() error {
 	return c.qclt.Close()
@@ -158,9 +153,6 @@ func (c *CoreClient) Close() error {
 
 // TRC fetches the signed TRC with the given ID.
 func (c *CoreClient) TRC(ctx context.Context, id cppki.TRCID) (cppki.SignedTRC, error) {
-	if c.coreAddr() == nil {
-		return cppki.SignedTRC{}, fmt.Errorf("core locator unknown")
-	}
 	resp, err := c.clt.TRC(ctx, connect.NewRequest(&cppb.TRCRequest{
 		Isd:    uint32(id.ISD),
 		Base:   uint64(id.Base),
@@ -178,9 +170,6 @@ func (c *CoreClient) Chains(
 	q trustdb.ChainQuery,
 ) ([][]*x509.Certificate, error) {
 
-	if c.coreAddr() == nil {
-		return nil, fmt.Errorf("core locator unknown")
-	}
 	req := &cppb.ChainsRequest{
 		IsdAs:        uint64(q.IA),
 		SubjectKeyId: q.SubjectKeyID,
@@ -219,9 +208,6 @@ func (c *CoreClient) RenewChain(
 	key crypto.Signer,
 ) ([]*x509.Certificate, error) {
 
-	if c.coreAddr() == nil {
-		return nil, fmt.Errorf("core locator unknown")
-	}
 	cmsReq, err := trust.BuildRenewalRequest(csr, key)
 	if err != nil {
 		return nil, fmt.Errorf("building renewal request: %w", err)
