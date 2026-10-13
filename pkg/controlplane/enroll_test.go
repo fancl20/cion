@@ -120,11 +120,9 @@ func serveCore(t *testing.T, n *testNode, wpki *webPKI) *trustFixture {
 	}
 	tlsConf := certMgr.TLSConfig()
 	svc := &TrustService{DB: f.db, Issuer: f.issuer}
-	// The server outlives the test's own thread — it serves until its socket
-	// closes at cleanup — so it reports through the package logger and its
-	// cleanup waits for the exit. The wait registers before the endpoint's
-	// own close, so the reverse unwind closes the socket first and the exit
-	// it prompts is already waiting when the wait's turn comes.
+	// The server outlives the test's own thread — it serves until the test's
+	// context ends, just before cleanup — so it reports through the package
+	// logger and its cleanup waits for the exit.
 	done := make(chan error, 1)
 	t.Cleanup(func() {
 		select {
@@ -133,12 +131,12 @@ func serveCore(t *testing.T, n *testNode, wpki *webPKI) *trustFixture {
 				slog.Debug("control endpoint exited", "err", err)
 			}
 		case <-time.After(5 * time.Second):
-			t.Error("the control endpoint did not stop with its socket")
+			t.Error("the control endpoint did not stop with the test's context")
 		}
 	})
 	endpoint := n.newConn(t, EndpointPort)
 	go func() {
-		done <- ServeHTTP3(endpoint, NewServer(svc).Handler, tlsConf)
+		done <- ServeHTTP3(t.Context(), endpoint, NewServer(svc).Handler, tlsConf)
 	}()
 	return f
 }

@@ -600,19 +600,12 @@ func (a *App) Run(ctx context.Context) error {
 // serveDirectory serves the core's directory on the socket New bound and
 // registered under the directory service, over the application's
 // authenticated channel — the control endpoint's TLS machinery, every
-// publisher identified by its verified chain — until the context ends. QUIC
-// answers a read deadline by reading again, so the context's end closes the
-// socket, and the loop returns with it released, the deferred release
-// waiting on a close under way. Close closes the socket again, harmlessly.
+// publisher identified by its verified chain — until the context ends, and
+// returns with the socket closed and every request's handler returned.
+// Close closes the socket again, harmlessly.
 func (a *App) serveDirectory(ctx context.Context) {
-	release := sync.OnceValue(a.dirServe.Close)
-	stop := context.AfterFunc(ctx, func() { _ = release() })
-	defer func() {
-		stop()
-		_ = release()
-	}()
 	slog.Info("Serving the WireGuard directory", "service", serviceName(SvcDirectory))
-	if err := controlplane.ServeHTTP3(a.dirServe, a.DirectoryHandler(),
+	if err := controlplane.ServeHTTP3(ctx, a.dirServe, a.DirectoryHandler(),
 		controlplane.EndpointTLS(controlplane.EndpointTLSConfig{
 			Engine: a.cfg.Engine,
 		})); err != nil && ctx.Err() == nil {

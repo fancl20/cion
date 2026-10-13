@@ -1,6 +1,7 @@
 package controlplane
 
 import (
+	"context"
 	"net/http"
 	"net/netip"
 	"sync"
@@ -15,11 +16,12 @@ import (
 	"github.com/fancl20/cion/pkg/webpki"
 )
 
-// TestServeHTTP3JoinsItsHandlers checks the endpoint's stop: closing the
-// socket ends every connection, canceling its requests' contexts, and
-// ServeHTTP3 returns only once each handler has returned — the node's
-// releases follow the serving loop's return, so a handler still running
-// would meet the stores they close.
+// TestServeHTTP3JoinsItsHandlers checks the endpoint's stop: the context's
+// end closes the socket, ending every connection and canceling its
+// requests' contexts, and ServeHTTP3 returns only once each handler has
+// returned — the node's releases follow the serving loop's return, so a
+// handler still running would meet the stores they close — with the socket
+// released for the next bind of the port.
 func TestServeHTTP3JoinsItsHandlers(t *testing.T) {
 	iaCore := addr.MustIAFrom(20, 0xff0000000001)
 	iaNode := addr.MustIAFrom(20, 0xff0000000002)
@@ -51,9 +53,11 @@ func TestServeHTTP3JoinsItsHandlers(t *testing.T) {
 		<-release
 		returned.Store(true)
 	})
+	serveCtx, stopServe := context.WithCancel(t.Context())
+	defer stopServe()
 	endpoint := core.newConn(t, EndpointPort)
 	served := make(chan error, 1)
-	go func() { served <- ServeHTTP3(endpoint, handler, certMgr.TLSConfig()) }()
+	go func() { served <- ServeHTTP3(serveCtx, endpoint, handler, certMgr.TLSConfig()) }()
 
 	client, err := webpki.NewCoreClient(webpki.CoreClientConfig{
 		Domain:  testDomain,
@@ -75,11 +79,11 @@ func TestServeHTTP3JoinsItsHandlers(t *testing.T) {
 		t.Fatal("the request never reached the handler")
 	}
 
-	_ = endpoint.Close()
+	stopServe()
 	select {
 	case <-canceled:
 	case <-time.After(5 * time.Second):
-		t.Fatal("the request's context did not end with the socket")
+		t.Fatal("the request's context did not end with the serve's")
 	}
 	// The socket's close ends the listener before the connections, so a
 	// server that leaves its handlers unjoined returns inside the window.
@@ -97,4 +101,6 @@ func TestServeHTTP3JoinsItsHandlers(t *testing.T) {
 	if !returned.Load() {
 		t.Error("ServeHTTP3 returned before its handler")
 	}
+	// The endpoint's port binds again: the serve released its socket.
+	core.newConn(t, EndpointPort)
 }

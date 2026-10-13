@@ -1,10 +1,12 @@
 package controlplane
 
 import (
+	"context"
 	"crypto/tls"
 	"log/slog"
 	"net"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/quic-go/quic-go"
@@ -86,12 +88,26 @@ var quicConfig = &quic.Config{InitialPacketSize: 1200}
 
 // ServeHTTP3 serves the handler with HTTP/3 (QUIC) on conn, answering the
 // drafts' service resolution beside it (control plane draft, Section 5),
-// until conn closes. It returns once every request's handler has returned:
-// conn's close ends every connection, canceling its requests' contexts, and
-// the server's Close waits for their handlers, so a caller releasing what
-// the handlers use after the return finds none still running. The TLS
-// configuration must carry the certificate for the served domain.
-func ServeHTTP3(conn *scion.Conn, handler http.Handler, tlsConf *tls.Config) error {
+// until the context ends or conn fails, and returns with conn closed and
+// every request's handler returned. QUIC answers a read deadline by reading
+// again, so the context's end closes conn; the close ends every connection,
+// canceling its requests' contexts, and the server's Close waits for their
+// handlers. The return waits on a close already under way, for a second
+// Close returns before the first's release finishes. The TLS configuration
+// must carry the certificate for the served domain.
+func ServeHTTP3(
+	ctx context.Context,
+	conn *scion.Conn,
+	handler http.Handler,
+	tlsConf *tls.Config,
+) error {
+
+	release := sync.OnceValue(conn.Close)
+	stop := context.AfterFunc(ctx, func() { _ = release() })
+	defer func() {
+		stop()
+		_ = release()
+	}()
 	transport := &quic.Transport{Conn: &resolutionConn{conn: conn}}
 	ln, err := transport.Listen(tlsConf, quicConfig)
 	if err != nil {

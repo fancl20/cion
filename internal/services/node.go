@@ -293,17 +293,9 @@ func (n *node) start(gen *generation) {
 		return nil
 	})
 	g.Go("control endpoint", supervise.Fatal, func(ctx context.Context) error {
-		// The context's end closes the socket, ending the serve, and the
-		// loop returns with it released — waiting on a close under way, for
-		// a second Close returns before the first's release finishes — so a
-		// restart in the same process rebinds the fixed endpoint port.
-		release := sync.OnceValue(n.endpointConn.Close)
-		stop := context.AfterFunc(ctx, func() { _ = release() })
-		defer func() {
-			stop()
-			_ = release()
-		}()
-		return controlplane.ServeHTTP3(n.endpointConn,
+		// The serve returns with the socket released, so a restart in the
+		// same process rebinds the fixed endpoint port.
+		return controlplane.ServeHTTP3(ctx, n.endpointConn,
 			controlplane.NewServer(n.services).Handler,
 			controlplane.EndpointTLS(controlplane.EndpointTLSConfig{
 				Domain: n.cfg.Domain,
