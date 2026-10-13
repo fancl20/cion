@@ -13,11 +13,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/fancl20/cion/pkg/apps/wireguard/impl/dbtest"
 	"tailscale.com/derp"
 	"tailscale.com/tailcfg"
 	"tailscale.com/types/key"
 	"tailscale.com/types/logger"
+
+	"github.com/fancl20/cion/pkg/apps/wireguard/impl/dbtest"
+	"github.com/fancl20/cion/pkg/webpki/webpkitest"
 )
 
 // TestKeysPersist checks the load-or-create pattern: a first read
@@ -77,7 +79,7 @@ func TestKeyEndpoint(t *testing.T) {
 		},
 	}}
 	resp, err := client.Get(fmt.Sprintf("https://%s/key?v=%d",
-		TestDomain, servedCapabilityVersion))
+		webpkitest.Domain, servedCapabilityVersion))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -203,13 +205,13 @@ func relayUpgrade(t *testing.T, addr string, roots *x509.CertPool) net.Conn {
 	t.Helper()
 	conn, err := tls.Dial("tcp", addr, &tls.Config{
 		RootCAs:    roots,
-		ServerName: TestDomain,
+		ServerName: webpkitest.Domain,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = conn.Close() })
-	req := "GET /derp HTTP/1.1\r\nHost: " + TestDomain +
+	req := "GET /derp HTTP/1.1\r\nHost: " + webpkitest.Domain +
 		"\r\nUpgrade: DERP\r\nConnection: Upgrade\r\n\r\n"
 	if _, err := conn.Write([]byte(req)); err != nil {
 		t.Fatal(err)

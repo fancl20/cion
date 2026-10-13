@@ -2,15 +2,8 @@ package coordination
 
 import (
 	"context"
-	"crypto/ecdsa"
-	"crypto/elliptic"
-	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
-	"crypto/x509/pkix"
-	"encoding/pem"
-	"math/big"
-	"net"
 	"net/netip"
 	"sync"
 	"testing"
@@ -21,6 +14,7 @@ import (
 
 	"github.com/fancl20/cion/pkg/apps/wireguard"
 	"github.com/fancl20/cion/pkg/modules/enrollauth"
+	"github.com/fancl20/cion/pkg/webpki/webpkitest"
 )
 
 // askAuthorizer records the facts it is asked with and answers as told,
@@ -50,56 +44,20 @@ func (a *askAuthorizer) asks() []enrollauth.AdmissionFacts {
 	return append([]enrollauth.AdmissionFacts(nil), a.asked...)
 }
 
-// testCert mints a self-signed certificate for 127.0.0.1, the harness's
-// stand-in for the WebPKI: the pool that trusts it and the TLS
-// configuration that presents it.
+// testCert presents the shared test CA's certificate for webpkitest.Domain
+// and 127.0.0.1, returning the pool that trusts the CA and the TLS
+// configuration that presents the certificate.
 func testCert(t *testing.T) (*x509.CertPool, *tls.Config) {
 	t.Helper()
-	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	ca := webpkitest.New(t)
+	pair, err := tls.LoadX509KeyPair(ca.CertFile, ca.KeyFile)
 	if err != nil {
 		t.Fatal(err)
 	}
-	tmpl := &x509.Certificate{
-		SerialNumber: big.NewInt(1),
-		Subject:      pkix.Name{CommonName: TestDomain},
-		IPAddresses:  []net.IP{net.IPv4(127, 0, 0, 1)},
-		DNSNames:     []string{TestDomain},
-		NotBefore:    time.Now().Add(-time.Hour),
-		NotAfter:     time.Now().Add(time.Hour),
-	}
-	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, key.Public(), key)
-	if err != nil {
-		t.Fatal(err)
-	}
-	cert, err := x509.ParseCertificate(der)
-	if err != nil {
-		t.Fatal(err)
-	}
-	pool := x509.NewCertPool()
-	pool.AddCert(cert)
-	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
-	pair, err := tls.X509KeyPair(certPEM, certKeyPEM(t, key))
-	if err != nil {
-		t.Fatal(err)
-	}
-	tlsCfg := &tls.Config{
+	return ca.Pool, &tls.Config{
 		Certificates: []tls.Certificate{pair},
 		MinVersion:   tls.VersionTLS13,
 	}
-	return pool, tlsCfg
-}
-
-// TestDomain is the test core's DNS identity.
-const TestDomain = "cion-core.test"
-
-// certKeyPEM wraps a private key in the PEM the key pair loader wants.
-func certKeyPEM(t *testing.T, key *ecdsa.PrivateKey) []byte {
-	t.Helper()
-	der, err := x509.MarshalECPrivateKey(key)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: der})
 }
 
 // testNode is one node entry of a test registry.
@@ -129,7 +87,7 @@ func machineZero() key.MachinePublic { return key.MachinePublic{} }
 // core's identity, its handler ready for an externally assembled server.
 func testApp(t *testing.T, cfg Config) *App {
 	t.Helper()
-	cfg.Domain = TestDomain
+	cfg.Domain = webpkitest.Domain
 	cfg.StateDir = t.TempDir()
 	a, err := New(cfg)
 	if err != nil {

@@ -11,6 +11,7 @@ import (
 
 	"github.com/fancl20/cion/pkg/apps/wireguard"
 	"github.com/fancl20/cion/pkg/apps/wireguard/impl/dbtest"
+	"github.com/fancl20/cion/pkg/webpki/webpkitest"
 )
 
 // TestNetmapHoldsOnePeer checks the map the registry builds for one host:
@@ -111,7 +112,7 @@ func TestNetmapHoldsOnePeer(t *testing.T) {
 		t.Fatalf("the DERP map = %+v, want one region, one node", resp.DERPMap.Regions)
 	}
 	relay := region.Nodes[0]
-	if relay.HostName != TestDomain || relay.STUNPort != -1 {
+	if relay.HostName != webpkitest.Domain || relay.STUNPort != -1 {
 		t.Errorf("the relay = %+v, want the core's identity and no STUN", relay)
 	}
 	if resp.DNSConfig != nil {

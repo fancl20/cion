@@ -2,73 +2,27 @@ package services
 
 import (
 	"context"
-	"crypto/ecdsa"
-	"crypto/elliptic"
-	"crypto/rand"
-	"crypto/x509"
-	"crypto/x509/pkix"
-	"encoding/pem"
-	"math/big"
 	"net"
 	"net/http"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/fancl20/cion/internal/supervise"
 	"github.com/fancl20/cion/pkg/apps"
 	"github.com/fancl20/cion/pkg/apps/coordination"
 	"github.com/fancl20/cion/pkg/apps/wireguard"
 	"github.com/fancl20/cion/pkg/webpki"
+	"github.com/fancl20/cion/pkg/webpki/webpkitest"
 )
-
-// mintCertFiles writes a self-signed certificate pair, the tests' stand-in
-// for the WebPKI, returning the files.
-func mintCertFiles(t *testing.T) (certFile, keyFile string) {
-	t.Helper()
-	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-	tmpl := &x509.Certificate{
-		SerialNumber: big.NewInt(1),
-		Subject:      pkix.Name{CommonName: "core.example.org"},
-		DNSNames:     []string{"core.example.org"},
-		NotBefore:    time.Now().Add(-time.Hour),
-		NotAfter:     time.Now().Add(time.Hour),
-		KeyUsage:     x509.KeyUsageDigitalSignature,
-	}
-	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, key.Public(), key)
-	if err != nil {
-		t.Fatal(err)
-	}
-	keyDER, err := x509.MarshalECPrivateKey(key)
-	if err != nil {
-		t.Fatal(err)
-	}
-	dir := t.TempDir()
-	certFile, keyFile = filepath.Join(dir, "cert.pem"), filepath.Join(dir, "key.pem")
-	if err := os.WriteFile(certFile, pem.EncodeToMemory(
-		&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(keyFile, pem.EncodeToMemory(
-		&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER}), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	return certFile, keyFile
-}
 
 // staticCertMgr prepares the static-file identity the bind tests stand on.
 func staticCertMgr(t *testing.T) *webpki.CertManager {
 	t.Helper()
-	certFile, keyFile := mintCertFiles(t)
+	ca := webpkitest.New(t)
 	manager, err := webpki.PrepareTLSCert(webpki.TLSCertConfig{
-		Domain:   "core.example.org",
-		CertFile: certFile,
-		KeyFile:  keyFile,
+		Domain:   webpkitest.Domain,
+		CertFile: ca.CertFile,
+		KeyFile:  ca.KeyFile,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -106,7 +60,7 @@ func (testRegistry) PublishHost(context.Context, wireguard.HostEntry) error {
 // when the phase returns, and the port answers before anything serves it.
 func TestAssembleHTTPSBind(t *testing.T) {
 	app, err := coordination.New(coordination.Config{
-		Domain:   "core.example.org",
+		Domain:   webpkitest.Domain,
 		Store:    testRegistry{},
 		StateDir: t.TempDir(),
 	})
@@ -202,7 +156,7 @@ func TestAssembleHTTPSRefusesSecondHandler(t *testing.T) {
 // with the published-endpoint message.
 func TestAssembleHTTPSWildcardRefused(t *testing.T) {
 	app, err := coordination.New(coordination.Config{
-		Domain:   "core.example.org",
+		Domain:   webpkitest.Domain,
 		Store:    testRegistry{},
 		StateDir: t.TempDir(),
 	})

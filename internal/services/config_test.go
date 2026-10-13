@@ -7,6 +7,7 @@ import (
 
 	"github.com/fancl20/cion/pkg/apps"
 	"github.com/fancl20/cion/pkg/trust"
+	"github.com/fancl20/cion/pkg/webpki/webpkitest"
 )
 
 // nodeConfig builds a minimal valid run-argument set for the validation and
@@ -14,7 +15,7 @@ import (
 func nodeConfig() NodeConfig {
 	return NodeConfig{
 		Core:     true,
-		Domain:   "core.example.org",
+		Domain:   webpkitest.Domain,
 		State:    "/var/lib/cion",
 		Internal: DefaultInternal,
 		Control:  DefaultControl,

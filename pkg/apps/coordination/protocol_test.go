@@ -26,6 +26,7 @@ import (
 	"github.com/fancl20/cion/pkg/apps/wireguard"
 	"github.com/fancl20/cion/pkg/apps/wireguard/impl/dbtest"
 	"github.com/fancl20/cion/pkg/modules/enrollauth"
+	"github.com/fancl20/cion/pkg/webpki/webpkitest"
 )
 
 // serveCoordination serves the application's handler on an externally
@@ -129,7 +130,7 @@ func noiseHTTP(t *testing.T, addr string, roots *x509.CertPool,
 			return conn, nil
 		},
 	}
-	cc, err := transport.NewClientConn(context.Background(), "http", TestDomain+":80")
+	cc, err := transport.NewClientConn(context.Background(), "http", webpkitest.Domain+":80")
 	if err != nil {
 		t.Fatalf("opening HTTP/2 over the noise channel: %v", err)
 	}
@@ -152,7 +153,7 @@ func register(t *testing.T, client *http.Client,
 	if err != nil {
 		t.Fatal(err)
 	}
-	resp, err := client.Post("http://"+TestDomain+"/machine/register",
+	resp, err := client.Post("http://"+webpkitest.Domain+"/machine/register",
 		"application/json", bytes.NewReader(raw))
 	if err != nil {
 		t.Fatalf("the registration request: %v", err)
@@ -184,7 +185,7 @@ func fetchMap(t *testing.T, client *http.Client,
 	if err != nil {
 		t.Fatal(err)
 	}
-	resp, err := client.Post("http://"+TestDomain+"/machine/map",
+	resp, err := client.Post("http://"+webpkitest.Domain+"/machine/map",
 		"application/json", bytes.NewReader(raw))
 	if err != nil {
 		t.Fatalf("the map request: %v", err)

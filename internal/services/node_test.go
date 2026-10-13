@@ -13,6 +13,7 @@ import (
 	"github.com/fancl20/cion/pkg/modules/enrollauth"
 	"github.com/fancl20/cion/pkg/modules/links"
 	"github.com/fancl20/cion/pkg/modules/links/impl/memory"
+	"github.com/fancl20/cion/pkg/webpki/webpkitest"
 )
 
 // setupFounderNode assembles a founding core from the minimal run arguments
@@ -21,12 +22,12 @@ import (
 // rendezvous ports on the control host. The group releases it at cleanup.
 func setupFounderNode(t *testing.T, mutate func(*NodeConfig)) *node {
 	t.Helper()
-	certFile, keyFile := mintCertFiles(t)
+	ca := webpkitest.New(t)
 	cfg := nodeConfig()
 	cfg.State = t.TempDir()
 	cfg.Internal = "127.0.0.124:30044"
 	cfg.Control = "127.0.0.124:30042"
-	cfg.CertFile, cfg.KeyFile = certFile, keyFile
+	cfg.CertFile, cfg.KeyFile = ca.CertFile, ca.KeyFile
 	mutate(&cfg)
 	group, _ := supervise.New(t.Context())
 	n, err := setupNode(t.Context(), group, cfg, DefaultDataplaneOptions())

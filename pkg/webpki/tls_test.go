@@ -3,18 +3,11 @@ package webpki
 import (
 	"bufio"
 	"context"
-	"crypto/ecdsa"
-	"crypto/elliptic"
-	"crypto/rand"
 	"crypto/tls"
-	"crypto/x509"
-	"crypto/x509/pkix"
 	"encoding/asn1"
 	"encoding/json/v2"
-	"encoding/pem"
 	"errors"
 	"io"
-	"math/big"
 	"net"
 	"net/http"
 	"os"
@@ -25,61 +18,13 @@ import (
 	"github.com/caddyserver/certmagic"
 	"github.com/mholt/acmez/v3"
 	"github.com/mholt/acmez/v3/acme"
-)
 
-// testDomain is the DNS identity of the test core's certificate.
-const testDomain = "cion-core.test"
+	"github.com/fancl20/cion/pkg/webpki/webpkitest"
+)
 
 // idPEACMEIdentifierV1 is the certificate extension an ACME TLS-ALPN
 // challenge certificate carries (RFC 8737 §6.1).
 var idPEACMEIdentifierV1 = asn1.ObjectIdentifier{1, 3, 6, 1, 5, 5, 7, 1, 31}
-
-// mintCertFiles writes a self-signed certificate pair for testDomain and
-// 127.0.0.1, the tests' stand-in for the WebPKI, returning the files and
-// the pool trusting the certificate.
-func mintCertFiles(t *testing.T) (certFile, keyFile string, pool *x509.CertPool) {
-	t.Helper()
-	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-	tmpl := &x509.Certificate{
-		SerialNumber: big.NewInt(1),
-		Subject:      pkix.Name{CommonName: testDomain},
-		IPAddresses:  []net.IP{net.IPv4(127, 0, 0, 1)},
-		DNSNames:     []string{testDomain},
-		NotBefore:    time.Now().Add(-time.Hour),
-		NotAfter:     time.Now().Add(time.Hour),
-		KeyUsage:     x509.KeyUsageDigitalSignature,
-		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
-	}
-	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, key.Public(), key)
-	if err != nil {
-		t.Fatal(err)
-	}
-	cert, err := x509.ParseCertificate(der)
-	if err != nil {
-		t.Fatal(err)
-	}
-	keyDER, err := x509.MarshalECPrivateKey(key)
-	if err != nil {
-		t.Fatal(err)
-	}
-	dir := t.TempDir()
-	certFile = filepath.Join(dir, "cert.pem")
-	keyFile = filepath.Join(dir, "key.pem")
-	if err := os.WriteFile(certFile, pem.EncodeToMemory(
-		&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(keyFile, pem.EncodeToMemory(
-		&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER}), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	pool = x509.NewCertPool()
-	pool.AddCert(cert)
-	return certFile, keyFile, pool
-}
 
 // serveHTTPS serves the manager's HTTPS server on the listener under the
 // test's supervision.
@@ -105,11 +50,11 @@ func serveHTTPS(t *testing.T, m *CertManager, ln net.Listener, handler http.Hand
 // identity: the bind returns with the port held, and a plain HTTP/1.1
 // request reaches the mounted handler over the loaded certificate.
 func TestServeHTTPSHTTP11(t *testing.T) {
-	certFile, keyFile, pool := mintCertFiles(t)
+	ca := webpkitest.New(t)
 	manager, err := PrepareTLSCert(TLSCertConfig{
-		Domain:   testDomain,
-		CertFile: certFile,
-		KeyFile:  keyFile,
+		Domain:   webpkitest.Domain,
+		CertFile: ca.CertFile,
+		KeyFile:  ca.KeyFile,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -134,7 +79,7 @@ func TestServeHTTPSHTTP11(t *testing.T) {
 	serveHTTPS(t, manager, ln, mux)
 
 	client := &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{
-		RootCAs: pool,
+		RootCAs: ca.Pool,
 	}}}
 	resp, err := client.Get("https://" + ln.Addr().String() + "/mounted")
 	if err != nil {
@@ -158,11 +103,11 @@ func TestServeHTTPSHTTP11(t *testing.T) {
 // tracks, an idle keep-alive here — and returns nil with the port released,
 // the address binding again at once.
 func TestServeHTTPSReleasesOnCancel(t *testing.T) {
-	certFile, keyFile, pool := mintCertFiles(t)
+	ca := webpkitest.New(t)
 	manager, err := PrepareTLSCert(TLSCertConfig{
-		Domain:   testDomain,
-		CertFile: certFile,
-		KeyFile:  keyFile,
+		Domain:   webpkitest.Domain,
+		CertFile: ca.CertFile,
+		KeyFile:  ca.KeyFile,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -181,7 +126,7 @@ func TestServeHTTPSReleasesOnCancel(t *testing.T) {
 		served <- manager.ServeHTTPS(ctx, ln, http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 	}()
 
-	conn, err := tls.Dial("tcp", address, &tls.Config{RootCAs: pool, ServerName: testDomain})
+	conn, err := tls.Dial("tcp", address, &tls.Config{RootCAs: ca.Pool, ServerName: webpkitest.Domain})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -223,7 +168,7 @@ func TestServeHTTPSReleasesOnCancel(t *testing.T) {
 // served from the cache the challenge was seeded into, with the extension
 // RFC 8737 names carried by the certificate itself.
 func TestServeHTTPSACMEChallenge(t *testing.T) {
-	manager, ln := acmeManager(t, testDomain)
+	manager, ln := acmeManager(t, webpkitest.Domain)
 	serveHTTPS(t, manager, ln, http.NotFoundHandler())
 
 	// An ACME probe: SNI naming the domain, the challenge name the one
@@ -232,7 +177,7 @@ func TestServeHTTPSACMEChallenge(t *testing.T) {
 	// nothing here.
 	conn, err := tls.Dial("tcp", ln.Addr().String(), &tls.Config{
 		NextProtos:         []string{acmez.ACMETLS1Protocol},
-		ServerName:         testDomain,
+		ServerName:         webpkitest.Domain,
 		InsecureSkipVerify: true,
 	})
 	if err != nil {
@@ -408,11 +353,11 @@ func TestCertManagerClose(t *testing.T) {
 	}
 	_ = ln.Close()
 
-	certFile, keyFile, _ := mintCertFiles(t)
+	ca := webpkitest.New(t)
 	static, err := PrepareTLSCert(TLSCertConfig{
-		Domain:   testDomain,
-		CertFile: certFile,
-		KeyFile:  keyFile,
+		Domain:   webpkitest.Domain,
+		CertFile: ca.CertFile,
+		KeyFile:  ca.KeyFile,
 	})
 	if err != nil {
 		t.Fatal(err)

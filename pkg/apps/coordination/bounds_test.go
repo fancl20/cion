@@ -17,6 +17,7 @@ import (
 	"tailscale.com/util/zstdframe"
 
 	"github.com/fancl20/cion/pkg/apps/wireguard/impl/dbtest"
+	"github.com/fancl20/cion/pkg/webpki/webpkitest"
 )
 
 // streamMap opens one streaming map request over the noise channel and reads
@@ -35,7 +36,7 @@ func streamMap(t *testing.T, client *http.Client,
 	if err != nil {
 		t.Fatal(err)
 	}
-	resp, err := client.Post("http://"+TestDomain+"/machine/map",
+	resp, err := client.Post("http://"+webpkitest.Domain+"/machine/map",
 		"application/json", bytes.NewReader(raw))
 	if err != nil {
 		t.Fatalf("the streaming map request: %v", err)
