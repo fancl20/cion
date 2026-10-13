@@ -21,6 +21,6 @@ var socksEntry = Entry{
 // requirement's check has already made the missing owner a refused boot,
 // and table order has already constructed it.
 func newSocks(_ *Environment, loaded []Loaded) (Application, error) {
-	wg, _ := AppOf(loaded, "wireguard").(*wireguard.App)
+	wg := AppOf(loaded, "wireguard").(*wireguard.App)
 	return socks.NewServer(wg), nil
 }

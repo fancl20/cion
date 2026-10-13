@@ -6,9 +6,10 @@
 // --applications run argument selects among the entries — unset to keep
 // the inference the run arguments practice, empty to run the deliberate
 // core, given to load exactly the names it lists. The application
-// packages sit one beneath the roof and import the core and the
-// libraries, never the assembly, the harness, the commands, or this root;
-// the table imports them, and the assembly imports the table.
+// packages sit one beneath the roof and import the core, the libraries,
+// and the siblings their entries require — never the assembly, the
+// harness, the commands, or this root; the table imports them, and the
+// assembly imports the table.
 package apps
 
 import (

@@ -3,6 +3,7 @@ package apps
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -142,34 +143,61 @@ func TestWalkFixtures(t *testing.T) {
 	}
 }
 
-// TestImportRule asserts the one-way direction: no application package's
-// production sources import anything above the roof — not the assembly,
-// not the harness, not the commands, not the roof's own root.
+// TestImportRule asserts the one-way direction and the borrowing rule: no
+// application package's production sources import anything above the roof —
+// not the assembly, not the harness, not the commands, not the roof's own
+// root — and an application imports a sibling only when its entry requires
+// it, so whatever it borrows is loaded beside it.
 func TestImportRule(t *testing.T) {
 	listing := walktest.Graph(t)
+	requires := make(map[string][]string, len(Table))
+	for _, e := range Table {
+		requires[e.Name] = e.Requires
+	}
 	for _, path := range walktest.PackagesUnder(t, walktest.Dir(t, "pkg/apps")) {
-		for _, problem := range importProblems(path, listing) {
+		for _, problem := range importProblems(path, listing, requires) {
 			t.Error(problem)
 		}
 	}
 }
 
-// importProblems reports every above-the-roof production import of one
-// application package.
-func importProblems(path string, listing map[string]*walktest.Package) []string {
+// importProblems reports every production import of one application package
+// that stands above the roof or reaches a sibling its entry does not require.
+func importProblems(path string, listing map[string]*walktest.Package,
+	requires map[string][]string) []string {
+
 	p := listing[path]
 	if p == nil {
 		return []string{path + " is not in the module's package graph"}
 	}
+	app := appOf(path)
 	var problems []string
 	for _, imp := range p.Imports {
 		if aboveRoof(imp) {
 			problems = append(problems, path+" imports "+imp+" in "+
 				"production: an application package imports the core and "+
 				"the libraries, never anything above the roof")
+			continue
+		}
+		if sibling := appOf(imp); sibling != "" && sibling != app &&
+			!slices.Contains(requires[app], sibling) {
+			problems = append(problems, path+" imports "+imp+" in "+
+				"production: an application imports a sibling only when its "+
+				"entry requires it")
 		}
 	}
 	return problems
+}
+
+// appOf names the application an import path beneath the roof belongs to,
+// the roof's child it sits in; a path outside the roof belongs to none.
+func appOf(imp string) string {
+	rest, ok := strings.CutPrefix(imp, roofPath+"/")
+	if !ok {
+		return ""
+	}
+	name, _, _ := strings.Cut(rest, "/")
+	return name
 }
 
 // aboveRoof reports whether an import path stands above the roof.
@@ -182,19 +210,32 @@ func aboveRoof(imp string) bool {
 }
 
 // TestImportRuleFixtures proves the import rule can fail: fabricated
-// production imports from above the roof are each reported, and the
-// imports beneath the roof pass.
+// production imports from above the roof and of a sibling the entry does not
+// require are each reported, while a required sibling, its implementation
+// package, the application's own packages, and the core pass.
 func TestImportRuleFixtures(t *testing.T) {
+	requires := map[string][]string{
+		"coordination": {"wireguard"},
+		"socks":        {"wireguard"},
+	}
 	listing := map[string]*walktest.Package{
 		roofPath + "/wireguard": {Imports: []string{
 			roofPath,
 			moduleRoot + "/pkg/core/controlplane",
 		}},
+		roofPath + "/wireguard/impl/bbolt": {Imports: []string{
+			roofPath + "/wireguard",
+		}},
 		roofPath + "/socks": {Imports: []string{
 			moduleRoot + "/internal/services",
+			roofPath + "/wireguard",
+		}},
+		roofPath + "/voting": {Imports: []string{
+			roofPath + "/coordination",
 		}},
 		roofPath + "/coordination": {Imports: []string{
 			roofPath + "/wireguard",
+			roofPath + "/wireguard/impl/bbolt",
 		}},
 	}
 	want := []struct {
@@ -203,15 +244,18 @@ func TestImportRuleFixtures(t *testing.T) {
 	}{
 		{roofPath + "/wireguard", roofPath},
 		{roofPath + "/socks", moduleRoot + "/internal/services"},
+		{roofPath + "/voting", roofPath + "/coordination"},
 	}
 	for _, w := range want {
-		problems := importProblems(w.path, listing)
-		if len(problems) != 1 || !strings.Contains(problems[0], w.imp) {
+		problems := importProblems(w.path, listing, requires)
+		if len(problems) != 1 || !strings.Contains(problems[0], " imports "+w.imp+" ") {
 			t.Errorf("importProblems(%s) = %v, want exactly %s flagged",
 				w.path, problems, w.imp)
 		}
 	}
-	if problems := importProblems(roofPath+"/coordination", listing); len(problems) != 0 {
-		t.Errorf("a sibling's import flagged: %v", problems)
+	for _, path := range []string{roofPath + "/coordination", roofPath + "/wireguard/impl/bbolt"} {
+		if problems := importProblems(path, listing, requires); len(problems) != 0 {
+			t.Errorf("importProblems(%s) = %v, want none", path, problems)
+		}
 	}
 }

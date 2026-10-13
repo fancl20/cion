@@ -28,7 +28,7 @@ var coordinationEntry = Entry{
 // already made the missing owner a refused boot, and table order has
 // already constructed it.
 func newCoordination(env *Environment, loaded []Loaded) (Application, error) {
-	wg, _ := AppOf(loaded, "wireguard").(*wireguard.App)
+	wg := AppOf(loaded, "wireguard").(*wireguard.App)
 	relay, err := relayAdvertisement(env.Domain, env.Relay)
 	if err != nil {
 		return nil, err
