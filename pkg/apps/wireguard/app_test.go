@@ -529,55 +529,6 @@ func assertReadsClosed(t *testing.T, what string, conn *scion.Conn) {
 	}
 }
 
-// TestWireguardValidatesConfig checks the configuration the node assembly
-// feeds: a directory side and a service registration named.
-func TestWireguardValidatesConfig(t *testing.T) {
-	ia := addr.MustIAFrom(20, 0xff0000000241)
-	internal, _ := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
-	t.Cleanup(func() { _ = internal.Close() })
-	// An ephemeral host port: the episode validates the configuration's
-	// shape, not the conventional port the run arguments default.
-	base := Config{
-		IA:         ia,
-		ListenHost: testHost,
-		ListenPort: freeHostPort(t),
-		StateDir:   t.TempDir(),
-		Provider:   &scion.PathProvider{IA: ia},
-		Engine:     trust.NewEngine(ia, nil, nil),
-		Store:      &fakeStore{},
-		NewConn: func() (*scion.Conn, error) {
-			return scion.NewConn(scion.ConnConfig{
-				IA:           ia,
-				Bind:         "127.0.0.1:0",
-				InternalAddr: internal.LocalAddr().String(),
-				MACKey:       testMACKey,
-				Links:        func() map[uint16]addr.IA { return map[uint16]addr.IA{1: addr.MustIAFrom(20, 2)} },
-			})
-		},
-		RegisterSvc:   func(addr.SVC, uint16) error { return nil },
-		UnregisterSvc: func(addr.SVC, uint16) error { return nil },
-	}
-
-	app, err := New(base)
-	if err != nil {
-		t.Fatalf("a valid configuration was rejected: %v", err)
-	}
-	// Release the bound host port with the application.
-	app.Close()
-
-	noDirectory := base
-	noDirectory.Store = nil
-	if _, err := New(noDirectory); err == nil {
-		t.Error("an application with neither store nor core route was accepted")
-	}
-
-	noRegistration := base
-	noRegistration.RegisterSvc = nil
-	if _, err := New(noRegistration); err == nil {
-		t.Error("an application with no service registration was accepted")
-	}
-}
-
 // TestWireguardValidatesAssignment checks the answer's fail-fast grammar:
 // only a /24 the tailnet range contains becomes the node's slice.
 func TestWireguardValidatesAssignment(t *testing.T) {

@@ -6,7 +6,6 @@ package file
 import (
 	"context"
 	"encoding/json/v2"
-	"errors"
 	"fmt"
 	"log/slog"
 	"net/netip"
@@ -246,9 +245,6 @@ func (f *Provider) Close() error { return nil }
 // writes nothing.
 func (f *Provider) reconcile(ctx context.Context) error {
 	store := f.pcs.Store
-	if store == nil {
-		return errors.New("the file provider was wired with no store")
-	}
 	named := make(map[addr.IA]bool, len(f.entries))
 	for _, e := range f.entries {
 		named[e.ia] = true

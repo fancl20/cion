@@ -147,9 +147,6 @@ type App struct {
 // exactly while the application exists. A failed assembly destroys the
 // netstack it created.
 func New(cfg Config) (*App, error) {
-	if cfg.Router == nil {
-		return nil, fmt.Errorf("no overlay router configured to borrow")
-	}
 	own := firstAddr(cfg.Subnet)
 	s := stack.New(stack.Options{
 		NetworkProtocols: []stack.NetworkProtocolFactory{

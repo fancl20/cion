@@ -62,14 +62,10 @@ func (n *node) appEnvironment() *apps.Environment {
 		TRCDecision:     n.trcDecision,
 		CoreRoute:       n.coreRoute,
 		DirectoryPacing: n.cfg.Pacing.Directory,
-		MountControlEndpoint: func(pattern string, handler http.Handler) error {
-			if n.services == nil {
-				return fmt.Errorf("the control endpoint is not assembled")
-			}
+		MountControlEndpoint: func(pattern string, handler http.Handler) {
 			n.services.Mounts = append(n.services.Mounts, controlplane.Mount{
 				Pattern: pattern, Handler: handler,
 			})
-			return nil
 		},
 	}
 

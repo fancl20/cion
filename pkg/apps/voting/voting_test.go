@@ -41,17 +41,13 @@ func newTestApp(t *testing.T, decide Decider) (http.Handler, string) {
 	t.Helper()
 	var pattern string
 	var handler http.Handler
-	_, err := New(Config{
+	New(Config{
 		IA:     coreIA,
 		Decide: decide,
-		MountControlEndpoint: func(p string, h http.Handler) error {
+		MountControlEndpoint: func(p string, h http.Handler) {
 			pattern, handler = p, h
-			return nil
 		},
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	return handler, pattern
 }
 
@@ -187,25 +183,6 @@ func TestSubmitRefusals(t *testing.T) {
 				t.Errorf("the refusal = %v, want %v", err, tc.want)
 			}
 		})
-	}
-}
-
-// TestNewRefusesNilDecision checks the application refuses to load without
-// the control plane's decision, mounting nothing.
-func TestNewRefusesNilDecision(t *testing.T) {
-	mounted := false
-	_, err := New(Config{
-		IA: coreIA,
-		MountControlEndpoint: func(string, http.Handler) error {
-			mounted = true
-			return nil
-		},
-	})
-	if err == nil {
-		t.Fatal("the application loaded without a decision")
-	}
-	if mounted {
-		t.Error("the refused application mounted its service")
 	}
 }
 

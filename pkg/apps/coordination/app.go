@@ -2,7 +2,6 @@ package coordination
 
 import (
 	"context"
-	"errors"
 	"net"
 	"net/http"
 	"sync"
@@ -129,12 +128,6 @@ type App struct {
 // fetch over plain TLS beside them. Handler hands the surface to its
 // mounter.
 func New(cfg Config) (*App, error) {
-	if cfg.Domain == "" {
-		return nil, errors.New("no domain configured")
-	}
-	if cfg.Store == nil {
-		return nil, errors.New("no registry store configured")
-	}
 	if cfg.DERP.HostName == "" {
 		cfg.DERP.HostName = cfg.Domain
 	}

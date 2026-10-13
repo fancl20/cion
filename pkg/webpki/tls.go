@@ -84,9 +84,6 @@ func PrepareTLSCert(cfg TLSCertConfig) (*CertManager, error) {
 			MinVersion:   tls.VersionTLS13,
 		}}, nil
 	}
-	if cfg.Domain == "" {
-		return nil, errors.New("TLSCertConfig needs a domain or certificate files")
-	}
 
 	var storage certmagic.Storage
 	if cfg.Storage != "" {

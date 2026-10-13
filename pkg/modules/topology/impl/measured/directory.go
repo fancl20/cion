@@ -321,17 +321,11 @@ type NodeDirectoryConfig struct {
 
 // NewNodeDirectory builds the node's directory view. The core keeps its own
 // store as the client.
-func NewNodeDirectory(cfg NodeDirectoryConfig) (*NodeDirectory, error) {
-	if cfg.Host == nil {
-		return nil, errors.New("the node directory needs its published host")
-	}
+func NewNodeDirectory(cfg NodeDirectoryConfig) *NodeDirectory {
 	d := &NodeDirectory{cfg: cfg}
 	if cfg.CoreRoute == nil {
-		if cfg.Store == nil {
-			return nil, errors.New("the core's directory needs its store")
-		}
 		d.client = storeDirectoryClient{store: cfg.Store}
-		return d, nil
+		return d
 	}
 	rpc := &rpcDirectoryClient{
 		conn:      cfg.Conn,
@@ -346,7 +340,7 @@ func NewNodeDirectory(cfg NodeDirectoryConfig) (*NodeDirectory, error) {
 		rpc.qclt = &quic.Transport{Conn: cfg.Conn}
 	}
 	d.client = rpc
-	return d, nil
+	return d
 }
 
 // Close releases the publish and fetch transport.

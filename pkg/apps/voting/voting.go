@@ -47,7 +47,7 @@ type Config struct {
 	Decide Decider
 	// MountControlEndpoint mounts one of the application's handlers on the
 	// node's control endpoint, behind the peer-identity middleware.
-	MountControlEndpoint func(pattern string, handler http.Handler) error
+	MountControlEndpoint func(pattern string, handler http.Handler)
 }
 
 // App is the voting application: its submission service mounted on the
@@ -64,20 +64,11 @@ var _ interface {
 } = (*App)(nil)
 
 // New mounts the application's submission service on the control endpoint.
-func New(cfg Config) (*App, error) {
-	if cfg.Decide == nil {
-		return nil, errors.New("the voting application needs the control plane's decision " +
-			"to hand the submissions to")
-	}
-	if cfg.MountControlEndpoint == nil {
-		return nil, errors.New("the voting application needs the control endpoint to mount on")
-	}
+func New(cfg Config) *App {
 	pattern, handler := votingv1connect.NewVotingServiceHandler(&service{decide: cfg.Decide})
-	if err := cfg.MountControlEndpoint(pattern, handler); err != nil {
-		return nil, err
-	}
+	cfg.MountControlEndpoint(pattern, handler)
 	slog.Info("Serving the TRC voting application", "isd_as", cfg.IA)
-	return &App{cfg: cfg}, nil
+	return &App{cfg: cfg}
 }
 
 // Run serves until the context is canceled: the control endpoint serves the

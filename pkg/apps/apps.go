@@ -95,8 +95,8 @@ type Environment struct {
 	TRCDecision voting.Decider
 	// MountControlEndpoint mounts one of the application's handlers on the
 	// node's control endpoint, behind the peer-identity middleware, beside
-	// the drafts' services; nil when the node assembles no endpoint.
-	MountControlEndpoint func(pattern string, handler http.Handler) error
+	// the drafts' services.
+	MountControlEndpoint func(pattern string, handler http.Handler)
 	// CoreRoute resolves the route to the founding core the directory's
 	// publish and fetch ride on every other node; the founding core needs
 	// none, serving the directory itself.

@@ -135,14 +135,11 @@ func TestDirectoryExpiry(t *testing.T) {
 func TestDirectoryPublishResolvesHost(t *testing.T) {
 	store := NewDirectoryStore()
 	host := netip.MustParseAddr("127.0.0.1")
-	d, err := NewNodeDirectory(NodeDirectoryConfig{
+	d := NewNodeDirectory(NodeDirectoryConfig{
 		IA:    directoryIA,
 		Host:  func(context.Context) netip.Addr { return host },
 		Store: store,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	ctx := context.Background()
 	if err := d.publish(ctx); err != nil {
 		t.Fatal(err)

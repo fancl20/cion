@@ -184,24 +184,6 @@ type svcReg struct {
 // over its own registered service socket, the route every other node
 // publishes and fetches through. Run serves it.
 func New(cfg Config) (*App, error) {
-	if cfg.IA.IsZero() {
-		return nil, fmt.Errorf("no ISD-AS configured")
-	}
-	if cfg.ListenPort == 0 {
-		return nil, fmt.Errorf("no listen port configured")
-	}
-	if cfg.NewConn == nil {
-		return nil, fmt.Errorf("no SCION connection builder configured")
-	}
-	if cfg.RegisterSvc == nil || cfg.UnregisterSvc == nil {
-		return nil, fmt.Errorf("no service registration configured")
-	}
-	if cfg.Engine == nil || cfg.Provider == nil {
-		return nil, fmt.Errorf("no trust engine or path provider configured")
-	}
-	if cfg.Store == nil && cfg.CoreRoute == nil {
-		return nil, fmt.Errorf("neither a directory store nor a core route configured")
-	}
 	key, err := LoadOrCreateKey(cfg.StateDir)
 	if err != nil {
 		return nil, fmt.Errorf("loading the application key: %w", err)

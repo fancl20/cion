@@ -353,11 +353,7 @@ func (z *Provider) assemble() error {
 		directoryCfg.Conn = conn
 		directoryCfg.CoreRoute = z.cfg.CoreRoute
 	}
-	directory, err := NewNodeDirectory(directoryCfg)
-	if err != nil {
-		return err
-	}
-	z.directory = directory
+	z.directory = NewNodeDirectory(directoryCfg)
 	if z.cfg.NewConn != nil {
 		// The probe socket is the comparator's to lose: a bind that fails
 		// logs and leaves the loop path-less, the rendezvous echoes still

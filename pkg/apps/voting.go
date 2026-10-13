@@ -16,6 +16,6 @@ var votingEntry = Entry{
 			IA:                   env.IA,
 			Decide:               env.TRCDecision,
 			MountControlEndpoint: env.MountControlEndpoint,
-		})
+		}), nil
 	},
 }
