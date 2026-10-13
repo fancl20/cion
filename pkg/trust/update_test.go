@@ -20,22 +20,6 @@ import (
 // joinerIA is the joining core the assembly tests onboard.
 var joinerIA = addr.MustIAFrom(20, 0xff0000000f01)
 
-// newJoinerMaterial returns the joiner's regular voting key and self-signed
-// certificate, the shape LoadOrCreateVotingCert persists.
-func newJoinerMaterial(t *testing.T) (crypto.Signer, *x509.Certificate) {
-	t.Helper()
-	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-	now := time.Now().UTC().Add(signingBackdate).Truncate(time.Second)
-	cert, err := createVotingCert(joinerIA, key, false, now)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return key, cert
-}
-
 // castFixture is a founder with its base TRC pinned and the joiner's voting
 // material beside it.
 type castFixture struct {
@@ -49,7 +33,7 @@ type castFixture struct {
 func newCastFixture(t *testing.T) *castFixture {
 	t.Helper()
 	f := &castFixture{founder: newGenesisFixture(t)}
-	f.joiner.key, f.joiner.cert = newJoinerMaterial(t)
+	f.joiner.key, f.joiner.cert = newJoinerMaterialOf(t, joinerIA)
 	return f
 }
 
@@ -503,7 +487,8 @@ func TestJoinCoreRefusesRegularVote(t *testing.T) {
 	}
 }
 
-// newJoinerMaterialOf returns fresh voting material naming the given IA.
+// newJoinerMaterialOf returns a fresh regular voting key and its self-signed
+// certificate naming ia, the shape LoadOrCreateVotingCert persists.
 func newJoinerMaterialOf(
 	t *testing.T,
 	ia addr.IA,
