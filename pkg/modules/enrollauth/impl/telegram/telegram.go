@@ -23,6 +23,7 @@ import (
 
 	"github.com/scionproto/scion/pkg/addr"
 
+	"github.com/fancl20/cion/pkg/loops"
 	"github.com/fancl20/cion/pkg/modules/enrollauth"
 	"github.com/fancl20/cion/pkg/statefile"
 )
@@ -237,10 +238,8 @@ func (t *Authorizer) Run(ctx context.Context) {
 		if err != nil {
 			if ctx.Err() == nil {
 				slog.Warn("Polling the Bot API", "err", err)
-				select {
-				case <-ctx.Done():
+				if !loops.Sleep(ctx, pollRetry) {
 					return
-				case <-time.After(pollRetry):
 				}
 			}
 			continue

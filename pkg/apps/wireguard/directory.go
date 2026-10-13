@@ -10,6 +10,7 @@ import (
 
 	"github.com/scionproto/scion/pkg/addr"
 
+	"github.com/fancl20/cion/pkg/loops"
 	"github.com/fancl20/cion/pkg/trust"
 )
 
@@ -195,12 +196,12 @@ func (a *App) runPublish(ctx context.Context) {
 		}
 		if err := a.publish(ctx); err != nil {
 			slog.Warn("WireGuard publication", "err", err)
-			if !sleepCtx(ctx, retry) {
+			if !loops.Sleep(ctx, retry) {
 				return
 			}
 			continue
 		}
-		if !sleepCtx(ctx, interval) {
+		if !loops.Sleep(ctx, interval) {
 			return
 		}
 	}
@@ -278,7 +279,7 @@ func (a *App) runSync(ctx context.Context) {
 		interval = RefreshInterval
 	}
 	for {
-		if !sleepCtx(ctx, interval) {
+		if !loops.Sleep(ctx, interval) {
 			return
 		}
 		directory, err := a.directory.List(ctx)
@@ -330,17 +331,6 @@ func (a *App) meshPeerIAs() []addr.IA {
 		ias = append(ias, ia)
 	}
 	return ias
-}
-
-// sleepCtx sleeps for d or until the context ends, reporting whether it
-// slept.
-func sleepCtx(ctx context.Context, d time.Duration) bool {
-	select {
-	case <-ctx.Done():
-		return false
-	case <-time.After(d):
-		return true
-	}
 }
 
 // Engine is the trust surface the application consumes: the chain that

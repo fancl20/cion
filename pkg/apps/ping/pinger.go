@@ -18,6 +18,7 @@ import (
 	spath "github.com/scionproto/scion/pkg/slayers/path/scion"
 
 	"github.com/fancl20/cion/pkg/dataplane"
+	"github.com/fancl20/cion/pkg/loops"
 	"github.com/fancl20/cion/pkg/scion"
 )
 
@@ -95,12 +96,8 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 
 	report := &Report{}
 	for seq := 0; seq < cfg.Count; seq++ {
-		if seq > 0 {
-			select {
-			case <-ctx.Done():
-				return report, ctx.Err()
-			case <-time.After(cfg.Interval):
-			}
+		if seq > 0 && !loops.Sleep(ctx, cfg.Interval) {
+			return report, ctx.Err()
 		}
 		// A path that expired since the last send — or failed to leave — is
 		// re-resolved; the run continues.

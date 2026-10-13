@@ -8,6 +8,7 @@ import (
 	"sync"
 	"testing"
 	"testing/synctest"
+	"time"
 
 	"github.com/google/go-cmp/cmp"
 )
@@ -151,5 +152,37 @@ func TestWaitJoinsTheLoops(t *testing.T) {
 		}
 		close(finish)
 		<-waited
+	})
+}
+
+// TestSleep checks the pause in a fake-time bubble: a pause under a live
+// context runs its full duration and reports true, a context ending midway
+// cuts it short and reports false, and an ended context reports false even
+// for a zero pause, whose timer is ready at once.
+func TestSleep(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		start := time.Now()
+		if !Sleep(t.Context(), time.Second) {
+			t.Fatal("a pause under a live context reported false")
+		}
+		if got := time.Since(start); got != time.Second {
+			t.Errorf("the pause took %v, want 1s", got)
+		}
+
+		ctx, cancel := context.WithCancel(t.Context())
+		time.AfterFunc(time.Second/2, cancel)
+		start = time.Now()
+		if Sleep(ctx, time.Second) {
+			t.Error("a pause whose context ended midway reported true")
+		}
+		if got := time.Since(start); got != time.Second/2 {
+			t.Errorf("the cut pause took %v, want 500ms", got)
+		}
+
+		for range 100 {
+			if Sleep(ctx, 0) {
+				t.Fatal("a zero pause under an ended context reported true")
+			}
+		}
 	})
 }

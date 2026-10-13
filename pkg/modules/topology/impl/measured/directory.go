@@ -372,12 +372,12 @@ func (d *NodeDirectory) runPublish(ctx context.Context) {
 		}
 		if err := d.publish(ctx); err != nil {
 			slog.Debug("Node directory publication", "err", err)
-			if !sleepCtx(ctx, retry) {
+			if !loops.Sleep(ctx, retry) {
 				return
 			}
 			continue
 		}
-		if !sleepCtx(ctx, interval) {
+		if !loops.Sleep(ctx, interval) {
 			return
 		}
 	}
@@ -420,7 +420,7 @@ func (d *NodeDirectory) runFetch(ctx context.Context) {
 			d.local = entries
 			d.mtx.Unlock()
 		}
-		if !sleepCtx(ctx, interval) {
+		if !loops.Sleep(ctx, interval) {
 			return
 		}
 	}
@@ -438,15 +438,4 @@ func intervalOr(v, def time.Duration) time.Duration {
 		return def
 	}
 	return v
-}
-
-// sleepCtx sleeps for d or until the context ends, reporting whether it
-// slept.
-func sleepCtx(ctx context.Context, d time.Duration) bool {
-	select {
-	case <-ctx.Done():
-		return false
-	case <-time.After(d):
-		return true
-	}
 }

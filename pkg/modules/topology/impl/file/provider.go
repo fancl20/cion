@@ -15,6 +15,7 @@ import (
 	"github.com/scionproto/scion/pkg/addr"
 
 	"github.com/fancl20/cion/pkg/controlplane"
+	"github.com/fancl20/cion/pkg/loops"
 	"github.com/fancl20/cion/pkg/modules/links"
 	"github.com/fancl20/cion/pkg/modules/topology"
 )
@@ -214,7 +215,7 @@ func (f *Provider) Run(ctx context.Context) {
 	if interval == 0 {
 		interval = WatchInterval
 	}
-	for sleepCtx(ctx, interval) {
+	for loops.Sleep(ctx, interval) {
 		info, err := os.Stat(f.cfg.Path)
 		if err != nil {
 			slog.Error("Watching the link-set", "err", err)
@@ -305,15 +306,4 @@ func (f *Provider) reconcile(ctx context.Context) error {
 			"local", e.local, "remote", e.remote)
 	}
 	return nil
-}
-
-// sleepCtx sleeps for d or until the context ends, reporting whether it
-// slept.
-func sleepCtx(ctx context.Context, d time.Duration) bool {
-	select {
-	case <-ctx.Done():
-		return false
-	case <-time.After(d):
-		return true
-	}
 }

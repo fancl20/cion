@@ -16,6 +16,7 @@ import (
 
 	"github.com/fancl20/cion/pkg/controlplane"
 	"github.com/fancl20/cion/pkg/dataplane"
+	"github.com/fancl20/cion/pkg/loops"
 	"github.com/fancl20/cion/pkg/modules/links"
 	"github.com/fancl20/cion/pkg/scion"
 	nodev1 "github.com/fancl20/cion/proto/node/v1"
@@ -134,7 +135,7 @@ func RunSelection(ctx context.Context, cfg SelectionConfig) {
 		interval = SelectionInterval
 	}
 	for {
-		if !sleepCtx(ctx, jitter(interval)) {
+		if !loops.Sleep(ctx, jitter(interval)) {
 			return
 		}
 		s.pass(ctx)

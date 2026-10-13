@@ -11,6 +11,7 @@ import (
 
 	"github.com/fancl20/cion/pkg/controlplane"
 	"github.com/fancl20/cion/pkg/dataplane"
+	"github.com/fancl20/cion/pkg/loops"
 	"github.com/fancl20/cion/pkg/modules/links"
 )
 
@@ -179,10 +180,8 @@ func (n *node) serveGenerations(ctx context.Context, gen *generation) error {
 					break
 				}
 				slog.Warn("Building the replacement data plane", "attempt", attempt, "err", err)
-				select {
-				case <-ctx.Done():
+				if !loops.Sleep(ctx, bindRetryPause) {
 					return nil
-				case <-time.After(bindRetryPause):
 				}
 			}
 			if err != nil {

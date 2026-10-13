@@ -451,10 +451,8 @@ func (z *Provider) selectionConfig() SelectionConfig {
 func (z *Provider) runJoinDials(ctx context.Context) {
 	for {
 		z.dialJoins(ctx)
-		select {
-		case <-ctx.Done():
+		if !loops.Sleep(ctx, joinDialInterval) {
 			return
-		case <-time.After(joinDialInterval):
 		}
 	}
 }

@@ -10,6 +10,7 @@ import (
 	"github.com/scionproto/scion/pkg/addr"
 	"github.com/scionproto/scion/pkg/scrypto/cppki"
 
+	"github.com/fancl20/cion/pkg/loops"
 	"github.com/fancl20/cion/pkg/modules/trustdb"
 	"github.com/fancl20/cion/pkg/trust"
 )
@@ -180,10 +181,8 @@ func (r authoritativeRoll) roll(ctx context.Context, cfg RotationConfig) error {
 // TRC's certificates disagree on.
 func RunRotation(ctx context.Context, cfg RotationConfig) {
 	for {
-		select {
-		case <-ctx.Done():
+		if !loops.Sleep(ctx, cfg.rotationPass(ctx)) {
 			return
-		case <-time.After(cfg.rotationPass(ctx)):
 		}
 	}
 }

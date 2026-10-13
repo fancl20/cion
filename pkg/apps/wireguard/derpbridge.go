@@ -17,6 +17,8 @@ import (
 	"tailscale.com/types/key"
 	"tailscale.com/types/logger"
 	"tailscale.com/util/eventbus"
+
+	"github.com/fancl20/cion/pkg/loops"
 )
 
 // DERPConfig configures the node's relay presence: the address of the core's
@@ -96,10 +98,8 @@ func (b *derpBridge) run(ctx context.Context) {
 		if err := b.connectAndServe(ctx); err != nil && ctx.Err() == nil {
 			slog.Warn("WireGuard DERP presence", "err", err)
 		}
-		select {
-		case <-ctx.Done():
+		if !loops.Sleep(ctx, derpReconnect) {
 			return
-		case <-time.After(derpReconnect):
 		}
 	}
 }
