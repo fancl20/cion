@@ -1,20 +1,18 @@
 package apps
 
 import (
-	"bytes"
-	"encoding/json"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/fancl20/cion/internal/walktest"
 )
 
 // The import graph's bounds: the module's root, and this roof's own
 // place in it.
 const (
-	moduleRoot = "github.com/fancl20/cion"
+	moduleRoot = walktest.Module
 	roofPath   = moduleRoot + "/pkg/apps"
 	// nonresident is the one child of the roof that is no resident: the
 	// ping application, the ping command's own client — the application a
@@ -33,7 +31,7 @@ func TestWalk(t *testing.T) {
 	for _, e := range Table {
 		names[e.Name] = true
 	}
-	for _, problem := range walkRoof(roofDir(t), names) {
+	for _, problem := range walkRoof(t, walktest.Dir(t, "pkg/apps"), names) {
 		t.Error(problem)
 	}
 }
@@ -41,11 +39,11 @@ func TestWalk(t *testing.T) {
 // walkRoof reads one roof's shape against the table's names, reporting
 // every assertion the tree breaks: a package without an entry, an entry
 // without its package.
-func walkRoof(roof string, entries map[string]bool) []string {
+func walkRoof(t *testing.T, roof string, entries map[string]bool) []string {
 	var problems []string
-	for _, c := range childDirs(roof) {
+	for _, c := range walktest.ChildDirs(t, roof) {
 		name := filepath.Base(c)
-		if name == nonresident || !hasPackage(c) {
+		if name == nonresident || !walktest.HasPackage(c) {
 			continue
 		}
 		if !entries[name] {
@@ -54,7 +52,7 @@ func walkRoof(roof string, entries map[string]bool) []string {
 		}
 	}
 	for name := range entries {
-		if !hasPackage(filepath.Join(roof, name)) {
+		if !walktest.HasPackage(filepath.Join(roof, name)) {
 			problems = append(problems, name+": holds an entry with no "+
 				"package beneath the roof")
 		}
@@ -124,7 +122,7 @@ func TestWalkFixtures(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := walkRoof(write(t, tc.files), tc.entries)
+			got := walkRoof(t, write(t, tc.files), tc.entries)
 			if tc.problems == nil {
 				for _, p := range got {
 					t.Errorf("unexpected problem: %s", p)
@@ -148,8 +146,8 @@ func TestWalkFixtures(t *testing.T) {
 // production sources import anything above the roof — not the assembly,
 // not the harness, not the commands, not the roof's own root.
 func TestImportRule(t *testing.T) {
-	listing := goList(t, repoRoot(t))
-	for _, path := range packagesUnder(t, roofDir(t)) {
+	listing := walktest.Graph(t)
+	for _, path := range walktest.PackagesUnder(t, walktest.Dir(t, "pkg/apps")) {
 		for _, problem := range importProblems(path, listing) {
 			t.Error(problem)
 		}
@@ -158,7 +156,7 @@ func TestImportRule(t *testing.T) {
 
 // importProblems reports every above-the-roof production import of one
 // application package.
-func importProblems(path string, listing map[string]*listPkg) []string {
+func importProblems(path string, listing map[string]*walktest.Package) []string {
 	p := listing[path]
 	if p == nil {
 		return []string{path + " is not in the module's package graph"}
@@ -187,7 +185,7 @@ func aboveRoof(imp string) bool {
 // production imports from above the roof are each reported, and the
 // imports beneath the roof pass.
 func TestImportRuleFixtures(t *testing.T) {
-	listing := map[string]*listPkg{
+	listing := map[string]*walktest.Package{
 		roofPath + "/wireguard": {Imports: []string{
 			roofPath,
 			moduleRoot + "/pkg/core/controlplane",
@@ -216,112 +214,4 @@ func TestImportRuleFixtures(t *testing.T) {
 	if problems := importProblems(roofPath+"/coordination", listing); len(problems) != 0 {
 		t.Errorf("a sibling's import flagged: %v", problems)
 	}
-}
-
-// packagesUnder lists every package's import path beneath the roof, the
-// root itself aside.
-func packagesUnder(t *testing.T, roof string) []string {
-	t.Helper()
-	var pkgs []string
-	err := filepath.WalkDir(roof, func(path string, d os.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if !d.IsDir() || path == roof || d.Name() == "testdata" {
-			return nil
-		}
-		if hasPackage(path) {
-			pkgs = append(pkgs, importPath(t, path))
-		}
-		return nil
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	return pkgs
-}
-
-// hasPackage reports whether the directory holds Go source.
-func hasPackage(dir string) bool {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return false
-	}
-	for _, e := range entries {
-		if !e.IsDir() && strings.HasSuffix(e.Name(), ".go") {
-			return true
-		}
-	}
-	return false
-}
-
-// childDirs lists a directory's subdirectories.
-func childDirs(dir string) []string {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return nil
-	}
-	var out []string
-	for _, e := range entries {
-		if e.IsDir() && e.Name() != "testdata" {
-			out = append(out, filepath.Join(dir, e.Name()))
-		}
-	}
-	return out
-}
-
-// listPkg is the slice of go list -json the import rule reads.
-type listPkg struct {
-	ImportPath string
-	Imports    []string
-}
-
-// goList reads the module's package graph: every package with its
-// production imports.
-func goList(t *testing.T, dir string) map[string]*listPkg {
-	t.Helper()
-	cmd := exec.Command("go", "list", "-json", "./...")
-	cmd.Dir = dir
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	out, err := cmd.Output()
-	if err != nil {
-		t.Fatalf("go list: %v: %s", err, stderr.String())
-	}
-	dec := json.NewDecoder(bytes.NewReader(out))
-	pkgs := make(map[string]*listPkg)
-	for dec.More() {
-		var p listPkg
-		if err := dec.Decode(&p); err != nil {
-			t.Fatalf("decoding go list: %v", err)
-		}
-		pkgs[p.ImportPath] = &p
-	}
-	return pkgs
-}
-
-// roofDir is this package's directory: the roof itself.
-func roofDir(t *testing.T) string {
-	t.Helper()
-	_, file, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("locating this file")
-	}
-	return filepath.Dir(file)
-}
-
-// repoRoot is the module's root, two levels above the roof.
-func repoRoot(t *testing.T) string {
-	t.Helper()
-	return filepath.Clean(filepath.Join(roofDir(t), "..", ".."))
-}
-
-// importPath derives a directory's import path from the repo layout.
-func importPath(t *testing.T, dir string) string {
-	t.Helper()
-	rel, err := filepath.Rel(repoRoot(t), dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return moduleRoot + "/" + filepath.ToSlash(rel)
 }

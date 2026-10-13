@@ -47,8 +47,11 @@ internet scale
 
 ## The components
 
-The dependency direction is one-way: modules and applications import the
-core and the libraries, never the reverse.
+Each kind of component sits beneath a roof of its own — `pkg/core`,
+`pkg/libs`, `pkg/modules`, and `pkg/apps` — whose walk test checks the
+roof's shape and its import rule. The dependency direction is one-way:
+modules and applications import the core and the libraries, never the
+reverse.
 
 ### The node core
 
@@ -65,6 +68,8 @@ policy chooses.
     turns their verdicts.
 *   **Trust engine** — holds and issues the network's trust material: the
     TRC, certificate chains, and their renewal.
+*   **Bootstrap channel** — the core's certificate management and the
+    joiner's first verified fetch of it.
 
 ### Shared libraries
 
@@ -75,8 +80,9 @@ run no loops of their own and hold no policy.
     datagrams over SCION paths, and the path provider that composes
     end-to-end paths from discovered segments.
 *   **Segment types** — the vocabulary of beacons and signed entries.
-*   **Bootstrap channel** — the core's certificate management and the
-    joiner's first verified fetch of it.
+*   **Underlay** — the facts of the UDP/IP network beneath SCION that the
+    data plane shares with the sockets: the end-host port, the largest
+    datagram, and the resolution of underlay addresses.
 *   **Peer identity** — the verified chain's identity, shared as middleware
     by every authenticated channel.
 *   **State files** — the files a node keeps in its state directory, written

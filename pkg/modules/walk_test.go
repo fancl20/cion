@@ -9,18 +9,16 @@
 package modules
 
 import (
-	"bytes"
-	"encoding/json"
 	"go/parser"
 	"go/token"
 	"maps"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"runtime"
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/fancl20/cion/internal/walktest"
 )
 
 // kinds are the seam species a module may declare; the kind fixes the
@@ -42,24 +40,17 @@ var implAllowlist = map[string]bool{
 // time, so a change elsewhere in the roof can be served from go test's
 // cache; the repo's -count discipline (AGENTS.md) is what defeats it.
 func TestWalk(t *testing.T) {
-	roof := roofDir(t)
-	listing := goList(t, repoRoot(t))
+	roof := walktest.Dir(t, "pkg/modules")
+	listing := walktest.Graph(t)
 
 	// The roof's root holds the check alone.
-	entries, err := os.ReadDir(roof)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, e := range entries {
-		if !e.IsDir() && strings.HasSuffix(e.Name(), ".go") &&
-			!strings.HasSuffix(e.Name(), "_test.go") {
-			t.Errorf("the roof's root holds %s beside the check; the "+
-				"check is the one package it holds", e.Name())
-		}
+	for _, f := range walktest.Sources(t, roof) {
+		t.Errorf("the roof's root holds %s beside the check; the "+
+			"check is the one package it holds", filepath.Base(f))
 	}
 
 	var problems []string
-	for _, m := range childDirs(t, roof) {
+	for _, m := range walktest.ChildDirs(t, roof) {
 		problems = append(problems, walkModule(t, m, listing)...)
 	}
 	for _, p := range problems {
@@ -69,7 +60,7 @@ func TestWalk(t *testing.T) {
 
 // walkModule reads one module's shape and its suite rule, reporting every
 // assertion the module breaks.
-func walkModule(t *testing.T, mod string, listing map[string]*listPkg) []string {
+func walkModule(t *testing.T, mod string, listing map[string]*walktest.Package) []string {
 	name := filepath.Base(mod)
 	var problems []string
 
@@ -83,7 +74,7 @@ func walkModule(t *testing.T, mod string, listing map[string]*listPkg) []string 
 	}
 
 	// Nothing beneath the root but impl/, the implementations' place.
-	for _, c := range childDirs(t, mod) {
+	for _, c := range walktest.ChildDirs(t, mod) {
 		if filepath.Base(c) == "impl" {
 			continue
 		}
@@ -94,21 +85,21 @@ func walkModule(t *testing.T, mod string, listing map[string]*listPkg) []string 
 	// impl/ holds one package per implementation and the module's contract
 	// suite, nothing deeper.
 	var impls, suites []string
-	for _, c := range childDirs(t, implDir(t, mod)) {
+	for _, c := range walktest.ChildDirs(t, implDir(t, mod)) {
 		base := filepath.Base(c)
-		if !hasPackage(c) {
+		if !walktest.HasPackage(c) {
 			problems = append(problems, name+": "+c+" is no package")
 			continue
 		}
-		for _, deeper := range childDirs(t, c) {
+		for _, deeper := range walktest.ChildDirs(t, c) {
 			problems = append(problems, name+": "+deeper+" nests a package "+
 				"beneath "+base+"; one package per implementation")
 		}
 		if strings.HasSuffix(base, "test") {
-			suites = append(suites, importPath(t, c))
+			suites = append(suites, walktest.ImportPath(t, c))
 			continue
 		}
-		impls = append(impls, importPath(t, c))
+		impls = append(impls, walktest.ImportPath(t, c))
 	}
 
 	// Every implementation runs the suite — a check the package graph
@@ -130,7 +121,7 @@ func walkModule(t *testing.T, mod string, listing map[string]*listPkg) []string 
 		runs := append(append([]string{}, p.TestImports...), p.XTestImports...)
 		runsSuite := false
 		for _, suite := range suites {
-			runsSuite = runsSuite || contains(runs, suite)
+			runsSuite = runsSuite || slices.Contains(runs, suite)
 		}
 		if !runsSuite {
 			problems = append(problems, name+": "+impl+" runs no contract "+
@@ -144,15 +135,15 @@ func walkModule(t *testing.T, mod string, listing map[string]*listPkg) []string 
 // node's composition root and the tests alone — composition-root
 // exclusivity as a mechanical fact.
 func TestImportRule(t *testing.T) {
-	roof := roofDir(t)
-	listing := goList(t, repoRoot(t))
+	roof := walktest.Dir(t, "pkg/modules")
+	listing := walktest.Graph(t)
 
-	for _, m := range childDirs(t, roof) {
-		for _, c := range childDirs(t, implDir(t, m)) {
+	for _, m := range walktest.ChildDirs(t, roof) {
+		for _, c := range walktest.ChildDirs(t, implDir(t, m)) {
 			if strings.HasSuffix(filepath.Base(c), "test") {
 				continue // the suite, shared test machinery
 			}
-			for _, p := range importProblems(importPath(t, c), listing) {
+			for _, p := range importProblems(walktest.ImportPath(t, c), listing) {
 				t.Error(p)
 			}
 		}
@@ -161,10 +152,10 @@ func TestImportRule(t *testing.T) {
 
 // importProblems reports every production importer of one implementation
 // package that stands outside the allowlist.
-func importProblems(impl string, listing map[string]*listPkg) []string {
+func importProblems(impl string, listing map[string]*walktest.Package) []string {
 	var problems []string
 	for path, p := range listing {
-		if !contains(p.Imports, impl) {
+		if !slices.Contains(p.Imports, impl) {
 			continue // tests import through TestImports; production here
 		}
 		if implAllowlist[path] {
@@ -285,7 +276,7 @@ func TestWalkFixtures(t *testing.T) {
 // composition root alone passes.
 func TestImportRuleFixtures(t *testing.T) {
 	const impl = "github.com/fancl20/cion/pkg/modules/m/impl/bbolt"
-	listing := map[string]*listPkg{
+	listing := map[string]*walktest.Package{
 		"github.com/fancl20/cion/internal/services":     {Imports: []string{impl}},
 		"github.com/fancl20/cion/pkg/core/controlplane": {Imports: []string{impl}},
 	}
@@ -328,113 +319,10 @@ func declaredKind(mod string) (string, bool) {
 	return "", false
 }
 
-// hasPackage reports whether the directory holds Go source.
-func hasPackage(dir string) bool {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return false
-	}
-	for _, e := range entries {
-		if !e.IsDir() && strings.HasSuffix(e.Name(), ".go") {
-			return true
-		}
-	}
-	return false
-}
-
-// childDirs lists a directory's subdirectories, testdata aside.
-func childDirs(t *testing.T, dir string) []string {
-	t.Helper()
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
-		t.Fatal(err)
-	}
-	var out []string
-	for _, e := range entries {
-		if e.IsDir() && e.Name() != "testdata" {
-			out = append(out, filepath.Join(dir, e.Name()))
-		}
-	}
-	return out
-}
-
 // implDir is the module's implementations' place; a module without one
-// holds a directory that does not exist, which childDirs reads as empty.
+// holds a directory that does not exist, which walktest.ChildDirs reads as
+// empty.
 func implDir(t *testing.T, mod string) string {
 	t.Helper()
 	return filepath.Join(mod, "impl")
-}
-
-// listPkg is the slice of go list -json an implementation rule reads.
-type listPkg struct {
-	ImportPath   string
-	Imports      []string
-	TestImports  []string
-	XTestImports []string
-}
-
-// goList reads the module's package graph: every package with its
-// production imports and its tests' imports.
-func goList(t *testing.T, dir string) map[string]*listPkg {
-	t.Helper()
-	out := runGo(t, dir, "list", "-json", "./...")
-	dec := json.NewDecoder(bytes.NewReader(out))
-	pkgs := make(map[string]*listPkg)
-	for dec.More() {
-		var p listPkg
-		if err := dec.Decode(&p); err != nil {
-			t.Fatalf("decoding go list: %v", err)
-		}
-		pkgs[p.ImportPath] = &p
-	}
-	return pkgs
-}
-
-// runGo runs go with the given arguments in dir, failing the test on error
-// and returning the standard output.
-func runGo(t *testing.T, dir string, args ...string) []byte {
-	t.Helper()
-	cmd := exec.Command("go", args...)
-	cmd.Dir = dir
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	out, err := cmd.Output()
-	if err != nil {
-		t.Fatalf("go %s: %v: %s", strings.Join(args, " "), err, stderr.String())
-	}
-	return out
-}
-
-// roofDir is this package's directory: the roof itself.
-func roofDir(t *testing.T) string {
-	t.Helper()
-	_, file, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("locating this file")
-	}
-	return filepath.Dir(file)
-}
-
-// repoRoot is the module's root, two levels above the roof.
-func repoRoot(t *testing.T) string {
-	t.Helper()
-	return filepath.Clean(filepath.Join(roofDir(t), "..", ".."))
-}
-
-// importPath derives a directory's import path from the repo layout.
-func importPath(t *testing.T, dir string) string {
-	t.Helper()
-	rel, err := filepath.Rel(repoRoot(t), dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return "github.com/fancl20/cion/" + filepath.ToSlash(rel)
-}
-
-// contains reports whether the list holds the string.
-func contains(list []string, s string) bool {
-	return slices.Contains(list, s)
 }

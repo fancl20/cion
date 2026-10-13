@@ -158,3 +158,18 @@ helpers, the overview, the history, and the flip.
     the tree and fail their fixtures as before.
 
 ## Implementation history
+
+*   Landed in four commits, one per step: 7bfc8b6, the underlay leaf
+    ([underlay.go](/pkg/libs/underlay/underlay.go)); 3de3086, the
+    libraries' moves; 7071de4, the core's moves; and the commit that adds
+    the roofs' checks ([core](/pkg/core/walk_test.go),
+    [libs](/pkg/libs/walk_test.go)) on the shared helpers
+    ([walktest.go](/internal/walktest/walktest.go)), updates the
+    architecture overview, and appends this record.
+*   The data plane's meter, named by its import path, follows the move:
+    `github.com/fancl20/cion/pkg/core/dataplane`.
+*   Comments that named a moved path follow it, and the bootstrap
+    channel's package document and the endpoint's TLS configuration stop
+    calling it a library.
+*   The architecture overview also names the four roofs and their walk
+    tests where it introduces the components.

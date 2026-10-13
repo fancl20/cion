@@ -1,6 +1,6 @@
 # File Every Package Under the Roof of Its Kind
 
-*   Status: proposed
+*   Status: accepted
 *   Date: 2026-10-13
 
 [TOC]
