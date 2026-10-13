@@ -13,6 +13,7 @@ import (
 	"go.etcd.io/bbolt"
 
 	"github.com/fancl20/cion/pkg/apps/wireguard"
+	"github.com/fancl20/cion/pkg/statefile"
 )
 
 // entriesBucket holds one directory entry per publishing ISD-AS; hostsBucket
@@ -28,19 +29,8 @@ type directoryDB struct {
 
 // New opens the directory store at path, creating it when missing.
 func New(path string, opts *bbolt.Options) (wireguard.DirectoryStore, error) {
-	db, err := bbolt.Open(path, 0o600, opts)
+	db, err := statefile.OpenBolt(path, opts, string(entriesBucket), string(hostsBucket))
 	if err != nil {
-		return nil, err
-	}
-	if err := db.Update(func(tx *bbolt.Tx) error {
-		for _, bucket := range [][]byte{entriesBucket, hostsBucket} {
-			if _, err := tx.CreateBucketIfNotExists(bucket); err != nil {
-				return err
-			}
-		}
-		return nil
-	}); err != nil {
-		_ = db.Close()
 		return nil, err
 	}
 	return &directoryDB{db: db}, nil

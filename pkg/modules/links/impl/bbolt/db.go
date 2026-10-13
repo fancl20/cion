@@ -15,6 +15,7 @@ import (
 	"go.etcd.io/bbolt"
 
 	"github.com/fancl20/cion/pkg/modules/links"
+	"github.com/fancl20/cion/pkg/statefile"
 )
 
 const (
@@ -110,19 +111,8 @@ type bboltDB struct {
 
 // New opens the link database at path, creating it if needed.
 func New(path string, opts *bbolt.Options) (links.DB, error) {
-	db, err := bbolt.Open(path, 0600, opts)
+	db, err := statefile.OpenBolt(path, opts, linksBucket, metaBucket)
 	if err != nil {
-		return nil, err
-	}
-	if err := db.Update(func(tx *bbolt.Tx) error {
-		for _, name := range []string{linksBucket, metaBucket} {
-			if _, err := tx.CreateBucketIfNotExists([]byte(name)); err != nil {
-				return err
-			}
-		}
-		return nil
-	}); err != nil {
-		_ = db.Close()
 		return nil, err
 	}
 	return &bboltDB{db: db}, nil

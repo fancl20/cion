@@ -1,8 +1,12 @@
-// Package statefile writes the files a node keeps in its state directory
-// whole: a reader sees the old content or the new one, and a crash leaves one
-// of the two. A shared library: no loops of its own, no policy. Every file
-// has a single writer — a loop, the boot, or the holder of a mutex — for the
-// writes to one path share one temporary name.
+// Package statefile writes and opens the files a node keeps in its state
+// directory: the small files written whole, and the bbolt databases opened
+// with their buckets in place. A shared library: no loops of its own, no
+// policy.
+//
+// A reader of a file written whole sees the old content or the new one, and a
+// crash leaves one of the two. Every such file has a single writer — a loop,
+// the boot, or the holder of a mutex — for the writes to one path share one
+// temporary name; bbolt serializes a database's writers itself.
 package statefile
 
 import (
@@ -11,6 +15,8 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+
+	"go.etcd.io/bbolt"
 )
 
 // Write replaces the file at path with data, mode 0600: it writes the data to
@@ -78,6 +84,29 @@ func LoadOrCreate[T any](
 		return zero, err
 	}
 	return v, nil
+}
+
+// OpenBolt opens the bbolt database at path with opts, creating the file with
+// mode 0600 when missing (its directory must exist), and creates the named
+// buckets it lacks. A failed bucket setup closes the database again,
+// releasing its file lock.
+func OpenBolt(path string, opts *bbolt.Options, buckets ...string) (*bbolt.DB, error) {
+	db, err := bbolt.Open(path, 0o600, opts)
+	if err != nil {
+		return nil, err
+	}
+	if err := db.Update(func(tx *bbolt.Tx) error {
+		for _, name := range buckets {
+			if _, err := tx.CreateBucketIfNotExists([]byte(name)); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	return db, nil
 }
 
 // writeSynced writes data to the file at path, created with mode 0600 or

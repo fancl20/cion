@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/fancl20/cion/pkg/modules/trustdb"
+	"github.com/fancl20/cion/pkg/statefile"
 
 	"github.com/scionproto/scion/pkg/scrypto/cppki"
 	"go.etcd.io/bbolt"
@@ -20,26 +21,13 @@ type bboltDB struct {
 	db *bbolt.DB
 }
 
+// New opens the trust database at path, creating it if needed.
 func New(path string, opts *bbolt.Options) (trustdb.DB, error) {
-	db, err := bbolt.Open(path, 0600, opts)
+	db, err := statefile.OpenBolt(path, opts, "chains", "trcs")
 	if err != nil {
 		return nil, err
 	}
-
-	if err := db.Update(func(tx *bbolt.Tx) error {
-		for _, s := range []string{"chains", "trcs"} {
-			if _, err := tx.CreateBucketIfNotExists([]byte(s)); err != nil {
-				return err
-			}
-		}
-		return nil
-	}); err != nil {
-		return nil, err
-	}
-
-	return &bboltDB{
-		db: db,
-	}, nil
+	return &bboltDB{db: db}, nil
 }
 
 // Chains looks up all chains that match the query.

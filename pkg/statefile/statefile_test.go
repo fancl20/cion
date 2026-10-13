@@ -8,6 +8,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"go.etcd.io/bbolt"
 )
 
 // TestWriteCreatesAndReplaces checks a write's shape: the file created with
@@ -182,5 +185,83 @@ func TestRemove(t *testing.T) {
 	}
 	if _, err := os.Lstat(path); !errors.Is(err, fs.ErrNotExist) {
 		t.Errorf("the file outlived its removal: %v", err)
+	}
+}
+
+// TestOpenBoltCreatesTheMissingBuckets opens a fresh database with two buckets
+// and reopens it with a third: the file has mode 0600, all three buckets
+// exist, and the first keeps what was written to it before the reopen.
+func TestOpenBoltCreatesTheMissingBuckets(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "store.db")
+	db, err := OpenBolt(path, nil, "a", "b")
+	if err != nil {
+		t.Fatalf("opening a fresh database: %v", err)
+	}
+	if err := db.Update(func(tx *bbolt.Tx) error {
+		return tx.Bucket([]byte("a")).Put([]byte("key"), []byte("value"))
+	}); err != nil {
+		t.Fatalf("writing to bucket a: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("closing the database: %v", err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Errorf("mode = %v, want 0600", info.Mode())
+	}
+
+	db, err = OpenBolt(path, nil, "a", "b", "c")
+	if err != nil {
+		t.Fatalf("reopening with a third bucket: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	var missing []string
+	var value []byte
+	if err := db.View(func(tx *bbolt.Tx) error {
+		for _, name := range []string{"a", "b", "c"} {
+			if tx.Bucket([]byte(name)) == nil {
+				missing = append(missing, name)
+			}
+		}
+		if a := tx.Bucket([]byte("a")); a != nil {
+			value = bytes.Clone(a.Get([]byte("key")))
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(missing) > 0 {
+		t.Errorf("buckets %v missing after the reopen", missing)
+	}
+	if string(value) != "value" {
+		t.Errorf("bucket a holds %q after the reopen, want %q", value, "value")
+	}
+}
+
+// TestOpenBoltReleasesTheFileWhenSetupFails opens an existing database
+// read-only, which holds the file's shared lock and refuses the bucket setup's
+// write, and then takes the exclusive lock a fresh open needs: the failed
+// OpenBolt must have closed the database.
+func TestOpenBoltReleasesTheFileWhenSetupFails(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "store.db")
+	db, err := OpenBolt(path, nil, "a")
+	if err != nil {
+		t.Fatalf("creating the database: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("closing the database: %v", err)
+	}
+	if _, err := OpenBolt(path, &bbolt.Options{ReadOnly: true}, "a"); err == nil {
+		t.Fatal("OpenBolt set the buckets up through a read-only open")
+	}
+	again, err := bbolt.Open(path, 0o600, &bbolt.Options{Timeout: 100 * time.Millisecond})
+	if err != nil {
+		t.Fatalf("reopening after the failed OpenBolt: %v", err)
+	}
+	if err := again.Close(); err != nil {
+		t.Fatalf("closing the reopened database: %v", err)
 	}
 }

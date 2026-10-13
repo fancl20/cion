@@ -17,6 +17,7 @@ import (
 	cppb "github.com/scionproto/scion/pkg/proto/control_plane"
 
 	"github.com/fancl20/cion/pkg/modules/pathdb"
+	"github.com/fancl20/cion/pkg/statefile"
 )
 
 const bucketName = "segments"
@@ -52,15 +53,8 @@ type bboltDB struct {
 
 // New opens the path database at path, creating it if needed.
 func New(path string, opts *bbolt.Options) (pathdb.DB, error) {
-	db, err := bbolt.Open(path, 0600, opts)
+	db, err := statefile.OpenBolt(path, opts, bucketName)
 	if err != nil {
-		return nil, err
-	}
-	if err := db.Update(func(tx *bbolt.Tx) error {
-		_, err := tx.CreateBucketIfNotExists([]byte(bucketName))
-		return err
-	}); err != nil {
-		_ = db.Close()
 		return nil, err
 	}
 	return &bboltDB{db: db}, nil
