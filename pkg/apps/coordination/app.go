@@ -4,6 +4,7 @@ import (
 	"context"
 	"net"
 	"net/http"
+	"net/netip"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/fancl20/cion/pkg/apps/wireguard"
 	"github.com/fancl20/cion/pkg/modules/enrollauth"
+	"github.com/fancl20/cion/pkg/ratelimit"
 )
 
 // Store is the registry the coordination application works on: the core's
@@ -97,9 +99,8 @@ type App struct {
 	admissionMtx sync.Mutex
 	// bySource and overall pace the seam's asks — one admission per interval
 	// per source address beside one per interval at the door — the bounds
-	// the security model's caps name. Both are one-token buckets at the
-	// interval, golang.org/x/time/rate's own limiter.
-	bySource sourceLimiter
+	// the security model's caps name.
+	bySource *ratelimit.Keyed[netip.Addr]
 	overall  *rate.Limiter
 	// mapStreams is the bounded set an open map stream holds one of: past
 	// the bound the map answers one full map and closes the stream.
@@ -143,7 +144,7 @@ func New(cfg Config) (*App, error) {
 		cfg:        cfg,
 		machineKey: machineKey,
 		derp:       newDERPServer(derpKey),
-		bySource:   newSourceLimiter(admissionMinInterval),
+		bySource:   ratelimit.NewKeyed[netip.Addr](admissionMinInterval),
 		overall:    rate.NewLimiter(rate.Every(admissionMinInterval), 1),
 		mapStreams: make(chan struct{}, maxMapStreams),
 		convs:      make(map[*conversationConn]struct{}),

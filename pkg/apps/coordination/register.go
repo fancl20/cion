@@ -7,11 +7,9 @@ import (
 	"log/slog"
 	"net/http"
 	"net/netip"
-	"sync"
 	"time"
 
 	"go4.org/mem"
-	"golang.org/x/time/rate"
 	"tailscale.com/tailcfg"
 	"tailscale.com/types/key"
 
@@ -125,7 +123,7 @@ func (a *App) handleRegister(w http.ResponseWriter, r *http.Request,
 	// refusal rides the pending refusal's own path and status, for the
 	// vendored client answers the rate's own status — 429 — by failing a
 	// headless host's login outright instead of retrying it.
-	if !a.bySource.admit(source.Addr()) || !a.overall.Allow() {
+	if !a.bySource.Admit(source.Addr()) || !a.overall.Allow() {
 		http.Error(w, "registration exceeds the admission rate",
 			http.StatusServiceUnavailable)
 		return
@@ -213,63 +211,6 @@ func (a *App) bindMachine(ctx context.Context, host *wireguard.HostEntry,
 		"node_key", nodePublicOf(host.PublicKey).ShortString(),
 		"machine", machine.ShortString())
 	return true, nil
-}
-
-// sourceLimiterCap bounds the sources a sourceLimiter holds.
-const sourceLimiterCap = 1024
-
-// sourceLimiter rate-caps the door's asks per source address: one per
-// interval, one token to a source's bucket, refilling over time and
-// forgetting sources gone silent — a full bucket names one. The address
-// alone keys it, for an internet source's port is ephemeral and a
-// per-address-port cap would cap nothing. It holds at most
-// sourceLimiterCap sources and sweeps the silent ones at most once per
-// interval, so a flood of fresh sources costs bounded memory and amortized
-// time; a fresh source arriving while the table is full is refused.
-type sourceLimiter struct {
-	interval time.Duration
-
-	mtx   sync.Mutex
-	held  map[netip.Addr]*rate.Limiter
-	swept time.Time
-}
-
-func newSourceLimiter(interval time.Duration) sourceLimiter {
-	return sourceLimiter{
-		interval: interval,
-		held:     make(map[netip.Addr]*rate.Limiter),
-	}
-}
-
-// admit reports whether the source may be asked now.
-func (l *sourceLimiter) admit(src netip.Addr) bool {
-	l.mtx.Lock()
-	defer l.mtx.Unlock()
-	now := time.Now()
-	lim, ok := l.held[src]
-	if !ok {
-		if len(l.held) >= sourceLimiterCap && !l.sweep(now) {
-			return false
-		}
-		lim = rate.NewLimiter(rate.Every(l.interval), 1)
-		l.held[src] = lim
-	}
-	return lim.AllowN(now, 1)
-}
-
-// sweep forgets the sources whose bucket is full — a fresh bucket answers
-// the same — at most once per interval, and reports whether the table has
-// room for a fresh source.
-func (l *sourceLimiter) sweep(now time.Time) bool {
-	if now.Sub(l.swept) >= l.interval {
-		l.swept = now
-		for a, held := range l.held {
-			if held.TokensAt(now) >= 1 {
-				delete(l.held, a)
-			}
-		}
-	}
-	return len(l.held) < sourceLimiterCap
 }
 
 // writeRegisterResponse completes the login on the spot: no AuthURL, the

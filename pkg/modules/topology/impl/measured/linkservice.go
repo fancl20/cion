@@ -14,6 +14,7 @@ import (
 
 	"github.com/fancl20/cion/pkg/modules/links"
 	"github.com/fancl20/cion/pkg/peeria"
+	"github.com/fancl20/cion/pkg/ratelimit"
 	nodev1 "github.com/fancl20/cion/proto/node/v1"
 	nodev1connect "github.com/fancl20/cion/proto/node/v1/nodev1connect"
 )
@@ -40,22 +41,22 @@ type LinkService struct {
 	MinInterval time.Duration
 
 	limiterOnce sync.Once
-	limiter     sourceLimiter[addr.IA]
+	limiter     *ratelimit.Keyed[addr.IA]
 	// mtx serializes the handlers' lookup-and-mutate runs over the store.
 	mtx sync.Mutex
 }
 
 // rateLimiter returns the admission rate limiter, built on first use so a
 // struct literal configuration works.
-func (s *LinkService) rateLimiter() *sourceLimiter[addr.IA] {
+func (s *LinkService) rateLimiter() *ratelimit.Keyed[addr.IA] {
 	s.limiterOnce.Do(func() {
 		interval := s.MinInterval
 		if interval == 0 {
 			interval = LinkMinInterval
 		}
-		s.limiter = newSourceLimiter[addr.IA](interval)
+		s.limiter = ratelimit.NewKeyed[addr.IA](interval)
 	})
-	return &s.limiter
+	return s.limiter
 }
 
 var _ nodev1connect.LinkServiceHandler = (*LinkService)(nil)
@@ -77,7 +78,7 @@ func (s *LinkService) Request(
 		return nil, connect.NewError(connect.CodePermissionDenied,
 			errors.New("no authenticated ISD-AS; the channel verified no chain"))
 	}
-	if !s.rateLimiter().admit(peer) {
+	if !s.rateLimiter().Admit(peer) {
 		return nil, connect.NewError(connect.CodeResourceExhausted,
 			fmt.Errorf("peer %s exceeds the admission rate", peer))
 	}

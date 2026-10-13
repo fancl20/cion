@@ -23,6 +23,7 @@ import (
 
 	"github.com/fancl20/cion/pkg/modules/enrollauth"
 	"github.com/fancl20/cion/pkg/modules/trustdb"
+	"github.com/fancl20/cion/pkg/ratelimit"
 	"github.com/fancl20/cion/pkg/scion"
 	"github.com/fancl20/cion/pkg/trust"
 )
@@ -59,8 +60,8 @@ type TrustService struct {
 	MinInterval time.Duration
 
 	limiterOnce sync.Once
-	byAddr      sourceLimiter[netip.AddrPort]
-	byIA        sourceLimiter[addr.IA]
+	byAddr      *ratelimit.Keyed[netip.AddrPort]
+	byIA        *ratelimit.Keyed[addr.IA]
 	// renewalMtx serializes the renewal transaction — the name check, the
 	// authorizer's question, the issuance, and the insert hold it together — so
 	// two concurrent first issuances of one free name cannot both pass the check.
@@ -196,13 +197,13 @@ func (s *TrustService) admit(ctx context.Context, ia addr.IA) bool {
 		if interval == 0 {
 			interval = EnrollmentMinInterval
 		}
-		s.byAddr = newSourceLimiter[netip.AddrPort](interval)
-		s.byIA = newSourceLimiter[addr.IA](interval)
+		s.byAddr = ratelimit.NewKeyed[netip.AddrPort](interval)
+		s.byIA = ratelimit.NewKeyed[addr.IA](interval)
 	})
 	if src := remoteUnderlay(ctx); src.IsValid() {
-		return s.byAddr.admit(src)
+		return s.byAddr.Admit(src)
 	}
-	return s.byIA.admit(ia)
+	return s.byIA.Admit(ia)
 }
 
 // Chains serves the certificate chains matching the request.
@@ -344,58 +345,6 @@ func (s *TrustService) ChainRenewal(
 	return connect.NewResponse(&cppb.ChainRenewalResponse{
 		CmsSignedResponse: cmsRes,
 	}), nil
-}
-
-// sourceLimiterCap bounds the keys a sourceLimiter tracks.
-const sourceLimiterCap = 1024
-
-// sourceLimiter rate-caps admissions per key: one admission per interval,
-// refills over time, and stops tracking keys once silent — the rendezvous
-// acceptor's own limiter the shape. It tracks at most sourceLimiterCap keys
-// and sweeps the silent ones at most once per interval, so a flood of fresh
-// keys costs bounded memory and amortized time; a fresh key arriving while
-// the table is full is refused.
-type sourceLimiter[K comparable] struct {
-	interval time.Duration
-
-	mtx   sync.Mutex
-	last  map[K]time.Time
-	swept time.Time
-}
-
-func newSourceLimiter[K comparable](interval time.Duration) sourceLimiter[K] {
-	return sourceLimiter[K]{interval: interval, last: make(map[K]time.Time)}
-}
-
-// admit reports whether the key may be admitted now.
-func (l *sourceLimiter[K]) admit(key K) bool {
-	now := time.Now()
-	l.mtx.Lock()
-	defer l.mtx.Unlock()
-	at, held := l.last[key]
-	if held && now.Sub(at) < l.interval {
-		return false
-	}
-	if !held && len(l.last) >= sourceLimiterCap && !l.sweep(now) {
-		return false
-	}
-	l.last[key] = now
-	return true
-}
-
-// sweep forgets the keys silent for an interval — each would be admitted
-// again, so forgetting it changes no answer — at most once per interval,
-// and reports whether the table has room for a fresh key.
-func (l *sourceLimiter[K]) sweep(now time.Time) bool {
-	if now.Sub(l.swept) >= l.interval {
-		l.swept = now
-		for k, at := range l.last {
-			if now.Sub(at) >= l.interval {
-				delete(l.last, k)
-			}
-		}
-	}
-	return len(l.last) < sourceLimiterCap
 }
 
 // remoteUnderlay returns the SCION source address the request context's

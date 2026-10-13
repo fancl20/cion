@@ -15,6 +15,7 @@ import (
 	"github.com/scionproto/scion/pkg/addr"
 
 	"github.com/fancl20/cion/pkg/modules/links"
+	"github.com/fancl20/cion/pkg/ratelimit"
 )
 
 // RendezvousPort is the UDP port every node's rendezvous acceptor listens on
@@ -213,8 +214,8 @@ type Rendezvous struct {
 	// byAddr rate-caps unnamed claims by the address claimed, byIA named
 	// ones by the ISD-AS: a node's dials share one key however many
 	// ephemeral sockets they use.
-	byAddr sourceLimiter[netip.AddrPort]
-	byIA   sourceLimiter[addr.IA]
+	byAddr *ratelimit.Keyed[netip.AddrPort]
+	byIA   *ratelimit.Keyed[addr.IA]
 }
 
 // RendezvousConfig configures a Rendezvous acceptor.
@@ -252,8 +253,8 @@ func NewRendezvous(cfg RendezvousConfig) (*Rendezvous, error) {
 	return &Rendezvous{
 		conn:   conn,
 		cfg:    cfg,
-		byAddr: newSourceLimiter[netip.AddrPort](interval),
-		byIA:   newSourceLimiter[addr.IA](interval),
+		byAddr: ratelimit.NewKeyed[netip.AddrPort](interval),
+		byIA:   ratelimit.NewKeyed[addr.IA](interval),
 	}, nil
 }
 
@@ -308,7 +309,7 @@ func (r *Rendezvous) handle(ctx context.Context, raw []byte, src *net.UDPAddr) (
 		return nil, err
 	}
 	if req.IA.IsZero() {
-		if !r.byAddr.admit(req.LinkAddr) {
+		if !r.byAddr.Admit(req.LinkAddr) {
 			return nil, fmt.Errorf("claim %s exceeds the admission rate", req.LinkAddr)
 		}
 		unnamed, err := r.unnamedLinks(ctx)
@@ -318,7 +319,7 @@ func (r *Rendezvous) handle(ctx context.Context, raw []byte, src *net.UDPAddr) (
 		if unnamed >= r.cfg.MaxLinks {
 			return nil, fmt.Errorf("unnamed candidate cap reached (%d)", r.cfg.MaxLinks)
 		}
-	} else if !r.byIA.admit(req.IA) {
+	} else if !r.byIA.Admit(req.IA) {
 		return nil, fmt.Errorf("ISD-AS %s exceeds the admission rate", req.IA)
 	}
 	// The lookup and the write run under the handler's lock: concurrent
@@ -504,55 +505,4 @@ func RendezvousEcho(
 
 func udpAddr(ap netip.AddrPort) *net.UDPAddr {
 	return net.UDPAddrFromAddrPort(ap)
-}
-
-// sourceLimiterCap bounds the keys a sourceLimiter tracks.
-const sourceLimiterCap = 1024
-
-// sourceLimiter rate-caps admissions per key: one admission per interval,
-// refills over time, and stops tracking keys once silent. It tracks at most
-// sourceLimiterCap keys and sweeps the silent ones at most once per
-// interval, so a flood of fresh keys costs bounded memory and amortized
-// time; a fresh key arriving while the table is full is refused.
-type sourceLimiter[K comparable] struct {
-	interval time.Duration
-
-	mtx   sync.Mutex
-	last  map[K]time.Time
-	swept time.Time
-}
-
-func newSourceLimiter[K comparable](interval time.Duration) sourceLimiter[K] {
-	return sourceLimiter[K]{interval: interval, last: make(map[K]time.Time)}
-}
-
-// admit reports whether the key may be admitted now.
-func (l *sourceLimiter[K]) admit(key K) bool {
-	now := time.Now()
-	l.mtx.Lock()
-	defer l.mtx.Unlock()
-	at, held := l.last[key]
-	if held && now.Sub(at) < l.interval {
-		return false
-	}
-	if !held && len(l.last) >= sourceLimiterCap && !l.sweep(now) {
-		return false
-	}
-	l.last[key] = now
-	return true
-}
-
-// sweep forgets the keys silent for an interval — each would be admitted
-// again, so forgetting it changes no answer — at most once per interval,
-// and reports whether the table has room for a fresh key.
-func (l *sourceLimiter[K]) sweep(now time.Time) bool {
-	if now.Sub(l.swept) >= l.interval {
-		l.swept = now
-		for k, at := range l.last {
-			if now.Sub(at) >= l.interval {
-				delete(l.last, k)
-			}
-		}
-	}
-	return len(l.last) < sourceLimiterCap
 }
