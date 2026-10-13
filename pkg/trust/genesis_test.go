@@ -5,12 +5,12 @@ import (
 	"context"
 	"crypto"
 	"crypto/x509"
-	"fmt"
-	"sync"
+	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/fancl20/cion/pkg/modules/trustdb"
+	trustbbolt "github.com/fancl20/cion/pkg/modules/trustdb/impl/bbolt"
 	"github.com/scionproto/scion/pkg/addr"
 	"github.com/scionproto/scion/pkg/scrypto/cppki"
 )
@@ -28,9 +28,16 @@ func newTestCoreKeys(t *testing.T, dir string) CoreKeys {
 	return keys
 }
 
+// newTestDB opens a bbolt trust database in a fresh temporary directory,
+// closed when the test ends.
 func newTestDB(t *testing.T) trustdb.DB {
 	t.Helper()
-	return newMemDB()
+	db, err := trustbbolt.New(filepath.Join(t.TempDir(), "trust.db"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	return db
 }
 
 // genesisFixture is a DB and key material with a genesis TRC in place.
@@ -228,106 +235,3 @@ func TestLoadOrCreateCoreKeys(t *testing.T) {
 		}
 	}
 }
-
-// memDB is an in-memory trust.DB for the package's own tests; importing the
-// bbolt implementation from here would be an import cycle.
-type memDB struct {
-	mtx    sync.Mutex
-	trcs   map[cppki.TRCID]cppki.SignedTRC
-	chains [][]*x509.Certificate
-}
-
-func newMemDB() *memDB {
-	return &memDB{trcs: make(map[cppki.TRCID]cppki.SignedTRC)}
-}
-
-func (d *memDB) Chains(ctx context.Context, q trustdb.ChainQuery) ([][]*x509.Certificate, error) {
-	d.mtx.Lock()
-	defer d.mtx.Unlock()
-	var out [][]*x509.Certificate
-	for _, chain := range d.chains {
-		if !q.IA.IsZero() {
-			ia, err := cppki.ExtractIA(chain[0].Subject)
-			if err != nil || !ia.Equal(q.IA) {
-				continue
-			}
-		}
-		if len(q.SubjectKeyID) != 0 && !bytes.Equal(chain[0].SubjectKeyId, q.SubjectKeyID) {
-			continue
-		}
-		if !q.Validity.NotBefore.IsZero() || !q.Validity.NotAfter.IsZero() {
-			v := cppki.Validity{NotBefore: chain[0].NotBefore, NotAfter: chain[0].NotAfter}
-			if !v.Covers(q.Validity) {
-				continue
-			}
-		}
-		out = append(out, chain)
-	}
-	return out, nil
-}
-
-func (d *memDB) InsertChain(ctx context.Context, chain []*x509.Certificate) (bool, error) {
-	d.mtx.Lock()
-	defer d.mtx.Unlock()
-	for _, existing := range d.chains {
-		if existing[0].Equal(chain[0]) && existing[1].Equal(chain[1]) {
-			return false, nil
-		}
-	}
-	d.chains = append(d.chains, chain)
-	return true, nil
-}
-
-func (d *memDB) DeleteExpiredChains(ctx context.Context, t time.Time) (int, error) {
-	d.mtx.Lock()
-	defer d.mtx.Unlock()
-	kept := d.chains[:0]
-	var deleted int
-	for _, chain := range d.chains {
-		if chain[0].NotAfter.Before(t) {
-			deleted++
-			continue
-		}
-		kept = append(kept, chain)
-	}
-	d.chains = kept
-	return deleted, nil
-}
-
-func (d *memDB) SignedTRC(ctx context.Context, id cppki.TRCID) (cppki.SignedTRC, error) {
-	d.mtx.Lock()
-	defer d.mtx.Unlock()
-	if trc, ok := d.trcs[id]; ok {
-		return trc, nil
-	}
-	if id.Base.IsLatest() && id.Serial.IsLatest() {
-		var latest cppki.SignedTRC
-		for _, trc := range d.trcs {
-			if trc.TRC.ID.ISD != id.ISD {
-				continue
-			}
-			if latest.IsZero() || trc.TRC.ID.Base > latest.TRC.ID.Base ||
-				(trc.TRC.ID.Base == latest.TRC.ID.Base &&
-					trc.TRC.ID.Serial > latest.TRC.ID.Serial) {
-				latest = trc
-			}
-		}
-		return latest, nil
-	}
-	return cppki.SignedTRC{}, nil
-}
-
-func (d *memDB) InsertTRC(ctx context.Context, trc cppki.SignedTRC) (bool, error) {
-	d.mtx.Lock()
-	defer d.mtx.Unlock()
-	if existing, ok := d.trcs[trc.TRC.ID]; ok {
-		if !bytes.Equal(existing.TRC.Raw, trc.TRC.Raw) {
-			return false, fmt.Errorf("insert conflicted TRC")
-		}
-		return false, nil
-	}
-	d.trcs[trc.TRC.ID] = trc
-	return true, nil
-}
-
-func (d *memDB) Close() error { return nil }
