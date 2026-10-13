@@ -23,7 +23,7 @@ import (
 	"github.com/scionproto/scion/pkg/private/serrors"
 	"github.com/scionproto/scion/pkg/scrypto/cppki"
 
-	"github.com/fancl20/cion/pkg/peeria"
+	"github.com/fancl20/cion/pkg/libs/peeria"
 	votingv1 "github.com/fancl20/cion/proto/voting/v1"
 	votingv1connect "github.com/fancl20/cion/proto/voting/v1/votingv1connect"
 )

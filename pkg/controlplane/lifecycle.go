@@ -13,7 +13,7 @@ import (
 	"github.com/scionproto/scion/pkg/addr"
 	"github.com/scionproto/scion/pkg/scrypto/cppki"
 
-	"github.com/fancl20/cion/pkg/loops"
+	"github.com/fancl20/cion/pkg/libs/loops"
 	"github.com/fancl20/cion/pkg/modules/trustdb"
 	"github.com/fancl20/cion/pkg/trust"
 )

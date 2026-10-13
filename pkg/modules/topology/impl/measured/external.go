@@ -12,7 +12,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/fancl20/cion/pkg/statefile"
+	"github.com/fancl20/cion/pkg/libs/statefile"
 )
 
 // ExternalHostFile holds the learned external host in the state directory's

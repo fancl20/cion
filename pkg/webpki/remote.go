@@ -27,8 +27,8 @@ import (
 	"github.com/scionproto/scion/pkg/scrypto/cppki"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
+	"github.com/fancl20/cion/pkg/libs/scion"
 	"github.com/fancl20/cion/pkg/modules/trustdb"
-	"github.com/fancl20/cion/pkg/scion"
 	"github.com/fancl20/cion/pkg/trust"
 )
 

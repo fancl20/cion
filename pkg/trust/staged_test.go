@@ -14,8 +14,8 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"github.com/scionproto/scion/pkg/scrypto/cppki"
 
+	"github.com/fancl20/cion/pkg/libs/statefile"
 	"github.com/fancl20/cion/pkg/modules/trustdb"
-	"github.com/fancl20/cion/pkg/statefile"
 )
 
 // TestFounderBootWithoutStagedRoll checks the boot with no roll staged:

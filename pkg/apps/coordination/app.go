@@ -13,8 +13,8 @@ import (
 	"tailscale.com/types/key"
 
 	"github.com/fancl20/cion/pkg/apps/wireguard"
+	"github.com/fancl20/cion/pkg/libs/ratelimit"
 	"github.com/fancl20/cion/pkg/modules/enrollauth"
-	"github.com/fancl20/cion/pkg/ratelimit"
 )
 
 // Store is the registry the coordination application works on: the core's

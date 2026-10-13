@@ -9,7 +9,7 @@ import (
 	"github.com/scionproto/scion/pkg/addr"
 	"github.com/scionproto/scion/pkg/slayers"
 
-	"github.com/fancl20/cion/pkg/expiring"
+	"github.com/fancl20/cion/pkg/libs/expiring"
 )
 
 // IfDownCacheTTL is how long a recognized interface-down signal holds: the

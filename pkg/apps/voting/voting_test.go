@@ -12,9 +12,9 @@ import (
 	"github.com/scionproto/scion/pkg/addr"
 	"github.com/scionproto/scion/pkg/scrypto/cppki"
 
+	"github.com/fancl20/cion/pkg/libs/peeria"
+	"github.com/fancl20/cion/pkg/libs/scion"
 	trustbbolt "github.com/fancl20/cion/pkg/modules/trustdb/impl/bbolt"
-	"github.com/fancl20/cion/pkg/peeria"
-	"github.com/fancl20/cion/pkg/scion"
 	"github.com/fancl20/cion/pkg/trust"
 	"github.com/fancl20/cion/pkg/trust/trusttest"
 	votingv1 "github.com/fancl20/cion/proto/voting/v1"

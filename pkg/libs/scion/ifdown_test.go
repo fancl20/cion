@@ -12,8 +12,8 @@ import (
 	"github.com/scionproto/scion/pkg/slayers"
 	"github.com/scionproto/scion/pkg/slayers/path/empty"
 
+	"github.com/fancl20/cion/pkg/libs/segment"
 	"github.com/fancl20/cion/pkg/modules/pathdb"
-	"github.com/fancl20/cion/pkg/segment"
 )
 
 // newTestCache returns a cache at the package's own signal TTL.

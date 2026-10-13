@@ -9,7 +9,7 @@ import (
 	"github.com/scionproto/scion/pkg/proto/control_plane"
 	"google.golang.org/protobuf/proto"
 
-	"github.com/fancl20/cion/pkg/scion"
+	"github.com/fancl20/cion/pkg/libs/scion"
 )
 
 // TransportQUIC names the QUIC transport of a service-resolution response —

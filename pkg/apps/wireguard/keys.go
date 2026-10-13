@@ -8,7 +8,7 @@ import (
 	"fmt"
 	"path/filepath"
 
-	"github.com/fancl20/cion/pkg/statefile"
+	"github.com/fancl20/cion/pkg/libs/statefile"
 )
 
 // KeyFile holds the node's WireGuard private key inside the application's

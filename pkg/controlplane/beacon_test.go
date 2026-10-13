@@ -19,11 +19,11 @@ import (
 	"github.com/scionproto/scion/pkg/scrypto"
 	"github.com/scionproto/scion/pkg/scrypto/cppki"
 
+	"github.com/fancl20/cion/pkg/libs/scion"
+	"github.com/fancl20/cion/pkg/libs/segment"
 	"github.com/fancl20/cion/pkg/modules/pathdb"
 	pathdbbbolt "github.com/fancl20/cion/pkg/modules/pathdb/impl/bbolt"
 	"github.com/fancl20/cion/pkg/modules/trustdb"
-	"github.com/fancl20/cion/pkg/scion"
-	"github.com/fancl20/cion/pkg/segment"
 	"github.com/fancl20/cion/pkg/trust"
 )
 

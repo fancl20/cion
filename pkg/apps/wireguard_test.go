@@ -5,7 +5,7 @@ import (
 
 	"github.com/scionproto/scion/pkg/addr"
 
-	"github.com/fancl20/cion/pkg/scion"
+	"github.com/fancl20/cion/pkg/libs/scion"
 	"github.com/fancl20/cion/pkg/trust"
 )
 

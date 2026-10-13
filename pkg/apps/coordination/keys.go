@@ -7,7 +7,7 @@ import (
 
 	"tailscale.com/types/key"
 
-	"github.com/fancl20/cion/pkg/statefile"
+	"github.com/fancl20/cion/pkg/libs/statefile"
 )
 
 // The persisted key files, beside the WireGuard application's own in the

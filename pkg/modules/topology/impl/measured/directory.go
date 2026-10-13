@@ -15,9 +15,9 @@ import (
 	spath "github.com/scionproto/scion/pkg/slayers/path/scion"
 
 	"github.com/fancl20/cion/pkg/controlplane"
-	"github.com/fancl20/cion/pkg/loops"
-	"github.com/fancl20/cion/pkg/peeria"
-	"github.com/fancl20/cion/pkg/scion"
+	"github.com/fancl20/cion/pkg/libs/loops"
+	"github.com/fancl20/cion/pkg/libs/peeria"
+	"github.com/fancl20/cion/pkg/libs/scion"
 	"github.com/fancl20/cion/pkg/trust"
 	nodev1 "github.com/fancl20/cion/proto/node/v1"
 	nodev1connect "github.com/fancl20/cion/proto/node/v1/nodev1connect"

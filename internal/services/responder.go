@@ -6,8 +6,8 @@ import (
 	"log/slog"
 	"sync"
 
+	"github.com/fancl20/cion/pkg/libs/scion"
 	"github.com/fancl20/cion/pkg/libs/underlay"
-	"github.com/fancl20/cion/pkg/scion"
 )
 
 // assembleResponder binds the node's SCMP echo responder to the control
@@ -16,8 +16,8 @@ import (
 // echo its peers must answer — a node that could decline the responder
 // silently disables the comparator on every neighbor — so it runs beside the
 // control-plane loops in every node, the one capability that moved out of an
-// application into the core. SCMP echo's read and write stay in pkg/scion, the
-// vocabulary the pinger and the responder share.
+// application into the core. SCMP echo's read and write stay in
+// pkg/libs/scion, the vocabulary the pinger and the responder share.
 func (n *node) assembleResponder() error {
 	conn, err := n.scionConn(underlay.EndhostPort)
 	if err != nil {

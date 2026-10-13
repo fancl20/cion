@@ -13,7 +13,7 @@ import (
 	"go.etcd.io/bbolt"
 
 	"github.com/fancl20/cion/pkg/apps/wireguard"
-	"github.com/fancl20/cion/pkg/statefile"
+	"github.com/fancl20/cion/pkg/libs/statefile"
 )
 
 // entriesBucket holds one directory entry per publishing ISD-AS; hostsBucket

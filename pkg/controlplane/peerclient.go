@@ -19,7 +19,7 @@ import (
 	cppb "github.com/scionproto/scion/pkg/proto/control_plane"
 	spath "github.com/scionproto/scion/pkg/slayers/path/scion"
 
-	"github.com/fancl20/cion/pkg/scion"
+	"github.com/fancl20/cion/pkg/libs/scion"
 	"github.com/fancl20/cion/pkg/trust"
 )
 

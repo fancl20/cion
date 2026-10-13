@@ -13,8 +13,8 @@ import (
 	"github.com/scionproto/scion/pkg/scrypto"
 	spath "github.com/scionproto/scion/pkg/slayers/path/scion"
 
+	"github.com/fancl20/cion/pkg/libs/segment"
 	"github.com/fancl20/cion/pkg/modules/pathdb"
-	"github.com/fancl20/cion/pkg/segment"
 )
 
 var (

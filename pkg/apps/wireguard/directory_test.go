@@ -16,7 +16,7 @@ import (
 	"github.com/scionproto/scion/pkg/addr"
 	"github.com/scionproto/scion/pkg/scrypto/cppki"
 
-	"github.com/fancl20/cion/pkg/peeria"
+	"github.com/fancl20/cion/pkg/libs/peeria"
 	wireguardv1 "github.com/fancl20/cion/proto/wireguard/v1"
 )
 

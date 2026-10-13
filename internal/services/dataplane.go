@@ -11,7 +11,7 @@ import (
 
 	"github.com/fancl20/cion/pkg/controlplane"
 	"github.com/fancl20/cion/pkg/dataplane"
-	"github.com/fancl20/cion/pkg/loops"
+	"github.com/fancl20/cion/pkg/libs/loops"
 	"github.com/fancl20/cion/pkg/modules/links"
 )
 

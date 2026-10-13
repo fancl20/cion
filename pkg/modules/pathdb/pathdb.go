@@ -14,7 +14,7 @@ import (
 	"github.com/scionproto/scion/pkg/addr"
 	cppb "github.com/scionproto/scion/pkg/proto/control_plane"
 
-	"github.com/fancl20/cion/pkg/segment"
+	"github.com/fancl20/cion/pkg/libs/segment"
 )
 
 // SegmentType mirrors the draft's segment types: the role a stored segment

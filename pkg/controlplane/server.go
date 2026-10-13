@@ -15,8 +15,8 @@ import (
 	"github.com/scionproto/scion/pkg/proto/control_plane/v1/control_planeconnect"
 	"google.golang.org/protobuf/proto"
 
-	"github.com/fancl20/cion/pkg/peeria"
-	"github.com/fancl20/cion/pkg/scion"
+	"github.com/fancl20/cion/pkg/libs/peeria"
+	"github.com/fancl20/cion/pkg/libs/scion"
 )
 
 // ControlPlane covers all control plane RPCs.

@@ -35,7 +35,7 @@ import (
 	"gvisor.dev/gvisor/pkg/tcpip/transport/udp"
 
 	"github.com/fancl20/cion/pkg/apps/wireguard"
-	"github.com/fancl20/cion/pkg/loops"
+	"github.com/fancl20/cion/pkg/libs/loops"
 )
 
 // Egress flow policy, carried whole by the service: flow state is bounded by a

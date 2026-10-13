@@ -11,7 +11,7 @@ import (
 	"github.com/scionproto/scion/pkg/addr"
 
 	"github.com/fancl20/cion/pkg/controlplane"
-	"github.com/fancl20/cion/pkg/peeria"
+	"github.com/fancl20/cion/pkg/libs/peeria"
 	nodev1 "github.com/fancl20/cion/proto/node/v1"
 )
 

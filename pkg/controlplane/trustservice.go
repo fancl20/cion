@@ -21,10 +21,10 @@ import (
 	"github.com/scionproto/scion/pkg/scrypto/cppki"
 	"google.golang.org/protobuf/proto"
 
+	"github.com/fancl20/cion/pkg/libs/ratelimit"
+	"github.com/fancl20/cion/pkg/libs/scion"
 	"github.com/fancl20/cion/pkg/modules/enrollauth"
 	"github.com/fancl20/cion/pkg/modules/trustdb"
-	"github.com/fancl20/cion/pkg/ratelimit"
-	"github.com/fancl20/cion/pkg/scion"
 	"github.com/fancl20/cion/pkg/trust"
 )
 

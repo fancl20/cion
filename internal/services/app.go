@@ -16,10 +16,10 @@ import (
 	"github.com/fancl20/cion/internal/supervise"
 	"github.com/fancl20/cion/pkg/apps"
 	"github.com/fancl20/cion/pkg/controlplane"
+	"github.com/fancl20/cion/pkg/libs/scion"
 	"github.com/fancl20/cion/pkg/modules/links"
 	"github.com/fancl20/cion/pkg/modules/pathdb"
 	"github.com/fancl20/cion/pkg/modules/trustdb"
-	"github.com/fancl20/cion/pkg/scion"
 	"github.com/fancl20/cion/pkg/trust"
 )
 

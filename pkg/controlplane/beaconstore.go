@@ -7,7 +7,7 @@ import (
 
 	"github.com/scionproto/scion/pkg/addr"
 
-	"github.com/fancl20/cion/pkg/segment"
+	"github.com/fancl20/cion/pkg/libs/segment"
 )
 
 // storePerInterface bounds the candidate PCBs kept per ingress interface: the

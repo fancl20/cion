@@ -20,10 +20,10 @@ import (
 	cppb "github.com/scionproto/scion/pkg/proto/control_plane"
 	"github.com/scionproto/scion/pkg/scrypto/cppki"
 
+	"github.com/fancl20/cion/pkg/libs/scion"
 	"github.com/fancl20/cion/pkg/modules/enrollauth"
 	"github.com/fancl20/cion/pkg/modules/trustdb"
 	"github.com/fancl20/cion/pkg/modules/trustdb/impl/bbolt"
-	"github.com/fancl20/cion/pkg/scion"
 	"github.com/fancl20/cion/pkg/trust"
 	"github.com/fancl20/cion/pkg/trust/trusttest"
 )

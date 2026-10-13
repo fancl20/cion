@@ -17,11 +17,11 @@ import (
 	"github.com/scionproto/scion/pkg/slayers/path/empty"
 
 	"github.com/fancl20/cion/pkg/controlplane"
+	"github.com/fancl20/cion/pkg/libs/scion"
+	"github.com/fancl20/cion/pkg/libs/segment"
 	"github.com/fancl20/cion/pkg/modules/links"
 	"github.com/fancl20/cion/pkg/modules/links/impl/memory"
 	"github.com/fancl20/cion/pkg/modules/pathdb"
-	"github.com/fancl20/cion/pkg/scion"
-	"github.com/fancl20/cion/pkg/segment"
 )
 
 // selFixture is the selection loop's test harness: a memory link store, a

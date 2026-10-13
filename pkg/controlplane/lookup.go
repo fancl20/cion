@@ -10,9 +10,9 @@ import (
 	"github.com/scionproto/scion/pkg/private/serrors"
 	cppb "github.com/scionproto/scion/pkg/proto/control_plane"
 
-	"github.com/fancl20/cion/pkg/expiring"
+	"github.com/fancl20/cion/pkg/libs/expiring"
+	"github.com/fancl20/cion/pkg/libs/scion"
 	"github.com/fancl20/cion/pkg/modules/pathdb"
-	"github.com/fancl20/cion/pkg/scion"
 )
 
 // lookupCacheTTL caps how long fetched segments are served from the cache,

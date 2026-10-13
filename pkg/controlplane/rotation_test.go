@@ -19,9 +19,9 @@ import (
 	"github.com/scionproto/scion/pkg/scrypto"
 	"github.com/scionproto/scion/pkg/scrypto/cppki"
 
+	"github.com/fancl20/cion/pkg/libs/statefile"
 	"github.com/fancl20/cion/pkg/modules/enrollauth"
 	"github.com/fancl20/cion/pkg/modules/trustdb"
-	"github.com/fancl20/cion/pkg/statefile"
 	"github.com/fancl20/cion/pkg/trust"
 	"github.com/fancl20/cion/pkg/trust/trusttest"
 )

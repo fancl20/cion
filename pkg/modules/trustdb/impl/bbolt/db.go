@@ -10,8 +10,8 @@ import (
 	"slices"
 	"time"
 
+	"github.com/fancl20/cion/pkg/libs/statefile"
 	"github.com/fancl20/cion/pkg/modules/trustdb"
-	"github.com/fancl20/cion/pkg/statefile"
 
 	"github.com/scionproto/scion/pkg/scrypto/cppki"
 	"go.etcd.io/bbolt"

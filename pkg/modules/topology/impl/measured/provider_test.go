@@ -11,11 +11,11 @@ import (
 
 	"github.com/scionproto/scion/pkg/addr"
 
+	"github.com/fancl20/cion/pkg/libs/scion"
 	"github.com/fancl20/cion/pkg/modules/links"
 	"github.com/fancl20/cion/pkg/modules/links/impl/memory"
 	"github.com/fancl20/cion/pkg/modules/topology"
 	"github.com/fancl20/cion/pkg/modules/topology/impl/providertest"
-	"github.com/fancl20/cion/pkg/scion"
 	nodev1connect "github.com/fancl20/cion/proto/node/v1/nodev1connect"
 )
 

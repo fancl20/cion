@@ -9,8 +9,8 @@ import (
 	cppb "github.com/scionproto/scion/pkg/proto/control_plane"
 	"github.com/scionproto/scion/pkg/proto/control_plane/v1/control_planeconnect"
 
-	"github.com/fancl20/cion/pkg/scion"
-	"github.com/fancl20/cion/pkg/segment"
+	"github.com/fancl20/cion/pkg/libs/scion"
+	"github.com/fancl20/cion/pkg/libs/segment"
 )
 
 // SegmentService implements the segment RPCs of the control endpoint: beacon

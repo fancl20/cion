@@ -14,7 +14,7 @@ import (
 	"github.com/scionproto/scion/pkg/addr"
 	"github.com/scionproto/scion/pkg/scrypto/cppki"
 
-	"github.com/fancl20/cion/pkg/statefile"
+	"github.com/fancl20/cion/pkg/libs/statefile"
 )
 
 // stagedFileHeader is the PEM header of a staged block naming the live file

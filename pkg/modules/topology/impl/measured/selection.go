@@ -15,10 +15,10 @@ import (
 	"github.com/scionproto/scion/pkg/addr"
 
 	"github.com/fancl20/cion/pkg/controlplane"
+	"github.com/fancl20/cion/pkg/libs/loops"
+	"github.com/fancl20/cion/pkg/libs/scion"
 	"github.com/fancl20/cion/pkg/libs/underlay"
-	"github.com/fancl20/cion/pkg/loops"
 	"github.com/fancl20/cion/pkg/modules/links"
-	"github.com/fancl20/cion/pkg/scion"
 	nodev1 "github.com/fancl20/cion/proto/node/v1"
 )
 

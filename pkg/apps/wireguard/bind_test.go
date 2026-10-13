@@ -12,9 +12,9 @@ import (
 	"github.com/scionproto/scion/pkg/addr"
 	"github.com/scionproto/scion/pkg/scrypto"
 
+	"github.com/fancl20/cion/pkg/libs/scion"
+	"github.com/fancl20/cion/pkg/libs/segment"
 	"github.com/fancl20/cion/pkg/modules/pathdb"
-	"github.com/fancl20/cion/pkg/scion"
-	"github.com/fancl20/cion/pkg/segment"
 )
 
 // testMACKey mirrors the forwarding key the data plane verifies.

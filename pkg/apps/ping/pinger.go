@@ -1,10 +1,10 @@
 // Package ping is CION's SCMP-echo application: the network's health probe and
 // the first resident of the pkg/apps namespace — a consumer of the path
-// library (pkg/scion) beside the control plane. A pinger resolves the freshest
-// path to a destination, sends a count of requests, and reports per-reply RTT,
-// the reply's path hops, and a loss summary; the responder that answers them
-// is the node's own, part of the core, so the pinger is the application's
-// whole surface.
+// library (pkg/libs/scion) beside the control plane. A pinger resolves the
+// freshest path to a destination, sends a count of requests, and reports
+// per-reply RTT, the reply's path hops, and a loss summary; the responder that
+// answers them is the node's own, part of the core, so the pinger is the
+// application's whole surface.
 package ping
 
 import (
@@ -17,9 +17,9 @@ import (
 	"github.com/scionproto/scion/pkg/addr"
 	spath "github.com/scionproto/scion/pkg/slayers/path/scion"
 
+	"github.com/fancl20/cion/pkg/libs/loops"
+	"github.com/fancl20/cion/pkg/libs/scion"
 	"github.com/fancl20/cion/pkg/libs/underlay"
-	"github.com/fancl20/cion/pkg/loops"
-	"github.com/fancl20/cion/pkg/scion"
 )
 
 // Config configures one ping run.

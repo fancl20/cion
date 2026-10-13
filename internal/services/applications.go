@@ -6,7 +6,7 @@ import (
 
 	"github.com/fancl20/cion/pkg/apps"
 	"github.com/fancl20/cion/pkg/controlplane"
-	"github.com/fancl20/cion/pkg/scion"
+	"github.com/fancl20/cion/pkg/libs/scion"
 	"github.com/fancl20/cion/pkg/trust"
 )
 

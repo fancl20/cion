@@ -6,8 +6,8 @@ import (
 
 	"github.com/scionproto/scion/pkg/addr"
 
-	"github.com/fancl20/cion/pkg/scion"
-	"github.com/fancl20/cion/pkg/segment"
+	"github.com/fancl20/cion/pkg/libs/scion"
+	"github.com/fancl20/cion/pkg/libs/segment"
 )
 
 // The route pick's hysteresis, code constants per ADR-0017's decision 17 — the

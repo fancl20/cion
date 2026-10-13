@@ -9,8 +9,8 @@ import (
 
 	"github.com/fancl20/cion/pkg/apps/wireguard"
 	wireguardbbolt "github.com/fancl20/cion/pkg/apps/wireguard/impl/bbolt"
+	"github.com/fancl20/cion/pkg/libs/scion"
 	"github.com/fancl20/cion/pkg/libs/underlay"
-	"github.com/fancl20/cion/pkg/scion"
 )
 
 // DefaultHostPort is the host-facing port's default, the WireGuard

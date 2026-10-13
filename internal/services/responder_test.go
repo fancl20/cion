@@ -7,7 +7,7 @@ import (
 
 	"github.com/scionproto/scion/pkg/addr"
 
-	"github.com/fancl20/cion/pkg/scion"
+	"github.com/fancl20/cion/pkg/libs/scion"
 )
 
 // TestResponderReleasesOnCancel checks the responder's stop: once its

@@ -14,8 +14,8 @@ import (
 	"github.com/scionproto/scion/pkg/addr"
 	"go.etcd.io/bbolt"
 
+	"github.com/fancl20/cion/pkg/libs/statefile"
 	"github.com/fancl20/cion/pkg/modules/links"
-	"github.com/fancl20/cion/pkg/statefile"
 )
 
 const (

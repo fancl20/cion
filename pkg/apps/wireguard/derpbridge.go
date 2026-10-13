@@ -18,7 +18,7 @@ import (
 	"tailscale.com/types/logger"
 	"tailscale.com/util/eventbus"
 
-	"github.com/fancl20/cion/pkg/loops"
+	"github.com/fancl20/cion/pkg/libs/loops"
 )
 
 // DERPConfig configures the node's relay presence: the address of the core's

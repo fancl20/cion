@@ -22,7 +22,7 @@ import (
 	spath "github.com/scionproto/scion/pkg/slayers/path/scion"
 	"golang.zx2c4.com/wireguard/conn"
 
-	"github.com/fancl20/cion/pkg/scion"
+	"github.com/fancl20/cion/pkg/libs/scion"
 )
 
 // bindBatchSize bounds the datagram batches the binds exchange with

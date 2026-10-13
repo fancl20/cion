@@ -14,10 +14,10 @@ import (
 	cppb "github.com/scionproto/scion/pkg/proto/control_plane"
 	spath "github.com/scionproto/scion/pkg/slayers/path/scion"
 
+	"github.com/fancl20/cion/pkg/libs/scion"
+	"github.com/fancl20/cion/pkg/libs/segment"
 	"github.com/fancl20/cion/pkg/modules/pathdb"
 	pathdbbbolt "github.com/fancl20/cion/pkg/modules/pathdb/impl/bbolt"
-	"github.com/fancl20/cion/pkg/scion"
-	"github.com/fancl20/cion/pkg/segment"
 )
 
 // lookupFixture is a lookup service over a path database with one up and one

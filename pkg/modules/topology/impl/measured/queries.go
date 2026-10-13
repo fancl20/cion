@@ -3,8 +3,8 @@ package measured
 import (
 	"time"
 
-	"github.com/fancl20/cion/pkg/scion"
-	"github.com/fancl20/cion/pkg/segment"
+	"github.com/fancl20/cion/pkg/libs/scion"
+	"github.com/fancl20/cion/pkg/libs/segment"
 )
 
 // The comparator's queries over the enumerated candidates — the questions

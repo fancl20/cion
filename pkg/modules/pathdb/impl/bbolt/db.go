@@ -16,8 +16,8 @@ import (
 
 	cppb "github.com/scionproto/scion/pkg/proto/control_plane"
 
+	"github.com/fancl20/cion/pkg/libs/statefile"
 	"github.com/fancl20/cion/pkg/modules/pathdb"
-	"github.com/fancl20/cion/pkg/statefile"
 )
 
 const bucketName = "segments"

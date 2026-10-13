@@ -23,9 +23,9 @@ import (
 
 	"github.com/scionproto/scion/pkg/addr"
 
-	"github.com/fancl20/cion/pkg/loops"
+	"github.com/fancl20/cion/pkg/libs/loops"
+	"github.com/fancl20/cion/pkg/libs/statefile"
 	"github.com/fancl20/cion/pkg/modules/enrollauth"
-	"github.com/fancl20/cion/pkg/statefile"
 )
 
 // botAPI is the Telegram Bot API's public base URL.

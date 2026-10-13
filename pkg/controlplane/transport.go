@@ -6,7 +6,7 @@
 // control endpoints are named by service destination, resolved through the
 // drafts' exchange wherever a stable underlay address is wanted; the SCION
 // socket and path composition the endpoint and the peer clients ride live
-// in the node's SCION library, pkg/scion, which this package consumes
+// in the node's SCION library, pkg/libs/scion, which this package consumes
 // beside any application.
 package controlplane
 

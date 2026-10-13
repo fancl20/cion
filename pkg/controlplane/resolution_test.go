@@ -10,7 +10,7 @@ import (
 	"github.com/scionproto/scion/pkg/proto/control_plane"
 	"google.golang.org/protobuf/proto"
 
-	"github.com/fancl20/cion/pkg/scion"
+	"github.com/fancl20/cion/pkg/libs/scion"
 	"github.com/fancl20/cion/pkg/webpki/webpkitest"
 )
 

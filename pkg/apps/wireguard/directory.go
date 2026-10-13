@@ -10,7 +10,7 @@ import (
 
 	"github.com/scionproto/scion/pkg/addr"
 
-	"github.com/fancl20/cion/pkg/loops"
+	"github.com/fancl20/cion/pkg/libs/loops"
 	"github.com/fancl20/cion/pkg/trust"
 )
 

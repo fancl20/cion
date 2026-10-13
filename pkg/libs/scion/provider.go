@@ -9,8 +9,8 @@ import (
 	"github.com/scionproto/scion/pkg/private/serrors"
 	spath "github.com/scionproto/scion/pkg/slayers/path/scion"
 
+	"github.com/fancl20/cion/pkg/libs/segment"
 	"github.com/fancl20/cion/pkg/modules/pathdb"
-	"github.com/fancl20/cion/pkg/segment"
 )
 
 // PathProvider composes up, core, and down segments into end-to-end SCION

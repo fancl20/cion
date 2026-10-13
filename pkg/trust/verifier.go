@@ -35,7 +35,7 @@ import (
 	"github.com/scionproto/scion/pkg/scrypto/cppki"
 	"github.com/scionproto/scion/pkg/scrypto/signed"
 
-	"github.com/fancl20/cion/pkg/expiring"
+	"github.com/fancl20/cion/pkg/libs/expiring"
 	"github.com/fancl20/cion/pkg/modules/trustdb"
 )
 
