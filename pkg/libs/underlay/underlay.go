@@ -14,8 +14,8 @@ import (
 // data plane's packet buffers and the SCION sockets' reads are this size.
 const BufferSize = 9000
 
-// ResolveAddrPort resolves a "host:port" address. IPv4 addresses in the
-// v4-mapped IPv6 form are normalized to plain IPv4.
+// ResolveAddrPort resolves a "host:port" address whose host names an address.
+// IPv4 addresses in the v4-mapped IPv6 form are normalized to plain IPv4.
 func ResolveAddrPort(s string) (netip.AddrPort, error) {
 	a, err := ResolveLocalAddr(s)
 	if err != nil {
@@ -24,9 +24,6 @@ func ResolveAddrPort(s string) (netip.AddrPort, error) {
 	ap := a.AddrPort()
 	if !ap.IsValid() {
 		return netip.AddrPort{}, fmt.Errorf("invalid address: %q", s)
-	}
-	if ap.Addr().Is4In6() {
-		ap = netip.AddrPortFrom(ap.Addr().Unmap(), ap.Port())
 	}
 	return ap, nil
 }
