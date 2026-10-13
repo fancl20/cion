@@ -68,7 +68,10 @@ func (f *recordingFetch) Fetch(
 	return resp, nil
 }
 
-func newLookupFixture(t *testing.T) *lookupFixture {
+// newLookupFixture serves lookups over a path database holding one up segment
+// from the core and a recording fetch answering for it; edit adjusts the
+// configuration before the service is built.
+func newLookupFixture(t *testing.T, edit ...func(*LookupConfig)) *lookupFixture {
 	t.Helper()
 	db, err := pathdbbbolt.New(filepath.Join(t.TempDir(), "path.db"), nil)
 	if err != nil {
@@ -89,12 +92,16 @@ func newLookupFixture(t *testing.T) *lookupFixture {
 			terminatedSegment(t, coreIATest, iaLineC, 3, now).PCB.PB,
 		},
 	}
-	lookup := NewLookupService()
-	lookup.IA = nodeIATest
-	lookup.DB = db
-	lookup.Cores = func(isd addr.ISD) []addr.IA { return []addr.IA{coreIATest} }
-	lookup.Fetch = fetch.Fetch
-	return &lookupFixture{db: db, lookup: lookup, fetch: fetch, now: now}
+	cfg := LookupConfig{
+		IA:    nodeIATest,
+		DB:    db,
+		Cores: func(isd addr.ISD) []addr.IA { return []addr.IA{coreIATest} },
+		Fetch: fetch.Fetch,
+	}
+	for _, e := range edit {
+		e(&cfg)
+	}
+	return &lookupFixture{db: db, lookup: NewLookupService(cfg), fetch: fetch, now: now}
 }
 
 // terminatedSegment builds a signed [core, end] segment fixture.
@@ -298,10 +305,11 @@ func TestLookupEmptyAnswerNotCached(t *testing.T) {
 // core, and a core whose dial fails — no route to it — answers nothing while
 // the other core's segments are still served, the failed ask left uncached.
 func TestLookupFetchesAskTheCoreTheyName(t *testing.T) {
-	fx := newLookupFixture(t)
-	fx.lookup.Cores = func(isd addr.ISD) []addr.IA {
-		return []addr.IA{coreIATest, iaCore2Test}
-	}
+	fx := newLookupFixture(t, func(cfg *LookupConfig) {
+		cfg.Cores = func(isd addr.ISD) []addr.IA {
+			return []addr.IA{coreIATest, iaCore2Test}
+		}
+	})
 	// A second origin's up segment makes the second core reachable too —
 	// the core expansion's source set.
 	up2 := terminatedSegment(t, iaCore2Test, nodeIATest, 4, fx.now)
@@ -384,9 +392,10 @@ func TestLookupFetchesAskTheCoreTheyName(t *testing.T) {
 // database and refuses a request whose source names the founder — the check
 // that keeps the per-core fetch honest.
 func TestLookupAuthoritativeServesCoreHandler(t *testing.T) {
-	fx := newLookupFixture(t)
-	fx.lookup.IsCore = true
-	fx.lookup.IA = iaCore2Test
+	fx := newLookupFixture(t, func(cfg *LookupConfig) {
+		cfg.IsCore = true
+		cfg.IA = iaCore2Test
+	})
 	ctx := context.Background()
 
 	// A request whose source names the founder is refused empty.
@@ -424,9 +433,10 @@ func TestLookupAuthoritativeServesCoreHandler(t *testing.T) {
 // source must be this core; core destinations are served from the core
 // segments, everything else from the down segments.
 func TestLookupCoreHandler(t *testing.T) {
-	fx := newLookupFixture(t)
-	fx.lookup.IsCore = true
-	fx.lookup.IA = coreIATest
+	fx := newLookupFixture(t, func(cfg *LookupConfig) {
+		cfg.IsCore = true
+		cfg.IA = coreIATest
+	})
 
 	// A request whose source is not this core is refused empty.
 	resp, err := fx.lookup.Segments(context.Background(),

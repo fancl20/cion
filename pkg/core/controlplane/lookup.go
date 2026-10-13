@@ -19,12 +19,8 @@ import (
 // so fresh registrations surface even though hop fields stay valid for hours.
 const lookupCacheTTL = time.Minute
 
-// LookupService implements the draft's segment-request handlers: the source-
-// AS handler of a non-core (Section 4.2.2) — up segments from the local path
-// database, core and down segments fetched from the core's control service
-// with expiry-aware caching, source wildcards expanded per Table 4 — and the
-// core handler (Section 4.2.3), which serves from the local database.
-type LookupService struct {
+// LookupConfig configures a LookupService.
+type LookupConfig struct {
 	// IA is the local ISD-AS.
 	IA addr.IA
 	// DB is the local path database.
@@ -39,6 +35,15 @@ type LookupService struct {
 	// the core the question is addressed to, and the source of the question
 	// is that core.
 	Fetch func(ctx context.Context, peer *scion.Addr, src, dst addr.IA) (*cppb.SegmentsResponse, error)
+}
+
+// LookupService implements the draft's segment-request handlers: the source-
+// AS handler of a non-core (Section 4.2.2) — up segments from the local path
+// database, core and down segments fetched from the core's control service
+// with expiry-aware caching, source wildcards expanded per Table 4 — and the
+// core handler (Section 4.2.3), which serves from the local database.
+type LookupService struct {
+	cfg LookupConfig
 
 	// cache holds fetched segments until the earliest of their expirations,
 	// capped by the cache TTL.
@@ -56,8 +61,8 @@ type lookupKey struct {
 }
 
 // NewLookupService returns a lookup service with an empty cache.
-func NewLookupService() *LookupService {
-	return &LookupService{cache: expiring.New[lookupKey, []*pathdb.Segment]()}
+func NewLookupService(cfg LookupConfig) *LookupService {
+	return &LookupService{cfg: cfg, cache: expiring.New[lookupKey, []*pathdb.Segment]()}
 }
 
 // Segments serves a segment request (draft Section 5).
@@ -96,7 +101,7 @@ func (s *LookupService) lookup(
 	src, dst addr.IA,
 ) []typedSegments {
 
-	if s.IsCore {
+	if s.cfg.IsCore {
 		return s.coreLookup(src, dst)
 	}
 	return s.sourceLookup(ctx, src, dst)
@@ -106,16 +111,16 @@ func (s *LookupService) lookup(
 // be this core; core and wildcard destinations are served from the core
 // segments, everything else from the down segments.
 func (s *LookupService) coreLookup(src, dst addr.IA) []typedSegments {
-	if !src.IsZero() && !src.Equal(s.IA) {
+	if !src.IsZero() && !src.Equal(s.cfg.IA) {
 		slog.Warn("Rejecting segment request whose source is not this core",
-			"src", src, "isd_as", s.IA)
+			"src", src, "isd_as", s.cfg.IA)
 		return nil
 	}
 	if s.isCore(dst) {
 		return []typedSegments{{Type: pathdb.SegmentTypeCore,
 			list: s.DBGet(pathdb.Query{Type: pathdb.SegmentTypeCore})}}
 	}
-	if dst.ISD() != s.IA.ISD() {
+	if dst.ISD() != s.cfg.IA.ISD() {
 		return nil
 	}
 	return []typedSegments{{Type: pathdb.SegmentTypeDown,
@@ -125,7 +130,7 @@ func (s *LookupService) coreLookup(src, dst addr.IA) []typedSegments {
 // sourceLookup implements the non-core source-AS handler (Section 4.2.2).
 func (s *LookupService) sourceLookup(ctx context.Context, src, dst addr.IA) []typedSegments {
 	var out []typedSegments
-	srcIsLocal := src.IsZero() || src.Equal(s.IA)
+	srcIsLocal := src.IsZero() || src.Equal(s.cfg.IA)
 	dstIsCore := s.isCore(dst)
 
 	if srcIsLocal && (dst.IsWildcard() || dstIsCore) {
@@ -175,7 +180,7 @@ func (s *LookupService) reachableCores() []addr.IA {
 // Down returns the down segments serving dst, fetching and caching them from
 // the core's control service as needed; the path provider composes them.
 func (s *LookupService) Down(ctx context.Context, dst addr.IA) []*pathdb.Segment {
-	if s.IsCore {
+	if s.cfg.IsCore {
 		return s.DBGet(pathdb.Query{Type: pathdb.SegmentTypeDown, DstIA: dst})
 	}
 	var down []*pathdb.Segment
@@ -202,7 +207,7 @@ func (s *LookupService) fetchCached(
 	}
 
 	peer := &scion.Addr{IA: core, Service: addr.SvcCS}
-	resp, err := s.Fetch(ctx, peer, core, dst)
+	resp, err := s.cfg.Fetch(ctx, peer, core, dst)
 	if err != nil {
 		slog.Warn("Fetching segments from core", "core", core, "dst", dst, "err", err)
 		return nil
@@ -239,7 +244,7 @@ func (s *LookupService) fetchCached(
 // is the shutdown racing the send, not corruption.
 func (s *LookupService) DBGet(q pathdb.Query) []*pathdb.Segment {
 	ctx := context.Background()
-	segs, err := s.DB.Get(ctx, q)
+	segs, err := s.cfg.DB.Get(ctx, q)
 	if err != nil {
 		slog.Error("Querying path database", "query", q, "err", err)
 		return nil
@@ -248,10 +253,10 @@ func (s *LookupService) DBGet(q pathdb.Query) []*pathdb.Segment {
 }
 
 func (s *LookupService) cores(isd addr.ISD) []addr.IA {
-	if s.Cores == nil {
+	if s.cfg.Cores == nil {
 		return nil
 	}
-	return s.Cores(isd)
+	return s.cfg.Cores(isd)
 }
 
 // isCore reports whether the IA names a core AS of its ISD.

@@ -418,13 +418,13 @@ func (n *node) buildBeaconing() error {
 	// core alike originate beacons, terminate core beacons, and serve the
 	// core's segment-lookup handler.
 	coreTier := n.cfg.role != trust.ASTypeNormal
-	lookup := controlplane.NewLookupService()
-	lookup.IA = n.ident.ia
-	lookup.DB = n.pathDB
-	lookup.IsCore = coreTier
-	lookup.Cores = cores
-	lookup.Fetch = n.peerClt.Segments
-	n.lookup = lookup
+	n.lookup = controlplane.NewLookupService(controlplane.LookupConfig{
+		IA:     n.ident.ia,
+		DB:     n.pathDB,
+		IsCore: coreTier,
+		Cores:  cores,
+		Fetch:  n.peerClt.Segments,
+	})
 
 	beacons := controlplane.NewBeaconStore()
 	n.beaconStore = beacons
@@ -451,7 +451,7 @@ func (n *node) buildBeaconing() error {
 	n.pathProvider = &scion.PathProvider{
 		IA:            n.ident.ia,
 		DB:            n.pathDB,
-		Lookup:        lookup.Down,
+		Lookup:        n.lookup.Down,
 		Bootstrap:     beaconer.BootstrapRoute,
 		Cores:         cores,
 		InterfaceDown: n.ifDown,
