@@ -3,9 +3,6 @@ package services
 import (
 	"context"
 	"crypto"
-	"crypto/ecdsa"
-	"crypto/elliptic"
-	"crypto/rand"
 	"crypto/x509"
 	"errors"
 	"path/filepath"
@@ -18,6 +15,7 @@ import (
 	"github.com/fancl20/cion/pkg/modules/trustdb"
 	"github.com/fancl20/cion/pkg/modules/trustdb/impl/bbolt"
 	"github.com/fancl20/cion/pkg/trust"
+	"github.com/fancl20/cion/pkg/trust/trusttest"
 )
 
 // coreRemote answers a node's trust fetches from its core's database,
@@ -76,41 +74,10 @@ func TestLinkEvidenceAsksTheCore(t *testing.T) {
 	iaStranger := addr.MustIAFrom(20, 0xff0000000005)
 
 	coreDB := openTrustDB(t)
-	keys, err := trust.LoadOrCreateCoreKeys(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	trc, err := trust.Genesis(ctx, coreDB, iaCore, keys)
-	if err != nil {
-		t.Fatal(err)
-	}
-	issuer, err := trust.NewIssuer(iaCore, keys, trc)
-	if err != nil {
-		t.Fatal(err)
-	}
-	// issue enrolls the ISD-AS at the core, which keeps the chain it issues.
-	issue := func(ia addr.IA) (crypto.Signer, []*x509.Certificate) {
-		t.Helper()
-		key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-		if err != nil {
-			t.Fatal(err)
-		}
-		csr, err := trust.CreateCSR(ia, key)
-		if err != nil {
-			t.Fatal(err)
-		}
-		chain, err := issuer.IssueChain(csr)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if _, err := coreDB.InsertChain(ctx, chain); err != nil {
-			t.Fatal(err)
-		}
-		return key, chain
-	}
-	nodeKey, nodeChain := issue(iaNode)
-	issue(iaPeer)
-	issue(iaLate)
+	founder := trusttest.NewFounder(t, coreDB, iaCore)
+	nodeKey, nodeChain := founder.Enroll(t, iaNode)
+	founder.Enroll(t, iaPeer)
+	founder.Enroll(t, iaLate)
 
 	nodeDB := openTrustDB(t)
 	remote := &coreRemote{db: coreDB}
@@ -139,7 +106,7 @@ func TestLinkEvidenceAsksTheCore(t *testing.T) {
 
 	// Enrolled, the node proves the peer by the chain its core issued, and
 	// the next read answers from the cache.
-	if _, err := nodeDB.InsertTRC(ctx, trc); err != nil {
+	if _, err := nodeDB.InsertTRC(ctx, founder.TRC); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := nodeDB.InsertChain(ctx, nodeChain); err != nil {

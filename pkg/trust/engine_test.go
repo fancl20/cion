@@ -19,6 +19,7 @@ import (
 	"github.com/fancl20/cion/pkg/modules/trustdb"
 	"github.com/fancl20/cion/pkg/modules/trustdb/impl/bbolt"
 	"github.com/fancl20/cion/pkg/trust"
+	"github.com/fancl20/cion/pkg/trust/trusttest"
 )
 
 var (
@@ -40,43 +41,17 @@ type engineFixture struct {
 
 func newEngineFixture(t *testing.T) *engineFixture {
 	t.Helper()
-	dir := t.TempDir()
-	db, err := bbolt.New(filepath.Join(dir, "trust.db"), nil)
+	db, err := bbolt.New(filepath.Join(t.TempDir(), "trust.db"), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	keys, err := trust.LoadOrCreateCoreKeys(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	trc, err := trust.Genesis(context.Background(), db, iaCore, keys)
-	if err != nil {
-		t.Fatal(err)
-	}
-	issuer, err := trust.NewIssuer(iaCore, keys, trc)
-	if err != nil {
-		t.Fatal(err)
-	}
-	asKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-	csr, err := trust.CreateCSR(iaNode, asKey)
-	if err != nil {
-		t.Fatal(err)
-	}
-	chain, err := issuer.IssueChain(csr)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := db.InsertChain(context.Background(), chain); err != nil {
-		t.Fatal(err)
-	}
-	engine := trust.NewEngine(iaNode, asKey, &trust.NetworkProvider{DB: db})
+	founder := trusttest.NewFounder(t, db, iaCore)
+	asKey, chain := founder.Enroll(t, iaNode)
 	return &engineFixture{
-		db: db, keys: keys, issuer: issuer, trc: trc, engine: engine,
-		asKey: asKey, chain: chain,
+		db: db, keys: founder.Keys, issuer: founder.Issuer, trc: founder.TRC,
+		engine: trust.NewEngine(iaNode, asKey, &trust.NetworkProvider{DB: db}),
+		asKey:  asKey, chain: chain,
 	}
 }
 

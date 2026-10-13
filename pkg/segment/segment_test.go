@@ -2,9 +2,6 @@ package segment_test
 
 import (
 	"context"
-	"crypto/ecdsa"
-	"crypto/elliptic"
-	"crypto/rand"
 	"hash"
 	"path/filepath"
 	"testing"
@@ -24,6 +21,7 @@ import (
 	"github.com/fancl20/cion/pkg/modules/trustdb/impl/bbolt"
 	"github.com/fancl20/cion/pkg/segment"
 	"github.com/fancl20/cion/pkg/trust"
+	"github.com/fancl20/cion/pkg/trust/trusttest"
 )
 
 var (
@@ -48,53 +46,19 @@ func macFactory() func() hash.Hash {
 type segFixture struct {
 	db      trustdb.DB
 	engines map[addr.IA]*trust.Engine
-	keys    map[addr.IA]*ecdsa.PrivateKey
 }
 
 func newSegFixture(t *testing.T, ias ...addr.IA) *segFixture {
 	t.Helper()
-	dir := t.TempDir()
-	db, err := bbolt.New(filepath.Join(dir, "trust.db"), nil)
+	db, err := bbolt.New(filepath.Join(t.TempDir(), "trust.db"), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	coreKeys, err := trust.LoadOrCreateCoreKeys(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	trc, err := trust.Genesis(context.Background(), db, ias[0], coreKeys)
-	if err != nil {
-		t.Fatal(err)
-	}
-	issuer, err := trust.NewIssuer(ias[0], coreKeys, trc)
-	if err != nil {
-		t.Fatal(err)
-	}
-	f := &segFixture{
-		db:      db,
-		engines: make(map[addr.IA]*trust.Engine),
-		keys:    make(map[addr.IA]*ecdsa.PrivateKey),
-	}
-	provider := &trust.NetworkProvider{DB: db}
+	founder := trusttest.NewFounder(t, db, ias[0])
+	f := &segFixture{db: db, engines: make(map[addr.IA]*trust.Engine)}
 	for _, ia := range ias {
-		key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-		if err != nil {
-			t.Fatal(err)
-		}
-		csr, err := trust.CreateCSR(ia, key)
-		if err != nil {
-			t.Fatal(err)
-		}
-		chain, err := issuer.IssueChain(csr)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if _, err := db.InsertChain(context.Background(), chain); err != nil {
-			t.Fatal(err)
-		}
-		f.keys[ia] = key
-		f.engines[ia] = trust.NewEngine(ia, key, provider)
+		f.engines[ia] = founder.Engine(t, ia)
 	}
 	return f
 }

@@ -16,6 +16,7 @@ import (
 	"github.com/fancl20/cion/pkg/peeria"
 	"github.com/fancl20/cion/pkg/scion"
 	"github.com/fancl20/cion/pkg/trust"
+	"github.com/fancl20/cion/pkg/trust/trusttest"
 	votingv1 "github.com/fancl20/cion/proto/voting/v1"
 	votingv1connect "github.com/fancl20/cion/proto/voting/v1/votingv1connect"
 )
@@ -93,21 +94,12 @@ func submit(
 // mattering to these tests.
 func fixtureTRC(t *testing.T) cppki.SignedTRC {
 	t.Helper()
-	dir := t.TempDir()
-	db, err := trustbbolt.New(filepath.Join(dir, "trust.db"), nil)
+	db, err := trustbbolt.New(filepath.Join(t.TempDir(), "trust.db"), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	keys, err := trust.LoadOrCreateCoreKeys(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	trc, err := trust.Genesis(context.Background(), db, coreIA, keys)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return trc
+	return trusttest.NewFounder(t, db, coreIA).TRC
 }
 
 // TestSubmitHandsToDecision checks the application's one job: a submission
