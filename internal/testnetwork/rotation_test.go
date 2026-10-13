@@ -23,11 +23,11 @@ import (
 	"github.com/scionproto/scion/pkg/scrypto/cppki"
 
 	"github.com/fancl20/cion/internal/services"
+	"github.com/fancl20/cion/pkg/core/trust"
+	"github.com/fancl20/cion/pkg/core/webpki/webpkitest"
 	"github.com/fancl20/cion/pkg/libs/statefile"
 	"github.com/fancl20/cion/pkg/modules/trustdb"
 	trustbbolt "github.com/fancl20/cion/pkg/modules/trustdb/impl/bbolt"
-	"github.com/fancl20/cion/pkg/trust"
-	"github.com/fancl20/cion/pkg/webpki/webpkitest"
 )
 
 // seedValidity is the pre-seeded material's lifetime: short enough to sit

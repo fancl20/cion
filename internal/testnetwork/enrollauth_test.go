@@ -13,10 +13,10 @@ import (
 	"time"
 
 	"github.com/fancl20/cion/internal/services"
+	"github.com/fancl20/cion/pkg/core/trust"
+	"github.com/fancl20/cion/pkg/core/webpki/webpkitest"
 	"github.com/fancl20/cion/pkg/modules/links"
 	"github.com/fancl20/cion/pkg/modules/trustdb"
-	"github.com/fancl20/cion/pkg/trust"
-	"github.com/fancl20/cion/pkg/webpki/webpkitest"
 )
 
 // operatorChatToken is the telegram spec the labs pass as

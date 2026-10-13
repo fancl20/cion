@@ -18,8 +18,10 @@ import (
 	"github.com/fancl20/cion/internal/supervise"
 	"github.com/fancl20/cion/pkg/apps"
 	"github.com/fancl20/cion/pkg/apps/voting"
-	"github.com/fancl20/cion/pkg/controlplane"
-	"github.com/fancl20/cion/pkg/dataplane"
+	"github.com/fancl20/cion/pkg/core/controlplane"
+	"github.com/fancl20/cion/pkg/core/dataplane"
+	"github.com/fancl20/cion/pkg/core/trust"
+	"github.com/fancl20/cion/pkg/core/webpki"
 	"github.com/fancl20/cion/pkg/libs/scion"
 	"github.com/fancl20/cion/pkg/modules/links"
 	"github.com/fancl20/cion/pkg/modules/pathdb"
@@ -27,8 +29,6 @@ import (
 	filesource "github.com/fancl20/cion/pkg/modules/topology/impl/file"
 	measured "github.com/fancl20/cion/pkg/modules/topology/impl/measured"
 	"github.com/fancl20/cion/pkg/modules/trustdb"
-	"github.com/fancl20/cion/pkg/trust"
-	"github.com/fancl20/cion/pkg/webpki"
 )
 
 // node is the fully wired CION node: data plane generations, the control

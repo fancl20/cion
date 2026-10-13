@@ -9,7 +9,7 @@ import (
 
 	"github.com/scionproto/scion/pkg/addr"
 
-	"github.com/fancl20/cion/pkg/dataplane"
+	"github.com/fancl20/cion/pkg/core/dataplane"
 )
 
 const (

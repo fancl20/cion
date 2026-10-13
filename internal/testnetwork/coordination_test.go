@@ -17,7 +17,7 @@ import (
 	"github.com/fancl20/cion/internal/services"
 	"github.com/fancl20/cion/pkg/apps"
 	"github.com/fancl20/cion/pkg/apps/wireguard"
-	"github.com/fancl20/cion/pkg/webpki/webpkitest"
+	"github.com/fancl20/cion/pkg/core/webpki/webpkitest"
 )
 
 // TailnetRange is the overlay's host space, mirrored from the application.

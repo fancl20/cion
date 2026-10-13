@@ -17,7 +17,7 @@ import (
 	"github.com/scionproto/scion/pkg/addr"
 	"golang.zx2c4.com/wireguard/device"
 
-	"github.com/fancl20/cion/pkg/controlplane"
+	"github.com/fancl20/cion/pkg/core/controlplane"
 	"github.com/fancl20/cion/pkg/libs/loops"
 	"github.com/fancl20/cion/pkg/libs/scion"
 	wireguardv1connect "github.com/fancl20/cion/proto/wireguard/v1/wireguardv1connect"

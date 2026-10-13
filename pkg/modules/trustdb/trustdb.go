@@ -17,7 +17,7 @@
 
 // Package trustdb is the trust material database: where trust material —
 // the TRC and certificate chains — persists, an implementation that
-// could differ. The engine that verifies and issues stays pkg/trust;
+// could differ. The engine that verifies and issues stays pkg/core/trust;
 // this is the seam beneath it.
 //
 // Kind: storage — bound by the assembly, which opens the implementation

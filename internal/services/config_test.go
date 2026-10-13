@@ -6,8 +6,8 @@ import (
 	"testing"
 
 	"github.com/fancl20/cion/pkg/apps"
-	"github.com/fancl20/cion/pkg/trust"
-	"github.com/fancl20/cion/pkg/webpki/webpkitest"
+	"github.com/fancl20/cion/pkg/core/trust"
+	"github.com/fancl20/cion/pkg/core/webpki/webpkitest"
 )
 
 // nodeConfig builds a minimal valid run-argument set for the validation and

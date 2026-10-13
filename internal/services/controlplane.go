@@ -17,7 +17,9 @@ import (
 
 	"github.com/fancl20/cion/internal/supervise"
 	"github.com/fancl20/cion/pkg/apps/voting"
-	"github.com/fancl20/cion/pkg/controlplane"
+	"github.com/fancl20/cion/pkg/core/controlplane"
+	"github.com/fancl20/cion/pkg/core/trust"
+	"github.com/fancl20/cion/pkg/core/webpki"
 	"github.com/fancl20/cion/pkg/libs/scion"
 	"github.com/fancl20/cion/pkg/modules/links"
 	linkbbolt "github.com/fancl20/cion/pkg/modules/links/impl/bbolt"
@@ -25,8 +27,6 @@ import (
 	pathdbbbolt "github.com/fancl20/cion/pkg/modules/pathdb/impl/bbolt"
 	"github.com/fancl20/cion/pkg/modules/topology"
 	trustbbolt "github.com/fancl20/cion/pkg/modules/trustdb/impl/bbolt"
-	"github.com/fancl20/cion/pkg/trust"
-	"github.com/fancl20/cion/pkg/webpki"
 )
 
 // setupControlPlane brings up the node's control plane, in phases: the state

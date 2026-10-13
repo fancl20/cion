@@ -286,12 +286,12 @@ func TestWalkFixtures(t *testing.T) {
 func TestImportRuleFixtures(t *testing.T) {
 	const impl = "github.com/fancl20/cion/pkg/modules/m/impl/bbolt"
 	listing := map[string]*listPkg{
-		"github.com/fancl20/cion/internal/services": {Imports: []string{impl}},
-		"github.com/fancl20/cion/pkg/controlplane":  {Imports: []string{impl}},
+		"github.com/fancl20/cion/internal/services":     {Imports: []string{impl}},
+		"github.com/fancl20/cion/pkg/core/controlplane": {Imports: []string{impl}},
 	}
 	problems := importProblems(impl, listing)
 	if len(problems) != 1 || !strings.Contains(problems[0],
-		"github.com/fancl20/cion/pkg/controlplane") {
+		"github.com/fancl20/cion/pkg/core/controlplane") {
 
 		t.Errorf("problems = %v, want exactly the control plane's import "+
 			"flagged", problems)

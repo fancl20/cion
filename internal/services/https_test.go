@@ -11,8 +11,8 @@ import (
 	"github.com/fancl20/cion/pkg/apps"
 	"github.com/fancl20/cion/pkg/apps/coordination"
 	"github.com/fancl20/cion/pkg/apps/wireguard"
-	"github.com/fancl20/cion/pkg/webpki"
-	"github.com/fancl20/cion/pkg/webpki/webpkitest"
+	"github.com/fancl20/cion/pkg/core/webpki"
+	"github.com/fancl20/cion/pkg/core/webpki/webpkitest"
 )
 
 // staticCertMgr prepares the static-file identity the bind tests stand on.

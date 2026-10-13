@@ -9,9 +9,9 @@ import (
 	"connectrpc.com/connect"
 	"github.com/scionproto/scion/pkg/scrypto/cppki"
 
-	"github.com/fancl20/cion/pkg/controlplane"
+	"github.com/fancl20/cion/pkg/core/controlplane"
+	"github.com/fancl20/cion/pkg/core/trust"
 	"github.com/fancl20/cion/pkg/libs/scion"
-	"github.com/fancl20/cion/pkg/trust"
 	votingv1 "github.com/fancl20/cion/proto/voting/v1"
 	votingv1connect "github.com/fancl20/cion/proto/voting/v1/votingv1connect"
 )

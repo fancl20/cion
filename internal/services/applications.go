@@ -5,9 +5,9 @@ import (
 	"net/http"
 
 	"github.com/fancl20/cion/pkg/apps"
-	"github.com/fancl20/cion/pkg/controlplane"
+	"github.com/fancl20/cion/pkg/core/controlplane"
+	"github.com/fancl20/cion/pkg/core/trust"
 	"github.com/fancl20/cion/pkg/libs/scion"
-	"github.com/fancl20/cion/pkg/trust"
 )
 
 // setupApplications constructs the applications resolve selected, in table

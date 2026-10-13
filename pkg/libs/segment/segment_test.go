@@ -17,11 +17,11 @@ import (
 	spath "github.com/scionproto/scion/pkg/slayers/path/scion"
 	"google.golang.org/protobuf/proto"
 
+	"github.com/fancl20/cion/pkg/core/trust"
+	"github.com/fancl20/cion/pkg/core/trust/trusttest"
 	"github.com/fancl20/cion/pkg/libs/segment"
 	"github.com/fancl20/cion/pkg/modules/trustdb"
 	"github.com/fancl20/cion/pkg/modules/trustdb/impl/bbolt"
-	"github.com/fancl20/cion/pkg/trust"
-	"github.com/fancl20/cion/pkg/trust/trusttest"
 )
 
 var (

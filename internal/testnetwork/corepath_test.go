@@ -7,8 +7,8 @@ import (
 	"github.com/scionproto/scion/pkg/scrypto/cppki"
 
 	"github.com/fancl20/cion/internal/services"
+	"github.com/fancl20/cion/pkg/core/webpki/webpkitest"
 	"github.com/fancl20/cion/pkg/modules/pathdb"
-	"github.com/fancl20/cion/pkg/webpki/webpkitest"
 )
 
 // TestPathLayerServesTwoCores is the path seam's integration proof: a

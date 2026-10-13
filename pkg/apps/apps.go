@@ -19,9 +19,9 @@ import (
 	"github.com/scionproto/scion/pkg/addr"
 
 	"github.com/fancl20/cion/pkg/apps/voting"
+	"github.com/fancl20/cion/pkg/core/trust"
 	"github.com/fancl20/cion/pkg/libs/scion"
 	"github.com/fancl20/cion/pkg/modules/enrollauth"
-	"github.com/fancl20/cion/pkg/trust"
 )
 
 // Application is the seam a resident application assembles through: Run

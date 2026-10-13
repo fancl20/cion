@@ -6,8 +6,8 @@ import (
 	"net"
 	"net/http"
 
-	"github.com/fancl20/cion/pkg/trust"
-	"github.com/fancl20/cion/pkg/webpki"
+	"github.com/fancl20/cion/pkg/core/trust"
+	"github.com/fancl20/cion/pkg/core/webpki"
 )
 
 // assembleHTTPS binds the node's HTTPS server: the one server that holds

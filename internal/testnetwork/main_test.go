@@ -6,7 +6,7 @@ import (
 
 	"tailscale.com/net/netns"
 
-	"github.com/fancl20/cion/pkg/webpki/webpkitest"
+	"github.com/fancl20/cion/pkg/core/webpki/webpkitest"
 )
 
 // packageWebPKI is the package's certificate authority, minted by TestMain

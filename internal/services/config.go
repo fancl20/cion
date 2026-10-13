@@ -8,9 +8,9 @@ import (
 	"time"
 
 	"github.com/fancl20/cion/pkg/apps"
+	"github.com/fancl20/cion/pkg/core/trust"
 	"github.com/fancl20/cion/pkg/libs/underlay"
 	"github.com/fancl20/cion/pkg/modules/enrollauth"
-	"github.com/fancl20/cion/pkg/trust"
 )
 
 // Default run arguments: a restart needs none of them.

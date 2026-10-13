@@ -19,7 +19,7 @@ import (
 	"tailscale.com/types/logger"
 
 	"github.com/fancl20/cion/pkg/apps/wireguard/impl/dbtest"
-	"github.com/fancl20/cion/pkg/webpki/webpkitest"
+	"github.com/fancl20/cion/pkg/core/webpki/webpkitest"
 )
 
 // TestKeysPersist checks the load-or-create pattern: a first read

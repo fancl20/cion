@@ -25,8 +25,8 @@ import (
 
 	"github.com/fancl20/cion/pkg/apps/wireguard"
 	"github.com/fancl20/cion/pkg/apps/wireguard/impl/dbtest"
+	"github.com/fancl20/cion/pkg/core/webpki/webpkitest"
 	"github.com/fancl20/cion/pkg/modules/enrollauth"
-	"github.com/fancl20/cion/pkg/webpki/webpkitest"
 )
 
 // serveCoordination serves the application's handler on an externally

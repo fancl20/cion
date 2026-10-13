@@ -12,7 +12,7 @@ import (
 	"github.com/scionproto/scion/pkg/addr"
 	spath "github.com/scionproto/scion/pkg/slayers/path/scion"
 
-	"github.com/fancl20/cion/pkg/controlplane"
+	"github.com/fancl20/cion/pkg/core/controlplane"
 	"github.com/fancl20/cion/pkg/libs/scion"
 	wireguardv1 "github.com/fancl20/cion/proto/wireguard/v1"
 	wireguardv1connect "github.com/fancl20/cion/proto/wireguard/v1/wireguardv1connect"

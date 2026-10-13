@@ -8,9 +8,9 @@ import (
 	"time"
 
 	"github.com/fancl20/cion/internal/services"
+	"github.com/fancl20/cion/pkg/core/webpki/webpkitest"
 	"github.com/fancl20/cion/pkg/modules/links"
 	"github.com/fancl20/cion/pkg/modules/topology/impl/measured"
-	"github.com/fancl20/cion/pkg/webpki/webpkitest"
 )
 
 // The lab's filter groups, by priority: the cut overrides the blackhole,

@@ -2,7 +2,7 @@
 // node's own assembly, services.BootApp, on the loopback hosts the labs
 // draw, beside the fixtures they share — the address draws and the polls;
 // the test WebPKI standing in for the core's certificate authority comes
-// from pkg/webpki/webpkitest. The labs import the node's assembly, so no
+// from pkg/core/webpki/webpkitest. The labs import the node's assembly, so no
 // package under pkg can host them.
 package testnetwork
 

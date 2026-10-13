@@ -1,0 +1,219 @@
+// Package webpki is the bootstrap channel: the ACME certificate management of
+// the core's endpoint and the WebPKI-verified client of the core's control
+// endpoint, serving the enrollment lifecycle from outside the drafts' subset.
+// It imports the SCION library and the trust material, never the control
+// plane.
+package webpki
+
+import (
+	"context"
+	"crypto"
+	"crypto/tls"
+	"crypto/x509"
+	"errors"
+	"fmt"
+	"net/http"
+	"net/netip"
+	"strings"
+	"time"
+
+	"connectrpc.com/connect"
+	"github.com/quic-go/quic-go"
+	"github.com/quic-go/quic-go/http3"
+	cppb "github.com/scionproto/scion/pkg/proto/control_plane"
+	"github.com/scionproto/scion/pkg/proto/control_plane/v1/control_planeconnect"
+	"github.com/scionproto/scion/pkg/scrypto/cppki"
+	"google.golang.org/protobuf/types/known/timestamppb"
+
+	"github.com/fancl20/cion/pkg/core/trust"
+	"github.com/fancl20/cion/pkg/libs/scion"
+	"github.com/fancl20/cion/pkg/modules/trustdb"
+)
+
+// client is the ConnectRPC client of the trust services the channel reaches:
+// the drafts' RPC machinery consumed as a library, the form the control
+// endpoint's own client takes beside the services this one does not ride.
+type client struct {
+	control_planeconnect.TrustMaterialServiceClient
+	control_planeconnect.ChainRenewalServiceClient
+}
+
+// newClient builds the trust client over the HTTP client at the base URL.
+func newClient(clt connect.HTTPClient, baseURL string) *client {
+	baseURL = strings.TrimRight(baseURL, "/")
+	return &client{
+		TrustMaterialServiceClient: control_planeconnect.NewTrustMaterialServiceClient(clt, baseURL),
+		ChainRenewalServiceClient:  control_planeconnect.NewChainRenewalServiceClient(clt, baseURL),
+	}
+}
+
+// CoreClient resolves trust material from the core's control endpoint:
+// ConnectRPC over HTTP/3 (QUIC) riding the SCION network, TLS-verified
+// end-to-end against the core's domain. The domain is a TLS identity, not a
+// locator; the locator supplies the SCION route — the core's control service
+// as a service destination on the one-hop path, or the reversed up segment
+// the path provider composes.
+type CoreClient struct {
+	conn    *scion.Conn
+	qclt    *quic.Transport
+	clt     *client
+	locator func() *scion.Addr
+	// resolve maps a service-destined locator to the QUIC transport address
+	// the drafts' service resolution returns; nil dials the locator as named.
+	resolve func(ctx context.Context, peer *scion.Addr) (netip.AddrPort, error)
+}
+
+// CoreClientConfig configures a CoreClient.
+type CoreClientConfig struct {
+	// Domain is the core's DNS domain, verified as the TLS server name.
+	Domain string
+	// Conn is the SCION connection QUIC rides to the core.
+	Conn *scion.Conn
+	// RootCAs anchors the TLS verification; nil means the system roots.
+	RootCAs *x509.CertPool
+	// Locator resolves the core's SCION address: its IA, the destination — the
+	// core's control service as a service destination, or an underlay address —
+	// and path — the one-hop path when the core is a neighbor, else the reversed
+	// freshest up segment. It is consulted at dial time and only then, so later
+	// dials pick up fresh paths and a locator taking turns among cores turns
+	// once per dial, and a nil address means the locator is unknown yet.
+	Locator func() *scion.Addr
+	// ResolveService resolves a service-destined locator through the drafts'
+	// service discovery (control plane draft, Section 5): the request the
+	// control plane's own exchange answers with the service's QUIC
+	// transport address, which the dial then uses. Nil dials a
+	// service-destined locator as named, the receiving router delivering to
+	// the registered service.
+	ResolveService func(ctx context.Context, peer *scion.Addr) (netip.AddrPort, error)
+}
+
+// NewCoreClient dials the core's control endpoint. The client fails on use,
+// not on creation: until the locator names a reachable core, requests fail
+// fast and are retried by the caller.
+func NewCoreClient(cfg CoreClientConfig) (*CoreClient, error) {
+	c := &CoreClient{conn: cfg.Conn, locator: cfg.Locator, resolve: cfg.ResolveService}
+	c.qclt = &quic.Transport{Conn: cfg.Conn}
+
+	// QUIC datagrams are capped so a datagram wrapped in a SCION header
+	// still fits a standard 1500-byte MTU, and idle connections die soon
+	// enough that re-dials pick up fresh paths: keep-alives sustain the
+	// healthy ones while the idle timeout retires one whose route went dark,
+	// the next dial taking the locator's current route.
+	quicConf := &quic.Config{
+		InitialPacketSize: 1200,
+		MaxIdleTimeout:    5 * time.Second,
+		KeepAlivePeriod:   2 * time.Second,
+	}
+	tlsConf := &tls.Config{
+		ServerName: cfg.Domain,
+		RootCAs:    cfg.RootCAs,
+		MinVersion: tls.VersionTLS13,
+	}
+	h3t := &http3.Transport{
+		TLSClientConfig: tlsConf,
+		QUICConfig:      quicConf,
+		// The request URL carries the domain, a TLS identity; the dialer
+		// routes to the SCION locator of the core.
+		Dial: func(ctx context.Context, _ string, tlsCfg *tls.Config,
+			cfg *quic.Config) (*quic.Conn, error) {
+
+			peer := c.locator()
+			if peer == nil {
+				return nil, errors.New("core locator unknown")
+			}
+			if peer.Service != 0 && c.resolve != nil {
+				// The drafts' own step: the service resolution answers the
+				// address the QUIC connection then uses (control plane
+				// draft, Section 5).
+				resolved, err := c.resolve(ctx, peer)
+				if err != nil {
+					return nil, fmt.Errorf("resolving the core's control service: %w", err)
+				}
+				peer = &scion.Addr{
+					IA:      peer.IA,
+					Addr:    resolved,
+					IfID:    peer.IfID,
+					Path:    peer.Path,
+					Service: 0,
+				}
+			}
+			return c.qclt.Dial(ctx, peer, tlsCfg, cfg)
+		},
+	}
+	c.clt = newClient(&http.Client{Transport: h3t}, "https://"+cfg.Domain)
+	return c, nil
+}
+
+// Close releases the underlying QUIC transport.
+func (c *CoreClient) Close() error {
+	return c.qclt.Close()
+}
+
+// TRC fetches the signed TRC with the given ID.
+func (c *CoreClient) TRC(ctx context.Context, id cppki.TRCID) (cppki.SignedTRC, error) {
+	resp, err := c.clt.TRC(ctx, connect.NewRequest(&cppb.TRCRequest{
+		Isd:    uint32(id.ISD),
+		Base:   uint64(id.Base),
+		Serial: uint64(id.Serial),
+	}))
+	if err != nil {
+		return cppki.SignedTRC{}, err
+	}
+	return cppki.DecodeSignedTRC(resp.Msg.Trc)
+}
+
+// Chains fetches the chains matching the query.
+func (c *CoreClient) Chains(
+	ctx context.Context,
+	q trustdb.ChainQuery,
+) ([][]*x509.Certificate, error) {
+
+	req := &cppb.ChainsRequest{
+		IsdAs:        uint64(q.IA),
+		SubjectKeyId: q.SubjectKeyID,
+	}
+	if !q.Validity.NotBefore.IsZero() {
+		req.AtLeastValidSince = timestamppb.New(q.Validity.NotBefore)
+	}
+	if !q.Validity.NotAfter.IsZero() {
+		req.AtLeastValidUntil = timestamppb.New(q.Validity.NotAfter)
+	}
+	resp, err := c.clt.Chains(ctx, connect.NewRequest(req))
+	if err != nil {
+		return nil, err
+	}
+	var out [][]*x509.Certificate
+	for _, chain := range resp.Msg.Chains {
+		asCert, err := x509.ParseCertificate(chain.AsCert)
+		if err != nil {
+			return nil, fmt.Errorf("parsing AS certificate: %w", err)
+		}
+		caCert, err := x509.ParseCertificate(chain.CaCert)
+		if err != nil {
+			return nil, fmt.Errorf("parsing CA certificate: %w", err)
+		}
+		out = append(out, []*x509.Certificate{asCert, caCert})
+	}
+	return out, nil
+}
+
+// RenewChain requests a chain for the CSR. The CMS wrapper is signed by the
+// subject key itself, the proof of possession a first-issuance request
+// offers.
+func (c *CoreClient) RenewChain(
+	ctx context.Context,
+	csr *x509.CertificateRequest,
+	key crypto.Signer,
+) ([]*x509.Certificate, error) {
+
+	cmsReq, err := trust.BuildRenewalRequest(csr, key)
+	if err != nil {
+		return nil, fmt.Errorf("building renewal request: %w", err)
+	}
+	resp, err := c.clt.ChainRenewal(ctx, connect.NewRequest(
+		&cppb.ChainRenewalRequest{CmsSignedRequest: cmsReq}))
+	if err != nil {
+		return nil, err
+	}
+	return trust.ParseRenewalResponse(resp.Msg.CmsSignedResponse)
+}

@@ -9,9 +9,9 @@ import (
 	"github.com/scionproto/scion/pkg/addr"
 	"github.com/scionproto/scion/pkg/scrypto/cppki"
 
+	"github.com/fancl20/cion/pkg/core/webpki/webpkitest"
 	"github.com/fancl20/cion/pkg/modules/pathdb"
 	"github.com/fancl20/cion/pkg/modules/trustdb"
-	"github.com/fancl20/cion/pkg/webpki/webpkitest"
 )
 
 // TestLineTopology is the line topology's integration test: a three-node
@@ -187,7 +187,7 @@ func TestHostSlotPool(t *testing.T) {
 	}
 }
 
-// The test topologies' ISD-ASes, matching pkg/controlplane's.
+// The test topologies' ISD-ASes, matching pkg/core/controlplane's.
 var (
 	coreIA  = addr.MustIAFrom(20, 0xff0000000001)
 	nodeIA  = addr.MustIAFrom(20, 0xff0000000002)

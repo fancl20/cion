@@ -17,7 +17,7 @@ import (
 // Echo is one SCMP echo message. The identifier is port-shaped: a request
 // carries its sender's underlay port, so the data plane delivers the reply —
 // which repeats the request's identifier — back to the requesting socket
-// (pkg/dataplane/dataplain.go's getDstPortSCMP).
+// (pkg/core/dataplane/dataplane.go's getDstPortSCMP).
 type Echo struct {
 	// Reply reports an echo reply; false is an echo request.
 	Reply bool

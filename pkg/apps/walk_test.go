@@ -190,7 +190,7 @@ func TestImportRuleFixtures(t *testing.T) {
 	listing := map[string]*listPkg{
 		roofPath + "/wireguard": {Imports: []string{
 			roofPath,
-			moduleRoot + "/pkg/controlplane",
+			moduleRoot + "/pkg/core/controlplane",
 		}},
 		roofPath + "/socks": {Imports: []string{
 			moduleRoot + "/internal/services",

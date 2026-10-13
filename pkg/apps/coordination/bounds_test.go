@@ -17,7 +17,7 @@ import (
 	"tailscale.com/util/zstdframe"
 
 	"github.com/fancl20/cion/pkg/apps/wireguard/impl/dbtest"
-	"github.com/fancl20/cion/pkg/webpki/webpkitest"
+	"github.com/fancl20/cion/pkg/core/webpki/webpkitest"
 )
 
 // streamMap opens one streaming map request over the noise channel and reads

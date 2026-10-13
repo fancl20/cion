@@ -13,8 +13,8 @@ import (
 	"tailscale.com/types/key"
 
 	"github.com/fancl20/cion/pkg/apps/wireguard"
+	"github.com/fancl20/cion/pkg/core/webpki/webpkitest"
 	"github.com/fancl20/cion/pkg/modules/enrollauth"
-	"github.com/fancl20/cion/pkg/webpki/webpkitest"
 )
 
 // askAuthorizer records the facts it is asked with and answers as told,

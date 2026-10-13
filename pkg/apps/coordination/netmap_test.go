@@ -11,7 +11,7 @@ import (
 
 	"github.com/fancl20/cion/pkg/apps/wireguard"
 	"github.com/fancl20/cion/pkg/apps/wireguard/impl/dbtest"
-	"github.com/fancl20/cion/pkg/webpki/webpkitest"
+	"github.com/fancl20/cion/pkg/core/webpki/webpkitest"
 )
 
 // TestNetmapHoldsOnePeer checks the map the registry builds for one host:

@@ -11,10 +11,10 @@ import (
 	"github.com/scionproto/scion/pkg/scrypto"
 
 	"github.com/fancl20/cion/pkg/apps/ping"
+	"github.com/fancl20/cion/pkg/core/webpki/webpkitest"
 	"github.com/fancl20/cion/pkg/libs/scion"
 	"github.com/fancl20/cion/pkg/libs/segment"
 	"github.com/fancl20/cion/pkg/modules/pathdb"
-	"github.com/fancl20/cion/pkg/webpki/webpkitest"
 )
 
 // TestPingForkTopology is the end-to-end proof of the path library's first
