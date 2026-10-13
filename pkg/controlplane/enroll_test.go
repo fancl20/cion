@@ -15,15 +15,16 @@ import (
 	"github.com/fancl20/cion/pkg/modules/trustdb"
 	"github.com/fancl20/cion/pkg/scion"
 	"github.com/fancl20/cion/pkg/trust"
+	"github.com/fancl20/cion/pkg/trust/trusttest"
 	"github.com/fancl20/cion/pkg/webpki"
 	"github.com/fancl20/cion/pkg/webpki/webpkitest"
 )
 
 // serveCore brings up the core's control endpoint: trust stack, TLS
 // certificate, HTTP/3 over the SCION connection.
-func serveCore(t *testing.T, n *testNode, wpki *webpkitest.CA) *trustFixture {
+func serveCore(t *testing.T, n *testNode, wpki *webpkitest.CA) *trusttest.Founder {
 	t.Helper()
-	f := newTrustFixture(t)
+	f := newFounder(t)
 
 	certMgr, err := webpki.PrepareTLSCert(webpki.TLSCertConfig{
 		Domain:   webpkitest.Domain,
@@ -34,7 +35,7 @@ func serveCore(t *testing.T, n *testNode, wpki *webpkitest.CA) *trustFixture {
 		t.Fatal(err)
 	}
 	tlsConf := certMgr.TLSConfig()
-	svc := &TrustService{DB: f.db, Issuer: f.issuer}
+	svc := &TrustService{DB: f.DB, Issuer: f.Issuer}
 	// The server outlives the test's own thread — it serves until the test's
 	// context ends, just before cleanup — so it reports through the package
 	// logger and its cleanup waits for the exit.
@@ -123,8 +124,8 @@ func TestEnrollmentTwoNodes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("node TRC: %v", err)
 	}
-	if trc.TRC.ID != f.trc.TRC.ID {
-		t.Errorf("node TRC %v, core TRC %v", trc.TRC.ID, f.trc.TRC.ID)
+	if trc.TRC.ID != f.TRC.TRC.ID {
+		t.Errorf("node TRC %v, core TRC %v", trc.TRC.ID, f.TRC.TRC.ID)
 	}
 	nodeChains, err := nodeDB.Chains(ctx, trustdb.ChainQuery{IA: iaNode})
 	if err != nil {
@@ -133,7 +134,7 @@ func TestEnrollmentTwoNodes(t *testing.T) {
 	if len(nodeChains) != 1 {
 		t.Fatalf("node chains = %d, want 1", len(nodeChains))
 	}
-	coreChains, err := f.db.Chains(ctx, trustdb.ChainQuery{IA: iaNode})
+	coreChains, err := f.DB.Chains(ctx, trustdb.ChainQuery{IA: iaNode})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -141,7 +142,7 @@ func TestEnrollmentTwoNodes(t *testing.T) {
 		t.Error("core and node DBs did not converge")
 	}
 	if err := cppki.VerifyChain(nodeChains[0], cppki.VerifyOptions{
-		TRC: []*cppki.TRC{&f.trc.TRC},
+		TRC: []*cppki.TRC{&f.TRC.TRC},
 	}); err != nil {
 		t.Errorf("enrolled chain does not verify against TRC: %v", err)
 	}

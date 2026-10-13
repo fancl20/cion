@@ -15,6 +15,7 @@ import (
 	"github.com/fancl20/cion/pkg/modules/enrollauth"
 	"github.com/fancl20/cion/pkg/modules/trustdb"
 	"github.com/fancl20/cion/pkg/trust"
+	"github.com/fancl20/cion/pkg/trust/trusttest"
 )
 
 // joinerIATest is the joining core the decision tests onboard.
@@ -25,7 +26,7 @@ var joinerIATest = addr.MustIAFrom(20, 0xff0000000f01)
 // unless the test says otherwise — and the joiner's voting material, with
 // the joiner enrolled unless the test says otherwise.
 type deciderFixture struct {
-	tf      *trustFixture
+	tf      *trusttest.Founder
 	decider *TRCDecider
 	auth    *askAuthorizer
 	db      trustdb.DB
@@ -42,13 +43,13 @@ type deciderFixture struct {
 // material, enrolling the joiner unless enroll is false.
 func newDeciderFixture(t *testing.T, enroll bool) *deciderFixture {
 	t.Helper()
-	f := newTrustFixture(t)
-	c := &deciderFixture{tf: f, db: f.db, pred: f.trc}
+	f := newFounder(t)
+	c := &deciderFixture{tf: f, db: f.DB, pred: f.TRC}
 	c.auth = &askAuthorizer{verdict: enrollauth.AdmissionAllow}
 	c.decider = &TRCDecider{
-		DB:         f.db,
+		DB:         f.DB,
 		IA:         coreIATest,
-		Sensitive:  f.keys.Sensitive,
+		Sensitive:  f.Keys.Sensitive,
 		Authorizer: c.auth,
 	}
 	c.joiner.ia = joinerIATest
@@ -63,7 +64,7 @@ func newDeciderFixture(t *testing.T, enroll bool) *deciderFixture {
 func (c *deciderFixture) enroll(t *testing.T, ia addr.IA) {
 	t.Helper()
 	csr, _ := newCSR(t, ia)
-	chain, err := c.tf.issuer.IssueChain(csr)
+	chain, err := c.tf.Issuer.IssueChain(csr)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -443,7 +444,7 @@ func TestTRCDeciderSignerSwapUnderCast(t *testing.T) {
 		cast <- c.decider.CastLocal(ctx, func(cppki.SignedTRC) error {
 			close(held)
 			<-release
-			c.decider.Sensitive = c.tf.keys.Sensitive
+			c.decider.Sensitive = c.tf.Keys.Sensitive
 			return nil
 		})
 	}()

@@ -23,6 +23,7 @@ import (
 	"github.com/fancl20/cion/pkg/modules/trustdb"
 	"github.com/fancl20/cion/pkg/statefile"
 	"github.com/fancl20/cion/pkg/trust"
+	"github.com/fancl20/cion/pkg/trust/trusttest"
 )
 
 // trcRemote serves a trust database's pinned TRCs — the numbers-less ask
@@ -51,24 +52,24 @@ func (r trcRemote) RenewChain(
 // founderRotationFixture is a founder with its decision, issuer, live keys,
 // and the watch over them.
 type founderRotationFixture struct {
-	trustFixture
+	trusttest.Founder
 	decider *TRCDecider
 	cfg     RotationConfig
 }
 
 func newFounderRotationFixture(t *testing.T) *founderRotationFixture {
 	t.Helper()
-	f := newTrustFixture(t)
-	decider := &TRCDecider{DB: f.db, IA: coreIATest, Sensitive: f.keys.Sensitive}
+	f := newFounder(t)
+	decider := &TRCDecider{DB: f.DB, IA: coreIATest, Sensitive: f.Keys.Sensitive}
 	cfg := RotationConfig{
 		IA:              coreIATest,
-		DB:              f.db,
-		State:           f.dir,
-		Roll:            FounderRoll(decider, f.issuer),
+		DB:              f.DB,
+		State:           f.Dir,
+		Roll:            FounderRoll(decider, f.Issuer),
 		RetryInterval:   time.Millisecond,
 		InspectInterval: 7 * time.Minute,
 	}
-	return &founderRotationFixture{trustFixture: *f, decider: decider, cfg: cfg}
+	return &founderRotationFixture{Founder: *f, decider: decider, cfg: cfg}
 }
 
 // pinnedAt returns the TRC pinned at the serial, zero when none is.
@@ -98,7 +99,7 @@ func TestFounderRotationPasses(t *testing.T) {
 		if got := f.cfg.rotationPass(ctx); got != 7*time.Minute {
 			t.Errorf("pass interval = %v, want the inspection interval", got)
 		}
-		if pinned := pinnedAt(t, f.db, 2); !pinned.IsZero() {
+		if pinned := pinnedAt(t, f.DB, 2); !pinned.IsZero() {
 			t.Error("a pass above the threshold rolled anyway")
 		}
 
@@ -108,27 +109,27 @@ func TestFounderRotationPasses(t *testing.T) {
 		if got := f.cfg.rotationPass(ctx); got != time.Millisecond {
 			t.Errorf("pass interval = %v, want the retry interval", got)
 		}
-		pinned := pinnedAt(t, f.db, 2)
+		pinned := pinnedAt(t, f.DB, 2)
 		if pinned.IsZero() {
 			t.Fatal("the roll pinned no successor")
 		}
-		if err := pinned.Verify(&f.trc.TRC); err != nil {
+		if err := pinned.Verify(&f.TRC.TRC); err != nil {
 			t.Errorf("the pinned successor does not verify against the base: %v", err)
 		}
 		if rolled := trust.CertsOf(pinned.TRC, coreIATest); len(rolled) != 3 {
 			t.Fatalf("the successor names %d of the founder's certificates, want 3", len(rolled))
 		}
-		checkLiveCoreKeys(t, f.dir, pinned)
+		checkLiveCoreKeys(t, f.Dir, pinned)
 		// The issuer rekeyed: a chain it issues now verifies against the
 		// successor, anchored in the fresh root.
-		checkIssuesUnder(t, f.issuer, pinned)
+		checkIssuesUnder(t, f.Issuer, pinned)
 		// The decision votes with the fresh sensitive key: the next roll's
 		// vote lands on the successor the first pinned.
 		time.Sleep(trust.VotingValidity - trust.RotationThreshold + time.Minute)
 		if got := f.cfg.rotationPass(ctx); got != time.Millisecond {
 			t.Errorf("second pass interval = %v, want the retry interval", got)
 		}
-		if second := pinnedAt(t, f.db, 3); second.IsZero() {
+		if second := pinnedAt(t, f.DB, 3); second.IsZero() {
 			t.Error("the second roll pinned no successor")
 		}
 
@@ -139,7 +140,7 @@ func TestFounderRotationPasses(t *testing.T) {
 		if got := fresh.cfg.rotationPass(ctx); got != time.Millisecond {
 			t.Errorf("overridden pass interval = %v, want the retry interval", got)
 		}
-		if pinned := pinnedAt(t, fresh.db, 2); pinned.IsZero() {
+		if pinned := pinnedAt(t, fresh.DB, 2); pinned.IsZero() {
 			t.Error("the overridden threshold rolled nothing")
 		}
 	})
@@ -179,11 +180,11 @@ func TestFounderRotationMismatch(t *testing.T) {
 		}
 		// The regular key replaced, the sensitive one still the named voter:
 		// the roll fires on the mismatch alone.
-		replaceKeyFiles(t, stranger, f.dir, trust.RegularKeyFile)
+		replaceKeyFiles(t, stranger, f.Dir, trust.RegularKeyFile)
 		if got := f.cfg.rotationPass(ctx); got != time.Millisecond {
 			t.Errorf("pass interval = %v, want the retry interval on the mismatch", got)
 		}
-		if pinned := pinnedAt(t, f.db, 2); pinned.IsZero() {
+		if pinned := pinnedAt(t, f.DB, 2); pinned.IsZero() {
 			t.Fatal("the mismatch roll pinned no successor")
 		}
 
@@ -191,12 +192,12 @@ func TestFounderRotationMismatch(t *testing.T) {
 		// vote it alone can cast is the recovery, and its loss is the
 		// redeploy — no roll, nothing pinned.
 		terminal := newFounderRotationFixture(t)
-		replaceKeyFiles(t, stranger, terminal.dir, trust.SensitiveKeyFile)
+		replaceKeyFiles(t, stranger, terminal.Dir, trust.SensitiveKeyFile)
 		if got := terminal.cfg.rotationPass(ctx); got != 7*time.Minute {
 			t.Errorf("pass interval = %v, want the inspection interval on the terminal corner",
 				got)
 		}
-		if pinned := pinnedAt(t, terminal.db, 2); !pinned.IsZero() {
+		if pinned := pinnedAt(t, terminal.DB, 2); !pinned.IsZero() {
 			t.Error("the terminal corner rolled anyway")
 		}
 	})
@@ -211,7 +212,7 @@ func TestFounderRotationPromotionFails(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		f := newFounderRotationFixture(t)
 		ctx := context.Background()
-		blocker := filepath.Join(f.dir, "keys", trust.SensitiveKeyFile+".tmp")
+		blocker := filepath.Join(f.Dir, "keys", trust.SensitiveKeyFile+".tmp")
 		if err := os.Mkdir(blocker, 0o700); err != nil {
 			t.Fatal(err)
 		}
@@ -220,7 +221,7 @@ func TestFounderRotationPromotionFails(t *testing.T) {
 		if got := f.cfg.rotationPass(ctx); got != time.Millisecond {
 			t.Errorf("pass interval = %v, want the retry interval", got)
 		}
-		pinned := pinnedAt(t, f.db, 2)
+		pinned := pinnedAt(t, f.DB, 2)
 		if pinned.IsZero() {
 			t.Fatal("the roll pinned no successor")
 		}
@@ -228,7 +229,7 @@ func TestFounderRotationPromotionFails(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		live, err := trust.LoadOrCreateCoreKeys(f.dir)
+		live, err := trust.LoadOrCreateCoreKeys(f.Dir)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -238,7 +239,7 @@ func TestFounderRotationPromotionFails(t *testing.T) {
 		if !trust.KeyMatchesCert(f.decider.Sensitive, sensitive) {
 			t.Error("the decision does not vote with the successor's sensitive key")
 		}
-		checkIssuesUnder(t, f.issuer, pinned)
+		checkIssuesUnder(t, f.Issuer, pinned)
 
 		if err := os.Remove(blocker); err != nil {
 			t.Fatal(err)
@@ -246,10 +247,10 @@ func TestFounderRotationPromotionFails(t *testing.T) {
 		if got := f.cfg.rotationPass(ctx); got != 7*time.Minute {
 			t.Errorf("pass interval = %v, want the inspection interval once promoted", got)
 		}
-		if third := pinnedAt(t, f.db, 3); !third.IsZero() {
+		if third := pinnedAt(t, f.DB, 3); !third.IsZero() {
 			t.Error("the pass after the failed promotion rolled again")
 		}
-		checkLiveCoreKeys(t, f.dir, pinned)
+		checkLiveCoreKeys(t, f.Dir, pinned)
 	})
 }
 
@@ -348,12 +349,12 @@ func (f *authoritativeRotationFixture) enroll(t *testing.T) {
 
 func newAuthoritativeRotationFixture(t *testing.T) *authoritativeRotationFixture {
 	t.Helper()
-	f := newTrustFixture(t)
+	f := newFounder(t)
 	auth := &askAuthorizer{verdict: enrollauth.AdmissionAllow}
 	decider := &TRCDecider{
-		DB:         f.db,
+		DB:         f.DB,
 		IA:         coreIATest,
-		Sensitive:  f.keys.Sensitive,
+		Sensitive:  f.Keys.Sensitive,
 		Authorizer: auth,
 	}
 	// The joiner enrolled and onboarded: the founder's newest names it.
@@ -367,14 +368,14 @@ func newAuthoritativeRotationFixture(t *testing.T) *authoritativeRotationFixture
 		t.Fatal(err)
 	}
 	csr, _ := newCSR(t, joinerIATest)
-	chain, err := f.issuer.IssueChain(csr)
+	chain, err := f.Issuer.IssueChain(csr)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.db.InsertChain(context.Background(), chain); err != nil {
+	if _, err := f.DB.InsertChain(context.Background(), chain); err != nil {
 		t.Fatal(err)
 	}
-	onboarding, err := trust.AssembleOnboarding(f.trc, joinerIATest, cert)
+	onboarding, err := trust.AssembleOnboarding(f.TRC, joinerIATest, cert)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -387,12 +388,12 @@ func newAuthoritativeRotationFixture(t *testing.T) *authoritativeRotationFixture
 	}
 	auth.asked = nil
 	db := openTrustDB(t, t.TempDir())
-	for _, trc := range []cppki.SignedTRC{f.trc, pinnedAt(t, f.db, 2)} {
+	for _, trc := range []cppki.SignedTRC{f.TRC, pinnedAt(t, f.DB, 2)} {
 		if _, err := db.InsertTRC(context.Background(), trc); err != nil {
 			t.Fatal(err)
 		}
 	}
-	remote := trcRemote{db: f.db}
+	remote := trcRemote{db: f.DB}
 	caster := deciderCaster{decider: decider, presenter: joinerIATest}
 	cfg := RotationConfig{
 		IA:              joinerIATest,
@@ -404,7 +405,7 @@ func newAuthoritativeRotationFixture(t *testing.T) *authoritativeRotationFixture
 	}
 	return &authoritativeRotationFixture{
 		db: db, state: state, cfg: cfg, remote: remote, caster: caster,
-		issuer: f.issuer, founderDB: f.db, decider: decider, auth: auth,
+		issuer: f.Issuer, founderDB: f.DB, decider: decider, auth: auth,
 	}
 }
 

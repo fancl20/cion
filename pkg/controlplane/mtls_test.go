@@ -26,11 +26,11 @@ type mtlsFixture struct {
 
 func newMTLSFixture(t *testing.T) *mtlsFixture {
 	t.Helper()
-	f := newTrustFixture(t)
+	f := newFounder(t)
 	return &mtlsFixture{
-		db:     f.db,
-		engine: f.engine(t, nodeIATest),
-		peer:   f.engine(t, iaLineC),
+		db:     f.DB,
+		engine: f.Engine(t, nodeIATest),
+		peer:   f.Engine(t, iaLineC),
 	}
 }
 
@@ -56,7 +56,7 @@ func TestNativeTLSVerifiesAgainstTRC(t *testing.T) {
 	// A chain anchored in another ISD's TRC.
 	foreignIA := addr.MustIAFrom(21, 0xff0000000001)
 	csr, _ := newCSR(t, foreignIA)
-	foreignChain, err := newTrustFixtureOf(t, foreignIA).issuer.IssueChain(csr)
+	foreignChain, err := newFounderOf(t, foreignIA).Issuer.IssueChain(csr)
 	if err != nil {
 		t.Fatal(err)
 	}

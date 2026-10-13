@@ -25,6 +25,7 @@ import (
 	"github.com/fancl20/cion/pkg/modules/trustdb/impl/bbolt"
 	"github.com/fancl20/cion/pkg/scion"
 	"github.com/fancl20/cion/pkg/trust"
+	"github.com/fancl20/cion/pkg/trust/trusttest"
 )
 
 var (
@@ -35,58 +36,17 @@ var (
 	iaExtendingTest = addr.MustIAFrom(20, 0xff000000001f)
 )
 
-// trustFixture is a serving-side trust stack: DB with a genesis TRC and an
-// issuer.
-type trustFixture struct {
-	// dir is the state directory: the database beside the keys folder, the
-	// node's own layout.
-	dir    string
-	db     trustdb.DB
-	keys   trust.CoreKeys
-	issuer *trust.Issuer
-	trc    cppki.SignedTRC
+// newFounder returns the founder of coreIATest's ISD.
+func newFounder(t *testing.T) *trusttest.Founder {
+	t.Helper()
+	return newFounderOf(t, coreIATest)
 }
 
-// newTrustFixture returns the founder of coreIATest's ISD.
-func newTrustFixture(t *testing.T) *trustFixture {
+// newFounderOf returns the founder ia over a fresh trust database, its
+// genesis TRC naming the fellow cores beside it.
+func newFounderOf(t *testing.T, ia addr.IA, fellows ...addr.IA) *trusttest.Founder {
 	t.Helper()
-	return newTrustFixtureOf(t, coreIATest)
-}
-
-// newTrustFixtureOf returns the founder ia, its genesis TRC naming the
-// fellow cores beside it.
-func newTrustFixtureOf(t *testing.T, ia addr.IA, fellows ...addr.IA) *trustFixture {
-	t.Helper()
-	dir := t.TempDir()
-	db := openTrustDB(t, dir)
-	keys, err := trust.LoadOrCreateCoreKeys(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	trc, err := trust.Genesis(context.Background(), db, ia, keys, fellows...)
-	if err != nil {
-		t.Fatal(err)
-	}
-	issuer, err := trust.NewIssuer(ia, keys, trc)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return &trustFixture{dir: dir, db: db, keys: keys, issuer: issuer, trc: trc}
-}
-
-// engine enrolls ia under the founder, its chain inserted into the
-// founder's database, and returns its engine over that database.
-func (f *trustFixture) engine(t *testing.T, ia addr.IA) *trust.Engine {
-	t.Helper()
-	csr, key := newCSR(t, ia)
-	chain, err := f.issuer.IssueChain(csr)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := f.db.InsertChain(context.Background(), chain); err != nil {
-		t.Fatal(err)
-	}
-	return trust.NewEngine(ia, key, &trust.NetworkProvider{DB: f.db})
+	return trusttest.NewFounder(t, openTrustDB(t, t.TempDir()), ia, fellows...)
 }
 
 // openTrustDB opens the trust database in dir, closed when the test ends.
@@ -115,8 +75,8 @@ func newCSR(t *testing.T, ia addr.IA) (*x509.CertificateRequest, crypto.Signer) 
 }
 
 func TestTrustServiceTRC(t *testing.T) {
-	f := newTrustFixture(t)
-	svc := &TrustService{DB: f.db, Issuer: f.issuer}
+	f := newFounder(t)
+	svc := &TrustService{DB: f.DB, Issuer: f.Issuer}
 
 	for name, req := range map[string]*cppb.TRCRequest{
 		"exact":  {Isd: uint32(coreIATest.ISD()), Base: 1, Serial: 1},
@@ -130,8 +90,8 @@ func TestTrustServiceTRC(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got.TRC.ID != f.trc.TRC.ID {
-			t.Errorf("%s: served TRC %v, want %v", name, got.TRC.ID, f.trc.TRC.ID)
+		if got.TRC.ID != f.TRC.TRC.ID {
+			t.Errorf("%s: served TRC %v, want %v", name, got.TRC.ID, f.TRC.TRC.ID)
 		}
 	}
 
@@ -144,15 +104,15 @@ func TestTrustServiceTRC(t *testing.T) {
 }
 
 func TestTrustServiceChains(t *testing.T) {
-	f := newTrustFixture(t)
-	svc := &TrustService{DB: f.db, Issuer: f.issuer}
+	f := newFounder(t)
+	svc := &TrustService{DB: f.DB, Issuer: f.Issuer}
 
 	csr, _ := newCSR(t, nodeIATest)
-	chain, err := f.issuer.IssueChain(csr)
+	chain, err := f.Issuer.IssueChain(csr)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.db.InsertChain(context.Background(), chain); err != nil {
+	if _, err := f.DB.InsertChain(context.Background(), chain); err != nil {
 		t.Fatal(err)
 	}
 
@@ -176,8 +136,8 @@ func TestTrustServiceChains(t *testing.T) {
 
 func TestTrustServiceChainRenewal(t *testing.T) {
 	t.Run("ok", func(t *testing.T) {
-		f := newTrustFixture(t)
-		svc := &TrustService{DB: f.db, Issuer: f.issuer}
+		f := newFounder(t)
+		svc := &TrustService{DB: f.DB, Issuer: f.Issuer}
 
 		csr, key := newCSR(t, nodeIATest)
 		req, err := trust.BuildRenewalRequest(csr, key)
@@ -194,12 +154,12 @@ func TestTrustServiceChainRenewal(t *testing.T) {
 			t.Fatal(err)
 		}
 		if err := cppki.VerifyChain(chain, cppki.VerifyOptions{
-			TRC: []*cppki.TRC{&f.trc.TRC},
+			TRC: []*cppki.TRC{&f.TRC.TRC},
 		}); err != nil {
 			t.Fatalf("renewed chain does not verify: %v", err)
 		}
 		// The issued chain is also in the core's DB.
-		chains, err := f.db.Chains(context.Background(), trustdb.ChainQuery{IA: nodeIATest})
+		chains, err := f.DB.Chains(context.Background(), trustdb.ChainQuery{IA: nodeIATest})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -209,8 +169,8 @@ func TestTrustServiceChainRenewal(t *testing.T) {
 	})
 
 	t.Run("wrong key", func(t *testing.T) {
-		f := newTrustFixture(t)
-		svc := &TrustService{DB: f.db, Issuer: f.issuer}
+		f := newFounder(t)
+		svc := &TrustService{DB: f.DB, Issuer: f.Issuer}
 
 		// Wrapper signed by a different key than the CSR's subject.
 		csr, _ := newCSR(t, nodeIATest)
@@ -230,8 +190,8 @@ func TestTrustServiceChainRenewal(t *testing.T) {
 	})
 
 	t.Run("unsigned csr", func(t *testing.T) {
-		f := newTrustFixture(t)
-		svc := &TrustService{DB: f.db, Issuer: f.issuer}
+		f := newFounder(t)
+		svc := &TrustService{DB: f.DB, Issuer: f.Issuer}
 
 		csr, key := newCSR(t, nodeIATest)
 		// Corrupt the CSR's signature in its DER form; parsing the request
@@ -256,8 +216,8 @@ func TestTrustServiceChainRenewal(t *testing.T) {
 	// every sequential ask — for these episodes exercise the checks, not the
 	// rate.
 	t.Run("taken name", func(t *testing.T) {
-		f := newTrustFixture(t)
-		svc := &TrustService{DB: f.db, Issuer: f.issuer, MinInterval: time.Microsecond}
+		f := newFounder(t)
+		svc := &TrustService{DB: f.DB, Issuer: f.Issuer, MinInterval: time.Microsecond}
 
 		csr, key := newCSR(t, nodeIATest)
 		req, err := trust.BuildRenewalRequest(csr, key)
@@ -312,17 +272,17 @@ func (d rekeyingDB) InsertChain(ctx context.Context, chain []*x509.Certificate) 
 // response's signature leaves the response signed by the CA certificate its
 // chain carries, the check the client makes.
 func TestChainRenewalRekeyBetweenIssueAndSign(t *testing.T) {
-	f := newTrustFixture(t)
-	db := rekeyingDB{DB: f.db, rekey: func() error {
+	f := newFounder(t)
+	db := rekeyingDB{DB: f.DB, rekey: func() error {
 		ca, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 		if err != nil {
 			return err
 		}
-		keys := f.keys
+		keys := f.Keys
 		keys.CA = ca
-		return f.issuer.Rekey(keys, f.trc)
+		return f.Issuer.Rekey(keys, f.TRC)
 	}}
-	svc := &TrustService{DB: db, Issuer: f.issuer}
+	svc := &TrustService{DB: db, Issuer: f.Issuer}
 
 	csr, key := newCSR(t, nodeIATest)
 	req, err := trust.BuildRenewalRequest(csr, key)
@@ -380,8 +340,8 @@ func TestTrustServiceEnrollmentAuthorizer(t *testing.T) {
 	}
 
 	t.Run("nil is open", func(t *testing.T) {
-		f := newTrustFixture(t)
-		svc := &TrustService{DB: f.db, Issuer: f.issuer}
+		f := newFounder(t)
+		svc := &TrustService{DB: f.DB, Issuer: f.Issuer}
 		csr, key := newCSR(t, nodeIATest)
 		if err := ask(t, svc, context.Background(), csr, key); err != nil {
 			t.Fatalf("open enrollment refused a first issuance: %v", err)
@@ -389,9 +349,9 @@ func TestTrustServiceEnrollmentAuthorizer(t *testing.T) {
 	})
 
 	t.Run("allow issues with the request's facts", func(t *testing.T) {
-		f := newTrustFixture(t)
+		f := newFounder(t)
 		auth := &askAuthorizer{verdict: enrollauth.AdmissionAllow}
-		svc := &TrustService{DB: f.db, Issuer: f.issuer, Authorizer: auth}
+		svc := &TrustService{DB: f.DB, Issuer: f.Issuer, Authorizer: auth}
 		csr, key := newCSR(t, nodeIATest)
 
 		if err := ask(t, svc, askContext(), csr, key); err != nil {
@@ -424,9 +384,9 @@ func TestTrustServiceEnrollmentAuthorizer(t *testing.T) {
 	})
 
 	t.Run("no address in the context is a zero fact", func(t *testing.T) {
-		f := newTrustFixture(t)
+		f := newFounder(t)
 		auth := &askAuthorizer{verdict: enrollauth.AdmissionAllow}
-		svc := &TrustService{DB: f.db, Issuer: f.issuer, Authorizer: auth}
+		svc := &TrustService{DB: f.DB, Issuer: f.Issuer, Authorizer: auth}
 		csr, key := newCSR(t, nodeIATest)
 		if err := ask(t, svc, context.Background(), csr, key); err != nil {
 			t.Fatal(err)
@@ -437,8 +397,8 @@ func TestTrustServiceEnrollmentAuthorizer(t *testing.T) {
 	})
 
 	t.Run("deny is PermissionDenied", func(t *testing.T) {
-		f := newTrustFixture(t)
-		svc := &TrustService{DB: f.db, Issuer: f.issuer,
+		f := newFounder(t)
+		svc := &TrustService{DB: f.DB, Issuer: f.Issuer,
 			Authorizer: &askAuthorizer{verdict: enrollauth.AdmissionDeny}}
 		csr, key := newCSR(t, nodeIATest)
 		err := ask(t, svc, context.Background(), csr, key)
@@ -446,15 +406,15 @@ func TestTrustServiceEnrollmentAuthorizer(t *testing.T) {
 			t.Errorf("deny error code = %v, want PermissionDenied", connect.CodeOf(err))
 		}
 		// Nothing was issued or stored.
-		chains, err := f.db.Chains(context.Background(), trustdb.ChainQuery{IA: nodeIATest})
+		chains, err := f.DB.Chains(context.Background(), trustdb.ChainQuery{IA: nodeIATest})
 		if err != nil || len(chains) != 0 {
 			t.Errorf("chains after a denial = %d (%v), want none", len(chains), err)
 		}
 	})
 
 	t.Run("pending is Unavailable", func(t *testing.T) {
-		f := newTrustFixture(t)
-		svc := &TrustService{DB: f.db, Issuer: f.issuer,
+		f := newFounder(t)
+		svc := &TrustService{DB: f.DB, Issuer: f.Issuer,
 			Authorizer: &askAuthorizer{verdict: enrollauth.AdmissionPending}}
 		csr, key := newCSR(t, nodeIATest)
 		err := ask(t, svc, context.Background(), csr, key)
@@ -464,9 +424,9 @@ func TestTrustServiceEnrollmentAuthorizer(t *testing.T) {
 	})
 
 	t.Run("the holder's renewal is never asked", func(t *testing.T) {
-		f := newTrustFixture(t)
+		f := newFounder(t)
 		auth := &askAuthorizer{verdict: enrollauth.AdmissionAllow}
-		svc := &TrustService{DB: f.db, Issuer: f.issuer, Authorizer: auth,
+		svc := &TrustService{DB: f.DB, Issuer: f.Issuer, Authorizer: auth,
 			MinInterval: time.Microsecond}
 		csr, key := newCSR(t, nodeIATest)
 		if err := ask(t, svc, context.Background(), csr, key); err != nil {
@@ -482,9 +442,9 @@ func TestTrustServiceEnrollmentAuthorizer(t *testing.T) {
 	})
 
 	t.Run("a taken name is never asked", func(t *testing.T) {
-		f := newTrustFixture(t)
+		f := newFounder(t)
 		auth := &askAuthorizer{verdict: enrollauth.AdmissionAllow}
-		svc := &TrustService{DB: f.db, Issuer: f.issuer, Authorizer: auth,
+		svc := &TrustService{DB: f.DB, Issuer: f.Issuer, Authorizer: auth,
 			MinInterval: time.Microsecond}
 		csr, key := newCSR(t, nodeIATest)
 		if err := ask(t, svc, context.Background(), csr, key); err != nil {
@@ -508,9 +468,9 @@ func TestTrustServiceEnrollmentAuthorizer(t *testing.T) {
 // read as a renewal — the chains share the subject key — and the authorizer is
 // asked on the first issuance the free name allows.
 func TestChainRenewalExtendingName(t *testing.T) {
-	f := newTrustFixture(t)
+	f := newFounder(t)
 	auth := &askAuthorizer{verdict: enrollauth.AdmissionAllow}
-	svc := &TrustService{DB: f.db, Issuer: f.issuer, Authorizer: auth}
+	svc := &TrustService{DB: f.DB, Issuer: f.Issuer, Authorizer: auth}
 	ctx := context.Background()
 
 	// The extending name holds a chain for the petitioner's own key; the
@@ -520,11 +480,11 @@ func TestChainRenewalExtendingName(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	extending, err := f.issuer.IssueChain(extendingCSR)
+	extending, err := f.Issuer.IssueChain(extendingCSR)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.db.InsertChain(ctx, extending); err != nil {
+	if _, err := f.DB.InsertChain(ctx, extending); err != nil {
 		t.Fatal(err)
 	}
 
@@ -540,7 +500,7 @@ func TestChainRenewalExtendingName(t *testing.T) {
 		t.Errorf("the authorizer was asked %d times, want the one of the free name",
 			len(auth.asked))
 	}
-	chains, err := f.db.Chains(ctx, trustdb.ChainQuery{IA: coreIATest})
+	chains, err := f.DB.Chains(ctx, trustdb.ChainQuery{IA: coreIATest})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -580,12 +540,12 @@ func sourceContext(port string) context.Context {
 // the authorizer's latency; the name-taken check settles the loser on its
 // retry, sequentially.
 func TestChainRenewalSerialized(t *testing.T) {
-	f := newTrustFixture(t)
+	f := newFounder(t)
 	auth := &blockingAuthorizer{
 		asked:   make(chan enrollauth.AdmissionFacts),
 		release: make(chan struct{}),
 	}
-	svc := &TrustService{DB: f.db, Issuer: f.issuer, Authorizer: auth}
+	svc := &TrustService{DB: f.DB, Issuer: f.Issuer, Authorizer: auth}
 
 	csrA, keyA := newCSR(t, nodeIATest)
 	reqA, err := trust.BuildRenewalRequest(csrA, keyA)
@@ -637,7 +597,7 @@ func TestChainRenewalSerialized(t *testing.T) {
 	if issued != 1 || refused != 1 {
 		t.Fatalf("issued = %d, refused = %d, want one of each", issued, refused)
 	}
-	chains, err := f.db.Chains(context.Background(), trustdb.ChainQuery{IA: nodeIATest})
+	chains, err := f.DB.Chains(context.Background(), trustdb.ChainQuery{IA: nodeIATest})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -651,8 +611,8 @@ func TestChainRenewalSerialized(t *testing.T) {
 // claimed ISD-AS when the context carries none — the second inside the
 // interval answering ResourceExhausted and a different source passing.
 func TestChainRenewalRateCap(t *testing.T) {
-	f := newTrustFixture(t)
-	svc := &TrustService{DB: f.db, Issuer: f.issuer, MinInterval: time.Hour}
+	f := newFounder(t)
+	svc := &TrustService{DB: f.DB, Issuer: f.Issuer, MinInterval: time.Hour}
 
 	ask := func(ctx context.Context, ia addr.IA) error {
 		csr, key := newCSR(t, ia)

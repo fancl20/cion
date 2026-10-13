@@ -126,15 +126,15 @@ var (
 
 func newBeaconFixture(t *testing.T) *beaconFixture {
 	t.Helper()
-	founder := newTrustFixtureOf(t, coreIATest, iaCore2Test)
-	pathDB, err := pathdbbbolt.New(filepath.Join(founder.dir, "path.db"), nil)
+	founder := newFounderOf(t, coreIATest, iaCore2Test)
+	pathDB, err := pathdbbbolt.New(filepath.Join(founder.Dir, "path.db"), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = pathDB.Close() })
 	engines := make(map[addr.IA]*trust.Engine)
 	for _, ia := range []addr.IA{coreIATest, iaCore2Test, nodeIATest, iaLineC} {
-		engines[ia] = founder.engine(t, ia)
+		engines[ia] = founder.Engine(t, ia)
 	}
 
 	// B's three links: interface 1 to the core A, interface 2 to C,
@@ -157,7 +157,7 @@ func newBeaconFixture(t *testing.T) *beaconFixture {
 		t.Fatal(err)
 	}
 	return &beaconFixture{
-		db: founder.db, pathDB: pathDB, engines: engines, store: store,
+		db: founder.DB, pathDB: pathDB, engines: engines, store: store,
 		sender: sender, beaconer: beaconer,
 	}
 }

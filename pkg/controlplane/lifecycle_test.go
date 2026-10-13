@@ -22,6 +22,7 @@ import (
 
 	"github.com/fancl20/cion/pkg/modules/trustdb"
 	"github.com/fancl20/cion/pkg/trust"
+	"github.com/fancl20/cion/pkg/trust/trusttest"
 )
 
 // fakeCore implements trust.Remote: it serves the TRC and issues chains
@@ -76,7 +77,7 @@ type lifecycleFixture struct {
 	cfg  EnrollmentConfig
 }
 
-func newLifecycleFixture(t *testing.T, f *trustFixture) *lifecycleFixture {
+func newLifecycleFixture(t *testing.T, f *trusttest.Founder) *lifecycleFixture {
 	t.Helper()
 	db := openTrustDB(t, t.TempDir())
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
@@ -86,7 +87,7 @@ func newLifecycleFixture(t *testing.T, f *trustFixture) *lifecycleFixture {
 	lf := &lifecycleFixture{
 		db:   db,
 		key:  key,
-		core: &fakeCore{issuer: f.issuer, trc: f.trc},
+		core: &fakeCore{issuer: f.Issuer, trc: f.TRC},
 	}
 	lf.cfg = EnrollmentConfig{
 		IA:            nodeIATest,
@@ -139,7 +140,7 @@ func (absentVoting) SubmitTRC(context.Context, cppki.SignedTRC) (cppki.SignedTRC
 // sweep has returned.
 func TestEnrollmentStopsWithoutVotingApp(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		f := newTrustFixture(t)
+		f := newFounder(t)
 		lf := newLifecycleFixture(t, f)
 		lf.enroll(t)
 		state := t.TempDir()
@@ -176,7 +177,7 @@ func TestEnrollmentStopsWithoutVotingApp(t *testing.T) {
 // chain's validity is walked through in a fake-time bubble.
 func TestEnrollmentPasses(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		f := newTrustFixture(t)
+		f := newFounder(t)
 		lf := newLifecycleFixture(t, f)
 		ctx := context.Background()
 		lf.enroll(t)
@@ -229,7 +230,7 @@ func TestEnrollmentPasses(t *testing.T) {
 // expiry: the pass keeps the fast cadence and keeps trying.
 func TestEnrollmentPassFailing(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		f := newTrustFixture(t)
+		f := newFounder(t)
 		lf := newLifecycleFixture(t, f)
 		lf.enroll(t)
 		lf.core.issuer = nil // the core goes dark
@@ -261,7 +262,7 @@ func (unreadableChainsDB) Chains(
 // for the retry cadence with nothing enrolled or self-issued, so the loop
 // reads again instead of ending.
 func TestEnrollmentPassUnreadableChains(t *testing.T) {
-	f := newTrustFixture(t)
+	f := newFounder(t)
 	lf := newLifecycleFixture(t, f)
 	ctx := context.Background()
 	cfg := lf.cfg
@@ -273,7 +274,7 @@ func TestEnrollmentPassUnreadableChains(t *testing.T) {
 	if got := lf.core.renewals(); got != 0 {
 		t.Errorf("renewals = %d, want none without a readable chain", got)
 	}
-	cfg.Renewal = FounderRenewal(f.issuer)
+	cfg.Renewal = FounderRenewal(f.Issuer)
 	if got := enrollPassOf(t, ctx, cfg); got != time.Millisecond {
 		t.Errorf("founder's pass interval = %v, want the retry interval", got)
 	}
@@ -293,11 +294,11 @@ func TestEnrollmentPassUnreadableChains(t *testing.T) {
 // the pinned TRC survives a sweep of a store whose chains are all expired.
 func TestChainSweepPass(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		f := newTrustFixture(t)
+		f := newFounder(t)
 		lf := newLifecycleFixture(t, f)
 		ctx := context.Background()
 		// Pin the fixture's genesis TRC the way enrollment does.
-		if _, err := lf.db.InsertTRC(ctx, f.trc); err != nil {
+		if _, err := lf.db.InsertTRC(ctx, f.TRC); err != nil {
 			t.Fatal(err)
 		}
 		lf.enroll(t)
@@ -343,7 +344,7 @@ func TestChainSweepPass(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if !cmp.Equal(trc, f.trc) {
+		if !cmp.Equal(trc, f.TRC) {
 			t.Error("the pinned TRC did not survive the sweep")
 		}
 	})
@@ -354,7 +355,7 @@ func TestChainSweepPass(t *testing.T) {
 // enrollment loop itself.
 func TestChainSweepLoop(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		f := newTrustFixture(t)
+		f := newFounder(t)
 		lf := newLifecycleFixture(t, f)
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
@@ -430,14 +431,14 @@ func TestBeaconingRunReturnsOnCancel(t *testing.T) {
 // lifetime.
 func TestCoreEnrollmentPass(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		f := newTrustFixture(t)
+		f := newFounder(t)
 		lf := newLifecycleFixture(t, f)
 		ctx := context.Background()
 		cfg := EnrollmentConfig{
 			IA:            nodeIATest,
 			DB:            lf.db,
 			Key:           lf.key,
-			Renewal:       FounderRenewal(f.issuer),
+			Renewal:       FounderRenewal(f.Issuer),
 			RetryInterval: time.Millisecond,
 		}
 
@@ -525,7 +526,7 @@ func (r *recorder) logged(level slog.Level, msg string) bool {
 // bubble.
 func TestEnrollmentPassReportsTRCValidity(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		f := newTrustFixture(t)
+		f := newFounder(t)
 		ctx := context.Background()
 		state := t.TempDir()
 		votingKey, err := trust.LoadOrCreateVotingKey(state)
@@ -536,12 +537,12 @@ func TestEnrollmentPassReportsTRCValidity(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		core := &fakeCore{issuer: f.issuer, trc: f.trc}
+		core := &fakeCore{issuer: f.Issuer, trc: f.TRC}
 		roles := []struct {
 			name    string
 			renewal Renewal
 		}{
-			{"founder", FounderRenewal(f.issuer)},
+			{"founder", FounderRenewal(f.Issuer)},
 			{"authoritative core", AuthoritativeRenewal(core, absentVoting{}, votingKey, votingCert)},
 			{"normal node", NormalRenewal(core)},
 		}
@@ -551,7 +552,7 @@ func TestEnrollmentPassReportsTRCValidity(t *testing.T) {
 			t.Helper()
 			for _, role := range roles {
 				lf := newLifecycleFixture(t, f)
-				if _, err := lf.db.InsertTRC(ctx, f.trc); err != nil {
+				if _, err := lf.db.InsertTRC(ctx, f.TRC); err != nil {
 					t.Fatal(err)
 				}
 				cfg := lf.cfg
@@ -564,7 +565,7 @@ func TestEnrollmentPassReportsTRCValidity(t *testing.T) {
 			}
 		}
 
-		time.Sleep(time.Until(f.trc.TRC.Validity.NotAfter) - trust.ChainRenewalThreshold/2)
+		time.Sleep(time.Until(f.TRC.TRC.Validity.NotAfter) - trust.ChainRenewalThreshold/2)
 		passes(slog.LevelWarn, "Pinned TRC approaching expiry")
 		time.Sleep(trust.ChainRenewalThreshold)
 		passes(slog.LevelError, "Pinned TRC expired")
@@ -579,14 +580,14 @@ func TestEnrollmentPassReportsTRCValidity(t *testing.T) {
 // newest alone, and the next pass renews nothing.
 func TestEnrollmentPassReanchors(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		f := newTrustFixture(t)
+		f := newFounder(t)
 		ctx := context.Background()
 		node := newLifecycleFixture(t, f)
 		founder := newLifecycleFixture(t, f)
 		founderCfg := founder.cfg
-		founderCfg.Renewal = FounderRenewal(f.issuer)
+		founderCfg.Renewal = FounderRenewal(f.Issuer)
 		for _, lf := range []*lifecycleFixture{node, founder} {
-			if _, err := lf.db.InsertTRC(ctx, f.trc); err != nil {
+			if _, err := lf.db.InsertTRC(ctx, f.TRC); err != nil {
 				t.Fatal(err)
 			}
 			lf.enroll(t)
@@ -595,11 +596,11 @@ func TestEnrollmentPassReanchors(t *testing.T) {
 		// The founder rolls its root an hour on: the successor pins, the
 		// issuer rekeys, and both databases hold the successor.
 		time.Sleep(time.Hour)
-		keys, rolled, err := trust.RotateCoreKeys(ctx, f.db, f.dir, coreIATest, f.trc)
+		keys, rolled, err := trust.RotateCoreKeys(ctx, f.DB, f.Dir, coreIATest, f.TRC)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := f.issuer.Rekey(keys, rolled); err != nil {
+		if err := f.Issuer.Rekey(keys, rolled); err != nil {
 			t.Fatal(err)
 		}
 		node.core.trc = rolled
