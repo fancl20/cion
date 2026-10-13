@@ -9,7 +9,6 @@ import (
 	"crypto/x509"
 	"errors"
 	"log/slog"
-	"path/filepath"
 	"slices"
 	"sync"
 	"sync/atomic"
@@ -22,7 +21,6 @@ import (
 	"github.com/scionproto/scion/pkg/scrypto/cppki"
 
 	"github.com/fancl20/cion/pkg/modules/trustdb"
-	"github.com/fancl20/cion/pkg/modules/trustdb/impl/bbolt"
 	"github.com/fancl20/cion/pkg/trust"
 )
 
@@ -80,11 +78,7 @@ type lifecycleFixture struct {
 
 func newLifecycleFixture(t *testing.T, f *trustFixture) *lifecycleFixture {
 	t.Helper()
-	db, err := bbolt.New(filepath.Join(t.TempDir(), "trust.db"), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
+	db := openTrustDB(t, t.TempDir())
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		t.Fatal(err)

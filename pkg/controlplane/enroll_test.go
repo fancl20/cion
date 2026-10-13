@@ -6,7 +6,6 @@ import (
 	"crypto/x509"
 	"errors"
 	"log/slog"
-	"path/filepath"
 	"testing"
 	"time"
 
@@ -14,7 +13,6 @@ import (
 	"github.com/scionproto/scion/pkg/scrypto/cppki"
 
 	"github.com/fancl20/cion/pkg/modules/trustdb"
-	"github.com/fancl20/cion/pkg/modules/trustdb/impl/bbolt"
 	"github.com/fancl20/cion/pkg/scion"
 	"github.com/fancl20/cion/pkg/trust"
 	"github.com/fancl20/cion/pkg/webpki"
@@ -108,11 +106,7 @@ func TestEnrollmentTwoNodes(t *testing.T) {
 	f := serveCore(t, core, wpki)
 
 	nodeDir := t.TempDir()
-	nodeDB, err := bbolt.New(filepath.Join(nodeDir, "trust.db"), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = nodeDB.Close() }()
+	nodeDB := openTrustDB(t, nodeDir)
 	asKey, err := trust.LoadOrCreateASKey(nodeDir)
 	if err != nil {
 		t.Fatal(err)
@@ -177,11 +171,7 @@ func TestEnrollmentWrongDomain(t *testing.T) {
 	serveCore(t, core, wpki)
 
 	nodeDir := t.TempDir()
-	nodeDB, err := bbolt.New(filepath.Join(nodeDir, "trust.db"), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = nodeDB.Close() }()
+	nodeDB := openTrustDB(t, nodeDir)
 	asKey, err := trust.LoadOrCreateASKey(nodeDir)
 	if err != nil {
 		t.Fatal(err)

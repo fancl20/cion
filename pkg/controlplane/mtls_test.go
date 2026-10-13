@@ -6,14 +6,12 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/tls"
-	"path/filepath"
 	"testing"
 
 	"github.com/scionproto/scion/pkg/addr"
 	"github.com/scionproto/scion/pkg/scrypto/cppki"
 
 	"github.com/fancl20/cion/pkg/modules/trustdb"
-	"github.com/fancl20/cion/pkg/modules/trustdb/impl/bbolt"
 	"github.com/fancl20/cion/pkg/trust"
 	"github.com/fancl20/cion/pkg/webpki/webpkitest"
 )
@@ -28,48 +26,11 @@ type mtlsFixture struct {
 
 func newMTLSFixture(t *testing.T) *mtlsFixture {
 	t.Helper()
-	dir := t.TempDir()
-	db, err := bbolt.New(filepath.Join(dir, "trust.db"), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
-	keys, err := trust.LoadOrCreateCoreKeys(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	trc, err := trust.Genesis(context.Background(), db, coreIATest, keys)
-	if err != nil {
-		t.Fatal(err)
-	}
-	issuer, err := trust.NewIssuer(coreIATest, keys, trc)
-	if err != nil {
-		t.Fatal(err)
-	}
-	provider := &trust.NetworkProvider{DB: db}
-	newEngine := func(ia addr.IA) *trust.Engine {
-		t.Helper()
-		key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-		if err != nil {
-			t.Fatal(err)
-		}
-		csr, err := trust.CreateCSR(ia, key)
-		if err != nil {
-			t.Fatal(err)
-		}
-		chain, err := issuer.IssueChain(csr)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if _, err := db.InsertChain(context.Background(), chain); err != nil {
-			t.Fatal(err)
-		}
-		return trust.NewEngine(ia, key, provider)
-	}
+	f := newTrustFixture(t)
 	return &mtlsFixture{
-		db:     db,
-		engine: newEngine(nodeIATest),
-		peer:   newEngine(iaLineC),
+		db:     f.db,
+		engine: f.engine(t, nodeIATest),
+		peer:   f.engine(t, iaLineC),
 	}
 }
 
@@ -93,34 +54,9 @@ func TestNativeTLSVerifiesAgainstTRC(t *testing.T) {
 	}
 
 	// A chain anchored in another ISD's TRC.
-	dir := t.TempDir()
-	db, err := bbolt.New(filepath.Join(dir, "trust.db"), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = db.Close() }()
-	keys, err := trust.LoadOrCreateCoreKeys(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
 	foreignIA := addr.MustIAFrom(21, 0xff0000000001)
-	trc, err := trust.Genesis(context.Background(), db, foreignIA, keys)
-	if err != nil {
-		t.Fatal(err)
-	}
-	foreignIssuer, err := trust.NewIssuer(foreignIA, keys, trc)
-	if err != nil {
-		t.Fatal(err)
-	}
-	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-	csr, err := trust.CreateCSR(foreignIA, key)
-	if err != nil {
-		t.Fatal(err)
-	}
-	foreignChain, err := foreignIssuer.IssueChain(csr)
+	csr, _ := newCSR(t, foreignIA)
+	foreignChain, err := newTrustFixtureOf(t, foreignIA).issuer.IssueChain(csr)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -145,11 +81,7 @@ func TestNativeTLSWrongPeerIA(t *testing.T) {
 // TestNativeTLSWithoutTRC checks the bootstrap window: without a pinned TRC
 // every chain is accepted, so a fresh node can still receive beacons.
 func TestNativeTLSWithoutTRC(t *testing.T) {
-	db, err := bbolt.New(filepath.Join(t.TempDir(), "trust.db"), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = db.Close() }()
+	db := openTrustDB(t, t.TempDir())
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		t.Fatal(err)

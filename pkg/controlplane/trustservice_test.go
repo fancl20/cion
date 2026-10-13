@@ -47,27 +47,57 @@ type trustFixture struct {
 	trc    cppki.SignedTRC
 }
 
+// newTrustFixture returns the founder of coreIATest's ISD.
 func newTrustFixture(t *testing.T) *trustFixture {
 	t.Helper()
+	return newTrustFixtureOf(t, coreIATest)
+}
+
+// newTrustFixtureOf returns the founder ia, its genesis TRC naming the
+// fellow cores beside it.
+func newTrustFixtureOf(t *testing.T, ia addr.IA, fellows ...addr.IA) *trustFixture {
+	t.Helper()
 	dir := t.TempDir()
+	db := openTrustDB(t, dir)
+	keys, err := trust.LoadOrCreateCoreKeys(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	trc, err := trust.Genesis(context.Background(), db, ia, keys, fellows...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	issuer, err := trust.NewIssuer(ia, keys, trc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &trustFixture{dir: dir, db: db, keys: keys, issuer: issuer, trc: trc}
+}
+
+// engine enrolls ia under the founder, its chain inserted into the
+// founder's database, and returns its engine over that database.
+func (f *trustFixture) engine(t *testing.T, ia addr.IA) *trust.Engine {
+	t.Helper()
+	csr, key := newCSR(t, ia)
+	chain, err := f.issuer.IssueChain(csr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.InsertChain(context.Background(), chain); err != nil {
+		t.Fatal(err)
+	}
+	return trust.NewEngine(ia, key, &trust.NetworkProvider{DB: f.db})
+}
+
+// openTrustDB opens the trust database in dir, closed when the test ends.
+func openTrustDB(t *testing.T, dir string) trustdb.DB {
+	t.Helper()
 	db, err := bbolt.New(filepath.Join(dir, "trust.db"), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	keys, err := trust.LoadOrCreateCoreKeys(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	trc, err := trust.Genesis(context.Background(), db, coreIATest, keys)
-	if err != nil {
-		t.Fatal(err)
-	}
-	issuer, err := trust.NewIssuer(coreIATest, keys, trc)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return &trustFixture{dir: dir, db: db, keys: keys, issuer: issuer, trc: trc}
+	return db
 }
 
 // newCSR returns a CSR for a freshly generated AS key.

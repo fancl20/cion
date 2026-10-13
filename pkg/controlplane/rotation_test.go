@@ -21,7 +21,6 @@ import (
 
 	"github.com/fancl20/cion/pkg/modules/enrollauth"
 	"github.com/fancl20/cion/pkg/modules/trustdb"
-	"github.com/fancl20/cion/pkg/modules/trustdb/impl/bbolt"
 	"github.com/fancl20/cion/pkg/statefile"
 	"github.com/fancl20/cion/pkg/trust"
 )
@@ -387,11 +386,7 @@ func newAuthoritativeRotationFixture(t *testing.T) *authoritativeRotationFixture
 		t.Fatal(err)
 	}
 	auth.asked = nil
-	db, err := bbolt.New(filepath.Join(t.TempDir(), "trust.db"), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
+	db := openTrustDB(t, t.TempDir())
 	for _, trc := range []cppki.SignedTRC{f.trc, pinnedAt(t, f.db, 2)} {
 		if _, err := db.InsertTRC(context.Background(), trc); err != nil {
 			t.Fatal(err)

@@ -22,7 +22,6 @@ import (
 	"github.com/fancl20/cion/pkg/modules/pathdb"
 	pathdbbbolt "github.com/fancl20/cion/pkg/modules/pathdb/impl/bbolt"
 	"github.com/fancl20/cion/pkg/modules/trustdb"
-	"github.com/fancl20/cion/pkg/modules/trustdb/impl/bbolt"
 	"github.com/fancl20/cion/pkg/scion"
 	"github.com/fancl20/cion/pkg/segment"
 	"github.com/fancl20/cion/pkg/trust"
@@ -127,49 +126,15 @@ var (
 
 func newBeaconFixture(t *testing.T) *beaconFixture {
 	t.Helper()
-	dir := t.TempDir()
-	db, err := bbolt.New(filepath.Join(dir, "trust.db"), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
-	pathDB, err := pathdbbbolt.New(filepath.Join(dir, "path.db"), nil)
+	founder := newTrustFixtureOf(t, coreIATest, iaCore2Test)
+	pathDB, err := pathdbbbolt.New(filepath.Join(founder.dir, "path.db"), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = pathDB.Close() })
-
-	keys, err := trust.LoadOrCreateCoreKeys(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	trc, err := trust.Genesis(context.Background(), db, coreIATest, keys, iaCore2Test)
-	if err != nil {
-		t.Fatal(err)
-	}
-	issuer, err := trust.NewIssuer(coreIATest, keys, trc)
-	if err != nil {
-		t.Fatal(err)
-	}
-	provider := &trust.NetworkProvider{DB: db}
 	engines := make(map[addr.IA]*trust.Engine)
 	for _, ia := range []addr.IA{coreIATest, iaCore2Test, nodeIATest, iaLineC} {
-		key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-		if err != nil {
-			t.Fatal(err)
-		}
-		csr, err := trust.CreateCSR(ia, key)
-		if err != nil {
-			t.Fatal(err)
-		}
-		chain, err := issuer.IssueChain(csr)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if _, err := db.InsertChain(context.Background(), chain); err != nil {
-			t.Fatal(err)
-		}
-		engines[ia] = trust.NewEngine(ia, key, provider)
+		engines[ia] = founder.engine(t, ia)
 	}
 
 	// B's three links: interface 1 to the core A, interface 2 to C,
@@ -192,7 +157,7 @@ func newBeaconFixture(t *testing.T) *beaconFixture {
 		t.Fatal(err)
 	}
 	return &beaconFixture{
-		db: db, pathDB: pathDB, engines: engines, store: store,
+		db: founder.db, pathDB: pathDB, engines: engines, store: store,
 		sender: sender, beaconer: beaconer,
 	}
 }
@@ -470,11 +435,7 @@ func TestHandleBeaconNonCoreOriginWaivedWithoutTRC(t *testing.T) {
 	f := newBeaconFixture(t)
 	ctx := context.Background()
 
-	freshDB, err := bbolt.New(filepath.Join(t.TempDir(), "trust.db"), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = freshDB.Close() }()
+	freshDB := openTrustDB(t, t.TempDir())
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		t.Fatal(err)
@@ -599,11 +560,7 @@ func TestHandleBeaconWithoutTRC(t *testing.T) {
 	ctx := context.Background()
 
 	// A fresh node's engine: no TRC pinned, no chains.
-	freshDB, err := bbolt.New(filepath.Join(t.TempDir(), "trust.db"), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = freshDB.Close() }()
+	freshDB := openTrustDB(t, t.TempDir())
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		t.Fatal(err)
@@ -666,11 +623,7 @@ func TestBootstrapAlternatesOrigins(t *testing.T) {
 	ctx := context.Background()
 
 	// A fresh node's engine: no TRC pinned, no chains.
-	freshDB, err := bbolt.New(filepath.Join(t.TempDir(), "trust.db"), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = freshDB.Close() }()
+	freshDB := openTrustDB(t, t.TempDir())
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		t.Fatal(err)
@@ -746,11 +699,7 @@ func TestBootstrapRouteFollowsVerifiedBeacons(t *testing.T) {
 
 	// A fresh node's engine, pinned once the core's first beacon opened its
 	// slot.
-	freshDB, err := bbolt.New(filepath.Join(t.TempDir(), "trust.db"), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = freshDB.Close() }()
+	freshDB := openTrustDB(t, t.TempDir())
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		t.Fatal(err)
