@@ -20,7 +20,6 @@ import (
 
 	"github.com/scionproto/scion/pkg/addr"
 	"github.com/scionproto/scion/pkg/scrypto"
-	"github.com/scionproto/scion/pkg/scrypto/cms/protocol"
 	"github.com/scionproto/scion/pkg/scrypto/cppki"
 
 	"github.com/fancl20/cion/internal/services"
@@ -48,15 +47,14 @@ func seedFounder(
 
 	t.Helper()
 	state := t.TempDir()
-	keys := mintCoreKeys(t)
+	keys, err := trust.LoadOrCreateCoreKeys(state)
+	if err != nil {
+		t.Fatal(err)
+	}
 	sensitive := mintVotingCert(t, founderIA, keys.Sensitive, true)
 	regular := mintVotingCert(t, founderIA, keys.Regular, false)
 	root := mintRootCert(t, founderIA, keys.Root)
 	persistIAFile(t, state, founderIA)
-	persistKeyFile(t, state, trust.SensitiveKeyFile, keys.Sensitive)
-	persistKeyFile(t, state, trust.RegularKeyFile, keys.Regular)
-	persistKeyFile(t, state, trust.RootKeyFile, keys.Root)
-	persistKeyFile(t, state, trust.CAKeyFile, keys.CA)
 
 	// The validity every seeded certificate covers, the latest start to the
 	// earliest end: each mint takes its own truncated clock, and the TRC's
@@ -83,8 +81,15 @@ func seedFounder(
 		Description:  "CION seeded rotation lab TRC",
 		Certificates: []*x509.Certificate{sensitive, regular, root, authCert},
 	}
-	signed := signSeedTRC(t, trc, []crypto.Signer{keys.Sensitive, keys.Regular, authKey},
+	signed, err := trust.SignRotation(trc,
+		[]crypto.Signer{keys.Sensitive, keys.Regular, authKey},
 		[]*x509.Certificate{sensitive, regular, authCert})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := signed.Verify(nil); err != nil {
+		t.Fatalf("the seeded TRC does not verify: %v", err)
+	}
 	db, err := trustbbolt.New(filepath.Join(state, "trust.db"), nil)
 	if err != nil {
 		t.Fatal(err)
@@ -103,64 +108,14 @@ func seedFounder(
 func seedAuthoritative(t *testing.T, ia addr.IA) (string, crypto.Signer, *x509.Certificate) {
 	t.Helper()
 	state := t.TempDir()
-	key := mintKey(t)
+	key, err := trust.LoadOrCreateVotingKey(state)
+	if err != nil {
+		t.Fatal(err)
+	}
 	cert := mintVotingCert(t, ia, key, false)
 	persistIAFile(t, state, ia)
-	persistKeyFile(t, state, trust.RegularKeyFile, key)
 	persistCertFile(t, state, trust.RegularVotingCertFile, cert)
 	return state, key, cert
-}
-
-// signSeedTRC CMS-signs the seeded TRC with every voter the base rules name.
-func signSeedTRC(
-	t *testing.T,
-	trc cppki.TRC,
-	keys []crypto.Signer,
-	certs []*x509.Certificate,
-) cppki.SignedTRC {
-
-	t.Helper()
-	payload, err := trc.Encode()
-	if err != nil {
-		t.Fatal(err)
-	}
-	eci, err := protocol.NewDataEncapsulatedContentInfo(payload)
-	if err != nil {
-		t.Fatal(err)
-	}
-	sd, err := protocol.NewSignedData(eci)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for i, key := range keys {
-		if err := sd.AddSignerInfo([]*x509.Certificate{certs[i]}, key); err != nil {
-			t.Fatal(err)
-		}
-	}
-	raw, err := sd.ContentInfoDER()
-	if err != nil {
-		t.Fatal(err)
-	}
-	signed, err := cppki.DecodeSignedTRC(raw)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := signed.Verify(nil); err != nil {
-		t.Fatalf("the seeded TRC does not verify: %v", err)
-	}
-	return signed
-}
-
-// mintCoreKeys mints the founder's four keys.
-func mintCoreKeys(t *testing.T) trust.CoreKeys {
-	t.Helper()
-	sensitive := mintKey(t)
-	regular := mintKey(t)
-	root := mintKey(t)
-	ca := mintKey(t)
-	return trust.CoreKeys{
-		Sensitive: sensitive, Regular: regular, Root: root, CA: ca,
-	}
 }
 
 // mintKey mints a fresh ECDSA P-256 key.
