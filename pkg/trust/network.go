@@ -155,6 +155,20 @@ func RenewChain(
 	if err := validateISD(ia); err != nil {
 		return nil, err
 	}
+	// The newest TRC is pulled, and the pool that anchors chains resolved,
+	// before the chain is requested: a chain under a fresh root verifies
+	// against the successor and not the predecessor the node still holds,
+	// the pool carrying the predecessor beside it while the successor's
+	// grace window runs, and an issued chain needs only local work to be
+	// kept. A root rolled between the pull and the issuance fails this
+	// attempt's verification, and the next attempt pulls the successor.
+	if _, err := pullNewestTRC(ctx, db, remote, ia.ISD()); err != nil {
+		return nil, err
+	}
+	pool, err := anchorPool(ctx, db, remote, ia.ISD())
+	if err != nil {
+		return nil, err
+	}
 	csr, err := CreateCSR(ia, key)
 	if err != nil {
 		return nil, fmt.Errorf("creating CSR: %w", err)
@@ -168,17 +182,6 @@ func RenewChain(
 	}
 	if certIA, err := cppki.ExtractIA(chain[0].Subject); err != nil || !certIA.Equal(ia) {
 		return nil, serrors.New("issued chain is for another ISD-AS", "expected", ia)
-	}
-	// The newest TRC is pulled before the issued chain verifies, so a chain
-	// under a fresh root verifies against the successor and not the
-	// predecessor the node still holds; the pool carries the predecessor
-	// beside it while the successor's grace window runs.
-	if _, err := pullNewestTRC(ctx, db, remote, ia.ISD()); err != nil {
-		return nil, err
-	}
-	pool, err := anchorPool(ctx, db, remote, ia.ISD())
-	if err != nil {
-		return nil, err
 	}
 	if err := cppki.VerifyChain(chain, cppki.VerifyOptions{TRC: pool}); err != nil {
 		return nil, serrors.Wrap("issued chain does not verify against TRC", err)

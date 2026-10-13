@@ -27,12 +27,17 @@ type fakeRemote struct {
 	chainFetches  int
 	renewalReqs   int
 	failFollowing bool
+	// trcErr fails every TRC fetch, the chain requests still answered.
+	trcErr error
 }
 
 func (r *fakeRemote) TRC(ctx context.Context, id cppki.TRCID) (cppki.SignedTRC, error) {
 	r.trcFetches++
 	if r.failFollowing {
 		return cppki.SignedTRC{}, errors.New("remote gone")
+	}
+	if r.trcErr != nil {
+		return cppki.SignedTRC{}, r.trcErr
 	}
 	if trc, ok := r.byID[id]; ok {
 		return trc, nil
@@ -191,6 +196,24 @@ func TestRenewChain(t *testing.T) {
 	}
 	if len(chains) != 1 {
 		t.Fatalf("stored chains = %d, want 1", len(chains))
+	}
+}
+
+// TestRenewChainPullsBeforeItAsks checks the renewal's order: the TRC pull
+// precedes the chain request, so a pull that fails, as one the attempt's
+// deadline cuts, fails the renewal before the core issues a chain the node
+// would throw away.
+func TestRenewChainPullsBeforeItAsks(t *testing.T) {
+	remote := newFakeRemote(t)
+	remote.trcErr = context.DeadlineExceeded
+
+	_, err := RenewChain(context.Background(), newTestDB(t), remote, nodeIA, newTestASKey(t))
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("renewal error = %v, want the pull's", err)
+	}
+	if remote.renewalReqs != 0 {
+		t.Errorf("the core was asked for a chain %d times before the pull succeeded, want never",
+			remote.renewalReqs)
 	}
 }
 
