@@ -1472,3 +1472,80 @@ func TestSelectionLosesPortRace(t *testing.T) {
 	}
 	lostPortRace(t, store, selA, entry.Local)
 }
+
+// TestSelectionRejoinTakesRetiredLocal checks the promotion of a neighbor
+// whose link the node retired while the neighbor's side stays established:
+// the neighbor's acceptor answers the rendezvous claim with that side
+// unchanged, its remote the retired entry's local address, so the new entry
+// takes that address, the neighbor's latest retired one, not an earlier
+// entry's or another neighbor's, and the two sides name each other. Once a
+// live entry holds the address, the promotion draws a fresh one.
+func TestSelectionRejoinTakesRetiredLocal(t *testing.T) {
+	ctx := context.Background()
+	peer := newRendezvousFixture(t, func(cfg *RendezvousConfig) {
+		cfg.IA = rendezvousIA
+	})
+	host := netip.MustParseAddr("127.0.0.1")
+	retiredSide := netip.AddrPortFrom(host, 40001)
+	peerSide := netip.AddrPortFrom(host, 40002)
+	if err := peer.store.Insert(ctx, &links.Link{
+		NeighborIA: selIA,
+		Local:      peerSide,
+		Remote:     retiredSide,
+		State:      links.StateEstablished,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	newSelection := func(t *testing.T) *selection {
+		t.Helper()
+		s := &selection{cfg: SelectionConfig{
+			IA:       selIA,
+			Store:    memory.New(),
+			LinkHost: host,
+		}}
+		now := time.Now()
+		for _, l := range []*links.Link{
+			// An earlier retired link to the neighbor, and a later one to
+			// another neighbor: neither is the address the neighbor's side
+			// names.
+			{NeighborIA: rendezvousIA, Local: netip.AddrPortFrom(host, 40003),
+				Remote: peerSide, State: links.StateRetired, Retired: now.Add(-time.Hour)},
+			{NeighborIA: selB, Local: netip.AddrPortFrom(host, 40004),
+				Remote: netip.AddrPortFrom(host, 40005), State: links.StateRetired,
+				Retired: now.Add(time.Minute)},
+			{NeighborIA: rendezvousIA, Local: retiredSide, Remote: peerSide,
+				State: links.StateRetired, Retired: now},
+		} {
+			if err := s.cfg.Store.Insert(ctx, l); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return s
+	}
+	e := scopedEntry(rendezvousIA, peer.addr.String())
+
+	s := newSelection(t)
+	entry, err := s.ownEntry(ctx, e)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !s.establishByRendezvous(ctx, e, entry) {
+		t.Fatal("the rendezvous establishment failed")
+	}
+	if entry.Local != retiredSide || entry.Remote != peerSide {
+		t.Errorf("the re-joined entry links %v to %v, want %v to %v, the neighbor's side",
+			entry.Local, entry.Remote, retiredSide, peerSide)
+	}
+
+	s = newSelection(t)
+	if err := s.cfg.Store.Insert(ctx, liveLink(selB, retiredSide.Port())); err != nil {
+		t.Fatal(err)
+	}
+	entry, err = s.ownEntry(ctx, e)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if entry.Local == retiredSide {
+		t.Errorf("the promotion took %v, which a live entry holds", entry.Local)
+	}
+}

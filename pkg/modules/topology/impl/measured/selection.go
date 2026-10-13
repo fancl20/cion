@@ -1004,12 +1004,12 @@ func (s *selection) establishByRendezvous(
 	return true
 }
 
-// ownEntry returns the local side of a promoted candidate, allocating the
-// link address and interface ID of a new one. The rendezvous acceptor and
-// the in-band link service record entries too; the store refuses a
-// neighbor's second live entry and a second live entry on one local
-// address, and a promotion that loses either race looks again: it proceeds
-// on the winner's entry, or records its own on a fresh address.
+// ownEntry returns the local side of a promoted candidate, recording a new
+// one when the table holds none. The rendezvous acceptor and the in-band
+// link service record entries too; the store refuses a neighbor's second
+// live entry and a second live entry on one local address, and a promotion
+// that loses either race looks again: it proceeds on the winner's entry, or
+// records its own on a fresh address.
 func (s *selection) ownEntry(ctx context.Context, e DirectoryEntry) (*links.Link, error) {
 	entry, err := s.recordEntry(ctx, e)
 	if errors.Is(err, links.ErrDuplicateNeighbor) || errors.Is(err, links.ErrDuplicateLocal) {
@@ -1019,7 +1019,12 @@ func (s *selection) ownEntry(ctx context.Context, e DirectoryEntry) (*links.Link
 }
 
 // recordEntry returns the neighbor's live entry, inserting a candidate
-// when the table holds none.
+// when the table holds none. The candidate takes the local address of the
+// neighbor's latest retired entry while no live entry holds it, else a
+// fresh one: the neighbor's side of a link this node retired stays
+// established until the neighbor's own verdict retires it, its socket
+// connected to that address, and its acceptor answers a rendezvous claim
+// with that side unchanged.
 func (s *selection) recordEntry(ctx context.Context, e DirectoryEntry) (*links.Link, error) {
 	entry, err := s.cfg.Store.ByNeighbor(ctx, e.IA)
 	if err != nil {
@@ -1032,9 +1037,11 @@ func (s *selection) recordEntry(ctx context.Context, e DirectoryEntry) (*links.L
 	if err != nil {
 		return nil, err
 	}
-	local, err := AllocateLinkAddr(s.cfg.LinkHost, entries)
-	if err != nil {
-		return nil, err
+	local, ok := retiredLocal(entries, e.IA)
+	if !ok {
+		if local, err = AllocateLinkAddr(s.cfg.LinkHost, entries); err != nil {
+			return nil, err
+		}
 	}
 	entry = &links.Link{
 		NeighborIA: e.IA,
@@ -1046,6 +1053,24 @@ func (s *selection) recordEntry(ctx context.Context, e DirectoryEntry) (*links.L
 		return nil, err
 	}
 	return entry, nil
+}
+
+// retiredLocal returns the local address of the neighbor's latest retired
+// entry, unless a live entry holds it.
+func retiredLocal(entries []*links.Link, ia addr.IA) (netip.AddrPort, bool) {
+	var latest *links.Link
+	for _, l := range entries {
+		if l.Live() || !l.NeighborIA.Equal(ia) {
+			continue
+		}
+		if latest == nil || l.Retired.After(latest.Retired) {
+			latest = l
+		}
+	}
+	if latest == nil || localHeld(entries, latest) {
+		return netip.AddrPort{}, false
+	}
+	return latest.Local, true
 }
 
 // ratioOf scales a duration by one of the loop's ratios.
