@@ -31,7 +31,8 @@ methods to wait system ready.
 
 Review changes to ensure they conform to all style requirements. For code
 changes, run tests with `go test -race -count=2` first, then `golangci-lint`,
-then `go fmt` and `go fix`.
+then `goimports -local github.com/fancl20/cion`, `go fmt`, `go fix`, and
+`go vet`.
 
 Pause and wait for human review before committing changes to the codebase.
 It's acceptable to amend a local commit if a later commit is a refinement of
