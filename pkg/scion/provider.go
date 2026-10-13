@@ -41,12 +41,14 @@ type PathProvider struct {
 	// interface until the entry lapses, keeping a crossing path only when
 	// nothing else exists. Nil composes without the filter.
 	InterfaceDown *InterfaceDownCache
-	// Links snapshots the node's live interfaces and their neighbors, the
-	// link table every consumer of the link set reads. A segment through an
-	// interface the node retired stays until it expires, while the data
-	// plane serves the interface no more: composition drops every path
-	// naming one of the node's own interfaces the snapshot lacks, never a
-	// last resort. Nil, or a nil snapshot, composes without the filter.
+	// Links snapshots the interfaces routes may leave the node through and
+	// their neighbors. A segment through an interface the node retired stays
+	// until it expires, while the data plane serves the interface no more,
+	// and a link whose verdict is down keeps its segments while the data
+	// plane refuses its egress: composition drops every path naming one of
+	// the node's own interfaces the snapshot lacks, and so does the
+	// bootstrap route, never a last resort. Nil, or a nil snapshot, composes
+	// without the filter.
 	Links func() map[uint16]addr.IA
 }
 
@@ -69,11 +71,20 @@ func (p *PathProvider) LocalPath(dst addr.IA) (*spath.Decoded, error) {
 	// pinned the TRC — the bootstrap beacon's reversed route serves the
 	// core; beacons originate only at cores.
 	if p.Bootstrap != nil {
-		if bs := p.Bootstrap(dst); bs != nil {
+		if bs := p.Bootstrap(dst); bs != nil && !retired(p.liveInterfaces(), egress(bs)) {
 			return bs, nil
 		}
 	}
 	return nil, serrors.New("no path to destination", "isd_as", dst)
+}
+
+// egress returns the interface a path leaves the local AS through: its
+// first hop's egress in the direction the path travels.
+func egress(p *spath.Decoded) uint16 {
+	if p.InfoFields[0].ConsDir {
+		return p.HopFields[0].ConsEgress
+	}
+	return p.HopFields[0].ConsIngress
 }
 
 // Path returns a data-plane path from the local AS to dst. What LocalPath

@@ -85,9 +85,10 @@ type Conn struct {
 	// mac MACs the hop fields of outgoing one-hop paths, with the same key
 	// the data plane verifies.
 	mac hash.Hash
-	// links snapshots the external links, interface ID to neighbor IA, to
-	// resolve the egress interface of fresh one-hop paths. Read live, so a
-	// topology change reaches the conn without rebuilding it.
+	// links snapshots the links one-hop writes may leave through, interface
+	// ID to neighbor IA, to resolve the egress interface of fresh one-hop
+	// paths. Read live, so a topology change reaches the conn without
+	// rebuilding it.
 	links func() map[uint16]addr.IA
 	// ifDown is the node's shared negative cache of interface-down signals;
 	// nil drops them as before.
@@ -110,8 +111,9 @@ type ConnConfig struct {
 	InternalAddr string
 	// MACKey is the data-plane forwarding key, used to MAC one-hop paths.
 	MACKey []byte
-	// Links snapshots the external links, interface ID to neighbor IA; the
-	// conn resolves one-hop egress through it live.
+	// Links snapshots the links one-hop writes may leave through, interface
+	// ID to neighbor IA; the conn resolves one-hop egress through it live,
+	// and a write to a neighbor the snapshot lacks fails at once.
 	Links func() map[uint16]addr.IA
 	// InterfaceDown is the node's shared negative cache of SCMP
 	// interface-down signals; the conn's receive paths recognize the signal

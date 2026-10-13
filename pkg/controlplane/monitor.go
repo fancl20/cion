@@ -119,9 +119,10 @@ func (m *HealthMonitor) Up(ifID uint16) bool {
 }
 
 // Verdicts returns the per-interface verdicts the node's consumers read: a
-// down interface originates and propagates nothing, the core route's
-// one-hop shortcut falls through to the composed route, and the selection
-// loop's floor and demotions count up links only.
+// down interface originates and propagates nothing, carries no route out of
+// the node — no composed path, one-hop write, or core route's shortcut
+// leaves through it — and the selection loop's floor and demotions count up
+// links only.
 func (m *HealthMonitor) Verdicts() map[uint16]bool {
 	m.mtx.Lock()
 	defer m.mtx.Unlock()

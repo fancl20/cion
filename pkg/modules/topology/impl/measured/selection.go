@@ -524,10 +524,9 @@ func (s *selection) establish(ctx context.Context, e DirectoryEntry, why string)
 // one-hop write does, the responder in the peer's core answering on the
 // reversed arrival path — and a candidate's (a demoted neighbor included)
 // by the rendezvous echo that reaches where no path and no interface exist.
-// A neighbor whose verdict is down gets no direct echo: the data plane
-// forwards a one-hop path without checking its egress, so the echo would be
-// lost without a signal after its waits, and the zero sample is what it
-// would measure. The baseline is the same SCMP echo instrument over the
+// A neighbor whose link the conn cannot send over — its verdict down —
+// fails each run's write at once, and the zero sample is what it would
+// measure. The baseline is the same SCMP echo instrument over the
 // freshest clean composed route of the enumeration the probe keeps beside
 // the sample, the route recorded as the sample's carrier: one destination,
 // two routes, the same median-of-runs discipline, and no clean route leaves
@@ -538,12 +537,10 @@ func (s *selection) establish(ctx context.Context, e DirectoryEntry, why string)
 func (s *selection) probe(ctx context.Context, e DirectoryEntry, l *links.Link) sample {
 	var m measurement
 	if l != nil {
-		if s.linkUp(l.IfID) {
-			m.direct = s.echoRTT(ctx, &scion.Addr{
-				IA:   e.IA,
-				Addr: netip.AddrPortFrom(e.ControlAddr.Addr(), dataplane.EndhostPort),
-			})
-		}
+		m.direct = s.echoRTT(ctx, &scion.Addr{
+			IA:   e.IA,
+			Addr: netip.AddrPortFrom(e.ControlAddr.Addr(), dataplane.EndhostPort),
+		})
 	} else if _, rtt, err := s.echo(ctx, s.cfg.ControlAddr.Addr(),
 		e.RendezvousAddr, addr.IA(0), s.cfg.ControlAddr); err == nil {
 		m.direct = rtt

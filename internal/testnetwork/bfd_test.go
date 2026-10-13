@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/scionproto/scion/pkg/addr"
+	spath "github.com/scionproto/scion/pkg/slayers/path/scion"
 
 	"github.com/fancl20/cion/internal/services"
 	"github.com/fancl20/cion/pkg/dataplane"
@@ -56,8 +57,12 @@ func TestBFDLivenessEpisode(t *testing.T) {
 	})
 	abEntry := entryOf(a, b.app.IA())
 	abIfID := abEntry.IfID
+	// The path through B is kept for the episode's echo across the dead
+	// link, which no composition offers once A's verdict on it is down.
+	var throughB *spath.Decoded
 	Poll(t, "A reaches C through B", func() bool {
-		return echoVia(ctx, t, a, c.app.IA(), c.host, abIfID, time.Second)
+		throughB = pathVia(ctx, t, a, c.app.IA(), abIfID)
+		return throughB != nil && echoOver(t, a, c.app.IA(), c.host, throughB, time.Second)
 	})
 
 	// A holds the floor of up links through a direct link to C — a line of
@@ -97,10 +102,10 @@ func TestBFDLivenessEpisode(t *testing.T) {
 		t.Error("the verdict flip minted a new session")
 	}
 
-	// An echo from A toward B's far side — C — over a path through the dead
-	// link: the egress-down branch answers with the type-5 signal, and A's
-	// conn records the signaled interface in the shared cache.
-	echoAcrossDownLink(ctx, t, a, c.app.IA(), c.host, abIfID)
+	// An echo from A toward B's far side — C — over the path through the
+	// dead link: the egress-down branch answers with the type-5 signal, and
+	// A's conn records the signaled interface in the shared cache.
+	echoAcrossDownLink(t, a, c.app.IA(), c.host, abIfID, throughB)
 
 	// Lift the blackhole: B restarted on the same state serves its persisted
 	// link, and A's verdict returns up on the next answered arrival — the
@@ -146,8 +151,13 @@ func TestBFDStaticLabEpisode(t *testing.T) {
 			establishedOf(b.assemblyNode, a.app.IA()) &&
 			establishedOf(c.assemblyNode, b.app.IA())
 	})
+	// The path through B is kept for the echo across the dead link, which
+	// no composition offers once A's verdict on it is down.
+	var throughB *spath.Decoded
 	Poll(t, "A reaches C through B", func() bool {
-		return pingFrom(ctx, a.assemblyNode, c.app.IA(), c.host)
+		throughB = pathVia(ctx, t, a.assemblyNode, c.app.IA(), ifID)
+		return throughB != nil &&
+			echoOver(t, a.assemblyNode, c.app.IA(), c.host, throughB, time.Second)
 	})
 
 	// The blackhole: B dies, and A's monitor marks the file provider's link
@@ -157,7 +167,7 @@ func TestBFDStaticLabEpisode(t *testing.T) {
 		return !a.app.Monitor().Up(ifID)
 	})
 	// The dead route answers the source with the signal; A's cache holds it.
-	echoAcrossDownLink(ctx, t, a.assemblyNode, c.app.IA(), c.host, ifID)
+	echoAcrossDownLink(t, a.assemblyNode, c.app.IA(), c.host, ifID, throughB)
 
 	// Lift the blackhole: B restarted from its link-set returns the link up.
 	b2 := bootStaticNode(t, wpki, ipB, false, b.stateDir, b.linkSet, nil)
@@ -178,26 +188,25 @@ func establishedOf(n *assemblyNode, ia addr.IA) bool {
 }
 
 // echoAcrossDownLink sends echoes toward the destination over a path
-// leaving through the node's down interface until the node's shared cache
-// holds the egress-down branch's type-5 signal, which the receive path
-// records while each echo goes unanswered.
-func echoAcrossDownLink(ctx context.Context, t *testing.T, n *assemblyNode,
-	dst addr.IA, host netip.Addr, ifID uint16) {
+// through the node's down interface — captured while the link was up, for
+// the provider composes no path through an interface the node cannot send
+// over — until the node's shared cache holds the egress-down branch's
+// type-5 signal, which the receive path records while each echo goes
+// unanswered.
+func echoAcrossDownLink(t *testing.T, n *assemblyNode, dst addr.IA,
+	host netip.Addr, ifID uint16, path *spath.Decoded) {
 
 	t.Helper()
 	Poll(t, "the interface-down signal to land in the cache", func() bool {
-		echoVia(ctx, t, n, dst, host, ifID, 100*time.Millisecond)
+		echoOver(t, n, dst, host, path, 100*time.Millisecond)
 		return n.app.InterfaceDown().Holds(n.app.IA(), ifID)
 	})
 }
 
-// echoVia sends an echo request toward the destination over a composed
-// path leaving through the node's interface and reads the socket until the
-// reply arrives or the wait elapses, reporting whether the reply arrived;
-// while no such path is composed it reports false at once. The receive path
-// records an interface-down signal in the node's shared cache as it reads.
-func echoVia(ctx context.Context, t *testing.T, n *assemblyNode, dst addr.IA,
-	host netip.Addr, ifID uint16, wait time.Duration) bool {
+// pathVia returns a composed path toward the destination that leaves
+// through the node's interface; nil while none is composed.
+func pathVia(ctx context.Context, t *testing.T, n *assemblyNode, dst addr.IA,
+	ifID uint16) *spath.Decoded {
 
 	t.Helper()
 	candidates, err := n.app.Provider().Enumerate(ctx, dst)
@@ -209,8 +218,31 @@ func echoVia(ctx context.Context, t *testing.T, n *assemblyNode, dst addr.IA,
 		return slices.Contains(c.Links, via)
 	})
 	if i < 0 {
-		return false
+		return nil
 	}
+	return candidates[i].Path
+}
+
+// echoVia sends an echo request toward the destination over a composed
+// path leaving through the node's interface and reports whether the reply
+// arrived within the wait; while no such path is composed it reports false
+// at once.
+func echoVia(ctx context.Context, t *testing.T, n *assemblyNode, dst addr.IA,
+	host netip.Addr, ifID uint16, wait time.Duration) bool {
+
+	t.Helper()
+	path := pathVia(ctx, t, n, dst, ifID)
+	return path != nil && echoOver(t, n, dst, host, path, wait)
+}
+
+// echoOver sends an echo request toward the destination over the path and
+// reads the socket until the reply arrives or the wait elapses, reporting
+// whether the reply arrived. The receive path records an interface-down
+// signal in the node's shared cache as it reads.
+func echoOver(t *testing.T, n *assemblyNode, dst addr.IA, host netip.Addr,
+	path *spath.Decoded, wait time.Duration) bool {
+
+	t.Helper()
 	conn, err := n.app.Conn(0)
 	if err != nil {
 		t.Fatal(err)
@@ -219,7 +251,7 @@ func echoVia(ctx context.Context, t *testing.T, n *assemblyNode, dst addr.IA,
 	if err := conn.WriteEchoRequestTo(&scion.Addr{
 		IA:   dst,
 		Addr: netip.AddrPortFrom(host, dataplane.EndhostPort),
-		Path: candidates[i].Path,
+		Path: path,
 	}, 0, nil); err != nil {
 		t.Fatal(err)
 	}

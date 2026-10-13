@@ -206,10 +206,10 @@ func (n *node) servingLinks(ctx context.Context) ([]*links.Link, error) {
 
 // linkTable snapshots the live links' interface IDs and neighbors — the
 // source every consumer of the link set reads: the beaconer's checks and
-// targets, the connections' one-hop egress resolution, and the core
-// route's one-hop shortcut. The snapshot caches, for a one-hop send reads
-// it per packet, and rebuilds once the store's signal moved its version:
-// every write to the node's store signals.
+// targets whole, the routes out of the node through usableLinks. The
+// snapshot caches, for a one-hop send reads it per packet, and rebuilds
+// once the store's signal moved its version: every write to the node's
+// store signals.
 func (n *node) linkTable() map[uint16]addr.IA {
 	n.tableMtx.Lock()
 	defer n.tableMtx.Unlock()
@@ -227,6 +227,34 @@ func (n *node) linkTable() map[uint16]addr.IA {
 	n.tableSnapshot = links.Links(entries)
 	n.tableBuilt = n.tableVersion
 	return n.tableSnapshot
+}
+
+// usableLinks snapshots the links the node can send over: the link table's
+// entries whose BFD verdict is up. The data plane refuses a down link's
+// egress, and forwards a one-hop packet onto it without that check, so no
+// signal tells the sender; every route out of the node — a composed path's
+// first hop, the bootstrap route, a one-hop write, the core route's
+// shortcut — resolves over these links alone, and fails at once where none
+// serves. The beaconer reads the whole table: a beacon arriving on a down
+// link still names its neighbor. A failed read of the store serves nil, as
+// the table does.
+func (n *node) usableLinks() map[uint16]addr.IA {
+	return usable(n.linkTable(), n.monitor.Verdicts())
+}
+
+// usable keeps the table's links whose verdict is up; an interface with no
+// verdict — one the monitor has not seen — is up, as the monitor counts it.
+func usable(table map[uint16]addr.IA, verdicts map[uint16]bool) map[uint16]addr.IA {
+	if table == nil {
+		return nil
+	}
+	out := make(map[uint16]addr.IA, len(table))
+	for ifID, neighbor := range table {
+		if up, ok := verdicts[ifID]; !ok || up {
+			out[ifID] = neighbor
+		}
+	}
+	return out
 }
 
 // registerControlService registers the CS service on a data plane provider:

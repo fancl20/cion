@@ -460,7 +460,7 @@ func (n *node) buildBeaconing() error {
 		Bootstrap:     beaconer.BootstrapRoute,
 		Cores:         cores,
 		InterfaceDown: n.ifDown,
-		Links:         n.linkTable,
+		Links:         n.usableLinks,
 	}
 	return nil
 }
@@ -547,6 +547,7 @@ func (n *node) assembleEndpoint() error {
 
 // scionConn returns a SCION connection bound to the control address's host
 // with the given port, sending through the node's internal link. Every conn
+// resolves its one-hop writes over the links the node can send over, and
 // shares the node's interface-down cache: each receive path recognizes the
 // signal the data plane's egress-down branch sends back.
 func (n *node) scionConn(port uint16) (*scion.Conn, error) {
@@ -555,7 +556,7 @@ func (n *node) scionConn(port uint16) (*scion.Conn, error) {
 		Bind:          netip.AddrPortFrom(n.cfg.controlAddr.Addr(), port).String(),
 		InternalAddr:  n.cfg.internalAddr.String(),
 		MACKey:        n.ident.key,
-		Links:         n.linkTable,
+		Links:         n.usableLinks,
 		InterfaceDown: n.ifDown,
 	})
 }
@@ -573,15 +574,10 @@ func (n *node) scionConn(port uint16) (*scion.Conn, error) {
 // service resolution answers it at dial time. Local state only: resolving a
 // route inside a dial must not spawn RPCs over the transport being dialed.
 func (n *node) coreRoute() *scion.Addr {
-	// The one-hop shortcut: an issuer core, a direct neighbor, its verdict
-	// up — a link the monitor marked down falls through to the composed
-	// route.
-	table := n.linkTable()
-	for ifID, neighborIA := range table {
-		if neighborIA.IsZero() || !n.issuerASes()[neighborIA] {
-			continue
-		}
-		if n.monitor.Up(ifID) {
+	// The one-hop shortcut: an issuer core a usable link reaches directly —
+	// a link the monitor marked down falls through to the composed route.
+	for ifID, neighborIA := range n.usableLinks() {
+		if !neighborIA.IsZero() && n.issuerASes()[neighborIA] {
 			return &scion.Addr{IA: neighborIA, Service: addr.SvcCS, IfID: ifID}
 		}
 	}

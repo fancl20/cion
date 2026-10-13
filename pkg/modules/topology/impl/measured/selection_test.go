@@ -1248,11 +1248,12 @@ func (emptyPathDB) Get(context.Context, pathdb.Query) ([]*pathdb.Segment, error)
 	return nil, nil
 }
 
-// TestProbeSkipsADownNeighborsEcho checks the direct side's skip: an
-// established neighbor whose verdict is down gets no echo — the data plane
-// would lose it on the one-hop path without a signal — so the probe sends
-// the router nothing and returns no direct sample at once.
-func TestProbeSkipsADownNeighborsEcho(t *testing.T) {
+// TestProbeSendsNothingOverAnUnusableLink checks a down neighbor's probe:
+// the node's conns resolve one-hop writes over the links it can send over,
+// so a neighbor whose link the snapshot lacks — its verdict down — fails
+// every run's write at once, and the probe sends the router nothing and
+// returns no direct sample within one ProbeWait.
+func TestProbeSendsNothingOverAnUnusableLink(t *testing.T) {
 	host := netip.MustParseAddr("127.0.0.1")
 	router, err := net.ListenUDP("udp", net.UDPAddrFromAddrPort(netip.AddrPortFrom(host, 0)))
 	if err != nil {
@@ -1264,15 +1265,14 @@ func TestProbeSkipsADownNeighborsEcho(t *testing.T) {
 		Bind:         netip.AddrPortFrom(host, 0).String(),
 		InternalAddr: router.LocalAddr().String(),
 		MACKey:       make([]byte, 16),
-		Links:        func() map[uint16]addr.IA { return map[uint16]addr.IA{1: selPeer} },
+		Links:        func() map[uint16]addr.IA { return map[uint16]addr.IA{} },
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer func() { _ = conn.Close() }()
 	s := &selection{cfg: SelectionConfig{
-		Conn:     conn,
-		Verdicts: func() map[uint16]bool { return map[uint16]bool{1: false} },
+		Conn: conn,
 		Provider: &scion.PathProvider{
 			IA:     selIA,
 			DB:     emptyPathDB{},

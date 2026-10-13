@@ -177,3 +177,23 @@ func TestLinkTableServesPersistedLinks(t *testing.T) {
 			n.linkTable(), l.IfID, neighbor)
 	}
 }
+
+// TestUsableLinksDropDownVerdicts checks the snapshot every route out of
+// the node resolves over: the table's links whose verdict is up, and those
+// the monitor holds no verdict for; a down verdict's link is dropped, and a
+// table that failed to read stays nil.
+func TestUsableLinksDropDownVerdicts(t *testing.T) {
+	up := addr.MustIAFrom(20, 0xfd0000000001)
+	down := addr.MustIAFrom(20, 0xfd0000000002)
+	unseen := addr.MustIAFrom(20, 0xfd0000000003)
+	table := map[uint16]addr.IA{1: up, 2: down, 3: unseen}
+	verdicts := map[uint16]bool{1: true, 2: false}
+
+	want := map[uint16]addr.IA{1: up, 3: unseen}
+	if diff := cmp.Diff(want, usable(table, verdicts)); diff != "" {
+		t.Errorf("usable links (-want +got):\n%s", diff)
+	}
+	if got := usable(nil, verdicts); got != nil {
+		t.Errorf("usable links of an unread table = %v, want nil", got)
+	}
+}

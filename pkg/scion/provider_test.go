@@ -1097,6 +1097,39 @@ func TestProviderLocalPathSkipsRetiredInterface(t *testing.T) {
 	}
 }
 
+// TestProviderBootstrapRouteNeedsItsInterface checks the snapshot filter on
+// the bootstrap route: it serves while the interface it leaves through is
+// in the snapshot, and resolves nothing once the interface is not — a link
+// the node retired or can no longer send over.
+func TestProviderBootstrapRouteNeedsItsInterface(t *testing.T) {
+	beacon := signedLine(t, time.Now(),
+		linkHop{ia: iaCore, eg: 11},
+		linkHop{ia: iaLeaf, in: 14},
+	)
+	route := beacon.ReversePath()
+	live := map[uint16]addr.IA{14: iaCore}
+	p := &PathProvider{
+		IA:     iaLeaf,
+		DB:     &fakePathDB{},
+		Lookup: func(context.Context, addr.IA) []*pathdb.Segment { return nil },
+		Bootstrap: func(addr.IA) *spath.Decoded {
+			return route
+		},
+		Links: func() map[uint16]addr.IA { return live },
+	}
+
+	if _, err := p.LocalPath(iaCore); err != nil {
+		t.Fatalf("LocalPath over the bootstrap route's live interface: %v", err)
+	}
+	live = map[uint16]addr.IA{}
+	if _, err := p.LocalPath(iaCore); err == nil {
+		t.Error("LocalPath took the bootstrap route through an interface the snapshot lacks")
+	}
+	if _, err := p.Path(context.Background(), iaCore); err == nil {
+		t.Error("Path took the bootstrap route through an interface the snapshot lacks")
+	}
+}
+
 // TestProviderEntriesTiebreak checks the rank's third tiebreak: two joins
 // tied on hops and timestamp resolve to the pair with fewer entries.
 func TestProviderEntriesTiebreak(t *testing.T) {
