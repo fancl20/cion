@@ -444,7 +444,7 @@ func TestFetchTRCNewest(t *testing.T) {
 
 	db := newTestDB(t)
 	provider := &NetworkProvider{DB: db, Remote: remote}
-	got, err := provider.GetSignedTRC(context.Background(), newestTRCID(base.TRC.ID.ISD))
+	got, err := provider.GetSignedTRC(context.Background(), NewestTRCID(base.TRC.ID.ISD))
 	if err != nil {
 		t.Fatal(err)
 	}

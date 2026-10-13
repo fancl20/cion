@@ -118,7 +118,7 @@ func TestAuthoritativeBootCompletesPromotion(t *testing.T) {
 	}
 	// The joiner pins the founder's successor, and the promotion stops after
 	// the key's write.
-	landed, err := founderDB.SignedTRC(ctx, newestTRCID(coreIA.ISD()))
+	landed, err := founderDB.SignedTRC(ctx, NewestTRCID(coreIA.ISD()))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -136,7 +136,7 @@ func TestAuthoritativeBootCompletesPromotion(t *testing.T) {
 
 	// The boot: the promotion against the newest pinned TRC, then the
 	// loaders.
-	newest, err := joiner.SignedTRC(ctx, newestTRCID(coreIA.ISD()))
+	newest, err := joiner.SignedTRC(ctx, NewestTRCID(coreIA.ISD()))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -165,7 +165,7 @@ func (failingPin) InsertTRC(context.Context, cppki.SignedTRC) (bool, error) {
 // it alone. It reports whether the boot promoted.
 func bootFounder(t *testing.T, f *genesisFixture) bool {
 	t.Helper()
-	newest, err := f.db.SignedTRC(context.Background(), newestTRCID(coreIA.ISD()))
+	newest, err := f.db.SignedTRC(context.Background(), NewestTRCID(coreIA.ISD()))
 	if err != nil {
 		t.Fatal(err)
 	}

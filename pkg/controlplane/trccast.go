@@ -12,7 +12,6 @@ import (
 
 	"github.com/scionproto/scion/pkg/addr"
 	"github.com/scionproto/scion/pkg/private/serrors"
-	"github.com/scionproto/scion/pkg/scrypto"
 	"github.com/scionproto/scion/pkg/scrypto/cppki"
 
 	"github.com/fancl20/cion/pkg/modules/enrollauth"
@@ -224,11 +223,7 @@ func (c *TRCDecider) authorizeVoting(
 
 // newestTRC returns the newest pinned TRC of the founder's ISD.
 func (c *TRCDecider) newestTRC(ctx context.Context) (cppki.SignedTRC, error) {
-	trc, err := c.DB.SignedTRC(ctx, cppki.TRCID{
-		ISD:    c.IA.ISD(),
-		Base:   scrypto.LatestVer,
-		Serial: scrypto.LatestVer,
-	})
+	trc, err := c.DB.SignedTRC(ctx, trust.NewestTRCID(c.IA.ISD()))
 	if err != nil {
 		return cppki.SignedTRC{}, serrors.Wrap("reading the newest pinned TRC", err)
 	}

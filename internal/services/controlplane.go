@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/scionproto/scion/pkg/addr"
-	"github.com/scionproto/scion/pkg/scrypto"
 	"github.com/scionproto/scion/pkg/scrypto/cppki"
 	spath "github.com/scionproto/scion/pkg/slayers/path/scion"
 	"go.etcd.io/bbolt"
@@ -356,11 +355,7 @@ func (n *node) rotation(roll controlplane.Roll) controlplane.RotationConfig {
 // promoteStaged promotes the material a roll staged once the newest pinned
 // TRC names it, and returns that TRC, zero on a first start.
 func (n *node) promoteStaged(ctx context.Context) (cppki.SignedTRC, error) {
-	newest, err := n.trustDB.SignedTRC(ctx, cppki.TRCID{
-		ISD:    n.ident.ia.ISD(),
-		Base:   scrypto.LatestVer,
-		Serial: scrypto.LatestVer,
-	})
+	newest, err := n.trustDB.SignedTRC(ctx, trust.NewestTRCID(n.ident.ia.ISD()))
 	if err != nil {
 		return cppki.SignedTRC{}, fmt.Errorf("reading the newest pinned TRC: %w", err)
 	}

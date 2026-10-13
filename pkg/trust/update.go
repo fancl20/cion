@@ -83,30 +83,11 @@ func AssembleOnboarding(
 		return cppki.TRC{}, serrors.New("the predecessor holds no sensitive voting certificate",
 			"trc", pred.TRC.ID)
 	}
-	// The window every carried certificate still covers: the latest start
-	// to the earliest end.
-	validity := cppki.Validity{
-		NotBefore: pred.TRC.Certificates[0].NotBefore,
-		NotAfter:  pred.TRC.Certificates[0].NotAfter,
-	}
-	for _, cert := range pred.TRC.Certificates[1:] {
-		if cert.NotBefore.After(validity.NotBefore) {
-			validity.NotBefore = cert.NotBefore
-		}
-		if cert.NotAfter.Before(validity.NotAfter) {
-			validity.NotAfter = cert.NotAfter
-		}
-	}
-	if votingCert.NotBefore.After(validity.NotBefore) {
-		validity.NotBefore = votingCert.NotBefore
-	}
-	if votingCert.NotAfter.Before(validity.NotAfter) {
-		validity.NotAfter = votingCert.NotAfter
-	}
+	certs := append(append([]*x509.Certificate{}, pred.TRC.Certificates...), votingCert)
 	return cppki.TRC{
 		Version:  1,
-		ID:       cppki.TRCID{ISD: pred.TRC.ID.ISD, Base: pred.TRC.ID.Base, Serial: pred.TRC.ID.Serial + 1},
-		Validity: validity,
+		ID:       successorID(pred.TRC.ID),
+		Validity: coveredValidity(certs),
 		// A sensitive update changes what a regular update may not; the
 		// quorum and noTrustReset stay as they were, and the first updates
 		// only add material, so no grace period.
@@ -116,7 +97,7 @@ func AssembleOnboarding(
 		CoreASes:          append(append([]addr.AS{}, pred.TRC.CoreASes...), joiner.AS()),
 		AuthoritativeASes: append(append([]addr.AS{}, pred.TRC.AuthoritativeASes...), joiner.AS()),
 		Description:       fmt.Sprintf("CION onboarding of %s", joiner),
-		Certificates:      append(append([]*x509.Certificate{}, pred.TRC.Certificates...), votingCert),
+		Certificates:      certs,
 	}, nil
 }
 
@@ -193,31 +174,61 @@ func JoinCore(
 	if err != nil {
 		return err
 	}
-	if _, err := trc.ValidateUpdate(&newest.TRC); err != nil {
-		return serrors.Wrap("classifying the successor against the founder's newest TRC",
-			err, "predecessor", newest.TRC.ID)
-	}
 	partial, err := SignUpdate(trc, key, cert)
 	if err != nil {
 		return err
 	}
-	// The submitted artifact is checked short of the founder's vote: the
-	// successor classifies, and the possession signature verifies over the
-	// payload. The completion's verification demands both signatures.
-	if err := verifySignedBy(partial, cert); err != nil {
-		return serrors.Wrap("verifying the proof of possession", err)
+	_, err = castSuccessor(ctx, db, newest, partial, submission(ctx, caster, cert))
+	return err
+}
+
+// castSuccessor casts the signed successor on its predecessor: the successor
+// must classify as an update of the predecessor and, once completed — the
+// submission's answer, or the founder's vote cast locally — verify against
+// it, which demands every signature its update requires. The completion then
+// pins and returns.
+func castSuccessor(
+	ctx context.Context,
+	db trustdb.DB,
+	pred cppki.SignedTRC,
+	partial cppki.SignedTRC,
+	complete func(cppki.SignedTRC) (cppki.SignedTRC, error),
+) (cppki.SignedTRC, error) {
+
+	if _, err := partial.TRC.ValidateUpdate(&pred.TRC); err != nil {
+		return cppki.SignedTRC{}, serrors.Wrap("classifying the successor against its predecessor",
+			err, "predecessor", pred.TRC.ID)
 	}
-	completed, err := caster.SubmitTRC(ctx, partial)
+	completed, err := complete(partial)
 	if err != nil {
-		return err
+		return cppki.SignedTRC{}, err
 	}
-	if err := completed.Verify(&newest.TRC); err != nil {
-		return serrors.Wrap("verifying the completed TRC", err, "id", completed.TRC.ID)
+	if err := completed.Verify(&pred.TRC); err != nil {
+		return cppki.SignedTRC{}, serrors.Wrap("verifying the completed TRC", err,
+			"id", completed.TRC.ID)
 	}
 	if _, err := db.InsertTRC(ctx, completed); err != nil {
-		return fmt.Errorf("pinning the completed TRC: %w", err)
+		return cppki.SignedTRC{}, fmt.Errorf("pinning the completed TRC: %w", err)
 	}
-	return nil
+	return completed, nil
+}
+
+// submission returns the completion that submits the signed successor
+// through the caster to the core's voting application. The artifact is
+// checked before it leaves, short of the votes the answer adds: the proof of
+// possession by cert verifies over the payload.
+func submission(
+	ctx context.Context,
+	caster TRCCaster,
+	cert *x509.Certificate,
+) func(cppki.SignedTRC) (cppki.SignedTRC, error) {
+
+	return func(partial cppki.SignedTRC) (cppki.SignedTRC, error) {
+		if err := verifySignedBy(partial, cert); err != nil {
+			return cppki.SignedTRC{}, serrors.Wrap("verifying the proof of possession", err)
+		}
+		return caster.SubmitTRC(ctx, partial)
+	}
 }
 
 // CoreNamed reports whether the TRC's core list names the ISD-AS.
@@ -247,16 +258,36 @@ func verifySignedBy(signed cppki.SignedTRC, cert *x509.Certificate) error {
 	return serrors.New("the TRC carries no signature by the certificate")
 }
 
-// newestTRCID returns the numbers-less TRC ID asking an ISD's newest TRC —
+// NewestTRCID returns the numbers-less TRC ID asking an ISD's newest TRC —
 // the active-discovery form the drafts' request carries (PKI draft,
 // Section 4.1.2).
-func newestTRCID(isd addr.ISD) cppki.TRCID {
+func NewestTRCID(isd addr.ISD) cppki.TRCID {
 	return cppki.TRCID{ISD: isd, Base: scrypto.LatestVer, Serial: scrypto.LatestVer}
 }
 
 // predecessorID returns the ID of the TRC one serial before id's.
 func predecessorID(id cppki.TRCID) cppki.TRCID {
 	return cppki.TRCID{ISD: id.ISD, Base: id.Base, Serial: id.Serial - 1}
+}
+
+// successorID returns the ID of the TRC one serial after id's.
+func successorID(id cppki.TRCID) cppki.TRCID {
+	return cppki.TRCID{ISD: id.ISD, Base: id.Base, Serial: id.Serial + 1}
+}
+
+// coveredValidity returns the window every certificate still covers: the
+// latest start to the earliest end.
+func coveredValidity(certs []*x509.Certificate) cppki.Validity {
+	validity := cppki.Validity{NotBefore: certs[0].NotBefore, NotAfter: certs[0].NotAfter}
+	for _, cert := range certs[1:] {
+		if cert.NotBefore.After(validity.NotBefore) {
+			validity.NotBefore = cert.NotBefore
+		}
+		if cert.NotAfter.Before(validity.NotAfter) {
+			validity.NotAfter = cert.NotAfter
+		}
+	}
+	return validity
 }
 
 // signTRCPayload CMS-signs the TRC payload with the given keys, embedding the

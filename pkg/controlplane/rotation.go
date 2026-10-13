@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/scionproto/scion/pkg/addr"
-	"github.com/scionproto/scion/pkg/scrypto"
 	"github.com/scionproto/scion/pkg/scrypto/cppki"
 
 	"github.com/fancl20/cion/pkg/modules/trustdb"
@@ -195,11 +194,7 @@ func RunRotation(ctx context.Context, cfg RotationConfig) {
 // roll is due or failing, or a promotion is. Within the threshold the holder
 // rolls, its log escalating with the expiry while the casts fail.
 func (cfg RotationConfig) rotationPass(ctx context.Context) time.Duration {
-	newest, err := cfg.DB.SignedTRC(ctx, cppki.TRCID{
-		ISD:    cfg.IA.ISD(),
-		Base:   scrypto.LatestVer,
-		Serial: scrypto.LatestVer,
-	})
+	newest, err := cfg.DB.SignedTRC(ctx, trust.NewestTRCID(cfg.IA.ISD()))
 	if err != nil {
 		slog.Error("Reading the newest pinned TRC", "isd_as", cfg.IA, "err", err)
 		return cfg.interval(cfg.RetryInterval, EnrollmentRetryInterval)

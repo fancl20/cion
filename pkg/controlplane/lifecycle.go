@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/scionproto/scion/pkg/addr"
-	"github.com/scionproto/scion/pkg/scrypto"
 	"github.com/scionproto/scion/pkg/scrypto/cppki"
 
 	"github.com/fancl20/cion/pkg/modules/trustdb"
@@ -183,11 +182,7 @@ func (r authoritativeRenewal) owed(ctx context.Context, cfg EnrollmentConfig) (b
 // onboarded reports whether the newest pinned TRC names the node a core of
 // its ISD; a node that has pinned no TRC yet is not onboarded.
 func onboarded(ctx context.Context, cfg EnrollmentConfig) bool {
-	trc, err := cfg.DB.SignedTRC(ctx, cppki.TRCID{
-		ISD:    cfg.IA.ISD(),
-		Base:   scrypto.LatestVer,
-		Serial: scrypto.LatestVer,
-	})
+	trc, err := cfg.DB.SignedTRC(ctx, trust.NewestTRCID(cfg.IA.ISD()))
 	if err != nil {
 		slog.Error("Reading the newest pinned TRC", "isd_as", cfg.IA, "err", err)
 		return false
@@ -237,11 +232,7 @@ func (cfg EnrollmentConfig) enrollPass(ctx context.Context) (time.Duration, erro
 		slog.Error("Inspecting the chain", "isd_as", cfg.IA, "err", err)
 		return cfg.interval(cfg.RetryInterval, EnrollmentRetryInterval), nil
 	}
-	newest, err := cfg.DB.SignedTRC(ctx, cppki.TRCID{
-		ISD:    cfg.IA.ISD(),
-		Base:   scrypto.LatestVer,
-		Serial: scrypto.LatestVer,
-	})
+	newest, err := cfg.DB.SignedTRC(ctx, trust.NewestTRCID(cfg.IA.ISD()))
 	if err != nil {
 		slog.Error("Reading the newest pinned TRC", "isd_as", cfg.IA, "err", err)
 		return cfg.interval(cfg.RetryInterval, EnrollmentRetryInterval), nil

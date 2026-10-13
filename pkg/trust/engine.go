@@ -182,7 +182,7 @@ func (e *Engine) AnchorPool() ([]*cppki.TRC, error) {
 	if !ok {
 		return nil, serrors.New("provider holds no local database")
 	}
-	newest, err := db.LocalTRC(newestTRCID(e.IA.ISD()))
+	newest, err := db.LocalTRC(NewestTRCID(e.IA.ISD()))
 	if err != nil {
 		return nil, err
 	}
@@ -201,7 +201,7 @@ type DBProvider interface {
 // newestTRC resolves the ISD's newest TRC through the provider: the newest
 // pinned one, fetched when nothing is pinned at all.
 func (e *Engine) newestTRC(ctx context.Context) (cppki.SignedTRC, error) {
-	trc, err := e.Provider.GetSignedTRC(ctx, newestTRCID(e.IA.ISD()))
+	trc, err := e.Provider.GetSignedTRC(ctx, NewestTRCID(e.IA.ISD()))
 	if err != nil {
 		return cppki.SignedTRC{}, serrors.Wrap("resolving newest TRC", err)
 	}
@@ -218,7 +218,7 @@ func (e *Engine) newestLocalTRC() (cppki.SignedTRC, error) {
 	if !ok {
 		return cppki.SignedTRC{}, serrors.New("provider holds no local database")
 	}
-	return db.LocalTRC(newestTRCID(e.IA.ISD()))
+	return db.LocalTRC(NewestTRCID(e.IA.ISD()))
 }
 
 // CoreASes returns the core ASes of the given ISD named by the newest pinned

@@ -199,7 +199,7 @@ func anchorPool(
 	isd addr.ISD,
 ) ([]*cppki.TRC, error) {
 
-	newest, err := fetchTRC(ctx, db, remote, newestTRCID(isd))
+	newest, err := fetchTRC(ctx, db, remote, NewestTRCID(isd))
 	if err != nil {
 		return nil, err
 	}
@@ -276,7 +276,7 @@ func pullNewestTRC(
 	isd addr.ISD,
 ) (cppki.SignedTRC, error) {
 
-	trc, err := remote.TRC(ctx, newestTRCID(isd))
+	trc, err := remote.TRC(ctx, NewestTRCID(isd))
 	if err != nil {
 		return cppki.SignedTRC{}, serrors.Wrap("fetching the newest TRC", err, "isd", isd)
 	}

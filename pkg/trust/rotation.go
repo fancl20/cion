@@ -76,24 +76,10 @@ func AssembleRotation(
 				"subject", cert.Subject)
 		}
 	}
-	// The window every carried certificate still covers: the latest start to
-	// the earliest end.
-	validity := cppki.Validity{
-		NotBefore: certs[0].NotBefore,
-		NotAfter:  certs[0].NotAfter,
-	}
-	for _, cert := range certs[1:] {
-		if cert.NotBefore.After(validity.NotBefore) {
-			validity.NotBefore = cert.NotBefore
-		}
-		if cert.NotAfter.Before(validity.NotAfter) {
-			validity.NotAfter = cert.NotAfter
-		}
-	}
 	return cppki.TRC{
 		Version:  1,
-		ID:       cppki.TRCID{ISD: pred.TRC.ID.ISD, Base: pred.TRC.ID.Base, Serial: pred.TRC.ID.Serial + 1},
-		Validity: validity,
+		ID:       successorID(pred.TRC.ID),
+		Validity: coveredValidity(certs),
 		// The grace window a chain issued under the replaced material keeps
 		// verifying: exactly the AS certificate validity, so a chain issued
 		// before the cast has expired by the time the window closes.
@@ -163,26 +149,17 @@ func RotateCoreKeys(
 	if err != nil {
 		return CoreKeys{}, cppki.SignedTRC{}, err
 	}
-	if _, err := trc.ValidateUpdate(&pred.TRC); err != nil {
-		return CoreKeys{}, cppki.SignedTRC{}, serrors.Wrap(
-			"classifying the successor against the predecessor", err,
-			"predecessor", pred.TRC.ID)
-	}
 	partial, err := SignRotation(trc,
 		[]crypto.Signer{fresh.Sensitive, fresh.Regular, fresh.Root}, certs)
 	if err != nil {
 		return CoreKeys{}, cppki.SignedTRC{}, err
 	}
-	completed, err := CoSign(partial, live.Sensitive, predSensitive)
+	completed, err := castSuccessor(ctx, db, pred, partial,
+		func(partial cppki.SignedTRC) (cppki.SignedTRC, error) {
+			return CoSign(partial, live.Sensitive, predSensitive)
+		})
 	if err != nil {
 		return CoreKeys{}, cppki.SignedTRC{}, err
-	}
-	if err := completed.Verify(&pred.TRC); err != nil {
-		return CoreKeys{}, cppki.SignedTRC{}, serrors.Wrap(
-			"verifying the completed rotation", err, "id", completed.TRC.ID)
-	}
-	if _, err := db.InsertTRC(ctx, completed); err != nil {
-		return CoreKeys{}, cppki.SignedTRC{}, fmt.Errorf("pinning the completed rotation: %w", err)
 	}
 	return fresh, completed, nil
 }
@@ -262,29 +239,13 @@ func RollVotingKey(
 	if err != nil {
 		return err
 	}
-	if _, err := trc.ValidateUpdate(&newest.TRC); err != nil {
-		return serrors.Wrap("classifying the successor against the founder's newest TRC",
-			err, "predecessor", newest.TRC.ID)
-	}
 	partial, err := SignRotation(trc, signers, certs)
 	if err != nil {
 		return err
 	}
-	// The submitted artifact is checked before it leaves: the successor
-	// classifies, and the possession signature verifies over the payload.
-	// The answer's verification demands every signature its update requires.
-	if err := verifySignedBy(partial, cert); err != nil {
-		return serrors.Wrap("verifying the proof of possession", err)
-	}
-	completed, err := caster.SubmitTRC(ctx, partial)
+	completed, err := castSuccessor(ctx, db, newest, partial, submission(ctx, caster, cert))
 	if err != nil {
 		return err
-	}
-	if err := completed.Verify(&newest.TRC); err != nil {
-		return serrors.Wrap("verifying the completed rotation", err, "id", completed.TRC.ID)
-	}
-	if _, err := db.InsertTRC(ctx, completed); err != nil {
-		return fmt.Errorf("pinning the completed rotation: %w", err)
 	}
 	promoted, err = PromoteStaged(stateDir, ia, completed.TRC)
 	if err != nil {

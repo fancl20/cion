@@ -242,7 +242,7 @@ func (c *fakeCaster) SubmitTRC(
 	if !c.served.IsZero() {
 		return c.served, nil
 	}
-	newest, err := c.db.SignedTRC(ctx, newestTRCID(coreIA.ISD()))
+	newest, err := c.db.SignedTRC(ctx, NewestTRCID(coreIA.ISD()))
 	if err != nil {
 		return cppki.SignedTRC{}, err
 	}
