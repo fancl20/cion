@@ -11,6 +11,7 @@ import (
 
 	"github.com/fancl20/cion/pkg/modules/pathdb"
 	"github.com/fancl20/cion/pkg/modules/trustdb"
+	"github.com/fancl20/cion/pkg/webpki/webpkitest"
 )
 
 // TestLineTopology is the line topology's integration test: a three-node
@@ -20,7 +21,7 @@ import (
 // A through B, and the provider resolves an end-to-end path from C to A.
 func TestLineTopology(t *testing.T) {
 	t.Parallel()
-	nodes := bootTopology(t, NewWebPKI(t), staticTopology{
+	nodes := bootTopology(t, webpkitest.New(t), staticTopology{
 		core:  coreIA,
 		nodes: []addr.IA{coreIA, nodeIA, lineCIA},
 		links: [][2]addr.IA{{coreIA, nodeIA}, {nodeIA, lineCIA}},
@@ -95,7 +96,7 @@ func TestLineTopology(t *testing.T) {
 // period.
 func TestRestartedNodeServesUpSegments(t *testing.T) {
 	t.Parallel()
-	wpki := NewWebPKI(t)
+	wpki := webpkitest.New(t)
 	nodes := bootTopology(t, wpki, staticTopology{
 		core:  coreIA,
 		nodes: []addr.IA{coreIA, nodeIA},

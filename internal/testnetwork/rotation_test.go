@@ -28,6 +28,7 @@ import (
 	trustbbolt "github.com/fancl20/cion/pkg/modules/trustdb/impl/bbolt"
 	"github.com/fancl20/cion/pkg/statefile"
 	"github.com/fancl20/cion/pkg/trust"
+	"github.com/fancl20/cion/pkg/webpki/webpkitest"
 )
 
 // seedValidity is the pre-seeded material's lifetime: short enough to sit
@@ -318,7 +319,7 @@ func persistCertFile(t *testing.T, state, name string, cert *x509.Certificate) {
 // the founder votes on at its admission policy's allow.
 func TestCoresRotateByTRCUpdate(t *testing.T) {
 	t.Parallel()
-	wpki := NewWebPKI(t)
+	wpki := webpkitest.New(t)
 	ipA, ipB, ipC, ipD := hostSlot(t), hostSlot(t), hostSlot(t), hostSlot(t)
 
 	founderIA, err := trust.GenerateIA()
@@ -343,8 +344,8 @@ func TestCoresRotateByTRCUpdate(t *testing.T) {
 		cfg.State = founderState
 		cfg.Internal = PinnedUDPAddrOn(t, ipA)
 		cfg.Control = FreeUDPAddrOn(t, ipA)
-		cfg.CertFile = wpki.certFile
-		cfg.KeyFile = wpki.keyFile
+		cfg.CertFile = wpki.CertFile
+		cfg.KeyFile = wpki.KeyFile
 		cfg.EnrollAuth = votingAuth
 		cfg.Pacing.EnrollmentInspect = EnrollRetry
 	})
@@ -357,7 +358,7 @@ func TestCoresRotateByTRCUpdate(t *testing.T) {
 		cfg.Internal = PinnedUDPAddrOn(t, ipB)
 		cfg.Control = FreeUDPAddrOn(t, ipB)
 		cfg.Neighbors = []string{a.rendezvousOf()}
-		cfg.RootCAs = wpki.pool
+		cfg.RootCAs = wpki.Pool
 		cfg.Pacing.EnrollmentInspect = EnrollRetry
 	})
 	// A third node joining the founder, to watch the successors spread.
@@ -366,7 +367,7 @@ func TestCoresRotateByTRCUpdate(t *testing.T) {
 		cfg.Internal = PinnedUDPAddrOn(t, ipC)
 		cfg.Control = FreeUDPAddrOn(t, ipC)
 		cfg.Neighbors = []string{a.rendezvousOf()}
-		cfg.RootCAs = wpki.pool
+		cfg.RootCAs = wpki.Pool
 		cfg.Pacing.EnrollmentInspect = EnrollRetry
 	})
 
@@ -477,7 +478,7 @@ func TestCoresRotateByTRCUpdate(t *testing.T) {
 		cfg.Internal = PinnedUDPAddrOn(t, ipD)
 		cfg.Control = FreeUDPAddrOn(t, ipD)
 		cfg.Neighbors = []string{a.rendezvousOf()}
-		cfg.RootCAs = wpki.pool
+		cfg.RootCAs = wpki.Pool
 	})
 	Poll(t, "the post-pin node enrolled", func() bool {
 		return holdsAssemblyChain(t, d, d.app.IA())
@@ -514,7 +515,7 @@ func TestCoresRotateByTRCUpdate(t *testing.T) {
 // successor alone.
 func TestFounderBootPromotesStagedRoll(t *testing.T) {
 	t.Parallel()
-	wpki := NewWebPKI(t)
+	wpki := webpkitest.New(t)
 	ipA, ipB := hostSlot(t), hostSlot(t)
 	state := t.TempDir()
 	boot := func() *assemblyNode {
@@ -523,8 +524,8 @@ func TestFounderBootPromotesStagedRoll(t *testing.T) {
 			cfg.State = state
 			cfg.Internal = PinnedUDPAddrOn(t, ipA)
 			cfg.Control = FreeUDPAddrOn(t, ipA)
-			cfg.CertFile = wpki.certFile
-			cfg.KeyFile = wpki.keyFile
+			cfg.CertFile = wpki.CertFile
+			cfg.KeyFile = wpki.KeyFile
 		})
 	}
 
@@ -577,7 +578,7 @@ func TestFounderBootPromotesStagedRoll(t *testing.T) {
 		cfg.Internal = PinnedUDPAddrOn(t, ipB)
 		cfg.Control = FreeUDPAddrOn(t, ipB)
 		cfg.Neighbors = []string{a.rendezvousOf()}
-		cfg.RootCAs = wpki.pool
+		cfg.RootCAs = wpki.Pool
 	})
 	Poll(t, "the joiner to enroll", func() bool {
 		return holdsAssemblyChain(t, b, b.app.IA())

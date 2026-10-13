@@ -19,6 +19,7 @@ import (
 	"github.com/fancl20/cion/pkg/modules/topology/impl/measured"
 	"github.com/fancl20/cion/pkg/scion"
 	"github.com/fancl20/cion/pkg/trust"
+	"github.com/fancl20/cion/pkg/webpki/webpkitest"
 )
 
 // fastPacing paces the assembly's loops for the integration tests. BFD keeps
@@ -87,7 +88,7 @@ func (n *assemblyNode) forwardingKey(t *testing.T) []byte {
 func bootAssembly(t *testing.T, mutate func(*services.NodeConfig)) *assemblyNode {
 	t.Helper()
 	cfg := services.NodeConfig{
-		Domain: TestDomain,
+		Domain: webpkitest.Domain,
 		Pacing: fastPacing,
 	}
 	if mutate != nil {
@@ -220,7 +221,7 @@ func establishedTo(ctx context.Context, n *assemblyNode, ia addr.IA) bool {
 // founding core A, the middle B joined to it by rendezvous, and C below
 // joined to B — on the given loopback hosts, each node's run arguments
 // taking the mutation last when one is set.
-func bootRendezvousLine(t *testing.T, wpki *WebPKI, ipA, ipB, ipC netip.Addr,
+func bootRendezvousLine(t *testing.T, wpki *webpkitest.CA, ipA, ipB, ipC netip.Addr,
 	mutate func(*services.NodeConfig)) (a, b, c *assemblyNode) {
 
 	t.Helper()
@@ -236,8 +237,8 @@ func bootRendezvousLine(t *testing.T, wpki *WebPKI, ipA, ipB, ipC netip.Addr,
 		cfg.State = t.TempDir()
 		cfg.Internal = PinnedUDPAddrOn(t, ipA)
 		cfg.Control = FreeUDPAddrOn(t, ipA)
-		cfg.CertFile = wpki.certFile
-		cfg.KeyFile = wpki.keyFile
+		cfg.CertFile = wpki.CertFile
+		cfg.KeyFile = wpki.KeyFile
 		last(cfg)
 	})
 	// B joins the core by rendezvous.
@@ -246,7 +247,7 @@ func bootRendezvousLine(t *testing.T, wpki *WebPKI, ipA, ipB, ipC netip.Addr,
 		cfg.Internal = PinnedUDPAddrOn(t, ipB)
 		cfg.Control = FreeUDPAddrOn(t, ipB)
 		cfg.Neighbors = []string{a.rendezvousOf()}
-		cfg.RootCAs = wpki.pool
+		cfg.RootCAs = wpki.Pool
 		last(cfg)
 	})
 	// C joins B — a non-core neighbor — with the core's domain.
@@ -255,7 +256,7 @@ func bootRendezvousLine(t *testing.T, wpki *WebPKI, ipA, ipB, ipC netip.Addr,
 		cfg.Internal = PinnedUDPAddrOn(t, ipC)
 		cfg.Control = FreeUDPAddrOn(t, ipC)
 		cfg.Neighbors = []string{b.rendezvousOf()}
-		cfg.RootCAs = wpki.pool
+		cfg.RootCAs = wpki.Pool
 		last(cfg)
 	})
 	return a, b, c
@@ -270,7 +271,7 @@ func bootRendezvousLine(t *testing.T, wpki *WebPKI, ipA, ipB, ipC netip.Addr,
 // restart serves from the persisted link store without rendezvous.
 func TestJoinByRendezvous(t *testing.T) {
 	t.Parallel()
-	wpki := NewWebPKI(t)
+	wpki := webpkitest.New(t)
 	ipA, ipB, ipC := hostSlot(t), hostSlot(t), hostSlot(t)
 	a, b, c := bootRendezvousLine(t, wpki, ipA, ipB, ipC, nil)
 	ctx := t.Context()
@@ -359,7 +360,7 @@ func TestJoinByRendezvous(t *testing.T) {
 		cfg.State = b.stateDir
 		cfg.Internal = PinnedUDPAddrOn(t, ipB)
 		cfg.Control = FreeUDPAddrOn(t, ipB)
-		cfg.RootCAs = wpki.pool
+		cfg.RootCAs = wpki.Pool
 	})
 	Poll(t, "the restarted B serves its persisted link", func() bool {
 		e := entryOf(ctx, b2, a.app.IA())
@@ -379,7 +380,7 @@ func TestJoinByRendezvous(t *testing.T) {
 // segments serve the tier.
 func TestLineCutHeals(t *testing.T) {
 	t.Parallel()
-	wpki := NewWebPKI(t)
+	wpki := webpkitest.New(t)
 	ipA, ipB, ipC := hostSlot(t), hostSlot(t), hostSlot(t)
 	a, b, c := bootRendezvousLine(t, wpki, ipA, ipB, ipC, nil)
 	ctx := t.Context()
@@ -442,7 +443,7 @@ func TestLineCutHeals(t *testing.T) {
 // once a neighbor exists draws a fresh identity and joins.
 func TestBootstrapWithoutAnswer(t *testing.T) {
 	t.Parallel()
-	wpki := NewWebPKI(t)
+	wpki := webpkitest.New(t)
 	ipA, ipD := hostSlot(t), hostSlot(t)
 	dead := FreeUDPAddrOn(t, ipA) // reserved, then released: nothing answers
 	state := t.TempDir()
@@ -450,12 +451,12 @@ func TestBootstrapWithoutAnswer(t *testing.T) {
 	func() {
 		ctx, cancel := context.WithCancel(t.Context())
 		_, err := services.BootApp(ctx, services.NodeConfig{
-			Domain:    TestDomain,
+			Domain:    webpkitest.Domain,
 			State:     state,
 			Internal:  PinnedUDPAddrOn(t, ipD),
 			Control:   FreeUDPAddrOn(t, ipD),
 			Neighbors: []string{dead},
-			RootCAs:   wpki.pool,
+			RootCAs:   wpki.Pool,
 			Pacing:    fastPacing,
 		})
 		defer cancel()
@@ -475,15 +476,15 @@ func TestBootstrapWithoutAnswer(t *testing.T) {
 		cfg.State = t.TempDir()
 		cfg.Internal = PinnedUDPAddrOn(t, ipA)
 		cfg.Control = FreeUDPAddrOn(t, ipA)
-		cfg.CertFile = wpki.certFile
-		cfg.KeyFile = wpki.keyFile
+		cfg.CertFile = wpki.CertFile
+		cfg.KeyFile = wpki.KeyFile
 	})
 	d := bootAssembly(t, func(cfg *services.NodeConfig) {
 		cfg.State = state
 		cfg.Internal = PinnedUDPAddrOn(t, ipD)
 		cfg.Control = FreeUDPAddrOn(t, ipD)
 		cfg.Neighbors = []string{a.rendezvousOf()}
-		cfg.RootCAs = wpki.pool
+		cfg.RootCAs = wpki.Pool
 	})
 	Poll(t, "the retried join to land", func() bool {
 		e := entryOf(t.Context(), d, a.app.IA())
@@ -502,7 +503,7 @@ func TestBootstrapWithoutAnswer(t *testing.T) {
 // the endpoint, responder, and rendezvous ports free again.
 func TestHeldHostPortRefusesBoot(t *testing.T) {
 	t.Parallel()
-	wpki := NewWebPKI(t)
+	wpki := webpkitest.New(t)
 	ip := hostSlot(t)
 	held, err := net.ListenUDP("udp",
 		net.UDPAddrFromAddrPort(netip.AddrPortFrom(ip, apps.DefaultHostPort)))
@@ -512,12 +513,12 @@ func TestHeldHostPortRefusesBoot(t *testing.T) {
 
 	cfg := services.NodeConfig{
 		Core:     true,
-		Domain:   TestDomain,
+		Domain:   webpkitest.Domain,
 		State:    t.TempDir(),
 		Internal: PinnedUDPAddrOn(t, ip),
 		Control:  FreeUDPAddrOn(t, ip),
-		CertFile: wpki.certFile,
-		KeyFile:  wpki.keyFile,
+		CertFile: wpki.CertFile,
+		KeyFile:  wpki.KeyFile,
 		AppArguments: apps.Arguments{
 			Wireguard: apps.WireguardArguments{HostPort: apps.DefaultHostPort},
 		},
@@ -545,26 +546,26 @@ func TestHeldHostPortRefusesBoot(t *testing.T) {
 // lock's bound with the directory named, instead of waiting on the lock.
 func TestHeldStateRefusesBoot(t *testing.T) {
 	t.Parallel()
-	wpki := NewWebPKI(t)
+	wpki := webpkitest.New(t)
 	ip := hostSlot(t)
 	running := bootAssembly(t, func(cfg *services.NodeConfig) {
 		cfg.Core = true
 		cfg.Applications = []string{}
 		cfg.Internal = PinnedUDPAddrOn(t, ip)
 		cfg.Control = FreeUDPAddrOn(t, ip)
-		cfg.CertFile = wpki.certFile
-		cfg.KeyFile = wpki.keyFile
+		cfg.CertFile = wpki.CertFile
+		cfg.KeyFile = wpki.KeyFile
 	})
 
 	app, err := services.BootApp(t.Context(), services.NodeConfig{
 		Core:         true,
 		Applications: []string{},
-		Domain:       TestDomain,
+		Domain:       webpkitest.Domain,
 		State:        running.stateDir,
 		Internal:     PinnedUDPAddrOn(t, ip),
 		Control:      FreeUDPAddrOn(t, ip),
-		CertFile:     wpki.certFile,
-		KeyFile:      wpki.keyFile,
+		CertFile:     wpki.CertFile,
+		KeyFile:      wpki.KeyFile,
 	})
 	if err == nil {
 		_ = app.Close()
@@ -582,7 +583,7 @@ func TestHeldStateRefusesBoot(t *testing.T) {
 // port among them — and a joiner enrolls against the last.
 func TestCoreRestartsInPlace(t *testing.T) {
 	t.Parallel()
-	wpki := NewWebPKI(t)
+	wpki := webpkitest.New(t)
 	ipA, ipB := hostSlot(t), hostSlot(t)
 	state := t.TempDir()
 	internal, control := PinnedUDPAddrOn(t, ipA), FreeUDPAddrOn(t, ipA)
@@ -597,8 +598,8 @@ func TestCoreRestartsInPlace(t *testing.T) {
 			cfg.State = state
 			cfg.Internal = internal
 			cfg.Control = control
-			cfg.CertFile = wpki.certFile
-			cfg.KeyFile = wpki.keyFile
+			cfg.CertFile = wpki.CertFile
+			cfg.KeyFile = wpki.KeyFile
 		})
 	}
 	a := boot()
@@ -611,7 +612,7 @@ func TestCoreRestartsInPlace(t *testing.T) {
 		cfg.Internal = PinnedUDPAddrOn(t, ipB)
 		cfg.Control = FreeUDPAddrOn(t, ipB)
 		cfg.Neighbors = []string{a.rendezvousOf()}
-		cfg.RootCAs = wpki.pool
+		cfg.RootCAs = wpki.Pool
 	})
 	Poll(t, "the joiner to enroll against the last boot", func() bool {
 		return holdsChain(t.Context(), b)
@@ -625,7 +626,7 @@ func TestCoreRestartsInPlace(t *testing.T) {
 // rather than an accident of unset arguments.
 func TestDeliberateCore(t *testing.T) {
 	t.Parallel()
-	wpki := NewWebPKI(t)
+	wpki := webpkitest.New(t)
 	ipA, ipB := hostSlot(t), hostSlot(t)
 
 	a := bootAssembly(t, func(cfg *services.NodeConfig) {
@@ -634,8 +635,8 @@ func TestDeliberateCore(t *testing.T) {
 		cfg.State = t.TempDir()
 		cfg.Internal = PinnedUDPAddrOn(t, ipA)
 		cfg.Control = FreeUDPAddrOn(t, ipA)
-		cfg.CertFile = wpki.certFile
-		cfg.KeyFile = wpki.keyFile
+		cfg.CertFile = wpki.CertFile
+		cfg.KeyFile = wpki.KeyFile
 	})
 	b := bootAssembly(t, func(cfg *services.NodeConfig) {
 		cfg.Applications = []string{}
@@ -643,7 +644,7 @@ func TestDeliberateCore(t *testing.T) {
 		cfg.Internal = PinnedUDPAddrOn(t, ipB)
 		cfg.Control = FreeUDPAddrOn(t, ipB)
 		cfg.Neighbors = []string{a.rendezvousOf()}
-		cfg.RootCAs = wpki.pool
+		cfg.RootCAs = wpki.Pool
 	})
 
 	Poll(t, "the joiner's link to the core", func() bool {

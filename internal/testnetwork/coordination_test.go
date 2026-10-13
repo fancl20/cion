@@ -17,6 +17,7 @@ import (
 	"github.com/fancl20/cion/internal/services"
 	"github.com/fancl20/cion/pkg/apps"
 	"github.com/fancl20/cion/pkg/apps/wireguard"
+	"github.com/fancl20/cion/pkg/webpki/webpkitest"
 )
 
 // TailnetRange is the overlay's host space, mirrored from the application.
@@ -61,7 +62,7 @@ func placeCoordination(t *testing.T) coordinationPlacement {
 // loopback host: the WebPKI certificate files, the wireguard application —
 // its tailnet slice the directory's assignment, its hosts dialed on the
 // default shared port — and the coordination endpoint beside it.
-func coordCore(t *testing.T, wpki *WebPKI, host netip.Addr,
+func coordCore(t *testing.T, wpki *webpkitest.CA, host netip.Addr,
 	place coordinationPlacement, mutate func(*services.NodeConfig)) *assemblyNode {
 
 	t.Helper()
@@ -70,8 +71,8 @@ func coordCore(t *testing.T, wpki *WebPKI, host netip.Addr,
 		cfg.State = t.TempDir()
 		cfg.Internal = PinnedUDPAddrOn(t, host)
 		cfg.Control = FreeUDPAddrOn(t, host)
-		cfg.CertFile = wpki.certFile
-		cfg.KeyFile = wpki.keyFile
+		cfg.CertFile = wpki.CertFile
+		cfg.KeyFile = wpki.KeyFile
 		cfg.AppArguments.Wireguard.HostPort = apps.DefaultHostPort
 		cfg.Coordination = &services.CoordinationOptions{
 			Addr: place.addr,
@@ -88,7 +89,7 @@ func coordCore(t *testing.T, wpki *WebPKI, host netip.Addr,
 // loopback host: it joins by rendezvous and runs the wireguard application
 // with its relay presence, its tailnet slice the directory's assignment and
 // its hosts dialed on the default shared port.
-func coordLeaf(t *testing.T, wpki *WebPKI, host netip.Addr, core *assemblyNode,
+func coordLeaf(t *testing.T, wpki *webpkitest.CA, host netip.Addr, core *assemblyNode,
 	place coordinationPlacement, mutate func(*services.NodeConfig)) *assemblyNode {
 
 	t.Helper()
@@ -97,7 +98,7 @@ func coordLeaf(t *testing.T, wpki *WebPKI, host netip.Addr, core *assemblyNode,
 		cfg.Internal = PinnedUDPAddrOn(t, host)
 		cfg.Control = FreeUDPAddrOn(t, host)
 		cfg.Neighbors = []string{core.rendezvousOf()}
-		cfg.RootCAs = wpki.pool
+		cfg.RootCAs = wpki.Pool
 		cfg.AppArguments.Wireguard.HostPort = apps.DefaultHostPort
 		cfg.Coordination = &services.CoordinationOptions{
 			DERP: services.DERPOptions{URL: place.derpURL, IPv4: "127.0.0.1"},

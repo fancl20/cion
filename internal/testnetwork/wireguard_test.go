@@ -17,6 +17,7 @@ import (
 
 	"github.com/fancl20/cion/internal/services"
 	"github.com/fancl20/cion/pkg/apps/wireguard"
+	"github.com/fancl20/cion/pkg/webpki/webpkitest"
 )
 
 // The WireGuard application's integration tests' topology: the core A and the
@@ -115,7 +116,7 @@ func registerHost(t *testing.T, core *assemblyNode, host wireguard.HostEntry) {
 // one publication retry.
 func startWireguardNodes(t *testing.T) (a, b *assemblyNode) {
 	t.Helper()
-	nodes := bootTopology(t, NewWebPKI(t), staticTopology{
+	nodes := bootTopology(t, webpkitest.New(t), staticTopology{
 		core:  wireguardA,
 		nodes: []addr.IA{wireguardA, wireguardB},
 		links: [][2]addr.IA{{wireguardA, wireguardB}},

@@ -16,6 +16,7 @@ import (
 	"github.com/fancl20/cion/pkg/modules/links"
 	"github.com/fancl20/cion/pkg/modules/trustdb"
 	"github.com/fancl20/cion/pkg/trust"
+	"github.com/fancl20/cion/pkg/webpki/webpkitest"
 )
 
 // operatorChatToken is the telegram spec the labs pass as
@@ -182,7 +183,7 @@ func holdsNoChainFor(ctx context.Context, core, joiner *assemblyNode) bool {
 
 // enrollAuthCore boots a founding core with the given enrollment policy on its
 // own loopback address.
-func enrollAuthCore(t *testing.T, wpki *WebPKI, ip netip.Addr,
+func enrollAuthCore(t *testing.T, wpki *webpkitest.CA, ip netip.Addr,
 	enrollAuth, telegramAPI string) *assemblyNode {
 	t.Helper()
 	return bootAssembly(t, func(cfg *services.NodeConfig) {
@@ -190,15 +191,15 @@ func enrollAuthCore(t *testing.T, wpki *WebPKI, ip netip.Addr,
 		cfg.State = t.TempDir()
 		cfg.Internal = PinnedUDPAddrOn(t, ip)
 		cfg.Control = FreeUDPAddrOn(t, ip)
-		cfg.CertFile = wpki.certFile
-		cfg.KeyFile = wpki.keyFile
+		cfg.CertFile = wpki.CertFile
+		cfg.KeyFile = wpki.KeyFile
 		cfg.EnrollAuth = enrollAuth
 		cfg.TelegramAPI = telegramAPI
 	})
 }
 
 // bootTelegramJoiner boots a joiner that enrolls with the given core.
-func bootTelegramJoiner(t *testing.T, wpki *WebPKI, ip netip.Addr,
+func bootTelegramJoiner(t *testing.T, wpki *webpkitest.CA, ip netip.Addr,
 	core *assemblyNode) *assemblyNode {
 	t.Helper()
 	return bootAssembly(t, func(cfg *services.NodeConfig) {
@@ -206,7 +207,7 @@ func bootTelegramJoiner(t *testing.T, wpki *WebPKI, ip netip.Addr,
 		cfg.Internal = PinnedUDPAddrOn(t, ip)
 		cfg.Control = FreeUDPAddrOn(t, ip)
 		cfg.Neighbors = []string{core.rendezvousOf()}
-		cfg.RootCAs = wpki.pool
+		cfg.RootCAs = wpki.Pool
 	})
 }
 
@@ -216,7 +217,7 @@ func bootTelegramJoiner(t *testing.T, wpki *WebPKI, ip netip.Addr,
 // the candidate established on its evidence.
 func TestJoinByEnrollAuthCIDR(t *testing.T) {
 	t.Parallel()
-	wpki := NewWebPKI(t)
+	wpki := webpkitest.New(t)
 	ipA, ipB := hostSlot(t), hostSlot(t)
 	a := enrollAuthCore(t, wpki, ipA, "cidrs=127.0.0.0/8", "")
 	b := bootTelegramJoiner(t, wpki, ipB, a)
@@ -240,7 +241,7 @@ func TestJoinByEnrollAuthCIDR(t *testing.T) {
 // retry interval.
 func TestJoinByEnrollAuthTelegram(t *testing.T) {
 	t.Parallel()
-	wpki := NewWebPKI(t)
+	wpki := webpkitest.New(t)
 	bot := newOperatorBot(t)
 	ipA, ipB := hostSlot(t), hostSlot(t)
 	a := enrollAuthCore(t, wpki, ipA,
@@ -276,7 +277,7 @@ func TestJoinByEnrollAuthTelegram(t *testing.T) {
 // prompt at all, its renewals the chain check's own, never the map's.
 func TestJoinByEnrollAuthTelegramRestart(t *testing.T) {
 	t.Parallel()
-	wpki := NewWebPKI(t)
+	wpki := webpkitest.New(t)
 	bot := newOperatorBot(t)
 	ipA, ipB := hostSlot(t), hostSlot(t)
 	a := enrollAuthCore(t, wpki, ipA, "telegram="+operatorChatToken, bot.url)
@@ -293,8 +294,8 @@ func TestJoinByEnrollAuthTelegramRestart(t *testing.T) {
 		cfg.State = state
 		cfg.Internal = PinnedUDPAddrOn(t, ipA)
 		cfg.Control = FreeUDPAddrOn(t, ipA)
-		cfg.CertFile = wpki.certFile
-		cfg.KeyFile = wpki.keyFile
+		cfg.CertFile = wpki.CertFile
+		cfg.KeyFile = wpki.KeyFile
 		cfg.EnrollAuth = "telegram=" + operatorChatToken
 		cfg.TelegramAPI = bot.url
 	})
@@ -324,7 +325,7 @@ func TestJoinByEnrollAuthTelegramRestart(t *testing.T) {
 // either side; and once it goes silent the window retires it.
 func TestJoinDeniedByEnrollAuth(t *testing.T) {
 	t.Parallel()
-	wpki := NewWebPKI(t)
+	wpki := webpkitest.New(t)
 	ipA, ipB := hostSlot(t), hostSlot(t)
 	// A prefix list that admits nothing on the lab's loopback addressing.
 	a := enrollAuthCore(t, wpki, ipA, "cidrs=10.0.0.0/8", "")
@@ -365,7 +366,7 @@ func TestJoinDeniedByEnrollAuth(t *testing.T) {
 // pends on its retry loop alone, no chain ever naming it on either side.
 func TestJoinPendingNeverCompletes(t *testing.T) {
 	t.Parallel()
-	wpki := NewWebPKI(t)
+	wpki := webpkitest.New(t)
 	bot := newOperatorBot(t)
 	ipA, ipB := hostSlot(t), hostSlot(t)
 	a := enrollAuthCore(t, wpki, ipA, "telegram="+operatorChatToken, bot.url)

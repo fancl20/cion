@@ -10,6 +10,7 @@ import (
 	"github.com/fancl20/cion/internal/services"
 	"github.com/fancl20/cion/pkg/modules/links"
 	"github.com/fancl20/cion/pkg/modules/topology/impl/measured"
+	"github.com/fancl20/cion/pkg/webpki/webpkitest"
 )
 
 // The lab's filter groups, by priority: the cut overrides the blackhole,
@@ -45,7 +46,7 @@ func TestStrandedTierHeals(t *testing.T) {
 		return
 	}
 	shapeLoopback(t)
-	wpki := NewWebPKI(t)
+	wpki := webpkitest.New(t)
 	ipA, ipF, ipG := hostSlot(t), hostSlot(t), hostSlot(t)
 	ipC, ipD, ipE := hostSlot(t), hostSlot(t), hostSlot(t)
 	for _, side := range [][]netip.Addr{{ipA, ipF, ipG}, {ipC, ipD, ipE}} {
@@ -69,8 +70,8 @@ func TestStrandedTierHeals(t *testing.T) {
 		cfg.State = t.TempDir()
 		cfg.Internal = PinnedUDPAddrOn(t, ipA)
 		cfg.Control = FreeUDPAddrOn(t, ipA)
-		cfg.CertFile = wpki.certFile
-		cfg.KeyFile = wpki.keyFile
+		cfg.CertFile = wpki.CertFile
+		cfg.KeyFile = wpki.KeyFile
 	})
 	join := func(ip netip.Addr, neighbors ...*assemblyNode) *assemblyNode {
 		return bootAssembly(t, func(cfg *services.NodeConfig) {
@@ -80,7 +81,7 @@ func TestStrandedTierHeals(t *testing.T) {
 			for _, n := range neighbors {
 				cfg.Neighbors = append(cfg.Neighbors, n.rendezvousOf())
 			}
-			cfg.RootCAs = wpki.pool
+			cfg.RootCAs = wpki.Pool
 		})
 	}
 	f := join(ipF, a)

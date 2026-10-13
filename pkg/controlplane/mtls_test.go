@@ -15,6 +15,7 @@ import (
 	"github.com/fancl20/cion/pkg/modules/trustdb"
 	"github.com/fancl20/cion/pkg/modules/trustdb/impl/bbolt"
 	"github.com/fancl20/cion/pkg/trust"
+	"github.com/fancl20/cion/pkg/webpki/webpkitest"
 )
 
 // mtlsFixture is a core with a TRC and two enrolled nodes: the local node
@@ -174,12 +175,12 @@ func TestEndpointTLSDispatch(t *testing.T) {
 
 	webPKI := &tls.Config{MinVersion: tls.VersionTLS13, NextProtos: []string{"h3"}}
 	conf := EndpointTLS(EndpointTLSConfig{
-		Domain: testDomain,
+		Domain: webpkitest.Domain,
 		WebPKI: webPKI,
 		Engine: f.engine,
 	})
 
-	native, err := conf.GetConfigForClient(&tls.ClientHelloInfo{ServerName: testDomain})
+	native, err := conf.GetConfigForClient(&tls.ClientHelloInfo{ServerName: webpkitest.Domain})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -196,7 +197,7 @@ func TestEndpointTLSDispatch(t *testing.T) {
 
 	// A non-core node has no WebPKI channel: every name is native.
 	coreless := EndpointTLS(EndpointTLSConfig{Engine: f.engine})
-	got, err := coreless.GetConfigForClient(&tls.ClientHelloInfo{ServerName: testDomain})
+	got, err := coreless.GetConfigForClient(&tls.ClientHelloInfo{ServerName: webpkitest.Domain})
 	if err != nil {
 		t.Fatal(err)
 	}

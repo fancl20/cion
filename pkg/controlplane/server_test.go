@@ -14,6 +14,7 @@ import (
 
 	"github.com/fancl20/cion/pkg/scion"
 	"github.com/fancl20/cion/pkg/webpki"
+	"github.com/fancl20/cion/pkg/webpki/webpkitest"
 )
 
 // TestServeHTTP3JoinsItsHandlers checks the endpoint's stop: the context's
@@ -25,14 +26,14 @@ import (
 func TestServeHTTP3JoinsItsHandlers(t *testing.T) {
 	iaCore := addr.MustIAFrom(20, 0xff0000000001)
 	iaNode := addr.MustIAFrom(20, 0xff0000000002)
-	wpki := newTestWebPKI(t)
+	wpki := webpkitest.New(t)
 	extA, extB := freeUDPAddr(t), freeUDPAddr(t)
 	core := startTestNode(t, iaCore, iaNode, extA, extB)
 	node := startTestNode(t, iaNode, iaCore, extB, extA)
 	certMgr, err := webpki.PrepareTLSCert(webpki.TLSCertConfig{
-		Domain:   testDomain,
-		CertFile: wpki.certFile,
-		KeyFile:  wpki.keyFile,
+		Domain:   webpkitest.Domain,
+		CertFile: wpki.CertFile,
+		KeyFile:  wpki.KeyFile,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -60,9 +61,9 @@ func TestServeHTTP3JoinsItsHandlers(t *testing.T) {
 	go func() { served <- ServeHTTP3(serveCtx, endpoint, handler, certMgr.TLSConfig()) }()
 
 	client, err := webpki.NewCoreClient(webpki.CoreClientConfig{
-		Domain:  testDomain,
+		Domain:  webpkitest.Domain,
 		Conn:    node.newConn(t, 0),
-		RootCAs: wpki.pool,
+		RootCAs: wpki.Pool,
 		Locator: func() *scion.Addr {
 			return &scion.Addr{IA: iaCore, Addr: netip.AddrPortFrom(core.controlIP, EndpointPort)}
 		},

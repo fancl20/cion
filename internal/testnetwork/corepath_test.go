@@ -8,6 +8,7 @@ import (
 
 	"github.com/fancl20/cion/internal/services"
 	"github.com/fancl20/cion/pkg/modules/pathdb"
+	"github.com/fancl20/cion/pkg/webpki/webpkitest"
 )
 
 // TestPathLayerServesTwoCores is the path seam's integration proof: a
@@ -23,7 +24,7 @@ import (
 // founder's fresher beacon.
 func TestPathLayerServesTwoCores(t *testing.T) {
 	t.Parallel()
-	wpki := NewWebPKI(t)
+	wpki := webpkitest.New(t)
 	ipA, ipB := hostSlot(t), hostSlot(t)
 
 	// The founding core.
@@ -32,8 +33,8 @@ func TestPathLayerServesTwoCores(t *testing.T) {
 		cfg.State = t.TempDir()
 		cfg.Internal = PinnedUDPAddrOn(t, ipA)
 		cfg.Control = FreeUDPAddrOn(t, ipA)
-		cfg.CertFile = wpki.certFile
-		cfg.KeyFile = wpki.keyFile
+		cfg.CertFile = wpki.CertFile
+		cfg.KeyFile = wpki.KeyFile
 		cfg.EnrollAuth = votingAuth
 	})
 	// The authoritative core, joined per 0037: the core flag beside the
@@ -44,7 +45,7 @@ func TestPathLayerServesTwoCores(t *testing.T) {
 		cfg.Internal = PinnedUDPAddrOn(t, ipB)
 		cfg.Control = FreeUDPAddrOn(t, ipB)
 		cfg.Neighbors = []string{a.rendezvousOf()}
-		cfg.RootCAs = wpki.pool
+		cfg.RootCAs = wpki.Pool
 	})
 	ctx := t.Context()
 
@@ -134,7 +135,7 @@ func TestPathLayerServesTwoCores(t *testing.T) {
 
 // nodeUnder boots a plain node standing under the core alone, its only
 // neighbor the core's rendezvous.
-func nodeUnder(t *testing.T, wpki *WebPKI, core *assemblyNode) *assemblyNode {
+func nodeUnder(t *testing.T, wpki *webpkitest.CA, core *assemblyNode) *assemblyNode {
 	t.Helper()
 	ip := hostSlot(t)
 	return bootAssembly(t, func(cfg *services.NodeConfig) {
@@ -142,7 +143,7 @@ func nodeUnder(t *testing.T, wpki *WebPKI, core *assemblyNode) *assemblyNode {
 		cfg.Internal = PinnedUDPAddrOn(t, ip)
 		cfg.Control = FreeUDPAddrOn(t, ip)
 		cfg.Neighbors = []string{core.rendezvousOf()}
-		cfg.RootCAs = wpki.pool
+		cfg.RootCAs = wpki.Pool
 	})
 }
 

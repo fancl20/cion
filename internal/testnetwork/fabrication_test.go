@@ -13,6 +13,7 @@ import (
 	"github.com/fancl20/cion/pkg/modules/pathdb"
 	"github.com/fancl20/cion/pkg/scion"
 	"github.com/fancl20/cion/pkg/segment"
+	"github.com/fancl20/cion/pkg/webpki/webpkitest"
 )
 
 // TestFabricatingNeighbor is the fabrication lab: an enrolled
@@ -27,7 +28,7 @@ func TestFabricatingNeighbor(t *testing.T) {
 	t.Parallel()
 	// The line's links pin the interfaces the fabricated entries name: A's
 	// toward B, and B's toward A and toward C.
-	nodes := bootTopology(t, NewWebPKI(t), staticTopology{
+	nodes := bootTopology(t, webpkitest.New(t), staticTopology{
 		core:  coreIA,
 		nodes: []addr.IA{coreIA, nodeIA, lineCIA},
 		links: [][2]addr.IA{{coreIA, nodeIA}, {nodeIA, lineCIA}},

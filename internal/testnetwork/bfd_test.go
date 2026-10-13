@@ -16,6 +16,7 @@ import (
 	"github.com/fancl20/cion/pkg/modules/links"
 	"github.com/fancl20/cion/pkg/scion"
 	"github.com/fancl20/cion/pkg/segment"
+	"github.com/fancl20/cion/pkg/webpki/webpkitest"
 )
 
 // bfdSelection paces the BFD lab's selection windows. The episode holds A's
@@ -44,7 +45,7 @@ func bfdPacing(cfg *services.NodeConfig) {
 // convergence comes before B dies.
 func TestBFDLivenessEpisode(t *testing.T) {
 	t.Parallel()
-	wpki := NewWebPKI(t)
+	wpki := webpkitest.New(t)
 	ipA, ipB, ipC := hostSlot(t), hostSlot(t), hostSlot(t)
 	a, b, c := bootRendezvousLine(t, wpki, ipA, ipB, ipC, bfdPacing)
 	ctx := t.Context()
@@ -114,7 +115,7 @@ func TestBFDLivenessEpisode(t *testing.T) {
 		cfg.State = b.stateDir
 		cfg.Internal = PinnedUDPAddrOn(t, ipB)
 		cfg.Control = FreeUDPAddrOn(t, ipB)
-		cfg.RootCAs = wpki.pool
+		cfg.RootCAs = wpki.Pool
 		bfdPacing(cfg)
 	})
 	_ = b2
@@ -139,7 +140,7 @@ func TestBFDLivenessEpisode(t *testing.T) {
 // anywhere; the verdict gates forwarding and the signal reaches the source.
 func TestBFDStaticLabEpisode(t *testing.T) {
 	t.Parallel()
-	wpki := NewWebPKI(t)
+	wpki := webpkitest.New(t)
 	ipB := hostSlot(t)
 	a, b, c := bootStaticLine(t, wpki, hostSlot(t), ipB, hostSlot(t))
 	// The interface the core's file named its link to B.

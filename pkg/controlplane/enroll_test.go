@@ -3,16 +3,9 @@ package controlplane
 import (
 	"context"
 	"crypto"
-	"crypto/ecdsa"
-	"crypto/elliptic"
-	"crypto/rand"
 	"crypto/x509"
-	"crypto/x509/pkix"
-	"encoding/pem"
 	"errors"
 	"log/slog"
-	"math/big"
-	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -25,95 +18,19 @@ import (
 	"github.com/fancl20/cion/pkg/scion"
 	"github.com/fancl20/cion/pkg/trust"
 	"github.com/fancl20/cion/pkg/webpki"
+	"github.com/fancl20/cion/pkg/webpki/webpkitest"
 )
-
-// testDomain is the DNS identity of the core endpoint in tests; its
-// certificate is signed by a test CA that stands in for the WebPKI.
-const testDomain = "cion-core.test"
-
-// webPKI is the test certificate authority anchoring the endpoint's TLS
-// certificate.
-type webPKI struct {
-	pool     *x509.CertPool
-	certFile string
-	keyFile  string
-}
-
-// newTestWebPKI creates the CA and the server certificate for testDomain,
-// returning the certificate files and the pool trusting the CA.
-func newTestWebPKI(t *testing.T) *webPKI {
-	t.Helper()
-	dir := t.TempDir()
-	caKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-	now := time.Now()
-	caTmpl := &x509.Certificate{
-		SerialNumber:          big.NewInt(1),
-		Subject:               pkix.Name{CommonName: "cion test CA"},
-		NotBefore:             now.Add(-time.Hour),
-		NotAfter:              now.Add(24 * time.Hour),
-		KeyUsage:              x509.KeyUsageCertSign,
-		BasicConstraintsValid: true,
-		IsCA:                  true,
-	}
-	caDER, err := x509.CreateCertificate(rand.Reader, caTmpl, caTmpl, caKey.Public(), caKey)
-	if err != nil {
-		t.Fatal(err)
-	}
-	caCert, err := x509.ParseCertificate(caDER)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	serverKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-	serverTmpl := &x509.Certificate{
-		SerialNumber: big.NewInt(2),
-		Subject:      pkix.Name{CommonName: testDomain},
-		DNSNames:     []string{testDomain},
-		NotBefore:    now.Add(-time.Hour),
-		NotAfter:     now.Add(24 * time.Hour),
-		KeyUsage:     x509.KeyUsageDigitalSignature,
-		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
-	}
-	serverDER, err := x509.CreateCertificate(rand.Reader, serverTmpl, caCert,
-		serverKey.Public(), caKey)
-	if err != nil {
-		t.Fatal(err)
-	}
-	serverKeyDER, err := x509.MarshalECPrivateKey(serverKey)
-	if err != nil {
-		t.Fatal(err)
-	}
-	certFile := filepath.Join(dir, "cert.pem")
-	keyFile := filepath.Join(dir, "key.pem")
-	if err := os.WriteFile(certFile, pem.EncodeToMemory(
-		&pem.Block{Type: "CERTIFICATE", Bytes: serverDER}), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(keyFile, pem.EncodeToMemory(
-		&pem.Block{Type: "EC PRIVATE KEY", Bytes: serverKeyDER}), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	pool := x509.NewCertPool()
-	pool.AddCert(caCert)
-	return &webPKI{pool: pool, certFile: certFile, keyFile: keyFile}
-}
 
 // serveCore brings up the core's control endpoint: trust stack, TLS
 // certificate, HTTP/3 over the SCION connection.
-func serveCore(t *testing.T, n *testNode, wpki *webPKI) *trustFixture {
+func serveCore(t *testing.T, n *testNode, wpki *webpkitest.CA) *trustFixture {
 	t.Helper()
 	f := newTrustFixture(t)
 
 	certMgr, err := webpki.PrepareTLSCert(webpki.TLSCertConfig{
-		Domain:   testDomain,
-		CertFile: wpki.certFile,
-		KeyFile:  wpki.keyFile,
+		Domain:   webpkitest.Domain,
+		CertFile: wpki.CertFile,
+		KeyFile:  wpki.KeyFile,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -183,7 +100,7 @@ func enrollNode(
 func TestEnrollmentTwoNodes(t *testing.T) {
 	iaCore := addr.MustIAFrom(20, 0xff0000000001)
 	iaNode := addr.MustIAFrom(20, 0xff0000000002)
-	wpki := newTestWebPKI(t)
+	wpki := webpkitest.New(t)
 	extA, extB := freeUDPAddr(t), freeUDPAddr(t)
 	core := startTestNode(t, iaCore, iaNode, extA, extB)
 	node := startTestNode(t, iaNode, iaCore, extB, extA)
@@ -203,7 +120,7 @@ func TestEnrollmentTwoNodes(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	if err := enrollNode(ctx, t, node, testDomain, wpki.pool, nodeDB, asKey); err != nil {
+	if err := enrollNode(ctx, t, node, webpkitest.Domain, wpki.Pool, nodeDB, asKey); err != nil {
 		t.Fatalf("enrollment failed: %v", err)
 	}
 
@@ -252,7 +169,7 @@ func TestEnrollmentTwoNodes(t *testing.T) {
 func TestEnrollmentWrongDomain(t *testing.T) {
 	iaCore := addr.MustIAFrom(20, 0xff0000000001)
 	iaNode := addr.MustIAFrom(20, 0xff0000000002)
-	wpki := newTestWebPKI(t)
+	wpki := webpkitest.New(t)
 	extA, extB := freeUDPAddr(t), freeUDPAddr(t)
 	core := startTestNode(t, iaCore, iaNode, extA, extB)
 	node := startTestNode(t, iaNode, iaCore, extB, extA)
@@ -273,7 +190,7 @@ func TestEnrollmentWrongDomain(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	// The client trusts the CA but expects another domain.
-	err = enrollNode(ctx, t, node, "other.test", wpki.pool, nodeDB, asKey)
+	err = enrollNode(ctx, t, node, "other.test", wpki.Pool, nodeDB, asKey)
 	if err == nil {
 		t.Fatal("enrollment against endpoint with wrong-domain certificate succeeded")
 	}

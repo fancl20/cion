@@ -14,6 +14,7 @@ import (
 	"github.com/fancl20/cion/internal/services"
 	"github.com/fancl20/cion/pkg/modules/trustdb"
 	"github.com/fancl20/cion/pkg/trust"
+	"github.com/fancl20/cion/pkg/webpki/webpkitest"
 )
 
 // votingAuth is the founder's admission policy in the labs that need its
@@ -32,7 +33,7 @@ const votingAuth = "cidrs=127.0.0.0/8"
 // endpoint — the issuer the route selects.
 func TestCoreJoinsBySensitiveUpdate(t *testing.T) {
 	t.Parallel()
-	wpki := NewWebPKI(t)
+	wpki := webpkitest.New(t)
 	ipA, ipB, ipC, ipD := hostSlot(t), hostSlot(t), hostSlot(t), hostSlot(t)
 
 	// The founding core.
@@ -41,8 +42,8 @@ func TestCoreJoinsBySensitiveUpdate(t *testing.T) {
 		cfg.State = t.TempDir()
 		cfg.Internal = PinnedUDPAddrOn(t, ipA)
 		cfg.Control = FreeUDPAddrOn(t, ipA)
-		cfg.CertFile = wpki.certFile
-		cfg.KeyFile = wpki.keyFile
+		cfg.CertFile = wpki.CertFile
+		cfg.KeyFile = wpki.KeyFile
 		cfg.EnrollAuth = votingAuth
 	})
 	// The joining core: the core flag beside the founder's rendezvous
@@ -53,7 +54,7 @@ func TestCoreJoinsBySensitiveUpdate(t *testing.T) {
 		cfg.Internal = PinnedUDPAddrOn(t, ipB)
 		cfg.Control = FreeUDPAddrOn(t, ipB)
 		cfg.Neighbors = []string{a.rendezvousOf()}
-		cfg.RootCAs = wpki.pool
+		cfg.RootCAs = wpki.Pool
 	})
 	// A third node joining the founder, to watch the successor spread.
 	c := bootAssembly(t, func(cfg *services.NodeConfig) {
@@ -61,7 +62,7 @@ func TestCoreJoinsBySensitiveUpdate(t *testing.T) {
 		cfg.Internal = PinnedUDPAddrOn(t, ipC)
 		cfg.Control = FreeUDPAddrOn(t, ipC)
 		cfg.Neighbors = []string{a.rendezvousOf()}
-		cfg.RootCAs = wpki.pool
+		cfg.RootCAs = wpki.Pool
 	})
 	// A node neighboring the joining core alone, whose enrollments must
 	// route past it to the founder.
@@ -70,7 +71,7 @@ func TestCoreJoinsBySensitiveUpdate(t *testing.T) {
 		cfg.Internal = PinnedUDPAddrOn(t, ipD)
 		cfg.Control = FreeUDPAddrOn(t, ipD)
 		cfg.Neighbors = []string{b.rendezvousOf()}
-		cfg.RootCAs = wpki.pool
+		cfg.RootCAs = wpki.Pool
 	})
 	ctx := t.Context()
 
@@ -154,7 +155,7 @@ func TestCoreJoinsBySensitiveUpdate(t *testing.T) {
 // the joiner.
 func TestCoreJoinsThroughAnAuthoritative(t *testing.T) {
 	t.Parallel()
-	wpki := NewWebPKI(t)
+	wpki := webpkitest.New(t)
 	ipA, ipB, ipE := hostSlot(t), hostSlot(t), hostSlot(t)
 
 	// The founding core, and the authoritative onboarded through it.
@@ -163,8 +164,8 @@ func TestCoreJoinsThroughAnAuthoritative(t *testing.T) {
 		cfg.State = t.TempDir()
 		cfg.Internal = PinnedUDPAddrOn(t, ipA)
 		cfg.Control = FreeUDPAddrOn(t, ipA)
-		cfg.CertFile = wpki.certFile
-		cfg.KeyFile = wpki.keyFile
+		cfg.CertFile = wpki.CertFile
+		cfg.KeyFile = wpki.KeyFile
 		cfg.EnrollAuth = votingAuth
 	})
 	b := bootAssembly(t, func(cfg *services.NodeConfig) {
@@ -173,7 +174,7 @@ func TestCoreJoinsThroughAnAuthoritative(t *testing.T) {
 		cfg.Internal = PinnedUDPAddrOn(t, ipB)
 		cfg.Control = FreeUDPAddrOn(t, ipB)
 		cfg.Neighbors = []string{a.rendezvousOf()}
-		cfg.RootCAs = wpki.pool
+		cfg.RootCAs = wpki.Pool
 	})
 	ctx := t.Context()
 	// onboarded reports whether the node's newest pinned TRC names it a
@@ -198,7 +199,7 @@ func TestCoreJoinsThroughAnAuthoritative(t *testing.T) {
 		cfg.Internal = PinnedUDPAddrOn(t, ipE)
 		cfg.Control = FreeUDPAddrOn(t, ipE)
 		cfg.Neighbors = []string{b.rendezvousOf()}
-		cfg.RootCAs = wpki.pool
+		cfg.RootCAs = wpki.Pool
 	})
 	stopped := make(chan error, 1)
 	go func() { stopped <- e.app.Wait() }()
@@ -236,7 +237,7 @@ func holdsAssemblyChain(t *testing.T, n *assemblyNode, ia addr.IA) bool {
 // with or without the application; only the onboarding needs it.
 func TestJoinerStopsWithoutVotingApp(t *testing.T) {
 	t.Parallel()
-	wpki := NewWebPKI(t)
+	wpki := webpkitest.New(t)
 	ipA, ipB, ipD, ipE := hostSlot(t), hostSlot(t), hostSlot(t), hostSlot(t)
 
 	// The deliberate core: no application loads, the voting application
@@ -247,18 +248,18 @@ func TestJoinerStopsWithoutVotingApp(t *testing.T) {
 		cfg.State = t.TempDir()
 		cfg.Internal = PinnedUDPAddrOn(t, ipA)
 		cfg.Control = FreeUDPAddrOn(t, ipA)
-		cfg.CertFile = wpki.certFile
-		cfg.KeyFile = wpki.keyFile
+		cfg.CertFile = wpki.CertFile
+		cfg.KeyFile = wpki.KeyFile
 	})
 	joiner := func(ip netip.Addr) services.NodeConfig {
 		return services.NodeConfig{
 			Core:      true,
-			Domain:    TestDomain,
+			Domain:    webpkitest.Domain,
 			State:     t.TempDir(),
 			Internal:  PinnedUDPAddrOn(t, ip),
 			Control:   FreeUDPAddrOn(t, ip),
 			Neighbors: []string{a.rendezvousOf()},
-			RootCAs:   wpki.pool,
+			RootCAs:   wpki.Pool,
 			Pacing:    fastPacing,
 		}
 	}
@@ -283,7 +284,7 @@ func TestJoinerStopsWithoutVotingApp(t *testing.T) {
 		cfg.Internal = PinnedUDPAddrOn(t, ipD)
 		cfg.Control = FreeUDPAddrOn(t, ipD)
 		cfg.Neighbors = []string{a.rendezvousOf()}
-		cfg.RootCAs = wpki.pool
+		cfg.RootCAs = wpki.Pool
 	})
 
 	// Each joiner enrolls, finds no voting application behind its
@@ -319,7 +320,7 @@ func TestJoinerStopsWithoutVotingApp(t *testing.T) {
 // the joining core's submission needs.
 func TestJoiningCoreMeshesWithTheFounder(t *testing.T) {
 	t.Parallel()
-	wpki := NewWebPKI(t)
+	wpki := webpkitest.New(t)
 	ipA, ipB := hostSlot(t), hostSlot(t)
 	// The shared host ports are drawn from the pinned band, for a WireGuard
 	// interface on the test host may hold the default. The two need not
@@ -335,8 +336,8 @@ func TestJoiningCoreMeshesWithTheFounder(t *testing.T) {
 		cfg.State = t.TempDir()
 		cfg.Internal = PinnedUDPAddrOn(t, ipA)
 		cfg.Control = FreeUDPAddrOn(t, ipA)
-		cfg.CertFile = wpki.certFile
-		cfg.KeyFile = wpki.keyFile
+		cfg.CertFile = wpki.CertFile
+		cfg.KeyFile = wpki.KeyFile
 		cfg.EnrollAuth = votingAuth
 	})
 	b := bootAssembly(t, func(cfg *services.NodeConfig) {
@@ -346,7 +347,7 @@ func TestJoiningCoreMeshesWithTheFounder(t *testing.T) {
 		cfg.Internal = PinnedUDPAddrOn(t, ipB)
 		cfg.Control = FreeUDPAddrOn(t, ipB)
 		cfg.Neighbors = []string{a.rendezvousOf()}
-		cfg.RootCAs = wpki.pool
+		cfg.RootCAs = wpki.Pool
 	})
 
 	for _, resident := range []string{"coordination", "voting"} {

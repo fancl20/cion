@@ -11,6 +11,7 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	"github.com/fancl20/cion/pkg/scion"
+	"github.com/fancl20/cion/pkg/webpki/webpkitest"
 )
 
 // TestServiceResolution checks the drafts' exchange end to end (control
@@ -20,7 +21,7 @@ import (
 func TestServiceResolution(t *testing.T) {
 	iaA := addr.MustIAFrom(20, 0xff0000000041)
 	iaB := addr.MustIAFrom(20, 0xff0000000042)
-	wpki := newTestWebPKI(t)
+	wpki := webpkitest.New(t)
 	extA, extB := freeUDPAddr(t), freeUDPAddr(t)
 	a := startTestNode(t, iaA, iaB, extA, extB)
 	b := startTestNode(t, iaB, iaA, extB, extA)

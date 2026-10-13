@@ -11,6 +11,7 @@ import (
 
 	"github.com/fancl20/cion/internal/services"
 	"github.com/fancl20/cion/pkg/modules/links"
+	"github.com/fancl20/cion/pkg/webpki/webpkitest"
 )
 
 // staticNode is a node of the static lab: the run command's own assembly
@@ -51,7 +52,7 @@ func newStaticSet(t *testing.T) string {
 // bootStaticNode boots one node of the static lab on its loopback host: the
 // run command's own assembly under the file provider, its state directory
 // and link-set file the caller's.
-func bootStaticNode(t *testing.T, wpki *WebPKI, ip netip.Addr, core bool,
+func bootStaticNode(t *testing.T, wpki *webpkitest.CA, ip netip.Addr, core bool,
 	state, linkSet string, mutate func(*services.NodeConfig)) *staticNode {
 
 	t.Helper()
@@ -63,10 +64,10 @@ func bootStaticNode(t *testing.T, wpki *WebPKI, ip netip.Addr, core bool,
 		cfg.Internal = PinnedUDPAddrOn(t, ip)
 		cfg.Control = FreeUDPAddrOn(t, ip)
 		if core {
-			cfg.CertFile = wpki.certFile
-			cfg.KeyFile = wpki.keyFile
+			cfg.CertFile = wpki.CertFile
+			cfg.KeyFile = wpki.KeyFile
 		} else {
-			cfg.RootCAs = wpki.pool
+			cfg.RootCAs = wpki.Pool
 		}
 		if mutate != nil {
 			mutate(cfg)
@@ -80,7 +81,7 @@ func bootStaticNode(t *testing.T, wpki *WebPKI, ip netip.Addr, core bool,
 // two links' underlay addresses picked up front, the files' entries
 // completing as each node's name turns final, the founding core started
 // first.
-func bootStaticLine(t *testing.T, wpki *WebPKI,
+func bootStaticLine(t *testing.T, wpki *webpkitest.CA,
 	ipA, ipB, ipC netip.Addr) (a, b, c *staticNode) {
 
 	t.Helper()
@@ -130,7 +131,7 @@ type staticTopology struct {
 // Each node's ISD-AS is written to its state before any boot, so every
 // node's link set names its neighbors up front, each link's addresses drawn
 // from its two nodes' hosts; the founding core, if any, boots first.
-func bootTopology(t *testing.T, wpki *WebPKI, topo staticTopology) map[addr.IA]*staticNode {
+func bootTopology(t *testing.T, wpki *webpkitest.CA, topo staticTopology) map[addr.IA]*staticNode {
 	t.Helper()
 	hosts := make(map[addr.IA]netip.Addr, len(topo.nodes))
 	states := make(map[addr.IA]string, len(topo.nodes))
@@ -180,7 +181,7 @@ func bootTopology(t *testing.T, wpki *WebPKI, topo staticTopology) map[addr.IA]*
 // surviving traffic rides through.
 func TestStaticLabByLinkSet(t *testing.T) {
 	t.Parallel()
-	wpki := NewWebPKI(t)
+	wpki := webpkitest.New(t)
 	a, b, c := bootStaticLine(t, wpki, hostSlot(t), hostSlot(t), hostSlot(t))
 
 	// The identity completed from the files: one ISD, each AS its own draw.
@@ -240,7 +241,7 @@ func TestStaticLabByLinkSet(t *testing.T) {
 // never enrolling. No allowlist exists anywhere.
 func TestStaticEnrollmentByAuthorizer(t *testing.T) {
 	t.Parallel()
-	wpki := NewWebPKI(t)
+	wpki := webpkitest.New(t)
 	ipA, ipB := hostSlot(t), hostSlot(t)
 	abA, abB := PinnedUDPAddrOn(t, ipA), PinnedUDPAddrOn(t, ipB)
 

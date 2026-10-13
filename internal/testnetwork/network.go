@@ -1,23 +1,15 @@
 // Package testnetwork holds the integration labs: nodes booted through the
 // node's own assembly, services.BootApp, on the loopback hosts the labs
-// draw, beside the fixtures they share — the test WebPKI standing in for
-// the core's certificate authority, the address draws, and the polls. The
-// labs import the node's assembly, so no package under pkg can host them.
+// draw, beside the fixtures they share — the address draws and the polls;
+// the test WebPKI standing in for the core's certificate authority comes
+// from pkg/webpki/webpkitest. The labs import the node's assembly, so no
+// package under pkg can host them.
 package testnetwork
 
 import (
-	"crypto/ecdsa"
-	"crypto/elliptic"
-	"crypto/rand"
-	"crypto/x509"
-	"crypto/x509/pkix"
-	"encoding/pem"
 	"errors"
-	"math/big"
 	"net"
 	"net/netip"
-	"os"
-	"path/filepath"
 	"sync/atomic"
 	"syscall"
 	"testing"
@@ -37,107 +29,6 @@ const (
 	// fixed TestTimeout missed a pipeline still progressing.
 	RestartTimeout = 3 * TestTimeout
 )
-
-// TestDomain is the DNS identity of the core endpoint in tests; its
-// certificate is signed by a test CA that stands in for the WebPKI.
-const TestDomain = "cion-core.test"
-
-// WebPKI is the test certificate authority anchoring the endpoint's TLS
-// certificate.
-type WebPKI struct {
-	pool     *x509.CertPool
-	certFile string
-	keyFile  string
-	caFile   string
-}
-
-// NewWebPKI creates the CA and the server certificate for TestDomain,
-// returning the certificate files and the pool trusting the CA.
-func NewWebPKI(t *testing.T) *WebPKI {
-	t.Helper()
-	wpki, err := mintWebPKI(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	return wpki
-}
-
-// mintWebPKI creates the CA and the server certificate for TestDomain in
-// the given directory, returning the certificate files, the pool trusting
-// the CA, and the CA's own certificate file.
-func mintWebPKI(dir string) (*WebPKI, error) {
-	caKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		return nil, err
-	}
-	now := time.Now()
-	caTmpl := &x509.Certificate{
-		SerialNumber:          big.NewInt(1),
-		Subject:               pkix.Name{CommonName: "cion test CA"},
-		NotBefore:             now.Add(-time.Hour),
-		NotAfter:              now.Add(24 * time.Hour),
-		KeyUsage:              x509.KeyUsageCertSign,
-		BasicConstraintsValid: true,
-		IsCA:                  true,
-	}
-	caDER, err := x509.CreateCertificate(rand.Reader, caTmpl, caTmpl, caKey.Public(), caKey)
-	if err != nil {
-		return nil, err
-	}
-	caCert, err := x509.ParseCertificate(caDER)
-	if err != nil {
-		return nil, err
-	}
-
-	serverKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		return nil, err
-	}
-	serverTmpl := &x509.Certificate{
-		SerialNumber: big.NewInt(2),
-		Subject:      pkix.Name{CommonName: TestDomain},
-		DNSNames:     []string{TestDomain},
-		// The loopback address beside the name: the coordination endpoint is an
-		// internet-facing surface, and the harness's tailnet clients dial it by
-		// address.
-		IPAddresses: []net.IP{net.IPv4(127, 0, 0, 1)},
-		NotBefore:   now.Add(-time.Hour),
-		NotAfter:    now.Add(24 * time.Hour),
-		KeyUsage:    x509.KeyUsageDigitalSignature,
-		ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
-	}
-	serverDER, err := x509.CreateCertificate(rand.Reader, serverTmpl, caCert,
-		serverKey.Public(), caKey)
-	if err != nil {
-		return nil, err
-	}
-	serverKeyDER, err := x509.MarshalECPrivateKey(serverKey)
-	if err != nil {
-		return nil, err
-	}
-	certFile := filepath.Join(dir, "cert.pem")
-	keyFile := filepath.Join(dir, "key.pem")
-	if err := os.WriteFile(certFile, pem.EncodeToMemory(
-		&pem.Block{Type: "CERTIFICATE", Bytes: serverDER}), 0o600); err != nil {
-		return nil, err
-	}
-	if err := os.WriteFile(keyFile, pem.EncodeToMemory(
-		&pem.Block{Type: "EC PRIVATE KEY", Bytes: serverKeyDER}), 0o600); err != nil {
-		return nil, err
-	}
-	if err := os.WriteFile(filepath.Join(dir, "ca.pem"), pem.EncodeToMemory(
-		&pem.Block{Type: "CERTIFICATE", Bytes: caDER}), 0o600); err != nil {
-		return nil, err
-	}
-	pool := x509.NewCertPool()
-	pool.AddCert(caCert)
-	return &WebPKI{
-		pool:     pool,
-		certFile: certFile,
-		keyFile:  keyFile,
-		caFile:   filepath.Join(dir, "ca.pem"),
-	}, nil
-}
 
 // FreeUDPAddrOn returns a free UDP address on the given host.
 func FreeUDPAddrOn(t *testing.T, ip netip.Addr) string {

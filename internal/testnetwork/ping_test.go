@@ -14,6 +14,7 @@ import (
 	"github.com/fancl20/cion/pkg/modules/pathdb"
 	"github.com/fancl20/cion/pkg/scion"
 	"github.com/fancl20/cion/pkg/segment"
+	"github.com/fancl20/cion/pkg/webpki/webpkitest"
 )
 
 // TestPingForkTopology is the end-to-end proof of the path library's first
@@ -24,7 +25,7 @@ import (
 // plane — and the core's requests ride the down segment alone.
 func TestPingForkTopology(t *testing.T) {
 	t.Parallel()
-	nodes := bootTopology(t, NewWebPKI(t), staticTopology{
+	nodes := bootTopology(t, webpkitest.New(t), staticTopology{
 		core:  coreIA,
 		nodes: []addr.IA{coreIA, nodeIA, lineCIA},
 		links: [][2]addr.IA{{coreIA, nodeIA}, {coreIA, lineCIA}},
@@ -114,7 +115,7 @@ func TestPingForkTopology(t *testing.T) {
 // episodes pass unchanged.
 func TestPingLineMiddleNode(t *testing.T) {
 	t.Parallel()
-	nodes := bootTopology(t, NewWebPKI(t), staticTopology{
+	nodes := bootTopology(t, webpkitest.New(t), staticTopology{
 		core:  coreIA,
 		nodes: []addr.IA{coreIA, nodeIA, lineCIA},
 		links: [][2]addr.IA{{coreIA, nodeIA}, {nodeIA, lineCIA}},
@@ -184,7 +185,7 @@ func TestPingSiblingNodes(t *testing.T) {
 	iaD := addr.MustIAFrom(20, 0xff0000000004)
 	// The core and the parent run unattended: the episode reads only the
 	// siblings' ends.
-	nodes := bootTopology(t, NewWebPKI(t), staticTopology{
+	nodes := bootTopology(t, webpkitest.New(t), staticTopology{
 		core:  coreIA,
 		nodes: []addr.IA{coreIA, nodeIA, lineCIA, iaD},
 		links: [][2]addr.IA{{coreIA, nodeIA}, {nodeIA, lineCIA}, {nodeIA, iaD}},
@@ -274,7 +275,7 @@ func TestPingReresolvesExpiredPath(t *testing.T) {
 // ends, the interface upSegment's hop fields name.
 func bootPair(t *testing.T, iaP, iaR addr.IA) (p, r *staticNode) {
 	t.Helper()
-	nodes := bootTopology(t, NewWebPKI(t), staticTopology{
+	nodes := bootTopology(t, webpkitest.New(t), staticTopology{
 		nodes: []addr.IA{iaP, iaR},
 		links: [][2]addr.IA{{iaP, iaR}},
 		pins:  map[[2]addr.IA]uint16{{iaP, iaR}: 1, {iaR, iaP}: 1},

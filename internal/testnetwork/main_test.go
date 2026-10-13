@@ -5,13 +5,15 @@ import (
 	"testing"
 
 	"tailscale.com/net/netns"
+
+	"github.com/fancl20/cion/pkg/webpki/webpkitest"
 )
 
 // packageWebPKI is the package's certificate authority, minted by TestMain
 // before any test runs: the CA whose file SSL_CERT_FILE names, the one the
 // vendored tailnet clients trust. The coordination suites' cores present
 // its certificate.
-var packageWebPKI *WebPKI
+var packageWebPKI *webpkitest.CA
 
 // TestMain mints the package's certificate authority before any test runs
 // and points the process's TLS root store at it: the vendored tailnet
@@ -33,11 +35,11 @@ func TestMain(m *testing.M) {
 	if err != nil {
 		panic(err)
 	}
-	wpki, err := mintWebPKI(dir)
+	wpki, err := webpkitest.Mint(dir)
 	if err != nil {
 		panic(err)
 	}
 	packageWebPKI = wpki
-	_ = os.Setenv("SSL_CERT_FILE", wpki.caFile)
+	_ = os.Setenv("SSL_CERT_FILE", wpki.CAFile)
 	os.Exit(m.Run())
 }
