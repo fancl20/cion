@@ -13,6 +13,8 @@ import (
 	"github.com/scionproto/scion/pkg/slayers"
 	"github.com/scionproto/scion/pkg/slayers/path"
 	"github.com/scionproto/scion/pkg/slayers/path/scion"
+
+	"github.com/fancl20/cion/pkg/libs/underlay"
 )
 
 // testHost is a loopback host no other package's tests bind, for the
@@ -187,7 +189,7 @@ func TestTwoNodeSCMPEcho(t *testing.T) {
 	// plane delivers SCMP echo requests; replies go to the port the echo
 	// identifier carries.
 	appB, err := net.ListenUDP("udp4",
-		net.UDPAddrFromAddrPort(netip.AddrPortFrom(testHost, EndhostPort)))
+		net.UDPAddrFromAddrPort(netip.AddrPortFrom(testHost, underlay.EndhostPort)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -273,7 +275,7 @@ func parseSCIONPacket(t *testing.T, data []byte) parsedPacket {
 
 func mustUDPAddr(t *testing.T, s string) *net.UDPAddr {
 	t.Helper()
-	a, err := ResolveAddrPort(s)
+	a, err := underlay.ResolveAddrPort(s)
 	if err != nil {
 		t.Fatal(err)
 	}

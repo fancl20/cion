@@ -23,6 +23,8 @@ import (
 	"unsafe"
 
 	"github.com/scionproto/scion/pkg/slayers"
+
+	"github.com/fancl20/cion/pkg/libs/underlay"
 )
 
 const (
@@ -32,10 +34,7 @@ const (
 	// usually ~1500B, but 9000B to support jumbo frames.
 	// TODO(multi_underlay): The buffer size should be a function of the collection of
 	// underlays (the largest frame size of all the enabled ones).
-	BufferSize = 9000
-
-	// bufSize is an alias of BufferSize for internal use.
-	bufSize = BufferSize
+	bufSize = underlay.BufferSize
 
 	// For SCMP packet quoting. A strict minimum of 28 is required. Much more is recommended.
 	minHeadroom      = 512

@@ -11,7 +11,7 @@ import (
 	"github.com/scionproto/scion/pkg/slayers/path"
 	spath "github.com/scionproto/scion/pkg/slayers/path/scion"
 
-	"github.com/fancl20/cion/pkg/dataplane"
+	"github.com/fancl20/cion/pkg/libs/underlay"
 )
 
 // Echo is one SCMP echo message. The identifier is port-shaped: a request
@@ -88,7 +88,7 @@ func serializeEcho(
 // are not SCMP echo are dropped silently, as ReadFrom drops non-UDP ones —
 // unless they are the interface-down signal the cache recognizes.
 func (c *Conn) ReadEchoFrom() (Echo, *Addr, error) {
-	buf := make([]byte, dataplane.BufferSize)
+	buf := make([]byte, underlay.BufferSize)
 	for {
 		n, _, err := c.conn.ReadFromUDP(buf)
 		if err != nil {
@@ -124,7 +124,7 @@ func (e *EchoLostError) Error() string {
 // packet is dropped, an interface-down signal entering the cache first.
 func (c *Conn) ReadEchoReply(seq uint16) (Echo, *Addr, error) {
 	own := func(e Echo) bool { return e.Identifier == c.LocalPort() && e.Seq == seq }
-	buf := make([]byte, dataplane.BufferSize)
+	buf := make([]byte, underlay.BufferSize)
 	for {
 		n, _, err := c.conn.ReadFromUDP(buf)
 		if err != nil {

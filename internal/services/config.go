@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/fancl20/cion/pkg/apps"
-	"github.com/fancl20/cion/pkg/dataplane"
+	"github.com/fancl20/cion/pkg/libs/underlay"
 	"github.com/fancl20/cion/pkg/modules/enrollauth"
 	"github.com/fancl20/cion/pkg/trust"
 )
@@ -203,10 +203,10 @@ func (c NodeConfig) resolve() (resolvedConfig, error) {
 		}
 	}
 	var err error
-	if r.controlAddr, err = dataplane.ResolveAddrPort(c.Control); err != nil {
+	if r.controlAddr, err = underlay.ResolveAddrPort(c.Control); err != nil {
 		return resolvedConfig{}, fmt.Errorf("parsing control address: %w", err)
 	}
-	if r.internalAddr, err = dataplane.ResolveAddrPort(c.Internal); err != nil {
+	if r.internalAddr, err = underlay.ResolveAddrPort(c.Internal); err != nil {
 		return resolvedConfig{}, fmt.Errorf("parsing internal address: %w", err)
 	}
 	if c.EnrollAuth != "" {

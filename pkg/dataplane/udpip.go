@@ -37,6 +37,8 @@ import (
 
 	"github.com/scionproto/scion/pkg/addr"
 	"github.com/scionproto/scion/pkg/slayers"
+
+	"github.com/fancl20/cion/pkg/libs/underlay"
 )
 
 var (
@@ -167,11 +169,11 @@ func (u *UDPProvider) NewExternalLink(
 	ifID uint16,
 	metrics *InterfaceMetrics,
 ) (Link, error) {
-	remoteAddr, err := ResolveAddrPort(remote)
+	remoteAddr, err := underlay.ResolveAddrPort(remote)
 	if err != nil {
 		return nil, fmt.Errorf("resolving remote address: %w", err)
 	}
-	localAddr, err := resolveLocalAddr(local)
+	localAddr, err := underlay.ResolveLocalAddr(local)
 	if err != nil {
 		return nil, fmt.Errorf("resolving local address: %w", err)
 	}
@@ -243,7 +245,7 @@ func (u *UDPProvider) NewInternalLink(
 	if u.internalConnection != nil {
 		return nil, errAlreadyInternalLink
 	}
-	localAddr, err := resolveLocalAddr(local)
+	localAddr, err := underlay.ResolveLocalAddr(local)
 	if err != nil {
 		return nil, fmt.Errorf("resolving local address: %w", err)
 	}
@@ -763,7 +765,7 @@ func (l *internalLink) Resolve(p *Packet, dst addr.Host, port uint16) error {
 		panic(fmt.Sprintf("unexpected address type returned from DstAddr: %s", dst.Type()))
 	}
 	if port == 0 {
-		port = EndhostPort
+		port = underlay.EndhostPort
 	}
 
 	// Packets that get here must have come from an external link; which does
@@ -982,37 +984,4 @@ func newReadMessages(n int) messages {
 		m[i].Buffers = make([][]byte, 1)
 	}
 	return m
-}
-
-// ResolveAddrPort resolves a "host:port" address. IPv4 addresses in the
-// v4-mapped IPv6 form are normalized to plain IPv4.
-func ResolveAddrPort(s string) (netip.AddrPort, error) {
-	a, err := resolveLocalAddr(s)
-	if err != nil {
-		return netip.AddrPort{}, err
-	}
-	ap := a.AddrPort()
-	if !ap.IsValid() {
-		return netip.AddrPort{}, fmt.Errorf("invalid address: %q", s)
-	}
-	if ap.Addr().Is4In6() {
-		ap = netip.AddrPortFrom(ap.Addr().Unmap(), ap.Port())
-	}
-	return ap, nil
-}
-
-// resolveLocalAddr resolves a local address of the form "host:port". The host
-// part may be empty, meaning any address. IPv4 addresses in the v4-mapped
-// IPv6 form are normalized to plain IPv4.
-func resolveLocalAddr(s string) (*net.UDPAddr, error) {
-	a, err := net.ResolveUDPAddr("udp", s)
-	if err != nil {
-		return nil, err
-	}
-	if a.IP != nil {
-		if ip4 := a.IP.To4(); ip4 != nil {
-			a.IP = ip4
-		}
-	}
-	return a, nil
 }

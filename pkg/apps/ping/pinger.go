@@ -17,7 +17,7 @@ import (
 	"github.com/scionproto/scion/pkg/addr"
 	spath "github.com/scionproto/scion/pkg/slayers/path/scion"
 
-	"github.com/fancl20/cion/pkg/dataplane"
+	"github.com/fancl20/cion/pkg/libs/underlay"
 	"github.com/fancl20/cion/pkg/loops"
 	"github.com/fancl20/cion/pkg/scion"
 )
@@ -109,7 +109,7 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 		}
 		dst := &scion.Addr{
 			IA:   cfg.Dst,
-			Addr: netip.AddrPortFrom(cfg.DstHost, dataplane.EndhostPort),
+			Addr: netip.AddrPortFrom(cfg.DstHost, underlay.EndhostPort),
 			Path: path,
 		}
 		sent := time.Now()

@@ -16,7 +16,7 @@
 // Modified for CION from defs.go in
 // github.com/scionproto/scion@v0.15.1/private/topology/underlay.
 
-package dataplane
+package underlay
 
 import (
 	"encoding/json/v2"

@@ -9,7 +9,7 @@ import (
 
 	"github.com/fancl20/cion/pkg/apps/wireguard"
 	wireguardbbolt "github.com/fancl20/cion/pkg/apps/wireguard/impl/bbolt"
-	"github.com/fancl20/cion/pkg/dataplane"
+	"github.com/fancl20/cion/pkg/libs/underlay"
 	"github.com/fancl20/cion/pkg/scion"
 )
 
@@ -65,7 +65,7 @@ func newWireguard(env *Environment, _ []Loaded) (Application, error) {
 // founding core's directory store or every other node's core route, and
 // the pacing riders.
 func wireguardConfig(env *Environment) (wireguard.Config, error) {
-	listenHost, err := dataplane.ResolveAddrPort(env.ControlHost)
+	listenHost, err := underlay.ResolveAddrPort(env.ControlHost)
 	if err != nil {
 		return wireguard.Config{}, fmt.Errorf("parsing the control address: %w", err)
 	}

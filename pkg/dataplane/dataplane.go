@@ -37,6 +37,8 @@ import (
 	"github.com/scionproto/scion/pkg/drkey"
 	"github.com/scionproto/scion/pkg/scrypto"
 	"github.com/scionproto/scion/pkg/slayers"
+
+	"github.com/fancl20/cion/pkg/libs/underlay"
 )
 
 var (
@@ -401,7 +403,7 @@ func (d *DataPlane) resolveLocalDst(packet *Packet, s slayers.SCION, lastLayer g
 func (d *DataPlane) dstScionPort(lastLayer gopacket.DecodingLayer) (uint16, error) {
 	// Parse UPD port and rewrite underlay IP/UDP port
 	l4Type := nextHdr(lastLayer)
-	port := uint16(EndhostPort)
+	port := uint16(underlay.EndhostPort)
 
 	switch l4Type {
 	case slayers.L4UDP:
@@ -441,7 +443,7 @@ func getDstPortSCMP(scmp *slayers.SCMP) (uint16, error) {
 	// our sole goal is to parse the L4 port or identifier in the offending packets.
 	if scmp.TypeCode.Type() == slayers.SCMPTypeEchoRequest ||
 		scmp.TypeCode.Type() == slayers.SCMPTypeTracerouteRequest {
-		return EndhostPort, nil
+		return underlay.EndhostPort, nil
 	}
 	if scmp.TypeCode.Type() == slayers.SCMPTypeEchoReply {
 		var scmpEcho slayers.SCMPEcho

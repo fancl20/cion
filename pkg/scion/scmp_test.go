@@ -10,7 +10,7 @@ import (
 	"github.com/scionproto/scion/pkg/addr"
 	"github.com/scionproto/scion/pkg/slayers"
 
-	"github.com/fancl20/cion/pkg/dataplane"
+	"github.com/fancl20/cion/pkg/libs/underlay"
 )
 
 // TestEchoWireRoundTrip checks the echo encoding the socket produces and
@@ -91,7 +91,7 @@ func TestEchoExchange(t *testing.T) {
 	// the responder binds the endhost port, where the data plane delivers
 	// echo requests.
 	connA := a.newConn(t, 0)
-	connB := b.newConn(t, dataplane.EndhostPort)
+	connB := b.newConn(t, underlay.EndhostPort)
 
 	peerB := &Addr{IA: iaB, Addr: connB.LocalAddr().(*Addr).Addr}
 	if err := connA.WriteEchoRequestTo(peerB, 1, []byte("probe")); err != nil {

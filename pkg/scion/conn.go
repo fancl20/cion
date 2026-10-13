@@ -27,7 +27,7 @@ import (
 	"github.com/scionproto/scion/pkg/slayers/path/onehop"
 	spath "github.com/scionproto/scion/pkg/slayers/path/scion"
 
-	"github.com/fancl20/cion/pkg/dataplane"
+	"github.com/fancl20/cion/pkg/libs/underlay"
 )
 
 // Addr is the SCION network address of a peer. It doubles as the return
@@ -125,7 +125,7 @@ type ConnConfig struct {
 // submitted to the router's internal link; packets the router delivers to
 // the bound address are received from it.
 func NewConn(cfg ConnConfig) (*Conn, error) {
-	local, err := dataplane.ResolveAddrPort(cfg.Bind)
+	local, err := underlay.ResolveAddrPort(cfg.Bind)
 	if err != nil {
 		return nil, fmt.Errorf("parsing bind address: %w", err)
 	}
@@ -195,7 +195,7 @@ func (c *Conn) Close() error {
 // unless they are the interface-down signal the cache recognizes — the
 // drafts' error the library's receive paths once dropped silently.
 func (c *Conn) ReadFrom(b []byte) (int, net.Addr, error) {
-	buf := make([]byte, dataplane.BufferSize)
+	buf := make([]byte, underlay.BufferSize)
 	for {
 		n, _, err := c.conn.ReadFromUDP(buf)
 		if err != nil {

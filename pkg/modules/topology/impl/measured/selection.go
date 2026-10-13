@@ -15,7 +15,7 @@ import (
 	"github.com/scionproto/scion/pkg/addr"
 
 	"github.com/fancl20/cion/pkg/controlplane"
-	"github.com/fancl20/cion/pkg/dataplane"
+	"github.com/fancl20/cion/pkg/libs/underlay"
 	"github.com/fancl20/cion/pkg/loops"
 	"github.com/fancl20/cion/pkg/modules/links"
 	"github.com/fancl20/cion/pkg/scion"
@@ -540,7 +540,7 @@ func (s *selection) probe(ctx context.Context, e DirectoryEntry, l *links.Link) 
 	if l != nil {
 		m.direct = s.echoRTT(ctx, &scion.Addr{
 			IA:   e.IA,
-			Addr: netip.AddrPortFrom(e.ControlAddr.Addr(), dataplane.EndhostPort),
+			Addr: netip.AddrPortFrom(e.ControlAddr.Addr(), underlay.EndhostPort),
 		})
 	} else if _, rtt, err := s.echo(ctx, s.cfg.ControlAddr.Addr(),
 		e.RendezvousAddr, addr.IA(0), s.cfg.ControlAddr); err == nil {
@@ -573,7 +573,7 @@ func (s *selection) pathEcho(
 	}
 	return s.echoRTT(ctx, &scion.Addr{
 		IA:   e.IA,
-		Addr: netip.AddrPortFrom(e.ControlAddr.Addr(), dataplane.EndhostPort),
+		Addr: netip.AddrPortFrom(e.ControlAddr.Addr(), underlay.EndhostPort),
 		Path: c.Path,
 	})
 }

@@ -12,7 +12,7 @@ import (
 	spath "github.com/scionproto/scion/pkg/slayers/path/scion"
 
 	"github.com/fancl20/cion/internal/services"
-	"github.com/fancl20/cion/pkg/dataplane"
+	"github.com/fancl20/cion/pkg/libs/underlay"
 	"github.com/fancl20/cion/pkg/modules/links"
 	"github.com/fancl20/cion/pkg/scion"
 	"github.com/fancl20/cion/pkg/segment"
@@ -251,7 +251,7 @@ func echoOver(t *testing.T, n *assemblyNode, dst addr.IA, host netip.Addr,
 	defer func() { _ = conn.Close() }()
 	if err := conn.WriteEchoRequestTo(&scion.Addr{
 		IA:   dst,
-		Addr: netip.AddrPortFrom(host, dataplane.EndhostPort),
+		Addr: netip.AddrPortFrom(host, underlay.EndhostPort),
 		Path: path,
 	}, 0, nil); err != nil {
 		t.Fatal(err)

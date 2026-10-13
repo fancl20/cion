@@ -6,7 +6,7 @@ import (
 	"log/slog"
 	"sync"
 
-	"github.com/fancl20/cion/pkg/dataplane"
+	"github.com/fancl20/cion/pkg/libs/underlay"
 	"github.com/fancl20/cion/pkg/scion"
 )
 
@@ -19,7 +19,7 @@ import (
 // application into the core. SCMP echo's read and write stay in pkg/scion, the
 // vocabulary the pinger and the responder share.
 func (n *node) assembleResponder() error {
-	conn, err := n.scionConn(dataplane.EndhostPort)
+	conn, err := n.scionConn(underlay.EndhostPort)
 	if err != nil {
 		return fmt.Errorf("binding the echo responder (the control address's host must not share the internal link's port): %w", err)
 	}
