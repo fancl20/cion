@@ -280,16 +280,14 @@ func (m *Metrics) NewInterfaceMetrics(ifID uint16, localIA, neighbor addr.IA) *I
 	for sc := minSizeClass; sc < maxSizeClass; sc++ {
 		labels := append(slices.Clone(ifLabels), attribute.String("sizeclass", sc.String()))
 		tm := trafficMetrics{
-			InputBytesTotal:   m.bind(m.inputBytes, labels),
-			InputPacketsTotal: m.bind(m.inputPackets, labels),
-			ProcessedPackets:  m.bind(m.processedPackets, labels),
+			InputBytesTotal:             m.bind(m.inputBytes, labels),
+			InputPacketsTotal:           m.bind(m.inputPackets, labels),
+			ProcessedPackets:            m.bind(m.processedPackets, labels),
+			DroppedPacketsInvalid:       m.bind(m.droppedPackets, labels, "reason", "invalid"),
+			DroppedPacketsBusyProcessor: m.bind(m.droppedPackets, labels, "reason", "busy_processor"),
+			DroppedPacketsBusyForwarder: m.bind(m.droppedPackets, labels, "reason", "busy_forwarder"),
+			DroppedPacketsBusySlowPath:  m.bind(m.droppedPackets, labels, "reason", "busy_slow_path"),
 		}
-		tm.DroppedPacketsInvalid = m.bind(m.droppedPackets, labels, "reason", "invalid")
-		tm.DroppedPacketsBusyProcessor =
-			m.bind(m.droppedPackets, labels, "reason", "busy_processor")
-		tm.DroppedPacketsBusyForwarder =
-			m.bind(m.droppedPackets, labels, "reason", "busy_forwarder")
-		tm.DroppedPacketsBusySlowPath = m.bind(m.droppedPackets, labels, "reason", "busy_slow_path")
 		for t := range ttMax {
 			tm.Output[t] = outputMetrics{
 				OutputBytesTotal:   m.bind(m.outputBytes, labels, "type", t.String()),
