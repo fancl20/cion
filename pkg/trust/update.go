@@ -178,57 +178,34 @@ func JoinCore(
 	if err != nil {
 		return err
 	}
-	_, err = castSuccessor(ctx, db, newest, partial, submission(ctx, caster, cert))
+	_, err = castSuccessor(ctx, db, newest, partial, caster.SubmitTRC)
 	return err
 }
 
-// castSuccessor casts the signed successor on its predecessor: the successor
-// must classify as an update of the predecessor and, once completed — the
-// submission's answer, or the founder's vote cast locally — verify against
-// it, which demands every signature its update requires. The completion then
-// pins and returns.
+// castSuccessor completes the signed successor — the submission's answer, or
+// the founder's vote cast locally — and pins the completion once it verifies
+// against the predecessor: the verification classifies the update and
+// demands every signature it requires.
 func castSuccessor(
 	ctx context.Context,
 	db trustdb.DB,
 	pred cppki.SignedTRC,
 	partial cppki.SignedTRC,
-	complete func(cppki.SignedTRC) (cppki.SignedTRC, error),
+	complete func(context.Context, cppki.SignedTRC) (cppki.SignedTRC, error),
 ) (cppki.SignedTRC, error) {
 
-	if _, err := partial.TRC.ValidateUpdate(&pred.TRC); err != nil {
-		return cppki.SignedTRC{}, serrors.Wrap("classifying the successor against its predecessor",
-			err, "predecessor", pred.TRC.ID)
-	}
-	completed, err := complete(partial)
+	completed, err := complete(ctx, partial)
 	if err != nil {
 		return cppki.SignedTRC{}, err
 	}
 	if err := completed.Verify(&pred.TRC); err != nil {
 		return cppki.SignedTRC{}, serrors.Wrap("verifying the completed TRC", err,
-			"id", completed.TRC.ID)
+			"id", completed.TRC.ID, "predecessor", pred.TRC.ID)
 	}
 	if _, err := db.InsertTRC(ctx, completed); err != nil {
 		return cppki.SignedTRC{}, fmt.Errorf("pinning the completed TRC: %w", err)
 	}
 	return completed, nil
-}
-
-// submission returns the completion that submits the signed successor
-// through the caster to the core's voting application. The artifact is
-// checked before it leaves, short of the votes the answer adds: the proof of
-// possession by cert verifies over the payload.
-func submission(
-	ctx context.Context,
-	caster TRCCaster,
-	cert *x509.Certificate,
-) func(cppki.SignedTRC) (cppki.SignedTRC, error) {
-
-	return func(partial cppki.SignedTRC) (cppki.SignedTRC, error) {
-		if err := verifySignedBy(partial, cert); err != nil {
-			return cppki.SignedTRC{}, serrors.Wrap("verifying the proof of possession", err)
-		}
-		return caster.SubmitTRC(ctx, partial)
-	}
 }
 
 // CoreNamed reports whether the TRC's core list names the ISD-AS.
@@ -245,17 +222,6 @@ func CoreNamed(trc cppki.TRC, ia addr.IA) bool {
 // certificate set.
 func SignerCert(trc cppki.TRC, ct cppki.CertType) (*x509.Certificate, error) {
 	return signerCert(trc, ct)
-}
-
-// verifySignedBy checks that one of the signer infos is the certificate's
-// and verifies over the payload.
-func verifySignedBy(signed cppki.SignedTRC, cert *x509.Certificate) error {
-	for _, si := range signed.SignerInfos {
-		if found, err := si.FindCertificate([]*x509.Certificate{cert}); err == nil && found != nil {
-			return verifySignerInfo(si, cert, signed.TRC.Raw)
-		}
-	}
-	return serrors.New("the TRC carries no signature by the certificate")
 }
 
 // NewestTRCID returns the numbers-less TRC ID asking an ISD's newest TRC —

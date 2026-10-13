@@ -155,7 +155,7 @@ func RotateCoreKeys(
 		return CoreKeys{}, cppki.SignedTRC{}, err
 	}
 	completed, err := castSuccessor(ctx, db, pred, partial,
-		func(partial cppki.SignedTRC) (cppki.SignedTRC, error) {
+		func(_ context.Context, partial cppki.SignedTRC) (cppki.SignedTRC, error) {
 			return CoSign(partial, live.Sensitive, predSensitive)
 		})
 	if err != nil {
@@ -243,7 +243,7 @@ func RollVotingKey(
 	if err != nil {
 		return err
 	}
-	completed, err := castSuccessor(ctx, db, newest, partial, submission(ctx, caster, cert))
+	completed, err := castSuccessor(ctx, db, newest, partial, caster.SubmitTRC)
 	if err != nil {
 		return err
 	}
