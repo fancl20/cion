@@ -25,12 +25,15 @@ import (
 // fastPacing paces the assembly's loops for the integration tests. BFD keeps
 // the production interval: its detection time rides out the stalls of a
 // loaded runner, which at a lab interval take every link down, lose the
-// echoes in flight, and leave the selection to retire live links.
+// echoes in flight, and leave the selection to retire live links. The
+// selection windows are long enough that the three a retirement counts
+// outlast a BFD detection and the re-handshake after it, so a stall that
+// drops a session on one side does not retire the link on that side alone.
 var fastPacing = services.NodePacing{
 	Propagation:     Propagation,
 	Registration:    Registration,
 	Enrollment:      EnrollRetry,
-	Selection:       300 * time.Millisecond,
+	Selection:       2 * time.Second,
 	CandidateWindow: 5 * time.Second,
 	Directory:       100 * time.Millisecond,
 	RendezvousRate:  10 * time.Millisecond,
