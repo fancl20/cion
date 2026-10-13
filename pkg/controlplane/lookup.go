@@ -3,7 +3,6 @@ package controlplane
 import (
 	"context"
 	"log/slog"
-	"sync"
 	"time"
 
 	"connectrpc.com/connect"
@@ -11,6 +10,7 @@ import (
 	"github.com/scionproto/scion/pkg/private/serrors"
 	cppb "github.com/scionproto/scion/pkg/proto/control_plane"
 
+	"github.com/fancl20/cion/pkg/expiring"
 	"github.com/fancl20/cion/pkg/modules/pathdb"
 	"github.com/fancl20/cion/pkg/scion"
 )
@@ -40,8 +40,9 @@ type LookupService struct {
 	// is that core.
 	Fetch func(ctx context.Context, peer *scion.Addr, src, dst addr.IA) (*cppb.SegmentsResponse, error)
 
-	mtx   sync.Mutex
-	cache map[lookupKey]cachedSegments
+	// cache holds fetched segments until the earliest of their expirations,
+	// capped by the cache TTL.
+	cache *expiring.Map[lookupKey, []*pathdb.Segment]
 }
 
 // lookupKey names the question a cached answer serves: the core fetched
@@ -54,16 +55,9 @@ type lookupKey struct {
 	segType pathdb.SegmentType
 }
 
-// cachedSegments holds fetched segments until the earliest of their
-// expirations, capped by the cache TTL.
-type cachedSegments struct {
-	segments []*pathdb.Segment
-	expiry   time.Time
-}
-
 // NewLookupService returns a lookup service with an empty cache.
 func NewLookupService() *LookupService {
-	return &LookupService{cache: make(map[lookupKey]cachedSegments)}
+	return &LookupService{cache: expiring.New[lookupKey, []*pathdb.Segment]()}
 }
 
 // Segments serves a segment request (draft Section 5).
@@ -203,12 +197,9 @@ func (s *LookupService) fetchCached(
 
 	now := time.Now()
 	key := lookupKey{core: core, dst: dst, segType: t}
-	s.mtx.Lock()
-	if cached, ok := s.cache[key]; ok && now.Before(cached.expiry) {
-		s.mtx.Unlock()
-		return cached.segments
+	if segs, ok := s.cache.Get(key); ok {
+		return segs
 	}
-	s.mtx.Unlock()
 
 	peer := &scion.Addr{IA: core, Service: addr.SvcCS}
 	resp, err := s.Fetch(ctx, peer, core, dst)
@@ -239,21 +230,7 @@ func (s *LookupService) fetchCached(
 	if len(segs) == 0 {
 		return nil
 	}
-	s.mtx.Lock()
-	// The write owns the map's bound: entries whose expiry has passed leave
-	// on the write that follows — the Telegram authorizer's shape for its
-	// decision map — so the map holds what the TTL still covers, a peer's
-	// spray of destinations costing a minute of memory and no more. No
-	// background sweeper: a goroutine that wakes on its own keeps the
-	// service from sitting whole inside a fake-time bubble.
-	now = time.Now()
-	for k, cached := range s.cache {
-		if !now.Before(cached.expiry) {
-			delete(s.cache, k)
-		}
-	}
-	s.cache[key] = cachedSegments{segments: segs, expiry: expiry}
-	s.mtx.Unlock()
+	s.cache.Set(key, segs, expiry)
 	return segs
 }
 

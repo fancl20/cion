@@ -212,11 +212,6 @@ func TestLookupCacheKeysByType(t *testing.T) {
 	if len(cores) != 1 || cores[0].PCB.ID() != 3 {
 		t.Fatalf("core segments = %v, want the canned core segment", cores)
 	}
-	fx.lookup.mtx.Lock()
-	if got := len(fx.lookup.cache); got != 2 {
-		t.Errorf("cache entries = %d, want one per type under the one pair", got)
-	}
-	fx.lookup.mtx.Unlock()
 
 	// Both kinds serve from their own entries: no further fetch.
 	fx.lookup.fetchCached(ctx, coreIATest, iaLineC, pathdb.SegmentTypeDown)
@@ -228,10 +223,10 @@ func TestLookupCacheKeysByType(t *testing.T) {
 	}
 }
 
-// TestLookupCacheForgets checks the cache's bound: an entry past its expiry
-// leaves on the next write, an entry still within its expiry survives
-// another's write however many pass, and neither kind ever answers the
-// other's question. The TTL's passage is a fake-time sleep in the bubble.
+// TestLookupCacheForgets checks the cache's windows: an entry past its expiry
+// is fetched again, an entry still within its expiry answers however many of
+// the other kind's writes pass, and neither kind ever answers the other's
+// question. The TTL's passage is a fake-time sleep in the bubble.
 func TestLookupCacheForgets(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		fx := newLookupFixture(t)
@@ -239,38 +234,23 @@ func TestLookupCacheForgets(t *testing.T) {
 		fetch := func(t pathdb.SegmentType) []*pathdb.Segment {
 			return fx.lookup.fetchCached(ctx, coreIATest, iaLineC, t)
 		}
-		cacheLen := func() int {
-			fx.lookup.mtx.Lock()
-			defer fx.lookup.mtx.Unlock()
-			return len(fx.lookup.cache)
-		}
 
 		fetch(pathdb.SegmentTypeDown)
 		fetch(pathdb.SegmentTypeCore)
-		if got := cacheLen(); got != 2 {
-			t.Fatalf("cache entries = %d, want both kinds within their expiry", got)
-		}
 
-		// The TTL passes; the next write empties the map of the expired
-		// entries and holds the one it wrote.
+		// The TTL passes; the next read fetches the down segments again.
 		time.Sleep(2 * lookupCacheTTL)
 		if downs := fetch(pathdb.SegmentTypeDown); len(downs) != 1 || downs[0].PCB.ID() != 2 {
 			t.Fatalf("down segments after the TTL = %v, want the canned segment re-fetched", downs)
 		}
-		if got := cacheLen(); got != 1 {
-			t.Errorf("cache entries after the TTL = %d, want 1 (the expired kinds left on the write)", got)
-		}
 
-		// The live entry survives another kind's landing write, and however
+		// The live entry survives the other kind's landing write, and however
 		// many reads pass, both kinds answer from the cache alone.
 		for range 5 {
 			fetch(pathdb.SegmentTypeCore)
 			if downs := fetch(pathdb.SegmentTypeDown); len(downs) != 1 || downs[0].PCB.ID() != 2 {
 				t.Fatalf("down segments = %v, want the entry the write left standing", downs)
 			}
-		}
-		if got := cacheLen(); got != 2 {
-			t.Errorf("cache entries = %d, want 2 (a live entry survives another's writes)", got)
 		}
 		fx.fetch.mtx.Lock()
 		if got := len(fx.fetch.calls); got != 4 {

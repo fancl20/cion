@@ -35,6 +35,7 @@ import (
 	"github.com/scionproto/scion/pkg/scrypto/cppki"
 	"github.com/scionproto/scion/pkg/scrypto/signed"
 
+	"github.com/fancl20/cion/pkg/expiring"
 	"github.com/fancl20/cion/pkg/modules/trustdb"
 )
 
@@ -59,8 +60,8 @@ type Verifier struct {
 	// chains and deduplicate its TRC reports for a minute; the engine sets
 	// both, and a verifier built without them verifies uncached, every
 	// read through the provider.
-	chains   *ttlCache[[][]*x509.Certificate]
-	notifies *ttlCache[struct{}]
+	chains   *expiring.Map[string, [][]*x509.Certificate]
+	notifies *expiring.Map[string, struct{}]
 }
 
 // Verify verifies the signature of the msg with a chain of the signer valid
@@ -125,20 +126,20 @@ func (v Verifier) Verify(ctx context.Context, signedMsg *cryptopb.SignedMessage,
 
 func (v *Verifier) notifyTRC(ctx context.Context, id cppki.TRCID) error {
 	key := fmt.Sprintf("notify-%s", id)
-	if _, ok := v.notifies.get(key); ok {
+	if _, ok := v.notifies.Get(key); ok {
 		return nil
 	}
 	if err := v.Engine.NotifyTRC(ctx, id, Server(v.BoundServer)); err != nil {
 		return err
 	}
-	v.notifies.add(key, struct{}{}, time.Minute)
+	v.notifies.SetIfAbsent(key, struct{}{}, time.Now().Add(time.Minute))
 	return nil
 }
 
 func (v *Verifier) getChains(ctx context.Context, q trustdb.ChainQuery) ([][]*x509.Certificate, error) {
 	key := fmt.Sprintf("chain-%s-%x", q.IA, q.SubjectKeyID)
 
-	if chains, ok := v.chains.get(key); ok {
+	if chains, ok := v.chains.Get(key); ok {
 		return chains, nil
 	}
 
@@ -147,7 +148,7 @@ func (v *Verifier) getChains(ctx context.Context, q trustdb.ChainQuery) ([][]*x5
 		return nil, err
 	}
 	if len(chains) != 0 {
-		v.chains.add(key, chains, v.cacheExpiration(chains))
+		v.chains.SetIfAbsent(key, chains, time.Now().Add(v.cacheExpiration(chains)))
 	}
 	return chains, nil
 }

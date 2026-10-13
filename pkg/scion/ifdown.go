@@ -8,6 +8,8 @@ import (
 	"github.com/gopacket/gopacket"
 	"github.com/scionproto/scion/pkg/addr"
 	"github.com/scionproto/scion/pkg/slayers"
+
+	"github.com/fancl20/cion/pkg/expiring"
 )
 
 // IfDownCacheTTL is how long a recognized interface-down signal holds: the
@@ -47,10 +49,11 @@ type InterfaceDownSignal struct {
 // skipped path for ten seconds.
 type InterfaceDownCache struct {
 	ttl time.Duration
+	// signaled holds the signaled ISD-AS and interface pairs until their
+	// entries lapse.
+	signaled *expiring.Map[ifDownKey, struct{}]
 
 	mtx sync.Mutex
-	// signaled holds the entries' expiry by ISD-AS and interface.
-	signaled map[ifDownKey]time.Time
 	// onSignal receives every recognized signal; the WireGuard bind drops
 	// the quoted destination's cached path through it.
 	onSignal func(InterfaceDownSignal)
@@ -65,7 +68,7 @@ type ifDownKey struct {
 func NewInterfaceDownCache() *InterfaceDownCache {
 	return &InterfaceDownCache{
 		ttl:      IfDownCacheTTL,
-		signaled: make(map[ifDownKey]time.Time),
+		signaled: expiring.New[ifDownKey, struct{}](),
 	}
 }
 
@@ -82,9 +85,8 @@ func (c *InterfaceDownCache) OnSignal(fn func(InterfaceDownSignal)) {
 // Record enters a recognized signal and delivers it to the registered
 // receiver.
 func (c *InterfaceDownCache) Record(sig InterfaceDownSignal) {
+	c.signaled.Set(ifDownKey{ia: sig.IA, ifID: sig.IfID}, struct{}{}, time.Now().Add(c.ttl))
 	c.mtx.Lock()
-	now := time.Now()
-	c.signaled[ifDownKey{ia: sig.IA, ifID: sig.IfID}] = now.Add(c.ttl)
 	fn := c.onSignal
 	c.mtx.Unlock()
 	if fn != nil {
@@ -95,39 +97,8 @@ func (c *InterfaceDownCache) Record(sig InterfaceDownSignal) {
 // Holds reports whether an interface is signaled down and the entry has not
 // lapsed.
 func (c *InterfaceDownCache) Holds(ia addr.IA, ifID uint16) bool {
-	c.mtx.Lock()
-	defer c.mtx.Unlock()
-	expiry, ok := c.signaled[ifDownKey{ia: ia, ifID: ifID}]
-	if !ok {
-		return false
-	}
-	if time.Now().After(expiry) {
-		delete(c.signaled, ifDownKey{ia: ia, ifID: ifID})
-		return false
-	}
-	return true
-}
-
-// Empty reports whether no live entry remains — a storm's worth of signals
-// aged out entirely, nothing persisted.
-func (c *InterfaceDownCache) Empty() bool {
-	return !c.HoldsAny()
-}
-
-// HoldsAny reports whether any live entry remains.
-func (c *InterfaceDownCache) HoldsAny() bool {
-	c.mtx.Lock()
-	defer c.mtx.Unlock()
-	now := time.Now()
-	live := false
-	for k, expiry := range c.signaled {
-		if now.After(expiry) {
-			delete(c.signaled, k)
-			continue
-		}
-		live = true
-	}
-	return live
+	_, ok := c.signaled.Get(ifDownKey{ia: ia, ifID: ifID})
+	return ok
 }
 
 // parseInterfaceDownPacket recognizes an SCMP External Interface Down

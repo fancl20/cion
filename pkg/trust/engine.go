@@ -13,6 +13,7 @@ import (
 	"github.com/scionproto/scion/pkg/scrypto/cppki"
 	"github.com/scionproto/scion/pkg/scrypto/signed"
 
+	"github.com/fancl20/cion/pkg/expiring"
 	"github.com/fancl20/cion/pkg/modules/trustdb"
 )
 
@@ -43,8 +44,8 @@ type Engine struct {
 
 	// chains and notifies cache the verifiers' recently used chains and
 	// deduplicate their TRC reports.
-	chains   *ttlCache[[][]*x509.Certificate]
-	notifies *ttlCache[struct{}]
+	chains   *expiring.Map[string, [][]*x509.Certificate]
+	notifies *expiring.Map[string, struct{}]
 }
 
 // NewEngine returns an engine for the node's IA, AS key, and provider.
@@ -53,8 +54,8 @@ func NewEngine(ia addr.IA, key crypto.Signer, provider Provider) *Engine {
 		IA:       ia,
 		Key:      key,
 		Provider: provider,
-		chains:   newTTLCache[[][]*x509.Certificate](),
-		notifies: newTTLCache[struct{}](),
+		chains:   expiring.New[string, [][]*x509.Certificate](),
+		notifies: expiring.New[string, struct{}](),
 	}
 }
 

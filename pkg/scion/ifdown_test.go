@@ -21,9 +21,9 @@ func newTestCache() *InterfaceDownCache {
 	return NewInterfaceDownCache()
 }
 
-// TestIfDownCacheHoldsAndLapses checks the retention: an entry lives
-// exactly the TTL and ages out entirely — a signal storm changes no
-// persistent state. The TTL's passage is a fake-time sleep in the bubble.
+// TestIfDownCacheHoldsAndLapses checks the retention: an entry lives exactly
+// the TTL, to the nanosecond. The TTL's passage is a fake-time sleep in the
+// bubble.
 func TestIfDownCacheHoldsAndLapses(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		c := newTestCache()
@@ -31,12 +31,13 @@ func TestIfDownCacheHoldsAndLapses(t *testing.T) {
 		if !c.Holds(iaMid, testIfID) {
 			t.Fatal("a fresh signal is not held")
 		}
-		time.Sleep(IfDownCacheTTL + time.Second)
+		time.Sleep(IfDownCacheTTL - time.Nanosecond)
+		if !c.Holds(iaMid, testIfID) {
+			t.Fatal("the signal lapsed before its TTL")
+		}
+		time.Sleep(time.Nanosecond)
 		if c.Holds(iaMid, testIfID) {
 			t.Error("the signal outlived its TTL")
-		}
-		if c.HoldsAny() {
-			t.Error("a lapsed cache still holds an entry")
 		}
 	})
 }
