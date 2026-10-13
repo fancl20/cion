@@ -72,7 +72,7 @@ func TestCoreJoinsBySensitiveUpdate(t *testing.T) {
 		cfg.Neighbors = []string{b.rendezvousOf()}
 		cfg.RootCAs = wpki.pool
 	})
-	ctx := context.Background()
+	ctx := t.Context()
 
 	// The joining core's identity completes from the neighbor's reply: the
 	// founder's ISD, the drawn AS kept.
@@ -175,7 +175,7 @@ func TestCoreJoinsThroughAnAuthoritative(t *testing.T) {
 		cfg.Neighbors = []string{a.rendezvousOf()}
 		cfg.RootCAs = wpki.pool
 	})
-	ctx := context.Background()
+	ctx := t.Context()
 	// onboarded reports whether the node's newest pinned TRC names it a
 	// core.
 	onboarded := func(n *assemblyNode) bool {
@@ -217,7 +217,7 @@ func TestCoreJoinsThroughAnAuthoritative(t *testing.T) {
 func holdsAssemblyChain(t *testing.T, n *assemblyNode, ia addr.IA) bool {
 	t.Helper()
 	now := time.Now()
-	chains, err := n.app.TrustDB().Chains(context.Background(), trustdb.ChainQuery{
+	chains, err := n.app.TrustDB().Chains(t.Context(), trustdb.ChainQuery{
 		IA:       ia,
 		Validity: cppki.Validity{NotBefore: now, NotAfter: now},
 	})
@@ -266,11 +266,11 @@ func TestJoinerStopsWithoutVotingApp(t *testing.T) {
 	// assertion.
 	bErr := make(chan error, 1)
 	go func() {
-		bErr <- services.Run(context.Background(), joiner(ipB), services.DefaultDataplaneOptions())
+		bErr <- services.Run(t.Context(), joiner(ipB), services.DefaultDataplaneOptions())
 	}()
 	// The same joining core booted for an application: its Wait is the
 	// assertion.
-	e, err := services.BootApp(context.Background(), joiner(ipE))
+	e, err := services.BootApp(t.Context(), joiner(ipE))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -360,7 +360,7 @@ func TestJoiningCoreMeshesWithTheFounder(t *testing.T) {
 
 	// The joining core's slice is the founder's assignment: the founder's
 	// directory lists the slice the joining core's publication was answered.
-	ctx, cancel := context.WithTimeout(context.Background(), TestTimeout)
+	ctx, cancel := context.WithTimeout(t.Context(), TestTimeout)
 	defer cancel()
 	subnet, err := wireguardOf(b).Subnet(ctx)
 	if err != nil {

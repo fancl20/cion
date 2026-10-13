@@ -26,13 +26,13 @@ func TestLineTopology(t *testing.T) {
 		links: [][2]addr.IA{{coreIA, nodeIA}, {nodeIA, lineCIA}},
 	})
 	a, b, c := nodes[coreIA], nodes[nodeIA], nodes[lineCIA]
-	ctx := context.Background()
+	ctx := t.Context()
 
 	// Beacons propagate A→B→C with signatures verified at each hop: a path
 	// database holds only verified segments, and B and C each keep the up
 	// segments they terminate.
-	Poll(t, "up segments at C", func() bool { return holdsUpSegments(c.assemblyNode) })
-	Poll(t, "up segments at B", func() bool { return holdsUpSegments(b.assemblyNode) })
+	Poll(t, "up segments at C", func() bool { return holdsUpSegments(ctx, c.assemblyNode) })
+	Poll(t, "up segments at B", func() bool { return holdsUpSegments(ctx, b.assemblyNode) })
 
 	// C enrolls through the reversed beacon over B: no direct A–C link
 	// exists, so the enrollment fetch rides the bootstrap route.
@@ -102,9 +102,9 @@ func TestRestartedNodeServesUpSegments(t *testing.T) {
 		links: [][2]addr.IA{{coreIA, nodeIA}},
 	})
 	b := nodes[nodeIA]
-	ctx := context.Background()
+	ctx := t.Context()
 
-	Poll(t, "B up segment", func() bool { return holdsUpSegments(b.assemblyNode) })
+	Poll(t, "B up segment", func() bool { return holdsUpSegments(ctx, b.assemblyNode) })
 
 	// B stops, every socket and store released when its Close returns, and
 	// boots again on the same state, host, and link set — the restart a
@@ -130,8 +130,8 @@ func TestRestartedNodeServesUpSegments(t *testing.T) {
 
 // holdsUpSegments reports whether the node's path database holds an up
 // segment.
-func holdsUpSegments(n *assemblyNode) bool {
-	segs, err := n.app.PathDB().Get(context.Background(),
+func holdsUpSegments(ctx context.Context, n *assemblyNode) bool {
+	segs, err := n.app.PathDB().Get(ctx,
 		pathdb.Query{Type: pathdb.SegmentTypeUp})
 	return err == nil && len(segs) > 0
 }

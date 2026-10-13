@@ -30,7 +30,7 @@ func TestPingForkTopology(t *testing.T) {
 		links: [][2]addr.IA{{coreIA, nodeIA}, {coreIA, lineCIA}},
 	})
 	a, b, c := nodes[coreIA], nodes[nodeIA], nodes[lineCIA]
-	ctx := context.Background()
+	ctx := t.Context()
 
 	// Beacons propagate, C enrolls, and the provider resolves the composed
 	// path C→A→B from C — the fork's three-node join pipeline, budgeted at
@@ -120,7 +120,7 @@ func TestPingLineMiddleNode(t *testing.T) {
 		links: [][2]addr.IA{{coreIA, nodeIA}, {nodeIA, lineCIA}},
 	})
 	a, b, c := nodes[coreIA], nodes[nodeIA], nodes[lineCIA]
-	ctx := context.Background()
+	ctx := t.Context()
 
 	// C's up segment [A, B, C] and B's registered down segment [A, B] meet
 	// at B: the truncated reversed up segment alone is the route. The join
@@ -190,7 +190,7 @@ func TestPingSiblingNodes(t *testing.T) {
 		links: [][2]addr.IA{{coreIA, nodeIA}, {nodeIA, lineCIA}, {nodeIA, iaD}},
 	})
 	c, d := nodes[lineCIA], nodes[iaD]
-	ctx := context.Background()
+	ctx := t.Context()
 
 	// C's up segment [A, B, C] and D's registered down segment [A, B, D]
 	// meet at B: [C, B] composed before [B, D], four hops in two segments.
@@ -242,7 +242,7 @@ func TestPingReresolvesExpiredPath(t *testing.T) {
 		fresh: fresh,
 	}
 	warmUp(t, p, r, fresh)
-	report, err := ping.Run(context.Background(), ping.Config{
+	report, err := ping.Run(t.Context(), ping.Config{
 		Conn:     p.conn(t),
 		Provider: &scion.PathProvider{IA: iaP, DB: db},
 		Dst:      iaR,
@@ -290,7 +290,7 @@ func warmUp(t *testing.T, p, r *staticNode, seg *pathdb.Segment) {
 	t.Helper()
 	provider := &scion.PathProvider{IA: p.app.IA(), DB: &staticPathDB{seg: seg}}
 	Poll(t, "R answers P's echo over the crafted segment", func() bool {
-		return pingOver(context.Background(), p.assemblyNode, provider, r.app.IA(), r.host)
+		return pingOver(t.Context(), p.assemblyNode, provider, r.app.IA(), r.host)
 	})
 }
 
@@ -363,7 +363,7 @@ func TestPingUnreachable(t *testing.T) {
 	conn := p.conn(t)
 	done := make(chan error, 1)
 	go func() {
-		_, err := ping.Run(context.Background(), ping.Config{
+		_, err := ping.Run(t.Context(), ping.Config{
 			Conn:     conn,
 			Provider: p.app.Provider(),
 			Dst:      stranger,
@@ -399,7 +399,7 @@ func TestPingLossSummary(t *testing.T) {
 	// address, which no node binds.
 	seg := upSegment(t, r.forwardingKey(t), p.forwardingKey(t), time.Now(), iaR, iaP)
 	warmUp(t, p, r, seg)
-	report, err := ping.Run(context.Background(), ping.Config{
+	report, err := ping.Run(t.Context(), ping.Config{
 		Conn:     p.conn(t),
 		Provider: &scion.PathProvider{IA: iaP, DB: &staticPathDB{seg: seg}},
 		Dst:      iaR,

@@ -167,15 +167,15 @@ func (b *operatorBot) promptHeaded(heading string) int {
 // holdsChain reports whether the node's trust database holds a valid chain
 // for its own name — the enrollment these labs measure, for a joiner may
 // converge its paths before any chain names it.
-func holdsChain(n *assemblyNode) bool {
-	chain, err := trust.NewestChain(context.Background(), n.app.TrustDB(),
+func holdsChain(ctx context.Context, n *assemblyNode) bool {
+	chain, err := trust.NewestChain(ctx, n.app.TrustDB(),
 		n.app.IA(), time.Now())
 	return err == nil && chain != nil
 }
 
 // holdsNoChainFor reports whether the core holds no chain naming the joiner.
-func holdsNoChainFor(core, joiner *assemblyNode) bool {
-	chains, err := core.app.TrustDB().Chains(context.Background(),
+func holdsNoChainFor(ctx context.Context, core, joiner *assemblyNode) bool {
+	chains, err := core.app.TrustDB().Chains(ctx,
 		trustdb.ChainQuery{IA: joiner.app.IA()})
 	return err == nil && len(chains) == 0
 }
@@ -222,16 +222,15 @@ func TestJoinByEnrollAuthCIDR(t *testing.T) {
 	b := bootTelegramJoiner(t, wpki, ipB, a)
 
 	Poll(t, "the joiner's candidate on the core", func() bool {
-		return entryOf(a, b.app.IA()) != nil
+		return entryOf(t.Context(), a, b.app.IA()) != nil
 	})
-	Poll(t, "the joiner enrolled by prefix", func() bool { return holdsChain(b) })
+	Poll(t, "the joiner enrolled by prefix", func() bool { return holdsChain(t.Context(), b) })
 	Poll(t, "the candidate established on its evidence", func() bool {
-		e := entryOf(a, b.app.IA())
+		e := entryOf(t.Context(), a, b.app.IA())
 		return e != nil && e.State == links.StateEstablished
 	})
-	ctx := context.Background()
 	Poll(t, "the joiner reaches the core", func() bool {
-		return pingFrom(ctx, b, a.app.IA(), a.host)
+		return pingFrom(t.Context(), b, a.app.IA(), a.host)
 	})
 }
 
@@ -253,7 +252,7 @@ func TestJoinByEnrollAuthTelegram(t *testing.T) {
 	// prompt re-asks the one identity, while the retry cadence runs. An
 	// absence proof — the window is the retry pacing's own.
 	time.Sleep(10 * fastPacing.Enrollment)
-	if holdsChain(b) {
+	if holdsChain(t.Context(), b) {
 		t.Fatal("the joiner enrolled before the operator answered")
 	}
 	if got := bot.promptCount(); got != 1 {
@@ -265,10 +264,9 @@ func TestJoinByEnrollAuthTelegram(t *testing.T) {
 	// chain then held — and slowness under the race detector is no
 	// regression, so no wall-clock bound rides the wait.
 	bot.press(t, 0, 0)
-	Poll(t, "the approved joiner to enroll", func() bool { return holdsChain(b) })
-	ctx := context.Background()
+	Poll(t, "the approved joiner to enroll", func() bool { return holdsChain(t.Context(), b) })
 	Poll(t, "the approved joiner to reach the core", func() bool {
-		return pingFrom(ctx, b, a.app.IA(), a.host)
+		return pingFrom(t.Context(), b, a.app.IA(), a.host)
 	})
 }
 
@@ -308,7 +306,9 @@ func TestJoinByEnrollAuthTelegramRestart(t *testing.T) {
 	// the fixed TestTimeout missed a loop still converging.
 	PollFor(t, RestartTimeout, "the operator's second prompt", func() bool { return bot.promptCount() == 2 })
 	bot.press(t, 1, 0)
-	PollFor(t, RestartTimeout, "the joiner to enroll after the restart", func() bool { return holdsChain(b) })
+	PollFor(t, RestartTimeout, "the joiner to enroll after the restart", func() bool {
+		return holdsChain(t.Context(), b)
+	})
 
 	// The enrolled node runs on with no prompt at all.
 	time.Sleep(20 * fastPacing.Enrollment)
@@ -337,17 +337,17 @@ func TestJoinDeniedByEnrollAuth(t *testing.T) {
 	// with no establishment is the claim, the retirement after silence the
 	// poll below.
 	Poll(t, "the joiner's candidate on the core", func() bool {
-		e := entryOf(a, b.app.IA())
+		e := entryOf(t.Context(), a, b.app.IA())
 		return e != nil && e.State == links.StateCandidate
 	})
 	time.Sleep(fastPacing.CandidateWindow + fastPacing.Selection)
-	if e := entryOf(a, b.app.IA()); e == nil || e.State != links.StateCandidate {
+	if e := entryOf(t.Context(), a, b.app.IA()); e == nil || e.State != links.StateCandidate {
 		t.Fatalf("the denied joiner's entry = %v, want still the graced candidate", e)
 	}
-	if holdsChain(b) {
+	if holdsChain(t.Context(), b) {
 		t.Error("a joiner outside the prefix list enrolled")
 	}
-	if !holdsNoChainFor(a, b) {
+	if !holdsNoChainFor(t.Context(), a, b) {
 		t.Error("the core issued a chain naming a joiner outside the prefix list")
 	}
 
@@ -355,7 +355,7 @@ func TestJoinDeniedByEnrollAuth(t *testing.T) {
 	// retires its entry.
 	b.stop(t)
 	Poll(t, "the candidate to retire with the window", func() bool {
-		e := entryOf(a, b.app.IA())
+		e := entryOf(t.Context(), a, b.app.IA())
 		return e != nil && e.State == links.StateRetired
 	})
 }
@@ -374,10 +374,10 @@ func TestJoinPendingNeverCompletes(t *testing.T) {
 	Poll(t, "the operator's prompt", func() bool { return bot.promptCount() == 1 })
 	// No operator answers; the joiner keeps pending and never enrolls.
 	time.Sleep(30 * fastPacing.Enrollment)
-	if holdsChain(b) {
+	if holdsChain(t.Context(), b) {
 		t.Error("an unattended prompt completed an enrollment")
 	}
-	if !holdsNoChainFor(a, b) {
+	if !holdsNoChainFor(t.Context(), a, b) {
 		t.Error("an unattended prompt issued a chain")
 	}
 	if got := bot.promptCount(); got != 1 {

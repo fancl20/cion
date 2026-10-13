@@ -1,7 +1,6 @@
 package testnetwork
 
 import (
-	"context"
 	"encoding/json/v2"
 	"net/netip"
 	"os"
@@ -191,23 +190,23 @@ func TestStaticLabByLinkSet(t *testing.T) {
 		}
 	}
 
-	ctx := context.Background()
+	ctx := t.Context()
 	// The links stand: both sides of each hold an established entry, the
 	// core's on the interface its file named.
 	Poll(t, "A's link to B", func() bool {
-		e := entryOf(a.assemblyNode, b.app.IA())
+		e := entryOf(ctx, a.assemblyNode, b.app.IA())
 		return e != nil && e.State == links.StateEstablished && e.IfID == 1
 	})
 	Poll(t, "B's link to A", func() bool {
-		e := entryOf(b.assemblyNode, a.app.IA())
+		e := entryOf(ctx, b.assemblyNode, a.app.IA())
 		return e != nil && e.State == links.StateEstablished
 	})
 	Poll(t, "B's link to C", func() bool {
-		e := entryOf(b.assemblyNode, c.app.IA())
+		e := entryOf(ctx, b.assemblyNode, c.app.IA())
 		return e != nil && e.State == links.StateEstablished
 	})
 	Poll(t, "C's link to B", func() bool {
-		e := entryOf(c.assemblyNode, b.app.IA())
+		e := entryOf(ctx, c.assemblyNode, b.app.IA())
 		return e != nil && e.State == links.StateEstablished
 	})
 
@@ -222,11 +221,11 @@ func TestStaticLabByLinkSet(t *testing.T) {
 	// Removing C's entry from B's file retires the link — a generation swap
 	// the surviving traffic rides through. The A–B entry keeps the
 	// addresses the standing link holds.
-	ab := entryOf(b.assemblyNode, a.app.IA())
+	ab := entryOf(ctx, b.assemblyNode, a.app.IA())
 	writeStaticSet(t, b.linkSet, staticLink{
 		IA: a.app.IA().String(), Local: ab.Local.String(), Remote: ab.Remote.String()})
 	Poll(t, "B retired the link to C", func() bool {
-		e := entryOf(b.assemblyNode, c.app.IA())
+		e := entryOf(ctx, b.assemblyNode, c.app.IA())
 		return e != nil && e.State == links.StateRetired
 	})
 	Poll(t, "A and B still answer each other", func() bool {
@@ -260,20 +259,20 @@ func TestStaticEnrollmentByAuthorizer(t *testing.T) {
 		staticLink{IA: b.app.IA().String(), Local: abA, Remote: abB, Interface: &ifID})
 
 	Poll(t, "the link stands by the operator's vouch", func() bool {
-		e := entryOf(b.assemblyNode, a.app.IA())
+		e := entryOf(t.Context(), b.assemblyNode, a.app.IA())
 		return e != nil && e.State == links.StateEstablished
 	})
 	Poll(t, "the core's vouched link stands", func() bool {
-		e := entryOf(a.assemblyNode, b.app.IA())
+		e := entryOf(t.Context(), a.assemblyNode, b.app.IA())
 		return e != nil && e.State == links.StateEstablished
 	})
 	// The authorizer bounds enrollment: no chain ever names the joiner, on
 	// either side, however long the joiner's retries run.
 	time.Sleep(30 * fastPacing.Enrollment)
-	if holdsChain(b.assemblyNode) {
+	if holdsChain(t.Context(), b.assemblyNode) {
 		t.Error("a joiner outside the prefix list enrolled over the vouched link")
 	}
-	if !holdsNoChainFor(a.assemblyNode, b.assemblyNode) {
+	if !holdsNoChainFor(t.Context(), a.assemblyNode, b.assemblyNode) {
 		t.Error("the core issued a chain naming a joiner outside the prefix list")
 	}
 }

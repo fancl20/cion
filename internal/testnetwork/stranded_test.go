@@ -89,10 +89,11 @@ func TestStrandedTierHeals(t *testing.T) {
 	d := join(ipD, a, c)
 	e := join(ipE, c, d)
 	near, far := []*assemblyNode{a, f, g}, []*assemblyNode{c, d, e}
+	ctx := t.Context()
 
 	PollFor(t, 3*time.Minute, "each side to mesh and the bridges to stand", func() bool {
-		return meshed(near) && meshed(far) && meshed([]*assemblyNode{a, c}) &&
-			meshed([]*assemblyNode{a, d})
+		return meshed(ctx, near) && meshed(ctx, far) &&
+			meshed(ctx, []*assemblyNode{a, c}) && meshed(ctx, []*assemblyNode{a, d})
 	})
 
 	// The blackholes lift while A links the sides: every node of each side
@@ -102,14 +103,14 @@ func TestStrandedTierHeals(t *testing.T) {
 	PollFor(t, 2*time.Minute, "the sides' probes to land", func() bool {
 		for _, x := range near[1:] {
 			for _, y := range far {
-				if !probedBy(x, y) || !probedBy(y, x) {
+				if !probedBy(ctx, x, y) || !probedBy(ctx, y, x) {
 					return false
 				}
 			}
 		}
 		return true
 	})
-	if pair := crossLink(near[1:], far); pair != "" {
+	if pair := crossLink(ctx, near[1:], far); pair != "" {
 		t.Fatalf("the sides linked before the cut: %s", pair)
 	}
 
@@ -117,11 +118,11 @@ func TestStrandedTierHeals(t *testing.T) {
 		steer(t, prioCut, bandLoss, ipA, n.host)
 	}
 	PollFor(t, 4*time.Minute, "the stranded clause to link the sides", func() bool {
-		if crossLink(near[1:], far) == "" || !meshed(near) {
+		if crossLink(ctx, near[1:], far) == "" || !meshed(ctx, near) {
 			return false
 		}
 		for _, n := range append(near, far...) {
-			if upLinks(n) < measured.NeighborFloor {
+			if upLinks(ctx, n) < measured.NeighborFloor {
 				return false
 			}
 		}
@@ -131,10 +132,10 @@ func TestStrandedTierHeals(t *testing.T) {
 
 // meshed reports whether every pair of the nodes holds an up link
 // established at both ends.
-func meshed(nodes []*assemblyNode) bool {
+func meshed(ctx context.Context, nodes []*assemblyNode) bool {
 	for i, x := range nodes {
 		for _, y := range nodes[i+1:] {
-			if !upTo(x, y) || !upTo(y, x) {
+			if !upTo(ctx, x, y) || !upTo(ctx, y, x) {
 				return false
 			}
 		}
@@ -144,10 +145,10 @@ func meshed(nodes []*assemblyNode) bool {
 
 // crossLink names the first pair across the two sets that holds an up link
 // established at both ends; empty when none does.
-func crossLink(xs, ys []*assemblyNode) string {
+func crossLink(ctx context.Context, xs, ys []*assemblyNode) string {
 	for _, x := range xs {
 		for _, y := range ys {
-			if upTo(x, y) && upTo(y, x) {
+			if upTo(ctx, x, y) && upTo(ctx, y, x) {
 				return fmt.Sprintf("%s–%s", x.app.IA(), y.app.IA())
 			}
 		}
@@ -157,8 +158,8 @@ func crossLink(xs, ys []*assemblyNode) string {
 
 // upTo reports whether the node holds an established link to the peer
 // whose verdict is up.
-func upTo(n, peer *assemblyNode) bool {
-	entries, err := n.app.Links().All(context.Background())
+func upTo(ctx context.Context, n, peer *assemblyNode) bool {
+	entries, err := n.app.Links().All(ctx)
 	if err != nil {
 		return false
 	}
@@ -172,8 +173,8 @@ func upTo(n, peer *assemblyNode) bool {
 }
 
 // upLinks counts the node's established links whose verdicts are up.
-func upLinks(n *assemblyNode) int {
-	entries, err := n.app.Links().All(context.Background())
+func upLinks(ctx context.Context, n *assemblyNode) int {
+	entries, err := n.app.Links().All(ctx)
 	if err != nil {
 		return 0
 	}
@@ -189,8 +190,8 @@ func upLinks(n *assemblyNode) int {
 // probedBy reports whether the prober's rendezvous probe ever landed on the
 // node's acceptor: the probe mints an entry aimed at the prober's host,
 // which proves the prober's directory holds the node.
-func probedBy(n, prober *assemblyNode) bool {
-	entries, err := n.app.Links().All(context.Background())
+func probedBy(ctx context.Context, n, prober *assemblyNode) bool {
+	entries, err := n.app.Links().All(ctx)
 	if err != nil {
 		return false
 	}

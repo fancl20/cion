@@ -31,7 +31,7 @@ func socksPort(ip netip.Addr) netip.AddrPort {
 // slice's first, the address the allocator never issues.
 func servingAddresses(t *testing.T, a *assemblyNode) map[addr.IA]netip.Addr {
 	t.Helper()
-	directory, err := wireguardOf(a).Directory(context.Background())
+	directory, err := wireguardOf(a).Directory(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -91,7 +91,7 @@ func internetUDPEcho(t *testing.T) netip.AddrPort {
 // retrying while the join completes.
 func socksDial(t *testing.T, srv *tsnet.Server, exit netip.Addr) net.Conn {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), TestTimeout)
+	ctx, cancel := context.WithTimeout(t.Context(), TestTimeout)
 	defer cancel()
 	var conn net.Conn
 	PollErr(t, "the host's SOCKS dial of "+exit.String(), func() error {
@@ -122,10 +122,10 @@ func TestEgressSocksService(t *testing.T) {
 
 	// The mesh stands before any host joins, in both directions.
 	Poll(t, "the leaf reaches the core", func() bool {
-		return pingFrom(context.Background(), b, a.app.IA(), a.host)
+		return pingFrom(t.Context(), b, a.app.IA(), a.host)
 	})
 	Poll(t, "the core reaches the leaf", func() bool {
-		return pingFrom(context.Background(), a, b.app.IA(), b.host)
+		return pingFrom(t.Context(), a, b.app.IA(), b.host)
 	})
 	Poll(t, "the core's registry holding B's entry", func() bool {
 		return len(servingAddresses(t, a)) == 2
@@ -224,7 +224,7 @@ func TestEgressSocksService(t *testing.T) {
 	// The unroutable negative: a destination no slice claims never enters
 	// the tunnel — the map carries the tailnet and nothing else, and the
 	// client's own dial says so.
-	ctx, cancel := context.WithTimeout(context.Background(), TestTimeout)
+	ctx, cancel := context.WithTimeout(t.Context(), TestTimeout)
 	defer cancel()
 	if conn, err := host.Dial(ctx, "tcp", "192.0.2.1:80"); err == nil {
 		_ = conn.Close()
@@ -255,10 +255,10 @@ func TestWithheldExitOffer(t *testing.T) {
 	// registry holds both nodes' entries — the withheld exit's address
 	// among them.
 	Poll(t, "the leaf reaches the core", func() bool {
-		return pingFrom(context.Background(), b, a.app.IA(), a.host)
+		return pingFrom(t.Context(), b, a.app.IA(), a.host)
 	})
 	Poll(t, "the core reaches the leaf", func() bool {
-		return pingFrom(context.Background(), a, b.app.IA(), b.host)
+		return pingFrom(t.Context(), a, b.app.IA(), b.host)
 	})
 	Poll(t, "the core's registry holding B's entry", func() bool {
 		return len(servingAddresses(t, a)) == 2
@@ -294,7 +294,7 @@ func TestWithheldExitOffer(t *testing.T) {
 	// dial says so, every attempt within the budget.
 	deadline := time.Now().Add(8 * time.Second)
 	for {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
 		conn, err := host.Dial(ctx, "tcp", socksPort(serving[b.app.IA()]).String())
 		cancel()
 		if err == nil {

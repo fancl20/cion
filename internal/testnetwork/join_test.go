@@ -96,7 +96,7 @@ func bootAssembly(t *testing.T, mutate func(*services.NodeConfig)) *assemblyNode
 	if cfg.State == "" {
 		cfg.State = t.TempDir()
 	}
-	app, err := services.BootApp(context.Background(), cfg)
+	app, err := services.BootApp(t.Context(), cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -144,8 +144,8 @@ func pingOver(ctx context.Context, n *assemblyNode, provider *scion.PathProvider
 
 // entryOf returns the node's link entry of a neighbor: its live one, the
 // store holding at most one, else a retired one.
-func entryOf(n *assemblyNode, ia addr.IA) *links.Link {
-	entries, err := n.app.Links().All(context.Background())
+func entryOf(ctx context.Context, n *assemblyNode, ia addr.IA) *links.Link {
+	entries, err := n.app.Links().All(ctx)
 	if err != nil {
 		return nil
 	}
@@ -167,11 +167,11 @@ func entryOf(n *assemblyNode, ia addr.IA) *links.Link {
 // drops a departed link's session and reports an interface it holds no
 // session for as up, so a link that retires before a poll reads its verdict
 // reads as up from then on.
-func markedDown(n *assemblyNode, ifID uint16) bool {
+func markedDown(ctx context.Context, n *assemblyNode, ifID uint16) bool {
 	if !n.app.Monitor().Up(ifID) {
 		return true
 	}
-	entries, err := n.app.Links().All(context.Background())
+	entries, err := n.app.Links().All(ctx)
 	if err != nil {
 		return false
 	}
@@ -187,7 +187,7 @@ func markedDown(n *assemblyNode, ifID uint16) bool {
 // address in the link band, where no bind of port 0 lands.
 func linkPortsInBand(t *testing.T, n *assemblyNode) {
 	t.Helper()
-	entries, err := n.app.Links().All(context.Background())
+	entries, err := n.app.Links().All(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -203,8 +203,8 @@ func linkPortsInBand(t *testing.T, n *assemblyNode) {
 // establishedTo reports whether the node holds an established entry of the
 // neighbor: re-establishment past a retirement mints a second entry beside
 // the retired first, so the live one is what the polls want.
-func establishedTo(n *assemblyNode, ia addr.IA) bool {
-	entries, err := n.app.Links().All(context.Background())
+func establishedTo(ctx context.Context, n *assemblyNode, ia addr.IA) bool {
+	entries, err := n.app.Links().All(ctx)
 	if err != nil {
 		return false
 	}
@@ -273,20 +273,20 @@ func TestJoinByRendezvous(t *testing.T) {
 	wpki := NewWebPKI(t)
 	ipA, ipB, ipC := hostSlot(t), hostSlot(t), hostSlot(t)
 	a, b, c := bootRendezvousLine(t, wpki, ipA, ipB, ipC, nil)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	// The joins land: both sides of each link hold an entry, each naming
 	// its neighbor from the rendezvous exchange alone.
 	Poll(t, "B's link to A", func() bool {
-		e := entryOf(b, a.app.IA())
+		e := entryOf(ctx, b, a.app.IA())
 		return e != nil && e.State == links.StateEstablished
 	})
 	Poll(t, "A's link to B", func() bool {
-		e := entryOf(a, b.app.IA())
+		e := entryOf(ctx, a, b.app.IA())
 		return e != nil && e.State == links.StateEstablished
 	})
 	Poll(t, "C's link to B", func() bool {
-		e := entryOf(c, b.app.IA())
+		e := entryOf(ctx, c, b.app.IA())
 		return e != nil && e.State == links.StateEstablished
 	})
 
@@ -298,11 +298,11 @@ func TestJoinByRendezvous(t *testing.T) {
 	// against the two-hop path, and promotes the direct link — below the
 	// floor of two, outright on reachability.
 	Poll(t, "C's direct link to A", func() bool {
-		e := entryOf(c, a.app.IA())
+		e := entryOf(ctx, c, a.app.IA())
 		return e != nil && e.State == links.StateEstablished
 	})
 	Poll(t, "A's link to C", func() bool {
-		e := entryOf(a, c.app.IA())
+		e := entryOf(ctx, a, c.app.IA())
 		return e != nil && e.State == links.StateEstablished
 	})
 	// Every link the joins and the promotion allocated lies in the band.
@@ -339,13 +339,13 @@ func TestJoinByRendezvous(t *testing.T) {
 	})
 
 	// Killing B leaves C connected through A.
-	cbIfID := entryOf(c, b.app.IA()).IfID
+	cbIfID := entryOf(ctx, c, b.app.IA()).IfID
 	b.stop(t)
 	// C marks its link to B down — the condition the wait wants, not a
 	// fixed multiple of the transmission interval — so the composed route
 	// crosses no link the monitor distrusts or the node no longer serves.
 	Poll(t, "C to mark the C–B link down", func() bool {
-		return markedDown(c, cbIfID)
+		return markedDown(ctx, c, cbIfID)
 	})
 	// The freshest up segment — A's beacon over the direct link — takes
 	// over from the one through the dead B.
@@ -362,7 +362,7 @@ func TestJoinByRendezvous(t *testing.T) {
 		cfg.RootCAs = wpki.pool
 	})
 	Poll(t, "the restarted B serves its persisted link", func() bool {
-		e := entryOf(b2, a.app.IA())
+		e := entryOf(ctx, b2, a.app.IA())
 		return e != nil && e.State == links.StateEstablished
 	})
 	linkPortsInBand(t, b2)
@@ -382,15 +382,15 @@ func TestLineCutHeals(t *testing.T) {
 	wpki := NewWebPKI(t)
 	ipA, ipB, ipC := hostSlot(t), hostSlot(t), hostSlot(t)
 	a, b, c := bootRendezvousLine(t, wpki, ipA, ipB, ipC, nil)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	// The joins land and C enrolls through the line.
 	Poll(t, "B's link to A", func() bool {
-		e := entryOf(b, a.app.IA())
+		e := entryOf(ctx, b, a.app.IA())
 		return e != nil && e.State == links.StateEstablished
 	})
 	Poll(t, "C's link to B", func() bool {
-		e := entryOf(c, b.app.IA())
+		e := entryOf(ctx, c, b.app.IA())
 		return e != nil && e.State == links.StateEstablished
 	})
 	Poll(t, "C enrolled through B", func() bool { return pingFrom(ctx, c, a.app.IA(), a.host) })
@@ -411,17 +411,17 @@ func TestLineCutHeals(t *testing.T) {
 	})
 
 	// Killing B strands C: every route from C to A crossed the dead link.
-	cbIfID := entryOf(c, b.app.IA()).IfID
+	cbIfID := entryOf(ctx, c, b.app.IA()).IfID
 	b.stop(t)
 	Poll(t, "C to mark the C–B link down", func() bool {
-		return markedDown(c, cbIfID)
+		return markedDown(ctx, c, cbIfID)
 	})
 
 	// C promotes A below the floor of up links — reachability outranking
 	// latency — and the establishment rides the rendezvous exchange, for no
 	// composed path resolves into the stranded tier.
-	Poll(t, "C's direct link to A", func() bool { return establishedTo(c, a.app.IA()) })
-	Poll(t, "A's link to C", func() bool { return establishedTo(a, c.app.IA()) })
+	Poll(t, "C's direct link to A", func() bool { return establishedTo(ctx, c, a.app.IA()) })
+	Poll(t, "A's link to C", func() bool { return establishedTo(ctx, a, c.app.IA()) })
 
 	// The traffic of the generation swaps survives.
 	PollFor(t, 10*time.Second, "C's echo to A after the cut healed", func() bool {
@@ -431,7 +431,7 @@ func TestLineCutHeals(t *testing.T) {
 	// The dead link retires once the new segments serve the tier: the
 	// verdict stayed down across the sustained window.
 	Poll(t, "the dead link to retire", func() bool {
-		e := entryOf(c, b.app.IA())
+		e := entryOf(ctx, c, b.app.IA())
 		return e != nil && e.State == links.StateRetired
 	})
 }
@@ -448,7 +448,7 @@ func TestBootstrapWithoutAnswer(t *testing.T) {
 	state := t.TempDir()
 
 	func() {
-		ctx, cancel := context.WithCancel(context.Background())
+		ctx, cancel := context.WithCancel(t.Context())
 		_, err := services.BootApp(ctx, services.NodeConfig{
 			Domain:    TestDomain,
 			State:     state,
@@ -486,7 +486,7 @@ func TestBootstrapWithoutAnswer(t *testing.T) {
 		cfg.RootCAs = wpki.pool
 	})
 	Poll(t, "the retried join to land", func() bool {
-		e := entryOf(d, a.app.IA())
+		e := entryOf(t.Context(), d, a.app.IA())
 		return e != nil && e.State == links.StateEstablished
 	})
 	if got := d.app.IA().ISD(); got != a.app.IA().ISD() {
@@ -613,7 +613,9 @@ func TestCoreRestartsInPlace(t *testing.T) {
 		cfg.Neighbors = []string{a.rendezvousOf()}
 		cfg.RootCAs = wpki.pool
 	})
-	Poll(t, "the joiner to enroll against the last boot", func() bool { return holdsChain(b) })
+	Poll(t, "the joiner to enroll against the last boot", func() bool {
+		return holdsChain(t.Context(), b)
+	})
 }
 
 // TestDeliberateCore is the empty list's proof: a core and a joiner that
@@ -645,11 +647,11 @@ func TestDeliberateCore(t *testing.T) {
 	})
 
 	Poll(t, "the joiner's link to the core", func() bool {
-		e := entryOf(b, a.app.IA())
+		e := entryOf(t.Context(), b, a.app.IA())
 		return e != nil && e.State == links.StateEstablished
 	})
 	Poll(t, "the joiner enrolled", func() bool {
-		return pingFrom(context.Background(), b, a.app.IA(), a.host)
+		return pingFrom(t.Context(), b, a.app.IA(), a.host)
 	})
 	for _, node := range []struct {
 		name string

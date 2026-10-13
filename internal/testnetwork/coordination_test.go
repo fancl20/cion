@@ -153,7 +153,7 @@ func hostUp(t *testing.T, srv *tsnet.Server) []netip.Addr {
 // that prove a login never does.
 func hostUpErr(t *testing.T, srv *tsnet.Server, budget time.Duration) ([]netip.Addr, bool) {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), budget)
+	ctx, cancel := context.WithTimeout(t.Context(), budget)
 	defer cancel()
 	status, err := srv.Up(ctx)
 	if err != nil {
@@ -178,7 +178,7 @@ func warmSession(t *testing.T, srv *tsnet.Server, far netip.Addr) {
 	// cover the wireguard handshake's own cadence.
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
-		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
 		conn, err := srv.Dial(ctx, "tcp",
 			netip.AddrPortFrom(far, 1).String())
 		cancel()
@@ -196,7 +196,7 @@ func warmSession(t *testing.T, srv *tsnet.Server, far netip.Addr) {
 // ownerOf returns the node whose slice holds the address.
 func ownerOf(t *testing.T, a, b *assemblyNode, ip netip.Addr) addr.IA {
 	t.Helper()
-	ctx := context.Background()
+	ctx := t.Context()
 	directory, err := wireguardOf(a).Directory(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -251,7 +251,7 @@ func echoOverTailnet(t *testing.T, dst *tsnet.Server, dstAddr netip.Addr,
 		done <- err
 	}()
 
-	ctx, cancel := context.WithTimeout(context.Background(), TestTimeout)
+	ctx, cancel := context.WithTimeout(t.Context(), TestTimeout)
 	defer cancel()
 	var conn net.Conn
 	PollErr(t, "the source host's dial through the tunnel", func() error {
@@ -310,17 +310,17 @@ func TestCoordinationOpenJoin(t *testing.T) {
 	// path to the leaf warms only once the leaf's down segments reach its
 	// database, and the mesh device's first send reads the cache alone.
 	Poll(t, "the leaf reaches the core", func() bool {
-		return pingFrom(context.Background(), b, a.app.IA(), a.host)
+		return pingFrom(t.Context(), b, a.app.IA(), a.host)
 	})
 	Poll(t, "the core reaches the leaf", func() bool {
-		return pingFrom(context.Background(), a, b.app.IA(), b.host)
+		return pingFrom(t.Context(), a, b.app.IA(), b.host)
 	})
 
 	// The far node's entry reaches the core's registry before its hosts
 	// can place in its slice: the directory's own convergence, the same
 	// one the mesh rides.
 	Poll(t, "the core's registry holding B's entry", func() bool {
-		directory, err := wireguardOf(a).Directory(context.Background())
+		directory, err := wireguardOf(a).Directory(t.Context())
 		if err != nil {
 			return false
 		}

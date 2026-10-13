@@ -102,7 +102,7 @@ func nodeHostPort(n *assemblyNode) netip.AddrPort {
 // stand in for the service.
 func registerHost(t *testing.T, core *assemblyNode, host wireguard.HostEntry) {
 	t.Helper()
-	if err := wireguardOf(core).Registry().PublishHost(context.Background(), host); err != nil {
+	if err := wireguardOf(core).Registry().PublishHost(t.Context(), host); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -139,15 +139,15 @@ func startWireguardNodes(t *testing.T) (a, b *assemblyNode) {
 func assignedSlice(t *testing.T, n *assemblyNode) netip.Prefix {
 	t.Helper()
 	Poll(t, "the node's assigned slice", func() bool {
-		return sliceOf(n).IsValid()
+		return sliceOf(t.Context(), n).IsValid()
 	})
-	return sliceOf(n)
+	return sliceOf(t.Context(), n)
 }
 
 // sliceOf returns the slice the node's directory entry carries, invalid
 // while none does.
-func sliceOf(n *assemblyNode) netip.Prefix {
-	directory, err := wireguardOf(n).Directory(context.Background())
+func sliceOf(ctx context.Context, n *assemblyNode) netip.Prefix {
+	directory, err := wireguardOf(n).Directory(ctx)
 	if err != nil {
 		return netip.Prefix{}
 	}

@@ -1,7 +1,6 @@
 package testnetwork
 
 import (
-	"context"
 	"testing"
 
 	"github.com/scionproto/scion/pkg/addr"
@@ -47,7 +46,7 @@ func TestPathLayerServesTwoCores(t *testing.T) {
 		cfg.Neighbors = []string{a.rendezvousOf()}
 		cfg.RootCAs = wpki.pool
 	})
-	ctx := context.Background()
+	ctx := t.Context()
 
 	// The join completes before any child starts: the successor TRC names
 	// both cores, so the origin checks pass from the first beacon.
@@ -153,7 +152,7 @@ func holdsSegmentFrom(
 	t *testing.T, n *assemblyNode, typ pathdb.SegmentType, core addr.IA) bool {
 
 	t.Helper()
-	segs, err := n.app.PathDB().Get(context.Background(), pathdb.Query{Type: typ})
+	segs, err := n.app.PathDB().Get(t.Context(), pathdb.Query{Type: typ})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -170,7 +169,7 @@ func holdsSegmentFrom(
 // ingress interface — both origins' beacons arrived over one link.
 func holdsSharedIngressUps(t *testing.T, n *assemblyNode, one, other addr.IA) bool {
 	t.Helper()
-	segs, err := n.app.PathDB().Get(context.Background(), pathdb.Query{Type: pathdb.SegmentTypeUp})
+	segs, err := n.app.PathDB().Get(t.Context(), pathdb.Query{Type: pathdb.SegmentTypeUp})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -201,7 +200,7 @@ func holdsSharedIngressUps(t *testing.T, n *assemblyNode, one, other addr.IA) bo
 // segments reaching the destination.
 func holdsDownSegmentsOf(t *testing.T, n *assemblyNode, dst addr.IA) bool {
 	t.Helper()
-	segs, err := n.app.PathDB().Get(context.Background(),
+	segs, err := n.app.PathDB().Get(t.Context(),
 		pathdb.Query{Type: pathdb.SegmentTypeDown, DstIA: dst})
 	if err != nil {
 		t.Fatal(err)

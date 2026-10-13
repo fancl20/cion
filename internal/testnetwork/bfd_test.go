@@ -47,15 +47,15 @@ func TestBFDLivenessEpisode(t *testing.T) {
 	wpki := NewWebPKI(t)
 	ipA, ipB, ipC := hostSlot(t), hostSlot(t), hostSlot(t)
 	a, b, c := bootRendezvousLine(t, wpki, ipA, ipB, ipC, bfdPacing)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	// The line stands: A–B and B–C established, everyone enrolled and
 	// answering end to end.
 	Poll(t, "the line to stand", func() bool {
-		return establishedOf(a, b.app.IA()) && establishedOf(b, a.app.IA()) &&
-			establishedOf(b, c.app.IA()) && establishedOf(c, b.app.IA())
+		return establishedOf(ctx, a, b.app.IA()) && establishedOf(ctx, b, a.app.IA()) &&
+			establishedOf(ctx, b, c.app.IA()) && establishedOf(ctx, c, b.app.IA())
 	})
-	abEntry := entryOf(a, b.app.IA())
+	abEntry := entryOf(ctx, a, b.app.IA())
 	abIfID := abEntry.IfID
 	// The path through B is kept for the episode's echo across the dead
 	// link, which no composition offers once A's verdict on it is down.
@@ -69,9 +69,9 @@ func TestBFDLivenessEpisode(t *testing.T) {
 	// three leaves both ends below the floor, so one end's selection loop
 	// promotes the other — and reaches C over it.
 	Poll(t, "A to hold a direct link to C", func() bool {
-		return establishedOf(a, c.app.IA())
+		return establishedOf(ctx, a, c.app.IA())
 	})
-	acIfID := entryOf(a, c.app.IA()).IfID
+	acIfID := entryOf(ctx, a, c.app.IA()).IfID
 	Poll(t, "A to reach C directly", func() bool {
 		return echoVia(ctx, t, a, c.app.IA(), c.host, acIfID, time.Second)
 	})
@@ -95,10 +95,10 @@ func TestBFDLivenessEpisode(t *testing.T) {
 	})
 	// The serving instance is untouched: the entry stays established on the
 	// same interface — no generation swap for a verdict flip.
-	if e := entryOf(a, b.app.IA()); e.State != links.StateEstablished || e.IfID != abIfID {
+	if e := entryOf(ctx, a, b.app.IA()); e.State != links.StateEstablished || e.IfID != abIfID {
 		t.Errorf("A's entry = %v/%d, want established on %d", e.State, e.IfID, abIfID)
 	}
-	if a.app.Monitor().Session(entryOf(a, b.app.IA())) != session {
+	if a.app.Monitor().Session(entryOf(ctx, a, b.app.IA())) != session {
 		t.Error("the verdict flip minted a new session")
 	}
 
@@ -121,13 +121,13 @@ func TestBFDLivenessEpisode(t *testing.T) {
 	Poll(t, "A's link to B to return up", func() bool {
 		return a.app.Monitor().Up(abIfID)
 	})
-	if a.app.Monitor().Session(entryOf(a, b.app.IA())) != session {
+	if a.app.Monitor().Session(entryOf(ctx, a, b.app.IA())) != session {
 		t.Error("the recovery minted a new session")
 	}
 	Poll(t, "A to reach B again", func() bool {
 		return pingFrom(ctx, a, b.app.IA(), b.host)
 	})
-	if e := entryOf(a, b.app.IA()); e.State != links.StateEstablished || e.IfID != abIfID {
+	if e := entryOf(ctx, a, b.app.IA()); e.State != links.StateEstablished || e.IfID != abIfID {
 		t.Errorf("A's entry after recovery = %v/%d, want established on %d",
 			e.State, e.IfID, abIfID)
 	}
@@ -145,11 +145,11 @@ func TestBFDStaticLabEpisode(t *testing.T) {
 	// The interface the core's file named its link to B.
 	ifID := uint16(1)
 
-	ctx := context.Background()
+	ctx := t.Context()
 	Poll(t, "the static line to stand", func() bool {
-		return establishedOf(a.assemblyNode, b.app.IA()) &&
-			establishedOf(b.assemblyNode, a.app.IA()) &&
-			establishedOf(c.assemblyNode, b.app.IA())
+		return establishedOf(ctx, a.assemblyNode, b.app.IA()) &&
+			establishedOf(ctx, b.assemblyNode, a.app.IA()) &&
+			establishedOf(ctx, c.assemblyNode, b.app.IA())
 	})
 	// The path through B is kept for the echo across the dead link, which
 	// no composition offers once A's verdict on it is down.
@@ -182,8 +182,8 @@ func TestBFDStaticLabEpisode(t *testing.T) {
 
 // establishedOf reports whether the node's entry of the neighbor is
 // established.
-func establishedOf(n *assemblyNode, ia addr.IA) bool {
-	e := entryOf(n, ia)
+func establishedOf(ctx context.Context, n *assemblyNode, ia addr.IA) bool {
+	e := entryOf(ctx, n, ia)
 	return e != nil && e.State == links.StateEstablished
 }
 

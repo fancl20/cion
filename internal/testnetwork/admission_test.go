@@ -92,7 +92,7 @@ func TestCoordinationTelegramPromptJoin(t *testing.T) {
 		// The login's budget is the operator's reaction time plus the
 		// client's own retry backoff, the restart lab's patience rather
 		// than the plain test timeout.
-		ctx, cancel := context.WithTimeout(context.Background(), RestartTimeout)
+		ctx, cancel := context.WithTimeout(t.Context(), RestartTimeout)
 		defer cancel()
 		status, err := host.Up(ctx)
 		if err != nil {

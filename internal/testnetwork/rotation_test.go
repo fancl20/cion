@@ -1,7 +1,6 @@
 package testnetwork
 
 import (
-	"context"
 	"crypto"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -89,7 +88,7 @@ func seedFounder(
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.InsertTRC(context.Background(), signed); err != nil {
+	if _, err := db.InsertTRC(t.Context(), signed); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.Close(); err != nil {
@@ -534,7 +533,7 @@ func TestFounderBootPromotesStagedRoll(t *testing.T) {
 	a := boot()
 	ia := a.app.IA()
 	a.stop(t)
-	ctx := context.Background()
+	ctx := t.Context()
 	db, err := trustbbolt.New(filepath.Join(state, "trust.db"), nil)
 	if err != nil {
 		t.Fatal(err)
@@ -600,7 +599,7 @@ func pinnedRung(
 ) cppki.SignedTRC {
 
 	t.Helper()
-	trc, err := n.app.TrustDB().SignedTRC(context.Background(),
+	trc, err := n.app.TrustDB().SignedTRC(t.Context(),
 		cppki.TRCID{ISD: isd, Base: 1, Serial: serial})
 	if err != nil {
 		t.Fatal(err)
@@ -635,7 +634,7 @@ func pollRolled(
 	t.Helper()
 	var rolled cppki.SignedTRC
 	Poll(t, "the core's roll to land", func() bool {
-		newest, err := n.app.TrustDB().SignedTRC(context.Background(), cppki.TRCID{
+		newest, err := n.app.TrustDB().SignedTRC(t.Context(), cppki.TRCID{
 			ISD: ia.ISD(), Base: scrypto.LatestVer, Serial: scrypto.LatestVer,
 		})
 		if err != nil || newest.IsZero() {
@@ -664,7 +663,7 @@ func pollDiscovered(
 	t.Helper()
 	var discovered cppki.SignedTRC
 	Poll(t, "the successor to spread", func() bool {
-		newest, err := n.app.TrustDB().SignedTRC(context.Background(), cppki.TRCID{
+		newest, err := n.app.TrustDB().SignedTRC(t.Context(), cppki.TRCID{
 			ISD: isd, Base: scrypto.LatestVer, Serial: scrypto.LatestVer,
 		})
 		if err != nil || newest.IsZero() {
@@ -681,7 +680,7 @@ func ownChain(t *testing.T, n *assemblyNode) []*x509.Certificate {
 	t.Helper()
 	var chain []*x509.Certificate
 	Poll(t, "the node's own chain", func() bool {
-		chains, err := n.app.TrustDB().Chains(context.Background(), trustdb.ChainQuery{
+		chains, err := n.app.TrustDB().Chains(t.Context(), trustdb.ChainQuery{
 			IA: n.app.IA(),
 		})
 		if err != nil {
@@ -703,7 +702,7 @@ func chainUnder(t *testing.T, n *assemblyNode, trc cppki.SignedTRC) []*x509.Cert
 	t.Helper()
 	var chain []*x509.Certificate
 	Poll(t, "the node's chain under the TRC's roots", func() bool {
-		chains, err := n.app.TrustDB().Chains(context.Background(), trustdb.ChainQuery{
+		chains, err := n.app.TrustDB().Chains(t.Context(), trustdb.ChainQuery{
 			IA: n.app.IA(),
 		})
 		if err != nil {
@@ -726,7 +725,7 @@ func chainUnder(t *testing.T, n *assemblyNode, trc cppki.SignedTRC) []*x509.Cert
 // its newest pinned TRC alone, once that TRC is a successor of the base.
 func anchoredInNewest(t *testing.T, n *assemblyNode, base cppki.SignedTRC) bool {
 	t.Helper()
-	ctx := context.Background()
+	ctx := t.Context()
 	newest, err := n.app.TrustDB().SignedTRC(ctx, cppki.TRCID{
 		ISD: base.TRC.ID.ISD, Base: scrypto.LatestVer, Serial: scrypto.LatestVer,
 	})
