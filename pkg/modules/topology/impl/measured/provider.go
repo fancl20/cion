@@ -59,10 +59,11 @@ type Config struct {
 	// probe's socket.
 	NewConn func() (*scion.Conn, error)
 	// Evidence reports whether a candidate's peer has proven itself — a
-	// chain of the peer the node knows, one it issued on the core or one a
-	// verified beacon's signatures resolved through — or the failure of the
-	// read that would tell.
-	Evidence func(*links.Link) (bool, error)
+	// chain of the peer the node knows, one it issued on the core, one a
+	// verified beacon's signatures resolved through, or one its core answers
+	// for — or the failure of the read that would tell. The context bounds
+	// a read that asks the core.
+	Evidence func(context.Context, *links.Link) (bool, error)
 	// CoreRoute resolves the core's endpoint, which the directory's client
 	// rides on non-core nodes.
 	CoreRoute func() *scion.Addr

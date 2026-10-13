@@ -140,7 +140,7 @@ func newSelFixture(t *testing.T, neighbors ...addr.IA) *selFixture {
 	f.sel.cfg.Verdicts = func() map[uint16]bool { return f.verdicts }
 	// Every established neighbor holds its verdict up unless a test says
 	// otherwise.
-	f.sel.cfg.Evidence = func(*links.Link) (bool, error) { return false, nil }
+	f.sel.cfg.Evidence = func(context.Context, *links.Link) (bool, error) { return false, nil }
 	f.sel.aliveFn = func(l *links.Link) bool { return f.alive[l.NeighborIA] }
 	f.refresh()
 	return f
@@ -918,7 +918,9 @@ func TestSelectionSweepCandidateWindow(t *testing.T) {
 		if err := f.store.Insert(context.Background(), proven); err != nil {
 			t.Fatal(err)
 		}
-		f.sel.cfg.Evidence = func(l *links.Link) (bool, error) { return l.IfID == proven.IfID, nil }
+		f.sel.cfg.Evidence = func(_ context.Context, l *links.Link) (bool, error) {
+			return l.IfID == proven.IfID, nil
+		}
 
 		time.Sleep(20 * time.Millisecond)
 		f.pass(t)
@@ -956,7 +958,7 @@ func TestSelectionSweepEvidenceReadFails(t *testing.T) {
 			neighborLink(selPeer, links.StateCandidate)); err != nil {
 			t.Fatal(err)
 		}
-		f.sel.cfg.Evidence = func(*links.Link) (bool, error) {
+		f.sel.cfg.Evidence = func(context.Context, *links.Link) (bool, error) {
 			return false, errors.New("the trust database is unreadable")
 		}
 
@@ -965,7 +967,7 @@ func TestSelectionSweepEvidenceReadFails(t *testing.T) {
 		if got := f.state(t, selPeer); got != links.StateCandidate {
 			t.Errorf("after the failed read the candidate is %v, want it still a candidate", got)
 		}
-		f.sel.cfg.Evidence = func(*links.Link) (bool, error) { return false, nil }
+		f.sel.cfg.Evidence = func(context.Context, *links.Link) (bool, error) { return false, nil }
 		f.pass(t)
 		if got := f.state(t, selPeer); got != links.StateRetired {
 			t.Errorf("after an unproven read past the window the candidate is %v, want it retired",

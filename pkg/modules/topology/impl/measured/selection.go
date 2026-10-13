@@ -54,7 +54,8 @@ const (
 	// CandidateWindow is how long an unproven candidate lives: a peer that
 	// produces no verified beacon or enrollment within it retires.
 	CandidateWindow = time.Minute
-	// EstablishTimeout bounds one in-band link request.
+	// EstablishTimeout bounds one in-band request: a link request, or the
+	// read of a candidate's evidence, which can ask the node's core.
 	EstablishTimeout = 5 * time.Second
 )
 
@@ -100,9 +101,11 @@ type SelectionConfig struct {
 	// names for the node, latest observation winning; nil discards it.
 	Learn func(netip.Addr)
 	// Evidence reports whether a candidate's peer has proven itself — a
-	// verified beacon or an enrollment the node has seen — or the failure of
-	// the read that would tell, which leaves the candidate to the next pass.
-	Evidence func(*links.Link) (bool, error)
+	// verified beacon or an enrollment the node has seen, or one its core
+	// answers for — or the failure of the read that would tell, which leaves
+	// the candidate to the next pass. The context bounds a read that asks
+	// the core.
+	Evidence func(context.Context, *links.Link) (bool, error)
 	// Stranded, when set, records the window's finding that the node holds
 	// fewer up links than the floor and no directory candidate answered its
 	// probe — the flag the joiner's dial loop reads to re-dial the
@@ -291,7 +294,7 @@ func (s *selection) sweep(ctx context.Context, entries []*links.Link) {
 		if l.State != links.StateCandidate {
 			continue
 		}
-		proven, err := s.proven(l)
+		proven, err := s.proven(ctx, l)
 		if err != nil {
 			slog.Error("Reading a candidate's evidence", "neighbor", l.NeighborIA, "err", err)
 			continue
@@ -315,13 +318,15 @@ func (s *selection) sweep(ctx context.Context, entries []*links.Link) {
 	}
 }
 
-// proven reads the candidate's evidence; without an evidence source no
-// candidate is proven.
-func (s *selection) proven(l *links.Link) (bool, error) {
+// proven reads the candidate's evidence, bounded like an in-band request;
+// without an evidence source no candidate is proven.
+func (s *selection) proven(ctx context.Context, l *links.Link) (bool, error) {
 	if s.cfg.Evidence == nil {
 		return false, nil
 	}
-	return s.cfg.Evidence(l)
+	ctx, cancel := context.WithTimeout(ctx, EstablishTimeout)
+	defer cancel()
+	return s.cfg.Evidence(ctx, l)
 }
 
 // candidateAlive runs one rendezvous echo against the candidate's own

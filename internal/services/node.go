@@ -326,23 +326,46 @@ func (n *node) start(gen *generation) {
 	}
 }
 
-// linkEvidence reports whether a candidate's peer has proven itself: a
-// chain of the peer the node knows — one it issued on the core, or one a
-// verified beacon's signatures resolved through — is the enrollment and the
-// verified beacon in one check.
-func (n *node) linkEvidence(l *links.Link) (bool, error) {
+// linkEvidence reports whether a candidate's peer has proven itself by its
+// admission: a chain of the peer valid now. The node's database answers
+// first — the chains a core issued, and those a verified beacon's
+// signatures resolved through — and on a miss an enrolled node asks its
+// core for the chain the core issued, through the provider its engine
+// resolves chains with. A non-issuing node gets a single-link peer's chain
+// no other way: the peer sends no beacon back over the link its beacons
+// arrive on. A core that does not answer proves nothing this pass.
+func (n *node) linkEvidence(ctx context.Context, l *links.Link) (bool, error) {
 	if l.NeighborIA.IsZero() {
 		return false, nil
 	}
 	now := time.Now()
-	chains, err := n.trustDB.Chains(context.Background(), trustdb.ChainQuery{
+	q := trustdb.ChainQuery{
 		IA:       l.NeighborIA,
 		Validity: cppki.Validity{NotBefore: now, NotAfter: now},
-	})
+	}
+	chains, err := n.trustDB.Chains(ctx, q)
 	if err != nil {
 		return false, fmt.Errorf("querying the chains of %s: %w", l.NeighborIA, err)
 	}
-	return len(chains) > 0, nil
+	if len(chains) > 0 {
+		return true, nil
+	}
+	// An un-enrolled node holds no TRC to verify an answer with, nor a
+	// route its core answers on.
+	own, err := n.engine.Chain(ctx)
+	if err != nil {
+		return false, err
+	}
+	if own == nil {
+		return false, nil
+	}
+	fetched, err := (&trust.NetworkProvider{DB: n.trustDB, Remote: n.remote}).GetChains(ctx, q)
+	if err != nil {
+		slog.Debug("Asking the core for a candidate's chain",
+			"neighbor", l.NeighborIA, "err", err)
+		return false, nil
+	}
+	return len(fetched) > 0, nil
 }
 
 // selfEnroll issues the core's own certificate chain locally, through the
