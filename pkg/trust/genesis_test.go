@@ -9,10 +9,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/fancl20/cion/pkg/modules/trustdb"
-	trustbbolt "github.com/fancl20/cion/pkg/modules/trustdb/impl/bbolt"
 	"github.com/scionproto/scion/pkg/addr"
 	"github.com/scionproto/scion/pkg/scrypto/cppki"
+
+	"github.com/fancl20/cion/pkg/modules/trustdb"
+	trustbbolt "github.com/fancl20/cion/pkg/modules/trustdb/impl/bbolt"
 )
 
 var coreIA = addr.MustIAFrom(20, 0xff0000000001)

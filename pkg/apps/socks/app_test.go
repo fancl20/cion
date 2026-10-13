@@ -13,8 +13,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/fancl20/cion/internal/socksclient"
-	"github.com/fancl20/cion/pkg/apps/wireguard"
 	"gvisor.dev/gvisor/pkg/buffer"
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/adapters/gonet"
@@ -24,6 +22,9 @@ import (
 	"gvisor.dev/gvisor/pkg/tcpip/stack"
 	"gvisor.dev/gvisor/pkg/tcpip/transport/tcp"
 	"gvisor.dev/gvisor/pkg/tcpip/transport/udp"
+
+	"github.com/fancl20/cion/internal/socksclient"
+	"github.com/fancl20/cion/pkg/apps/wireguard"
 )
 
 // The lab's addresses: the service's own slice, its first address the
