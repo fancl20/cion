@@ -1,4 +1,4 @@
-package controlplane
+package liveness
 
 import (
 	"context"

@@ -64,8 +64,10 @@ policy chooses.
     up or down verdict.
 *   **Control endpoint** — speaks the control services to neighbor nodes:
     beaconing, segment registration and lookup, trust material, and service
-    resolution, beside the per-link liveness sessions and the monitor that
-    turns their verdicts.
+    resolution.
+*   **Liveness** — a BFD session on every serving link, and the monitor
+    that keeps the sessions across data plane generations and turns their
+    arrivals into each link's up or down verdict.
 *   **Trust engine** — holds and issues the network's trust material: the
     TRC, certificate chains, and their renewal, and runs the procedures that
     keep it current: the chain's lifecycle, the rotation watch, and the

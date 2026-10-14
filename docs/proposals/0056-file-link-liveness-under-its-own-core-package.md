@@ -74,3 +74,9 @@ The change lands in one commit.
     table alone of the core and the modules.
 
 ## Implementation history
+
+*   Landed in one commit, as planned: the sessions and the monitor in
+    liveness ([bfd.go](/pkg/core/liveness/bfd.go),
+    [monitor.go](/pkg/core/liveness/monitor.go)) with their tests, the
+    package's document atop the monitor, and the fifth member in the core
+    walk ([walk_test.go](/pkg/core/walk_test.go)).

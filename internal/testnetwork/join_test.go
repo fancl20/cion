@@ -13,7 +13,7 @@ import (
 	"github.com/fancl20/cion/internal/services"
 	"github.com/fancl20/cion/pkg/apps"
 	"github.com/fancl20/cion/pkg/apps/ping"
-	"github.com/fancl20/cion/pkg/core/controlplane"
+	"github.com/fancl20/cion/pkg/core/liveness"
 	"github.com/fancl20/cion/pkg/core/trust"
 	"github.com/fancl20/cion/pkg/core/webpki/webpkitest"
 	"github.com/fancl20/cion/pkg/libs/scion"
@@ -38,7 +38,7 @@ var fastPacing = services.NodePacing{
 	Directory:       100 * time.Millisecond,
 	RendezvousRate:  10 * time.Millisecond,
 	LinkSetPoll:     100 * time.Millisecond,
-	BFD:             controlplane.BFDTransmissionInterval,
+	BFD:             liveness.BFDTransmissionInterval,
 }
 
 // assemblyNode is a node booted through the run command's own assembly.

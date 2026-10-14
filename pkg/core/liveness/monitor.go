@@ -1,4 +1,9 @@
-package controlplane
+// Package liveness runs the node's link liveness (data plane draft, Section
+// 6.1): a BFD session per serving link, and the health monitor that keeps
+// the sessions across data plane generations and reduces their arrivals to
+// a verdict per interface. Each generation's links carry the sessions, whose
+// verdicts the data plane's egress check reads.
+package liveness
 
 import (
 	"context"

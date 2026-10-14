@@ -1,6 +1,6 @@
 # Give Link Liveness a Core Package of Its Own
 
-*   Status: proposed
+*   Status: accepted
 *   Date: 2026-10-14
 
 [TOC]

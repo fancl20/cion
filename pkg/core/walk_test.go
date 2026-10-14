@@ -1,8 +1,8 @@
 // Package core is the node core's roof: the engines every node runs, core AS
 // or not, one package each beneath the roof — the data plane, the control
-// plane, the trust engine, and the bootstrap channel. This package is the
-// check that asserts it: a walk of the roof and an import rule, both run with
-// the tests. The roof's root holds nothing else.
+// plane, link liveness, the trust engine, and the bootstrap channel. This
+// package is the check that asserts it: a walk of the roof and an import
+// rule, both run with the tests. The roof's root holds nothing else.
 package core
 
 import (
@@ -18,7 +18,7 @@ import (
 
 // members are the core's packages. The core is frozen at this enumeration: a
 // package beneath the roof that is not one of them fails the walk.
-var members = []string{"controlplane", "dataplane", "trust", "webpki"}
+var members = []string{"controlplane", "dataplane", "liveness", "trust", "webpki"}
 
 // TestWalk asserts the roof's shape: its root holds the check alone, and its
 // children are the core's members, each a package. The walk reads the tree at
@@ -54,8 +54,9 @@ func walkRoof(t *testing.T, roof string) []string {
 }
 
 // TestWalkFixtures proves the walk's assertions can fail: trees built to
-// break each one — a fifth child, a production source at the root, a missing
-// member — are each reported, so the walk cannot silently pass on nothing.
+// break each one — an extra child, a production source at the root, a
+// missing member — are each reported, so the walk cannot silently pass on
+// nothing.
 func TestWalkFixtures(t *testing.T) {
 	write := func(t *testing.T, files map[string]string) string {
 		t.Helper()
@@ -88,7 +89,7 @@ func TestWalkFixtures(t *testing.T) {
 	}{
 		{name: "a roof in good shape", files: roof(nil, "")},
 		{
-			name:    "a fifth child",
+			name:    "an extra child",
 			files:   roof(map[string]string{"policy/policy.go": "package policy"}, ""),
 			problem: "policy: sits beneath the roof",
 		},

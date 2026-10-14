@@ -16,6 +16,7 @@ import (
 	"github.com/fancl20/cion/internal/supervise"
 	"github.com/fancl20/cion/pkg/apps"
 	"github.com/fancl20/cion/pkg/core/controlplane"
+	"github.com/fancl20/cion/pkg/core/liveness"
 	"github.com/fancl20/cion/pkg/core/trust"
 	"github.com/fancl20/cion/pkg/libs/scion"
 	"github.com/fancl20/cion/pkg/modules/links"
@@ -103,7 +104,7 @@ func (a *App) Links() links.DB { return a.node.linkStore }
 
 // Monitor returns the node's BFD health monitor — the sessions and their
 // verdicts, one per serving link.
-func (a *App) Monitor() *controlplane.HealthMonitor { return a.node.monitor }
+func (a *App) Monitor() *liveness.HealthMonitor { return a.node.monitor }
 
 // InterfaceDown returns the node's shared negative cache of SCMP
 // interface-down signals.

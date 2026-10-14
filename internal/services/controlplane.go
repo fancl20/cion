@@ -18,6 +18,7 @@ import (
 	"github.com/fancl20/cion/internal/supervise"
 	"github.com/fancl20/cion/pkg/apps/voting"
 	"github.com/fancl20/cion/pkg/core/controlplane"
+	"github.com/fancl20/cion/pkg/core/liveness"
 	"github.com/fancl20/cion/pkg/core/trust"
 	"github.com/fancl20/cion/pkg/core/webpki"
 	"github.com/fancl20/cion/pkg/libs/scion"
@@ -489,7 +490,7 @@ func (n *node) wireTopology() {
 // is assembled with it — the conns the phases bind record the signals the
 // data plane's egress-down branch sends.
 func (n *node) assembleMonitor() error {
-	monitor, err := controlplane.NewHealthMonitor(controlplane.HealthMonitorConfig{
+	monitor, err := liveness.NewHealthMonitor(liveness.HealthMonitorConfig{
 		IA:       n.ident.ia,
 		MACKey:   n.ident.key,
 		Store:    n.linkStore,

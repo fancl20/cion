@@ -19,6 +19,7 @@ import (
 	"github.com/fancl20/cion/pkg/apps/voting"
 	"github.com/fancl20/cion/pkg/core/controlplane"
 	"github.com/fancl20/cion/pkg/core/dataplane"
+	"github.com/fancl20/cion/pkg/core/liveness"
 	"github.com/fancl20/cion/pkg/core/trust"
 	"github.com/fancl20/cion/pkg/core/webpki"
 	"github.com/fancl20/cion/pkg/libs/scion"
@@ -83,7 +84,7 @@ type node struct {
 	// monitor owns the BFD sessions and their verdicts; ifDown is the
 	// node's shared negative cache of interface-down signals its conns
 	// record and its path composition consults.
-	monitor *controlplane.HealthMonitor
+	monitor *liveness.HealthMonitor
 	ifDown  *scion.InterfaceDownCache
 
 	// The trust role's products for the later phases, each held as the type
