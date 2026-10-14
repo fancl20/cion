@@ -1,4 +1,4 @@
-package controlplane
+package trust
 
 import (
 	"context"
@@ -10,7 +10,6 @@ import (
 	"github.com/scionproto/scion/pkg/addr"
 	"github.com/scionproto/scion/pkg/scrypto/cppki"
 
-	"github.com/fancl20/cion/pkg/core/trust"
 	"github.com/fancl20/cion/pkg/libs/loops"
 	"github.com/fancl20/cion/pkg/modules/trustdb"
 )
@@ -38,7 +37,7 @@ type RotationConfig struct {
 	// AuthoritativeRoll.
 	Roll Roll
 
-	// Threshold overrides trust.RotationThreshold; zero keeps it.
+	// Threshold overrides RotationThreshold; zero keeps it.
 	Threshold time.Duration
 	// RetryInterval and InspectInterval override the defaults; zero keeps
 	// them.
@@ -57,7 +56,7 @@ func (cfg RotationConfig) interval(v, def time.Duration) time.Duration {
 
 func (cfg RotationConfig) threshold() time.Duration {
 	if cfg.Threshold == 0 {
-		return trust.RotationThreshold
+		return RotationThreshold
 	}
 	return cfg.Threshold
 }
@@ -80,17 +79,17 @@ type Roll interface {
 // CastLocal, serialized with the submissions; once it pins, the decision
 // votes with the fresh sensitive key and the issuer issues under the fresh
 // root.
-func FounderRoll(decider *TRCDecider, issuer *trust.Issuer) Roll {
+func FounderRoll(decider *TRCDecider, issuer *Issuer) Roll {
 	return founderRoll{decider: decider, issuer: issuer}
 }
 
 type founderRoll struct {
 	decider *TRCDecider
-	issuer  *trust.Issuer
+	issuer  *Issuer
 }
 
 func (founderRoll) check(cfg RotationConfig, owned []*x509.Certificate) (bool, bool, error) {
-	keys, err := trust.LoadOrCreateCoreKeys(cfg.State)
+	keys, err := LoadOrCreateCoreKeys(cfg.State)
 	if err != nil {
 		return false, false, err
 	}
@@ -109,7 +108,7 @@ func (founderRoll) check(cfg RotationConfig, owned []*x509.Certificate) (bool, b
 		case cppki.Root:
 			key = keys.Root
 		}
-		if key != nil && !trust.KeyMatchesCert(key, cert) {
+		if key != nil && !KeyMatchesCert(key, cert) {
 			if ct == cppki.Sensitive {
 				lost = true
 			} else {
@@ -122,7 +121,7 @@ func (founderRoll) check(cfg RotationConfig, owned []*x509.Certificate) (bool, b
 
 func (r founderRoll) roll(ctx context.Context, cfg RotationConfig) error {
 	return r.decider.CastLocal(ctx, func(newest cppki.SignedTRC) error {
-		keys, completed, err := trust.RotateCoreKeys(ctx, cfg.DB, cfg.State,
+		keys, completed, err := RotateCoreKeys(ctx, cfg.DB, cfg.State,
 			cfg.IA, newest)
 		if err != nil {
 			return err
@@ -136,7 +135,7 @@ func (r founderRoll) roll(ctx context.Context, cfg RotationConfig) error {
 		if err := r.issuer.Rekey(keys, completed); err != nil {
 			return err
 		}
-		_, err = trust.PromoteStaged(cfg.State, cfg.IA, completed.TRC)
+		_, err = PromoteStaged(cfg.State, cfg.IA, completed.TRC)
 		return err
 	})
 }
@@ -145,23 +144,23 @@ func (r founderRoll) roll(ctx context.Context, cfg RotationConfig) error {
 // key checked, and the roll submitted through the caster to the founder's
 // voting application, the channel its join used, the founder's newest TRC
 // resolved through the remote.
-func AuthoritativeRoll(remote trust.Remote, caster trust.TRCCaster) Roll {
+func AuthoritativeRoll(remote Remote, caster TRCCaster) Roll {
 	return authoritativeRoll{remote: remote, caster: caster}
 }
 
 type authoritativeRoll struct {
-	remote trust.Remote
-	caster trust.TRCCaster
+	remote Remote
+	caster TRCCaster
 }
 
 func (authoritativeRoll) check(cfg RotationConfig, owned []*x509.Certificate) (bool, bool, error) {
-	key, err := trust.LoadOrCreateVotingKey(cfg.State)
+	key, err := LoadOrCreateVotingKey(cfg.State)
 	if err != nil {
 		return false, false, err
 	}
 	for _, cert := range owned {
 		if ct, err := cppki.ValidateCert(cert); err == nil && ct == cppki.Regular &&
-			!trust.KeyMatchesCert(key, cert) {
+			!KeyMatchesCert(key, cert) {
 
 			return true, false, nil
 		}
@@ -170,7 +169,7 @@ func (authoritativeRoll) check(cfg RotationConfig, owned []*x509.Certificate) (b
 }
 
 func (r authoritativeRoll) roll(ctx context.Context, cfg RotationConfig) error {
-	return trust.RollVotingKey(ctx, cfg.DB, r.remote, r.caster, cfg.IA, cfg.State)
+	return RollVotingKey(ctx, cfg.DB, r.remote, r.caster, cfg.IA, cfg.State)
 }
 
 // RunRotation runs the rotation watch of a core: a calm inspection interval
@@ -193,23 +192,23 @@ func RunRotation(ctx context.Context, cfg RotationConfig) {
 // roll is due or failing, or a promotion is. Within the threshold the holder
 // rolls, its log escalating with the expiry while the casts fail.
 func (cfg RotationConfig) rotationPass(ctx context.Context) time.Duration {
-	newest, err := cfg.DB.SignedTRC(ctx, trust.NewestTRCID(cfg.IA.ISD()))
+	newest, err := cfg.DB.SignedTRC(ctx, NewestTRCID(cfg.IA.ISD()))
 	if err != nil {
 		slog.Error("Reading the newest pinned TRC", "isd_as", cfg.IA, "err", err)
 		return cfg.interval(cfg.RetryInterval, EnrollmentRetryInterval)
 	}
-	if newest.IsZero() || !trust.CoreNamed(newest.TRC, cfg.IA) {
+	if newest.IsZero() || !CoreNamed(newest.TRC, cfg.IA) {
 		// Nothing to roll yet: the founder always names itself, and a joining
 		// core's onboarding cast is the enrollment loop's until it lands.
 		return cfg.interval(cfg.InspectInterval, ChainInspectInterval)
 	}
 	// A roll that pinned and failed to promote its staged material completes
 	// here, before the live files are read.
-	if _, err := trust.PromoteStaged(cfg.State, cfg.IA, newest.TRC); err != nil {
+	if _, err := PromoteStaged(cfg.State, cfg.IA, newest.TRC); err != nil {
 		slog.Error("Promoting the staged voting material", "isd_as", cfg.IA, "err", err)
 		return cfg.interval(cfg.RetryInterval, EnrollmentRetryInterval)
 	}
-	owned := trust.CertsOf(newest.TRC, cfg.IA)
+	owned := CertsOf(newest.TRC, cfg.IA)
 	due, err := cfg.materialDue(owned)
 	if err != nil {
 		slog.Error("Reading the live voting material", "isd_as", cfg.IA, "err", err)
@@ -282,7 +281,7 @@ func (cfg RotationConfig) materialDue(owned []*x509.Certificate) (materialState,
 func (cfg RotationConfig) attemptRoll(ctx context.Context) error {
 	timeout := cfg.Timeout
 	if timeout == 0 {
-		timeout = trust.RollTimeout
+		timeout = RollTimeout
 	}
 	attemptCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()

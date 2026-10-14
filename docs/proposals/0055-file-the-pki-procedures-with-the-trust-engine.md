@@ -124,3 +124,17 @@ The change lands in one commit.
     package graph.
 
 ## Implementation history
+
+*   Landed in one commit, as planned: the three procedures in trust
+    ([lifecycle.go](/pkg/core/trust/lifecycle.go),
+    [trccast.go](/pkg/core/trust/trccast.go),
+    [rotationwatch.go](/pkg/core/trust/rotationwatch.go)), `RemoteUnderlay`
+    beside the trust service
+    ([trustservice.go](/pkg/core/controlplane/trustservice.go)), and the
+    moved tests with their [export_test.go](/pkg/core/trust/export_test.go).
+*   `NewCSR` joined `trusttest`, for both sides use it. The trust database's
+    opener cannot: `trusttest` sits beneath the core roof, whose packages
+    import no module implementation. The moved tests declare it, the
+    fixture's two ISD-ASes, and the founder's constructor in
+    [fixtures_test.go](/pkg/core/trust/fixtures_test.go), and the trust
+    service's tests keep theirs.

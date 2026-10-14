@@ -1,4 +1,4 @@
-package controlplane
+package trust
 
 import (
 	"context"
@@ -6,6 +6,7 @@ import (
 	"crypto/x509"
 	"encoding/hex"
 	"log/slog"
+	"net/netip"
 	"slices"
 	"sync"
 	"time"
@@ -14,7 +15,6 @@ import (
 	"github.com/scionproto/scion/pkg/private/serrors"
 	"github.com/scionproto/scion/pkg/scrypto/cppki"
 
-	"github.com/fancl20/cion/pkg/core/trust"
 	"github.com/fancl20/cion/pkg/modules/enrollauth"
 	"github.com/fancl20/cion/pkg/modules/trustdb"
 )
@@ -60,6 +60,7 @@ type TRCDecider struct {
 func (c *TRCDecider) DecideTRC(
 	ctx context.Context,
 	presenter addr.IA,
+	source netip.AddrPort,
 	trc cppki.SignedTRC,
 ) (cppki.SignedTRC, error) {
 
@@ -118,14 +119,14 @@ func (c *TRCDecider) DecideTRC(
 	}
 	// A sensitive update short of a vote asks for the founder's: the
 	// policy's allow is its only gate.
-	if err := c.authorizeVoting(ctx, presenter, novelCerts(trc.TRC, newest.TRC)); err != nil {
+	if err := c.authorizeVoting(ctx, presenter, source, novelCerts(trc.TRC, newest.TRC)); err != nil {
 		return cppki.SignedTRC{}, err
 	}
-	sensitiveCert, err := trust.SignerCert(newest.TRC, cppki.Sensitive)
+	sensitiveCert, err := SignerCert(newest.TRC, cppki.Sensitive)
 	if err != nil {
 		return cppki.SignedTRC{}, err
 	}
-	completed, err := trust.CoSign(trc, c.Sensitive, sensitiveCert)
+	completed, err := CoSign(trc, c.Sensitive, sensitiveCert)
 	if err != nil {
 		return cppki.SignedTRC{}, serrors.Wrap("casting the founder's vote", err, "id", trc.TRC.ID)
 	}
@@ -180,10 +181,10 @@ func novelCerts(sub, pred cppki.TRC) []*x509.Certificate {
 func (c *TRCDecider) authorizeVoting(
 	ctx context.Context,
 	presenter addr.IA,
+	source netip.AddrPort,
 	added []*x509.Certificate,
 ) error {
 
-	source := remoteUnderlay(ctx)
 	if c.Authorizer == nil {
 		slog.Warn("Denying voting submission: no admission policy is configured",
 			"isd_as", presenter, "source", source)
@@ -223,7 +224,7 @@ func (c *TRCDecider) authorizeVoting(
 
 // newestTRC returns the newest pinned TRC of the founder's ISD.
 func (c *TRCDecider) newestTRC(ctx context.Context) (cppki.SignedTRC, error) {
-	trc, err := c.DB.SignedTRC(ctx, trust.NewestTRCID(c.IA.ISD()))
+	trc, err := c.DB.SignedTRC(ctx, NewestTRCID(c.IA.ISD()))
 	if err != nil {
 		return cppki.SignedTRC{}, serrors.Wrap("reading the newest pinned TRC", err)
 	}

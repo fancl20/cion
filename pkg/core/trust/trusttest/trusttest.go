@@ -7,6 +7,7 @@
 package trusttest
 
 import (
+	"crypto"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -79,4 +80,18 @@ func (f *Founder) Engine(t testing.TB, ia addr.IA) *trust.Engine {
 	t.Helper()
 	key, _ := f.Enroll(t, ia)
 	return trust.NewEngine(ia, key, &trust.NetworkProvider{DB: f.DB})
+}
+
+// NewCSR returns a CSR for a freshly generated AS key of ia.
+func NewCSR(t *testing.T, ia addr.IA) (*x509.CertificateRequest, crypto.Signer) {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	csr, err := trust.CreateCSR(ia, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return csr, key
 }

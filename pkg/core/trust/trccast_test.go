@@ -1,4 +1,4 @@
-package controlplane
+package trust_test
 
 import (
 	"context"
@@ -15,6 +15,7 @@ import (
 	"github.com/fancl20/cion/pkg/core/trust"
 	"github.com/fancl20/cion/pkg/core/trust/trusttest"
 	"github.com/fancl20/cion/pkg/modules/enrollauth"
+	"github.com/fancl20/cion/pkg/modules/enrollauth/impl/authtest"
 	"github.com/fancl20/cion/pkg/modules/trustdb"
 )
 
@@ -27,8 +28,8 @@ var joinerIATest = addr.MustIAFrom(20, 0xff0000000f01)
 // the joiner enrolled unless the test says otherwise.
 type deciderFixture struct {
 	tf      *trusttest.Founder
-	decider *TRCDecider
-	auth    *askAuthorizer
+	decider *trust.TRCDecider
+	auth    *authtest.Recorder
 	db      trustdb.DB
 	pred    cppki.SignedTRC
 
@@ -45,8 +46,8 @@ func newDeciderFixture(t *testing.T, enroll bool) *deciderFixture {
 	t.Helper()
 	f := newFounder(t)
 	c := &deciderFixture{tf: f, db: f.DB, pred: f.TRC}
-	c.auth = &askAuthorizer{verdict: enrollauth.AdmissionAllow}
-	c.decider = &TRCDecider{
+	c.auth = &authtest.Recorder{Verdict: enrollauth.AdmissionAllow}
+	c.decider = &trust.TRCDecider{
 		DB:         f.DB,
 		IA:         coreIATest,
 		Sensitive:  f.Keys.Sensitive,
@@ -63,7 +64,7 @@ func newDeciderFixture(t *testing.T, enroll bool) *deciderFixture {
 // enroll issues and stores a chain for the IA, the gate the decision asks.
 func (c *deciderFixture) enroll(t *testing.T, ia addr.IA) {
 	t.Helper()
-	csr, _ := newCSR(t, ia)
+	csr, _ := trusttest.NewCSR(t, ia)
 	chain, err := c.tf.Issuer.IssueChain(csr)
 	if err != nil {
 		t.Fatal(err)
@@ -125,7 +126,7 @@ func TestTRCDeciderOnboards(t *testing.T) {
 	partial := c.submission(t, c.pred, func() (crypto.Signer, *x509.Certificate) {
 		return c.joiner.key, c.joiner.cert
 	})
-	completed, err := c.decider.DecideTRC(ctx, c.joiner.ia, partial)
+	completed, err := c.decider.DecideTRC(ctx, c.joiner.ia, netip.AddrPort{}, partial)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -148,7 +149,7 @@ func TestTRCDeciderOnboards(t *testing.T) {
 	}
 
 	// The re-presentation decides nothing: the same TRC comes back.
-	again, err := c.decider.DecideTRC(ctx, c.joiner.ia, partial)
+	again, err := c.decider.DecideTRC(ctx, c.joiner.ia, netip.AddrPort{}, partial)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -163,7 +164,7 @@ func TestTRCDeciderOnboards(t *testing.T) {
 func TestTRCDeciderRequiresEnrollment(t *testing.T) {
 	c := newDeciderFixture(t, false)
 
-	_, err := c.decider.DecideTRC(context.Background(), c.joiner.ia,
+	_, err := c.decider.DecideTRC(context.Background(), c.joiner.ia, netip.AddrPort{},
 		c.submission(t, c.pred, func() (crypto.Signer, *x509.Certificate) {
 			return c.joiner.key, c.joiner.cert
 		}))
@@ -187,17 +188,17 @@ func TestTRCDeciderAsksAdmission(t *testing.T) {
 	partial := c.submission(t, c.pred, func() (crypto.Signer, *x509.Certificate) {
 		return c.joiner.key, c.joiner.cert
 	})
-	completed, err := c.decider.DecideTRC(askContext(), c.joiner.ia, partial)
+	completed, err := c.decider.DecideTRC(context.Background(), c.joiner.ia, askSource, partial)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if want := (cppki.TRCID{ISD: coreIATest.ISD(), Base: 1, Serial: 2}); completed.TRC.ID != want {
 		t.Fatalf("the decided TRC = %v, want the successor %v", completed.TRC.ID, want)
 	}
-	if len(c.auth.asked) != 1 {
-		t.Fatalf("the authorizer was asked %d times, want 1", len(c.auth.asked))
+	if len(c.auth.Asked) != 1 {
+		t.Fatalf("the authorizer was asked %d times, want 1", len(c.auth.Asked))
 	}
-	got := c.auth.asked[0]
+	got := c.auth.Asked[0]
 	if got.Boundary != enrollauth.BoundaryVoting {
 		t.Errorf("asked boundary = %v, want the voting one", got.Boundary)
 	}
@@ -211,13 +212,13 @@ func TestTRCDeciderAsksAdmission(t *testing.T) {
 		t.Errorf("asked source = %v, want the context's %v", got.Source, want)
 	}
 
-	c.auth.verdict = enrollauth.AdmissionDeny
-	if _, err := c.decider.DecideTRC(askContext(), c.joiner.ia, partial); err != nil {
+	c.auth.Verdict = enrollauth.AdmissionDeny
+	if _, err := c.decider.DecideTRC(context.Background(), c.joiner.ia, askSource, partial); err != nil {
 		t.Fatalf("the re-presentation was refused: %v", err)
 	}
-	if len(c.auth.asked) != 1 {
+	if len(c.auth.Asked) != 1 {
 		t.Errorf("the authorizer was asked %d times after the re-presentation, want still 1",
-			len(c.auth.asked))
+			len(c.auth.Asked))
 	}
 }
 
@@ -250,17 +251,17 @@ func TestTRCDeciderAsksForEveryAddedKey(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	c.auth.verdict = enrollauth.AdmissionDeny
-	if _, err := c.decider.DecideTRC(askContext(), c.joiner.ia, partial); err == nil {
+	c.auth.Verdict = enrollauth.AdmissionDeny
+	if _, err := c.decider.DecideTRC(context.Background(), c.joiner.ia, askSource, partial); err == nil {
 		t.Fatal("a denied submission adding two certificates was decided")
 	}
 	if stored := pinnedAt(t, c.db, 2); !stored.IsZero() {
 		t.Error("the denied submission pinned something")
 	}
-	if len(c.auth.asked) != 1 {
-		t.Fatalf("the authorizer was asked %d times, want 1", len(c.auth.asked))
+	if len(c.auth.Asked) != 1 {
+		t.Fatalf("the authorizer was asked %d times, want 1", len(c.auth.Asked))
 	}
-	got := c.auth.asked[0]
+	got := c.auth.Asked[0]
 	if got.Claim != c.joiner.ia {
 		t.Errorf("asked claim = %v, want the presenter %v", got.Claim, c.joiner.ia)
 	}
@@ -269,8 +270,8 @@ func TestTRCDeciderAsksForEveryAddedKey(t *testing.T) {
 		t.Errorf("asked keys (-want +got):\n%s", diff)
 	}
 
-	c.auth.verdict = enrollauth.AdmissionAllow
-	completed, err := c.decider.DecideTRC(askContext(), c.joiner.ia, partial)
+	c.auth.Verdict = enrollauth.AdmissionAllow
+	completed, err := c.decider.DecideTRC(context.Background(), c.joiner.ia, askSource, partial)
 	if err != nil {
 		t.Fatalf("the allowed submission was refused: %v", err)
 	}
@@ -292,9 +293,9 @@ func TestTRCDeciderRefusesDenied(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			c := newDeciderFixture(t, true)
-			c.auth.verdict = tc.verdict
+			c.auth.Verdict = tc.verdict
 
-			if _, err := c.decider.DecideTRC(askContext(), c.joiner.ia,
+			if _, err := c.decider.DecideTRC(context.Background(), c.joiner.ia, askSource,
 				c.submission(t, c.pred, func() (crypto.Signer, *x509.Certificate) {
 					return c.joiner.key, c.joiner.cert
 				})); err == nil {
@@ -315,7 +316,7 @@ func TestTRCDeciderDeniesWithoutAuthorizer(t *testing.T) {
 	c := newDeciderFixture(t, true)
 	c.decider.Authorizer = nil
 
-	if _, err := c.decider.DecideTRC(askContext(), c.joiner.ia,
+	if _, err := c.decider.DecideTRC(context.Background(), c.joiner.ia, askSource,
 		c.submission(t, c.pred, func() (crypto.Signer, *x509.Certificate) {
 			return c.joiner.key, c.joiner.cert
 		})); err == nil {
@@ -333,16 +334,16 @@ func TestTRCDeciderDeniesWithoutAuthorizer(t *testing.T) {
 func TestTRCDeciderAsksAfterTheGates(t *testing.T) {
 	c := newDeciderFixture(t, false)
 
-	if _, err := c.decider.DecideTRC(askContext(), c.joiner.ia,
+	if _, err := c.decider.DecideTRC(context.Background(), c.joiner.ia, askSource,
 		c.submission(t, c.pred, func() (crypto.Signer, *x509.Certificate) {
 			return c.joiner.key, c.joiner.cert
 		})); err == nil {
 
 		t.Fatal("the unenrolled joiner's submission was decided")
 	}
-	if len(c.auth.asked) != 0 {
+	if len(c.auth.Asked) != 0 {
 		t.Errorf("the authorizer was asked %d times, want none behind a refused gate",
-			len(c.auth.asked))
+			len(c.auth.Asked))
 	}
 }
 
@@ -366,12 +367,12 @@ func TestTRCDeciderRefusesStalePredecessor(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := c.decider.DecideTRC(ctx, other, otherPartial); err != nil {
+	if _, err := c.decider.DecideTRC(ctx, other, netip.AddrPort{}, otherPartial); err != nil {
 		t.Fatalf("the first join was refused: %v", err)
 	}
 
 	// The joiner's submission still builds on the base and is refused.
-	if _, err := c.decider.DecideTRC(ctx, c.joiner.ia,
+	if _, err := c.decider.DecideTRC(ctx, c.joiner.ia, netip.AddrPort{},
 		c.submission(t, c.pred, func() (crypto.Signer, *x509.Certificate) {
 			return c.joiner.key, c.joiner.cert
 		})); err == nil {
@@ -400,7 +401,7 @@ func TestTRCDeciderRefusesUnsigned(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := c.decider.DecideTRC(context.Background(), c.joiner.ia, unsigned); err == nil {
+	if _, err := c.decider.DecideTRC(context.Background(), c.joiner.ia, netip.AddrPort{}, unsigned); err == nil {
 		t.Fatal("an update without the presenter's signature was decided")
 	}
 	if stored := pinnedAt(t, c.db, 2); !stored.IsZero() {
@@ -413,7 +414,7 @@ func TestTRCDeciderRefusesUnsigned(t *testing.T) {
 func TestTRCDeciderRefusesUnverifiedPresenter(t *testing.T) {
 	c := newDeciderFixture(t, true)
 
-	if _, err := c.decider.DecideTRC(context.Background(), addr.IA(0),
+	if _, err := c.decider.DecideTRC(context.Background(), addr.IA(0), netip.AddrPort{},
 		c.submission(t, c.pred, func() (crypto.Signer, *x509.Certificate) {
 			return c.joiner.key, c.joiner.cert
 		})); err == nil {
@@ -455,7 +456,7 @@ func TestTRCDeciderSignerSwapUnderCast(t *testing.T) {
 	}
 	decided := make(chan error, 1)
 	go func() {
-		_, err := c.decider.DecideTRC(ctx, c.joiner.ia, partial)
+		_, err := c.decider.DecideTRC(ctx, c.joiner.ia, netip.AddrPort{}, partial)
 		decided <- err
 	}()
 	close(release)
@@ -479,14 +480,14 @@ type rollFixture struct {
 func newRollFixture(t *testing.T) *rollFixture {
 	t.Helper()
 	c := newDeciderFixture(t, true)
-	completed, err := c.decider.DecideTRC(context.Background(), c.joiner.ia,
+	completed, err := c.decider.DecideTRC(context.Background(), c.joiner.ia, netip.AddrPort{},
 		c.submission(t, c.pred, func() (crypto.Signer, *x509.Certificate) {
 			return c.joiner.key, c.joiner.cert
 		}))
 	if err != nil {
 		t.Fatal(err)
 	}
-	c.auth.asked = nil
+	c.auth.Asked = nil
 	return &rollFixture{deciderFixture: *c, rolled: completed}
 }
 
@@ -521,10 +522,10 @@ func (c *rollFixture) rollSubmission(
 // answered with the pin, casting nothing.
 func TestTRCDeciderRolls(t *testing.T) {
 	c := newRollFixture(t)
-	c.auth.verdict = enrollauth.AdmissionDeny
+	c.auth.Verdict = enrollauth.AdmissionDeny
 
 	submitted, freshCert := c.rollSubmission(t, c.rolled)
-	pinned, err := c.decider.DecideTRC(askContext(), c.joiner.ia, submitted)
+	pinned, err := c.decider.DecideTRC(context.Background(), c.joiner.ia, askSource, submitted)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -541,16 +542,16 @@ func TestTRCDeciderRolls(t *testing.T) {
 	if !trust.CertsOf(pinned.TRC, c.joiner.ia)[0].Equal(freshCert) {
 		t.Error("the decided roll does not carry the presenter's fresh certificate")
 	}
-	if len(c.auth.asked) != 0 {
+	if len(c.auth.Asked) != 0 {
 		t.Errorf("the authorizer was asked %d times, want none behind a routine roll",
-			len(c.auth.asked))
+			len(c.auth.Asked))
 	}
 	if stored := pinnedAt(t, c.db, 3); string(stored.Raw) != string(submitted.Raw) {
 		t.Error("the decided roll did not pin as submitted")
 	}
 
 	// The re-presentation of the landed roll is answered with the pin.
-	again, err := c.decider.DecideTRC(askContext(), c.joiner.ia, submitted)
+	again, err := c.decider.DecideTRC(context.Background(), c.joiner.ia, askSource, submitted)
 	if err != nil {
 		t.Fatalf("the re-presented roll was refused: %v", err)
 	}
@@ -585,22 +586,22 @@ func TestTRCDeciderLostKeyRoll(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	c.auth.verdict = enrollauth.AdmissionDeny
-	if _, err := c.decider.DecideTRC(askContext(), c.joiner.ia, submitted); err == nil {
+	c.auth.Verdict = enrollauth.AdmissionDeny
+	if _, err := c.decider.DecideTRC(context.Background(), c.joiner.ia, askSource, submitted); err == nil {
 		t.Fatal("a denied lost-key roll was decided")
 	}
 	if stored := pinnedAt(t, c.db, 3); !stored.IsZero() {
 		t.Error("the denied lost-key roll pinned something")
 	}
-	if len(c.auth.asked) != 1 {
-		t.Fatalf("the authorizer was asked %d times, want 1", len(c.auth.asked))
+	if len(c.auth.Asked) != 1 {
+		t.Fatalf("the authorizer was asked %d times, want 1", len(c.auth.Asked))
 	}
-	if diff := cmp.Diff([]string{fingerprint(cert)}, c.auth.asked[0].Keys); diff != "" {
+	if diff := cmp.Diff([]string{fingerprint(cert)}, c.auth.Asked[0].Keys); diff != "" {
 		t.Errorf("asked keys (-want +got):\n%s", diff)
 	}
 
-	c.auth.verdict = enrollauth.AdmissionAllow
-	completed, err := c.decider.DecideTRC(askContext(), c.joiner.ia, submitted)
+	c.auth.Verdict = enrollauth.AdmissionAllow
+	completed, err := c.decider.DecideTRC(context.Background(), c.joiner.ia, askSource, submitted)
 	if err != nil {
 		t.Fatalf("the allowed lost-key roll was refused: %v", err)
 	}
@@ -633,12 +634,12 @@ func TestTRCDeciderRefusesUnvotedRegularUpdate(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := c.decider.DecideTRC(askContext(), c.joiner.ia, unvoted); err == nil {
+	if _, err := c.decider.DecideTRC(context.Background(), c.joiner.ia, askSource, unvoted); err == nil {
 		t.Fatal("a regular update without its vote was decided")
 	}
-	if len(c.auth.asked) != 0 {
+	if len(c.auth.Asked) != 0 {
 		t.Errorf("the authorizer was asked %d times, want none for a regular update",
-			len(c.auth.asked))
+			len(c.auth.Asked))
 	}
 	if stored := pinnedAt(t, c.db, 3); !stored.IsZero() {
 		t.Error("the unvoted roll pinned something")

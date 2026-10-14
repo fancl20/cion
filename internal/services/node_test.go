@@ -9,7 +9,7 @@ import (
 	"github.com/scionproto/scion/pkg/addr"
 
 	"github.com/fancl20/cion/internal/supervise"
-	"github.com/fancl20/cion/pkg/core/controlplane"
+	"github.com/fancl20/cion/pkg/core/trust"
 	"github.com/fancl20/cion/pkg/core/webpki/webpkitest"
 	"github.com/fancl20/cion/pkg/modules/enrollauth"
 	"github.com/fancl20/cion/pkg/modules/links"
@@ -64,7 +64,7 @@ func TestSetupNodeConsumesResolution(t *testing.T) {
 		t.Fatal("resolve built no authorizer")
 	}
 	trustService := n.services.TrustService
-	decider := n.trcDecision.(*controlplane.TRCDecider)
+	decider := n.trcDecision.(*trust.TRCDecider)
 	for holder, got := range map[string]enrollauth.AdmissionAuthorizer{
 		"the trust service":             trustService.Authorizer,
 		"the TRC decision":              decider.Authorizer,

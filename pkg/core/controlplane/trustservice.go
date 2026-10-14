@@ -166,7 +166,7 @@ func (s *TrustService) authorizeFirstIssuance(
 	facts := enrollauth.AdmissionFacts{
 		Boundary: enrollauth.BoundaryEnrollment,
 		Keys:     []string{hex.EncodeToString(skid)},
-		Source:   remoteUnderlay(ctx),
+		Source:   RemoteUnderlay(ctx),
 		Claim:    ia,
 	}
 	answer := s.Authorizer.Authorize(ctx, facts)
@@ -200,7 +200,7 @@ func (s *TrustService) admit(ctx context.Context, ia addr.IA) bool {
 		s.byAddr = ratelimit.NewKeyed[netip.AddrPort](interval)
 		s.byIA = ratelimit.NewKeyed[addr.IA](interval)
 	})
-	if src := remoteUnderlay(ctx); src.IsValid() {
+	if src := RemoteUnderlay(ctx); src.IsValid() {
 		return s.byAddr.Admit(src)
 	}
 	return s.byIA.Admit(ia)
@@ -347,11 +347,11 @@ func (s *TrustService) ChainRenewal(
 	}), nil
 }
 
-// remoteUnderlay returns the SCION source address the request context's
+// RemoteUnderlay returns the SCION source address the request context's
 // connection carries — the *scion.Addr the QUIC transport named the peer by,
 // the pattern arrivalInterface reads — and the zero AddrPort when the
 // context carries none.
-func remoteUnderlay(ctx context.Context) netip.AddrPort {
+func RemoteUnderlay(ctx context.Context) netip.AddrPort {
 	remote, ok := ctx.Value(http3.RemoteAddrContextKey).(*scion.Addr)
 	if !ok || remote == nil {
 		return netip.AddrPort{}

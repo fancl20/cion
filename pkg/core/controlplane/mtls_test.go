@@ -12,6 +12,7 @@ import (
 	"github.com/scionproto/scion/pkg/scrypto/cppki"
 
 	"github.com/fancl20/cion/pkg/core/trust"
+	"github.com/fancl20/cion/pkg/core/trust/trusttest"
 	"github.com/fancl20/cion/pkg/core/webpki/webpkitest"
 	"github.com/fancl20/cion/pkg/modules/trustdb"
 )
@@ -55,7 +56,7 @@ func TestNativeTLSVerifiesAgainstTRC(t *testing.T) {
 
 	// A chain anchored in another ISD's TRC.
 	foreignIA := addr.MustIAFrom(21, 0xff0000000001)
-	csr, _ := newCSR(t, foreignIA)
+	csr, _ := trusttest.NewCSR(t, foreignIA)
 	foreignChain, err := newFounderOf(t, foreignIA).Issuer.IssueChain(csr)
 	if err != nil {
 		t.Fatal(err)

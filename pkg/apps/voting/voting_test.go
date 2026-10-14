@@ -5,10 +5,12 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"path/filepath"
 	"testing"
 
 	"connectrpc.com/connect"
+	"github.com/quic-go/quic-go/http3"
 	"github.com/scionproto/scion/pkg/addr"
 	"github.com/scionproto/scion/pkg/scrypto/cppki"
 
@@ -28,12 +30,12 @@ var (
 )
 
 // decideFunc adapts a function to the Decider interface.
-type decideFunc func(context.Context, addr.IA, cppki.SignedTRC) (cppki.SignedTRC, error)
+type decideFunc func(context.Context, addr.IA, netip.AddrPort, cppki.SignedTRC) (cppki.SignedTRC, error)
 
-func (f decideFunc) DecideTRC(ctx context.Context, presenter addr.IA,
+func (f decideFunc) DecideTRC(ctx context.Context, presenter addr.IA, source netip.AddrPort,
 	trc cppki.SignedTRC) (cppki.SignedTRC, error) {
 
-	return f(ctx, presenter, trc)
+	return f(ctx, presenter, source, trc)
 }
 
 // newTestApp builds the application over a captured mount, with the decision
@@ -104,27 +106,34 @@ func fixtureTRC(t *testing.T) cppki.SignedTRC {
 
 // TestSubmitHandsToDecision checks the application's one job: a submission
 // from a verified presenter is handed to the control plane's decision with
-// the channel's fact, and the TRC the decision returned is answered in its
-// own bytes.
+// the channel's facts — the presenter and the source address — and the TRC
+// the decision returned is answered in its own bytes.
 func TestSubmitHandsToDecision(t *testing.T) {
 	trc := fixtureTRC(t)
+	source := netip.MustParseAddrPort("198.51.100.7:41234")
 	var gotPresenter addr.IA
+	var gotSource netip.AddrPort
 	var gotTRC cppki.SignedTRC
 	handler, pattern := newTestApp(t, decideFunc(
-		func(ctx context.Context, presenter addr.IA,
+		func(ctx context.Context, presenter addr.IA, src netip.AddrPort,
 			submitted cppki.SignedTRC) (cppki.SignedTRC, error) {
 
-			gotPresenter, gotTRC = presenter, submitted
+			gotPresenter, gotSource, gotTRC = presenter, src, submitted
 			return trc, nil
 		}))
 
-	got, err := submit(t, handler, presenterContext(joinerIA), trc)
+	ctx := context.WithValue(presenterContext(joinerIA), http3.RemoteAddrContextKey,
+		&scion.Addr{IA: joinerIA, Addr: source})
+	got, err := submit(t, handler, ctx, trc)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !gotPresenter.Equal(joinerIA) {
 		t.Errorf("the decision's presenter = %v, want the channel's %v",
 			gotPresenter, joinerIA)
+	}
+	if gotSource != source {
+		t.Errorf("the decision's source = %v, want the request's %v", gotSource, source)
 	}
 	if string(gotTRC.Raw) != string(trc.Raw) {
 		t.Error("the decision's TRC differs from the submitted one")
@@ -142,7 +151,7 @@ func TestSubmitHandsToDecision(t *testing.T) {
 // decision would have allowed.
 func TestSubmitRefusals(t *testing.T) {
 	trc := fixtureTRC(t)
-	allowing := decideFunc(func(context.Context, addr.IA, cppki.SignedTRC) (cppki.SignedTRC, error) {
+	allowing := decideFunc(func(context.Context, addr.IA, netip.AddrPort, cppki.SignedTRC) (cppki.SignedTRC, error) {
 		return trc, nil
 	})
 	cases := []struct {
@@ -162,7 +171,7 @@ func TestSubmitRefusals(t *testing.T) {
 		},
 		{
 			"a refusing decision", presenterContext(joinerIA),
-			decideFunc(func(context.Context, addr.IA, cppki.SignedTRC) (cppki.SignedTRC, error) {
+			decideFunc(func(context.Context, addr.IA, netip.AddrPort, cppki.SignedTRC) (cppki.SignedTRC, error) {
 				return cppki.SignedTRC{}, errors.New("refused")
 			}), trc, connect.CodeFailedPrecondition,
 		},
@@ -194,7 +203,7 @@ func TestSubmitterReportsAbsentApp(t *testing.T) {
 	}
 
 	handler, _ := newTestApp(t, decideFunc(
-		func(context.Context, addr.IA, cppki.SignedTRC) (cppki.SignedTRC, error) {
+		func(context.Context, addr.IA, netip.AddrPort, cppki.SignedTRC) (cppki.SignedTRC, error) {
 			return trc, nil
 		}))
 	serving := NewSubmitter(clientOf(handler), func() *scion.Addr {

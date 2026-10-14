@@ -1,4 +1,4 @@
-package controlplane
+package trust
 
 import (
 	"context"
@@ -13,7 +13,6 @@ import (
 	"github.com/scionproto/scion/pkg/addr"
 	"github.com/scionproto/scion/pkg/scrypto/cppki"
 
-	"github.com/fancl20/cion/pkg/core/trust"
 	"github.com/fancl20/cion/pkg/libs/loops"
 	"github.com/fancl20/cion/pkg/modules/trustdb"
 )
@@ -77,16 +76,16 @@ type Renewal interface {
 // FounderRenewal is the founding core's renewal: its chain self-issued
 // through the issuer that serves the enrollment requests, and nothing more
 // owed.
-func FounderRenewal(issuer *trust.Issuer) Renewal {
+func FounderRenewal(issuer *Issuer) Renewal {
 	return founderRenewal{issuer: issuer}
 }
 
 type founderRenewal struct {
-	issuer *trust.Issuer
+	issuer *Issuer
 }
 
 func (r founderRenewal) renew(ctx context.Context, cfg EnrollmentConfig) error {
-	csr, err := trust.CreateCSR(cfg.IA, cfg.Key)
+	csr, err := CreateCSR(cfg.IA, cfg.Key)
 	if err != nil {
 		return err
 	}
@@ -104,16 +103,16 @@ func (founderRenewal) owed(context.Context, EnrollmentConfig) (bool, error) {
 
 // NormalRenewal is the normal node's renewal: its chain renewed against the
 // core's endpoint through the remote, and nothing more owed.
-func NormalRenewal(remote trust.Remote) Renewal {
+func NormalRenewal(remote Remote) Renewal {
 	return normalRenewal{remote: remote}
 }
 
 type normalRenewal struct {
-	remote trust.Remote
+	remote Remote
 }
 
 func (r normalRenewal) renew(ctx context.Context, cfg EnrollmentConfig) error {
-	_, err := trust.RenewChain(ctx, cfg.DB, r.remote, cfg.IA, cfg.Key)
+	_, err := RenewChain(ctx, cfg.DB, r.remote, cfg.IA, cfg.Key)
 	return err
 }
 
@@ -128,8 +127,8 @@ func (normalRenewal) owed(context.Context, EnrollmentConfig) (bool, error) {
 // signed with the voting key as its proof of possession, and submitted
 // through the caster to the founder's voting application.
 func AuthoritativeRenewal(
-	remote trust.Remote,
-	caster trust.TRCCaster,
+	remote Remote,
+	caster TRCCaster,
 	votingKey crypto.Signer,
 	votingCert *x509.Certificate,
 ) Renewal {
@@ -143,21 +142,21 @@ func AuthoritativeRenewal(
 }
 
 type authoritativeRenewal struct {
-	remote     trust.Remote
-	caster     trust.TRCCaster
+	remote     Remote
+	caster     TRCCaster
 	votingKey  crypto.Signer
 	votingCert *x509.Certificate
 }
 
 func (r authoritativeRenewal) renew(ctx context.Context, cfg EnrollmentConfig) error {
-	_, err := trust.RenewChain(ctx, cfg.DB, r.remote, cfg.IA, cfg.Key)
+	_, err := RenewChain(ctx, cfg.DB, r.remote, cfg.IA, cfg.Key)
 	return err
 }
 
 // owed performs one onboarding attempt while the newest pinned TRC does
 // not name the core: the submission's round trip, bounded like an
 // enrollment attempt. A core that hosts no voting application is terminal,
-// returned as trust.ErrNoVotingApp: nothing the node does obtains voting
+// returned as ErrNoVotingApp: nothing the node does obtains voting
 // power through the founder, and the network the node leaves behind keeps
 // serving everything else, the application none of it depends on. Every
 // other failure is logged for the next pass to retry.
@@ -167,12 +166,12 @@ func (r authoritativeRenewal) owed(ctx context.Context, cfg EnrollmentConfig) (b
 	}
 	attemptCtx, cancel := context.WithTimeout(ctx, EnrollmentTimeout)
 	defer cancel()
-	err := trust.JoinCore(attemptCtx, cfg.DB, r.remote, r.caster,
+	err := JoinCore(attemptCtx, cfg.DB, r.remote, r.caster,
 		cfg.IA, r.votingKey, r.votingCert)
 	switch {
 	case err == nil:
 		slog.Info("Onboarded as an authoritative core", "isd_as", cfg.IA)
-	case errors.Is(err, trust.ErrNoVotingApp):
+	case errors.Is(err, ErrNoVotingApp):
 		return true, err
 	default:
 		slog.Warn("Submitting the onboarding update", "isd_as", cfg.IA, "err", err)
@@ -183,12 +182,12 @@ func (r authoritativeRenewal) owed(ctx context.Context, cfg EnrollmentConfig) (b
 // onboarded reports whether the newest pinned TRC names the node a core of
 // its ISD; a node that has pinned no TRC yet is not onboarded.
 func onboarded(ctx context.Context, cfg EnrollmentConfig) bool {
-	trc, err := cfg.DB.SignedTRC(ctx, trust.NewestTRCID(cfg.IA.ISD()))
+	trc, err := cfg.DB.SignedTRC(ctx, NewestTRCID(cfg.IA.ISD()))
 	if err != nil {
 		slog.Error("Reading the newest pinned TRC", "isd_as", cfg.IA, "err", err)
 		return false
 	}
-	return trust.CoreNamed(trc.TRC, cfg.IA)
+	return CoreNamed(trc.TRC, cfg.IA)
 }
 
 // RunEnrollment runs a node's chain lifecycle: each pass reads the newest
@@ -200,7 +199,7 @@ func onboarded(ctx context.Context, cfg EnrollmentConfig) bool {
 // the trust database's expired-chain sweep on its own interval. The founding
 // core's synchronous startup self-enrollment is its first pass. It returns
 // nil once the context ends, and the owed work's terminal failure — a
-// joining core's trust.ErrNoVotingApp — with the sweep stopped.
+// joining core's ErrNoVotingApp — with the sweep stopped.
 func RunEnrollment(ctx context.Context, cfg EnrollmentConfig) error {
 	sweepCtx, stopSweep := context.WithCancel(ctx)
 	var sweep sync.WaitGroup
@@ -231,7 +230,7 @@ func (cfg EnrollmentConfig) enrollPass(ctx context.Context) (time.Duration, erro
 		slog.Error("Inspecting the chain", "isd_as", cfg.IA, "err", err)
 		return cfg.interval(cfg.RetryInterval, EnrollmentRetryInterval), nil
 	}
-	newest, err := cfg.DB.SignedTRC(ctx, trust.NewestTRCID(cfg.IA.ISD()))
+	newest, err := cfg.DB.SignedTRC(ctx, NewestTRCID(cfg.IA.ISD()))
 	if err != nil {
 		slog.Error("Reading the newest pinned TRC", "isd_as", cfg.IA, "err", err)
 		return cfg.interval(cfg.RetryInterval, EnrollmentRetryInterval), nil
@@ -245,7 +244,7 @@ func (cfg EnrollmentConfig) enrollPass(ctx context.Context) (time.Duration, erro
 		slog.Error("Last chain expired; re-enrolling",
 			"isd_as", cfg.IA, "expired_for", -remaining)
 		cfg.attemptRenewal(ctx)
-	case remaining < trust.ChainRenewalThreshold:
+	case remaining < ChainRenewalThreshold:
 		slog.Warn("Chain approaching expiry; re-enrolling",
 			"isd_as", cfg.IA, "remaining", remaining)
 		cfg.attemptRenewal(ctx)
@@ -290,7 +289,7 @@ func newestChain(
 	cfg EnrollmentConfig,
 ) ([]*x509.Certificate, time.Duration, error) {
 
-	chain, err := trust.NewestChain(ctx, cfg.DB, cfg.IA, time.Now())
+	chain, err := NewestChain(ctx, cfg.DB, cfg.IA, time.Now())
 	if err != nil {
 		return nil, 0, fmt.Errorf("reading the newest chain: %w", err)
 	}
@@ -313,7 +312,7 @@ func logTRCValidity(ia addr.IA, trc cppki.SignedTRC) {
 	case remaining <= 0:
 		slog.Error("Pinned TRC expired",
 			"isd_as", ia, "expired_for", -remaining)
-	case remaining < trust.ChainRenewalThreshold:
+	case remaining < ChainRenewalThreshold:
 		slog.Warn("Pinned TRC approaching expiry",
 			"isd_as", ia, "remaining", remaining)
 	}
@@ -341,7 +340,7 @@ func (cfg EnrollmentConfig) sweepChains(ctx context.Context) {
 // window; errors log the beaconer's sweepOnce way, and a successful sweep is
 // silent, for it is the common case.
 func (cfg EnrollmentConfig) sweepOnce(ctx context.Context) {
-	if _, err := cfg.DB.DeleteExpiredChains(ctx, time.Now().Add(-trust.ChainRetention)); err != nil {
+	if _, err := cfg.DB.DeleteExpiredChains(ctx, time.Now().Add(-ChainRetention)); err != nil {
 		slog.Error("Sweeping expired chains", "err", err)
 	}
 }

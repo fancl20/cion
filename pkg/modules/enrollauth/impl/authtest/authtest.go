@@ -1,6 +1,7 @@
 // Package authtest implements the shared contract tests for enrollment
 // authorizer implementations, the databases' impl/dbtest pattern: an
-// implementation has at least one test that runs this suite.
+// implementation has at least one test that runs this suite. Recorder is the
+// authorizer the seam's callers test with.
 package authtest
 
 import (
@@ -44,4 +45,21 @@ func Run(t *testing.T, s Suite) {
 			t.Errorf("verdict %d is outside the vocabulary", ans.Admission)
 		}
 	})
+}
+
+// Recorder is an authorizer that records the facts it is asked with and
+// answers every ask with its verdict.
+type Recorder struct {
+	// Asked holds the facts of every ask, in order.
+	Asked []enrollauth.AdmissionFacts
+	// Verdict is the answer every ask receives.
+	Verdict enrollauth.AdmissionVerdict
+}
+
+// Authorize records the facts and answers the verdict.
+func (r *Recorder) Authorize(
+	_ context.Context, f enrollauth.AdmissionFacts) enrollauth.AdmissionAnswer {
+
+	r.Asked = append(r.Asked, f)
+	return enrollauth.AdmissionAnswer{Admission: r.Verdict}
 }

@@ -168,7 +168,7 @@ func (n *node) setupFounder(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("creating issuer: %w", err)
 	}
-	decider := &controlplane.TRCDecider{
+	decider := &trust.TRCDecider{
 		DB:         n.trustDB,
 		IA:         n.ident.ia,
 		Sensitive:  keys.Sensitive,
@@ -194,15 +194,15 @@ func (n *node) setupFounder(ctx context.Context) error {
 	n.webPKI = manager.TLSConfig()
 	n.roleLoops = []roleLoop{
 		{"enrollment", supervise.Fatal, func(ctx context.Context) error {
-			return controlplane.RunEnrollment(ctx,
-				n.enrollment(controlplane.FounderRenewal(issuer)))
+			return trust.RunEnrollment(ctx,
+				n.enrollment(trust.FounderRenewal(issuer)))
 		}},
 		// The founder's rotation watch: its own three certificates roll
 		// inside the cast it signs itself, serialized on the decision the
 		// submissions take too.
 		{"rotation watch", supervise.Fatal, func(ctx context.Context) error {
-			controlplane.RunRotation(ctx,
-				n.rotation(controlplane.FounderRoll(decider, issuer)))
+			trust.RunRotation(ctx,
+				n.rotation(trust.FounderRoll(decider, issuer)))
 			return nil
 		}},
 	}
@@ -250,15 +250,15 @@ func (n *node) setupAuthoritative(ctx context.Context) error {
 		// The onboarding's failure is terminal: the loop returns it, and the
 		// node stops with it as the cause.
 		{"enrollment", supervise.Fatal, func(ctx context.Context) error {
-			return controlplane.RunEnrollment(ctx, n.enrollment(
-				controlplane.AuthoritativeRenewal(coreClt, n.submitter(), votingKey, votingCert)))
+			return trust.RunEnrollment(ctx, n.enrollment(
+				trust.AuthoritativeRenewal(coreClt, n.submitter(), votingKey, votingCert)))
 		}},
 		// The authoritative core's rotation watch: its certificate rolls
 		// through the same channel its join used, by a regular update its
 		// current key votes on.
 		{"rotation watch", supervise.Fatal, func(ctx context.Context) error {
-			controlplane.RunRotation(ctx,
-				n.rotation(controlplane.AuthoritativeRoll(coreClt, n.submitter())))
+			trust.RunRotation(ctx,
+				n.rotation(trust.AuthoritativeRoll(coreClt, n.submitter())))
 			return nil
 		}},
 	}
@@ -275,8 +275,8 @@ func (n *node) setupNormal() error {
 	n.remote = coreClt
 	n.roleLoops = []roleLoop{
 		{"enrollment", supervise.Fatal, func(ctx context.Context) error {
-			return controlplane.RunEnrollment(ctx,
-				n.enrollment(controlplane.NormalRenewal(coreClt)))
+			return trust.RunEnrollment(ctx,
+				n.enrollment(trust.NormalRenewal(coreClt)))
 		}},
 	}
 	return nil
@@ -328,8 +328,8 @@ func (n *node) submitter() *voting.Submitter {
 }
 
 // enrollment configures the node's chain lifecycle with the role's renewal.
-func (n *node) enrollment(renewal controlplane.Renewal) controlplane.EnrollmentConfig {
-	return controlplane.EnrollmentConfig{
+func (n *node) enrollment(renewal trust.Renewal) trust.EnrollmentConfig {
+	return trust.EnrollmentConfig{
 		IA:              n.ident.ia,
 		DB:              n.trustDB,
 		Key:             n.asKey,
@@ -340,8 +340,8 @@ func (n *node) enrollment(renewal controlplane.Renewal) controlplane.EnrollmentC
 }
 
 // rotation configures a core's rotation watch with the holder's roll.
-func (n *node) rotation(roll controlplane.Roll) controlplane.RotationConfig {
-	return controlplane.RotationConfig{
+func (n *node) rotation(roll trust.Roll) trust.RotationConfig {
+	return trust.RotationConfig{
 		IA:              n.ident.ia,
 		DB:              n.trustDB,
 		State:           n.cfg.State,

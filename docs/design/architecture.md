@@ -67,7 +67,9 @@ policy chooses.
     resolution, beside the per-link liveness sessions and the monitor that
     turns their verdicts.
 *   **Trust engine** — holds and issues the network's trust material: the
-    TRC, certificate chains, and their renewal.
+    TRC, certificate chains, and their renewal, and runs the procedures that
+    keep it current: the chain's lifecycle, the rotation watch, and the
+    founder's decision on submitted TRC updates.
 *   **Bootstrap channel** — the core's certificate management and the
     joiner's first verified fetch of it.
 

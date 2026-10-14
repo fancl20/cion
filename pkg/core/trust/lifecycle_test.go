@@ -1,4 +1,4 @@
-package controlplane
+package trust_test
 
 import (
 	"context"
@@ -11,13 +11,11 @@ import (
 	"log/slog"
 	"slices"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"testing/synctest"
 	"time"
 
 	"github.com/google/go-cmp/cmp"
-	"github.com/scionproto/scion/pkg/addr"
 	"github.com/scionproto/scion/pkg/scrypto/cppki"
 
 	"github.com/fancl20/cion/pkg/core/trust"
@@ -74,7 +72,7 @@ type lifecycleFixture struct {
 	db   trustdb.DB
 	key  crypto.Signer
 	core *fakeCore
-	cfg  EnrollmentConfig
+	cfg  trust.EnrollmentConfig
 }
 
 func newLifecycleFixture(t *testing.T, f *trusttest.Founder) *lifecycleFixture {
@@ -89,11 +87,11 @@ func newLifecycleFixture(t *testing.T, f *trusttest.Founder) *lifecycleFixture {
 		key:  key,
 		core: &fakeCore{issuer: f.Issuer, trc: f.TRC},
 	}
-	lf.cfg = EnrollmentConfig{
+	lf.cfg = trust.EnrollmentConfig{
 		IA:            nodeIATest,
 		DB:            db,
 		Key:           key,
-		Renewal:       NormalRenewal(lf.core),
+		Renewal:       trust.NormalRenewal(lf.core),
 		RetryInterval: time.Millisecond,
 	}
 	return lf
@@ -117,9 +115,9 @@ func (f *lifecycleFixture) enroll(t *testing.T) {
 
 // enrollPassOf runs one non-core pass, failing the test on a terminal
 // failure, and returns the wait it asks for.
-func enrollPassOf(t *testing.T, ctx context.Context, cfg EnrollmentConfig) time.Duration {
+func enrollPassOf(t *testing.T, ctx context.Context, cfg trust.EnrollmentConfig) time.Duration {
 	t.Helper()
-	wait, err := cfg.enrollPass(ctx)
+	wait, err := trust.EnrollPass(cfg, ctx)
 	if err != nil {
 		t.Fatalf("enrollment pass: %v", err)
 	}
@@ -153,20 +151,20 @@ func TestEnrollmentStopsWithoutVotingApp(t *testing.T) {
 			t.Fatal(err)
 		}
 		cfg := lf.cfg
-		cfg.Renewal = AuthoritativeRenewal(lf.core, absentVoting{}, key, cert)
+		cfg.Renewal = trust.AuthoritativeRenewal(lf.core, absentVoting{}, key, cert)
 
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 		done := make(chan error, 1)
-		go func() { done <- RunEnrollment(ctx, cfg) }()
+		go func() { done <- trust.RunEnrollment(ctx, cfg) }()
 		synctest.Wait()
 		select {
 		case err := <-done:
 			if !errors.Is(err, trust.ErrNoVotingApp) {
-				t.Fatalf("RunEnrollment = %v, want the absent voting application", err)
+				t.Fatalf("trust.RunEnrollment = %v, want the absent voting application", err)
 			}
 		default:
-			t.Fatal("RunEnrollment still runs after the onboarding's terminal failure")
+			t.Fatal("trust.RunEnrollment still runs after the onboarding's terminal failure")
 		}
 	})
 }
@@ -274,7 +272,7 @@ func TestEnrollmentPassUnreadableChains(t *testing.T) {
 	if got := lf.core.renewals(); got != 0 {
 		t.Errorf("renewals = %d, want none without a readable chain", got)
 	}
-	cfg.Renewal = FounderRenewal(f.Issuer)
+	cfg.Renewal = trust.FounderRenewal(f.Issuer)
 	if got := enrollPassOf(t, ctx, cfg); got != time.Millisecond {
 		t.Errorf("founder's pass interval = %v, want the retry interval", got)
 	}
@@ -306,7 +304,7 @@ func TestChainSweepPass(t *testing.T) {
 		// The enrolled chain is valid for three days: however many sweeps
 		// pass, it stays.
 		for range 3 {
-			lf.cfg.sweepOnce(ctx)
+			trust.SweepOnce(lf.cfg, ctx)
 		}
 		chains, err := lf.db.Chains(ctx, trustdb.ChainQuery{})
 		if err != nil {
@@ -330,7 +328,7 @@ func TestChainSweepPass(t *testing.T) {
 		if len(chains) != 0 {
 			t.Fatalf("valid query past expiry = %d chains, want 0", len(chains))
 		}
-		lf.cfg.sweepOnce(ctx)
+		trust.SweepOnce(lf.cfg, ctx)
 		chains, err = lf.db.Chains(ctx, trustdb.ChainQuery{})
 		if err != nil {
 			t.Fatal(err)
@@ -359,12 +357,12 @@ func TestChainSweepLoop(t *testing.T) {
 		lf := newLifecycleFixture(t, f)
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
-		go lf.cfg.sweepChains(ctx)
+		go trust.SweepChains(lf.cfg, ctx)
 		lf.enroll(t)
 
 		// The chain expires and the retention window passes; the ticker's
 		// next fire sweeps it.
-		time.Sleep(trust.ASValidity + trust.ChainRetention + 2*ChainSweepInterval)
+		time.Sleep(trust.ASValidity + trust.ChainRetention + 2*trust.ChainSweepInterval)
 		synctest.Wait()
 		chains, err := lf.db.Chains(ctx, trustdb.ChainQuery{})
 		if err != nil {
@@ -372,56 +370,6 @@ func TestChainSweepLoop(t *testing.T) {
 		}
 		if len(chains) != 0 {
 			t.Errorf("chains after the sweep's ticker fired = %d, want 0", len(chains))
-		}
-	})
-}
-
-// TestBeaconingRunReturnsOnCancel checks Run's own join: the loops step on
-// their tickers, and Run returns once every loop has exited after the
-// cancellation — on the bubble-and-cancel shape the sweep loop's episode
-// set.
-func TestBeaconingRunReturnsOnCancel(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		f := newBeaconFixture(t)
-		var rounds atomic.Int32
-		links := func() map[uint16]addr.IA {
-			rounds.Add(1)
-			return map[uint16]addr.IA{}
-		}
-		b, err := NewBeaconer(BeaconerConfig{
-			IA:                   coreIATest,
-			Engine:               f.engines[coreIATest],
-			MACKey:               []byte(testMACKey),
-			Store:                f.store,
-			DB:                   f.pathDB,
-			Links:                links,
-			Sender:               f.sender,
-			Core:                 true,
-			PropagationInterval:  time.Millisecond,
-			RegistrationInterval: 2 * time.Millisecond,
-		})
-		if err != nil {
-			t.Fatal(err)
-		}
-
-		ctx, cancel := context.WithCancel(context.Background())
-		defer cancel()
-		done := make(chan struct{})
-		go func() {
-			defer close(done)
-			b.Run(ctx)
-		}()
-		time.Sleep(10 * time.Millisecond)
-		if got := rounds.Load(); got < 3 {
-			t.Fatalf("origination rounds = %d, want the loops stepping on their tickers", got)
-		}
-
-		cancel()
-		synctest.Wait()
-		select {
-		case <-done:
-		default:
-			t.Fatal("Run did not return once its loops had exited")
 		}
 	})
 }
@@ -434,11 +382,11 @@ func TestCoreEnrollmentPass(t *testing.T) {
 		f := newFounder(t)
 		lf := newLifecycleFixture(t, f)
 		ctx := context.Background()
-		cfg := EnrollmentConfig{
+		cfg := trust.EnrollmentConfig{
 			IA:            nodeIATest,
 			DB:            lf.db,
 			Key:           lf.key,
-			Renewal:       FounderRenewal(f.Issuer),
+			Renewal:       trust.FounderRenewal(f.Issuer),
 			RetryInterval: time.Millisecond,
 		}
 
@@ -452,7 +400,7 @@ func TestCoreEnrollmentPass(t *testing.T) {
 		}
 
 		// Valid for three days: settle to the inspection interval.
-		if got := enrollPassOf(t, ctx, cfg); got != cfg.interval(0, ChainInspectInterval) {
+		if got := enrollPassOf(t, ctx, cfg); got != trust.ChainInspectInterval {
 			t.Errorf("pass interval = %v, want the default inspection interval", got)
 		}
 
@@ -540,11 +488,11 @@ func TestEnrollmentPassReportsTRCValidity(t *testing.T) {
 		core := &fakeCore{issuer: f.Issuer, trc: f.TRC}
 		roles := []struct {
 			name    string
-			renewal Renewal
+			renewal trust.Renewal
 		}{
-			{"founder", FounderRenewal(f.Issuer)},
-			{"authoritative core", AuthoritativeRenewal(core, absentVoting{}, votingKey, votingCert)},
-			{"normal node", NormalRenewal(core)},
+			{"founder", trust.FounderRenewal(f.Issuer)},
+			{"authoritative core", trust.AuthoritativeRenewal(core, absentVoting{}, votingKey, votingCert)},
+			{"normal node", trust.NormalRenewal(core)},
 		}
 		// passes runs one pass of each role on a database holding the TRC
 		// and no chain, and fails the test unless each logs the message.
@@ -585,7 +533,7 @@ func TestEnrollmentPassReanchors(t *testing.T) {
 		node := newLifecycleFixture(t, f)
 		founder := newLifecycleFixture(t, f)
 		founderCfg := founder.cfg
-		founderCfg.Renewal = FounderRenewal(f.Issuer)
+		founderCfg.Renewal = trust.FounderRenewal(f.Issuer)
 		for _, lf := range []*lifecycleFixture{node, founder} {
 			if _, err := lf.db.InsertTRC(ctx, f.TRC); err != nil {
 				t.Fatal(err)

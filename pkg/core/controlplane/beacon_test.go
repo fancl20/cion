@@ -10,7 +10,9 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/google/go-cmp/cmp"
@@ -1481,4 +1483,54 @@ func TestBeaconerPausesOnDownInterface(t *testing.T) {
 	if sent != 1 {
 		t.Fatalf("propagated %d beacons after the up edge, want 1", sent)
 	}
+}
+
+// TestBeaconingRunReturnsOnCancel checks Run's own join: the loops step on
+// their tickers, and Run returns once every loop has exited after the
+// cancellation — on the bubble-and-cancel shape the sweep loop's episode
+// set.
+func TestBeaconingRunReturnsOnCancel(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		f := newBeaconFixture(t)
+		var rounds atomic.Int32
+		links := func() map[uint16]addr.IA {
+			rounds.Add(1)
+			return map[uint16]addr.IA{}
+		}
+		b, err := NewBeaconer(BeaconerConfig{
+			IA:                   coreIATest,
+			Engine:               f.engines[coreIATest],
+			MACKey:               []byte(testMACKey),
+			Store:                f.store,
+			DB:                   f.pathDB,
+			Links:                links,
+			Sender:               f.sender,
+			Core:                 true,
+			PropagationInterval:  time.Millisecond,
+			RegistrationInterval: 2 * time.Millisecond,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			b.Run(ctx)
+		}()
+		time.Sleep(10 * time.Millisecond)
+		if got := rounds.Load(); got < 3 {
+			t.Fatalf("origination rounds = %d, want the loops stepping on their tickers", got)
+		}
+
+		cancel()
+		synctest.Wait()
+		select {
+		case <-done:
+		default:
+			t.Fatal("Run did not return once its loops had exited")
+		}
+	})
 }

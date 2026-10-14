@@ -17,12 +17,14 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"net/netip"
 
 	"connectrpc.com/connect"
 	"github.com/scionproto/scion/pkg/addr"
 	"github.com/scionproto/scion/pkg/private/serrors"
 	"github.com/scionproto/scion/pkg/scrypto/cppki"
 
+	"github.com/fancl20/cion/pkg/core/controlplane"
 	"github.com/fancl20/cion/pkg/libs/peeria"
 	votingv1 "github.com/fancl20/cion/proto/voting/v1"
 	votingv1connect "github.com/fancl20/cion/proto/voting/v1/votingv1connect"
@@ -32,9 +34,10 @@ import (
 // plane's own update of the pinned TRC — the founder asking its gates,
 // pinning what verifies as submitted, and casting its sensitive vote on its
 // admission policy's allow — answered with the TRC it pinned. The presenter
-// is the ISD-AS the application's channel verified, never a claim.
+// is the ISD-AS the application's channel verified, never a claim, and the
+// source is the address the submission arrived from.
 type Decider interface {
-	DecideTRC(ctx context.Context, presenter addr.IA,
+	DecideTRC(ctx context.Context, presenter addr.IA, source netip.AddrPort,
 		trc cppki.SignedTRC) (cppki.SignedTRC, error)
 }
 
@@ -111,7 +114,7 @@ func (s *service) Submit(
 		return nil, connect.NewError(connect.CodeInvalidArgument,
 			serrors.Wrap("parsing the submitted TRC", err))
 	}
-	pinned, err := s.decide.DecideTRC(ctx, presenter, trc)
+	pinned, err := s.decide.DecideTRC(ctx, presenter, controlplane.RemoteUnderlay(ctx), trc)
 	if err != nil {
 		return nil, connect.NewError(connect.CodeFailedPrecondition, err)
 	}
