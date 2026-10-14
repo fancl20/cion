@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto"
 	"crypto/tls"
-	"crypto/x509"
 	"fmt"
 	"log/slog"
 	"net"
@@ -366,28 +365,4 @@ func (n *node) linkEvidence(ctx context.Context, l *links.Link) (bool, error) {
 		return false, nil
 	}
 	return len(fetched) > 0, nil
-}
-
-// selfEnroll issues the core's own certificate chain locally, through the
-// same issuer that serves enrollment requests.
-func selfEnroll(
-	ctx context.Context,
-	db trustdb.DB,
-	issuer *trust.Issuer,
-	ia addr.IA,
-	asKey crypto.Signer,
-) ([]*x509.Certificate, error) {
-
-	csr, err := trust.CreateCSR(ia, asKey)
-	if err != nil {
-		return nil, err
-	}
-	chain, err := issuer.IssueChain(csr)
-	if err != nil {
-		return nil, err
-	}
-	if _, err := db.InsertChain(ctx, chain); err != nil {
-		return nil, err
-	}
-	return chain, nil
 }

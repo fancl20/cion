@@ -85,15 +85,29 @@ type founderRenewal struct {
 }
 
 func (r founderRenewal) renew(ctx context.Context, cfg EnrollmentConfig) error {
-	csr, err := CreateCSR(cfg.IA, cfg.Key)
+	return SelfIssue(ctx, cfg.DB, r.issuer, cfg.IA, cfg.Key)
+}
+
+// SelfIssue issues ia's chain for key through the issuer that serves the
+// enrollment requests and stores it in db: the founding core's renewal, and
+// the chain its boot holds before the endpoint serves.
+func SelfIssue(
+	ctx context.Context,
+	db trustdb.DB,
+	issuer *Issuer,
+	ia addr.IA,
+	key crypto.Signer,
+) error {
+
+	csr, err := CreateCSR(ia, key)
 	if err != nil {
 		return err
 	}
-	chain, err := r.issuer.IssueChain(csr)
+	chain, err := issuer.IssueChain(csr)
 	if err != nil {
 		return err
 	}
-	_, err = cfg.DB.InsertChain(ctx, chain)
+	_, err = db.InsertChain(ctx, chain)
 	return err
 }
 

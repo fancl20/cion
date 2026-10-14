@@ -174,7 +174,7 @@ func (n *node) setupFounder(ctx context.Context) error {
 		Sensitive:  keys.Sensitive,
 		Authorizer: n.cfg.enrollAuth,
 	}
-	if _, err := selfEnroll(ctx, n.trustDB, issuer, n.ident.ia, n.asKey); err != nil {
+	if err := trust.SelfIssue(ctx, n.trustDB, issuer, n.ident.ia, n.asKey); err != nil {
 		return fmt.Errorf("self-enrolling core: %w", err)
 	}
 	manager, err := webpki.PrepareTLSCert(webpki.TLSCertConfig{
