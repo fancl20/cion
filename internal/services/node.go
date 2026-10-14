@@ -23,6 +23,7 @@ import (
 	"github.com/fancl20/cion/pkg/core/trust"
 	"github.com/fancl20/cion/pkg/core/webpki"
 	"github.com/fancl20/cion/pkg/libs/scion"
+	"github.com/fancl20/cion/pkg/libs/scionrpc"
 	"github.com/fancl20/cion/pkg/modules/links"
 	"github.com/fancl20/cion/pkg/modules/pathdb"
 	"github.com/fancl20/cion/pkg/modules/topology"
@@ -295,12 +296,13 @@ func (n *node) start(gen *generation) {
 	g.Go("control endpoint", supervise.Fatal, func(ctx context.Context) error {
 		// The serve returns with the socket released, so a restart in the
 		// same process rebinds the fixed endpoint port.
-		return controlplane.ServeHTTP3(ctx, n.endpointConn,
+		return scionrpc.ServeHTTP3(ctx, n.endpointConn,
 			controlplane.NewServer(n.services).Handler,
-			controlplane.EndpointTLS(controlplane.EndpointTLSConfig{
-				Domain: n.cfg.Domain,
-				WebPKI: n.webPKI,
-				Engine: n.engine,
+			scionrpc.EndpointTLS(scionrpc.EndpointTLSConfig{
+				Domain:      n.cfg.Domain,
+				WebPKI:      n.webPKI,
+				Credentials: n.engine,
+				Key:         n.engine.Key,
 			}))
 	})
 	g.Go("echo responder", supervise.Fatal, n.responder.Run)
@@ -308,7 +310,7 @@ func (n *node) start(gen *generation) {
 		n.topology.Run(ctx)
 		return nil
 	})
-	slog.Info("Serving control endpoint", "port", controlplane.EndpointPort)
+	slog.Info("Serving control endpoint", "port", scionrpc.EndpointPort)
 	if n.httpsLn != nil {
 		// The node's HTTPS server: the listener is held from assembly, and the
 		// founder's certificate maintenance among the role's loops launches

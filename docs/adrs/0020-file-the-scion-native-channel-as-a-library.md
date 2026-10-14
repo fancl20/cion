@@ -1,6 +1,6 @@
 # File the SCION-Native Channel as a Library
 
-*   Status: proposed
+*   Status: accepted
 *   Date: 2026-10-14
 
 [TOC]

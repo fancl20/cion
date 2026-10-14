@@ -24,8 +24,8 @@ import (
 	"github.com/scionproto/scion/pkg/private/serrors"
 	"github.com/scionproto/scion/pkg/scrypto/cppki"
 
-	"github.com/fancl20/cion/pkg/core/controlplane"
 	"github.com/fancl20/cion/pkg/libs/peeria"
+	"github.com/fancl20/cion/pkg/libs/scionrpc"
 	votingv1 "github.com/fancl20/cion/proto/voting/v1"
 	votingv1connect "github.com/fancl20/cion/proto/voting/v1/votingv1connect"
 )
@@ -114,7 +114,7 @@ func (s *service) Submit(
 		return nil, connect.NewError(connect.CodeInvalidArgument,
 			serrors.Wrap("parsing the submitted TRC", err))
 	}
-	pinned, err := s.decide.DecideTRC(ctx, presenter, controlplane.RemoteUnderlay(ctx), trc)
+	pinned, err := s.decide.DecideTRC(ctx, presenter, scionrpc.RemoteUnderlay(ctx), trc)
 	if err != nil {
 		return nil, connect.NewError(connect.CodeFailedPrecondition, err)
 	}

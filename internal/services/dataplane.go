@@ -9,9 +9,9 @@ import (
 
 	"github.com/scionproto/scion/pkg/addr"
 
-	"github.com/fancl20/cion/pkg/core/controlplane"
 	"github.com/fancl20/cion/pkg/core/dataplane"
 	"github.com/fancl20/cion/pkg/libs/loops"
+	"github.com/fancl20/cion/pkg/libs/scionrpc"
 	"github.com/fancl20/cion/pkg/modules/links"
 )
 
@@ -263,7 +263,7 @@ func usable(table map[uint16]addr.IA, verdicts map[uint16]bool) map[uint16]addr.
 // services the resolution answers.
 func (n *node) registerControlService(provider *dataplane.UDPProvider) error {
 	host := addr.HostIP(n.cfg.controlAddr.Addr())
-	return provider.AddSvc(addr.SvcCS, host, controlplane.EndpointPort)
+	return provider.AddSvc(addr.SvcCS, host, scionrpc.EndpointPort)
 }
 
 // backend is one service registration the applications own.

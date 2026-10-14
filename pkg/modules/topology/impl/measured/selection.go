@@ -15,9 +15,9 @@ import (
 	"github.com/scionproto/scion/pkg/addr"
 	spath "github.com/scionproto/scion/pkg/slayers/path/scion"
 
-	"github.com/fancl20/cion/pkg/core/controlplane"
 	"github.com/fancl20/cion/pkg/libs/loops"
 	"github.com/fancl20/cion/pkg/libs/scion"
+	"github.com/fancl20/cion/pkg/libs/scionrpc"
 	"github.com/fancl20/cion/pkg/libs/underlay"
 	"github.com/fancl20/cion/pkg/modules/links"
 	"github.com/fancl20/cion/pkg/modules/topology"
@@ -949,7 +949,7 @@ func (s *selection) establishLink(ctx context.Context, e DirectoryEntry, why str
 	if path, err := s.cfg.Paths.Path(probeCtx, e.IA); err == nil {
 		peer := &scion.Addr{
 			IA:   e.IA,
-			Addr: netip.AddrPortFrom(e.ControlAddr.Addr(), controlplane.EndpointPort),
+			Addr: netip.AddrPortFrom(e.ControlAddr.Addr(), scionrpc.EndpointPort),
 			Path: path,
 		}
 		rpcCtx, rpcCancel := context.WithTimeout(ctx, EstablishTimeout)

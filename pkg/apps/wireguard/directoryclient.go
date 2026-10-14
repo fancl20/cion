@@ -12,8 +12,8 @@ import (
 	"github.com/scionproto/scion/pkg/addr"
 	spath "github.com/scionproto/scion/pkg/slayers/path/scion"
 
-	"github.com/fancl20/cion/pkg/core/controlplane"
 	"github.com/fancl20/cion/pkg/libs/scion"
+	"github.com/fancl20/cion/pkg/libs/scionrpc"
 	wireguardv1 "github.com/fancl20/cion/proto/wireguard/v1"
 	wireguardv1connect "github.com/fancl20/cion/proto/wireguard/v1/wireguardv1connect"
 )
@@ -68,15 +68,16 @@ func (c *rpcDirectoryClient) client() (wireguardv1connect.DirectoryServiceClient
 	if core == nil {
 		return nil, errors.New("no route to the core's directory yet")
 	}
-	authority := controlplane.PeerAuthority(core)
+	authority := scionrpc.PeerAuthority(core)
 	c.mtx.Lock()
 	defer c.mtx.Unlock()
 	if c.clt != nil && c.authority == authority {
 		return c.clt, nil
 	}
-	hclt := controlplane.NewSCIONClient(controlplane.PeerClientConfig{
-		Engine: c.engine,
-		Conn:   c.conn,
+	hclt := scionrpc.NewSCIONClient(scionrpc.PeerClientConfig{
+		Credentials: c.engine,
+		Key:         c.engine.Key,
+		Conn:        c.conn,
 		PathTo: func(dst addr.IA) *spath.Decoded {
 			path, err := c.resolver.LocalPath(dst)
 			if err != nil {

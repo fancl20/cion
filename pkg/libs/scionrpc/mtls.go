@@ -1,7 +1,8 @@
-package controlplane
+package scionrpc
 
 import (
 	"context"
+	"crypto"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -18,8 +19,6 @@ import (
 	"github.com/scionproto/scion/pkg/addr"
 	"github.com/scionproto/scion/pkg/private/serrors"
 	"github.com/scionproto/scion/pkg/scrypto/cppki"
-
-	"github.com/fancl20/cion/pkg/core/trust"
 )
 
 // The SCION-native channel: peers present their AS certificate chains — issued
@@ -41,8 +40,11 @@ type EndpointTLSConfig struct {
 	// WebPKI serves the bootstrap channel; typically from
 	// pkg/core/webpki's PrepareTLSCert. Nil disables the channel.
 	WebPKI *tls.Config
-	// Engine provides the node's AS chain for the SCION-native channel.
-	Engine *trust.Engine
+	// Credentials provide the node's AS chain for the SCION-native channel
+	// and the TRC anchors peers' chains verify against.
+	Credentials Credentials
+	// Key is the AS key behind the chain.
+	Key crypto.Signer
 }
 
 // EndpointTLS composes the endpoint's TLS configuration: the bootstrap channel
@@ -56,9 +58,9 @@ func EndpointTLS(cfg EndpointTLSConfig) *tls.Config {
 		// the TRC once the node has pinned one.
 		ClientAuth: tls.RequireAnyClientCert,
 		GetCertificate: func(*tls.ClientHelloInfo) (*tls.Certificate, error) {
-			return nativeCert(cfg.Engine)
+			return nativeCert(cfg.Credentials, cfg.Key)
 		},
-		VerifyPeerCertificate: verifyChainAgainstTRC(cfg.Engine, nil),
+		VerifyPeerCertificate: verifyChainAgainstTRC(cfg.Credentials, nil),
 	}
 	return &tls.Config{
 		MinVersion: tls.VersionTLS13,
@@ -78,7 +80,13 @@ func EndpointTLS(cfg EndpointTLSConfig) *tls.Config {
 // verified against the pinned TRC, with its subject naming the expected IA.
 // Beacon sends clear verifyServer: their receivers may not be enrolled yet,
 // and the PCB's signatures authenticate the path authoritatively.
-func nativeClientTLS(peer addr.IA, engine *trust.Engine, verifyServer bool) *tls.Config {
+func nativeClientTLS(
+	peer addr.IA,
+	creds Credentials,
+	key crypto.Signer,
+	verifyServer bool,
+) *tls.Config {
+
 	conf := &tls.Config{
 		// The peer's IA names the connection; verification below is anchored
 		// in the TRC, not in the server name.
@@ -87,11 +95,11 @@ func nativeClientTLS(peer addr.IA, engine *trust.Engine, verifyServer bool) *tls
 		NextProtos:         []string{"h3"},
 		InsecureSkipVerify: true, // verified against the TRC below
 		GetClientCertificate: func(*tls.CertificateRequestInfo) (*tls.Certificate, error) {
-			return nativeCert(engine)
+			return nativeCert(creds, key)
 		},
 	}
 	if verifyServer {
-		conf.VerifyPeerCertificate = verifyChainAgainstTRC(engine, &peer)
+		conf.VerifyPeerCertificate = verifyChainAgainstTRC(creds, &peer)
 	}
 	return conf
 }
@@ -102,7 +110,7 @@ func nativeClientTLS(peer addr.IA, engine *trust.Engine, verifyServer bool) *tls
 // within its grace period — and, when expected is non-nil, that its subject
 // names the expected IA. Without a pinned TRC every chain is accepted — the
 // bootstrap window.
-func verifyChainAgainstTRC(engine *trust.Engine, expected *addr.IA) func([][]byte, [][]*x509.Certificate) error {
+func verifyChainAgainstTRC(creds Credentials, expected *addr.IA) func([][]byte, [][]*x509.Certificate) error {
 	return func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
 		if len(rawCerts) == 0 {
 			return errors.New("peer presented no certificate")
@@ -115,7 +123,7 @@ func verifyChainAgainstTRC(engine *trust.Engine, expected *addr.IA) func([][]byt
 			}
 			chain[i] = cert
 		}
-		pool, err := engine.AnchorPool()
+		pool, err := creds.AnchorPool()
 		if err != nil {
 			return err
 		}
@@ -147,8 +155,8 @@ func verifyChainAgainstTRC(engine *trust.Engine, expected *addr.IA) func([][]byt
 // a valid chain gets an ephemeral self-signed one: it can then receive
 // beacons — whose signatures it cannot verify yet anyway — but not send
 // anything whose authentication would matter.
-func nativeCert(engine *trust.Engine) (*tls.Certificate, error) {
-	chain, err := engine.Chain(context.Background())
+func nativeCert(creds Credentials, key crypto.Signer) (*tls.Certificate, error) {
+	chain, err := creds.Chain(context.Background())
 	if err != nil {
 		return nil, err
 	}
@@ -157,7 +165,7 @@ func nativeCert(engine *trust.Engine) (*tls.Certificate, error) {
 	}
 	return &tls.Certificate{
 		Certificate: [][]byte{chain[0].Raw, chain[1].Raw},
-		PrivateKey:  engine.Key,
+		PrivateKey:  key,
 		Leaf:        chain[0],
 	}, nil
 }

@@ -62,9 +62,9 @@ policy chooses.
     each packet carries. It is built with an immutable link set and serves
     until retired; the only state that changes while serving is each link's
     up or down verdict.
-*   **Control endpoint** — speaks the control services to neighbor nodes:
-    beaconing, segment registration and lookup, trust material, and service
-    resolution.
+*   **Control endpoint** — speaks the control services to neighbor nodes
+    over the SCION-native channel: beaconing, segment registration and
+    lookup, trust material, and service resolution.
 *   **Liveness** — a BFD session on every serving link, and the monitor
     that keeps the sessions across data plane generations and turns their
     arrivals into each link's up or down verdict.
@@ -83,6 +83,10 @@ run no loops of their own and hold no policy.
 *   **SCION library** — the application seam: the socket that carries
     datagrams over SCION paths, and the path provider that composes
     end-to-end paths from discovered segments.
+*   **SCION RPC** — the SCION-native channel: HTTP/3 over QUIC riding SCION
+    paths, peers authenticated by their chains against the TRC, and the
+    drafts' service resolution. The control endpoint serves the drafts'
+    services over it, and applications serve and dial their own.
 *   **Segment types** — the vocabulary of beacons and signed entries.
 *   **Underlay** — the facts of the UDP/IP network beneath SCION that the
     data plane shares with the sockets: the end-host port, the largest

@@ -22,6 +22,7 @@ import (
 	"github.com/fancl20/cion/pkg/core/trust"
 	"github.com/fancl20/cion/pkg/core/webpki"
 	"github.com/fancl20/cion/pkg/libs/scion"
+	"github.com/fancl20/cion/pkg/libs/scionrpc"
 	"github.com/fancl20/cion/pkg/modules/links"
 	linkbbolt "github.com/fancl20/cion/pkg/modules/links/impl/bbolt"
 	"github.com/fancl20/cion/pkg/modules/pathdb"
@@ -309,7 +310,7 @@ func (n *node) coreClient() (*webpki.CoreClient, error) {
 		RootCAs: n.cfg.RootCAs,
 		Locator: n.coreRoute,
 		ResolveService: func(ctx context.Context, peer *scion.Addr) (netip.AddrPort, error) {
-			return controlplane.ResolveService(ctx, resolutionConn, peer)
+			return scionrpc.ResolveService(ctx, resolutionConn, peer)
 		},
 	})
 	if err != nil {
@@ -383,9 +384,10 @@ func (n *node) buildMessenger() error {
 	// The client's Close closes its QUIC transport alone; registered after
 	// the conn, it releases first.
 	n.group.Own("peer conn", peerConn.Close)
-	peerClt := controlplane.NewPeerClient(controlplane.PeerClientConfig{
-		Engine: n.engine,
-		Conn:   peerConn,
+	peerClt := controlplane.NewPeerClient(scionrpc.PeerClientConfig{
+		Credentials: n.engine,
+		Key:         n.engine.Key,
+		Conn:        peerConn,
 		PathTo: func(dst addr.IA) *spath.Decoded {
 			path, err := n.pathProvider.LocalPath(dst)
 			if err != nil {
@@ -511,7 +513,7 @@ func (n *node) assembleMonitor() error {
 // additionally serves the bootstrap channel, under the WebPKI identity its
 // role prepared, for clients offering its domain as the TLS server name.
 func (n *node) assembleEndpoint() error {
-	endpointConn, err := n.scionConn(controlplane.EndpointPort)
+	endpointConn, err := n.scionConn(scionrpc.EndpointPort)
 	if err != nil {
 		return err
 	}

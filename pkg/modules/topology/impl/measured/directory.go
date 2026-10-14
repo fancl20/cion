@@ -14,11 +14,11 @@ import (
 	"github.com/scionproto/scion/pkg/addr"
 	spath "github.com/scionproto/scion/pkg/slayers/path/scion"
 
-	"github.com/fancl20/cion/pkg/core/controlplane"
 	"github.com/fancl20/cion/pkg/core/trust"
 	"github.com/fancl20/cion/pkg/libs/loops"
 	"github.com/fancl20/cion/pkg/libs/peeria"
 	"github.com/fancl20/cion/pkg/libs/scion"
+	"github.com/fancl20/cion/pkg/libs/scionrpc"
 	nodev1 "github.com/fancl20/cion/proto/node/v1"
 	nodev1connect "github.com/fancl20/cion/proto/node/v1/nodev1connect"
 )
@@ -195,9 +195,8 @@ func (c storeDirectoryClient) List(_ context.Context) ([]DirectoryEntry, error) 
 	return c.store.List(time.Now()), nil
 }
 
-// rpcDirectoryClient publishes and fetches over the SCION-native verified
-// channel toward the core's endpoint, the control endpoint's client machinery
-// consumed as a library.
+// rpcDirectoryClient publishes and fetches over the SCION-native channel
+// toward the core's endpoint, the core's chain verified against the TRC.
 type rpcDirectoryClient struct {
 	conn      *scion.Conn
 	engine    *trust.Engine
@@ -218,15 +217,16 @@ func (c *rpcDirectoryClient) client() (nodev1connect.DirectoryServiceClient, err
 	if core == nil {
 		return nil, errors.New("no route to the core's endpoint yet")
 	}
-	authority := controlplane.PeerAuthority(core)
+	authority := scionrpc.PeerAuthority(core)
 	c.mtx.Lock()
 	defer c.mtx.Unlock()
 	if c.clt != nil && c.authority == authority {
 		return c.clt, nil
 	}
-	hclt := controlplane.NewSCIONClient(controlplane.PeerClientConfig{
-		Engine: c.engine,
-		Conn:   c.conn,
+	hclt := scionrpc.NewSCIONClient(scionrpc.PeerClientConfig{
+		Credentials: c.engine,
+		Key:         c.engine.Key,
+		Conn:        c.conn,
 		PathTo: func(dst addr.IA) *spath.Decoded {
 			path, err := c.paths.LocalPath(dst)
 			if err != nil {
@@ -406,7 +406,7 @@ func (d *NodeDirectory) publish(ctx context.Context) error {
 	host := d.cfg.Host(ctx)
 	return d.client.Publish(ctx, DirectoryEntry{
 		IA:             d.cfg.IA,
-		ControlAddr:    netip.AddrPortFrom(host, controlplane.EndpointPort),
+		ControlAddr:    netip.AddrPortFrom(host, scionrpc.EndpointPort),
 		RendezvousAddr: netip.AddrPortFrom(host, RendezvousPort),
 	})
 }

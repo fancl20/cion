@@ -19,9 +19,9 @@ import (
 	"connectrpc.com/connect"
 	"github.com/scionproto/scion/pkg/addr"
 
-	"github.com/fancl20/cion/pkg/core/controlplane"
 	"github.com/fancl20/cion/pkg/libs/loops"
 	"github.com/fancl20/cion/pkg/libs/scion"
+	"github.com/fancl20/cion/pkg/libs/scionrpc"
 	"github.com/fancl20/cion/pkg/modules/links"
 	"github.com/fancl20/cion/pkg/modules/topology"
 	nodev1 "github.com/fancl20/cion/proto/node/v1"
@@ -370,16 +370,16 @@ func (z *Provider) assemble() error {
 
 // Mounts returns the measured provider's services: the in-band link service
 // on every node, the node directory's beside it on the core.
-func (z *Provider) Mounts() ([]controlplane.Mount, error) {
+func (z *Provider) Mounts() ([]scionrpc.Mount, error) {
 	if err := z.assemble(); err != nil {
 		return nil, err
 	}
 	path, handler := nodev1connect.NewLinkServiceHandler(z.links)
-	mounts := []controlplane.Mount{{Pattern: path, Handler: handler}}
+	mounts := []scionrpc.Mount{{Pattern: path, Handler: handler}}
 	if z.directoryStore != nil {
 		path, handler := nodev1connect.NewDirectoryServiceHandler(
 			&DirectoryService{Store: z.directoryStore})
-		mounts = append(mounts, controlplane.Mount{Pattern: path, Handler: handler})
+		mounts = append(mounts, scionrpc.Mount{Pattern: path, Handler: handler})
 	}
 	return mounts, nil
 }
@@ -434,7 +434,7 @@ func (z *Provider) selectionConfig() SelectionConfig {
 		Latencies:   z.env.Latencies,
 		Paths:       z.env.Paths,
 		Conn:        z.probeConn,
-		ControlAddr: netip.AddrPortFrom(z.cfg.ControlHost, controlplane.EndpointPort),
+		ControlAddr: netip.AddrPortFrom(z.cfg.ControlHost, scionrpc.EndpointPort),
 		LinkHost:    z.cfg.ControlHost,
 		Link:        &linkClient{peer: z.env.Peer},
 		Learn:       z.learn,
@@ -598,7 +598,7 @@ func (c *linkClient) Link(
 	ifID uint16,
 ) (*nodev1.LinkReply, error) {
 
-	authority := controlplane.PeerAuthority(peer)
+	authority := scionrpc.PeerAuthority(peer)
 	c.mtx.Lock()
 	if c.clts == nil {
 		c.clts = make(map[string]nodev1connect.LinkServiceClient)

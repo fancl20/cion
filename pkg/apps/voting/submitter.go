@@ -9,9 +9,9 @@ import (
 	"connectrpc.com/connect"
 	"github.com/scionproto/scion/pkg/scrypto/cppki"
 
-	"github.com/fancl20/cion/pkg/core/controlplane"
 	"github.com/fancl20/cion/pkg/core/trust"
 	"github.com/fancl20/cion/pkg/libs/scion"
+	"github.com/fancl20/cion/pkg/libs/scionrpc"
 	votingv1 "github.com/fancl20/cion/proto/voting/v1"
 	votingv1connect "github.com/fancl20/cion/proto/voting/v1/votingv1connect"
 )
@@ -55,7 +55,7 @@ func (s *Submitter) SubmitTRC(
 	if core == nil {
 		return cppki.SignedTRC{}, errors.New("no route to the core yet")
 	}
-	authority := controlplane.PeerAuthority(core)
+	authority := scionrpc.PeerAuthority(core)
 	s.mtx.Lock()
 	if s.clt == nil || s.authority != authority {
 		s.clt = votingv1connect.NewVotingServiceClient(s.hclt, "https://"+authority)

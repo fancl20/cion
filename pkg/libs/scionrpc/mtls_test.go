@@ -1,4 +1,4 @@
-package controlplane
+package scionrpc
 
 import (
 	"context"
@@ -108,9 +108,10 @@ func TestEndpointTLSDispatch(t *testing.T) {
 
 	webPKI := &tls.Config{MinVersion: tls.VersionTLS13, NextProtos: []string{"h3"}}
 	conf := EndpointTLS(EndpointTLSConfig{
-		Domain: webpkitest.Domain,
-		WebPKI: webPKI,
-		Engine: f.engine,
+		Domain:      webpkitest.Domain,
+		WebPKI:      webPKI,
+		Credentials: f.engine,
+		Key:         f.engine.Key,
 	})
 
 	native, err := conf.GetConfigForClient(&tls.ClientHelloInfo{ServerName: webpkitest.Domain})
@@ -129,7 +130,7 @@ func TestEndpointTLSDispatch(t *testing.T) {
 	}
 
 	// A non-core node has no WebPKI channel: every name is native.
-	coreless := EndpointTLS(EndpointTLSConfig{Engine: f.engine})
+	coreless := EndpointTLS(EndpointTLSConfig{Credentials: f.engine, Key: f.engine.Key})
 	got, err := coreless.GetConfigForClient(&tls.ClientHelloInfo{ServerName: webpkitest.Domain})
 	if err != nil {
 		t.Fatal(err)
@@ -143,7 +144,7 @@ func TestEndpointTLSDispatch(t *testing.T) {
 // node's AS chain with the AS key.
 func TestNativeCertFromEngine(t *testing.T) {
 	f := newMTLSFixture(t)
-	cert, err := nativeCert(f.engine)
+	cert, err := nativeCert(f.engine, f.engine.Key)
 	if err != nil {
 		t.Fatal(err)
 	}

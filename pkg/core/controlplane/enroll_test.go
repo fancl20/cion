@@ -17,6 +17,7 @@ import (
 	"github.com/fancl20/cion/pkg/core/webpki"
 	"github.com/fancl20/cion/pkg/core/webpki/webpkitest"
 	"github.com/fancl20/cion/pkg/libs/scion"
+	"github.com/fancl20/cion/pkg/libs/scionrpc"
 	"github.com/fancl20/cion/pkg/modules/trustdb"
 )
 
@@ -50,9 +51,9 @@ func serveCore(t *testing.T, n *testNode, wpki *webpkitest.CA) *trusttest.Founde
 			t.Error("the control endpoint did not stop with the test's context")
 		}
 	})
-	endpoint := n.newConn(t, EndpointPort)
+	endpoint := n.newConn(t, scionrpc.EndpointPort)
 	go func() {
-		done <- ServeHTTP3(t.Context(), endpoint, NewServer(svc).Handler, tlsConf)
+		done <- scionrpc.ServeHTTP3(t.Context(), endpoint, NewServer(svc).Handler, tlsConf)
 	}()
 	return f
 }
@@ -71,7 +72,7 @@ func enrollNode(
 	key crypto.Signer,
 ) error {
 
-	resolved, err := ResolveService(ctx, n.newConn(t, 0),
+	resolved, err := scionrpc.ResolveService(ctx, n.newConn(t, 0),
 		&scion.Addr{IA: n.neighbor, Service: addr.SvcCS})
 	if err != nil {
 		return err

@@ -1,4 +1,4 @@
-package controlplane
+package scionrpc
 
 import (
 	"context"
@@ -25,7 +25,7 @@ func TestServiceResolution(t *testing.T) {
 	extA, extB := freeUDPAddr(t), freeUDPAddr(t)
 	a := startTestNode(t, iaA, iaB, extA, extB)
 	b := startTestNode(t, iaB, iaA, extB, extA)
-	serveCore(t, b, wpki)
+	serveEndpoint(t, b, wpki)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

@@ -4,12 +4,11 @@ import (
 	"context"
 
 	"connectrpc.com/connect"
-	"github.com/quic-go/quic-go/http3"
 	"github.com/scionproto/scion/pkg/private/serrors"
 	cppb "github.com/scionproto/scion/pkg/proto/control_plane"
 	"github.com/scionproto/scion/pkg/proto/control_plane/v1/control_planeconnect"
 
-	"github.com/fancl20/cion/pkg/libs/scion"
+	"github.com/fancl20/cion/pkg/libs/scionrpc"
 	"github.com/fancl20/cion/pkg/libs/segment"
 )
 
@@ -88,8 +87,8 @@ func (s *SegmentService) Segments(
 // connection's remote address: the router recorded it in the one-hop path's
 // second hop when the packet entered this AS.
 func arrivalInterface(ctx context.Context) (uint16, error) {
-	remote, ok := ctx.Value(http3.RemoteAddrContextKey).(*scion.Addr)
-	if !ok || remote == nil {
+	remote := scionrpc.RemoteAddr(ctx)
+	if remote == nil {
 		return 0, serrors.New("peer address unavailable in request context")
 	}
 	if remote.IfID == 0 {

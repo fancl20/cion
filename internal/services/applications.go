@@ -5,9 +5,9 @@ import (
 	"net/http"
 
 	"github.com/fancl20/cion/pkg/apps"
-	"github.com/fancl20/cion/pkg/core/controlplane"
 	"github.com/fancl20/cion/pkg/core/trust"
 	"github.com/fancl20/cion/pkg/libs/scion"
+	"github.com/fancl20/cion/pkg/libs/scionrpc"
 )
 
 // setupApplications constructs the applications resolve selected, in table
@@ -63,7 +63,7 @@ func (n *node) appEnvironment() *apps.Environment {
 		CoreRoute:       n.coreRoute,
 		DirectoryPacing: n.cfg.Pacing.Directory,
 		MountControlEndpoint: func(pattern string, handler http.Handler) {
-			n.services.Mounts = append(n.services.Mounts, controlplane.Mount{
+			n.services.Mounts = append(n.services.Mounts, scionrpc.Mount{
 				Pattern: pattern, Handler: handler,
 			})
 		},

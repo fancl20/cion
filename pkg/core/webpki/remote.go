@@ -80,10 +80,9 @@ type CoreClientConfig struct {
 	Locator func() *scion.Addr
 	// ResolveService resolves a service-destined locator through the drafts'
 	// service discovery (control plane draft, Section 5): the request the
-	// control plane's own exchange answers with the service's QUIC
-	// transport address, which the dial then uses. Nil dials a
-	// service-destined locator as named, the receiving router delivering to
-	// the registered service.
+	// control endpoint answers with the service's QUIC transport address,
+	// which the dial then uses. Nil dials a service-destined locator as
+	// named, the receiving router delivering to the registered service.
 	ResolveService func(ctx context.Context, peer *scion.Addr) (netip.AddrPort, error)
 }
 

@@ -29,9 +29,9 @@ import (
 	"github.com/scionproto/scion/pkg/addr"
 	spath "github.com/scionproto/scion/pkg/slayers/path/scion"
 
-	"github.com/fancl20/cion/pkg/core/controlplane"
 	"github.com/fancl20/cion/pkg/core/trust"
 	"github.com/fancl20/cion/pkg/libs/scion"
+	"github.com/fancl20/cion/pkg/libs/scionrpc"
 	"github.com/fancl20/cion/pkg/modules/links"
 )
 
@@ -62,7 +62,7 @@ type Provider interface {
 	// endpoint, mounted behind the peer-identity middleware; empty when the
 	// provider serves none. A socket that fails to bind fails the node's
 	// assembly here, as every phase's bind does.
-	Mounts() ([]controlplane.Mount, error)
+	Mounts() ([]scionrpc.Mount, error)
 	// Run runs the provider's loops until the context is canceled, each in
 	// its own goroutine with a panic absorbed and logged — one loop's bug
 	// must not take the provider's down — and returns once every loop it

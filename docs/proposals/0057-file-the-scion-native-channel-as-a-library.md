@@ -165,3 +165,22 @@ The change lands in one commit.
     quic-go's HTTP/3 package no more.
 
 ## Implementation history
+
+*   Landed in one commit, as planned: the library
+    ([scionrpc.go](/pkg/libs/scionrpc/scionrpc.go),
+    [serve.go](/pkg/libs/scionrpc/serve.go),
+    [client.go](/pkg/libs/scionrpc/client.go),
+    [mtls.go](/pkg/libs/scionrpc/mtls.go),
+    [resolution.go](/pkg/libs/scionrpc/resolution.go)) with the moved tests
+    and their [fixtures_test.go](/pkg/libs/scionrpc/fixtures_test.go), whose
+    `serveEndpoint` serves the resolution episode's endpoint.
+*   The new episodes are `TestRemoteAddr`
+    ([scionrpc_test.go](/pkg/libs/scionrpc/scionrpc_test.go)) and
+    `TestArrivalInterface`
+    ([segmentservice_test.go](/pkg/core/controlplane/segmentservice_test.go)).
+*   `PeerClient` drops the conn and the engine it held: neither was read,
+    and the configuration no longer carries the engine.
+*   Three comments that called the channel the control endpoint's or the
+    control plane's machinery now name the SCION-native channel or the
+    endpoint: the WireGuard directory's serve, the measured provider's
+    directory client, and the bootstrap channel's resolution hook.

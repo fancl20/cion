@@ -18,9 +18,9 @@ import (
 	spath "github.com/scionproto/scion/pkg/slayers/path/scion"
 	"golang.zx2c4.com/wireguard/device"
 
-	"github.com/fancl20/cion/pkg/core/controlplane"
 	"github.com/fancl20/cion/pkg/libs/loops"
 	"github.com/fancl20/cion/pkg/libs/scion"
+	"github.com/fancl20/cion/pkg/libs/scionrpc"
 	wireguardv1connect "github.com/fancl20/cion/proto/wireguard/v1/wireguardv1connect"
 )
 
@@ -591,15 +591,16 @@ func (a *App) Run(ctx context.Context) error {
 
 // serveDirectory serves the core's directory on the socket New bound and
 // registered under the directory service, over the application's
-// authenticated channel — the control endpoint's TLS machinery, every
-// publisher identified by its verified chain — until the context ends, and
-// returns with the socket closed and every request's handler returned.
-// Close closes the socket again, harmlessly.
+// authenticated channel — the SCION-native channel's TLS, every publisher
+// identified by its verified chain — until the context ends, and returns
+// with the socket closed and every request's handler returned. Close closes
+// the socket again, harmlessly.
 func (a *App) serveDirectory(ctx context.Context) {
 	slog.Info("Serving the WireGuard directory", "service", serviceName(SvcDirectory))
-	if err := controlplane.ServeHTTP3(ctx, a.dirServe, a.DirectoryHandler(),
-		controlplane.EndpointTLS(controlplane.EndpointTLSConfig{
-			Engine: a.cfg.Engine,
+	if err := scionrpc.ServeHTTP3(ctx, a.dirServe, a.DirectoryHandler(),
+		scionrpc.EndpointTLS(scionrpc.EndpointTLSConfig{
+			Credentials: a.cfg.Engine,
+			Key:         a.cfg.Engine.Key,
 		})); err != nil && ctx.Err() == nil {
 		slog.Error("WireGuard directory service exited", "err", err)
 	}

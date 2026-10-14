@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"connectrpc.com/connect"
-	"github.com/quic-go/quic-go/http3"
 	"github.com/scionproto/scion/pkg/addr"
 	"github.com/scionproto/scion/pkg/private/serrors"
 	cppb "github.com/scionproto/scion/pkg/proto/control_plane"
@@ -23,7 +22,7 @@ import (
 
 	"github.com/fancl20/cion/pkg/core/trust"
 	"github.com/fancl20/cion/pkg/libs/ratelimit"
-	"github.com/fancl20/cion/pkg/libs/scion"
+	"github.com/fancl20/cion/pkg/libs/scionrpc"
 	"github.com/fancl20/cion/pkg/modules/enrollauth"
 	"github.com/fancl20/cion/pkg/modules/trustdb"
 )
@@ -166,7 +165,7 @@ func (s *TrustService) authorizeFirstIssuance(
 	facts := enrollauth.AdmissionFacts{
 		Boundary: enrollauth.BoundaryEnrollment,
 		Keys:     []string{hex.EncodeToString(skid)},
-		Source:   RemoteUnderlay(ctx),
+		Source:   scionrpc.RemoteUnderlay(ctx),
 		Claim:    ia,
 	}
 	answer := s.Authorizer.Authorize(ctx, facts)
@@ -200,7 +199,7 @@ func (s *TrustService) admit(ctx context.Context, ia addr.IA) bool {
 		s.byAddr = ratelimit.NewKeyed[netip.AddrPort](interval)
 		s.byIA = ratelimit.NewKeyed[addr.IA](interval)
 	})
-	if src := RemoteUnderlay(ctx); src.IsValid() {
+	if src := scionrpc.RemoteUnderlay(ctx); src.IsValid() {
 		return s.byAddr.Admit(src)
 	}
 	return s.byIA.Admit(ia)
@@ -345,16 +344,4 @@ func (s *TrustService) ChainRenewal(
 	return connect.NewResponse(&cppb.ChainRenewalResponse{
 		CmsSignedResponse: cmsRes,
 	}), nil
-}
-
-// RemoteUnderlay returns the SCION source address the request context's
-// connection carries — the *scion.Addr the QUIC transport named the peer by,
-// the pattern arrivalInterface reads — and the zero AddrPort when the
-// context carries none.
-func RemoteUnderlay(ctx context.Context) netip.AddrPort {
-	remote, ok := ctx.Value(http3.RemoteAddrContextKey).(*scion.Addr)
-	if !ok || remote == nil {
-		return netip.AddrPort{}
-	}
-	return remote.Addr
 }

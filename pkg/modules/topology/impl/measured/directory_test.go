@@ -10,8 +10,8 @@ import (
 	"connectrpc.com/connect"
 	"github.com/scionproto/scion/pkg/addr"
 
-	"github.com/fancl20/cion/pkg/core/controlplane"
 	"github.com/fancl20/cion/pkg/libs/peeria"
+	"github.com/fancl20/cion/pkg/libs/scionrpc"
 	nodev1 "github.com/fancl20/cion/proto/node/v1"
 )
 
@@ -149,7 +149,7 @@ func TestDirectoryPublishResolvesHost(t *testing.T) {
 		t.Fatalf("entries = %v, want the one", entries)
 	}
 	published := func(host netip.Addr) (control, rendezvous netip.AddrPort) {
-		return netip.AddrPortFrom(host, controlplane.EndpointPort),
+		return netip.AddrPortFrom(host, scionrpc.EndpointPort),
 			netip.AddrPortFrom(host, RendezvousPort)
 	}
 	wantControl, wantRendezvous := published(host)

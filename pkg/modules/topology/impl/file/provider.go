@@ -14,8 +14,8 @@ import (
 
 	"github.com/scionproto/scion/pkg/addr"
 
-	"github.com/fancl20/cion/pkg/core/controlplane"
 	"github.com/fancl20/cion/pkg/libs/loops"
+	"github.com/fancl20/cion/pkg/libs/scionrpc"
 	"github.com/fancl20/cion/pkg/modules/links"
 	"github.com/fancl20/cion/pkg/modules/topology"
 )
@@ -202,7 +202,7 @@ func (f *Provider) Seed(ctx context.Context) error {
 }
 
 // Mounts serves none: the static provider mounts nothing on the endpoint.
-func (f *Provider) Mounts() ([]controlplane.Mount, error) {
+func (f *Provider) Mounts() ([]scionrpc.Mount, error) {
 	return nil, nil
 }
 
