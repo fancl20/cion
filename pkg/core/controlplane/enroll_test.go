@@ -73,11 +73,11 @@ func enrollNode(
 ) error {
 
 	resolved, err := scionrpc.ResolveService(ctx, n.newConn(t, 0),
-		&scion.Addr{IA: n.neighbor, Service: addr.SvcCS})
+		&scion.Addr{IA: n.Neighbor, Service: addr.SvcCS})
 	if err != nil {
 		return err
 	}
-	core := &scion.Addr{IA: n.neighbor, Addr: resolved}
+	core := &scion.Addr{IA: n.Neighbor, Addr: resolved}
 	client, err := webpki.NewCoreClient(webpki.CoreClientConfig{
 		Domain:  domain,
 		Conn:    n.newConn(t, 0),
@@ -88,7 +88,7 @@ func enrollNode(
 		return err
 	}
 	defer func() { _ = client.Close() }()
-	_, enrollErr := trust.RenewChain(ctx, db, client, n.ia, key)
+	_, enrollErr := trust.RenewChain(ctx, db, client, n.IA, key)
 	return enrollErr
 }
 

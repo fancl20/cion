@@ -65,7 +65,7 @@ func TestServeHTTP3JoinsItsHandlers(t *testing.T) {
 		Conn:    node.newConn(t, 0),
 		RootCAs: wpki.Pool,
 		Locator: func() *scion.Addr {
-			return &scion.Addr{IA: iaCore, Addr: netip.AddrPortFrom(core.controlIP, EndpointPort)}
+			return &scion.Addr{IA: iaCore, Addr: netip.AddrPortFrom(core.ControlIP, EndpointPort)}
 		},
 	})
 	if err != nil {

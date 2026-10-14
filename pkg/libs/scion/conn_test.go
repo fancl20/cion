@@ -1,15 +1,13 @@
 package scion
 
 import (
-	"context"
-	"net"
 	"net/netip"
 	"testing"
 	"time"
 
 	"github.com/scionproto/scion/pkg/addr"
 
-	"github.com/fancl20/cion/pkg/core/dataplane"
+	"github.com/fancl20/cion/pkg/core/dataplane/dataplanetest"
 )
 
 const (
@@ -22,77 +20,14 @@ var testMACKeyBytes = []byte(testMACKey)
 // testNode is one node of the smallest topology that carries SCION packets:
 // a data plane with an internal and an external link.
 type testNode struct {
-	ia        addr.IA
-	neighbor  addr.IA
-	internal  string
-	controlIP netip.Addr
-	provider  *dataplane.UDPProvider
-	cancel    context.CancelFunc
+	*dataplanetest.Node
 }
 
-// startTestNode brings up the node; extRemote must be the neighbor node's
-// extLocal, so that traffic crosses the data plane over the direct link
-// exactly as between two deployed nodes.
+// startTestNode brings up the node on testHost; extRemote must be the
+// neighbor node's extLocal.
 func startTestNode(t *testing.T, ia, neighbor addr.IA, extLocal, extRemote string) *testNode {
 	t.Helper()
-
-	internal, control := freeUDPAddr(t), freeUDPAddr(t)
-	controlAddr, err := netip.ParseAddrPort(control)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	metrics, err := dataplane.NewMetrics()
-	if err != nil {
-		t.Fatal(err)
-	}
-	provider := dataplane.NewUDPProvider(64, 0, 0)
-	il, err := provider.NewInternalLink(internal, 64,
-		metrics.NewInterfaceMetrics(0, ia, 0))
-	if err != nil {
-		t.Fatal(err)
-	}
-	el, err := provider.NewExternalLink(64, nil, extLocal, extRemote, testIfID,
-		metrics.NewInterfaceMetrics(testIfID, ia, 0))
-	if err != nil {
-		t.Fatal(err)
-	}
-	local := addr.HostIP(controlAddr.Addr())
-	d, err := dataplane.NewDataPlane(ia, local, testMACKeyBytes, provider,
-		[]dataplane.Link{il, el})
-	if err != nil {
-		t.Fatal(err)
-	}
-	d.RunConfig = dataplane.RunConfig{
-		NumProcessors:         2,
-		NumSlowPathProcessors: 1,
-		BatchSize:             64,
-	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	serveDone := make(chan error, 1)
-	t.Cleanup(func() {
-		cancel()
-		select {
-		case err := <-serveDone:
-			if err != nil {
-				t.Errorf("Serve returned %v, want nil", err)
-			}
-		case <-time.After(5 * time.Second):
-			t.Error("Serve did not return after cancellation")
-		}
-		provider.Stop()
-	})
-	go func() { serveDone <- d.Serve(ctx) }()
-
-	return &testNode{
-		ia:        ia,
-		neighbor:  neighbor,
-		internal:  internal,
-		controlIP: controlAddr.Addr(),
-		provider:  provider,
-		cancel:    cancel,
-	}
+	return &testNode{dataplanetest.StartNode(t, testHost, ia, neighbor, extLocal, extRemote)}
 }
 
 // newConn returns a connection of the node, bound to the control address's
@@ -100,11 +35,11 @@ func startTestNode(t *testing.T, ia, neighbor addr.IA, extLocal, extRemote strin
 func (n *testNode) newConn(t *testing.T, port uint16) *Conn {
 	t.Helper()
 	conn, err := NewConn(ConnConfig{
-		IA:           n.ia,
-		Bind:         netip.AddrPortFrom(n.controlIP, port).String(),
-		InternalAddr: n.internal,
-		MACKey:       testMACKeyBytes,
-		Links:        func() map[uint16]addr.IA { return map[uint16]addr.IA{testIfID: n.neighbor} },
+		IA:           n.IA,
+		Bind:         netip.AddrPortFrom(n.ControlIP, port).String(),
+		InternalAddr: n.Internal,
+		MACKey:       n.MACKey,
+		Links:        n.Links,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -124,12 +59,7 @@ var testHost = netip.MustParseAddr("127.0.0.127")
 // kernel and released for the caller's bind.
 func freeUDPAddr(t *testing.T) string {
 	t.Helper()
-	c, err := net.ListenUDP("udp4", net.UDPAddrFromAddrPort(netip.AddrPortFrom(testHost, 0)))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = c.Close() }()
-	return c.LocalAddr().String()
+	return dataplanetest.FreeUDPAddr(t, testHost)
 }
 
 // TestConnDatagrams checks that the socket delivers datagrams over one-hop
@@ -171,8 +101,8 @@ func TestConnDatagrams(t *testing.T) {
 	if !fromB.IA.Equal(iaA) {
 		t.Errorf("peer IA = %v, want %v", fromB.IA, iaA)
 	}
-	if fromB.Addr.Addr() != a.controlIP {
-		t.Errorf("peer address = %v, want host %v", fromB.Addr, a.controlIP)
+	if fromB.Addr.Addr() != a.ControlIP {
+		t.Errorf("peer address = %v, want host %v", fromB.Addr, a.ControlIP)
 	}
 	if fromB.IfID != testIfID {
 		t.Errorf("peer ingress interface = %d, want %d", fromB.IfID, testIfID)
@@ -229,7 +159,7 @@ func TestConnServiceDestination(t *testing.T) {
 	connA := a.newConn(t, 0)
 	connB := b.newConn(t, 0)
 	svc := addr.SVC(0x7ff1)
-	if err := b.provider.AddSvc(svc, addr.HostIP(b.controlIP), connB.LocalPort()); err != nil {
+	if err := b.Provider.AddSvc(svc, addr.HostIP(b.ControlIP), connB.LocalPort()); err != nil {
 		t.Fatal(err)
 	}
 
@@ -284,7 +214,7 @@ func TestConnServiceWithoutBackend(t *testing.T) {
 
 	// B registers a backend for one service; the sender addresses another.
 	connB := b.newConn(t, 0)
-	if err := b.provider.AddSvc(addr.SVC(0x7ff1), addr.HostIP(b.controlIP), connB.LocalPort()); err != nil {
+	if err := b.Provider.AddSvc(addr.SVC(0x7ff1), addr.HostIP(b.ControlIP), connB.LocalPort()); err != nil {
 		t.Fatal(err)
 	}
 	connA := a.newConn(t, 0)
