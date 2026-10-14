@@ -1273,7 +1273,7 @@ func TestProbeSendsNothingOverAnUnusableLink(t *testing.T) {
 	defer func() { _ = conn.Close() }()
 	s := &selection{cfg: SelectionConfig{
 		Conn: conn,
-		Provider: &scion.PathProvider{
+		Paths: &scion.PathProvider{
 			IA:     selIA,
 			DB:     emptyPathDB{},
 			Lookup: func(context.Context, addr.IA) []*pathdb.Segment { return nil },

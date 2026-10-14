@@ -133,7 +133,7 @@ func TestSeedDrawsAgainstEarlierSeeds(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		z.Wire(topology.Pieces{IA: zeroconfDraw, Store: store})
+		z.Wire(topology.Environment{IA: zeroconfDraw, Store: store})
 		if err := z.Seed(context.Background()); err != nil {
 			t.Fatal(err)
 		}

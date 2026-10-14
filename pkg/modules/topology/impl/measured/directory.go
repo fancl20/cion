@@ -201,7 +201,7 @@ func (c storeDirectoryClient) List(_ context.Context) ([]DirectoryEntry, error) 
 type rpcDirectoryClient struct {
 	conn      *scion.Conn
 	engine    *trust.Engine
-	provider  *scion.PathProvider
+	paths     DirectoryPaths
 	coreRoute func() *scion.Addr
 
 	qclt *quic.Transport
@@ -228,7 +228,7 @@ func (c *rpcDirectoryClient) client() (nodev1connect.DirectoryServiceClient, err
 		Engine: c.engine,
 		Conn:   c.conn,
 		PathTo: func(dst addr.IA) *spath.Decoded {
-			path, err := c.provider.LocalPath(dst)
+			path, err := c.paths.LocalPath(dst)
 			if err != nil {
 				return nil
 			}
@@ -290,6 +290,12 @@ type NodeDirectory struct {
 	local []DirectoryEntry
 }
 
+// DirectoryPaths is the path resolution the directory's channel calls: the
+// path to the core from local state alone, safe inside the channel's dial.
+type DirectoryPaths interface {
+	LocalPath(dst addr.IA) (*spath.Decoded, error)
+}
+
 // NodeDirectoryConfig configures a NodeDirectory.
 type NodeDirectoryConfig struct {
 	// IA is the publisher's ISD-AS.
@@ -305,8 +311,8 @@ type NodeDirectoryConfig struct {
 	Engine *trust.Engine
 	// Conn is the SCION connection the publish and fetch rides.
 	Conn *scion.Conn
-	// Provider resolves the path to the core.
-	Provider *scion.PathProvider
+	// Paths resolves the path to the core.
+	Paths DirectoryPaths
 	// CoreRoute resolves the core's endpoint; nil on the core itself, which
 	// serves the directory from Store.
 	CoreRoute func() *scion.Addr
@@ -330,7 +336,7 @@ func NewNodeDirectory(cfg NodeDirectoryConfig) *NodeDirectory {
 	rpc := &rpcDirectoryClient{
 		conn:      cfg.Conn,
 		engine:    cfg.Engine,
-		provider:  cfg.Provider,
+		paths:     cfg.Paths,
 		coreRoute: cfg.CoreRoute,
 	}
 	// The transport exists only over a conn: a provider whose conn is

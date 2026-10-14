@@ -85,7 +85,7 @@ type Pacing struct {
 // default: loading it is what makes a node zero-conf.
 type Provider struct {
 	cfg Config
-	pcs topology.Pieces
+	env topology.Environment
 
 	// external is the learned external host, persisted beside the identity
 	// so a restart republishes it; domain resolves the founding core's own
@@ -235,8 +235,8 @@ func (z *Provider) CompleteIdentity(ctx context.Context, ia addr.IA) (addr.IA, e
 }
 
 // Wire stores the phases' products for the machinery's assembly.
-func (z *Provider) Wire(pcs topology.Pieces) {
-	z.pcs = pcs
+func (z *Provider) Wire(env topology.Environment) {
+	z.env = env
 }
 
 // Seed seeds the store with an entry per --topology.neighbor, aimed at
@@ -245,7 +245,7 @@ func (z *Provider) Wire(pcs topology.Pieces) {
 // against the table as the earlier seeds left it. A non-core that holds no
 // entry and names no neighbor could never link; it refuses to start.
 func (z *Provider) Seed(ctx context.Context) error {
-	entries, err := z.pcs.Store.All(ctx)
+	entries, err := z.env.Store.All(ctx)
 	if err != nil {
 		return err
 	}
@@ -260,7 +260,7 @@ func (z *Provider) Seed(ctx context.Context) error {
 		if err != nil {
 			return fmt.Errorf("parsing --topology.neighbor %q: %w", s, err)
 		}
-		existing, err := z.pcs.Store.ByRemote(ctx, rendezvous)
+		existing, err := z.env.Store.ByRemote(ctx, rendezvous)
 		if err != nil {
 			return err
 		}
@@ -278,7 +278,7 @@ func (z *Provider) Seed(ctx context.Context) error {
 				Rendezvous: rendezvous,
 				State:      links.StateCandidate,
 			}
-			if err := z.pcs.Store.Insert(ctx, seed); err != nil {
+			if err := z.env.Store.Insert(ctx, seed); err != nil {
 				return err
 			}
 			entries = append(entries, seed)
@@ -295,7 +295,7 @@ func (z *Provider) Seed(ctx context.Context) error {
 			Rendezvous: rendezvous,
 			State:      links.StateCandidate,
 		}
-		if err := z.pcs.Store.Insert(ctx, seed); err != nil {
+		if err := z.env.Store.Insert(ctx, seed); err != nil {
 			return err
 		}
 		entries = append(entries, seed)
@@ -316,9 +316,9 @@ func (z *Provider) assemble() error {
 	}
 	rendezvous, err := NewRendezvous(RendezvousConfig{
 		Bind:        netip.AddrPortFrom(z.cfg.ControlHost, RendezvousPort).String(),
-		IA:          z.pcs.IA,
+		IA:          z.env.IA,
 		MinInterval: z.cfg.Pacing.RendezvousRate,
-		Store:       z.pcs.Store,
+		Store:       z.env.Store,
 		MaxLinks:    MaxNeighbors,
 		LinkHost:    z.cfg.ControlHost,
 	})
@@ -327,16 +327,16 @@ func (z *Provider) assemble() error {
 	}
 	z.rendezvous = rendezvous
 	z.links = &LinkService{
-		Store:       z.pcs.Store,
+		Store:       z.env.Store,
 		MaxLinks:    MaxNeighbors,
 		LinkHost:    z.cfg.ControlHost,
 		MinInterval: z.cfg.Pacing.RendezvousRate,
 	}
 	directoryCfg := NodeDirectoryConfig{
-		IA:              z.pcs.IA,
+		IA:              z.env.IA,
 		Host:            z.publishedHost,
-		Engine:          z.pcs.Engine,
-		Provider:        z.pcs.Provider,
+		Engine:          z.env.Engine,
+		Paths:           z.env.Paths,
 		PublishInterval: z.cfg.Pacing.Directory,
 		PublishRetry:    z.cfg.Pacing.Directory,
 		FetchInterval:   z.cfg.Pacing.Directory,
@@ -423,20 +423,20 @@ func (z *Provider) Close() error {
 
 // selectionConfig builds the topology loop's configuration from the
 // provider's own pieces: the link store its decisions land in, the directory
-// its candidates come from, the provider and conn its probes ride, and the
+// its candidates come from, the paths and conn its probes ride, and the
 // monitor's verdicts its demotions read.
 func (z *Provider) selectionConfig() SelectionConfig {
 	return SelectionConfig{
-		IA:          z.pcs.IA,
-		Store:       z.pcs.Store,
+		IA:          z.env.IA,
+		Store:       z.env.Store,
 		Directory:   z.directory.Entries,
-		Verdicts:    z.pcs.Verdicts,
-		Latencies:   z.pcs.Latencies,
-		Provider:    z.pcs.Provider,
+		Verdicts:    z.env.Verdicts,
+		Latencies:   z.env.Latencies,
+		Paths:       z.env.Paths,
 		Conn:        z.probeConn,
 		ControlAddr: netip.AddrPortFrom(z.cfg.ControlHost, controlplane.EndpointPort),
 		LinkHost:    z.cfg.ControlHost,
-		Link:        &linkClient{peer: z.pcs.Peer},
+		Link:        &linkClient{peer: z.env.Peer},
 		Learn:       z.learn,
 		Evidence:    z.cfg.Evidence,
 		Stranded:    &z.stranded,
@@ -477,7 +477,7 @@ func (z *Provider) runJoinDials(ctx context.Context) {
 // revivals left it. An unanswered re-dial costs a UDP round trip and
 // changes nothing.
 func (z *Provider) dialJoins(ctx context.Context) {
-	entries, err := z.pcs.Store.All(ctx)
+	entries, err := z.env.Store.All(ctx)
 	if err != nil {
 		slog.Error("Reading the link store", "err", err)
 		return
@@ -505,7 +505,7 @@ func (z *Provider) dialJoins(ctx context.Context) {
 			}
 			local = fresh
 		}
-		reply, _, err := RendezvousEcho(ctx, z.cfg.ControlHost, target, z.pcs.IA, local)
+		reply, _, err := RendezvousEcho(ctx, z.cfg.ControlHost, target, z.env.IA, local)
 		if err != nil {
 			slog.Debug("Rendezvous dial", "rendezvous", target, "err", err)
 			continue
@@ -523,7 +523,7 @@ func (z *Provider) dialJoins(ctx context.Context) {
 		if revival {
 			l.State = links.StateCandidate
 		}
-		err = z.pcs.Store.Update(ctx, l)
+		err = z.env.Store.Update(ctx, l)
 		if revival && (errors.Is(err, links.ErrDuplicateNeighbor) ||
 			errors.Is(err, links.ErrDuplicateLocal)) {
 			continue
@@ -531,7 +531,7 @@ func (z *Provider) dialJoins(ctx context.Context) {
 		if errors.Is(err, links.ErrDuplicateNeighbor) {
 			l.State = links.StateRetired
 			l.Retired = time.Now()
-			if err := z.pcs.Store.Update(ctx, l); err != nil {
+			if err := z.env.Store.Update(ctx, l); err != nil {
 				slog.Error("Retiring a redundant entry", "err", err)
 				continue
 			}
@@ -581,7 +581,7 @@ func localHeld(entries []*links.Link, l *links.Link) bool {
 // client per peer keyed by its encoded authority so the transport reuses
 // the connection.
 type linkClient struct {
-	peer *controlplane.PeerClient
+	peer topology.PeerChannel
 
 	mtx  sync.Mutex
 	clts map[string]nodev1connect.LinkServiceClient

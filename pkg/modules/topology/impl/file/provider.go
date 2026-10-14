@@ -46,7 +46,7 @@ type Config struct {
 // exactly as a measured one, the drafts' exchanges alone crossing the wire.
 type Provider struct {
 	cfg Config
-	pcs topology.Pieces
+	env topology.Environment
 
 	// read is the file's parsed state of the last good read, kept so an
 	// unchanged modification time writes nothing and a changed one
@@ -182,10 +182,10 @@ func (f *Provider) CompleteIdentity(_ context.Context, ia addr.IA) (addr.IA, err
 	return completed, nil
 }
 
-// Wire stores the phases' products; the store is the piece the
+// Wire stores the phases' products; the store is the one the
 // reconciliation lands in.
-func (f *Provider) Wire(pcs topology.Pieces) {
-	f.pcs = pcs
+func (f *Provider) Wire(env topology.Environment) {
+	f.env = env
 }
 
 // Seed reconciles the link-set into the store before the first data plane
@@ -245,7 +245,7 @@ func (f *Provider) Close() error { return nil }
 // interface ID, the ID being the store's key. A pass that changed nothing
 // writes nothing.
 func (f *Provider) reconcile(ctx context.Context) error {
-	store := f.pcs.Store
+	store := f.env.Store
 	named := make(map[addr.IA]bool, len(f.entries))
 	for _, e := range f.entries {
 		named[e.ia] = true

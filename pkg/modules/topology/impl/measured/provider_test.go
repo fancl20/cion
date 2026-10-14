@@ -56,7 +56,7 @@ func TestZeroconfCompletesByEcho(t *testing.T) {
 	// The seed lands the bootstrap's neighbor retargeted: the reply's
 	// addresses carry, the entry a candidate.
 	store := memory.New()
-	z.Wire(topology.Pieces{IA: ia, Store: store})
+	z.Wire(topology.Environment{IA: ia, Store: store})
 	if err := z.Seed(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -105,7 +105,7 @@ func TestZeroconfFirstStartNeedsNeighbor(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	z.Wire(topology.Pieces{Store: memory.New()})
+	z.Wire(topology.Environment{Store: memory.New()})
 	if _, err := z.CompleteIdentity(context.Background(), zeroconfDraw); err == nil {
 		t.Error("a first start whose bootstrap neighbor never answered completed")
 	}
@@ -121,7 +121,7 @@ func TestZeroconfFirstStartNeedsNeighbor(t *testing.T) {
 	if _, err := z.CompleteIdentity(context.Background(), zeroconfDraw); err != nil {
 		t.Fatal(err)
 	}
-	z.Wire(topology.Pieces{Store: memory.New()})
+	z.Wire(topology.Environment{Store: memory.New()})
 	if err := z.Seed(context.Background()); err != nil {
 		t.Fatalf("seeding with a bootstrap neighbor: %v", err)
 	}
@@ -145,7 +145,7 @@ func TestZeroconfMounts(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		z.Wire(topology.Pieces{Store: memory.New()})
+		z.Wire(topology.Environment{Store: memory.New()})
 		// Mounts binds the rendezvous port; releasing it lets a rerun of the
 		// test in the same process bind it again.
 		t.Cleanup(func() { _ = z.Close() })
@@ -200,7 +200,7 @@ func TestProviderRunReturnsAndCloseReleases(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	z.Wire(topology.Pieces{IA: zeroconfDraw, Store: memory.New()})
+	z.Wire(topology.Environment{IA: zeroconfDraw, Store: memory.New()})
 	if _, err := z.Mounts(); err != nil {
 		t.Fatal(err)
 	}
@@ -353,7 +353,7 @@ func TestStrandedRedial(t *testing.T) {
 		t.Fatal(err)
 	}
 	store := memory.New()
-	z.Wire(topology.Pieces{IA: zeroconfDraw, Store: store})
+	z.Wire(topology.Environment{IA: zeroconfDraw, Store: store})
 	retired := &links.Link{
 		NeighborIA: rendezvousIA,
 		Local:      netip.MustParseAddrPort("127.0.0.1:40001"),
@@ -408,7 +408,7 @@ func strandedDialer(t *testing.T, ia addr.IA, entries ...*links.Link) (*Provider
 		t.Fatal(err)
 	}
 	store := memory.New()
-	z.Wire(topology.Pieces{IA: ia, Store: store})
+	z.Wire(topology.Environment{IA: ia, Store: store})
 	for _, l := range entries {
 		if err := store.Insert(context.Background(), l); err != nil {
 			t.Fatal(err)

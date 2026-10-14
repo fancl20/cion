@@ -45,7 +45,7 @@ func Run(t *testing.T, s Suite) {
 	})
 	t.Run("contract: seeding is idempotent", func(t *testing.T) {
 		p := s.New(t)
-		p.Wire(topology.Pieces{Store: s.Store})
+		p.Wire(topology.Environment{Store: s.Store})
 		if err := p.Seed(ctx); err != nil {
 			t.Fatalf("the first seed: %v", err)
 		}

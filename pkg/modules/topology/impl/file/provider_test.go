@@ -62,7 +62,7 @@ func newFileFixture(t *testing.T, entries ...Entry) *fileFixture {
 	}
 	f.Provider = New(Config{Path: f.path})
 	writeLinkSet(t, f.path, entries...)
-	f.Wire(topology.Pieces{Store: links.Notifying(f.store, func() { f.writes++ })})
+	f.Wire(topology.Environment{Store: links.Notifying(f.store, func() { f.writes++ })})
 	return f
 }
 

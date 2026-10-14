@@ -13,12 +13,14 @@ import (
 	"time"
 
 	"github.com/scionproto/scion/pkg/addr"
+	spath "github.com/scionproto/scion/pkg/slayers/path/scion"
 
 	"github.com/fancl20/cion/pkg/core/controlplane"
 	"github.com/fancl20/cion/pkg/libs/loops"
 	"github.com/fancl20/cion/pkg/libs/scion"
 	"github.com/fancl20/cion/pkg/libs/underlay"
 	"github.com/fancl20/cion/pkg/modules/links"
+	"github.com/fancl20/cion/pkg/modules/topology"
 	nodev1 "github.com/fancl20/cion/proto/node/v1"
 )
 
@@ -69,6 +71,14 @@ type LinkRequester interface {
 		local netip.AddrPort, ifID uint16) (*nodev1.LinkReply, error)
 }
 
+// SelectionPaths is the path resolution the selection loop calls: the
+// freshest path to a candidate, the baseline, and the composed paths with
+// their facts.
+type SelectionPaths interface {
+	Path(ctx context.Context, dst addr.IA) (*spath.Decoded, error)
+	Enumerate(ctx context.Context, dst addr.IA) ([]scion.Candidate, error)
+}
+
 // SelectionConfig configures the selection loop.
 type SelectionConfig struct {
 	// IA is the local ISD-AS.
@@ -85,9 +95,10 @@ type SelectionConfig struct {
 	// Latencies receives the window's per-link one-way delay estimates —
 	// each neighbor's echo round trip halved — for the beaconer's entries
 	// to declare; nil discards them.
-	Latencies *controlplane.LinkLatency
-	// Provider resolves the freshest path to a candidate — the baseline.
-	Provider *scion.PathProvider
+	Latencies topology.LatencyRecorder
+	// Paths resolves the freshest path to a candidate — the baseline — and
+	// enumerates the composed ones.
+	Paths SelectionPaths
 	// Conn carries the SCMP echo probes; its port is the reply address.
 	Conn *scion.Conn
 	// ControlAddr is the node's own control address, claimed in probes; its
@@ -549,7 +560,7 @@ func (s *selection) probe(ctx context.Context, e DirectoryEntry, l *links.Link) 
 	probeCtx, cancel := context.WithTimeout(ctx, ProbeWait*ProbeRuns+time.Second)
 	defer cancel()
 	sm := sample{m: m}
-	candidates, err := s.cfg.Provider.Enumerate(probeCtx, e.IA)
+	candidates, err := s.cfg.Paths.Enumerate(probeCtx, e.IA)
 	if err != nil {
 		return sm
 	}
@@ -935,7 +946,7 @@ func (s *selection) establishLink(ctx context.Context, e DirectoryEntry, why str
 	}
 	probeCtx, cancel := context.WithTimeout(ctx, EstablishTimeout)
 	defer cancel()
-	if path, err := s.cfg.Provider.Path(probeCtx, e.IA); err == nil {
+	if path, err := s.cfg.Paths.Path(probeCtx, e.IA); err == nil {
 		peer := &scion.Addr{
 			IA:   e.IA,
 			Addr: netip.AddrPortFrom(e.ControlAddr.Addr(), controlplane.EndpointPort),

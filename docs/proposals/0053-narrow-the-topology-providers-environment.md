@@ -113,3 +113,11 @@ one commit.
     directory tests run on them unchanged.
 
 ## Implementation history
+
+*   Landed in one commit, as planned: the environment and its three
+    interfaces in the contract ([topology.go](/pkg/modules/topology/topology.go)),
+    and the measured configurations' `Paths` fields taking `SelectionPaths`
+    ([selection.go](/pkg/modules/topology/impl/measured/selection.go)) and
+    `DirectoryPaths`
+    ([directory.go](/pkg/modules/topology/impl/measured/directory.go)),
+    each declared beside its configuration.

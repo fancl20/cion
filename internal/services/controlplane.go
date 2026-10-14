@@ -468,11 +468,11 @@ func (n *node) buildBeaconing() error {
 // and the one direction the dependency ever crosses: the application
 // imports the core and the shared libraries, never the reverse.
 func (n *node) wireTopology() {
-	n.topology.Wire(topology.Pieces{
+	n.topology.Wire(topology.Environment{
 		IA:        n.ident.ia,
 		Store:     n.linkStore,
 		Peer:      n.peerClt,
-		Provider:  n.pathProvider,
+		Paths:     n.pathProvider,
 		Engine:    n.engine,
 		Verdicts:  n.monitor.Verdicts,
 		Latencies: n.linkLatency,
