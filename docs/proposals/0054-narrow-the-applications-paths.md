@@ -92,3 +92,16 @@ The change lands in one commit.
     unchanged.
 
 ## Implementation history
+
+*   Landed in one commit, as planned: `apps.Paths` beside the environment
+    ([apps.go](/pkg/apps/apps.go)), `wireguard.Paths` beside the
+    configuration ([app.go](/pkg/apps/wireguard/app.go)), `localPaths` once
+    for the mesh socket and the directory client
+    ([bind.go](/pkg/apps/wireguard/bind.go)), and `ping.Paths`
+    ([pinger.go](/pkg/apps/ping/pinger.go)).
+*   The mesh socket and the directory client hold the interface as
+    `resolver`: the socket already names its path cache `paths`.
+*   The route tests set the lookup of the provider their fixtures built, so
+    they reach it through two helpers that assert the concrete type,
+    `providerOf` and `appProvider`
+    ([route_test.go](/pkg/apps/wireguard/route_test.go)).

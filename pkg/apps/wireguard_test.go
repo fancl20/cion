@@ -22,7 +22,7 @@ func wireguardEnvironment(t *testing.T, core bool) *Environment {
 		ControlHost: "127.0.0.1:30042",
 		Domain:      "core.example.org",
 		Engine:      trust.NewEngine(ia, nil, nil),
-		Provider:    &scion.PathProvider{},
+		Paths:       &scion.PathProvider{},
 	}
 }
 

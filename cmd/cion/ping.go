@@ -77,7 +77,7 @@ func runPing(ctx context.Context, cfg services.NodeConfig, target string, opts *
 	fmt.Printf("cion ping %s,%s\n", dst, host)
 	report, err := ping.Run(ctx, ping.Config{
 		Conn:     conn,
-		Provider: app.Provider(),
+		Paths:    app.Provider(),
 		Dst:      dst,
 		DstHost:  host,
 		Count:    opts.count,

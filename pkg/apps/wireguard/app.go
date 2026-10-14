@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/scionproto/scion/pkg/addr"
+	spath "github.com/scionproto/scion/pkg/slayers/path/scion"
 	"golang.zx2c4.com/wireguard/device"
 
 	"github.com/fancl20/cion/pkg/core/controlplane"
@@ -54,6 +55,14 @@ const PersistentKeepalive = 25 * time.Second
 // in-process forwarding.
 const CountersInterval = time.Minute
 
+// Paths is the node's path resolution the application calls: the composed
+// candidates the route warm-up ranks, and the path from local state its sends
+// and its directory channel ride.
+type Paths interface {
+	Enumerate(ctx context.Context, dst addr.IA) ([]scion.Candidate, error)
+	LocalPath(dst addr.IA) (*spath.Decoded, error)
+}
+
 // Config configures the application.
 type Config struct {
 	// IA is the node's ISD-AS.
@@ -71,8 +80,9 @@ type Config struct {
 	// StateDir is the application's own state directory: the WireGuard key
 	// pair's home.
 	StateDir string
-	// Provider resolves the paths mesh datagrams ride.
-	Provider *scion.PathProvider
+	// Paths resolves the paths mesh datagrams ride and enumerates the
+	// candidates the route warm-up ranks.
+	Paths Paths
 	// Engine provides the node's chain for the directory channel.
 	Engine *Engine
 	// Store is the directory store the core node's application serves, and
@@ -203,7 +213,7 @@ func New(cfg Config) (*App, error) {
 		cfg:       cfg,
 		key:       key,
 		cnt:       cnt,
-		mesh:      newMeshSocket(meshConn, cfg.Provider, cnt),
+		mesh:      newMeshSocket(meshConn, cfg.Paths, cnt),
 		host:      newHostSocket(hostConn, cnt),
 		router:    newRouter(OverlayMTU, cnt),
 		meshPeers: make(map[addr.IA]*meshPeer),
@@ -242,7 +252,7 @@ func New(cfg Config) (*App, error) {
 			a.release()
 			return nil, fmt.Errorf("binding the directory socket: %w", err)
 		}
-		a.dirConn = newRPCDirectoryClient(dirConn, cfg.CoreRoute, cfg.Engine, cfg.Provider)
+		a.dirConn = newRPCDirectoryClient(dirConn, cfg.CoreRoute, cfg.Engine, cfg.Paths)
 		a.directory = a.dirConn
 	}
 	if cfg.DERP != nil {

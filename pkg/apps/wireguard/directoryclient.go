@@ -25,7 +25,7 @@ import (
 type rpcDirectoryClient struct {
 	conn      *scion.Conn
 	engine    *Engine
-	provider  *scion.PathProvider
+	resolver  localPaths
 	coreRoute func() *scion.Addr
 
 	// qclt is the one QUIC transport every dial rides.
@@ -44,12 +44,12 @@ func newRPCDirectoryClient(
 	conn *scion.Conn,
 	coreRoute func() *scion.Addr,
 	engine *Engine,
-	provider *scion.PathProvider,
+	resolver localPaths,
 ) *rpcDirectoryClient {
 	return &rpcDirectoryClient{
 		conn:      conn,
 		engine:    engine,
-		provider:  provider,
+		resolver:  resolver,
 		coreRoute: coreRoute,
 		qclt:      &quic.Transport{Conn: conn},
 	}
@@ -78,7 +78,7 @@ func (c *rpcDirectoryClient) client() (wireguardv1connect.DirectoryServiceClient
 		Engine: c.engine,
 		Conn:   c.conn,
 		PathTo: func(dst addr.IA) *spath.Decoded {
-			path, err := c.provider.LocalPath(dst)
+			path, err := c.resolver.LocalPath(dst)
 			if err != nil {
 				return nil
 			}

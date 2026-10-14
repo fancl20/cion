@@ -22,13 +22,19 @@ import (
 	"github.com/fancl20/cion/pkg/libs/underlay"
 )
 
+// Paths is the node's path resolution the pinger calls: a path to the
+// destination.
+type Paths interface {
+	Path(ctx context.Context, dst addr.IA) (*spath.Decoded, error)
+}
+
 // Config configures one ping run.
 type Config struct {
 	// Conn is the pinger's socket; its port becomes the echo identifier the
 	// replies return to.
 	Conn *scion.Conn
-	// Provider resolves paths to the destination.
-	Provider *scion.PathProvider
+	// Paths resolves paths to the destination.
+	Paths Paths
 	// Dst is the destination ISD-AS.
 	Dst addr.IA
 	// DstHost is the destination's underlay host address, which the
@@ -83,7 +89,7 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 	}
 	var path *spath.Decoded
 	resolve := func() error {
-		p, err := cfg.Provider.Path(ctx, cfg.Dst)
+		p, err := cfg.Paths.Path(ctx, cfg.Dst)
 		if err != nil {
 			return fmt.Errorf("resolving a path to %s: %w", cfg.Dst, err)
 		}

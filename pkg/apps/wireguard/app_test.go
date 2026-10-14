@@ -193,7 +193,7 @@ func newTestWireguard(
 		ListenHost: testHost,
 		ListenPort: freeHostPort(t),
 		StateDir:   t.TempDir(),
-		Provider:   provider,
+		Paths:      provider,
 		Engine:     trust.NewEngine(ia, nil, &trust.NetworkProvider{DB: db}),
 		Store:      directory,
 		NewConn: func() (*scion.Conn, error) {

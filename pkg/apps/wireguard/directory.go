@@ -302,7 +302,7 @@ func (a *App) runSync(ctx context.Context) {
 // the loop would serve keep working through the bootstrap fallback.
 func (a *App) warmMeshPaths(ctx context.Context) {
 	for _, ia := range a.meshPeerIAs() {
-		candidates, err := a.cfg.Provider.Enumerate(ctx, ia)
+		candidates, err := a.cfg.Paths.Enumerate(ctx, ia)
 		if err != nil {
 			slog.Warn("WireGuard mesh route", "peer", ia, "err", err)
 			continue

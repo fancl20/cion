@@ -525,11 +525,22 @@ func pathOf(s *meshSocket, ia addr.IA) *spath.Decoded {
 	return s.paths[ia]
 }
 
+// providerOf returns the path provider testMeshSocket built the socket over.
+func providerOf(s *meshSocket) *scion.PathProvider {
+	return s.resolver.(*scion.PathProvider)
+}
+
+// appProvider returns the path provider newTestWireguard built the
+// application over.
+func appProvider(a *App) *scion.PathProvider {
+	return a.cfg.Paths.(*scion.PathProvider)
+}
+
 // landAll enumerates through the socket's provider and lands the pick,
 // reporting whether a switch landed.
 func landAll(t *testing.T, s *meshSocket, dest addr.IA) bool {
 	t.Helper()
-	candidates, err := s.provider.Enumerate(context.Background(), dest)
+	candidates, err := providerOf(s).Enumerate(context.Background(), dest)
 	if err != nil {
 		t.Fatalf("enumerating %s: %v", dest, err)
 	}
@@ -571,7 +582,7 @@ func routeSocket(t *testing.T) (*meshSocket, *routeTopology, func()) {
 	db := &memDB{segs: []*pathdb.Segment{up1}}
 	downs := []*pathdb.Segment{down1}
 	socket, _ := testMeshSocket(t, db)
-	socket.provider.Lookup = func(_ context.Context, dst addr.IA) []*pathdb.Segment {
+	providerOf(socket).Lookup = func(_ context.Context, dst addr.IA) []*pathdb.Segment {
 		if !dst.Equal(dest) {
 			return nil
 		}
@@ -689,7 +700,7 @@ func TestMeshSocketEvictionsClearRoute(t *testing.T) {
 	socket.mtx.Lock()
 	socket.expiry[tp.dest] = time.Now().Add(-time.Hour)
 	socket.mtx.Unlock()
-	candidates, err := socket.provider.Enumerate(context.Background(), tp.dest)
+	candidates, err := providerOf(socket).Enumerate(context.Background(), tp.dest)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -746,8 +757,8 @@ func TestWireguardWarmMeshPaths(t *testing.T) {
 	down := declaredSeg(t, pathdb.SegmentTypeDown, now, core, dest, 31, 32, 6*time.Millisecond)
 	db := &memDB{}
 	downs := []*pathdb.Segment{down}
-	a.cfg.Provider.DB = db
-	a.cfg.Provider.Lookup = func(_ context.Context, dst addr.IA) []*pathdb.Segment {
+	appProvider(a).DB = db
+	appProvider(a).Lookup = func(_ context.Context, dst addr.IA) []*pathdb.Segment {
 		if !dst.Equal(dest) {
 			return nil
 		}

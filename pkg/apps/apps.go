@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/scionproto/scion/pkg/addr"
+	spath "github.com/scionproto/scion/pkg/slayers/path/scion"
 
 	"github.com/fancl20/cion/pkg/apps/voting"
 	"github.com/fancl20/cion/pkg/core/trust"
@@ -68,10 +69,10 @@ type Environment struct {
 	// Domain is the core's domain — the founding core's own when Core is
 	// set, the network's core domain otherwise.
 	Domain string
-	// Engine provides the node's chain for the directory channel; Provider
+	// Engine provides the node's chain for the directory channel; Paths
 	// resolves the paths the mesh datagrams ride.
-	Engine   *trust.Engine
-	Provider *scion.PathProvider
+	Engine *trust.Engine
+	Paths  Paths
 	// NewConn binds the node's sending conn on an ephemeral port: the
 	// socket the application's own services ride.
 	NewConn func() (*scion.Conn, error)
@@ -110,6 +111,13 @@ type Environment struct {
 	// DirectoryPacing overrides the directory's publish and fetch cadence;
 	// zero keeps the production constants.
 	DirectoryPacing time.Duration
+}
+
+// Paths is the node's path resolution as the residents call it: the composed
+// candidates to a destination, and a path from local state alone.
+type Paths interface {
+	Enumerate(ctx context.Context, dst addr.IA) ([]scion.Candidate, error)
+	LocalPath(dst addr.IA) (*spath.Decoded, error)
 }
 
 // RelayPlacement is the harness's stand-in for the production relay

@@ -41,6 +41,12 @@ type datagram struct {
 	src  conn.Endpoint
 }
 
+// localPaths resolves a path from local state alone, the resolution safe
+// inside a send or a dial.
+type localPaths interface {
+	LocalPath(dst addr.IA) (*spath.Decoded, error)
+}
+
 // meshSocket is the node's mesh transport: one SCION socket bound to an
 // ephemeral port and registered under the wireguard service in its own AS,
 // shared by every mesh device, fanning each received datagram out to all of
@@ -50,7 +56,7 @@ type datagram struct {
 // through.
 type meshSocket struct {
 	conn     *scion.Conn
-	provider *scion.PathProvider
+	resolver localPaths
 	cnt      *counters
 
 	mtx sync.Mutex
@@ -68,10 +74,10 @@ type meshSocket struct {
 	done   chan struct{}
 }
 
-func newMeshSocket(c *scion.Conn, provider *scion.PathProvider, cnt *counters) *meshSocket {
+func newMeshSocket(c *scion.Conn, resolver localPaths, cnt *counters) *meshSocket {
 	return &meshSocket{
 		conn:     c,
-		provider: provider,
+		resolver: resolver,
 		cnt:      cnt,
 		subs:     make(map[*meshBind]chan datagram),
 		paths:    make(map[addr.IA]*spath.Decoded),
@@ -168,7 +174,7 @@ func (s *meshSocket) send(ep *meshEndpoint, bufs [][]byte) error {
 			s.setPath(dst.IA, path)
 		}
 		if path == nil {
-			refreshed, err := s.provider.LocalPath(dst.IA)
+			refreshed, err := s.resolver.LocalPath(dst.IA)
 			if err != nil {
 				s.cnt.sendFailures.Add(int64(len(bufs)))
 				return fmt.Errorf("resolving a path to %s: %w", dst.IA, err)

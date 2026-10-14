@@ -136,7 +136,7 @@ func pingOver(ctx context.Context, n *assemblyNode, provider *scion.PathProvider
 	defer func() { _ = conn.Close() }()
 	report, err := ping.Run(ctx, ping.Config{
 		Conn:     conn,
-		Provider: provider,
+		Paths:    provider,
 		Dst:      dst,
 		DstHost:  host,
 		Count:    1,

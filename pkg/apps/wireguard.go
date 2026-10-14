@@ -75,7 +75,7 @@ func wireguardConfig(env *Environment) (wireguard.Config, error) {
 		ListenPort:    env.Arguments.Wireguard.HostPort,
 		DERP:          relayPresence(env.Domain, env.Relay),
 		StateDir:      filepath.Join(env.StateRoot, "wireguard"),
-		Provider:      env.Provider,
+		Paths:         env.Paths,
 		Engine:        env.Engine,
 		NewConn:       env.NewConn,
 		RegisterSvc:   env.RegisterSvc,

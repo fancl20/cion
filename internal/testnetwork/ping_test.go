@@ -43,7 +43,7 @@ func TestPingForkTopology(t *testing.T) {
 	})
 	report, err := ping.Run(ctx, ping.Config{
 		Conn:     c.conn(t),
-		Provider: c.app.Provider(),
+		Paths:    c.app.Provider(),
 		Dst:      nodeIA,
 		DstHost:  b.host,
 		Count:    3,
@@ -85,7 +85,7 @@ func TestPingForkTopology(t *testing.T) {
 	})
 	report, err = ping.Run(ctx, ping.Config{
 		Conn:     a.conn(t),
-		Provider: a.app.Provider(),
+		Paths:    a.app.Provider(),
 		Dst:      lineCIA,
 		DstHost:  c.host,
 		Count:    3,
@@ -147,7 +147,7 @@ func TestPingLineMiddleNode(t *testing.T) {
 		t.Helper()
 		report, err := ping.Run(ctx, ping.Config{
 			Conn:     p.conn(t),
-			Provider: p.app.Provider(),
+			Paths:    p.app.Provider(),
 			Dst:      dst,
 			DstHost:  host,
 			Count:    3,
@@ -201,7 +201,7 @@ func TestPingSiblingNodes(t *testing.T) {
 	})
 	report, err := ping.Run(ctx, ping.Config{
 		Conn:     c.conn(t),
-		Provider: c.app.Provider(),
+		Paths:    c.app.Provider(),
 		Dst:      iaD,
 		DstHost:  d.host,
 		Count:    3,
@@ -245,7 +245,7 @@ func TestPingReresolvesExpiredPath(t *testing.T) {
 	warmUp(t, p, r, fresh)
 	report, err := ping.Run(t.Context(), ping.Config{
 		Conn:     p.conn(t),
-		Provider: &scion.PathProvider{IA: iaP, DB: db},
+		Paths:    &scion.PathProvider{IA: iaP, DB: db},
 		Dst:      iaR,
 		DstHost:  r.host,
 		Count:    3,
@@ -366,7 +366,7 @@ func TestPingUnreachable(t *testing.T) {
 	go func() {
 		_, err := ping.Run(t.Context(), ping.Config{
 			Conn:     conn,
-			Provider: p.app.Provider(),
+			Paths:    p.app.Provider(),
 			Dst:      stranger,
 			DstHost:  netip.MustParseAddr("127.0.0.99"),
 			Count:    1,
@@ -402,7 +402,7 @@ func TestPingLossSummary(t *testing.T) {
 	warmUp(t, p, r, seg)
 	report, err := ping.Run(t.Context(), ping.Config{
 		Conn:     p.conn(t),
-		Provider: &scion.PathProvider{IA: iaP, DB: &staticPathDB{seg: seg}},
+		Paths:    &scion.PathProvider{IA: iaP, DB: &staticPathDB{seg: seg}},
 		Dst:      iaR,
 		DstHost:  hostSlot(t),
 		Count:    2,

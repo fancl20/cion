@@ -53,7 +53,7 @@ func (n *node) appEnvironment() *apps.Environment {
 		ControlHost:     n.cfg.controlAddr.String(),
 		Domain:          n.cfg.Domain,
 		Engine:          n.engine,
-		Provider:        n.pathProvider,
+		Paths:           n.pathProvider,
 		NewConn:         func() (*scion.Conn, error) { return n.scionConn(0) },
 		InterfaceDown:   n.ifDown,
 		RegisterSvc:     n.registerSvc,
