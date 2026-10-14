@@ -24,8 +24,8 @@ package.
 
 They touch nothing else there, and nothing there touches them: the
 beaconer reads their verdicts through a function. They are the control
-plane's only reason to import the data plane, the neighbor table, and the
-packet layers. [Proposal 0055](/docs/proposals/0055-file-the-pki-procedures-with-the-trust-engine.md)
+plane's only reason to import the data plane, the neighbor table, gopacket,
+and SCION's header layers. [Proposal 0055](/docs/proposals/0055-file-the-pki-procedures-with-the-trust-engine.md)
 moved the PKI procedures out of the package and deferred the next split.
 
 This ADR decides where link liveness lives.
@@ -82,7 +82,7 @@ Chosen option: **a fifth core member, `liveness`** — realized as follows:
 *   Each core item ADR-0009 enumerates has a package, and the control
     plane's reviews against its draft alone.
 *   The control plane's package stops importing the data plane, the neighbor
-    table, and the packet layers.
+    table, gopacket, and SCION's header layers.
 *   Liveness's tests stand alone: they share no fixture with the control
     plane's.
 
