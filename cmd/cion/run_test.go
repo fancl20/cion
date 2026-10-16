@@ -216,7 +216,7 @@ func TestRunCommandsPresetRole(t *testing.T) {
 		want string
 	}{
 		{newRunCoreCommand(), "--trust.domain is required: the founding core's own"},
-		{newRunLocalCommand(), "--trust.domain is required: the network's core domain"},
+		{newRunLocalCommand(), "--trust.domain is required: the network's core identity"},
 	} {
 		tc.cmd.SilenceUsage = true
 		tc.cmd.SilenceErrors = true

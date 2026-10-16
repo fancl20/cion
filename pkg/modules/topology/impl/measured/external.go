@@ -89,14 +89,19 @@ func (h *externalHost) host() netip.Addr {
 	return h.current
 }
 
-// domainHost resolves the founding core's own domain to the address its
-// entry publishes — the name its certificate machinery stands behind, which
-// the mapping a provider holds the core behind already resolves to it. The
-// answer must share the control host's family: the published address is one
-// the node's sockets bind. The fallback is the control host itself.
+// domainHost resolves the founding core's own identity to the address its
+// entry publishes: an address literal directly — the config resolution has
+// already pinned it to the control host's own — a domain through the
+// resolver, the mapping a provider holds the core behind; a domain's
+// answer must share the control host's family, a published address being
+// one the node's sockets bind. The fallback is the control host itself.
 type domainHost struct {
 	domain   string
 	fallback netip.Addr
+	// literal is the identity's own address, valid when the identity is an
+	// address: the one fact resolution needs then, a value that cannot
+	// change.
+	literal netip.Addr
 
 	// lookup resolves a name; nil uses the system resolver. The field is
 	// the tests' seam.
@@ -109,9 +114,23 @@ type domainHost struct {
 	ok   bool
 }
 
-// resolve returns the domain's address, the fallback when the name fails to
+// newDomainHost builds the founder's host resolution, parsing the identity's
+// grammar once: an address needs no lookup and no memoization.
+func newDomainHost(domain string, fallback netip.Addr) *domainHost {
+	d := &domainHost{domain: domain, fallback: fallback}
+	if addr, err := netip.ParseAddr(domain); err == nil {
+		d.literal = addr.Unmap()
+	}
+	return d
+}
+
+// resolve returns the identity's address: the literal itself when the
+// identity is one, else the domain's — the fallback when the name fails to
 // resolve or carries no address of the control host's family.
 func (d *domainHost) resolve(ctx context.Context) netip.Addr {
+	if d.literal.IsValid() {
+		return d.literal
+	}
 	d.mtx.Lock()
 	defer d.mtx.Unlock()
 	ttl := domainFailureTTL

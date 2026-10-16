@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/netip"
 	"sync"
 	"time"
 
@@ -24,12 +25,21 @@ const HTTPSPort = "443"
 // server-level bound the HTTPS surface carries.
 const readHeaderTimeout = 30 * time.Second
 
+// shortlivedProfile is the issuer profile an address identity certifies
+// under — the one the CA admits an ip identifier by, its certificates
+// living 160 hours inside the maintenance's renewal.
+const shortlivedProfile = "shortlived"
+
+// sharedRange is the carrier-grade NAT block, an address of which no public
+// CA validates beside the ranges the netip predicates name.
+var sharedRange = netip.MustParsePrefix("100.64.0.0/10")
+
 // TLSCertConfig describes how the endpoint's TLS certificate is obtained:
-// explicit certificate files, or a certificate for the domain managed via
-// ACME (certmagic) as the default.
+// explicit certificate files, or a certificate for the identity managed
+// via ACME (certmagic) as the default.
 type TLSCertConfig struct {
-	// Domain is the DNS domain of the certificate. It is a TLS identity,
-	// never resolved: the SCION link is the locator.
+	// Domain is the identity the certificate answers for. It is a TLS
+	// identity, never resolved: the SCION link is the locator.
 	Domain string
 	// Email is the ACME account email; empty lets the ACME server ask for
 	// one interactively or proceed without.
@@ -85,6 +95,22 @@ func PrepareTLSCert(cfg TLSCertConfig) (*CertManager, error) {
 		}}, nil
 	}
 
+	// An address identity takes the shortlived profile — the one the CA
+	// certifies ip identifiers under — and a range no public CA validates
+	// refuses the boot before any resource binds: an address that cannot
+	// certify would retry its issuance forever under the maintenance's
+	// Degrade. The refusal names the certificate files the offline
+	// deployment uses.
+	isAddress := false
+	if parsed, err := netip.ParseAddr(cfg.Domain); err == nil {
+		if nonvalidatable := unvalidatableRange(parsed.Unmap()); nonvalidatable != "" {
+			return nil, fmt.Errorf("--trust.domain %s is %s, a range no public CA "+
+				"validates: use the certificate files (--trust.cert-file, "+
+				"--trust.key-file) instead", cfg.Domain, nonvalidatable)
+		}
+		isAddress = true
+	}
+
 	var storage certmagic.Storage
 	if cfg.Storage != "" {
 		storage = &certmagic.FileStorage{Path: cfg.Storage}
@@ -102,6 +128,9 @@ func PrepareTLSCert(cfg TLSCertConfig) (*CertManager, error) {
 		return nil, fmt.Errorf("certmagic did not configure an ACME issuer")
 	}
 	issuer.Email = cfg.Email
+	if isAddress {
+		issuer.Profile = shortlivedProfile
+	}
 
 	// The HTTP-01 challenge must be answerable before issuance starts; the
 	// TLS-ALPN-01 challenge rides whichever server holds port 443.
@@ -215,6 +244,28 @@ func (m *CertManager) httpsTLSConfig() *tls.Config {
 	cfg := m.tlsCfg.Clone()
 	cfg.NextProtos = []string{"http/1.1", acmez.ACMETLS1Protocol}
 	return cfg
+}
+
+// unvalidatableRange names the range an address belongs to that no public
+// CA validates — private, loopback, link-local, shared, unspecified, and
+// multicast ranges are the CA's refusals — the empty string for an address
+// one validates: a global unicast address outside them.
+func unvalidatableRange(addr netip.Addr) string {
+	switch {
+	case addr.IsUnspecified():
+		return "an unspecified address"
+	case addr.IsLoopback():
+		return "a loopback address"
+	case addr.IsMulticast():
+		return "a multicast address"
+	case addr.IsLinkLocalUnicast():
+		return "a link-local address"
+	case addr.IsPrivate():
+		return "a private address"
+	case sharedRange.Contains(addr):
+		return "a shared address"
+	}
+	return ""
 }
 
 // serveHTTP01 answers the ACME HTTP-01 challenge on a dedicated TCP

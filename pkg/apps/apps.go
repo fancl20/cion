@@ -66,8 +66,8 @@ type Environment struct {
 	// ControlHost is the control address, "host:port"; its host is the
 	// underlay host the host-facing port binds.
 	ControlHost string
-	// Domain is the core's domain — the founding core's own when Core is
-	// set, the network's core domain otherwise.
+	// Domain is the core's WebPKI identity — the founding core's own when
+	// Core is set, the network's core identity otherwise.
 	Domain string
 	// Engine provides the node's chain for the directory channel; Paths
 	// resolves the paths the mesh datagrams ride.

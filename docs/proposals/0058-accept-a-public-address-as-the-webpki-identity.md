@@ -222,4 +222,31 @@ The change lands in one commit.
 
 ## Implementation history
 
-None yet.
+*   Landed in one commit, as planned. The grammar's five readers are
+    [tls.go](/pkg/core/webpki/tls.go) — the profile selection and the
+    range refusal before any resource binds,
+    [mtls.go](/pkg/libs/scionrpc/mtls.go) — the demux's nameless arm,
+    [remote.go](/pkg/core/webpki/remote.go) — the bracketed URL,
+    [external.go](/pkg/modules/topology/impl/measured/external.go) — the
+    literal the founder publishes, and
+    [config.go](/internal/services/config.go) — the founding resolution's
+    pin of the identity to the control host's own address.
+*   The new episodes are `TestPrepareTLSCertAddressIdentity` and
+    `TestServeHTTPSACMEChallengeIPIdentifier`
+    ([tls_test.go](/pkg/core/webpki/tls_test.go)),
+    `TestEndpointTLSDispatchAddressIdentity`
+    ([mtls_test.go](/pkg/libs/scionrpc/mtls_test.go)),
+    `TestCoreBaseURLBracketsTheLiteral`
+    ([remote_test.go](/pkg/core/webpki/remote_test.go)),
+    `TestDomainHostAnswersTheLiteral`
+    ([external_test.go](/pkg/modules/topology/impl/measured/external_test.go)),
+    `TestJoinByAddressIdentity`
+    ([join_test.go](/internal/testnetwork/join_test.go)), and
+    `TestCoordinationByAddressIdentity`
+    ([coordination_test.go](/internal/testnetwork/coordination_test.go)).
+*   [webpkitest](/pkg/core/webpki/webpkitest/webpkitest.go) mints the
+    address-shaped certificate beside the domain's — `NewFor` for a host of
+    a lab's own drawing, the loopback address the default — and the
+    coordination episode ran on the vendored client engine without a
+    refusal: the tailnet named by the address and the relay dialed by it
+    both answered.

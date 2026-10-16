@@ -15,8 +15,8 @@ func addCoreNodeFlags(flags *pflag.FlagSet, opts *services.NodeConfig) {
 		"an existing node's rendezvous underlay address; set, the core joins the "+
 			"neighbor's ISD as an authoritative core instead of founding its own")
 	flags.StringVar(&opts.Domain, "trust.domain", "",
-		"the founding core's own domain without a neighbor, else the network's core "+
-			"domain — the WebPKI identity of the enrollment and TRC fetch (required)")
+		"the founding core's own identity without a neighbor, else the network's core "+
+			"identity — the WebPKI identity of the enrollment and TRC fetch (required)")
 	flags.StringVar(&opts.AcmeEmail, "trust.acme-email", "",
 		"the ACME account email for the founding core's certificate (optional)")
 	flags.StringVar(&opts.CertFile, "trust.cert-file", "",
@@ -43,7 +43,7 @@ func newRunCoreCommand() *cobra.Command {
 		Short: "Run a core: founding without a neighbor, joining as an authoritative core with one",
 		Long: "Run a core: without a --topology.neighbor, the founding core — TRC genesis, " +
 			"the issuer every node's chain descends from, and self-enrollment, serving " +
-			"its own domain; with one, an authoritative core joining the neighbor's ISD — " +
+			"its own identity; with one, an authoritative core joining the neighbor's ISD — " +
 			"enrolling like any node until the founder's sensitive update onboards it. " +
 			"Identity and links come from the state directory; a first start needs the " +
 			"core's --trust.domain and, to join, a bootstrap neighbor.",

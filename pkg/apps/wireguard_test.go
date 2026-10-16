@@ -62,6 +62,19 @@ func TestWireguardConfigFromEnvironment(t *testing.T) {
 	if cfg.CoreRoute == nil {
 		t.Error("the joiner got no core route")
 	}
+
+	// An address identity derives its own relay URL, an IPv6 literal
+	// bracketed the way a URL's authority carries it.
+	v6 := wireguardEnvironment(t, true)
+	v6.Domain = "2001:db8::7"
+	v6cfg, err := wireguardConfig(v6)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = v6cfg.Store.Close() })
+	if v6cfg.DERP == nil || v6cfg.DERP.URL != "https://[2001:db8::7]/derp" {
+		t.Errorf("relay presence = %+v, want the bracketed literal", v6cfg.DERP)
+	}
 }
 
 // TestWireguardRelayPlacement checks the harness's relay placement

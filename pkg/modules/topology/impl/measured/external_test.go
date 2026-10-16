@@ -60,6 +60,38 @@ func TestExternalHostPersistsAcrossRestart(t *testing.T) {
 	}
 }
 
+// TestDomainHostAnswersTheLiteral checks the founding core's published host
+// under an address identity: the literal is the answer itself — no lookup,
+// no memoization, and no family check, for the config resolution has
+// already pinned it to the control host's own address.
+func TestDomainHostAnswersTheLiteral(t *testing.T) {
+	lookups := 0
+	d := newDomainHost("2001:db8::1", netip.MustParseAddr("10.0.0.7"))
+	d.lookup = func(context.Context, string, string) ([]netip.Addr, error) {
+		lookups++
+		return nil, errors.New("no such name")
+	}
+	if got := d.resolve(context.Background()); got != netip.MustParseAddr("2001:db8::1") {
+		t.Errorf("resolved host = %v, want the literal", got)
+	}
+	if lookups != 0 {
+		t.Errorf("resolutions = %d, want none for a value that cannot change", lookups)
+	}
+
+	// A domain identity still resolves through the lookup.
+	d = newDomainHost("core.example.org", netip.MustParseAddr("10.0.0.7"))
+	d.lookup = func(context.Context, string, string) ([]netip.Addr, error) {
+		lookups++
+		return []netip.Addr{netip.MustParseAddr("192.0.2.20")}, nil
+	}
+	if got := d.resolve(context.Background()); got != netip.MustParseAddr("192.0.2.20") {
+		t.Errorf("resolved host = %v, want the domain's address", got)
+	}
+	if lookups != 1 {
+		t.Errorf("resolutions = %d, want the domain's one", lookups)
+	}
+}
+
 // TestDomainHostResolvesPublishedAddress checks the founding core's
 // published host: its domain's first address of the control host's family —
 // a published address the node's sockets do not bind is a misconfiguration —

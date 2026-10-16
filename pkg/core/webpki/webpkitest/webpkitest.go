@@ -14,6 +14,7 @@ import (
 	"encoding/pem"
 	"math/big"
 	"net"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"testing"
@@ -24,32 +25,60 @@ import (
 // is signed by the test CA.
 const Domain = "cion-core.test"
 
+// Address is the address identity the CA mints a certificate for beside
+// the domain's: the loopback address, the host an address-shaped lab's core
+// sits on.
+const Address = "127.0.0.1"
+
 // CA is the test certificate authority anchoring the endpoint's TLS
-// certificate: the pool trusting it, the server certificate and key files
-// for Domain, and the CA's own certificate file.
+// certificates: the pool trusting it, the domain's server certificate and
+// key files, the address identity's beside them, and the CA's own
+// certificate file.
 type CA struct {
 	Pool     *x509.CertPool
 	CertFile string
 	KeyFile  string
-	CAFile   string
+	// AddrCertFile and AddrKeyFile hold the address identity's certificate
+	// — SANs carrying the address alone, the common name omitted, the
+	// shape the shortlived profile issues.
+	AddrCertFile string
+	AddrKeyFile  string
+	CAFile       string
 }
 
-// New mints the CA and the server certificate in a fresh temporary
-// directory.
+// New mints the CA and the server certificates — the domain's and the
+// loopback address's — in a fresh temporary directory.
 func New(t testing.TB) *CA {
 	t.Helper()
-	ca, err := Mint(t.TempDir())
+	ca, err := mint(t.TempDir(), netip.MustParseAddr(Address))
 	if err != nil {
 		t.Fatal(err)
 	}
 	return ca
 }
 
-// Mint mints the CA and the server certificate in dir, for callers with no
-// test at hand, such as TestMain. The server certificate names Domain and
-// the loopback address 127.0.0.1, which clients that dial the endpoint by
-// address verify.
+// NewFor is New with the address identity's own address, for the labs whose
+// core sits on a host of their own drawing.
+func NewFor(t testing.TB, address netip.Addr) *CA {
+	t.Helper()
+	ca, err := mint(t.TempDir(), address)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return ca
+}
+
+// Mint mints the CA and the server certificates in dir, for callers with no
+// test at hand, such as TestMain.
 func Mint(dir string) (*CA, error) {
+	return mint(dir, netip.MustParseAddr(Address))
+}
+
+// mint mints the CA and the two server certificates in dir. The domain's
+// names Domain and the loopback address 127.0.0.1, which clients that dial
+// the endpoint by address verify; the address identity's carries address
+// alone.
+func mint(dir string, address netip.Addr) (*CA, error) {
 	caKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		return nil, err
@@ -96,11 +125,35 @@ func Mint(dir string) (*CA, error) {
 	if err != nil {
 		return nil, err
 	}
+
+	addrKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return nil, err
+	}
+	addrTmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(3),
+		IPAddresses:  []net.IP{address.AsSlice()},
+		NotBefore:    now.Add(-time.Hour),
+		NotAfter:     now.Add(24 * time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+	}
+	addrDER, err := x509.CreateCertificate(rand.Reader, addrTmpl, caCert,
+		addrKey.Public(), caKey)
+	if err != nil {
+		return nil, err
+	}
+	addrKeyDER, err := x509.MarshalECPrivateKey(addrKey)
+	if err != nil {
+		return nil, err
+	}
 	ca := &CA{
-		Pool:     x509.NewCertPool(),
-		CertFile: filepath.Join(dir, "cert.pem"),
-		KeyFile:  filepath.Join(dir, "key.pem"),
-		CAFile:   filepath.Join(dir, "ca.pem"),
+		Pool:         x509.NewCertPool(),
+		CertFile:     filepath.Join(dir, "cert.pem"),
+		KeyFile:      filepath.Join(dir, "key.pem"),
+		AddrCertFile: filepath.Join(dir, "addr-cert.pem"),
+		AddrKeyFile:  filepath.Join(dir, "addr-key.pem"),
+		CAFile:       filepath.Join(dir, "ca.pem"),
 	}
 	ca.Pool.AddCert(caCert)
 	for _, f := range []struct {
@@ -109,6 +162,8 @@ func Mint(dir string) (*CA, error) {
 	}{
 		{ca.CertFile, &pem.Block{Type: "CERTIFICATE", Bytes: serverDER}},
 		{ca.KeyFile, &pem.Block{Type: "EC PRIVATE KEY", Bytes: serverKeyDER}},
+		{ca.AddrCertFile, &pem.Block{Type: "CERTIFICATE", Bytes: addrDER}},
+		{ca.AddrKeyFile, &pem.Block{Type: "EC PRIVATE KEY", Bytes: addrKeyDER}},
 		{ca.CAFile, &pem.Block{Type: "CERTIFICATE", Bytes: caDER}},
 	} {
 		if err := os.WriteFile(f.path, pem.EncodeToMemory(f.block), 0o600); err != nil {

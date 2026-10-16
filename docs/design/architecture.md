@@ -15,7 +15,7 @@ A CION network is a set of nodes, one per AS, run by different operators and
 linked pairwise over a UDP/IP underlay. Each node forwards packets whose path
 is carried in the packet itself — no node holds a routing table — and the
 endpoint, not the network, chooses the path its traffic takes. A node joins
-with two facts, one neighbor's address and the core's domain, and needs
+with two facts, one neighbor's address and the core's identity, and needs
 nothing else: identity is generated locally, paths are discovered, links are
 earned by measurement, and hosts are tailnet clients — one login against the
 core's coordination endpoint serves the network's life, every node an
@@ -152,7 +152,7 @@ provider and the neighbor table.
 ### Trust and enrollment
 
 The founding core self-issues the TRC and anchors it in the WebPKI through
-its domain. A joiner's first fetch of the core is the only WebPKI-anchored
+its identity. A joiner's first fetch of the core is the only WebPKI-anchored
 exchange; enrollment then issues the chain that authenticates everything the
 node says thereafter, and renewal is automatic. First issuance is the
 admission gate, where enrollment policy — if a deployment selects one —

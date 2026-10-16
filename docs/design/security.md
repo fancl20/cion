@@ -17,7 +17,7 @@ overview](/docs/design/architecture.md) names the components involved.
     WebPKI identity — the coordination endpoint is the one host-facing
     surface where the WebPKI appears a second time.
 *   **Joiner to core, once.** The joiner's first fetch of the core's endpoint
-    is anchored in the WebPKI through the core's domain — the only place the
+    is anchored in the WebPKI through the core's identity, the only place the
     WebPKI appears. Every exchange after it rides the network's own trust.
 *   **Node to node, first contact.** The rendezvous exchange is
     unauthenticated: a matched nonce proves return routability and nothing

@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math/big"
+	"net/netip"
 	"sync"
 	"time"
 
@@ -33,9 +34,10 @@ import (
 
 // EndpointTLSConfig configures the endpoint's two channels.
 type EndpointTLSConfig struct {
-	// Domain is the core's WebPKI identity; clients offering it as the TLS
-	// server name are served the bootstrap channel. Empty on non-core nodes,
-	// which serve only the SCION-native channel.
+	// Domain is the core's WebPKI identity. A domain's bootstrap clients
+	// offer it as the TLS server name; an address's arrive nameless, Go's
+	// client omitting the SNI extension for an address-shaped ServerName.
+	// Empty on non-core nodes, which serve only the SCION-native channel.
 	Domain string
 	// WebPKI serves the bootstrap channel; typically from
 	// pkg/core/webpki's PrepareTLSCert. Nil disables the channel.
@@ -48,8 +50,9 @@ type EndpointTLSConfig struct {
 }
 
 // EndpointTLS composes the endpoint's TLS configuration: the bootstrap channel
-// — the WebPKI certificate for clients offering the core's domain as the TLS
-// server name — and the SCION-native channel for everything else.
+// — the WebPKI certificate for the clients the identity takes, a domain's
+// naming it as the TLS server name and an address's arriving nameless — and
+// the SCION-native channel for everything else.
 func EndpointTLS(cfg EndpointTLSConfig) *tls.Config {
 	native := &tls.Config{
 		MinVersion: tls.VersionTLS13,
@@ -66,12 +69,25 @@ func EndpointTLS(cfg EndpointTLSConfig) *tls.Config {
 		MinVersion: tls.VersionTLS13,
 		NextProtos: []string{"h3"},
 		GetConfigForClient: func(chi *tls.ClientHelloInfo) (*tls.Config, error) {
-			if cfg.WebPKI != nil && chi.ServerName == cfg.Domain {
+			if cfg.WebPKI != nil && bootstrapHello(chi.ServerName, cfg.Domain) {
 				return cfg.WebPKI, nil
 			}
 			return native, nil
 		},
 	}
+}
+
+// bootstrapHello reports whether a ClientHello takes the bootstrap channel:
+// a domain identity by offering it as the TLS server name, an address
+// identity by carrying no name at all — RFC 6066 admits DNS names alone in
+// the SNI extension, so the bootstrap client's hello against an address
+// identity arrives nameless. No ambiguity arises: the native channel's
+// clients always name their peer, the ISD-AS set on every dial.
+func bootstrapHello(offered, identity string) bool {
+	if _, err := netip.ParseAddr(identity); err == nil {
+		return offered == ""
+	}
+	return offered == identity
 }
 
 // nativeClientTLS returns the client TLS configuration for a connection to

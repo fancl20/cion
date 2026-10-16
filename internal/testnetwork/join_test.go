@@ -375,6 +375,53 @@ func TestJoinByRendezvous(t *testing.T) {
 	})
 }
 
+// TestJoinByAddressIdentity is the address identity's join proof: the
+// founding core's --trust.domain a public address — the control host's own,
+// as the resolution pins it — its certificate the address-shaped one the
+// test CA mints, and the joiner's --trust.domain the same literal. The
+// joiner's bootstrap client arrives nameless — Go's client omitting the SNI
+// extension for an address-shaped server name — and the endpoint's demux
+// hands it the WebPKI channel; over it the joiner fetches the TRC and
+// enrolls, and the core's published host is the literal its sockets bind.
+func TestJoinByAddressIdentity(t *testing.T) {
+	t.Parallel()
+	ipA, ipB := hostSlot(t), hostSlot(t)
+	wpki := webpkitest.NewFor(t, ipA)
+	identity := ipA.String()
+	a := bootAssembly(t, func(cfg *services.NodeConfig) {
+		cfg.Core = true
+		cfg.Domain = identity
+		cfg.State = t.TempDir()
+		cfg.Internal = PinnedUDPAddrOn(t, ipA)
+		cfg.Control = FreeUDPAddrOn(t, ipA)
+		cfg.CertFile = wpki.AddrCertFile
+		cfg.KeyFile = wpki.AddrKeyFile
+	})
+	b := bootAssembly(t, func(cfg *services.NodeConfig) {
+		cfg.Domain = identity
+		cfg.State = t.TempDir()
+		cfg.Internal = PinnedUDPAddrOn(t, ipB)
+		cfg.Control = FreeUDPAddrOn(t, ipB)
+		cfg.Neighbors = []string{a.rendezvousOf()}
+		cfg.RootCAs = wpki.Pool
+	})
+	ctx := t.Context()
+
+	Poll(t, "B's link to the core", func() bool {
+		e := entryOf(ctx, b, a.app.IA())
+		return e != nil && e.State == links.StateEstablished
+	})
+	// The TRC the enrollment verifies against came through the address
+	// identity's channel, the first fetch the WebPKI anchors.
+	Poll(t, "B fetched the TRC over the address identity", func() bool {
+		trc, err := b.app.TrustDB().SignedTRC(ctx, trust.NewestTRCID(a.app.IA().ISD()))
+		return err == nil && !trc.IsZero()
+	})
+	Poll(t, "B enrolled over the address identity", func() bool {
+		return pingFrom(ctx, b, a.app.IA(), a.host)
+	})
+}
+
 // TestLineCutHeals is the cut's integration proof: the three-node line —
 // the core A, the middle B, and C below — where killing B leaves C with
 // every route to A crossing the dead link. C, below the floor of up links,

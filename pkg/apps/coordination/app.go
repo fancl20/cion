@@ -29,8 +29,9 @@ type Store interface {
 // DERPConfig names the relay a netmap advertises: the core's own HTTPS
 // identity, one region, the one fallback path a client expects.
 type DERPConfig struct {
-	// HostName is the DERP node's hostname — the core's domain by default,
-	// and the name the certificate answers for.
+	// HostName is the DERP node's hostname — the core's identity by
+	// default, the name the certificate answers for; an address answers
+	// the resolver and the verification both.
 	HostName string
 	// IPv4 optionally dials the relay by address instead of DNS — the
 	// integration harness's stand-in for resolution.
@@ -45,7 +46,7 @@ type DERPConfig struct {
 
 // Config configures the coordination application.
 type Config struct {
-	// Domain is the core's domain: the name the certificate answers for
+	// Domain is the core's identity: the name the certificate answers for
 	// and the tailnet's own.
 	Domain string
 	// Store is the registry: node entries read for the netmap and

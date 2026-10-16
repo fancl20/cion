@@ -6,6 +6,8 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/tls"
+	"net"
+	"net/netip"
 	"testing"
 
 	"github.com/scionproto/scion/pkg/addr"
@@ -137,6 +139,116 @@ func TestEndpointTLSDispatch(t *testing.T) {
 	}
 	if got.ClientAuth != tls.RequireAnyClientCert {
 		t.Error("non-core endpoint did not serve the SCION-native channel")
+	}
+}
+
+// TestEndpointTLSDispatchAddressIdentity checks the dispatch's address arm:
+// against an address identity a nameless ClientHello — the bootstrap
+// client's shape, Go's client omitting the SNI extension for an
+// address-shaped ServerName — takes the WebPKI channel and completes its
+// handshake, the certificate's IP addresses answering the bare literal the
+// client names, while a hello naming anything takes the native channel, and
+// a nameless hello against a domain identity keeps the native channel's
+// rule.
+func TestEndpointTLSDispatchAddressIdentity(t *testing.T) {
+	f := newMTLSFixture(t)
+
+	ca := webpkitest.New(t)
+	pair, err := tls.LoadX509KeyPair(ca.AddrCertFile, ca.AddrKeyFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	webPKI := &tls.Config{
+		Certificates: []tls.Certificate{pair},
+		MinVersion:   tls.VersionTLS13,
+		NextProtos:   []string{"h3"},
+	}
+	conf := EndpointTLS(EndpointTLSConfig{
+		Domain:      webpkitest.Address,
+		WebPKI:      webPKI,
+		Credentials: f.engine,
+		Key:         f.engine.Key,
+	})
+
+	nameless, err := conf.GetConfigForClient(&tls.ClientHelloInfo{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if nameless != webPKI {
+		t.Error("a nameless ClientHello did not get the WebPKI channel")
+	}
+	named, err := conf.GetConfigForClient(&tls.ClientHelloInfo{ServerName: webpkitest.Address})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if named == webPKI || named.ClientAuth != tls.RequireAnyClientCert {
+		t.Error("a ClientHello naming an address did not get the SCION-native channel")
+	}
+
+	// The nameless handshake completes, both families: the endpoint serves
+	// the WebPKI certificate, and the client verifies the bare literal
+	// against its IP addresses.
+	for _, identity := range []struct {
+		literal string
+		ca      *webpkitest.CA
+	}{
+		{webpkitest.Address, ca},
+		{"::1", webpkitest.NewFor(t, netip.MustParseAddr("::1"))},
+	} {
+		pair, err := tls.LoadX509KeyPair(identity.ca.AddrCertFile, identity.ca.AddrKeyFile)
+		if err != nil {
+			t.Fatal(err)
+		}
+		conf := EndpointTLS(EndpointTLSConfig{
+			Domain: identity.literal,
+			WebPKI: &tls.Config{
+				Certificates: []tls.Certificate{pair},
+				MinVersion:   tls.VersionTLS13,
+				NextProtos:   []string{"h3"},
+			},
+			Credentials: f.engine,
+			Key:         f.engine.Key,
+		})
+		client, server := net.Pipe()
+		served := make(chan error, 1)
+		go func() { served <- tls.Server(server, conf).Handshake() }()
+		clt := tls.Client(client, &tls.Config{
+			ServerName: identity.literal,
+			RootCAs:    identity.ca.Pool,
+			MinVersion: tls.VersionTLS13,
+			NextProtos: []string{"h3"},
+		})
+		if err := clt.Handshake(); err != nil {
+			t.Errorf("the bootstrap handshake against %s: %v", identity.literal, err)
+		} else if err := <-served; err != nil {
+			t.Errorf("the endpoint's side of the %s handshake: %v", identity.literal, err)
+		}
+		_ = client.Close()
+		_ = server.Close()
+	}
+
+	// A domain identity keeps its rule: the nameless hello is the native
+	// channel's, whose client-certificate demand refuses the handshake.
+	domain := EndpointTLS(EndpointTLSConfig{
+		Domain:      webpkitest.Domain,
+		WebPKI:      webPKI,
+		Credentials: f.engine,
+		Key:         f.engine.Key,
+	})
+	got, err := domain.GetConfigForClient(&tls.ClientHelloInfo{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got == webPKI || got.ClientAuth != tls.RequireAnyClientCert {
+		t.Fatal("a nameless ClientHello against a domain identity did not get " +
+			"the SCION-native channel")
+	}
+	client, server := net.Pipe()
+	defer func() { _ = client.Close(); _ = server.Close() }()
+	go func() { _ = tls.Server(server, domain).Handshake() }()
+	clt := tls.Client(client, &tls.Config{MinVersion: tls.VersionTLS13})
+	if err := clt.Handshake(); err == nil {
+		t.Error("a nameless handshake against a domain identity completed")
 	}
 }
 

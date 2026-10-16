@@ -391,3 +391,78 @@ func TestCoordinationOpenJoin(t *testing.T) {
 		t.Fatal("the core's Close never returned with its hosts connected")
 	}
 }
+
+// TestCoordinationByAddressIdentity is the address identity's coordination
+// proof: the core's --trust.domain a public address — the loopback host its
+// control sockets and placed endpoint both sit on, as the resolution pins
+// it — and its certificate the address-shaped one the package CA mints.
+// The vendored client engine logs in against the placed address — the
+// tailnet named by the identity, the certificate verified against its IP
+// addresses — and two hosts exchange traffic through the mesh, the relay
+// the netmap advertises dialed by the same literal.
+func TestCoordinationByAddressIdentity(t *testing.T) {
+	t.Parallel()
+	// The package CA: its address certificate is the one the vendored
+	// clients' root store trusts.
+	wpki := packageWebPKI
+	place := placeCoordination(t)
+	loopback := netip.MustParseAddr("127.0.0.1")
+	a := coordCore(t, wpki, loopback, place, func(cfg *services.NodeConfig) {
+		cfg.Domain = webpkitest.Address
+		cfg.CertFile = wpki.AddrCertFile
+		cfg.KeyFile = wpki.AddrKeyFile
+	})
+	b := coordLeaf(t, wpki, hostSlot(t), a, place, func(cfg *services.NodeConfig) {
+		cfg.Domain = webpkitest.Address
+	})
+
+	Poll(t, "the leaf reaches the core", func() bool {
+		return pingFrom(t.Context(), b, a.app.IA(), a.host)
+	})
+	Poll(t, "the core reaches the leaf", func() bool {
+		return pingFrom(t.Context(), a, b.app.IA(), b.host)
+	})
+
+	// The far node's entry reaches the core's registry before its hosts
+	// can place in its slice: the directory's own convergence, the same
+	// one the mesh rides.
+	Poll(t, "the core's registry holding B's entry", func() bool {
+		directory, err := wireguardOf(a).Directory(t.Context())
+		if err != nil {
+			return false
+		}
+		for _, entry := range directory.Nodes {
+			if entry.IA.Equal(b.app.IA()) && entry.HostEndpoint.IsValid() {
+				return true
+			}
+		}
+		return false
+	})
+
+	hostA := tailnetHost(t, "host-a", place.controlURL, "")
+	ipsA := hostUp(t, hostA)
+	if len(ipsA) != 1 || !ipsA[0].Is4() || !TailnetRange.Contains(ipsA[0]) {
+		t.Fatalf("the host's addresses = %v, want one of the tailnet range", ipsA)
+	}
+	hostB := tailnetHost(t, "host-b", place.controlURL, "")
+	ipsB := hostUp(t, hostB)
+	if len(ipsB) != 1 || !ipsB[0].Is4() || !TailnetRange.Contains(ipsB[0]) {
+		t.Fatalf("the far host's addresses = %v, want one of the tailnet range", ipsB)
+	}
+
+	Poll(t, "A's host device programmed", func() bool {
+		return len(wireguardOf(a).HostPeers()) == 1
+	})
+	Poll(t, "B's host device programmed", func() bool {
+		return len(wireguardOf(b).HostPeers()) == 1
+	})
+
+	warmSession(t, hostA, ipsB[0])
+	warmSession(t, hostB, ipsA[0])
+
+	src, dstHost, dstIP := hostA, hostB, ipsB[0]
+	if ownerOf(t, a, b, ipsA[0]) == b.app.IA() {
+		src, dstHost, dstIP = hostB, hostA, ipsA[0]
+	}
+	echoOverTailnet(t, dstHost, dstIP, src, "through the address identity")
+}

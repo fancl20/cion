@@ -2,6 +2,7 @@ package apps
 
 import (
 	"fmt"
+	"net/netip"
 	"os"
 	"path/filepath"
 
@@ -112,13 +113,15 @@ func wireguardConfig(env *Environment) (wireguard.Config, error) {
 }
 
 // relayPresence derives the node's relay presence: the core's coordination
-// endpoint on its own HTTPS identity — the domain every node already
-// holds. The harness's placement overrides it, its loopback address and
-// pinned certificate standing in for the domain and the WebPKI.
-func relayPresence(domain string, relay RelayPlacement) *wireguard.DERPConfig {
-	// The relay's own path rides the URL: the client dials it verbatim.
+// endpoint on its own HTTPS identity — the name every node already holds, a
+// domain or an address. The harness's placement overrides it, its loopback
+// address and pinned certificate standing in for the identity and the
+// WebPKI.
+func relayPresence(identity string, relay RelayPlacement) *wireguard.DERPConfig {
+	// The relay's own path rides the URL: the client dials it verbatim, an
+	// IPv6 literal in RFC 3986's brackets.
 	derp := &wireguard.DERPConfig{
-		URL: "https://" + domain + "/derp",
+		URL: "https://" + urlHost(identity) + "/derp",
 	}
 	if relay.URL != "" {
 		derp.URL = relay.URL
@@ -126,6 +129,15 @@ func relayPresence(domain string, relay RelayPlacement) *wireguard.DERPConfig {
 		derp.CertName = relay.CertName
 	}
 	return derp
+}
+
+// urlHost brackets an IPv6 literal the way a URL's authority carries it;
+// every other grammar stands as given.
+func urlHost(identity string) string {
+	if addr, err := netip.ParseAddr(identity); err == nil && addr.Is6() {
+		return "[" + identity + "]"
+	}
+	return identity
 }
 
 // directoryRoute resolves the core's directory endpoint: the core's

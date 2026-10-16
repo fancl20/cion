@@ -7,11 +7,14 @@ import (
 	"encoding/asn1"
 	"encoding/json/v2"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -168,7 +171,8 @@ func TestServeHTTPSReleasesOnCancel(t *testing.T) {
 // served from the cache the challenge was seeded into, with the extension
 // RFC 8737 names carried by the certificate itself.
 func TestServeHTTPSACMEChallenge(t *testing.T) {
-	manager, ln := acmeManager(t, webpkitest.Domain)
+	manager, ln := acmeManager(t, webpkitest.Domain,
+		acme.Identifier{Type: "dns", Value: webpkitest.Domain})
 	serveHTTPS(t, manager, ln, http.NotFoundHandler())
 
 	// An ACME probe: SNI naming the domain, the challenge name the one
@@ -201,17 +205,17 @@ func TestServeHTTPSACMEChallenge(t *testing.T) {
 }
 
 // acmeManager builds a certmagic-backed identity — PrepareTLSCert's ACME
-// arm without its port-80 listener — with a solved TLS-ALPN challenge
-// seeded into the cache the way a distributed solve stores it, and binds
-// the node's HTTPS server for it.
-func acmeManager(t *testing.T, domain string) (*CertManager, net.Listener) {
+// arm without its port-80 listener — with a solved TLS-ALPN challenge for
+// the identifier seeded into the cache the way a distributed solve stores
+// it, and binds the node's HTTPS server for it.
+func acmeManager(t *testing.T, domain string, identifier acme.Identifier) (*CertManager, net.Listener) {
 	t.Helper()
 	magic, issuer := newTestIssuer(t)
 	seedChallenge(t, magic, issuer, acme.Challenge{
 		Type:             "tls-alpn-01",
 		Token:            "token",
 		KeyAuthorization: "key-authorization",
-		Identifier:       acme.Identifier{Type: "dns", Value: domain},
+		Identifier:       identifier,
 	})
 	manager := &CertManager{
 		tlsCfg: &tls.Config{
@@ -250,7 +254,9 @@ func newTestIssuer(t *testing.T) (*certmagic.Config, *certmagic.ACMEIssuer) {
 }
 
 // seedChallenge stores one solved challenge where certmagic's distributed
-// solve leaves it — the store its own handlers read the challenge from.
+// solve leaves it — the store its own handlers read the challenge from. A
+// TLS-ALPN challenge's ip identifier keys by the reversed literal, the name
+// the validation itself names.
 func seedChallenge(
 	t *testing.T, magic *certmagic.Config, issuer *certmagic.ACMEIssuer, chal acme.Challenge,
 ) {
@@ -260,12 +266,132 @@ func seedChallenge(
 	if err != nil {
 		t.Fatal(err)
 	}
+	value := chal.Identifier.Value
+	if chal.Type == "tls-alpn-01" && chal.Identifier.Type == "ip" {
+		value = reverseTreeName(t, value)
+	}
 	tokenKey := filepath.Join("acme",
 		certmagic.StorageKeys.Safe(issuer.IssuerKey()), "challenge_tokens",
-		certmagic.StorageKeys.Safe(chal.Identifier.Value)+".json")
+		certmagic.StorageKeys.Safe(value)+".json")
 	if err := magic.Storage.Store(context.Background(), tokenKey, raw); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// reverseTreeName spells an IPv4 address the way the reverse tree does —
+// the SNI an RFC 8738 validation names and the challenge key certmagic
+// gives an ip identifier.
+func reverseTreeName(t *testing.T, value string) string {
+	t.Helper()
+	addr, err := netip.ParseAddr(value)
+	if err != nil || !addr.Is4() {
+		t.Fatalf("the reverse tree of %q: only the tests' IPv4 is spelled", value)
+	}
+	b := addr.As4()
+	return fmt.Sprintf("%d.%d.%d.%d.in-addr.arpa", b[3], b[2], b[1], b[0])
+}
+
+// TestPrepareTLSCertAddressIdentity pins the identity's grammar on the ACME
+// arm: an address selects the issuer's shortlived profile — the one the CA
+// certifies ip identifiers under — a range no public CA validates refuses
+// the boot with the certificate files named, and a domain keeps the default
+// profile. The static-file arm takes any certificate and stays on its own
+// tests.
+func TestPrepareTLSCertAddressIdentity(t *testing.T) {
+	for _, tc := range []struct {
+		domain string
+		reason string
+	}{
+		{"10.0.0.7", "a private address"},
+		{"127.0.0.1", "a loopback address"},
+		{"169.254.0.1", "a link-local address"},
+		{"100.64.0.1", "a shared address"},
+		{"0.0.0.0", "an unspecified address"},
+		{"224.0.0.1", "a multicast address"},
+		{"::1", "a loopback address"},
+		{"fe80::1", "a link-local address"},
+		{"fc00::1", "a private address"},
+	} {
+		_, err := PrepareTLSCert(TLSCertConfig{Domain: tc.domain, Storage: t.TempDir()})
+		if err == nil || !strings.Contains(err.Error(), tc.reason) ||
+			!strings.Contains(err.Error(), "--trust.cert-file") {
+			t.Errorf("PrepareTLSCert(%q) = %v, want the refusal naming %s and the "+
+				"certificate files", tc.domain, err, tc.reason)
+		}
+	}
+
+	// An address the CA validates takes the shortlived profile; the HTTP-01
+	// listener it stands is closed before the domain's takes the port.
+	address, err := PrepareTLSCert(TLSCertConfig{
+		Domain:  "192.0.2.20",
+		Storage: t.TempDir(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	issuer, ok := address.magic.Issuers[0].(*certmagic.ACMEIssuer)
+	if !ok {
+		t.Fatal("certmagic did not configure an ACME issuer")
+	}
+	if issuer.Profile != shortlivedProfile {
+		t.Errorf("an address identity's issuer profile = %q, want %q",
+			issuer.Profile, shortlivedProfile)
+	}
+	if err := address.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	domain, err := PrepareTLSCert(TLSCertConfig{
+		Domain:  webpkitest.Domain,
+		Storage: t.TempDir(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = domain.Close() }()
+	issuer, ok = domain.magic.Issuers[0].(*certmagic.ACMEIssuer)
+	if !ok {
+		t.Fatal("certmagic did not configure an ACME issuer")
+	}
+	if issuer.Profile != "" {
+		t.Errorf("a domain identity's issuer profile = %q, want the default", issuer.Profile)
+	}
+}
+
+// TestServeHTTPSACMEChallengeIPIdentifier checks the challenge's address
+// arm: an ip identifier seeded the way the distributed solve stores it —
+// keyed by the reversed literal — answers on the node's HTTPS server, the
+// validation an ACME CA performs naming the reverse tree in its SNI
+// (RFC 8738), with the extension RFC 8737 names carried by the certificate
+// itself.
+func TestServeHTTPSACMEChallengeIPIdentifier(t *testing.T) {
+	manager, ln := acmeManager(t, webpkitest.Address,
+		acme.Identifier{Type: "ip", Value: webpkitest.Address})
+	serveHTTPS(t, manager, ln, http.NotFoundHandler())
+
+	conn, err := tls.Dial("tcp", ln.Addr().String(), &tls.Config{
+		NextProtos:         []string{acmez.ACMETLS1Protocol},
+		ServerName:         reverseTreeName(t, webpkitest.Address),
+		InsecureSkipVerify: true,
+	})
+	if err != nil {
+		t.Fatalf("the challenge handshake against the mounted server: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+	if proto := conn.ConnectionState().NegotiatedProtocol; proto != acmez.ACMETLS1Protocol {
+		t.Fatalf("the negotiated protocol = %q, want %q", proto, acmez.ACMETLS1Protocol)
+	}
+	certs := conn.ConnectionState().PeerCertificates
+	if len(certs) == 0 {
+		t.Fatal("the challenge handshake presented no certificate")
+	}
+	for _, ext := range certs[0].Extensions {
+		if ext.Id.Equal(idPEACMEIdentifierV1) {
+			return
+		}
+	}
+	t.Errorf("the served certificate carries no ACME identifier extension, "+
+		"want the challenge's (subject %q)", certs[0].Subject.CommonName)
 }
 
 // TestHTTP01ChallengeSolves checks the dedicated challenge server: an

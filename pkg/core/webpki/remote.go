@@ -49,10 +49,10 @@ func newClient(clt connect.HTTPClient, baseURL string) *client {
 
 // CoreClient resolves trust material from the core's control endpoint:
 // ConnectRPC over HTTP/3 (QUIC) riding the SCION network, TLS-verified
-// end-to-end against the core's domain. The domain is a TLS identity, not a
-// locator; the locator supplies the SCION route — the core's control service
-// as a service destination on the one-hop path, or the reversed up segment
-// the path provider composes.
+// end-to-end against the core's identity. It is a TLS identity, not a
+// locator; the locator supplies the SCION route — the core's control
+// service as a service destination on the one-hop path, or the reversed up
+// segment the path provider composes.
 type CoreClient struct {
 	conn    *scion.Conn
 	qclt    *quic.Transport
@@ -65,7 +65,9 @@ type CoreClient struct {
 
 // CoreClientConfig configures a CoreClient.
 type CoreClientConfig struct {
-	// Domain is the core's DNS domain, verified as the TLS server name.
+	// Domain is the core's identity, carried bare as the TLS server name:
+	// a name the certificate's DNS names answer, an address its IP
+	// addresses.
 	Domain string
 	// Conn is the SCION connection QUIC rides to the core.
 	Conn *scion.Conn
@@ -139,8 +141,19 @@ func NewCoreClient(cfg CoreClientConfig) (*CoreClient, error) {
 			return c.qclt.Dial(ctx, peer, tlsCfg, cfg)
 		},
 	}
-	c.clt = newClient(&http.Client{Transport: h3t}, "https://"+cfg.Domain)
+	c.clt = newClient(&http.Client{Transport: h3t}, coreBaseURL(cfg.Domain))
 	return c, nil
+}
+
+// coreBaseURL builds the base URL the client's requests carry: the identity
+// under HTTPS, an IPv6 literal in RFC 3986's brackets. The URL carries the
+// identity alone — the dial above routes to the SCION locator and never
+// reads it.
+func coreBaseURL(identity string) string {
+	if addr, err := netip.ParseAddr(identity); err == nil && addr.Is6() {
+		return "https://[" + identity + "]"
+	}
+	return "https://" + identity
 }
 
 // Close releases the underlying QUIC transport.

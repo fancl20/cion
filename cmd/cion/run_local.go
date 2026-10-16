@@ -14,7 +14,7 @@ func addLocalNodeFlags(flags *pflag.FlagSet, opts *services.NodeConfig) {
 	flags.StringSliceVar(&opts.Neighbors, "topology.neighbor", nil,
 		"an existing node's rendezvous underlay address; repeatable")
 	flags.StringVar(&opts.Domain, "trust.domain", "",
-		"the network's core domain, the WebPKI identity of the enrollment and TRC fetch "+
+		"the network's core identity, the WebPKI identity of the enrollment and TRC fetch "+
 			"(required)")
 }
 

@@ -44,9 +44,9 @@ type Config struct {
 	// non-core's first start needs at least one, later starts seed
 	// additional entries, idempotent by remote address.
 	Neighbors []string
-	// Domain is the founding core's own domain, the name its published host
-	// resolves from; the non-cores learn theirs from the rendezvous
-	// exchange instead.
+	// Domain is the founding core's own identity — a domain the published
+	// host resolves from, an address the published host is; the non-cores
+	// learn theirs from the rendezvous exchange instead.
 	Domain string
 	// StateDir persists the learned external host beside the identity;
 	// empty keeps it in memory alone.
@@ -89,9 +89,9 @@ type Provider struct {
 
 	// external is the learned external host, persisted beside the identity
 	// so a restart republishes it; domain resolves the founding core's own
-	// published host from its domain.
+	// published host from its identity.
 	external externalHost
-	domain   domainHost
+	domain   *domainHost
 
 	// bootstrap is the first start's completed rendezvous, the seed it
 	// taught both sides landing complete.
@@ -131,7 +131,7 @@ func New(cfg Config) (*Provider, error) {
 			path:    externalHostPath(cfg.StateDir),
 			current: host,
 		},
-		domain: domainHost{domain: cfg.Domain, fallback: cfg.ControlHost},
+		domain: newDomainHost(cfg.Domain, cfg.ControlHost),
 	}, nil
 }
 
@@ -155,8 +155,8 @@ func (z *Provider) learn(host netip.Addr) {
 
 // publishedHost resolves the host the node's own entry publishes: the
 // learned external host when one is recorded, else the control host. The
-// founding core — which dials no rendezvous — resolves its own domain, the
-// control host beside it as the fallback.
+// founding core — which dials no rendezvous — resolves its own identity,
+// the control host beside it as the fallback.
 func (z *Provider) publishedHost(ctx context.Context) netip.Addr {
 	if z.cfg.Core {
 		return z.domain.resolve(ctx)
