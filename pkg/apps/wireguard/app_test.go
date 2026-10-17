@@ -460,8 +460,8 @@ func TestWireguardRunJoinsItsLoops(t *testing.T) {
 
 	cancel()
 	select {
-	case <-returned:
-		t.Fatal("Run returned while a publication was in flight")
+	case err := <-returned:
+		t.Fatalf("Run returned (%v) while a publication was in flight", err)
 	case <-time.After(100 * time.Millisecond):
 	}
 	release()

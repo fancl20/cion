@@ -222,7 +222,9 @@ func TestIngestCounterStaging(t *testing.T) {
 	go func() { serveDone <- n.d.Serve(ctx) }()
 	t.Cleanup(func() {
 		cancel()
-		<-serveDone
+		if err := <-serveDone; err != nil {
+			t.Errorf("Serve returned %v, want nil", err)
+		}
 	})
 
 	// The internal link's bound address, where a local host writes.

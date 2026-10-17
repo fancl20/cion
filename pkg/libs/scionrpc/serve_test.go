@@ -2,6 +2,8 @@ package scionrpc
 
 import (
 	"context"
+	"errors"
+	"net"
 	"net/http"
 	"net/netip"
 	"sync"
@@ -95,7 +97,10 @@ func TestServeHTTP3JoinsItsHandlers(t *testing.T) {
 	}
 	releaseHandler()
 	select {
-	case <-served:
+	case err := <-served:
+		if !errors.Is(err, net.ErrClosed) {
+			t.Errorf("ServeHTTP3 returned (%v), want the closed socket's error", err)
+		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("ServeHTTP3 did not return once its handler had")
 	}
