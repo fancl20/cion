@@ -2,6 +2,7 @@ package testnetwork
 
 import (
 	"bytes"
+	"errors"
 	"net/netip"
 	"os"
 	"os/exec"
@@ -33,8 +34,8 @@ const (
 // and the test proceeds alone. The inner run starts before the test turns
 // parallel: until its exec, the fork holds every descriptor the test process
 // has open, so a fork beside running tests would keep bound a socket one of
-// them closed to rebind its address. A host without unprivileged user
-// namespaces fails the test rather than skipping it.
+// them closed to rebind its address. A host that blocks unprivileged user
+// namespaces skips the test.
 func ownNetns(t *testing.T) bool {
 	t.Helper()
 	if os.Getenv(netnsEnv) == t.Name() {
@@ -54,6 +55,9 @@ func ownNetns(t *testing.T) bool {
 		GidMappings: []syscall.SysProcIDMap{{ContainerID: 0, HostID: os.Getgid(), Size: 1}},
 	}
 	if err := cmd.Start(); err != nil {
+		if errors.Is(err, syscall.EPERM) {
+			t.Skipf("the host blocks unprivileged user namespaces: %v", err)
+		}
 		t.Fatalf("starting %s in its own network namespace: %v", t.Name(), err)
 	}
 	t.Parallel()
