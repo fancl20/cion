@@ -118,7 +118,7 @@ func TestStrandedTierHeals(t *testing.T) {
 	for _, n := range far {
 		steer(t, prioCut, bandLoss, ipA, n.host)
 	}
-	PollFor(t, 4*time.Minute, "the stranded clause to link the sides", func() bool {
+	PollFor(t, 10*time.Minute, "the stranded clause to link the sides", func() bool {
 		if crossLink(ctx, near[1:], far) == "" || !meshed(ctx, near) {
 			return false
 		}

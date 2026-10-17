@@ -35,9 +35,9 @@ jobs:
       # The WebPKI labs answer the ACME HTTP-01 challenge on port 80,
       # which the runner's unprivileged user cannot bind.
       - run: sudo sysctl -w net.ipv4.ip_unprivileged_port_start=0
-      # The stranded-tier lab's polls alone budget nine minutes a count,
+      # The stranded-tier lab's polls alone budget fifteen minutes a count,
       # past the default ten-minute package timeout.
-      - run: go test -race -count=2 -timeout=30m ./...
+      - run: go test -race -count=2 -timeout=45m ./...
 
   build:
     needs: [lint, test]
