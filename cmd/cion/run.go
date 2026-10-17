@@ -16,7 +16,9 @@ import (
 // takes: the bare three that place the daemon, the static topology
 // provider's selection, and the composition's list — the arguments the
 // retiring configuration file carried, with defaults so a restart needs
-// none of them.
+// none of them. The link-set and the list override working defaults — the
+// measured provider, the inference — so they hide from the help while
+// staying settable.
 func addSharedNodeFlags(flags *pflag.FlagSet, opts *services.NodeConfig) {
 	flags.StringVar(&opts.State, "state", services.DefaultState,
 		"the state directory, where the first start generates the identity")
@@ -28,11 +30,13 @@ func addSharedNodeFlags(flags *pflag.FlagSet, opts *services.NodeConfig) {
 	flags.StringVar(&opts.LinkSet, "topology.link-set", "",
 		"path to a JSON link-set file naming the static topology: "+
 			"neighbor ISD-ASes with each link's two underlay addresses")
+	_ = flags.MarkHidden("topology.link-set")
 	flags.StringSliceVar(&opts.Applications, "applications", nil,
 		"the resident applications the node runs, comma-separated and "+
 			"repeatable: unset loads what the arguments imply, the empty value "+
 			"loads none — the deliberate core — and a list loads exactly the "+
 			"named ("+applicationNames()+")")
+	_ = flags.MarkHidden("applications")
 }
 
 // applicationNames lists the resident applications' names in table order,
@@ -53,20 +57,24 @@ func addApplicationFlags(flags *pflag.FlagSet, opts *services.NodeConfig) {
 }
 
 // addTuningFlags registers the data-plane tuning flags the run commands
-// carry, from the dataplane defaults.
+// carry, from the dataplane defaults. The defaults carry the production
+// values, so the trio hides from the help while staying settable.
 func addTuningFlags(flags *pflag.FlagSet, tuning *services.DataplaneOptions) {
 	defaults := services.DefaultDataplaneOptions()
 	flags.IntVar(&tuning.Processors, "dataplane.processors", defaults.Processors,
 		"number of fast-path packet processors")
+	_ = flags.MarkHidden("dataplane.processors")
 	flags.IntVar(&tuning.BatchSize, "dataplane.batch-size", defaults.BatchSize,
 		"receive batch size per underlay socket")
+	_ = flags.MarkHidden("dataplane.batch-size")
 	flags.IntVar(&tuning.QueueSize, "dataplane.queue-size", defaults.QueueSize,
 		"queue depth of the internal and external links")
+	_ = flags.MarkHidden("dataplane.queue-size")
 }
 
-// runDaemon is the body both run commands share: the tuning sanity checks
-// and the services.Run call over the node configuration the command
-// assembled, so the two differ in their arguments and nothing else.
+// runDaemon is the body both run commands share: the sanity checks over
+// the assembled arguments and the services.Run call over them, so the two
+// differ in their arguments and nothing else.
 func runDaemon(ctx context.Context, cfg services.NodeConfig, tuning services.DataplaneOptions) error {
 	// A zero processor count or batch size would panic deep inside
 	// Serve, which divides by them; fail at the flag instead.
@@ -81,6 +89,14 @@ func runDaemon(ctx context.Context, cfg services.NodeConfig, tuning services.Dat
 		if check.value < 1 {
 			return fmt.Errorf("--%s must be at least 1", check.name)
 		}
+	}
+	// The founding core — the core flag without a neighbor — must name an
+	// enrollment policy: unset, the gate would run enrollment and
+	// registration open. A joining core carries no gate, for only the
+	// founding core issues chains.
+	if cfg.Core && len(cfg.Neighbors) == 0 && cfg.EnrollAuth == "" {
+		return fmt.Errorf("--trust.enroll-auth is required on the founding core: " +
+			"cidrs=<comma-separated prefix list> or telegram=<chat>:<token>")
 	}
 	return services.Run(ctx, cfg, tuning)
 }

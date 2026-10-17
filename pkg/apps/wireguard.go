@@ -31,6 +31,9 @@ var wireguardEntry = Entry{
 			"the shared host-facing UDP port every host dials; the directory assigns "+
 				"the node's slice of the tailnet range at its first publication "+
 				"(zero runs no WireGuard or SOCKS application)")
+		// The conventional port serves, so a different one is the
+		// operator's deliberate override — settable, off the help.
+		_ = flags.MarkHidden("wireguard.host-port")
 	},
 	MissingArg: func(args *Arguments) string {
 		if args.Wireguard.HostPort == 0 {

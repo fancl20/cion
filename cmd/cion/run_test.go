@@ -113,44 +113,48 @@ func TestRunArgumentsParse(t *testing.T) {
 
 // TestRunCommandsHelpReadsInParts checks the surface each command's help
 // reads: the placement flags print first, then each part's block, in the
-// registration order the commands compose.
+// registration order the commands compose — the deliberate overrides
+// hidden from it.
 func TestRunCommandsHelpReadsInParts(t *testing.T) {
 	for _, command := range []struct {
-		name string
-		cmd  *cobra.Command
-		want []string
+		name   string
+		cmd    *cobra.Command
+		want   []string
+		hidden []string
 	}{
 		{"run core", newRunCoreCommand(), []string{
 			"--state", "--internal", "--control",
-			"--topology.link-set",
-			"--applications",
 			"--topology.neighbor",
-			"--trust.domain", "--trust.acme-email", "--trust.cert-file",
-			"--trust.key-file", "--trust.enroll-auth",
+			"--trust.domain", "--trust.acme-email", "--trust.enroll-auth",
+		}, []string{
+			"--topology.link-set", "--applications",
+			"--trust.cert-file", "--trust.key-file",
 			"--wireguard.host-port",
 			"--dataplane.processors", "--dataplane.batch-size",
 			"--dataplane.queue-size",
 		}},
 		{"run local", newRunLocalCommand(), []string{
 			"--state", "--internal", "--control",
-			"--topology.link-set",
-			"--applications",
 			"--topology.neighbor",
 			"--trust.domain",
+		}, []string{
+			"--topology.link-set", "--applications",
 			"--wireguard.host-port",
 			"--dataplane.processors", "--dataplane.batch-size",
 			"--dataplane.queue-size",
 		}},
 		{"ping", newPingCommand(), []string{
 			"--state", "--internal", "--control",
-			"--topology.link-set",
-			"--applications",
 			"--topology.neighbor",
 			"--trust.domain",
+			"--count", "--interval", "--wait",
+		}, []string{
+			"--topology.link-set", "--applications",
 			"--wireguard.host-port",
 		}},
 	} {
-		rest := command.cmd.Flags().FlagUsages()
+		usage := command.cmd.Flags().FlagUsages()
+		rest := usage
 		for _, flag := range command.want {
 			i := strings.Index(rest, flag)
 			if i < 0 {
@@ -158,6 +162,11 @@ func TestRunCommandsHelpReadsInParts(t *testing.T) {
 				break
 			}
 			rest = rest[i:]
+		}
+		for _, flag := range command.hidden {
+			if strings.Contains(usage, flag) {
+				t.Errorf("%s's help shows the hidden %s", command.name, flag)
+			}
 		}
 	}
 }
@@ -207,20 +216,22 @@ func TestRunCommandsRefuseForeignArguments(t *testing.T) {
 }
 
 // TestRunCommandsPresetRole checks the role each command presets in the
-// node configuration it assembles: run bare of a domain, each fails on its
-// role's missing-domain refusal — the core's own on the core, the network's
-// core domain on the local node.
+// node configuration it assembles: run past the founder's required policy
+// but bare of a domain, each fails on its role's missing-domain refusal —
+// the core's own on the core, the network's core domain on the local node.
 func TestRunCommandsPresetRole(t *testing.T) {
 	for _, tc := range []struct {
+		args []string
 		cmd  *cobra.Command
 		want string
 	}{
-		{newRunCoreCommand(), "--trust.domain is required: the founding core's own"},
-		{newRunLocalCommand(), "--trust.domain is required: the network's core identity"},
+		{[]string{"--trust.enroll-auth", "cidrs=192.0.2.0/24"},
+			newRunCoreCommand(), "--trust.domain is required: the founding core's own"},
+		{nil, newRunLocalCommand(), "--trust.domain is required: the network's core identity"},
 	} {
 		tc.cmd.SilenceUsage = true
 		tc.cmd.SilenceErrors = true
-		tc.cmd.SetArgs([]string{})
+		tc.cmd.SetArgs(tc.args)
 		err := tc.cmd.ExecuteContext(context.Background())
 		if err == nil {
 			t.Errorf("bare %s ran, want the missing-domain refusal", tc.cmd.Name())
@@ -230,6 +241,20 @@ func TestRunCommandsPresetRole(t *testing.T) {
 			t.Errorf("%s's missing-domain error = %q, want the refusal %q",
 				tc.cmd.Name(), err, tc.want)
 		}
+	}
+}
+
+// TestRunCoreRequiresEnrollAuth checks the founder's gate requirement: the
+// core command without a neighbor refuses to run without a policy, for
+// unset is open enrollment and registration.
+func TestRunCoreRequiresEnrollAuth(t *testing.T) {
+	cmd := newRunCoreCommand()
+	cmd.SilenceUsage = true
+	cmd.SilenceErrors = true
+	cmd.SetArgs([]string{"--trust.domain", "core.example.org"})
+	err := cmd.ExecuteContext(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "--trust.enroll-auth is required") {
+		t.Errorf("the founder without a policy = %v, want the enroll-auth refusal", err)
 	}
 }
 

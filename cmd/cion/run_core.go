@@ -9,7 +9,8 @@ import (
 
 // addCoreNodeFlags registers the core role's arguments: its own domain when
 // it founds, the network's when it joins, and the issuance surface beside
-// them.
+// them. The certificate pair is the offline fallback to ACME, so it hides
+// from the help while staying settable.
 func addCoreNodeFlags(flags *pflag.FlagSet, opts *services.NodeConfig) {
 	flags.StringSliceVar(&opts.Neighbors, "topology.neighbor", nil,
 		"an existing node's rendezvous underlay address; set, the core joins the "+
@@ -21,13 +22,15 @@ func addCoreNodeFlags(flags *pflag.FlagSet, opts *services.NodeConfig) {
 		"the ACME account email for the founding core's certificate (optional)")
 	flags.StringVar(&opts.CertFile, "trust.cert-file", "",
 		"the founding core's TLS certificate file, the offline fallback to ACME")
+	_ = flags.MarkHidden("trust.cert-file")
 	flags.StringVar(&opts.KeyFile, "trust.key-file", "",
 		"the founding core's TLS key file, the offline fallback to ACME")
+	_ = flags.MarkHidden("trust.key-file")
 	flags.StringVar(&opts.EnrollAuth, "trust.enroll-auth", "",
 		"gate first issuance and the founder's TRC votes with a policy: "+
 			"cidrs=<comma-separated prefix list> admits by source address, "+
-			"telegram=<chat>:<token> prompts the chat per joiner; "+
-			"enrollment is open and the votes are denied when unset")
+			"telegram=<chat>:<token> prompts the chat per joiner "+
+			"(required on the founding core)")
 }
 
 // newRunCoreCommand builds `cion run core`: the founding core without a
@@ -46,7 +49,8 @@ func newRunCoreCommand() *cobra.Command {
 			"its own identity; with one, an authoritative core joining the neighbor's ISD — " +
 			"enrolling like any node until the founder's sensitive update onboards it. " +
 			"Identity and links come from the state directory; a first start needs the " +
-			"core's --trust.domain and, to join, a bootstrap neighbor.",
+			"core's --trust.domain, the founder a --trust.enroll-auth policy, and, to " +
+			"join, a bootstrap neighbor.",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runDaemon(cmd.Context(), *opts, *tuning)
