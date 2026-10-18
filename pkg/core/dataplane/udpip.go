@@ -898,7 +898,9 @@ type udpBatchConn struct {
 
 // newUDPConn opens a UDP socket bound to listen and, if remote is valid,
 // connected to it. The socket's family is determined by the remote address if
-// set, otherwise by the local address (any address means dual-stack IPv6).
+// set, otherwise by the local address (any address means dual-stack IPv6);
+// a wildcard listen host of the family the remote excludes binds the remote
+// family's wildcard at the same port.
 func newUDPConn(
 	listen *net.UDPAddr,
 	remote netip.AddrPort,
@@ -909,10 +911,19 @@ func newUDPConn(
 	network := "udp"
 	switch {
 	case remote.IsValid():
+		wildcard := net.IPv6zero
 		if remote.Addr().Is4() || remote.Addr().Is4In6() {
 			network = "udp4"
+			wildcard = net.IPv4zero
 		} else {
 			network = "udp6"
+		}
+		// A wildcard listen host of the other family names the port alone —
+		// the wildcard-bound link's recorded local address rides whichever
+		// family its peer dials — so the bind takes the remote family's
+		// wildcard at the recorded port.
+		if listen.IP.IsUnspecified() && (listen.IP.To4() != nil) != (wildcard.To4() != nil) {
+			listen = &net.UDPAddr{IP: wildcard, Port: listen.Port}
 		}
 	case listen.IP != nil:
 		if listen.IP.To4() != nil {
