@@ -117,11 +117,15 @@ func raiseLoopback(t *testing.T) {
 	copy(req.Name[:], "lo")
 	_, _, errno := syscall.Syscall(syscall.SYS_IOCTL, uintptr(fd),
 		siocgifflags, uintptr(unsafe.Pointer(&req)))
-	refuse(t, "reading lo's flags", errno)
+	if errno != 0 {
+		refuse(t, "reading lo's flags", errno)
+	}
 	req.Flags |= syscall.IFF_UP
 	_, _, errno = syscall.Syscall(syscall.SYS_IOCTL, uintptr(fd),
 		siocsifflags, uintptr(unsafe.Pointer(&req)))
-	refuse(t, "raising lo", errno)
+	if errno != 0 {
+		refuse(t, "raising lo", errno)
+	}
 }
 
 // refuse skips the lab when the kernel declined the interface step — EPERM,
