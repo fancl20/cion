@@ -44,13 +44,19 @@ func TestNodeConfigResolve(t *testing.T) {
 		t.Fatalf("resolving a joiner: %v", err)
 	}
 
-	// The founding core's address identity is the control host's own; a
-	// joiner names the network's identity whatever its grammar, and no
-	// control host of its own is asked.
+	// A founding address identity stands on its own: the control host's
+	// address or another one, the public face a NAT forwards; a joiner names
+	// the network's identity whatever its grammar, and no control host of its
+	// own is asked.
 	ownAddress := nodeConfig()
 	ownAddress.Domain = "127.0.0.1"
 	if _, err := ownAddress.resolve(); err != nil {
 		t.Fatalf("resolving the control host's own address as the identity: %v", err)
+	}
+	nattedAddress := nodeConfig()
+	nattedAddress.Domain = "192.0.2.9"
+	if _, err := nattedAddress.resolve(); err != nil {
+		t.Fatalf("resolving an address identity beyond the control host: %v", err)
 	}
 	joinerAddress := nodeConfig()
 	joinerAddress.Core = false
@@ -113,7 +119,6 @@ func TestNodeConfigResolve(t *testing.T) {
 			c.LinkSet = "/tmp/link-set.json"
 			c.Neighbors = []string{"192.0.2.7:30043"}
 		},
-		"address not the control host's": func(c *NodeConfig) { c.Domain = "192.0.2.9" },
 	}
 	for name, mutate := range bad {
 		t.Run(name, func(t *testing.T) {

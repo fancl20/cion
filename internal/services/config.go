@@ -169,11 +169,10 @@ type resolvedConfig struct {
 
 // resolve applies the role-aware argument checks and resolves the run
 // arguments once: the domain is always required, the role derives from the
-// core flag and the neighbors, a founding address identity must be the
-// control host's own, and the gate and the core-bound applications load on
-// the founding core alone. The authorizer is built and the applications
-// selected here, so a malformed spec or a miscombination fails the boot
-// before any assembly runs.
+// core flag and the neighbors, and the gate and the core-bound applications
+// load on the founding core alone. The authorizer is built and the
+// applications selected here, so a malformed spec or a miscombination fails
+// the boot before any assembly runs.
 func (c NodeConfig) resolve() (resolvedConfig, error) {
 	r := resolvedConfig{NodeConfig: c}
 	if c.Core {
@@ -209,15 +208,6 @@ func (c NodeConfig) resolve() (resolvedConfig, error) {
 	}
 	if r.internalAddr, err = underlay.ResolveAddrPort(c.Internal); err != nil {
 		return resolvedConfig{}, fmt.Errorf("parsing internal address: %w", err)
-	}
-	if founding {
-		if addr, err := netip.ParseAddr(c.Domain); err == nil &&
-			addr.Unmap() != r.controlAddr.Addr() {
-			return resolvedConfig{}, fmt.Errorf("--trust.domain %s is not the control host "+
-				"%s the HTTPS server binds: the CA validates the address the server holds — "+
-				"a founder whose public face differs keeps a domain",
-				c.Domain, r.controlAddr.Addr())
-		}
 	}
 	if c.EnrollAuth != "" {
 		// A silently inert gate is the misleading configuration the
