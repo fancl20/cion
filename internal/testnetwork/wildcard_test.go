@@ -28,10 +28,6 @@ func TestWildcardControlBoots(t *testing.T) {
 	if !ownNetns(t) {
 		return
 	}
-	// A fresh namespace's loopback starts down; the lab's dials ride it.
-	if lo, err := net.InterfaceByName("lo"); err == nil && lo.Flags&net.FlagUp == 0 {
-		runTool(t, "ip", "link", "set", "lo", "up")
-	}
 	wpki := webpkitest.New(t)
 	n := bootAssembly(t, func(cfg *services.NodeConfig) {
 		cfg.Core = true
