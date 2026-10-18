@@ -9,8 +9,10 @@ import (
 
 	"github.com/fancl20/cion/pkg/apps"
 	"github.com/fancl20/cion/pkg/core/trust"
+	"github.com/fancl20/cion/pkg/libs/scionrpc"
 	"github.com/fancl20/cion/pkg/libs/underlay"
 	"github.com/fancl20/cion/pkg/modules/enrollauth"
+	measured "github.com/fancl20/cion/pkg/modules/topology/impl/measured"
 )
 
 // Default run arguments: a restart needs none of them.
@@ -22,7 +24,8 @@ const (
 	// cannot observe the internal link's number.
 	DefaultInternal = "127.0.0.1:30044"
 	// DefaultControl is the control address's default; its host carries the
-	// control, rendezvous, and directory sockets at the endpoint's port.
+	// control endpoint, the rendezvous acceptor, and the coordination
+	// listener, each at the port the underlay block's ladder fixes.
 	DefaultControl = "127.0.0.1:30042"
 )
 
@@ -198,15 +201,17 @@ func (c NodeConfig) resolve() (resolvedConfig, error) {
 		return resolvedConfig{}, fmt.Errorf("--state, --internal, and --control are required")
 	}
 	for _, s := range c.Neighbors {
-		if _, err := netip.ParseAddrPort(s); err != nil {
+		if _, err := measured.ParseRendezvousAddr(s); err != nil {
 			return resolvedConfig{}, fmt.Errorf("parsing --topology.neighbor %q: %w", s, err)
 		}
 	}
 	var err error
-	if r.controlAddr, err = underlay.ResolveAddrPort(c.Control); err != nil {
+	if r.controlAddr, err = underlay.ResolveAddrPortDefault(
+		c.Control, scionrpc.EndpointPort); err != nil {
 		return resolvedConfig{}, fmt.Errorf("parsing control address: %w", err)
 	}
-	if r.internalAddr, err = underlay.ResolveAddrPort(c.Internal); err != nil {
+	if r.internalAddr, err = underlay.ResolveAddrPortDefault(
+		c.Internal, netip.MustParseAddrPort(DefaultInternal).Port()); err != nil {
 		return resolvedConfig{}, fmt.Errorf("parsing internal address: %w", err)
 	}
 	if c.EnrollAuth != "" {

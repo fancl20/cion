@@ -244,12 +244,13 @@ func bootRendezvousLine(t *testing.T, wpki *webpkitest.CA, ipA, ipB, ipC netip.A
 		cfg.KeyFile = wpki.KeyFile
 		last(cfg)
 	})
-	// B joins the core by rendezvous.
+	// B joins the core by rendezvous, its neighbor a bare host — the port
+	// the argument's grammar defaults.
 	b = bootAssembly(t, func(cfg *services.NodeConfig) {
 		cfg.State = t.TempDir()
 		cfg.Internal = PinnedUDPAddrOn(t, ipB)
 		cfg.Control = FreeUDPAddrOn(t, ipB)
-		cfg.Neighbors = []string{a.rendezvousOf()}
+		cfg.Neighbors = []string{a.host.String()}
 		cfg.RootCAs = wpki.Pool
 		last(cfg)
 	})

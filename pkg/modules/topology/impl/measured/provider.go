@@ -199,7 +199,7 @@ func (z *Provider) CompleteIdentity(ctx context.Context, ia addr.IA) (addr.IA, e
 		return ia, err
 	}
 	for _, s := range z.cfg.Neighbors {
-		target, err := netip.ParseAddrPort(s)
+		target, err := ParseRendezvousAddr(s)
 		if err != nil {
 			return ia, fmt.Errorf("parsing --topology.neighbor %q: %w", s, err)
 		}
@@ -257,7 +257,7 @@ func (z *Provider) Seed(ctx context.Context) error {
 		return nil
 	}
 	for _, s := range z.cfg.Neighbors {
-		rendezvous, err := netip.ParseAddrPort(s)
+		rendezvous, err := ParseRendezvousAddr(s)
 		if err != nil {
 			return fmt.Errorf("parsing --topology.neighbor %q: %w", s, err)
 		}

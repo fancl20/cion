@@ -13,8 +13,9 @@ import (
 // from the help while staying settable.
 func addCoreNodeFlags(flags *pflag.FlagSet, opts *services.NodeConfig) {
 	flags.StringSliceVar(&opts.Neighbors, "topology.neighbor", nil,
-		"an existing node's rendezvous underlay address; set, the core joins the "+
-			"neighbor's ISD as an authoritative core instead of founding its own")
+		"an existing node's rendezvous underlay address, host or host:30043; set, "+
+			"the core joins the neighbor's ISD as an authoritative core instead "+
+			"of founding its own")
 	flags.StringVar(&opts.Domain, "trust.domain", "",
 		"the founding core's own identity without a neighbor, else the network's core "+
 			"identity — the WebPKI identity of the enrollment and TRC fetch (required)")

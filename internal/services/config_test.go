@@ -44,6 +44,25 @@ func TestNodeConfigResolve(t *testing.T) {
 		t.Fatalf("resolving a joiner: %v", err)
 	}
 
+	// A bare host names the argument's default port: the control and
+	// internal addresses their defaults, a neighbor the fixed rendezvous
+	// port.
+	bare := nodeConfig()
+	bare.Core = false
+	bare.Control = "192.0.2.7"
+	bare.Internal = "192.0.2.7"
+	bare.Neighbors = []string{"192.0.2.9"}
+	rc, err = bare.resolve()
+	if err != nil {
+		t.Fatalf("resolving bare hosts: %v", err)
+	}
+	if want := netip.MustParseAddrPort("192.0.2.7:30042"); rc.controlAddr != want {
+		t.Errorf("the bare control address = %v, want %v", rc.controlAddr, want)
+	}
+	if want := netip.MustParseAddrPort("192.0.2.7:30044"); rc.internalAddr != want {
+		t.Errorf("the bare internal address = %v, want %v", rc.internalAddr, want)
+	}
+
 	// A founding address identity stands on its own: the control host's
 	// address or another one, the public face a NAT forwards; a joiner names
 	// the network's identity whatever its grammar, and no control host of its
@@ -90,7 +109,7 @@ func TestNodeConfigResolve(t *testing.T) {
 		"missing state":       func(c *NodeConfig) { c.State = "" },
 		"bad neighbor":        func(c *NodeConfig) { c.Core = false; c.Neighbors = []string{"nope"} },
 		"missing internal":    func(c *NodeConfig) { c.Internal = "" },
-		"unparsable internal": func(c *NodeConfig) { c.Internal = "127.0.0.1" },
+		"unparsable internal": func(c *NodeConfig) { c.Internal = "nope" },
 		"unparsable control":  func(c *NodeConfig) { c.Control = "nope" },
 		"enroll-auth without the founding core": func(c *NodeConfig) {
 			c.Neighbors = []string{"192.0.2.7:30043"}

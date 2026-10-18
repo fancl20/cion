@@ -6,11 +6,13 @@ import (
 	"net"
 	"net/netip"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/scionproto/scion/pkg/addr"
 
+	"github.com/fancl20/cion/pkg/libs/scionrpc"
 	"github.com/fancl20/cion/pkg/modules/links"
 	"github.com/fancl20/cion/pkg/modules/links/impl/memory"
 )
@@ -254,16 +256,55 @@ func TestRendezvousRefusesTakenRemote(t *testing.T) {
 	}
 }
 
+// TestParseRendezvousAddr checks the neighbor argument's grammar: an address
+// keeps the port it spells, a bare host names the fixed rendezvous port.
+func TestParseRendezvousAddr(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"192.0.2.7:4242", "192.0.2.7:4242"},
+		{"192.0.2.7", "192.0.2.7:30043"},
+		{"fd00::1", "[fd00::1]:30043"},
+		{"[fd00::1]:4242", "[fd00::1]:4242"},
+	}
+	for _, tc := range cases {
+		got, err := ParseRendezvousAddr(tc.in)
+		if err != nil {
+			t.Errorf("ParseRendezvousAddr(%q): %v", tc.in, err)
+			continue
+		}
+		if want := netip.MustParseAddrPort(tc.want); got != want {
+			t.Errorf("ParseRendezvousAddr(%q) = %v, want %v", tc.in, got, want)
+		}
+	}
+	if ap, err := ParseRendezvousAddr("nope"); err == nil {
+		t.Errorf("ParseRendezvousAddr(%q) = %v, want an error", "nope", ap)
+	}
+}
+
 // TestRendezvousNoReplyAllocatesNothing checks the negative: a request
 // whose nonce echo never returns allocates nothing on the joiner's side —
-// and a dial to a silent port allocates nothing anywhere.
+// and a dial to a silent port allocates nothing anywhere. A dial to a silent
+// port but the endpoint's names the confusion its error carries, and a dial
+// to any other silent port carries none.
 func TestRendezvousNoReplyAllocatesNothing(t *testing.T) {
+	dial := func(t *testing.T, target netip.AddrPort) error {
+		t.Helper()
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_, _, err := RendezvousEcho(ctx, netip.MustParseAddr("127.0.0.1"),
+			target, rendezvousIA, netip.MustParseAddrPort("127.0.0.1:4242"))
+		return err
+	}
 	dead := netip.MustParseAddrPort("127.0.0.1:1")
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	if _, _, err := RendezvousEcho(ctx, netip.MustParseAddr("127.0.0.1"),
-		dead, rendezvousIA, netip.MustParseAddrPort("127.0.0.1:4242")); err == nil {
+	if err := dial(t, dead); err == nil {
 		t.Fatal("a dial to a silent port succeeded")
+	} else if strings.Contains(err.Error(), "acceptor") {
+		t.Errorf("a dial to a port but the endpoint's names the acceptor: %v", err)
+	}
+	endpoint := netip.AddrPortFrom(netip.MustParseAddr("127.0.0.1"), scionrpc.EndpointPort)
+	if err := dial(t, endpoint); err == nil {
+		t.Fatal("a dial to a silent endpoint port succeeded")
+	} else if !strings.Contains(err.Error(), "acceptor binds") {
+		t.Errorf("a dial to the endpoint's port carries no silence hint: %v", err)
 	}
 }
 

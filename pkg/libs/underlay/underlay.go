@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"strconv"
 )
 
 // BufferSize is the largest datagram the underlay carries, a jumbo frame: the
@@ -26,6 +27,15 @@ func ResolveAddrPort(s string) (netip.AddrPort, error) {
 		return netip.AddrPort{}, fmt.Errorf("invalid address: %q", s)
 	}
 	return ap, nil
+}
+
+// ResolveAddrPortDefault resolves an address as ResolveAddrPort does, a form
+// without a port naming the given default port instead.
+func ResolveAddrPortDefault(s string, defaultPort uint16) (netip.AddrPort, error) {
+	if _, _, err := net.SplitHostPort(s); err != nil {
+		s = net.JoinHostPort(s, strconv.Itoa(int(defaultPort)))
+	}
+	return ResolveAddrPort(s)
 }
 
 // ResolveLocalAddr resolves a local address of the form "host:port". The host

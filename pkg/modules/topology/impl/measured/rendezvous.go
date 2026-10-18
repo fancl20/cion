@@ -15,6 +15,7 @@ import (
 	"github.com/scionproto/scion/pkg/addr"
 
 	"github.com/fancl20/cion/pkg/libs/ratelimit"
+	"github.com/fancl20/cion/pkg/libs/scionrpc"
 	"github.com/fancl20/cion/pkg/modules/links"
 )
 
@@ -25,6 +26,20 @@ import (
 const RendezvousPort = 30043
 
 const rendezvousVersion = 1
+
+// ParseRendezvousAddr parses a rendezvous address as the neighbor argument
+// spells it: "host:port" as spelled, a bare host naming the fixed rendezvous
+// port — the one address a joiner dials before it holds anything else.
+func ParseRendezvousAddr(s string) (netip.AddrPort, error) {
+	if ap, err := netip.ParseAddrPort(s); err == nil {
+		return ap, nil
+	}
+	host, err := netip.ParseAddr(s)
+	if err != nil {
+		return netip.AddrPort{}, fmt.Errorf("parsing rendezvous address %q: %w", s, err)
+	}
+	return netip.AddrPortFrom(host, RendezvousPort), nil
+}
 
 // Rendezvous cadence and limits. The exchange is underlay-level and carries no
 // cryptography, because the joiner has nothing to show yet: the nonce echo is
@@ -443,6 +458,19 @@ func (r *Rendezvous) countLinks(ctx context.Context, keep func(*links.Link) bool
 	return live, nil
 }
 
+// rendezvousSilenceHint names the confusion an unanswered dial to the control
+// endpoint's port carries — the address an operator copies from the control
+// argument: the endpoint serves SCION and drops rendezvous packets, and the
+// acceptor answers a port further down the underlay block's ladder. Empty
+// for every other target, the probes' derived ones among them.
+func rendezvousSilenceHint(target netip.AddrPort) string {
+	if target.Port() != scionrpc.EndpointPort {
+		return ""
+	}
+	return fmt.Sprintf("; that port is the SCION control endpoint's (%d), which drops "+
+		"rendezvous packets — the acceptor binds %d", scionrpc.EndpointPort, RendezvousPort)
+}
+
 // RendezvousEcho sends one request run to the target and returns the reply
 // with the round trip, the measurement the selection loop probes candidates
 // with. The requester claims the given address; a probe claims its control
@@ -500,7 +528,8 @@ func RendezvousEcho(
 			return reply, time.Since(sent), nil
 		}
 	}
-	return RendezvousReply{}, 0, fmt.Errorf("no rendezvous reply from %s", target)
+	return RendezvousReply{}, 0, fmt.Errorf("no rendezvous reply from %s%s",
+		target, rendezvousSilenceHint(target))
 }
 
 func udpAddr(ap netip.AddrPort) *net.UDPAddr {

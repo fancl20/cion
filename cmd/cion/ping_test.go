@@ -15,6 +15,7 @@ func TestPingArgumentsParse(t *testing.T) {
 	if err := cmd.Flags().Parse([]string{
 		"--trust.domain", "core.example.org",
 		"--topology.neighbor", "192.0.2.7:30043",
+		"--topology.neighbor", "192.0.2.9",
 		"--state", "/var/lib/cion",
 	}); err != nil {
 		t.Fatalf("parsing the local surface: %v", err)

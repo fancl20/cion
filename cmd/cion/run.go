@@ -23,10 +23,12 @@ func addSharedNodeFlags(flags *pflag.FlagSet, opts *services.NodeConfig) {
 	flags.StringVar(&opts.State, "state", services.DefaultState,
 		"the state directory, where the first start generates the identity")
 	flags.StringVar(&opts.Internal, "internal", services.DefaultInternal,
-		"the UDP address the router listens on for hosts in the local AS")
+		"the UDP address the router listens on for hosts in the local AS; "+
+			"a bare host names the default port")
 	flags.StringVar(&opts.Control, "control", services.DefaultControl,
 		"the UDP address of the control service; its host carries the control, "+
-			"rendezvous, and directory sockets")
+			"rendezvous, and directory sockets at the ports the underlay block "+
+			"fixes, so a bare host names the host alone")
 	flags.StringVar(&opts.LinkSet, "topology.link-set", "",
 		"path to a JSON link-set file naming the static topology: "+
 			"neighbor ISD-ASes with each link's two underlay addresses")

@@ -96,6 +96,18 @@ func TestRunArgumentsParse(t *testing.T) {
 		t.Errorf("the address defaults = %q, %q", opts.Internal, opts.Control)
 	}
 
+	// A bare host flows as spelled: the default port is resolve's to add.
+	opts, err = parseNodeArgs(t, "local",
+		"--trust.domain", "core.example.org",
+		"--topology.neighbor", "192.0.2.7",
+	)
+	if err != nil {
+		t.Fatalf("parsing a bare-host neighbor: %v", err)
+	}
+	if len(opts.Neighbors) != 1 || opts.Neighbors[0] != "192.0.2.7" {
+		t.Errorf("the bare-host --topology.neighbor = %v", opts.Neighbors)
+	}
+
 	// The commands themselves carry their role's partition.
 	if err := newRunCoreCommand().Flags().Parse([]string{
 		"--trust.domain", "core.example.org",
