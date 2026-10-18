@@ -5,6 +5,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -27,8 +28,26 @@ func newRootCommand() *cobra.Command {
 		SilenceErrors: true,
 	}
 	root.CompletionOptions.DisableDefaultCmd = true
+	var level string
+	root.PersistentFlags().StringVar(&level, "log.level", "info",
+		"the node's log level: debug, info, warn, or error")
+	root.PersistentPreRunE = func(*cobra.Command, []string) error {
+		return setLogLevel(level)
+	}
 	root.AddCommand(newRunCommand(), newPingCommand())
 	return root
+}
+
+// setLogLevel applies --log.level to the default handler in place, keeping
+// the format every log line already carries: a debug level uncovers the
+// diagnostics the node logs below info, the rendezvous refusals among them.
+func setLogLevel(s string) error {
+	var level slog.Level
+	if err := level.UnmarshalText([]byte(s)); err != nil {
+		return fmt.Errorf("parsing --log.level %q: %w", s, err)
+	}
+	slog.SetLogLoggerLevel(level)
+	return nil
 }
 
 // main runs the cion command line. It prints failures the way the flag-era
