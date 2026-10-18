@@ -195,7 +195,7 @@ func warmSession(t *testing.T, srv *tsnet.Server, far netip.Addr) {
 }
 
 // ownerOf returns the node whose slice holds the address.
-func ownerOf(t *testing.T, a, b *assemblyNode, ip netip.Addr) addr.IA {
+func ownerOf(t *testing.T, a *assemblyNode, ip netip.Addr) addr.IA {
 	t.Helper()
 	ctx := t.Context()
 	directory, err := wireguardOf(a).Directory(ctx)
@@ -373,7 +373,7 @@ func TestCoordinationOpenJoin(t *testing.T) {
 	// the core is the mesh's warmable direction, and the core's replies
 	// ride the reversed arrival path the exchange seeds.
 	src, dstHost, dstIP := hostA, hostB, ipsB[0]
-	if ownerOf(t, a, b, ipsA[0]) == b.app.IA() {
+	if ownerOf(t, a, ipsA[0]) == b.app.IA() {
 		src, dstHost, dstIP = hostB, hostA, ipsA[0]
 	}
 	echoOverTailnet(t, dstHost, dstIP, src, "through the tailnet")
@@ -461,7 +461,7 @@ func TestCoordinationByAddressIdentity(t *testing.T) {
 	warmSession(t, hostB, ipsA[0])
 
 	src, dstHost, dstIP := hostA, hostB, ipsB[0]
-	if ownerOf(t, a, b, ipsA[0]) == b.app.IA() {
+	if ownerOf(t, a, ipsA[0]) == b.app.IA() {
 		src, dstHost, dstIP = hostB, hostA, ipsA[0]
 	}
 	echoOverTailnet(t, dstHost, dstIP, src, "through the address identity")

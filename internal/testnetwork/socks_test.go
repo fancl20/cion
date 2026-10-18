@@ -141,7 +141,7 @@ func TestEgressSocksService(t *testing.T) {
 	if len(ips) != 1 || !ips[0].Is4() || !TailnetRange.Contains(ips[0]) {
 		t.Fatalf("the host's addresses = %v, want one of the tailnet range", ips)
 	}
-	owner := ownerOf(t, a, b, ips[0])
+	owner := ownerOf(t, a, ips[0])
 	serving := servingAddresses(t, a)
 	near, far := serving[owner], serving[otherIA(t, a, owner)]
 	Poll(t, "the owning node's host device programmed", func() bool {
@@ -276,7 +276,7 @@ func TestWithheldExitOffer(t *testing.T) {
 	serving := servingAddresses(t, a)
 	Poll(t, "the owning node's host device programmed", func() bool {
 		return len(wireguardOf(nodeOf(t, a, b,
-			ownerOf(t, a, b, ips[0]))).HostPeers()) == 1
+			ownerOf(t, a, ips[0]))).HostPeers()) == 1
 	})
 
 	// The control: the same host's flow to the offering core connects —
