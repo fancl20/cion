@@ -156,7 +156,8 @@ func (z *Provider) learn(host netip.Addr) {
 // publishedHost resolves the host the node's own entry publishes: the
 // learned external host when one is recorded, else the control host. The
 // founding core — which dials no rendezvous — resolves its own identity,
-// the control host beside it as the fallback.
+// its last good answer held through a failed resolution; before any has
+// landed the zero address, which publishes nothing.
 func (z *Provider) publishedHost(ctx context.Context) netip.Addr {
 	if z.cfg.Core {
 		return z.domain.resolve(ctx)

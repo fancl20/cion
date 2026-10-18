@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 // TestExternalHostPersistsAcrossRestart checks the learned external host's
@@ -62,8 +63,8 @@ func TestExternalHostPersistsAcrossRestart(t *testing.T) {
 
 // TestDomainHostAnswersTheLiteral checks the founding core's published host
 // under an address identity: the literal is the answer itself — no lookup,
-// no memoization, and no family check, for the config resolution has
-// already pinned it to the control host's own address.
+// no memoization, and no family check, the identity being the address it
+// publishes.
 func TestDomainHostAnswersTheLiteral(t *testing.T) {
 	lookups := 0
 	d := newDomainHost("2001:db8::1", netip.MustParseAddr("10.0.0.7"))
@@ -93,15 +94,16 @@ func TestDomainHostAnswersTheLiteral(t *testing.T) {
 }
 
 // TestDomainHostResolvesPublishedAddress checks the founding core's
-// published host: its domain's first address of the control host's family —
+// published host: its domain's first address of the bind host's family —
 // a published address the node's sockets do not bind is a misconfiguration —
-// the control host itself the fallback when the name fails, and the answer
-// memoized so the publication cadence outlives a name's resolution.
+// the answer memoized so the publication cadence outlives a name's
+// resolution, the last good one held through a failed re-resolution, and
+// the zero address before any answer has landed.
 func TestDomainHostResolvesPublishedAddress(t *testing.T) {
 	lookups := 0
 	d := domainHost{
-		domain:   "core.example.org",
-		fallback: netip.MustParseAddr("10.0.0.7"),
+		domain: "core.example.org",
+		bind:   netip.MustParseAddr("10.0.0.7"),
 		lookup: func(context.Context, string, string) ([]netip.Addr, error) {
 			lookups++
 			return []netip.Addr{
@@ -124,29 +126,38 @@ func TestDomainHostResolvesPublishedAddress(t *testing.T) {
 		t.Errorf("resolutions = %d, want the memoized one", lookups)
 	}
 
-	// A name that fails falls back to the control host, memoized the same.
-	d = domainHost{
-		domain:   "core.example.org",
-		fallback: netip.MustParseAddr("10.0.0.7"),
+	// A failed re-resolution holds the last good answer: the memo aged past
+	// its window and the lookup failing, the held one still serves.
+	d.lookup = func(context.Context, string, string) ([]netip.Addr, error) {
+		return nil, errors.New("no such name")
+	}
+	d.at = time.Now().Add(-2 * domainSuccessTTL)
+	if got := d.resolve(ctx); got != netip.MustParseAddr("192.0.2.20") {
+		t.Errorf("held host = %v, want the last good one", got)
+	}
+
+	// A name no answer has ever landed for holds nothing: the zero
+	// address, which publishes nothing.
+	never := domainHost{
+		domain: "core.example.org",
+		bind:   netip.MustParseAddr("10.0.0.7"),
 		lookup: func(context.Context, string, string) ([]netip.Addr, error) {
 			return nil, errors.New("no such name")
 		},
 	}
-	for range 2 {
-		if got := d.resolve(ctx); got != netip.MustParseAddr("10.0.0.7") {
-			t.Errorf("fallback host = %v, want the control host", got)
-		}
+	if got := never.resolve(ctx); got.IsValid() {
+		t.Errorf("never-answered host = %v, want the zero address", got)
 	}
 
-	// A name whose answers are all of the wrong family falls back too.
-	d = domainHost{
-		domain:   "core.example.org",
-		fallback: netip.MustParseAddr("10.0.0.7"),
+	// A name whose answers are all of the wrong family holds nothing too.
+	wrongFamily := domainHost{
+		domain: "core.example.org",
+		bind:   netip.MustParseAddr("10.0.0.7"),
 		lookup: func(context.Context, string, string) ([]netip.Addr, error) {
 			return []netip.Addr{netip.MustParseAddr("2001:db8::1")}, nil
 		},
 	}
-	if got := d.resolve(ctx); got != netip.MustParseAddr("10.0.0.7") {
-		t.Errorf("wrong-family host = %v, want the control host's", got)
+	if got := wrongFamily.resolve(ctx); got.IsValid() {
+		t.Errorf("wrong-family host = %v, want the zero address", got)
 	}
 }

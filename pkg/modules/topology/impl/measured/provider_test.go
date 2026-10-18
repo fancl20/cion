@@ -275,8 +275,8 @@ func TestContract(t *testing.T) {
 // TestPublishedHostFollowsLearning checks the host the node's own entry
 // publishes: a non-core's follows the learned external host — a restart
 // republishes the persisted one — and the founding core resolves its own
-// domain, of the family its control host binds, the control host beside it
-// as the fallback.
+// domain, of the family its control host binds, holding no address the
+// resolver did not vouch for.
 func TestPublishedHostFollowsLearning(t *testing.T) {
 	control := netip.MustParseAddr("10.0.0.7")
 	z, err := New(Config{ControlHost: control, StateDir: t.TempDir()})
@@ -320,7 +320,8 @@ func TestPublishedHostFollowsLearning(t *testing.T) {
 		t.Errorf("the core's host = %v, want its domain's 192.0.2.20", got)
 	}
 
-	// A name that fails leaves the control host published.
+	// A name that has never answered publishes nothing: no address the
+	// resolver did not vouch for.
 	failing, err := New(Config{
 		Core:        true,
 		Domain:      "core.example.org",
@@ -333,8 +334,8 @@ func TestPublishedHostFollowsLearning(t *testing.T) {
 	failing.domain.lookup = func(context.Context, string, string) ([]netip.Addr, error) {
 		return nil, errors.New("no such name")
 	}
-	if got := failing.publishedHost(ctx); got != control {
-		t.Errorf("the core's fallback host = %v, want the control host %v", got, control)
+	if got := failing.publishedHost(ctx); got.IsValid() {
+		t.Errorf("the core's unresolved host = %v, want the zero address", got)
 	}
 }
 

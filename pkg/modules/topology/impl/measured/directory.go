@@ -302,9 +302,9 @@ type NodeDirectoryConfig struct {
 	IA addr.IA
 	// Host resolves the published entry's host at each publication: the
 	// learned external host when one is recorded, else the control host —
-	// the founding core's its own domain's address, the control host the
-	// fallback. Every socket keeps binding the control host whatever this
-	// returns.
+	// the founding core's its own domain's address, held through a failed
+	// resolution. Every socket keeps binding the control host whatever this
+	// returns, and an invalid host publishes nothing.
 	Host func(context.Context) netip.Addr
 	// Engine provides the node's AS chain as the client certificate; a node
 	// without a chain cannot publish.
@@ -392,7 +392,9 @@ func (d *NodeDirectory) runPublish(ctx context.Context) {
 // publish sends the node's entry once the node's chain exists: an un-enrolled
 // node has no certificate to authenticate the channel with. The entry is
 // built, not baked: its host resolves at each publication, so a host learned
-// or a domain's address changed mid-run publishes on the next cadence.
+// or a domain's address changed mid-run publishes on the next cadence. A
+// host that resolves to none — the founding core's name before its first
+// answer — publishes nothing, the retry re-asking.
 func (d *NodeDirectory) publish(ctx context.Context) error {
 	if d.cfg.Engine != nil {
 		chain, err := d.cfg.Engine.Chain(ctx)
@@ -404,6 +406,9 @@ func (d *NodeDirectory) publish(ctx context.Context) error {
 		}
 	}
 	host := d.cfg.Host(ctx)
+	if !host.IsValid() {
+		return errors.New("the entry's host did not resolve")
+	}
 	return d.client.Publish(ctx, DirectoryEntry{
 		IA:             d.cfg.IA,
 		ControlAddr:    netip.AddrPortFrom(host, scionrpc.EndpointPort),

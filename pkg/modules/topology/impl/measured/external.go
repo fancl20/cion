@@ -90,14 +90,17 @@ func (h *externalHost) host() netip.Addr {
 }
 
 // domainHost resolves the founding core's own identity to the address its
-// entry publishes: an address literal directly — the config resolution has
-// already pinned it to the control host's own — a domain through the
+// entry publishes: an address literal directly, a domain through the
 // resolver, the mapping a provider holds the core behind; a domain's
-// answer must share the control host's family, a published address being
-// one the node's sockets bind. The fallback is the control host itself.
+// answer must share the bind host's family, the sockets binding it
+// receiving what the published address draws. Only an answer the resolver
+// vouched for publishes: a failed re-resolution holds the last good one,
+// and before any has landed the zero address, which publishes nothing.
 type domainHost struct {
-	domain   string
-	fallback netip.Addr
+	domain string
+	// bind is the control host the node's sockets bind; its family alone
+	// picks the resolver's answer.
+	bind netip.Addr
 	// literal is the identity's own address, valid when the identity is an
 	// address: the one fact resolution needs then, a value that cannot
 	// change.
@@ -108,7 +111,8 @@ type domainHost struct {
 	lookup func(ctx context.Context, network, host string) ([]netip.Addr, error)
 
 	mtx sync.Mutex
-	// at, host, and ok memoize the last resolution.
+	// at and ok memoize the last attempt — its moment and its outcome —
+	// and host the last good answer, held through a failure.
 	at   time.Time
 	host netip.Addr
 	ok   bool
@@ -116,8 +120,8 @@ type domainHost struct {
 
 // newDomainHost builds the founder's host resolution, parsing the identity's
 // grammar once: an address needs no lookup and no memoization.
-func newDomainHost(domain string, fallback netip.Addr) *domainHost {
-	d := &domainHost{domain: domain, fallback: fallback}
+func newDomainHost(domain string, bind netip.Addr) *domainHost {
+	d := &domainHost{domain: domain, bind: bind}
 	if addr, err := netip.ParseAddr(domain); err == nil {
 		d.literal = addr.Unmap()
 	}
@@ -125,8 +129,8 @@ func newDomainHost(domain string, fallback netip.Addr) *domainHost {
 }
 
 // resolve returns the identity's address: the literal itself when the
-// identity is one, else the domain's — the fallback when the name fails to
-// resolve or carries no address of the control host's family.
+// identity is one, else the domain's — the last good answer held through a
+// failed resolution, the zero address before any has landed.
 func (d *domainHost) resolve(ctx context.Context) netip.Addr {
 	if d.literal.IsValid() {
 		return d.literal
@@ -137,22 +141,19 @@ func (d *domainHost) resolve(ctx context.Context) netip.Addr {
 	if d.ok {
 		ttl = domainSuccessTTL
 	}
-	if !d.at.IsZero() && time.Since(d.at) < ttl {
-		if d.ok {
-			return d.host
+	if d.at.IsZero() || time.Since(d.at) >= ttl {
+		d.at = time.Now()
+		if host, ok := d.lookupAddr(ctx); ok {
+			d.host, d.ok = host, true
+		} else {
+			d.ok = false
 		}
-		return d.fallback
-	}
-	d.at = time.Now()
-	d.host, d.ok = d.lookupAddr(ctx)
-	if !d.ok {
-		return d.fallback
 	}
 	return d.host
 }
 
-// lookupAddr resolves the domain, keeping the addresses of the control
-// host's family alone.
+// lookupAddr resolves the domain, keeping the addresses of the bind host's
+// family alone.
 func (d *domainHost) lookupAddr(ctx context.Context) (netip.Addr, bool) {
 	lookup := d.lookup
 	if lookup == nil {
@@ -165,7 +166,7 @@ func (d *domainHost) lookupAddr(ctx context.Context) (netip.Addr, bool) {
 		return netip.Addr{}, false
 	}
 	for _, a := range addrs {
-		if a.IsValid() && a.BitLen() == d.fallback.BitLen() {
+		if a.IsValid() && a.BitLen() == d.bind.BitLen() {
 			return a, true
 		}
 	}
