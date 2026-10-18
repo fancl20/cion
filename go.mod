@@ -5,6 +5,7 @@ go 1.27.0
 require (
 	connectrpc.com/connect v1.21.0
 	github.com/caddyserver/certmagic v0.25.4
+	github.com/florianl/go-tc v0.4.8
 	github.com/google/go-cmp v0.7.0
 	github.com/gopacket/gopacket v1.7.3
 	github.com/mholt/acmez/v3 v3.1.7
@@ -18,6 +19,7 @@ require (
 	go.opentelemetry.io/otel/sdk/metric v1.44.0
 	go4.org/mem v0.0.0-20240501181205-ae6ca9944745
 	golang.org/x/net v0.59.0
+	golang.org/x/sys v0.48.0
 	golang.org/x/time v0.16.0
 	golang.zx2c4.com/wireguard v0.0.0-20260522210424-ecfc5a8d5446
 	google.golang.org/protobuf v1.36.12
@@ -50,6 +52,7 @@ require (
 	github.com/hdevalence/ed25519consensus v0.2.0 // indirect
 	github.com/huin/goupnp v1.3.0 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
+	github.com/josharian/native v1.1.0 // indirect
 	github.com/jsimonetti/rtnetlink v1.4.2 // indirect
 	github.com/kamstrup/intmap v0.5.2 // indirect
 	github.com/klauspost/compress v1.20.1 // indirect
@@ -81,7 +84,6 @@ require (
 	golang.org/x/exp v0.0.0-20260908205506-85c1c2202aba // indirect
 	golang.org/x/oauth2 v0.36.0 // indirect
 	golang.org/x/sync v0.23.0 // indirect
-	golang.org/x/sys v0.48.0 // indirect
 	golang.org/x/term v0.46.0 // indirect
 	golang.org/x/text v0.42.0 // indirect
 	golang.zx2c4.com/wintun v0.0.0-20230126152724-0fa3db229ce2 // indirect

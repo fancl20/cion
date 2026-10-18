@@ -39,7 +39,7 @@ const (
 // crossing the cut. Only the stranded clause can link the sides: no node
 // falls below the floor, and whatever prices the other side — a stale
 // route's declarations near 34ms, or nothing — an 80ms round trip neither
-// beats nor seconds it. The lab shapes the loopback with tc in a network
+// beats nor seconds it. The lab shapes the loopback in a network
 // namespace of its own.
 func TestStrandedTierHeals(t *testing.T) {
 	if !ownNetns(t) {
