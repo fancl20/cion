@@ -100,9 +100,15 @@ func (c *resolutionConn) SetWriteDeadline(t time.Time) error { return c.conn.Set
 
 // answer replies to one resolution request with the endpoint's QUIC
 // transport address: the socket the request arrived on, the address the
-// registered service maps to.
+// registered service maps to — the advertised host at its port when the
+// bind names no host a peer could dial, and nothing while none has
+// resolved, the requester's retry re-asking.
 func (c *resolutionConn) answer(from net.Addr) {
-	local := c.conn.LocalAddr().(*scion.Addr).Addr
+	local, ok := c.conn.AdvertisedAddr()
+	if !ok {
+		slog.Debug("Answering service resolution without a host", "peer", from)
+		return
+	}
 	resp, err := proto.Marshal(&control_plane.ServiceResolutionResponse{
 		Transports: map[string]*control_plane.Transport{
 			TransportQUIC: {Address: local.String()},

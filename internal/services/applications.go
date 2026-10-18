@@ -33,17 +33,17 @@ func (n *node) setupApplications() error {
 }
 
 // appEnvironment builds the node's facts the entries' constructors adapt:
-// the identity and role, the state root, the control host, the domain,
-// the trust engine and path provider, the sending conn and the
-// interface-down cache, the service-socket registration, the admission
-// authorizer, the core route the joiner's directory fetch rides, the
-// relay derivation's inputs with the harness's placement among them, the
-// directory pacing, the control plane's TRC decision the voting application
-// hands its submissions to, and the control-endpoint mounting behind the
-// peer-identity middleware. The environment's core flag marks the founding
-// tier alone: a joining core runs the applications a local node runs, its
-// WireGuard application publishing to and fetching from the founder's
-// directory.
+// the identity and role, the state root, the control host beside its
+// published-host resolver, the domain, the trust engine and path provider,
+// the sending conn and the interface-down cache, the service-socket
+// registration, the admission authorizer, the core route the joiner's
+// directory fetch rides, the relay derivation's inputs with the harness's
+// placement among them, the directory pacing, the control plane's TRC
+// decision the voting application hands its submissions to, and the
+// control-endpoint mounting behind the peer-identity middleware. The
+// environment's core flag marks the founding tier alone: a joining core
+// runs the applications a local node runs, its WireGuard application
+// publishing to and fetching from the founder's directory.
 func (n *node) appEnvironment() *apps.Environment {
 	env := &apps.Environment{
 		Arguments:       n.cfg.AppArguments,
@@ -51,6 +51,7 @@ func (n *node) appEnvironment() *apps.Environment {
 		Core:            n.cfg.role == trust.ASTypeCore,
 		StateRoot:       n.cfg.State,
 		ControlHost:     n.cfg.controlAddr.String(),
+		PublishedHost:   n.publishedHost,
 		Domain:          n.cfg.Domain,
 		Engine:          n.engine,
 		Paths:           n.pathProvider,

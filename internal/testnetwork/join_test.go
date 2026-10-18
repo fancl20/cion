@@ -17,6 +17,8 @@ import (
 	"github.com/fancl20/cion/pkg/core/trust"
 	"github.com/fancl20/cion/pkg/core/webpki/webpkitest"
 	"github.com/fancl20/cion/pkg/libs/scion"
+	"github.com/fancl20/cion/pkg/libs/scionrpc"
+	"github.com/fancl20/cion/pkg/libs/underlay"
 	"github.com/fancl20/cion/pkg/modules/links"
 	"github.com/fancl20/cion/pkg/modules/pathdb"
 	"github.com/fancl20/cion/pkg/modules/topology/impl/measured"
@@ -110,7 +112,10 @@ func bootAssembly(t *testing.T, mutate func(*services.NodeConfig)) *assemblyNode
 			t.Errorf("stopping %v: %v", app.IA(), err)
 		}
 	})
-	ap, err := netip.ParseAddrPort(cfg.Control)
+	// The control address's host is the address the lab's helpers name a
+	// peer by, the bare-host form included — its port derived the same way
+	// the resolution derives it.
+	ap, err := underlay.ResolveAddrPortDefault(cfg.Control, scionrpc.EndpointPort)
 	if err != nil {
 		t.Fatal(err)
 	}

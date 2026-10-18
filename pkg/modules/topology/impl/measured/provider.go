@@ -154,10 +154,12 @@ func (z *Provider) learn(host netip.Addr) {
 }
 
 // publishedHost resolves the host the node's own entry publishes: the
-// learned external host when one is recorded, else the control host. The
-// founding core — which dials no rendezvous — resolves its own identity,
-// its last good answer held through a failed resolution; before any has
-// landed the zero address, which publishes nothing.
+// learned external host when one is recorded, else the control host when it
+// names one — under the wildcard bind the zero address, which publishes
+// nothing until a host is learned. The founding core — which dials no
+// rendezvous — resolves its own identity, its last good answer held through
+// a failed resolution; before any has landed the zero address, which
+// publishes nothing.
 func (z *Provider) publishedHost(ctx context.Context) netip.Addr {
 	if z.cfg.Core {
 		return z.domain.resolve(ctx)
@@ -165,7 +167,18 @@ func (z *Provider) publishedHost(ctx context.Context) netip.Addr {
 	if host := z.external.host(); host.IsValid() {
 		return host
 	}
+	if z.cfg.ControlHost.IsUnspecified() {
+		return netip.Addr{}
+	}
 	return z.cfg.ControlHost
+}
+
+// PublishedHost resolves the host the node's publications carry — the node
+// directory's entry and the applications' own — so every publication answers
+// with one host: the learned one, else the bind host when it names one, the
+// zero address publishing nothing.
+func (z *Provider) PublishedHost(ctx context.Context) netip.Addr {
+	return z.publishedHost(ctx)
 }
 
 // bootstrapped is what a first-start joiner's rendezvous taught it: the
@@ -175,6 +188,9 @@ type bootstrapped struct {
 	target netip.AddrPort
 	reply  RendezvousReply
 	local  netip.AddrPort
+	// remote is the acceptor's link address under the claim rule, the side
+	// the seed records.
+	remote netip.AddrPort
 }
 
 // CompleteIdentity completes a first-start joiner's identity: the ISD of its
@@ -203,7 +219,7 @@ func (z *Provider) CompleteIdentity(ctx context.Context, ia addr.IA) (addr.IA, e
 		if err != nil {
 			return ia, fmt.Errorf("parsing --topology.neighbor %q: %w", s, err)
 		}
-		reply, _, err := RendezvousEcho(ctx, z.cfg.ControlHost, target,
+		reply, _, _, err := RendezvousEcho(ctx, z.cfg.ControlHost, target,
 			addr.IA(0), local)
 		if err != nil {
 			slog.Warn("The bootstrap neighbor's rendezvous did not answer",
@@ -223,12 +239,17 @@ func (z *Provider) CompleteIdentity(ctx context.Context, ia addr.IA) (addr.IA, e
 		// the first claimed zero: a link whose entry names no neighbor
 		// serves no beacons, and the exchange is the one place left to name
 		// it. The reply re-answers the same entry's addresses.
-		reply, _, err = RendezvousEcho(ctx, z.cfg.ControlHost, target, ia, local)
+		reply, observed, _, err := RendezvousEcho(ctx, z.cfg.ControlHost, target, ia, local)
 		if err != nil {
 			return ia, fmt.Errorf("naming the bootstrap neighbor's entry: %w", err)
 		}
 		z.learn(reply.Observed.Addr())
-		z.bootstrap = &bootstrapped{target: target, reply: reply, local: local}
+		z.bootstrap = &bootstrapped{
+			target: target,
+			reply:  reply,
+			local:  local,
+			remote: recordedLinkAddr(reply.LinkAddr, observed),
+		}
 		return ia, nil
 	}
 	return ia, fmt.Errorf("no bootstrap neighbor answered its rendezvous; " +
@@ -274,7 +295,7 @@ func (z *Provider) Seed(ctx context.Context) error {
 			seed := &links.Link{
 				NeighborIA: b.reply.IA,
 				Local:      b.local,
-				Remote:     b.reply.LinkAddr,
+				Remote:     b.remote,
 				RemoteIfID: b.reply.IfID,
 				Rendezvous: rendezvous,
 				State:      links.StateCandidate,
@@ -447,8 +468,8 @@ func (z *Provider) selectionConfig() SelectionConfig {
 }
 
 // runJoinDials dials the rendezvous of every entry still aimed at one: the
-// reply retargets the entry to the acceptor's link address, and the first
-// generation serves it.
+// reply retargets the entry to the acceptor's link address under the claim
+// rule, and the first generation serves it.
 func (z *Provider) runJoinDials(ctx context.Context) {
 	for {
 		z.dialJoins(ctx)
@@ -506,7 +527,7 @@ func (z *Provider) dialJoins(ctx context.Context) {
 			}
 			local = fresh
 		}
-		reply, _, err := RendezvousEcho(ctx, z.cfg.ControlHost, target, z.env.IA, local)
+		reply, observed, _, err := RendezvousEcho(ctx, z.cfg.ControlHost, target, z.env.IA, local)
 		if err != nil {
 			slog.Debug("Rendezvous dial", "rendezvous", target, "err", err)
 			continue
@@ -519,7 +540,7 @@ func (z *Provider) dialJoins(ctx context.Context) {
 		}
 		l.Local = local
 		l.NeighborIA = reply.IA
-		l.Remote = reply.LinkAddr
+		l.Remote = recordedLinkAddr(reply.LinkAddr, observed)
 		l.RemoteIfID = reply.IfID
 		if revival {
 			l.State = links.StateCandidate

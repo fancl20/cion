@@ -23,10 +23,12 @@ const (
 	// underlay block's bottom, the port that binds the node alone — a peer
 	// cannot observe the internal link's number.
 	DefaultInternal = "127.0.0.1:30044"
-	// DefaultControl is the control address's default; its host carries the
-	// control endpoint, the rendezvous acceptor, and the coordination
-	// listener, each at the port the underlay block's ladder fixes.
-	DefaultControl = "127.0.0.1:30042"
+	// DefaultControl is the control address's default: the bare wildcard
+	// host, binding every interface of its family — the control endpoint,
+	// the rendezvous acceptor, and the coordination listener each at the
+	// port the underlay block's ladder fixes, the resolution deriving the
+	// form's port from the endpoint's.
+	DefaultControl = "0.0.0.0"
 )
 
 // NodeConfig is the node's run arguments — everything the retiring

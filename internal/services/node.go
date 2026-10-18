@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/netip"
 	"sync"
 	"time"
 
@@ -48,6 +49,11 @@ type node struct {
 	// completes a first start's identity, seeds the store, mounts its
 	// services on the endpoint, and runs its loops under start.
 	topology topology.Provider
+	// publishedHost resolves the host the node's publications carry — the
+	// measured provider's own, the learned host beside the bind; the file
+	// provider's the control host a concrete bind names, for it learns
+	// nothing. The zero address publishes nothing.
+	publishedHost func(context.Context) netip.Addr
 
 	// Link state: the neighbor table as the one source of truth, wrapped so
 	// that every write signals linkChanges and lands as a generation swap.
@@ -178,6 +184,14 @@ func (n *node) selectProvider() error {
 			Path:          n.cfg.LinkSet,
 			WatchInterval: n.cfg.Pacing.LinkSetPoll,
 		})
+		// The static provider learns nothing: its publication names the
+		// control host a concrete bind carries, nothing under the wildcard.
+		n.publishedHost = func(context.Context) netip.Addr {
+			if host := n.cfg.controlAddr.Addr(); !host.IsUnspecified() {
+				return host
+			}
+			return netip.Addr{}
+		}
 		return nil
 	}
 	cfg := measured.Config{
@@ -208,6 +222,7 @@ func (n *node) selectProvider() error {
 		return err
 	}
 	n.topology = provider
+	n.publishedHost = provider.PublishedHost
 	return nil
 }
 

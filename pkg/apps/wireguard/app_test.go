@@ -192,10 +192,13 @@ func newTestWireguard(
 		IA:         ia,
 		ListenHost: testHost,
 		ListenPort: freeHostPort(t),
-		StateDir:   t.TempDir(),
-		Paths:      provider,
-		Engine:     trust.NewEngine(ia, nil, &trust.NetworkProvider{DB: db}),
-		Store:      directory,
+		PublishedHost: func(context.Context) netip.Addr {
+			return testHost
+		},
+		StateDir: t.TempDir(),
+		Paths:    provider,
+		Engine:   trust.NewEngine(ia, nil, &trust.NetworkProvider{DB: db}),
+		Store:    directory,
 		NewConn: func() (*scion.Conn, error) {
 			return scion.NewConn(scion.ConnConfig{
 				IA:           ia,
@@ -280,6 +283,72 @@ func TestWireguardPublishesOnceEnrolled(t *testing.T) {
 	}
 	if want := "100.64.0.0/24"; subnet.String() != want {
 		t.Errorf("assigned slice = %s, want the first free %s", subnet, want)
+	}
+}
+
+// TestWireguardEntryFollowsPublishedHost checks the entry's host-facing
+// endpoint: it prefers the published host at each publication — the learned
+// host once one is recorded — falls back to the bind host a concrete bind
+// names when the resolver names none, and holds the publication under a
+// wildcard bind that names neither, the cadence retrying.
+func TestWireguardEntryFollowsPublishedHost(t *testing.T) {
+	ia := addr.MustIAFrom(20, 0xff0000000213)
+	db := &flippableTrustDB{}
+	db.enroll([]*x509.Certificate{iaSubjectCert(t, ia)})
+	var resolved atomic.Value
+	store := func(host netip.Addr) { resolved.Store(host) }
+	store(netip.Addr{}) // nothing learned, the founding core's name unresolved
+	resolve := func(context.Context) netip.Addr {
+		return resolved.Load().(netip.Addr)
+	}
+
+	// A concrete bind publishes itself while the resolver names none.
+	a, directory := newTestWireguard(t, ia, db, func(c *Config) {
+		c.PublishedHost = resolve
+	})
+	directory.answer = netip.MustParsePrefix("100.64.1.0/24")
+	if err := a.publish(context.Background()); err != nil {
+		t.Fatalf("publishing the bind host: %v", err)
+	}
+	select {
+	case entry := <-directory.published:
+		if want := netip.AddrPortFrom(a.cfg.ListenHost, a.HostPort()); entry.HostEndpoint != want {
+			t.Errorf("the unresolved entry's endpoint = %v, want the bind host %v",
+				entry.HostEndpoint, want)
+		}
+	default:
+		t.Fatal("the bind host never published")
+	}
+
+	// The learned host outranks the bind at the next publication.
+	learned := netip.MustParseAddr("203.0.113.7")
+	store(learned)
+	if err := a.publish(context.Background()); err != nil {
+		t.Fatalf("publishing the learned host: %v", err)
+	}
+	select {
+	case entry := <-directory.published:
+		if want := netip.AddrPortFrom(learned, a.HostPort()); entry.HostEndpoint != want {
+			t.Errorf("the entry's endpoint = %v, want the learned host at the shared port %v",
+				entry.HostEndpoint, want)
+		}
+	default:
+		t.Fatal("the learned host never published")
+	}
+
+	// A wildcard bind naming neither holds the publication.
+	wild, wildDir := newTestWireguard(t, ia, db, func(c *Config) {
+		c.PublishedHost = resolve
+		c.ListenHost = netip.MustParseAddr("0.0.0.0")
+	})
+	store(netip.Addr{})
+	if err := wild.publish(context.Background()); err == nil {
+		t.Error("a publication with neither a resolved nor a bound host succeeded")
+	}
+	select {
+	case <-wildDir.published:
+		t.Fatal("published an entry with neither a resolved nor a bound host")
+	default:
 	}
 }
 

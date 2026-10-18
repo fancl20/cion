@@ -214,7 +214,7 @@ func TestProviderRunReturnsAndCloseReleases(t *testing.T) {
 		z.Run(ctx)
 		close(returned)
 	}()
-	if _, _, err := RendezvousEcho(context.Background(), host,
+	if _, _, _, err := RendezvousEcho(context.Background(), host,
 		netip.AddrPortFrom(host, RendezvousPort), addr.IA(0),
 		netip.AddrPortFrom(host, 4242)); err != nil {
 		t.Fatalf("the acceptor did not answer while Run served: %v", err)
@@ -274,9 +274,11 @@ func TestContract(t *testing.T) {
 
 // TestPublishedHostFollowsLearning checks the host the node's own entry
 // publishes: a non-core's follows the learned external host — a restart
-// republishes the persisted one — and the founding core resolves its own
-// domain, of the family its control host binds, holding no address the
-// resolver did not vouch for.
+// republishes the persisted one — the wildcard fallback publishing nothing
+// until one is learned, and the founding core resolving its own domain, of
+// the family its control host binds — the wildcard's first answer, which
+// names no family to filter by — holding no address the resolver did not
+// vouch for.
 func TestPublishedHostFollowsLearning(t *testing.T) {
 	control := netip.MustParseAddr("10.0.0.7")
 	z, err := New(Config{ControlHost: control, StateDir: t.TempDir()})
@@ -301,6 +303,23 @@ func TestPublishedHostFollowsLearning(t *testing.T) {
 		t.Errorf("restarted host = %v, want the persisted %v", got, learned)
 	}
 
+	// The wildcard fallback publishes nothing until a host is learned: the
+	// control host names none, exactly the founder's unresolved name.
+	wild, err := New(Config{
+		ControlHost: netip.MustParseAddr("0.0.0.0"),
+		StateDir:    t.TempDir(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := wild.publishedHost(ctx); got.IsValid() {
+		t.Errorf("the unlearned wildcard host = %v, want the zero address", got)
+	}
+	wild.learn(learned)
+	if got := wild.publishedHost(ctx); got != learned {
+		t.Errorf("the learned wildcard host = %v, want %v", got, learned)
+	}
+
 	core, err := New(Config{
 		Core:        true,
 		Domain:      "core.example.org",
@@ -318,6 +337,24 @@ func TestPublishedHostFollowsLearning(t *testing.T) {
 	}
 	if got := core.publishedHost(ctx); got != netip.MustParseAddr("192.0.2.20") {
 		t.Errorf("the core's host = %v, want its domain's 192.0.2.20", got)
+	}
+
+	// A wildcard-bound core publishes the resolver's first answer.
+	wildCore, err := New(Config{
+		Core:        true,
+		Domain:      "core.example.org",
+		ControlHost: netip.MustParseAddr("0.0.0.0"),
+		StateDir:    t.TempDir(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := netip.MustParseAddr("2001:db8::2")
+	wildCore.domain.lookup = func(context.Context, string, string) ([]netip.Addr, error) {
+		return []netip.Addr{first, netip.MustParseAddr("192.0.2.21")}, nil
+	}
+	if got := wildCore.publishedHost(ctx); got != first {
+		t.Errorf("the wildcard core's host = %v, want the resolver's first answer %v", got, first)
 	}
 
 	// A name that has never answered publishes nothing: no address the

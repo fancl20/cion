@@ -1,7 +1,6 @@
 package services
 
 import (
-	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -46,10 +45,7 @@ func (n *node) assembleHTTPS() error {
 		// deployment's shape, as it is today.
 		return nil
 	}
-	addr, err := n.httpsBindAddr()
-	if err != nil {
-		return err
-	}
+	addr := n.httpsBindAddr()
 	ln, err := n.certMgr.ListenHTTPS(addr)
 	if err != nil {
 		return err
@@ -62,17 +58,13 @@ func (n *node) assembleHTTPS() error {
 
 // httpsBindAddr names the address the HTTPS server binds: the integration
 // harness's placement when it names one — its loopback bind standing in
-// for the core's domain — else the core's control host at the HTTPS port.
-// A wildcard control address refuses the boot: the published endpoint
-// would name an address no host could dial.
-func (n *node) httpsBindAddr() (string, error) {
+// for the core's domain — else the core's control host at the HTTPS port,
+// the wildcard binding every interface of its family: the published
+// coordination endpoint names the identity, not the bind host, and the
+// CA's challenges want the port held on every interface.
+func (n *node) httpsBindAddr() string {
 	if o := n.cfg.Coordination; o != nil && o.Addr != "" {
-		return o.Addr, nil
+		return o.Addr
 	}
-	host := n.cfg.controlAddr.Addr()
-	if host.IsUnspecified() {
-		return "", errors.New("the coordination endpoint needs a specific host: " +
-			"a wildcard control address would publish an endpoint no host could dial")
-	}
-	return net.JoinHostPort(host.String(), webpki.HTTPSPort), nil
+	return net.JoinHostPort(n.cfg.controlAddr.Addr().String(), webpki.HTTPSPort)
 }

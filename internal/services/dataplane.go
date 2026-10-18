@@ -262,8 +262,19 @@ func usable(table map[uint16]addr.IA, verdicts map[uint16]bool) map[uint16]addr.
 // resolution requests alike — is delivered to the endpoint beside whose
 // services the resolution answers.
 func (n *node) registerControlService(provider *dataplane.UDPProvider) error {
-	host := addr.HostIP(n.cfg.controlAddr.Addr())
-	return provider.AddSvc(addr.SvcCS, host, scionrpc.EndpointPort)
+	return provider.AddSvc(addr.SvcCS, n.deliveryHost(), scionrpc.EndpointPort)
+}
+
+// deliveryHost names the host the service registrations deliver to: the
+// control host, or — under the wildcard bind — the internal address's, the
+// host the internal link already sends from and every wildcard-bound
+// receiver covers; the operating system's wildcard-means-loopback delivery
+// convention is no contract.
+func (n *node) deliveryHost() addr.Host {
+	if n.cfg.controlAddr.Addr().IsUnspecified() {
+		return addr.HostIP(n.cfg.internalAddr.Addr())
+	}
+	return addr.HostIP(n.cfg.controlAddr.Addr())
 }
 
 // backend is one service registration the applications own.
@@ -275,7 +286,7 @@ type backend struct {
 // registerBackends re-registers the applications' service backends on a new
 // provider; the CS registration is discovery's own.
 func (n *node) registerBackends(provider *dataplane.UDPProvider) error {
-	host := addr.HostIP(n.cfg.controlAddr.Addr())
+	host := n.deliveryHost()
 	n.backendsMtx.Lock()
 	defer n.backendsMtx.Unlock()
 	for _, b := range n.backends {
@@ -289,7 +300,7 @@ func (n *node) registerBackends(provider *dataplane.UDPProvider) error {
 // registerSvc registers one of the applications' sockets as a SCION service
 // in this AS — on the serving provider and on every generation to come.
 func (n *node) registerSvc(svc addr.SVC, port uint16) error {
-	host := addr.HostIP(n.cfg.controlAddr.Addr())
+	host := n.deliveryHost()
 	n.backendsMtx.Lock()
 	defer n.backendsMtx.Unlock()
 	n.backends = append(n.backends, backend{svc: svc, port: port})
@@ -301,7 +312,7 @@ func (n *node) registerSvc(svc addr.SVC, port uint16) error {
 
 // unregisterSvc deregisters a socket registerSvc registered.
 func (n *node) unregisterSvc(svc addr.SVC, port uint16) error {
-	host := addr.HostIP(n.cfg.controlAddr.Addr())
+	host := n.deliveryHost()
 	n.backendsMtx.Lock()
 	defer n.backendsMtx.Unlock()
 	kept := n.backends[:0]

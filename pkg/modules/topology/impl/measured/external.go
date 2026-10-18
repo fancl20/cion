@@ -93,9 +93,11 @@ func (h *externalHost) host() netip.Addr {
 // entry publishes: an address literal directly, a domain through the
 // resolver, the mapping a provider holds the core behind; a domain's
 // answer must share the bind host's family, the sockets binding it
-// receiving what the published address draws. Only an answer the resolver
-// vouched for publishes: a failed re-resolution holds the last good one,
-// and before any has landed the zero address, which publishes nothing.
+// receiving what the published address draws — unless the bind is the
+// wildcard, which names none, and the resolver's first answer publishes.
+// Only an answer the resolver vouched for publishes: a failed re-resolution
+// holds the last good one, and before any has landed the zero address,
+// which publishes nothing.
 type domainHost struct {
 	domain string
 	// bind is the control host the node's sockets bind; its family alone
@@ -153,7 +155,8 @@ func (d *domainHost) resolve(ctx context.Context) netip.Addr {
 }
 
 // lookupAddr resolves the domain, keeping the addresses of the bind host's
-// family alone.
+// family alone; a wildcard bind names none, and the resolver's first answer
+// publishes.
 func (d *domainHost) lookupAddr(ctx context.Context) (netip.Addr, bool) {
 	lookup := d.lookup
 	if lookup == nil {
@@ -165,8 +168,9 @@ func (d *domainHost) lookupAddr(ctx context.Context) (netip.Addr, bool) {
 	if err != nil {
 		return netip.Addr{}, false
 	}
+	wildcard := d.bind.IsUnspecified()
 	for _, a := range addrs {
-		if a.IsValid() && a.BitLen() == d.bind.BitLen() {
+		if a = a.Unmap(); a.IsValid() && (wildcard || a.BitLen() == d.bind.BitLen()) {
 			return a, true
 		}
 	}

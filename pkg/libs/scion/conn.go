@@ -8,6 +8,7 @@
 package scion
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/binary"
 	"errors"
@@ -93,6 +94,9 @@ type Conn struct {
 	// ifDown is the node's shared negative cache of interface-down signals;
 	// nil drops them as before.
 	ifDown *InterfaceDownCache
+	// advertise resolves the host the service-resolution replies name in
+	// place of the bound one; nil keeps the bound address.
+	advertise func(ctx context.Context) netip.Addr
 
 	conn *net.UDPConn
 
@@ -119,6 +123,11 @@ type ConnConfig struct {
 	// interface-down signals; the conn's receive paths recognize the signal
 	// and record it. Nil drops them.
 	InterfaceDown *InterfaceDownCache
+	// Advertise resolves the host the conn's service-resolution replies
+	// name under a wildcard bind, which names no host a peer could dial;
+	// a concrete bind names itself whatever this returns. Nil names
+	// nothing under the wildcard.
+	Advertise func(ctx context.Context) netip.Addr
 }
 
 // NewConn binds the endpoint's underlay address. Packets it sends are
@@ -150,13 +159,14 @@ func NewConn(cfg ConnConfig) (*Conn, error) {
 	}
 	local = netip.AddrPortFrom(boundIP.Unmap(), uint16(bound.Port))
 	return &Conn{
-		localIA:  cfg.IA,
-		local:    local,
-		internal: internal,
-		mac:      mac,
-		links:    cfg.Links,
-		ifDown:   cfg.InterfaceDown,
-		conn:     conn,
+		localIA:   cfg.IA,
+		local:     local,
+		internal:  internal,
+		mac:       mac,
+		links:     cfg.Links,
+		ifDown:    cfg.InterfaceDown,
+		advertise: cfg.Advertise,
+		conn:      conn,
 	}, nil
 }
 
@@ -180,6 +190,25 @@ func (c *Conn) LocalPort() uint16 { return c.local.Port() }
 // LocalAddr returns the endpoint's SCION address.
 func (c *Conn) LocalAddr() net.Addr {
 	return &Addr{IA: c.localIA, Addr: c.local}
+}
+
+// AdvertisedAddr returns the underlay address the conn's service-resolution
+// replies name: the bound address while it names a host, else — under the
+// wildcard bind — the advertised host at the bound port. False when a
+// wildcard bind has no host to name yet, the reply naming nothing and the
+// requester's retry re-asking.
+func (c *Conn) AdvertisedAddr() (netip.AddrPort, bool) {
+	if !c.local.Addr().IsUnspecified() {
+		return c.local, true
+	}
+	if c.advertise == nil {
+		return netip.AddrPort{}, false
+	}
+	host := c.advertise(context.Background())
+	if !host.IsValid() || host.IsUnspecified() {
+		return netip.AddrPort{}, false
+	}
+	return netip.AddrPortFrom(host, c.local.Port()), true
 }
 
 // Close releases the underlay socket.

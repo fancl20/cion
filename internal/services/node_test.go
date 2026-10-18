@@ -52,6 +52,21 @@ func roleLoopNames(n *node) []string {
 	return names
 }
 
+// TestServiceRegistrationsCarryDeliveryHost checks the host the service
+// registrations deliver to: the control host a concrete bind names, and —
+// under the wildcard bind — the internal address's, the loopback the
+// internal link already sends from and every wildcard-bound receiver covers.
+func TestServiceRegistrationsCarryDeliveryHost(t *testing.T) {
+	n := resolvedNode(t, func(c *NodeConfig) { c.Control = "127.0.0.1:30042" })
+	if got, want := n.deliveryHost().IP(), n.cfg.controlAddr.Addr(); got != want {
+		t.Errorf("the delivery host = %v, want the control host %v", got, want)
+	}
+	w := resolvedNode(t, func(c *NodeConfig) { c.Control = "0.0.0.0" })
+	if got, want := w.deliveryHost().IP(), w.cfg.internalAddr.Addr(); got != want {
+		t.Errorf("the wildcard's delivery host = %v, want the internal address's %v", got, want)
+	}
+}
+
 // TestSetupNodeConsumesResolution checks the phases hold what resolve built
 // once: the trust service, the TRC decision, and the applications'
 // environment hold the one authorizer instance, and the applications that

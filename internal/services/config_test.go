@@ -24,14 +24,16 @@ func nodeConfig() NodeConfig {
 
 // TestNodeConfigResolve checks the role-aware argument checks: the domain
 // is always required, the joining core takes its neighbor, and the
-// addresses resolve.
+// addresses resolve — the default control address the bare wildcard, its
+// port derived from the endpoint's.
 func TestNodeConfigResolve(t *testing.T) {
 	rc, err := nodeConfig().resolve()
 	if err != nil {
 		t.Fatalf("resolving the minimal core: %v", err)
 	}
-	if want := netip.MustParseAddrPort(DefaultControl); rc.controlAddr != want {
-		t.Errorf("the control address = %v, want %v", rc.controlAddr, want)
+	if want := (netip.AddrPortFrom(netip.MustParseAddr(DefaultControl), 30042)); rc.controlAddr != want {
+		t.Errorf("the control address = %v, want the wildcard at the endpoint's port %v",
+			rc.controlAddr, want)
 	}
 	if want := netip.MustParseAddrPort(DefaultInternal); rc.internalAddr != want {
 		t.Errorf("the internal address = %v, want %v", rc.internalAddr, want)

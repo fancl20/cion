@@ -72,6 +72,11 @@ type Config struct {
 	// ListenPort is the shared host-facing UDP port — hosts are plain
 	// internet clients with a single endpoint to reach.
 	ListenPort uint16
+	// PublishedHost resolves the host the entry's host-facing endpoint
+	// prefers at each publication: the learned host, the founding core's
+	// identity. An answer that names none leaves the bind host — a wildcard
+	// bind naming neither holds the publication for the cadence's retry.
+	PublishedHost func(ctx context.Context) netip.Addr
 	// DERP is the relay presence the node holds: received datagrams feed
 	// the shared host port and sends carry the replies, so a host on a
 	// network where UDP to the node cannot pass still reaches its node.
@@ -194,6 +199,9 @@ type svcReg struct {
 // over its own registered service socket, the route every other node
 // publishes and fetches through. Run serves it.
 func New(cfg Config) (*App, error) {
+	if cfg.PublishedHost == nil {
+		return nil, fmt.Errorf("no published-host resolver")
+	}
 	key, err := LoadOrCreateKey(cfg.StateDir)
 	if err != nil {
 		return nil, fmt.Errorf("loading the application key: %w", err)

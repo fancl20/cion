@@ -310,6 +310,26 @@ func (r *Rendezvous) Run(ctx context.Context) {
 	}
 }
 
+// recordedLinkAddr applies the claim rule every recording site shares: the
+// claim's host when it names one, the observed host when it does not — the
+// address the exchange's own round trip proved answers — the claim's port
+// always, for it names the socket that will receive. A wildcard-bound peer
+// claims the wildcard; what it cannot name, the exchange observes.
+func recordedLinkAddr(claim, observed netip.AddrPort) netip.AddrPort {
+	if !claim.Addr().IsUnspecified() {
+		return claim
+	}
+	return netip.AddrPortFrom(observed.Addr().Unmap(), claim.Port())
+}
+
+// observedAddr returns a datagram's source as the exchange records it: the
+// kernel's v4-mapped form of a wildcard socket's arrival normalized to the
+// plain address.
+func observedAddr(src *net.UDPAddr) netip.AddrPort {
+	ap := src.AddrPort()
+	return netip.AddrPortFrom(ap.Addr().Unmap(), ap.Port())
+}
+
 // handle applies the admission policy and records the entry, returning the
 // reply to send to the source. The echo is the return-routability check: the
 // reply only ever reaches the socket the request came from. The exchange
@@ -317,12 +337,16 @@ func (r *Rendezvous) Run(ctx context.Context) {
 // check — so a claim only ever mints, names, or retargets a candidate: an
 // established entry answers with its recorded side untouched, and a claim
 // at an address another serving link holds is turned away, the store
-// refusing the second. The store calls run under ctx, the loop's.
+// refusing the second. The claim rule applies before anything reads the
+// claim: a request without a host in it — the wildcard-bound joiner's —
+// records the host the request arrived from under the claim's port. The
+// store calls run under ctx, the loop's.
 func (r *Rendezvous) handle(ctx context.Context, raw []byte, src *net.UDPAddr) ([]byte, error) {
 	req, err := ParseRendezvousRequest(raw)
 	if err != nil {
 		return nil, err
 	}
+	req.LinkAddr = recordedLinkAddr(req.LinkAddr, observedAddr(src))
 	if req.IA.IsZero() {
 		if !r.byAddr.Admit(req.LinkAddr) {
 			return nil, fmt.Errorf("claim %s exceeds the admission rate", req.LinkAddr)
@@ -358,7 +382,7 @@ func (r *Rendezvous) handle(ctx context.Context, raw []byte, src *net.UDPAddr) (
 		LinkAddr: entry.Local,
 		IfID:     entry.IfID,
 		IA:       r.cfg.IA,
-		Observed: src.AddrPort(),
+		Observed: observedAddr(src),
 	}
 	return reply.Marshal(), nil
 }
@@ -472,31 +496,33 @@ func rendezvousSilenceHint(target netip.AddrPort) string {
 }
 
 // RendezvousEcho sends one request run to the target and returns the reply
-// with the round trip, the measurement the selection loop probes candidates
-// with. The requester claims the given address; a probe claims its control
-// address, a promotion its link address. The context's end moves the read
-// deadline to the past, ending a wait in flight; each attempt reads the
-// context after setting its own deadline, so no attempt overrides the move
-// unseen.
+// with the round trip and the address the reply arrived from — the acceptor's
+// routable host on the path the dial proved, the observation an unspecified
+// answer records under the answer's port. The requester claims the given
+// address; a probe claims its control address, a promotion its link address.
+// The context's end moves the read deadline to the past, ending a wait in
+// flight; each attempt reads the context after setting its own deadline, so
+// no attempt overrides the move unseen.
 func RendezvousEcho(
 	ctx context.Context,
 	bindHost netip.Addr,
 	target netip.AddrPort,
 	ia addr.IA,
 	linkAddr netip.AddrPort,
-) (RendezvousReply, time.Duration, error) {
+) (RendezvousReply, netip.AddrPort, time.Duration, error) {
 
 	conn, err := net.ListenUDP("udp",
 		net.UDPAddrFromAddrPort(netip.AddrPortFrom(bindHost, 0)))
 	if err != nil {
-		return RendezvousReply{}, 0, fmt.Errorf("binding the rendezvous client: %w", err)
+		return RendezvousReply{}, netip.AddrPort{}, 0,
+			fmt.Errorf("binding the rendezvous client: %w", err)
 	}
 	defer func() { _ = conn.Close() }()
 	stop := context.AfterFunc(ctx, func() { _ = conn.SetReadDeadline(time.Now()) })
 	defer stop()
 	var req RendezvousRequest
 	if _, err := rand.Read(req.Nonce[:]); err != nil {
-		return RendezvousReply{}, 0, err
+		return RendezvousReply{}, netip.AddrPort{}, 0, err
 	}
 	req.IA = ia
 	req.LinkAddr = linkAddr
@@ -507,17 +533,17 @@ func RendezvousEcho(
 	buf := make([]byte, 192)
 	for range RendezvousAttempts {
 		if err := conn.SetReadDeadline(time.Now().Add(RendezvousAttemptWait)); err != nil {
-			return RendezvousReply{}, 0, err
+			return RendezvousReply{}, netip.AddrPort{}, 0, err
 		}
 		if err := ctx.Err(); err != nil {
-			return RendezvousReply{}, 0, err
+			return RendezvousReply{}, netip.AddrPort{}, 0, err
 		}
 		sent := time.Now()
 		if _, err := conn.WriteToUDP(raw, udpAddr(target)); err != nil {
-			return RendezvousReply{}, 0, err
+			return RendezvousReply{}, netip.AddrPort{}, 0, err
 		}
 		for {
-			n, _, err := conn.ReadFromUDP(buf)
+			n, src, err := conn.ReadFromUDP(buf)
 			if err != nil {
 				break // the wait elapsed or the context ended: lost, retry
 			}
@@ -525,11 +551,11 @@ func RendezvousEcho(
 			if err != nil || reply.Nonce != req.Nonce {
 				continue
 			}
-			return reply, time.Since(sent), nil
+			return reply, observedAddr(src), time.Since(sent), nil
 		}
 	}
-	return RendezvousReply{}, 0, fmt.Errorf("no rendezvous reply from %s%s",
-		target, rendezvousSilenceHint(target))
+	return RendezvousReply{}, netip.AddrPort{}, 0,
+		fmt.Errorf("no rendezvous reply from %s%s", target, rendezvousSilenceHint(target))
 }
 
 func udpAddr(ap netip.AddrPort) *net.UDPAddr {

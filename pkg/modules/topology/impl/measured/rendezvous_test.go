@@ -65,7 +65,7 @@ func TestRendezvousRoundTrip(t *testing.T) {
 	f := newRendezvousFixture(t, nil)
 	claim := netip.MustParseAddrPort("127.0.0.1:4242")
 
-	reply, rtt, err := RendezvousEcho(context.Background(),
+	reply, _, rtt, err := RendezvousEcho(context.Background(),
 		netip.MustParseAddr("127.0.0.1"), f.addr, rendezvousIA, claim)
 	if err != nil {
 		t.Fatal(err)
@@ -101,7 +101,7 @@ func TestRendezvousRoundTrip(t *testing.T) {
 	// A re-request of the same peer is idempotent: the recorded side
 	// re-answers, no second entry.
 	newClaim := netip.MustParseAddrPort("127.0.0.1:4243")
-	reply2, _, err := RendezvousEcho(context.Background(),
+	reply2, _, _, err := RendezvousEcho(context.Background(),
 		netip.MustParseAddr("127.0.0.1"), f.addr, rendezvousIA, newClaim)
 	if err != nil {
 		t.Fatal(err)
@@ -127,7 +127,7 @@ func TestRendezvousNamesCandidate(t *testing.T) {
 	f := newRendezvousFixture(t, nil)
 	claim := netip.MustParseAddrPort("127.0.0.1:4242")
 
-	if _, _, err := RendezvousEcho(context.Background(),
+	if _, _, _, err := RendezvousEcho(context.Background(),
 		netip.MustParseAddr("127.0.0.1"), f.addr, addr.IA(0), claim); err != nil {
 		t.Fatal(err)
 	}
@@ -139,7 +139,7 @@ func TestRendezvousNamesCandidate(t *testing.T) {
 		t.Fatalf("bootstrap claim recorded %v, want unnamed", entry.NeighborIA)
 	}
 
-	reply, _, err := RendezvousEcho(context.Background(),
+	reply, _, _, err := RendezvousEcho(context.Background(),
 		netip.MustParseAddr("127.0.0.1"), f.addr, rendezvousIA, claim)
 	if err != nil {
 		t.Fatal(err)
@@ -290,7 +290,7 @@ func TestRendezvousNoReplyAllocatesNothing(t *testing.T) {
 		t.Helper()
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
-		_, _, err := RendezvousEcho(ctx, netip.MustParseAddr("127.0.0.1"),
+		_, _, _, err := RendezvousEcho(ctx, netip.MustParseAddr("127.0.0.1"),
 			target, rendezvousIA, netip.MustParseAddrPort("127.0.0.1:4242"))
 		return err
 	}
@@ -372,12 +372,12 @@ func TestRendezvousLinkCap(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, _, err := RendezvousEcho(context.Background(),
+	if _, _, _, err := RendezvousEcho(context.Background(),
 		netip.MustParseAddr("127.0.0.1"), f.addr, rendezvousIA, claim); err == nil {
 		t.Error("a request past the link cap was admitted")
 	}
 	// A returning neighbor is never blocked by the cap.
-	if _, _, err := RendezvousEcho(context.Background(),
+	if _, _, _, err := RendezvousEcho(context.Background(),
 		netip.MustParseAddr("127.0.0.1"), f.addr, strangerKeyIA, claim); err != nil {
 		t.Errorf("a returning neighbor was refused at the cap: %v", err)
 	}
@@ -462,7 +462,7 @@ func TestRendezvousEchoEndsWithItsContext(t *testing.T) {
 	echoed := make(chan error, 1)
 	start := time.Now()
 	go func() {
-		_, _, err := RendezvousEcho(ctx, host, silent.LocalAddr().(*net.UDPAddr).AddrPort(),
+		_, _, _, err := RendezvousEcho(ctx, host, silent.LocalAddr().(*net.UDPAddr).AddrPort(),
 			addr.IA(0), netip.AddrPortFrom(host, 4242))
 		echoed <- err
 	}()
@@ -477,6 +477,74 @@ func TestRendezvousEchoEndsWithItsContext(t *testing.T) {
 	// cut short holds the dial a full RendezvousAttemptWait.
 	if held := time.Since(start); held >= RendezvousAttemptWait {
 		t.Errorf("RendezvousEcho returned after %v, want under RendezvousAttemptWait", held)
+	}
+}
+
+// TestRendezvousRecordsObservedHost checks the claim rule the wildcard bind
+// rides on: a request without a host in its claim — the wildcard-bound
+// joiner's — records the observed source host under the claim's port at the
+// acceptor, and the reply without one records the host the reply arrived
+// from under the answer's port at the dialer. The exchange binds the
+// wildcard on both sides — a wildcard bind takes every interface of its
+// family, the loopback's v4 among them — its sockets at ephemeral ports, so
+// the package's other mounts keep their fixed ones.
+func TestRendezvousRecordsObservedHost(t *testing.T) {
+	wildcard := netip.MustParseAddr("0.0.0.0")
+	f := newRendezvousFixture(t, func(cfg *RendezvousConfig) {
+		cfg.Bind = "0.0.0.0:0"
+		cfg.LinkHost = wildcard
+	})
+	// The dial aims at the acceptor's port on the v4 loopback, the form a
+	// published host spells.
+	loopback := netip.MustParseAddr("127.0.0.1")
+	target := netip.AddrPortFrom(loopback, f.addr.Port())
+	claim := netip.AddrPortFrom(wildcard, 31001)
+
+	reply, observed, _, err := RendezvousEcho(context.Background(),
+		wildcard, target, rendezvousIA, claim)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The acceptor's side: the claim's port on the host the request arrived
+	// from, the entry's local address a wildcard bind value.
+	entry, err := f.store.ByNeighbor(context.Background(), rendezvousIA)
+	if err != nil || entry == nil {
+		t.Fatalf("no entry recorded (%v)", err)
+	}
+	if want := netip.AddrPortFrom(loopback, claim.Port()); entry.Remote != want {
+		t.Errorf("entry remote = %v, want the observed host under the claim's port %v",
+			entry.Remote, want)
+	}
+	if !entry.Local.Addr().IsUnspecified() {
+		t.Errorf("entry local = %v, want the wildcard bind value", entry.Local)
+	}
+	// The dialer's side: the answer's port on the host the reply arrived
+	// from — the acceptor's routable host on the path the dial proved.
+	if observed.Addr() != loopback {
+		t.Errorf("the reply's source = %v, want the loopback host", observed)
+	}
+	remote := recordedLinkAddr(reply.LinkAddr, observed)
+	if want := netip.AddrPortFrom(loopback, reply.LinkAddr.Port()); remote != want {
+		t.Errorf("recorded remote = %v, want the reply's source under the answer's port %v",
+			remote, want)
+	}
+	if reply.LinkAddr != entry.Local {
+		t.Errorf("reply link address = %v, want the entry's %v", reply.LinkAddr, entry.Local)
+	}
+
+	// A re-request naming a host is the concrete claim the rule keeps
+	// verbatim: the entry retargets onto exactly what it spells.
+	concrete := netip.AddrPortFrom(loopback, 31002)
+	if _, _, _, err := RendezvousEcho(context.Background(),
+		wildcard, target, rendezvousIA, concrete); err != nil {
+		t.Fatal(err)
+	}
+	entry, err = f.store.ByNeighbor(context.Background(), rendezvousIA)
+	if err != nil || entry == nil {
+		t.Fatalf("no entry recorded (%v)", err)
+	}
+	if entry.Remote != concrete {
+		t.Errorf("the concrete claim's remote = %v, want it verbatim %v", entry.Remote, concrete)
 	}
 }
 

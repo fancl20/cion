@@ -356,7 +356,7 @@ func (s *selection) candidateAlive(ctx context.Context, l *links.Link) bool {
 	if !target.IsValid() {
 		return false
 	}
-	_, _, err := s.echo(ctx, s.cfg.ControlAddr.Addr(), target,
+	_, _, _, err := s.echo(ctx, s.cfg.ControlAddr.Addr(), target,
 		addr.IA(0), s.cfg.ControlAddr)
 	return err == nil
 }
@@ -378,19 +378,20 @@ func rendezvousTarget(l *links.Link) netip.AddrPort {
 
 // echo dials one rendezvous exchange, recording the external host the
 // reply's observed source names for the node — every dial teaches the
-// dialer its external host.
+// dialer its external host — and returning the reply's source beside the
+// reply, the observation an unspecified answer records under.
 func (s *selection) echo(
 	ctx context.Context,
 	bind netip.Addr,
 	target netip.AddrPort,
 	ia addr.IA,
 	linkAddr netip.AddrPort,
-) (RendezvousReply, time.Duration, error) {
-	reply, rtt, err := RendezvousEcho(ctx, bind, target, ia, linkAddr)
+) (RendezvousReply, netip.AddrPort, time.Duration, error) {
+	reply, observed, rtt, err := RendezvousEcho(ctx, bind, target, ia, linkAddr)
 	if err == nil && s.cfg.Learn != nil {
 		s.cfg.Learn(reply.Observed.Addr())
 	}
-	return reply, rtt, err
+	return reply, observed, rtt, err
 }
 
 // neighbors maps the established entries by their neighbor ISD-AS.
@@ -553,7 +554,7 @@ func (s *selection) probe(ctx context.Context, e DirectoryEntry, l *links.Link) 
 			IA:   e.IA,
 			Addr: netip.AddrPortFrom(e.ControlAddr.Addr(), underlay.EndhostPort),
 		})
-	} else if _, rtt, err := s.echo(ctx, s.cfg.ControlAddr.Addr(),
+	} else if _, _, rtt, err := s.echo(ctx, s.cfg.ControlAddr.Addr(),
 		e.RendezvousAddr, addr.IA(0), s.cfg.ControlAddr); err == nil {
 		m.direct = rtt
 	}
@@ -963,7 +964,10 @@ func (s *selection) establishLink(ctx context.Context, e DirectoryEntry, why str
 			slog.Error("The link reply carries a malformed address", "err", err)
 			return false
 		} else {
-			entry.Remote = remote
+			// The rule's in-band side: an unspecified claim's port records
+			// on the host the request dialed — the published host the fixed
+			// ports and the link band sit on.
+			entry.Remote = recordedLinkAddr(remote, peer.Addr)
 			entry.RemoteIfID = uint16(reply.IfId)
 			entry.State = links.StateEstablished
 			if err := s.cfg.Store.Update(ctx, entry); err != nil {
@@ -992,11 +996,13 @@ func (s *selection) establishLink(ctx context.Context, e DirectoryEntry, why str
 // the establishment a joiner with no paths uses. The reply must name the
 // entry's ISD-AS: the published address can be a learned public host, and an
 // answer arriving from a different node — a colliding subnet's real peer —
-// must not mint an entry naming one ISD-AS at another's address.
+// must not mint an entry naming one ISD-AS at another's address. The reply's
+// link address records under the claim rule, its port on the reply's
+// observed source host when the answer names none.
 func (s *selection) establishByRendezvous(
 	ctx context.Context, e DirectoryEntry, entry *links.Link,
 ) bool {
-	reply, _, err := s.echo(ctx, s.cfg.LinkHost, e.RendezvousAddr, s.cfg.IA, entry.Local)
+	reply, observed, _, err := s.echo(ctx, s.cfg.LinkHost, e.RendezvousAddr, s.cfg.IA, entry.Local)
 	if err != nil {
 		slog.Warn("The rendezvous establishment failed", "neighbor", e.IA, "err", err)
 		return false
@@ -1006,7 +1012,7 @@ func (s *selection) establishByRendezvous(
 			"neighbor", e.IA, "answered", reply.IA)
 		return false
 	}
-	entry.Remote = reply.LinkAddr
+	entry.Remote = recordedLinkAddr(reply.LinkAddr, observed)
 	entry.RemoteIfID = reply.IfID
 	if err := s.cfg.Store.Update(ctx, entry); err != nil {
 		slog.Error("Recording the rendezvous establishment", "neighbor", e.IA, "err", err)

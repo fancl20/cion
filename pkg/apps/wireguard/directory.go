@@ -210,7 +210,9 @@ func (a *App) runPublish(ctx context.Context) {
 // publish sends the node's entry once the node's chain exists: an
 // un-enrolled node has no certificate to authenticate the channel with. The
 // answer is the store's assignment, which the application holds as the
-// node's slice — the signal the SOCKS application's assembly waits on.
+// node's slice — the signal the SOCKS application's assembly waits on. A
+// host the entry's endpoint cannot name — neither the resolver nor the
+// wildcard bind — publishes nothing, the retry re-asking.
 func (a *App) publish(ctx context.Context) error {
 	chain, err := a.cfg.Engine.Chain(ctx)
 	if err != nil {
@@ -219,7 +221,11 @@ func (a *App) publish(ctx context.Context) error {
 	if len(chain) == 0 {
 		return fmt.Errorf("no certificate chain yet; enrollment has not produced one")
 	}
-	subnet, err := a.directory.Publish(ctx, a.selfEntry())
+	entry, err := a.selfEntry(ctx)
+	if err != nil {
+		return err
+	}
+	subnet, err := a.directory.Publish(ctx, entry)
 	if err != nil {
 		return err
 	}
@@ -234,13 +240,23 @@ func (a *App) publish(ctx context.Context) error {
 }
 
 // selfEntry is the node's own publication: the claim without a slice — the
-// store assigns it.
-func (a *App) selfEntry() Entry {
+// store assigns it — the endpoint naming the published host at the shared
+// port: the resolver's answer — the learned host, the founding core's
+// identity — else the bind host when it names one, resolved anew at each
+// publication so a host learned mid-run publishes on the next cadence.
+func (a *App) selfEntry(ctx context.Context) (Entry, error) {
+	host := a.cfg.PublishedHost(ctx)
+	if !host.IsValid() || host.IsUnspecified() {
+		host = a.cfg.ListenHost
+	}
+	if !host.IsValid() || host.IsUnspecified() {
+		return Entry{}, errors.New("the entry's host did not resolve")
+	}
 	return Entry{
 		IA:           a.cfg.IA,
 		PublicKey:    a.key.PublicKey(),
-		HostEndpoint: netip.AddrPortFrom(a.cfg.ListenHost, a.cfg.ListenPort),
-	}
+		HostEndpoint: netip.AddrPortFrom(host, a.cfg.ListenPort),
+	}, nil
 }
 
 // Subnet returns the node's assigned slice of the tailnet range, waiting for

@@ -1,6 +1,7 @@
 package scion
 
 import (
+	"context"
 	"net/netip"
 	"testing"
 	"time"
@@ -54,6 +55,52 @@ func (n *testNode) newConn(t *testing.T, port uint16) *Conn {
 // would collide across packages and a released reservation could be taken
 // before its rebind.
 var testHost = netip.MustParseAddr("127.0.0.127")
+
+// TestConnAdvertisedAddr checks the address the conn's service-resolution
+// replies name: a concrete bind names itself whatever the advertise
+// resolver answers, and the wildcard bind names the advertised host at its
+// port — nothing while the resolver has learned none, for the bound
+// wildcard names no host a peer could dial.
+func TestConnAdvertisedAddr(t *testing.T) {
+	var host netip.Addr
+	advertise := func(context.Context) netip.Addr { return host }
+	conn, err := NewConn(ConnConfig{
+		IA:           addr.MustIAFrom(20, 0xff0000000001),
+		Bind:         netip.AddrPortFrom(testHost, 0).String(),
+		InternalAddr: netip.AddrPortFrom(testHost, 30001).String(),
+		MACKey:       testMACKeyBytes,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = conn.Close() }()
+	conn.advertise = advertise
+	if advertised, ok := conn.AdvertisedAddr(); !ok || advertised != conn.local {
+		t.Errorf("a concrete bind's AdvertisedAddr() = %v, %v, want the bound %v",
+			advertised, ok, conn.local)
+	}
+
+	wild, err := NewConn(ConnConfig{
+		IA:           addr.MustIAFrom(20, 0xff0000000001),
+		Bind:         netip.AddrPortFrom(netip.MustParseAddr("0.0.0.0"), 0).String(),
+		InternalAddr: netip.AddrPortFrom(testHost, 30001).String(),
+		MACKey:       testMACKeyBytes,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = wild.Close() }()
+	wild.advertise = advertise
+	if _, ok := wild.AdvertisedAddr(); ok {
+		t.Error("an unresolved advertise resolver named an address")
+	}
+	host = netip.MustParseAddr("203.0.113.7")
+	advertised, ok := wild.AdvertisedAddr()
+	if !ok || advertised != netip.AddrPortFrom(host, wild.local.Port()) {
+		t.Errorf("the wildcard's AdvertisedAddr() = %v, %v, want %v at the bound port %v",
+			advertised, ok, host, wild.local.Port())
+	}
+}
 
 // freeUDPAddr returns a UDP address on testHost with a port picked by the
 // kernel and released for the caller's bind.

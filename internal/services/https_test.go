@@ -151,27 +151,22 @@ func TestAssembleHTTPSRefusesSecondHandler(t *testing.T) {
 	}
 }
 
-// TestAssembleHTTPSWildcardRefused checks the wildcard refusal at the
-// bind: a control address whose host no host could dial refuses the boot
-// with the published-endpoint message.
-func TestAssembleHTTPSWildcardRefused(t *testing.T) {
-	app, err := coordination.New(coordination.Config{
-		Domain:   webpkitest.Domain,
-		Store:    testRegistry{},
-		StateDir: t.TempDir(),
+// TestAssembleHTTPSWildcardBinds checks the wildcard bind: a control
+// address whose host is the wildcard names the HTTPS bind at the port,
+// every interface of its family — the published coordination endpoint
+// names the identity, not the bind host, and the CA's challenges want the
+// port held everywhere.
+func TestAssembleHTTPSWildcardBinds(t *testing.T) {
+	n := resolvedNode(t, func(c *NodeConfig) { c.Control = "0.0.0.0" })
+	if got, want := n.httpsBindAddr(), "0.0.0.0:443"; got != want {
+		t.Errorf("httpsBindAddr() = %q, want the wildcard at the HTTPS port %q", got, want)
+	}
+	// The harness's placement still overrides the bind.
+	n = resolvedNode(t, func(c *NodeConfig) {
+		c.Control = "0.0.0.0"
+		c.Coordination = &CoordinationOptions{Addr: "127.0.0.1:0"}
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(app.Close)
-	n := resolvedNode(t, func(c *NodeConfig) { c.Control = "0.0.0.0:30042" })
-	n.certMgr = staticCertMgr(t)
-	n.apps = []apps.Loaded{{Name: "coordination", App: app}}
-	_, err = n.httpsBindAddr()
-	if err == nil {
-		t.Fatal("a wildcard control address named a bind, want refusal")
-	}
-	if want := "no host could dial"; !strings.Contains(err.Error(), want) {
-		t.Errorf("the refusal = %q, want it to carry %q", err, want)
+	if got, want := n.httpsBindAddr(), "127.0.0.1:0"; got != want {
+		t.Errorf("httpsBindAddr() = %q, want the placement %q", got, want)
 	}
 }

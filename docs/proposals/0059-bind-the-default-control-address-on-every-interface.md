@@ -258,4 +258,42 @@ The change lands in one commit.
 
 ## Implementation history
 
-None yet.
+*   The claim rule lives in `recordedLinkAddr`
+    ([rendezvous.go](/pkg/modules/topology/impl/measured/rendezvous.go)):
+    the acceptor rewrites an unspecified claim by the request's observed
+    source before any cap or table reads it, `RendezvousEcho` returns the
+    reply's observed source beside the reply, and the bootstrap, the join
+    dials, and the rendezvous establishment record under it
+    ([provider.go](/pkg/modules/topology/impl/measured/provider.go),
+    [selection.go](/pkg/modules/topology/impl/measured/selection.go)); the
+    in-band establishment records an unspecified reply on the host the
+    request dialed. The kernel's v4-mapped form of a wildcard socket's
+    arrival normalizes to the plain address where the exchange derives it.
+*   The wildcard's publications: the measured provider's fallback returns
+    the zero address under a wildcard bind and `PublishedHost` hands the
+    resolver to the applications' environment
+    ([apps.go](/pkg/apps/apps.go)), the WireGuard entry resolving its
+    endpoint at each publication
+    ([directory.go](/pkg/apps/wireguard/directory.go)), and the founding
+    core's domain resolution takes the resolver's first answer when the
+    bind names no family
+    ([external.go](/pkg/modules/topology/impl/measured/external.go)).
+*   The binds: `httpsBindAddr` names the wildcard at the HTTPS port
+    ([https.go](/internal/services/https.go)), the service registrations
+    carry the internal address's host under the wildcard
+    ([dataplane.go](/internal/services/dataplane.go)), `DefaultControl` is
+    the bare wildcard host with the flag help restated
+    ([config.go](/internal/services/config.go),
+    [run.go](/cmd/cion/run.go)), and the scion conn's service-resolution
+    replies name the published host under a wildcard bind, which names no
+    host a peer could dial — a concrete bind keeps naming itself
+    ([conn.go](/pkg/libs/scion/conn.go),
+    [serve.go](/pkg/libs/scionrpc/serve.go)).
+*   The proofs: the rule's wildcard exchange and the fallback publications
+    in the measured package's tests, the establishment's two arms in
+    [selection_test.go](/pkg/modules/topology/impl/measured/selection_test.go),
+    and the wildcard boot episode in its own network namespace — a
+    wildcard bind holds the fixed ports against every node of one host, so
+    the observed-address link between two wildcard assemblies is proven at
+    the package's exchange, the episode binding one assembly
+    ([wildcard_test.go](/internal/testnetwork/wildcard_test.go)).
