@@ -46,6 +46,12 @@ type Config struct {
 	Interval time.Duration
 	// Wait bounds the wait for each reply before it counts as lost.
 	Wait time.Duration
+	// Ready bounds the wait for the network to serve before the counted
+	// run: the first path resolution is retried within it and uncounted
+	// warm-up requests leave until one is answered. Zero resolves once and
+	// counts at once; a destination no path resolves for, within the bound
+	// when set, is an error either way, never a hang.
+	Ready time.Duration
 	// Log receives a line per reply and the summary; nil discards them.
 	Log func(string, ...any)
 }
@@ -81,8 +87,11 @@ func (r *Report) Loss() int { return r.Sent - r.Received }
 
 // Run sends Count echo requests at Interval, matching replies by identifier
 // and sequence. The path is resolved once and re-resolved whenever it
-// expired or a send failed; the run continues either way. A destination no
-// path resolves for is an error, not a hang.
+// expired or a send failed; the run continues either way. Ready bounds the
+// wait for a network still converging — the first resolution retried within
+// it, uncounted warm-up requests leaving until one is answered — so the
+// counted run reports the network, not its bring-up. A destination no path
+// resolves for, within Ready when set, is an error, not a hang.
 func Run(ctx context.Context, cfg Config) (*Report, error) {
 	if cfg.Count < 1 {
 		return nil, errors.New("ping count must be positive")
@@ -96,8 +105,45 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 		path = p
 		return nil
 	}
-	if err := resolve(); err != nil {
+	// A cold boot serves no path at once — the beaconer's first propagation
+	// pass waits out its interval — so the first resolution retries within
+	// the readiness bound; zero bounds nothing and the failure stands.
+	deadline := time.Now().Add(cfg.Ready)
+	err := resolve()
+	for err != nil && time.Now().Before(deadline) {
+		if !loops.Sleep(ctx, cfg.Interval) {
+			return nil, ctx.Err()
+		}
+		err = resolve()
+	}
+	if err != nil {
 		return nil, err
+	}
+	// The warm-up sends uncounted requests, their sequence numbers drawn
+	// from the top so no late reply matches a counted one, until the first
+	// answer or the bound: a warm restart's peer holds its verdict down
+	// until the BFD handshake re-completes, refusing the first replies'
+	// egress — losses the counted run would report as its own.
+	for seq := uint16(0xffff); cfg.Ready > 0 && time.Now().Before(deadline); seq-- {
+		if path == nil || !scion.PathExpiry(path).After(time.Now()) {
+			if err := resolve(); err != nil {
+				break // the counted run re-resolves and reports the failure
+			}
+		}
+		dst := &scion.Addr{
+			IA:   cfg.Dst,
+			Addr: netip.AddrPortFrom(cfg.DstHost, underlay.EndhostPort),
+			Path: path,
+		}
+		sent := time.Now()
+		if err := cfg.Conn.WriteEchoRequestTo(dst, seq, nil); err != nil {
+			path = nil // re-resolved on the next warm-up request
+		} else if _, ok := awaitReply(cfg, sent, seq); ok {
+			break
+		}
+		if !loops.Sleep(ctx, cfg.Interval) {
+			return nil, ctx.Err()
+		}
 	}
 
 	report := &Report{}

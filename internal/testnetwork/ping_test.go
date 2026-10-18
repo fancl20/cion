@@ -2,13 +2,16 @@ package testnetwork
 
 import (
 	"context"
+	"errors"
 	"hash"
 	"net/netip"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/scionproto/scion/pkg/addr"
 	"github.com/scionproto/scion/pkg/scrypto"
+	spath "github.com/scionproto/scion/pkg/slayers/path/scion"
 
 	"github.com/fancl20/cion/pkg/apps/ping"
 	"github.com/fancl20/cion/pkg/core/webpki/webpkitest"
@@ -77,8 +80,8 @@ func TestPingForkTopology(t *testing.T) {
 	}
 
 	// The core pings down its other leaf: its own down segment is the
-	// complete route — its resolution waited for first, the run not
-	// retrying one.
+	// complete route — its resolution waited for first, the run, its
+	// readiness bound unset, not retrying one.
 	PollFor(t, RestartTimeout, "path from A to C", func() bool {
 		path, err := a.app.Provider().Path(ctx, lineCIA)
 		return err == nil && len(path.HopFields) == 2
@@ -129,7 +132,7 @@ func TestPingLineMiddleNode(t *testing.T) {
 	// restart lab's patience like the fork's. B's and the core's own
 	// episodes wait for their side of the pipeline — C's down segment
 	// registered at the core — before pinging, the resolution a ping run
-	// does not retry.
+	// without its readiness bound does not retry.
 	PollFor(t, RestartTimeout, "path from C to B", func() bool {
 		path, err := c.app.Provider().Path(ctx, nodeIA)
 		return err == nil && len(path.HopFields) == 2
@@ -268,6 +271,108 @@ func TestPingReresolvesExpiredPath(t *testing.T) {
 				reply.Seq, reply.Hops)
 		}
 	}
+}
+
+// TestPingReadyWarmsUp checks the readiness bound's warm-up: a run over a
+// freshly booted pair — the peer's BFD handshake and boot's generation
+// swaps still settling, the first replies lost to them — sends uncounted
+// requests until one is answered and only then counts, the counted run
+// reporting the network rather than its bring-up.
+func TestPingReadyWarmsUp(t *testing.T) {
+	t.Parallel()
+	iaP := addr.MustIAFrom(20, 0xff0000000061)
+	iaR := addr.MustIAFrom(20, 0xff0000000062)
+	p, r := bootPair(t, iaP, iaR)
+
+	// The crafted-segment provider of the expiry lab, without its external
+	// warm-up: the run's own readiness bound absorbs what warmUp polled for,
+	// budgeted at the restart lab's patience the same way.
+	seg := upSegment(t, r.forwardingKey(t), p.forwardingKey(t), time.Now(), iaR, iaP)
+	report, err := ping.Run(t.Context(), ping.Config{
+		Conn:     p.conn(t),
+		Paths:    &scion.PathProvider{IA: iaP, DB: &staticPathDB{seg: seg}},
+		Dst:      iaR,
+		DstHost:  r.host,
+		Count:    3,
+		Interval: 100 * time.Millisecond,
+		Wait:     2 * time.Second,
+		Ready:    RestartTimeout,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Received != 3 || report.Loss() != 0 {
+		t.Fatalf("received %d of %d replies, want 3 of 3 after the warm-up",
+			report.Received, report.Sent)
+	}
+}
+
+// TestPingReadyRetriesResolution checks the readiness bound's other wait:
+// the first resolutions failing — a cold boot's beaconing not landed yet —
+// retry within the bound and the run counts on the one that serves, while a
+// destination nothing resolves for within the bound stays the error it
+// always was.
+func TestPingReadyRetriesResolution(t *testing.T) {
+	t.Parallel()
+	iaP := addr.MustIAFrom(20, 0xff0000000071)
+	iaR := addr.MustIAFrom(20, 0xff0000000072)
+	p, r := bootPair(t, iaP, iaR)
+
+	seg := upSegment(t, r.forwardingKey(t), p.forwardingKey(t), time.Now(), iaR, iaP)
+	provider := &scion.PathProvider{IA: iaP, DB: &staticPathDB{seg: seg}}
+	paths := &delayedPaths{inner: provider, failFor: 2}
+	report, err := ping.Run(t.Context(), ping.Config{
+		Conn:     p.conn(t),
+		Paths:    paths,
+		Dst:      iaR,
+		DstHost:  r.host,
+		Count:    3,
+		Interval: 100 * time.Millisecond,
+		Wait:     2 * time.Second,
+		Ready:    RestartTimeout,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Received != 3 || report.Loss() != 0 {
+		t.Fatalf("received %d of %d replies, want 3 of 3 past the failed resolutions",
+			report.Received, report.Sent)
+	}
+	if calls := paths.calls.Load(); calls < 3 {
+		t.Errorf("resolutions = %d, want the first two failures retried past", calls)
+	}
+
+	// The bound kept: a provider nothing resolves for fails within it, not
+	// by hanging.
+	paths = &delayedPaths{inner: provider, failFor: 1 << 30}
+	if _, err := ping.Run(t.Context(), ping.Config{
+		Conn:     p.conn(t),
+		Paths:    paths,
+		Dst:      iaR,
+		DstHost:  r.host,
+		Count:    1,
+		Interval: 100 * time.Millisecond,
+		Wait:     time.Second,
+		Ready:    300 * time.Millisecond,
+	}); err == nil {
+		t.Error("a destination nothing resolves for succeeded, want the bounded error")
+	}
+}
+
+// delayedPaths fails the first failFor resolutions the way a cold boot's
+// provider does — its segments not landed yet — then serves the inner
+// provider's answers.
+type delayedPaths struct {
+	inner   ping.Paths
+	failFor int32
+	calls   atomic.Int32
+}
+
+func (d *delayedPaths) Path(ctx context.Context, dst addr.IA) (*spath.Decoded, error) {
+	if d.calls.Add(1) <= d.failFor {
+		return nil, errors.New("no path yet")
+	}
+	return d.inner.Path(ctx, dst)
 }
 
 // bootPair boots the crafted-path labs' two non-core nodes, P and R, on the

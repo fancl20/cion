@@ -19,6 +19,7 @@ type pingOptions struct {
 	count    int
 	interval time.Duration
 	wait     time.Duration
+	ready    time.Duration
 }
 
 // newPingCommand builds `cion ping`: the SCION echo application, printing
@@ -47,13 +48,17 @@ func newPingCommand() *cobra.Command {
 	cmd.Flags().IntVar(&pingOpts.count, "count", 4, "number of requests")
 	cmd.Flags().DurationVar(&pingOpts.interval, "interval", time.Second, "time between requests")
 	cmd.Flags().DurationVar(&pingOpts.wait, "wait", 2*time.Second, "wait per reply")
+	cmd.Flags().DurationVar(&pingOpts.ready, "ready", 15*time.Second,
+		"wait for a path and a first reply before counting; 0 counts at once")
 	return cmd
 }
 
 // runPing boots the full node in place of serving: the pinger's packets cross
 // the data plane and its paths come from the node's own beaconing, so the node
-// serves underneath the run. A ping that succeeds returns how the node
-// stopped.
+// serves underneath the run. The run waits, within --ready, for the first
+// resolution and the first reply before it counts — a freshly booted node's
+// beaconing and a peer's BFD handshake land seconds in. A ping that succeeds
+// returns how the node stopped.
 func runPing(ctx context.Context, cfg services.NodeConfig, target string, opts *pingOptions) (err error) {
 	dst, host, err := parsePingTarget(target)
 	if err != nil {
@@ -83,6 +88,7 @@ func runPing(ctx context.Context, cfg services.NodeConfig, target string, opts *
 		Count:    opts.count,
 		Interval: opts.interval,
 		Wait:     opts.wait,
+		Ready:    opts.ready,
 		Log:      func(f string, a ...any) { fmt.Printf(f+"\n", a...) },
 	})
 	if err != nil {
