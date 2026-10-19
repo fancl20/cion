@@ -2,12 +2,9 @@ package testnetwork
 
 import (
 	"bytes"
-	"encoding/binary"
 	"errors"
 	"fmt"
-	"math"
 	"net"
-	"net/netip"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -15,10 +12,6 @@ import (
 	"testing"
 	"time"
 	"unsafe"
-
-	"github.com/florianl/go-tc"
-	"github.com/florianl/go-tc/core"
-	"golang.org/x/sys/unix"
 )
 
 // netnsEnv names the test a re-executed test binary runs inside its own
@@ -27,16 +20,6 @@ import (
 const (
 	netnsEnv     = "CION_TEST_NETNS"
 	netnsSkipEnv = "CION_TEST_NETNS_SKIP"
-)
-
-// The loopback's shaping bands, as qdisc handles: the added bands of a
-// prio root qdisc, each a netem child — three one-way delays and a total
-// loss. Unclassified traffic keeps the default band.
-const (
-	band1ms  = 0x10004 // 1:4
-	band15ms = 0x10005 // 1:5
-	band40ms = 0x10006 // 1:6
-	bandLoss = 0x10007 // 1:7
 )
 
 // ownNetns runs the calling test in a fresh user and network namespace with
@@ -149,124 +132,4 @@ func refuse(t *testing.T, step string, errno syscall.Errno) {
 		}
 	}
 	t.Skipf("%s", reason)
-}
-
-// openTrafficControl opens the rtnetlink socket the lab shapes the
-// loopback through — the kernel's own traffic-control interface, so the
-// lab leans on no external tool — and looks up the loopback it shapes,
-// closing the socket with the test.
-func openTrafficControl(t *testing.T) (*tc.Tc, uint32) {
-	t.Helper()
-	tcnl, err := tc.Open(&tc.Config{})
-	if err != nil {
-		t.Fatalf("opening the traffic-control socket: %v", err)
-	}
-	t.Cleanup(func() { _ = tcnl.Close() })
-	lo, err := net.InterfaceByName("lo")
-	if err != nil {
-		t.Fatalf("looking up the loopback: %v", err)
-	}
-	return tcnl, uint32(lo.Index)
-}
-
-// u32Terminal is the selector flag — the kernel's TC_U32_TERMINAL, which
-// go-tc does not export — that ends the classifier's walk on a match: a
-// non-terminal match keeps walking the hash chain, fails, and falls back
-// to the default band.
-const u32Terminal = 0x1
-
-// netemTick is the unit netem's latency field counts: 64 nanoseconds, the
-// kernel's PSCHED tick.
-const netemTick = 64 * time.Nanosecond
-
-// shapeLoopback installs the shaping bands beneath a prio root qdisc on
-// the loopback ownNetns raised: seven bands, four of them netem children,
-// and the zero priomap riding every priority in the default band, so the
-// filters alone route traffic into the shaped bands. Netem prices loss as
-// a fraction of 2³².
-func shapeLoopback(t *testing.T) {
-	t.Helper()
-	tcnl, lo := openTrafficControl(t)
-	root := tc.Object{
-		Family:  unix.AF_UNSPEC,
-		Ifindex: lo,
-		Handle:  core.BuildHandle(1, 0),
-		Parent:  tc.HandleRoot,
-		Kind:    "prio", Prio: &tc.Prio{Bands: 7},
-	}
-	if err := tcnl.Qdisc().Add(&root); err != nil {
-		t.Fatalf("adding the prio root qdisc: %v", err)
-	}
-	for band, shape := range map[uint32]tc.NetemQopt{
-		band1ms:  {Latency: uint32(1 * time.Millisecond / netemTick), Limit: 1000},
-		band15ms: {Latency: uint32(15 * time.Millisecond / netemTick), Limit: 1000},
-		band40ms: {Latency: uint32(40 * time.Millisecond / netemTick), Limit: 1000},
-		bandLoss: {Loss: math.MaxUint32, Limit: 1000},
-	} {
-		child := tc.Object{
-			Family: unix.AF_UNSPEC, Ifindex: lo, Parent: band,
-			Kind:  "netem",
-			Netem: &tc.Netem{Qopt: shape},
-		}
-		if err := tcnl.Qdisc().Add(&child); err != nil {
-			t.Fatalf("adding band %#x's netem child: %v", band, err)
-		}
-	}
-}
-
-// steer sends both directions between two hosts into the band through u32
-// filters of the given priority, one group per priority: the lowest number
-// matches first.
-func steer(t *testing.T, prio int, band uint32, a, b netip.Addr) {
-	t.Helper()
-	tcnl, lo := openTrafficControl(t)
-	for _, pair := range [][2]netip.Addr{{a, b}, {b, a}} {
-		classID := band
-		filter := tc.Object{
-			Family:  unix.AF_UNSPEC,
-			Ifindex: lo,
-			Parent:  core.BuildHandle(1, 0),
-			Info:    core.FilterInfo(uint16(prio), unix.ETH_P_IP),
-			Kind:    "u32",
-			U32: &tc.U32{
-				ClassID: &classID,
-				Sel: &tc.U32Sel{
-					Flags: u32Terminal,
-					NKeys: 2,
-					Keys: []tc.U32Key{
-						{Mask: 0xffffffff, Val: nativeWord(pair[0]), Off: 12}, // the IP source
-						{Mask: 0xffffffff, Val: nativeWord(pair[1]), Off: 16}, // the IP destination
-					},
-				},
-			},
-		}
-		if err := tcnl.Filter().Add(&filter); err != nil {
-			t.Fatalf("steering %s↔%s into band %#x: %v", pair[0], pair[1], band, err)
-		}
-	}
-}
-
-// nativeWord reads an address's four bytes as the native-endian word the
-// u32 keys carry: the kernel matches the marshaled bytes against the
-// packet's own.
-func nativeWord(addr netip.Addr) uint32 {
-	as4 := addr.As4()
-	return binary.NativeEndian.Uint32(as4[:])
-}
-
-// lift deletes a filter group — the handle-less delete the kernel takes
-// as the whole priority — so its pairs fall to the groups below it.
-func lift(t *testing.T, prio int) {
-	t.Helper()
-	tcnl, lo := openTrafficControl(t)
-	group := tc.Object{
-		Family:  unix.AF_UNSPEC,
-		Ifindex: lo,
-		Parent:  core.BuildHandle(1, 0),
-		Info:    core.FilterInfo(uint16(prio), unix.ETH_P_IP),
-		Kind:    "u32",
-	}
-	if err := tcnl.Filter().Delete(&group); err != nil {
-		t.Fatalf("lifting the priority-%d filters: %v", prio, err)
-	}
 }

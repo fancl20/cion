@@ -8,76 +8,62 @@ import (
 	"time"
 
 	"github.com/fancl20/cion/internal/services"
+	"github.com/fancl20/cion/internal/testnetwork/fabric"
 	"github.com/fancl20/cion/pkg/core/webpki/webpkitest"
 	"github.com/fancl20/cion/pkg/modules/links"
 	"github.com/fancl20/cion/pkg/modules/topology/impl/measured"
 )
 
-// The lab's filter groups, by priority: the cut overrides the blackhole,
-// which overrides the delays.
-const (
-	prioCut       = 1
-	prioBlackhole = 2
-	prioDelay     = 10
-)
-
 // TestStrandedTierHeals is the stranded clause's integration proof with the
 // floor met. Two sides — the founding core A with F and G, and C, D, and E —
-// each a full mesh by its joins, bridged by C's and D's links to A, on a
-// loopback shaped to one-way delays of 1ms within a side, 15ms between A and
-// C, D, or E, and 40ms between F or G and C, D, or E. While the sides form,
-// F and G are blackholed from the far side and E from A: a node whose joins
-// are not yet proven links any candidate it reaches for its floor, and a
-// third bridge would leave each bridge useless beside the other two. The
-// joins' topology then stands: a detour through a sibling doubles a round
-// trip within a side, so no link within a side is useless; the two bridges
-// are each other's only alternative, so excluding either changes the route
-// count; and no direct round trip across the sides beats or seconds the
-// routes through them. Lifting the blackholes while the bridges stand lets
-// every node probe the other side, and nothing strands. Cutting A from C, D,
-// and E then leaves every node its floor and every route into the other side
-// crossing the cut. Only the stranded clause can link the sides: no node
-// falls below the floor, and whatever prices the other side — a stale
-// route's declarations near 34ms, or nothing — an 80ms round trip neither
-// beats nor seconds it. The lab shapes the loopback in a network
-// namespace of its own.
+// each a full mesh by its joins, bridged by C's and D's links to A, on the
+// userspace fabric's taps shaped to one-way delays of 1ms within a side,
+// 15ms between A and C, D, or E, and 40ms between F or G and C, D, or E.
+// While the sides form, F and G are blackholed from the far side and E from
+// A: a node whose joins are not yet proven links any candidate it reaches
+// for its floor, and a third bridge would leave each bridge useless beside
+// the other two. The joins' topology then stands: a detour through a sibling
+// doubles a round trip within a side, so no link within a side is useless;
+// the two bridges are each other's only alternative, so excluding either
+// changes the route count; and no direct round trip across the sides beats
+// or seconds the routes through them. Lifting the blackholes while the
+// bridges stand lets every node probe the other side, and nothing strands.
+// Cutting A from C, D, and E then leaves every node its floor and every
+// route into the other side crossing the cut. Only the stranded clause can
+// link the sides: no node falls below the floor, and whatever prices the
+// other side — a stale route's declarations near 34ms, or nothing — an 80ms
+// round trip neither beats nor seconds it. The lab draws its bands as taps
+// on the fabric, in no namespace and with no privileges.
 func TestStrandedTierHeals(t *testing.T) {
-	if !ownNetns(t) {
-		return
-	}
-	shapeLoopback(t)
+	t.Parallel()
+	fab := fabric.New(t)
 	wpki := webpkitest.New(t)
 	ipA, ipF, ipG := hostSlot(t), hostSlot(t), hostSlot(t)
 	ipC, ipD, ipE := hostSlot(t), hostSlot(t), hostSlot(t)
 	for _, side := range [][]netip.Addr{{ipA, ipF, ipG}, {ipC, ipD, ipE}} {
 		for i := range side {
 			for _, other := range side[i+1:] {
-				steer(t, prioDelay, band1ms, side[i], other)
+				fab.Delay(side[i], other, 1*time.Millisecond)
 			}
 		}
 	}
+	var blackholes []func()
 	for _, far := range []netip.Addr{ipC, ipD, ipE} {
-		steer(t, prioDelay, band15ms, ipA, far)
+		fab.Delay(ipA, far, 15*time.Millisecond)
 		for _, near := range []netip.Addr{ipF, ipG} {
-			steer(t, prioDelay, band40ms, near, far)
-			steer(t, prioBlackhole, bandLoss, near, far)
+			fab.Delay(near, far, 40*time.Millisecond)
+			blackholes = append(blackholes, fab.Blackhole(near, far))
 		}
 	}
-	steer(t, prioBlackhole, bandLoss, ipA, ipE)
+	blackholes = append(blackholes, fab.Blackhole(ipA, ipE))
 
-	a := bootAssembly(t, func(cfg *services.NodeConfig) {
+	a := bootOnFabric(t, fab, ipA, func(cfg *services.NodeConfig) {
 		cfg.Core = true
-		cfg.State = t.TempDir()
-		cfg.Internal = PinnedUDPAddrOn(t, ipA)
-		cfg.Control = FreeUDPAddrOn(t, ipA)
 		cfg.CertFile = wpki.CertFile
 		cfg.KeyFile = wpki.KeyFile
 	})
 	join := func(ip netip.Addr, neighbors ...*assemblyNode) *assemblyNode {
-		return bootAssembly(t, func(cfg *services.NodeConfig) {
-			cfg.State = t.TempDir()
-			cfg.Internal = PinnedUDPAddrOn(t, ip)
-			cfg.Control = FreeUDPAddrOn(t, ip)
+		return bootOnFabric(t, fab, ip, func(cfg *services.NodeConfig) {
 			for _, n := range neighbors {
 				cfg.Neighbors = append(cfg.Neighbors, n.rendezvousOf())
 			}
@@ -92,7 +78,7 @@ func TestStrandedTierHeals(t *testing.T) {
 	near, far := []*assemblyNode{a, f, g}, []*assemblyNode{c, d, e}
 	ctx := t.Context()
 
-	PollFor(t, 3*time.Minute, "each side to mesh and the bridges to stand", func() bool {
+	PollFor(t, 5*time.Minute, "each side to mesh and the bridges to stand", func() bool {
 		return meshed(ctx, near) && meshed(ctx, far) &&
 			meshed(ctx, []*assemblyNode{a, c}) && meshed(ctx, []*assemblyNode{a, d})
 	})
@@ -100,7 +86,9 @@ func TestStrandedTierHeals(t *testing.T) {
 	// The blackholes lift while A links the sides: every node of each side
 	// probes the other's, landing an entry on its acceptor, and the routes
 	// through A answer, so no tier strands and no link crosses.
-	lift(t, prioBlackhole)
+	for _, lift := range blackholes {
+		lift()
+	}
 	PollFor(t, 2*time.Minute, "the sides' probes to land", func() bool {
 		for _, x := range near[1:] {
 			for _, y := range far {
@@ -116,7 +104,7 @@ func TestStrandedTierHeals(t *testing.T) {
 	}
 
 	for _, n := range far {
-		steer(t, prioCut, bandLoss, ipA, n.host)
+		fab.Cut(ipA, n.host)
 	}
 	PollFor(t, 4*time.Minute, "the stranded clause to link the sides", func() bool {
 		if crossLink(ctx, near[1:], far) == "" || !meshed(ctx, near) {

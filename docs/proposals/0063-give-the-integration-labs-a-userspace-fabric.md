@@ -314,3 +314,47 @@ gains nothing: `gvisor.dev/gvisor` is already direct.
     other.
 
 ## Implementation history
+
+*   The seam landed first: the socket source in `underlay` — the kernel
+    conn the provider's `udpBatchConn` was, beside the TCP listener the
+    founder's HTTPS bind takes — with the three sites constructing
+    through it and the boot carrying the source beside the run arguments
+    ([sockets.go](/pkg/libs/underlay/sockets.go),
+    [conn.go](/pkg/libs/scion/conn.go),
+    [udpip.go](/pkg/core/dataplane/udpip.go),
+    [app.go](/internal/services/app.go)). The kernel family's suite
+    passes unchanged; the family selection stays with the kernel conn,
+    naming the family under a hint where the provider's link sockets
+    always pinned it.
+*   The fabric, its taps, and the boundary landed under the labs' roof:
+    one gVisor netstack per node — IPv4 admitting the loopback pool's
+    hosts inbound — drained by a forwarder that routes by destination
+    through the drawn taps and the drawn boundary, on one clock
+    ([fabric.go](/internal/testnetwork/fabric/fabric.go),
+    [taps.go](/internal/testnetwork/fabric/taps.go),
+    [boundary.go](/internal/testnetwork/fabric/boundary.go)). The
+    translation's checksums renew over zeroed checksum fields, both the
+    IP header's and the UDP's — the boundary's one real trap.
+*   The boundary's fidelity closes the reach a userspace relay cannot: the
+    inside is unreachable from the outside, every crossing named for the
+    gateway — which is what makes the neighbors' traffic ride the links,
+    whose locators the observations spell. Without it the founder reaches
+    the translated node's real address directly, mints entries aimed at
+    it, and their sessions' BFD tears at the translated session.
+*   The translation lab rides the fabric: the exchange-level proof keeps
+    its shape, the mapping-carried data path holds Established across
+    idle windows and falls with the mapping under silence, and the
+    restart proof lands as the fresh mapping the founder's fresh entry
+    records — a drawn port the stopped node's socket never spelled. The
+    re-establishment over the changed mapping stays deferred: the
+    returning node's confirm rides its link's verdict, and the verdict
+    waits on the very locator the confirm would re-aim — a cycle that
+    stands between a plain relocated node and its confirm too, the
+    relocation gap [proposal
+    0061](/docs/proposals/0061-treat-the-neighbors-locator-as-an-observation.md)
+    left unproven at the kernel, now named by the fabric.
+*   The stranded lab draws its bands as taps and leaves the namespace; the
+    tc machinery retired with the go-tc import, `ownNetns` and
+    `raiseLoopback` staying for the wildcard lab alone
+    ([stranded_test.go](/internal/testnetwork/stranded_test.go),
+    [netns_test.go](/internal/testnetwork/netns_test.go)).
