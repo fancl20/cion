@@ -15,6 +15,7 @@ import (
 	"github.com/scionproto/scion/pkg/addr"
 
 	"github.com/fancl20/cion/pkg/core/dataplane"
+	"github.com/fancl20/cion/pkg/libs/underlay"
 )
 
 // IfID is the interface ID of every node's external link.
@@ -69,7 +70,7 @@ func StartNode(t *testing.T, host netip.Addr, ia, neighbor addr.IA, extLocal, ex
 	if err != nil {
 		t.Fatal(err)
 	}
-	provider := dataplane.NewUDPProvider(64, 0, 0)
+	provider := dataplane.NewUDPProvider(64, 0, 0, underlay.Kernel)
 	il, err := provider.NewInternalLink(internal, 64,
 		metrics.NewInterfaceMetrics(0, ia, 0))
 	if err != nil {

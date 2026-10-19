@@ -11,6 +11,8 @@ import (
 
 	"github.com/scionproto/scion/pkg/addr"
 	"github.com/scionproto/scion/pkg/slayers"
+
+	"github.com/fancl20/cion/pkg/libs/underlay"
 )
 
 const testTimeout = 2 * time.Second
@@ -80,7 +82,7 @@ func TestExternalLinkSendReceive(t *testing.T) {
 	defer func() { _ = remote.Close() }()
 	remoteAddr := remote.LocalAddr().String()
 
-	provider := NewUDPProvider(64, 0, 0)
+	provider := NewUDPProvider(64, 0, 0, underlay.Kernel)
 	link, err := provider.NewExternalLink(
 		64, nil, "127.0.0.1:0", remoteAddr, 1, newTestMetrics(t, 1),
 	)
@@ -122,7 +124,7 @@ func TestExternalLinkSendReceive(t *testing.T) {
 	in := scionLikeDatagram([]byte("hello from remote"))
 	var local *net.UDPAddr
 	for _, c := range provider.allConnections {
-		local = c.conn.conn.LocalAddr().(*net.UDPAddr)
+		local = c.conn.LocalAddr()
 	}
 	if _, err := remote.WriteToUDP(in, local); err != nil {
 		t.Fatal(err)
@@ -136,61 +138,10 @@ func TestExternalLinkSendReceive(t *testing.T) {
 	}
 }
 
-// TestNewUDPConnWildcardFamily checks the unconnected socket's family
-// pairing: the remote hint names the family, and a wildcard listen host of
-// the other family — the wildcard-bound link's recorded local address,
-// whose port alone it names — binds the hint family's wildcard at the same
-// port instead of failing the bind.
-func TestNewUDPConnWildcardFamily(t *testing.T) {
-	v4Peer, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = v4Peer.Close() }()
-	c, err := newUDPConn(&net.UDPAddr{IP: net.IPv6zero},
-		v4Peer.LocalAddr().(*net.UDPAddr).AddrPort(), 0, 0)
-	if err != nil {
-		t.Fatalf("binding for the v4 remote from the v6 wildcard: %v", err)
-	}
-	defer func() { _ = c.Close() }()
-	if local := c.conn.LocalAddr().(*net.UDPAddr); local.IP.To4() == nil {
-		t.Errorf("the socket's local address = %v, want the v4 wildcard", local)
-	}
-	out := []byte("v4 from the v6 wildcard")
-	v4Addr := v4Peer.LocalAddr().(*net.UDPAddr)
-	if _, err := c.WriteToUDP(out, v4Addr); err != nil {
-		t.Fatalf("writing to the v4 remote: %v", err)
-	}
-	_ = v4Peer.SetReadDeadline(time.Now().Add(testTimeout))
-	got := make([]byte, bufSize)
-	n, err := v4Peer.Read(got)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Equal(got[:n], out) {
-		t.Fatalf("received %q, want %q", got[:n], out)
-	}
-
-	v6Peer, err := net.ListenUDP("udp6", &net.UDPAddr{IP: net.IPv6loopback})
-	if err != nil {
-		t.Skipf("the host declines the v6 loopback: %v", err)
-	}
-	defer func() { _ = v6Peer.Close() }()
-	c6, err := newUDPConn(&net.UDPAddr{IP: net.IPv4zero},
-		v6Peer.LocalAddr().(*net.UDPAddr).AddrPort(), 0, 0)
-	if err != nil {
-		t.Fatalf("binding for the v6 remote from the v4 wildcard: %v", err)
-	}
-	defer func() { _ = c6.Close() }()
-	if local := c6.conn.LocalAddr().(*net.UDPAddr); local.IP.To4() != nil {
-		t.Errorf("the socket's local address = %v, want the v6 wildcard", local)
-	}
-}
-
 // TestInternalLinkSendReceive exercises both directions of the internal link
 // over the UDP/IP underlay, including address resolution.
 func TestInternalLinkSendReceive(t *testing.T) {
-	provider := NewUDPProvider(64, 0, 0)
+	provider := NewUDPProvider(64, 0, 0, underlay.Kernel)
 	internal := freeUDPAddr(t)
 	link, err := provider.NewInternalLink(internal, 64, newTestMetrics(t, 0))
 	if err != nil {
@@ -262,7 +213,7 @@ func TestInternalLinkSendReceive(t *testing.T) {
 // TestInternalLinkResolveSVC checks that SVC destinations resolve to the
 // registered service address.
 func TestInternalLinkResolveSVC(t *testing.T) {
-	provider := NewUDPProvider(64, 0, 0)
+	provider := NewUDPProvider(64, 0, 0, underlay.Kernel)
 	link, err := provider.NewInternalLink("127.0.0.1:0", 64, newTestMetrics(t, 0))
 	if err != nil {
 		t.Fatal(err)
@@ -287,7 +238,7 @@ func TestInternalLinkResolveSVC(t *testing.T) {
 
 // TestInternalLinkResolveErrors checks the address validation error paths.
 func TestInternalLinkResolveErrors(t *testing.T) {
-	provider := NewUDPProvider(64, 0, 0)
+	provider := NewUDPProvider(64, 0, 0, underlay.Kernel)
 	link, err := provider.NewInternalLink("127.0.0.1:0", 64, newTestMetrics(t, 0))
 	if err != nil {
 		t.Fatal(err)
@@ -331,7 +282,7 @@ func TestExternalLinkReaimAndObserved(t *testing.T) {
 	moved := newPeerSocket(t)
 	stranger := newPeerSocket(t)
 
-	provider := NewUDPProvider(64, 0, 0)
+	provider := NewUDPProvider(64, 0, 0, underlay.Kernel)
 	link, err := provider.NewExternalLink(
 		64, nil, "127.0.0.1:0", aimed.LocalAddr().String(), 3, newTestMetrics(t, 3),
 	)
@@ -350,7 +301,7 @@ func TestExternalLinkReaimAndObserved(t *testing.T) {
 	// source filter is the discriminator's, above this layer — and recorded
 	// as the link's last observed source, moving no locator.
 	in := scionLikeDatagram([]byte("from a stranger"))
-	if _, err := stranger.WriteToUDP(in, el.raw.conn.LocalAddr().(*net.UDPAddr)); err != nil {
+	if _, err := stranger.WriteToUDP(in, el.raw.LocalAddr()); err != nil {
 		t.Fatal(err)
 	}
 	rpkt := recvFromQueues(t, procQs)
@@ -414,7 +365,7 @@ func TestExternalLinkReaimAndObserved(t *testing.T) {
 // address having stopped naming the link.
 func TestExternalLinksShareLocator(t *testing.T) {
 	shared := newPeerSocket(t)
-	provider := NewUDPProvider(64, 0, 0)
+	provider := NewUDPProvider(64, 0, 0, underlay.Kernel)
 	for _, ifID := range []uint16{1, 2} {
 		if _, err := provider.NewExternalLink(
 			64, nil, "127.0.0.1:0", shared.LocalAddr().String(), ifID,

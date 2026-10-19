@@ -19,17 +19,22 @@ import (
 	"github.com/fancl20/cion/pkg/core/liveness"
 	"github.com/fancl20/cion/pkg/core/trust"
 	"github.com/fancl20/cion/pkg/libs/scion"
+	"github.com/fancl20/cion/pkg/libs/underlay"
 	"github.com/fancl20/cion/pkg/modules/links"
 	"github.com/fancl20/cion/pkg/modules/pathdb"
 	"github.com/fancl20/cion/pkg/modules/trustdb"
 )
 
 // Run boots the node the run arguments and state directory describe and
-// serves it until it stops — the run command's daemon. It returns nil once
-// the context ends, or the failure of the Fatal loop that stopped the node,
-// joined with the releases' errors.
-func Run(ctx context.Context, cfg NodeConfig, opts DataplaneOptions) error {
-	n, err := boot(ctx, cfg, opts)
+// serves it until it stops — the run command's daemon — binding every
+// underlay socket through the source. It returns nil once the context ends,
+// or the failure of the Fatal loop that stopped the node, joined with the
+// releases' errors.
+func Run(
+	ctx context.Context, cfg NodeConfig, opts DataplaneOptions, sockets underlay.Sockets,
+) error {
+
+	n, err := boot(ctx, cfg, opts, sockets)
 	if err != nil {
 		return err
 	}
@@ -43,9 +48,12 @@ func Run(ctx context.Context, cfg NodeConfig, opts DataplaneOptions) error {
 // so a bind failure surfaces here instead of as a lost packet, and the
 // loops start after it. A failed boot stops the group, releasing what the
 // boot acquired.
-func boot(ctx context.Context, cfg NodeConfig, opts DataplaneOptions) (*node, error) {
+func boot(
+	ctx context.Context, cfg NodeConfig, opts DataplaneOptions, sockets underlay.Sockets,
+) (*node, error) {
+
 	group, loops := supervise.New(ctx)
-	n, err := setupNode(ctx, group, cfg, opts)
+	n, err := setupNode(ctx, group, cfg, opts, sockets)
 	if err != nil {
 		return nil, errors.Join(err, group.Stop())
 	}
@@ -67,10 +75,11 @@ type App struct {
 	node *node
 }
 
-// BootApp boots the node and starts it serving underneath the application;
-// Close stops it when the application is done.
-func BootApp(ctx context.Context, cfg NodeConfig) (*App, error) {
-	n, err := boot(ctx, cfg, DefaultDataplaneOptions())
+// BootApp boots the node and starts it serving underneath the application,
+// binding every underlay socket through the source; Close stops it when the
+// application is done.
+func BootApp(ctx context.Context, cfg NodeConfig, sockets underlay.Sockets) (*App, error) {
+	n, err := boot(ctx, cfg, DefaultDataplaneOptions(), sockets)
 	if err != nil {
 		return nil, err
 	}

@@ -11,6 +11,7 @@ import (
 	"github.com/fancl20/cion/internal/supervise"
 	"github.com/fancl20/cion/pkg/core/trust"
 	"github.com/fancl20/cion/pkg/core/webpki/webpkitest"
+	"github.com/fancl20/cion/pkg/libs/underlay"
 	"github.com/fancl20/cion/pkg/modules/enrollauth"
 	"github.com/fancl20/cion/pkg/modules/links"
 	"github.com/fancl20/cion/pkg/modules/links/impl/memory"
@@ -30,7 +31,7 @@ func setupFounderNode(t *testing.T, mutate func(*NodeConfig)) *node {
 	cfg.CertFile, cfg.KeyFile = ca.CertFile, ca.KeyFile
 	mutate(&cfg)
 	group, _ := supervise.New(t.Context())
-	n, err := setupNode(t.Context(), group, cfg, DefaultDataplaneOptions())
+	n, err := setupNode(t.Context(), group, cfg, DefaultDataplaneOptions(), underlay.Kernel)
 	if err != nil {
 		t.Fatal(errors.Join(err, group.Stop()))
 	}

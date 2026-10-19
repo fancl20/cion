@@ -561,6 +561,7 @@ func (n *node) scionConn(port uint16) (*scion.Conn, error) {
 		Links:         n.usableLinks,
 		InterfaceDown: n.ifDown,
 		Advertise:     n.publishedHost,
+		Sockets:       n.sockets,
 	})
 }
 

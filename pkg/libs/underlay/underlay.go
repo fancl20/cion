@@ -1,6 +1,7 @@
 // Package underlay holds the facts of the UDP/IP network beneath SCION that the
 // data plane shares with the node's sockets: the end-host port, the largest
-// datagram, the underlay types, and the resolution of underlay addresses. A
+// datagram, the underlay types, the resolution of underlay addresses, and the
+// socket source the node's sites bind through — the kernel's the default. A
 // shared library: no loops of its own, no policy.
 package underlay
 

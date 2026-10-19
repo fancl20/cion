@@ -125,7 +125,7 @@ func (n *node) startGeneration(ctx context.Context) (*generation, error) {
 	if err != nil {
 		return nil, err
 	}
-	provider := dataplane.NewUDPProvider(n.opts.BatchSize, receiveBufferSize, sendBufferSize)
+	provider := dataplane.NewUDPProvider(n.opts.BatchSize, receiveBufferSize, sendBufferSize, n.sockets)
 
 	dlinks := make([]dataplane.Link, 0, len(entries)+1)
 	internalLink, err := provider.NewInternalLink(

@@ -13,6 +13,7 @@ import (
 	"github.com/scionproto/scion/pkg/addr"
 
 	"github.com/fancl20/cion/pkg/libs/scionrpc"
+	"github.com/fancl20/cion/pkg/libs/underlay"
 	"github.com/fancl20/cion/pkg/modules/links"
 	"github.com/fancl20/cion/pkg/modules/links/impl/memory"
 )
@@ -47,7 +48,7 @@ func newRendezvousFixture(t *testing.T, mutate func(*RendezvousConfig)) *rendezv
 	if err != nil {
 		t.Fatal(err)
 	}
-	ap := r.conn.LocalAddr().(*net.UDPAddr).AddrPort()
+	ap := r.conn.LocalAddr().AddrPort()
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(func() {
 		cancel()
@@ -61,7 +62,7 @@ func newRendezvousFixture(t *testing.T, mutate func(*RendezvousConfig)) *rendezv
 // the probe-and-release shape the band allocation performs.
 func linkAddr(t *testing.T) netip.AddrPort {
 	t.Helper()
-	local, err := AllocateLinkAddr(netip.MustParseAddr("127.0.0.1"), nil)
+	local, err := AllocateLinkAddr(underlay.Kernel, netip.MustParseAddr("127.0.0.1"), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -77,7 +78,7 @@ func TestRendezvousRoundTrip(t *testing.T) {
 	f := newRendezvousFixture(t, nil)
 	local := linkAddr(t)
 
-	reply, _, rtt, err := RendezvousEcho(context.Background(),
+	reply, _, rtt, err := RendezvousEcho(context.Background(), underlay.Kernel,
 		local, f.addr, rendezvousIA, local)
 	if err != nil {
 		t.Fatal(err)
@@ -119,7 +120,7 @@ func TestRendezvousRoundTrip(t *testing.T) {
 
 	// A re-request from the same address is idempotent: the recorded side
 	// re-answers, no second entry, no retarget.
-	reply2, _, _, err := RendezvousEcho(context.Background(),
+	reply2, _, _, err := RendezvousEcho(context.Background(), underlay.Kernel,
 		local, f.addr, rendezvousIA, local)
 	if err != nil {
 		t.Fatal(err)
@@ -138,7 +139,7 @@ func TestRendezvousRoundTrip(t *testing.T) {
 	// A dial from another socket — the peer moved, or a pre-change joiner
 	// dialed ephemeral — retargets the candidate onto the new observation.
 	moved := linkAddr(t)
-	if _, _, _, err := RendezvousEcho(context.Background(),
+	if _, _, _, err := RendezvousEcho(context.Background(), underlay.Kernel,
 		moved, f.addr, rendezvousIA, moved); err != nil {
 		t.Fatal(err)
 	}
@@ -160,7 +161,7 @@ func TestRendezvousNamesCandidate(t *testing.T) {
 	f := newRendezvousFixture(t, nil)
 	local := linkAddr(t)
 
-	if _, _, _, err := RendezvousEcho(context.Background(),
+	if _, _, _, err := RendezvousEcho(context.Background(), underlay.Kernel,
 		local, f.addr, addr.IA(0), local); err != nil {
 		t.Fatal(err)
 	}
@@ -175,7 +176,7 @@ func TestRendezvousNamesCandidate(t *testing.T) {
 		t.Fatalf("bootstrap claim recorded %v, want unnamed", entry.NeighborIA)
 	}
 
-	reply, _, _, err := RendezvousEcho(context.Background(),
+	reply, _, _, err := RendezvousEcho(context.Background(), underlay.Kernel,
 		local, f.addr, rendezvousIA, local)
 	if err != nil {
 		t.Fatal(err)
@@ -326,7 +327,7 @@ func TestRendezvousNoReplyAllocatesNothing(t *testing.T) {
 		t.Helper()
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
-		_, _, _, err := RendezvousEcho(ctx, netip.MustParseAddrPort("127.0.0.1:0"),
+		_, _, _, err := RendezvousEcho(ctx, underlay.Kernel, netip.MustParseAddrPort("127.0.0.1:0"),
 			target, rendezvousIA, netip.MustParseAddrPort("127.0.0.1:4242"))
 		return err
 	}
@@ -408,12 +409,12 @@ func TestRendezvousLinkCap(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, _, _, err := RendezvousEcho(context.Background(),
+	if _, _, _, err := RendezvousEcho(context.Background(), underlay.Kernel,
 		netip.MustParseAddrPort("127.0.0.1:0"), f.addr, rendezvousIA, claim); err == nil {
 		t.Error("a request past the link cap was admitted")
 	}
 	// A returning neighbor is never blocked by the cap.
-	if _, _, _, err := RendezvousEcho(context.Background(),
+	if _, _, _, err := RendezvousEcho(context.Background(), underlay.Kernel,
 		netip.MustParseAddrPort("127.0.0.1:0"), f.addr, strangerKeyIA, claim); err != nil {
 		t.Errorf("a returning neighbor was refused at the cap: %v", err)
 	}
@@ -498,7 +499,7 @@ func TestRendezvousEchoEndsWithItsContext(t *testing.T) {
 	echoed := make(chan error, 1)
 	start := time.Now()
 	go func() {
-		_, _, _, err := RendezvousEcho(ctx, netip.AddrPortFrom(host, 0),
+		_, _, _, err := RendezvousEcho(ctx, underlay.Kernel, netip.AddrPortFrom(host, 0),
 			silent.LocalAddr().(*net.UDPAddr).AddrPort(),
 			addr.IA(0), netip.AddrPortFrom(host, 4242))
 		echoed <- err
@@ -541,7 +542,7 @@ func TestRendezvousRecordsTheObservation(t *testing.T) {
 	// wildcard at the claimed port, and the record is the observation — the
 	// loopback host the request arrived from under the bound port.
 	claim := netip.AddrPortFrom(wildcard, 31001)
-	reply, observed, _, err := RendezvousEcho(context.Background(),
+	reply, observed, _, err := RendezvousEcho(context.Background(), underlay.Kernel,
 		claim, target, rendezvousIA, claim)
 	if err != nil {
 		t.Fatal(err)
@@ -577,7 +578,7 @@ func TestRendezvousRecordsTheObservation(t *testing.T) {
 	// anyway: the mapping of whatever socket dialed.
 	ephemeral := netip.AddrPortFrom(loopback, 0)
 	lying := netip.MustParseAddrPort("192.0.2.9:4242")
-	if _, _, _, err := RendezvousEcho(context.Background(),
+	if _, _, _, err := RendezvousEcho(context.Background(), underlay.Kernel,
 		ephemeral, target, rendezvousIA, lying); err != nil {
 		t.Fatal(err)
 	}
@@ -596,7 +597,7 @@ func TestRendezvousRecordsTheObservation(t *testing.T) {
 	// cap they bound not filling with one per port.
 	probe := netip.AddrPortFrom(loopback, 30042)
 	for range 2 {
-		if _, _, _, err := RendezvousEcho(context.Background(),
+		if _, _, _, err := RendezvousEcho(context.Background(), underlay.Kernel,
 			ephemeral, target, addr.IA(0), probe); err != nil {
 			t.Fatal(err)
 		}
@@ -634,7 +635,7 @@ func TestRendezvousRunReleasesOnCancel(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	bound := r.conn.LocalAddr().(*net.UDPAddr).AddrPort()
+	bound := r.conn.LocalAddr().AddrPort()
 	ctx, cancel := context.WithCancel(context.Background())
 	returned := make(chan struct{})
 	go func() {

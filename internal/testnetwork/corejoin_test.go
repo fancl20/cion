@@ -14,6 +14,7 @@ import (
 	"github.com/fancl20/cion/internal/services"
 	"github.com/fancl20/cion/pkg/core/trust"
 	"github.com/fancl20/cion/pkg/core/webpki/webpkitest"
+	"github.com/fancl20/cion/pkg/libs/underlay"
 	"github.com/fancl20/cion/pkg/modules/trustdb"
 )
 
@@ -267,11 +268,11 @@ func TestJoinerStopsWithoutVotingApp(t *testing.T) {
 	// assertion.
 	bErr := make(chan error, 1)
 	go func() {
-		bErr <- services.Run(t.Context(), joiner(ipB), services.DefaultDataplaneOptions())
+		bErr <- services.Run(t.Context(), joiner(ipB), services.DefaultDataplaneOptions(), underlay.Kernel)
 	}()
 	// The same joining core booted for an application: its Wait is the
 	// assertion.
-	e, err := services.BootApp(t.Context(), joiner(ipE))
+	e, err := services.BootApp(t.Context(), joiner(ipE), underlay.Kernel)
 	if err != nil {
 		t.Fatal(err)
 	}

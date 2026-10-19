@@ -9,6 +9,7 @@ import (
 	"os"
 	"testing"
 
+	"github.com/fancl20/cion/pkg/libs/underlay"
 	"github.com/fancl20/cion/pkg/modules/links"
 	"github.com/fancl20/cion/pkg/modules/links/impl/memory"
 	"github.com/fancl20/cion/pkg/modules/topology"
@@ -48,7 +49,7 @@ func heldBand(free ...uint16) []*links.Link {
 // the link band.
 func TestAllocateLinkAddrDrawsFromBand(t *testing.T) {
 	for range 50 {
-		got, err := AllocateLinkAddr(bandHost, nil)
+		got, err := AllocateLinkAddr(underlay.Kernel, bandHost, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -92,7 +93,7 @@ func TestAllocateLinkAddrSkipsHeldPorts(t *testing.T) {
 	defer func() { _ = c.Close() }()
 	want := netip.AddrPortFrom(bandHost, free)
 	for range 20 {
-		got, err := AllocateLinkAddr(bandHost, entries)
+		got, err := AllocateLinkAddr(underlay.Kernel, bandHost, entries)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -101,11 +102,11 @@ func TestAllocateLinkAddrSkipsHeldPorts(t *testing.T) {
 		}
 	}
 	retired := &links.Link{Local: want, State: links.StateRetired}
-	if got, err := AllocateLinkAddr(bandHost, append(entries, retired)); err != nil || got != want {
+	if got, err := AllocateLinkAddr(underlay.Kernel, bandHost, append(entries, retired)); err != nil || got != want {
 		t.Errorf("allocated (%v, %v) beside a retired entry on %v, want it", got, err, want)
 	}
 	live := &links.Link{Local: want, State: links.StateEstablished}
-	if got, err := AllocateLinkAddr(bandHost, append(entries, live)); err == nil {
+	if got, err := AllocateLinkAddr(underlay.Kernel, bandHost, append(entries, live)); err == nil {
 		t.Errorf("an allocation over a band held whole returned %v", got)
 	}
 }

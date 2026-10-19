@@ -27,7 +27,7 @@ func TestServeDrainsOnCancellation(t *testing.T) {
 	go func() { serveDone <- n.d.Serve(ctx) }()
 
 	// The internal link's bound address, where a local host writes.
-	internal := n.provider.internalConnection.conn.conn.LocalAddr().(*net.UDPAddr)
+	internal := n.provider.internalConnection.conn.LocalAddr()
 	host, err := net.DialUDP("udp4", nil, internal)
 	if err != nil {
 		t.Fatal(err)

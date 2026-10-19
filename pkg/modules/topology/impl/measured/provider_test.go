@@ -12,6 +12,7 @@ import (
 	"github.com/scionproto/scion/pkg/addr"
 
 	"github.com/fancl20/cion/pkg/libs/scion"
+	"github.com/fancl20/cion/pkg/libs/underlay"
 	"github.com/fancl20/cion/pkg/modules/links"
 	"github.com/fancl20/cion/pkg/modules/links/impl/memory"
 	"github.com/fancl20/cion/pkg/modules/topology"
@@ -214,7 +215,7 @@ func TestProviderRunReturnsAndCloseReleases(t *testing.T) {
 		z.Run(ctx)
 		close(returned)
 	}()
-	if _, _, _, err := RendezvousEcho(context.Background(), netip.AddrPortFrom(host, 0),
+	if _, _, _, err := RendezvousEcho(context.Background(), underlay.Kernel, netip.AddrPortFrom(host, 0),
 		netip.AddrPortFrom(host, RendezvousPort), addr.IA(0),
 		netip.AddrPortFrom(host, 4242)); err != nil {
 		t.Fatalf("the acceptor did not answer while Run served: %v", err)

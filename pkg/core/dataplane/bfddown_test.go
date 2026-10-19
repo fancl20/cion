@@ -11,6 +11,8 @@ import (
 	"github.com/gopacket/gopacket/layers"
 	"github.com/scionproto/scion/pkg/addr"
 	"github.com/scionproto/scion/pkg/slayers"
+
+	"github.com/fancl20/cion/pkg/libs/underlay"
 )
 
 // downSession is a link's BFD session holding the down verdict: the flag
@@ -32,7 +34,7 @@ func startDownNode(t *testing.T) (n *node, key []byte) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	provider := NewUDPProvider(64, 0, 0)
+	provider := NewUDPProvider(64, 0, 0, underlay.Kernel)
 	internal, ext := freeUDPAddr(t), freeUDPAddr(t)
 	il, err := provider.NewInternalLink(internal, 64,
 		metrics.NewInterfaceMetrics(0, ia, 0))

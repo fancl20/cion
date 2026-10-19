@@ -15,6 +15,7 @@ import (
 	"github.com/fancl20/cion/pkg/libs/peeria"
 	"github.com/fancl20/cion/pkg/libs/ratelimit"
 	"github.com/fancl20/cion/pkg/libs/scionrpc"
+	"github.com/fancl20/cion/pkg/libs/underlay"
 	"github.com/fancl20/cion/pkg/modules/links"
 	nodev1 "github.com/fancl20/cion/proto/node/v1"
 	nodev1connect "github.com/fancl20/cion/proto/node/v1/nodev1connect"
@@ -42,6 +43,9 @@ type LinkService struct {
 	// MinInterval is the least pause between admissions of one peer; zero
 	// uses the default.
 	MinInterval time.Duration
+	// Sockets is the socket source the allocated addresses probe through;
+	// the zero value is the kernel's.
+	Sockets underlay.Sockets
 	// Observed returns a serving link's last observed underlay source by
 	// interface ID — the data plane's witness of where the peer's packets
 	// come from, the record the request's agreement rule reads. Nil serves
@@ -172,7 +176,7 @@ func (s *LinkService) record(
 			return nil, connect.NewError(connect.CodeResourceExhausted,
 				fmt.Errorf("link cap reached (%d)", live))
 		}
-		local, err := AllocateLinkAddr(s.LinkHost, entries)
+		local, err := AllocateLinkAddr(s.Sockets, s.LinkHost, entries)
 		if err != nil {
 			return nil, connect.NewError(connect.CodeInternal, err)
 		}

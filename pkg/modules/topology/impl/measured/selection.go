@@ -104,6 +104,9 @@ type SelectionConfig struct {
 	Paths SelectionPaths
 	// Conn carries the SCMP echo probes; its port is the reply address.
 	Conn *scion.Conn
+	// Sockets is the socket source the dials and the band probes construct
+	// through; the zero value is the kernel's.
+	Sockets underlay.Sockets
 	// ControlAddr is the node's own control address, claimed in probes; its
 	// host is the scope the loop's own dials leave from, the half of the
 	// scope filter the viewer supplies.
@@ -365,7 +368,7 @@ func (s *selection) echo(
 	ia addr.IA,
 	linkAddr netip.AddrPort,
 ) (RendezvousReply, netip.AddrPort, time.Duration, error) {
-	reply, observed, rtt, err := RendezvousEcho(ctx, bind, target, ia, linkAddr)
+	reply, observed, rtt, err := RendezvousEcho(ctx, s.cfg.Sockets, bind, target, ia, linkAddr)
 	if err == nil && s.cfg.Learn != nil {
 		s.cfg.Learn(reply.Observed.Addr())
 	}
@@ -1065,7 +1068,7 @@ func (s *selection) recordEntry(ctx context.Context, e DirectoryEntry) (*links.L
 	}
 	local, ok := retiredLocal(entries, e.IA)
 	if !ok {
-		if local, err = AllocateLinkAddr(s.cfg.LinkHost, entries); err != nil {
+		if local, err = AllocateLinkAddr(s.cfg.Sockets, s.cfg.LinkHost, entries); err != nil {
 			return nil, err
 		}
 	}

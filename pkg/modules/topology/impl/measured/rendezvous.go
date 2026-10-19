@@ -16,6 +16,7 @@ import (
 
 	"github.com/fancl20/cion/pkg/libs/ratelimit"
 	"github.com/fancl20/cion/pkg/libs/scionrpc"
+	"github.com/fancl20/cion/pkg/libs/underlay"
 	"github.com/fancl20/cion/pkg/modules/links"
 )
 
@@ -220,7 +221,7 @@ func (r *binReader) read(dst *[16]byte) {
 // ISD-AS and the joiner names its own from the reply, so every establishment
 // names both sides before the link serves.
 type Rendezvous struct {
-	conn *net.UDPConn
+	conn underlay.UDPConn
 	cfg  RendezvousConfig
 
 	// mtx serializes the handlers' lookup-and-mutate runs over the store.
@@ -249,6 +250,9 @@ type RendezvousConfig struct {
 	MaxLinks int
 	// LinkHost is the host link addresses are allocated on.
 	LinkHost netip.Addr
+	// Sockets is the socket source the acceptor's bind and the dials
+	// construct through; the zero value is the kernel's.
+	Sockets underlay.Sockets
 }
 
 // NewRendezvous binds the rendezvous address.
@@ -257,7 +261,7 @@ func NewRendezvous(cfg RendezvousConfig) (*Rendezvous, error) {
 	if err != nil {
 		return nil, fmt.Errorf("parsing rendezvous address: %w", err)
 	}
-	conn, err := net.ListenUDP("udp", bind)
+	conn, err := cfg.Sockets.NewUDP(bind, netip.AddrPort{})
 	if err != nil {
 		return nil, fmt.Errorf("binding rendezvous address: %w", err)
 	}
@@ -441,7 +445,7 @@ func (r *Rendezvous) admit(ctx context.Context, req RendezvousRequest) (*links.L
 		if live := namedLive(entries); live >= r.cfg.MaxLinks {
 			return nil, fmt.Errorf("link cap reached (%d)", live)
 		}
-		local, err := AllocateLinkAddr(r.cfg.LinkHost, entries)
+		local, err := AllocateLinkAddr(r.cfg.Sockets, r.cfg.LinkHost, entries)
 		if err != nil {
 			return nil, err
 		}
@@ -520,13 +524,14 @@ func rendezvousSilenceHint(target netip.AddrPort) string {
 // unseen.
 func RendezvousEcho(
 	ctx context.Context,
+	sockets underlay.Sockets,
 	bind netip.AddrPort,
 	target netip.AddrPort,
 	ia addr.IA,
 	linkAddr netip.AddrPort,
 ) (RendezvousReply, netip.AddrPort, time.Duration, error) {
 
-	conn, err := net.ListenUDP("udp", net.UDPAddrFromAddrPort(bind))
+	conn, err := sockets.NewUDP(net.UDPAddrFromAddrPort(bind), netip.AddrPort{})
 	if err != nil {
 		return RendezvousReply{}, netip.AddrPort{}, 0,
 			fmt.Errorf("binding the rendezvous client: %w", err)

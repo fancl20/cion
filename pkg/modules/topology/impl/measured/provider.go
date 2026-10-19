@@ -22,6 +22,7 @@ import (
 	"github.com/fancl20/cion/pkg/libs/loops"
 	"github.com/fancl20/cion/pkg/libs/scion"
 	"github.com/fancl20/cion/pkg/libs/scionrpc"
+	"github.com/fancl20/cion/pkg/libs/underlay"
 	"github.com/fancl20/cion/pkg/modules/links"
 	"github.com/fancl20/cion/pkg/modules/topology"
 	nodev1 "github.com/fancl20/cion/proto/node/v1"
@@ -61,6 +62,9 @@ type Config struct {
 	// CoreRoute resolves the core's endpoint, which the directory's client
 	// rides on non-core nodes.
 	CoreRoute func() *scion.Addr
+	// Sockets is the socket source the acceptor's bind, the dials, and the
+	// band probes construct through; the zero value is the kernel's.
+	Sockets underlay.Sockets
 
 	// Pacing shortens the loops' periods; zero values keep the production
 	// constants. The daemon never sets it — the integration tests do.
@@ -205,7 +209,7 @@ func (z *Provider) CompleteIdentity(ctx context.Context, ia addr.IA) (addr.IA, e
 	}
 	// The store opens after the completed identity persists, and a first
 	// start's table holds nothing: no entry holds a port yet.
-	local, err := AllocateLinkAddr(z.cfg.ControlHost, nil)
+	local, err := AllocateLinkAddr(z.cfg.Sockets, z.cfg.ControlHost, nil)
 	if err != nil {
 		return ia, err
 	}
@@ -217,7 +221,7 @@ func (z *Provider) CompleteIdentity(ctx context.Context, ia addr.IA) (addr.IA, e
 		// Both dials bind the link address the seed will claim — the socket
 		// that will serve — so the mapping the acceptor observes is the one
 		// the link keeps; the socket is held for each round trip alone.
-		reply, _, _, err := RendezvousEcho(ctx, local, target, addr.IA(0), local)
+		reply, _, _, err := RendezvousEcho(ctx, z.cfg.Sockets, local, target, addr.IA(0), local)
 		if err != nil {
 			slog.Warn("The bootstrap neighbor's rendezvous did not answer",
 				"rendezvous", target, "err", err)
@@ -236,7 +240,7 @@ func (z *Provider) CompleteIdentity(ctx context.Context, ia addr.IA) (addr.IA, e
 		// the first claimed zero: a link whose entry names no neighbor
 		// serves no beacons, and the exchange is the one place left to name
 		// it. The reply re-answers the same entry's addresses.
-		reply, observed, _, err := RendezvousEcho(ctx, local, target, ia, local)
+		reply, observed, _, err := RendezvousEcho(ctx, z.cfg.Sockets, local, target, ia, local)
 		if err != nil {
 			return ia, fmt.Errorf("naming the bootstrap neighbor's entry: %w", err)
 		}
@@ -305,7 +309,7 @@ func (z *Provider) Seed(ctx context.Context) error {
 				"rendezvous", rendezvous)
 			continue
 		}
-		local, err := AllocateLinkAddr(z.cfg.ControlHost, entries)
+		local, err := AllocateLinkAddr(z.cfg.Sockets, z.cfg.ControlHost, entries)
 		if err != nil {
 			return err
 		}
@@ -340,6 +344,7 @@ func (z *Provider) assemble() error {
 		Store:       z.env.Store,
 		MaxLinks:    MaxNeighbors,
 		LinkHost:    z.cfg.ControlHost,
+		Sockets:     z.cfg.Sockets,
 	})
 	if err != nil {
 		return err
@@ -350,6 +355,7 @@ func (z *Provider) assemble() error {
 		MaxLinks:    MaxNeighbors,
 		LinkHost:    z.cfg.ControlHost,
 		MinInterval: z.cfg.Pacing.RendezvousRate,
+		Sockets:     z.cfg.Sockets,
 		Observed:    z.env.Observed,
 	}
 	z.linker = &linkClient{peer: z.env.Peer}
@@ -459,6 +465,7 @@ func (z *Provider) selectionConfig() SelectionConfig {
 		Conn:        z.probeConn,
 		ControlAddr: netip.AddrPortFrom(z.cfg.ControlHost, scionrpc.EndpointPort),
 		LinkHost:    z.cfg.ControlHost,
+		Sockets:     z.cfg.Sockets,
 		Link:        z.linker,
 		Learn:       z.learn,
 		Stranded:    &z.stranded,
@@ -520,7 +527,7 @@ func (z *Provider) dialJoins(ctx context.Context) {
 		}
 		local := l.Local
 		if revival && localHeld(entries, l) {
-			fresh, err := AllocateLinkAddr(z.cfg.ControlHost, entries)
+			fresh, err := AllocateLinkAddr(z.cfg.Sockets, z.cfg.ControlHost, entries)
 			if err != nil {
 				slog.Error("Allocating a revived entry's link address", "err", err)
 				continue
@@ -530,7 +537,7 @@ func (z *Provider) dialJoins(ctx context.Context) {
 		// The dial binds the entry's link address — the socket that will
 		// serve — held for the round trip alone: the mapping the acceptor
 		// observes is the one the entry keeps.
-		reply, observed, _, err := RendezvousEcho(ctx, local, target, z.env.IA, local)
+		reply, observed, _, err := RendezvousEcho(ctx, z.cfg.Sockets, local, target, z.env.IA, local)
 		if err != nil {
 			slog.Debug("Rendezvous dial", "rendezvous", target, "err", err)
 			continue

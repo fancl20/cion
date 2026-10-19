@@ -8,6 +8,7 @@ import (
 	"net/netip"
 	"syscall"
 
+	"github.com/fancl20/cion/pkg/libs/underlay"
 	"github.com/fancl20/cion/pkg/modules/links"
 )
 
@@ -26,12 +27,15 @@ const (
 
 // AllocateLinkAddr allocates a link's local underlay address on the given
 // host: a port of the link band that no live entry among the given ones
-// holds, drawn from a random offset, bound once to probe it, and released
-// for the data plane generation to rebind. The release is safe, for nothing
-// that binds port 0 draws from the band. Every generation rebinds the
-// recorded address identically, which is what makes a swap invisible to the
-// peer.
-func AllocateLinkAddr(host netip.Addr, entries []*links.Link) (netip.AddrPort, error) {
+// holds, drawn from a random offset, bound once through the socket source to
+// probe it, and released for the data plane generation to rebind. The release
+// is safe, for nothing that binds port 0 draws from the band. Every
+// generation rebinds the recorded address identically, which is what makes a
+// swap invisible to the peer.
+func AllocateLinkAddr(
+	sockets underlay.Sockets, host netip.Addr, entries []*links.Link,
+) (netip.AddrPort, error) {
+
 	held := make(map[netip.AddrPort]bool, len(entries))
 	for _, l := range entries {
 		if l.Live() {
@@ -44,14 +48,14 @@ func AllocateLinkAddr(host netip.Addr, entries []*links.Link) (netip.AddrPort, e
 		if held[addr] {
 			continue
 		}
-		c, err := net.ListenUDP("udp", net.UDPAddrFromAddrPort(addr))
+		c, err := sockets.NewUDP(net.UDPAddrFromAddrPort(addr), netip.AddrPort{})
 		if errors.Is(err, syscall.EADDRINUSE) {
 			continue
 		}
 		if err != nil {
 			return netip.AddrPort{}, fmt.Errorf("allocating a link address: %w", err)
 		}
-		bound := c.LocalAddr().(*net.UDPAddr).AddrPort()
+		bound := c.LocalAddr().AddrPort()
 		if err := c.Close(); err != nil {
 			return netip.AddrPort{}, err
 		}

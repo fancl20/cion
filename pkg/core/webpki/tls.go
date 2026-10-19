@@ -14,6 +14,8 @@ import (
 
 	"github.com/caddyserver/certmagic"
 	"github.com/mholt/acmez/v3"
+
+	"github.com/fancl20/cion/pkg/libs/underlay"
 )
 
 // HTTPSPort is the node's HTTPS port — internet HTTPS's one port, where the
@@ -191,18 +193,18 @@ func (m *CertManager) Close() error {
 }
 
 // ListenHTTPS binds the node's HTTPS server on the address the assembly
-// names — the listener held when the call returns, so the certificate
-// maintenance launches against a listening server and a first issuance's
-// probe finds the port answered. The TLS configuration is the shared
-// identity's clone advertising http/1.1 and the ACME TLS-ALPN name: the
-// mounted handler's protocol and the challenge inside one handshake, both
-// answered by the one GetCertificate.
-func (m *CertManager) ListenHTTPS(addr string) (net.Listener, error) {
-	ln, err := tls.Listen("tcp", addr, m.httpsTLSConfig())
+// names, through the socket source — the listener held when the call
+// returns, so the certificate maintenance launches against a listening
+// server and a first issuance's probe finds the port answered. The TLS
+// configuration is the shared identity's clone advertising http/1.1 and the
+// ACME TLS-ALPN name: the mounted handler's protocol and the challenge
+// inside one handshake, both answered by the one GetCertificate.
+func (m *CertManager) ListenHTTPS(addr string, sockets underlay.Sockets) (net.Listener, error) {
+	ln, err := sockets.NewTCP(addr)
 	if err != nil {
 		return nil, fmt.Errorf("binding the HTTPS port: %w", err)
 	}
-	return ln, nil
+	return tls.NewListener(ln, m.httpsTLSConfig()), nil
 }
 
 // ServeHTTPS serves the handler on the listener until the context is

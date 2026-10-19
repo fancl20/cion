@@ -99,7 +99,7 @@ type Conn struct {
 	// lands.
 	advertise func(ctx context.Context) netip.Addr
 
-	conn *net.UDPConn
+	conn underlay.UDPConn
 
 	mtx    sync.Mutex // Guards the MAC hasher and the closed flag.
 	closed bool
@@ -130,6 +130,9 @@ type ConnConfig struct {
 	// service-resolution replies' answer alike. Nil names nothing under the
 	// wildcard, and no packet leaves one until a host lands.
 	Advertise func(ctx context.Context) netip.Addr
+	// Sockets is the socket source the underlay bind constructs through;
+	// the zero value is the kernel's.
+	Sockets underlay.Sockets
 }
 
 // NewConn binds the endpoint's underlay address. Packets it sends are
@@ -148,13 +151,13 @@ func NewConn(cfg ConnConfig) (*Conn, error) {
 	if err != nil {
 		return nil, fmt.Errorf("initializing MAC: %w", err)
 	}
-	conn, err := net.ListenUDP("udp", net.UDPAddrFromAddrPort(local))
+	conn, err := cfg.Sockets.NewUDP(net.UDPAddrFromAddrPort(local), netip.AddrPort{})
 	if err != nil {
 		return nil, fmt.Errorf("binding endpoint address: %w", err)
 	}
 	// A zero port is replaced by the bound one, so the advertised address is
 	// the one replies can reach.
-	bound := conn.LocalAddr().(*net.UDPAddr)
+	bound := conn.LocalAddr()
 	boundIP, ok := netip.AddrFromSlice(bound.IP)
 	if !ok {
 		return nil, fmt.Errorf("bound address %v carries no IP", bound)

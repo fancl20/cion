@@ -22,6 +22,7 @@ import (
 	"github.com/fancl20/cion/pkg/core/webpki"
 	"github.com/fancl20/cion/pkg/libs/scion"
 	"github.com/fancl20/cion/pkg/libs/scionrpc"
+	"github.com/fancl20/cion/pkg/libs/underlay"
 	"github.com/fancl20/cion/pkg/modules/links"
 	"github.com/fancl20/cion/pkg/modules/pathdb"
 	"github.com/fancl20/cion/pkg/modules/topology"
@@ -37,9 +38,10 @@ import (
 // loops on the group, which releases the resources once the loops have
 // returned.
 type node struct {
-	cfg   resolvedConfig
-	ident identity
-	opts  DataplaneOptions
+	cfg     resolvedConfig
+	ident   identity
+	opts    DataplaneOptions
+	sockets underlay.Sockets
 
 	// topology is the loaded source module: the measured provider by
 	// default, the file provider when --topology.link-set names a link-set. It
@@ -202,6 +204,7 @@ func (n *node) selectProvider() error {
 			return n.scionConn(0)
 		},
 		CoreRoute: n.coreRoute,
+		Sockets:   n.sockets,
 		Pacing: measured.Pacing{
 			RendezvousRate:  n.cfg.Pacing.RendezvousRate,
 			Directory:       n.cfg.Pacing.Directory,
@@ -232,6 +235,7 @@ func setupNode(
 	group *supervise.Group,
 	cfg NodeConfig,
 	opts DataplaneOptions,
+	sockets underlay.Sockets,
 ) (*node, error) {
 
 	rc, err := cfg.resolve()
@@ -246,6 +250,7 @@ func setupNode(
 		cfg:         rc,
 		ident:       ident,
 		opts:        opts,
+		sockets:     sockets,
 		linkChanges: make(chan struct{}, 1),
 		group:       group,
 	}

@@ -12,6 +12,7 @@ import (
 
 	"github.com/fancl20/cion/internal/services"
 	"github.com/fancl20/cion/pkg/apps/ping"
+	"github.com/fancl20/cion/pkg/libs/underlay"
 )
 
 // pingOptions carries the ping command's request tuning flags.
@@ -64,7 +65,7 @@ func runPing(ctx context.Context, cfg services.NodeConfig, target string, opts *
 	if err != nil {
 		return err
 	}
-	app, err := services.BootApp(ctx, cfg)
+	app, err := services.BootApp(ctx, cfg, underlay.Kernel)
 	if err != nil {
 		return err
 	}

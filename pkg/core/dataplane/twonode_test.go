@@ -61,7 +61,7 @@ func startTwoNodes(t *testing.T) (a, b *node) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		provider := NewUDPProvider(64, 0, 0)
+		provider := NewUDPProvider(64, 0, 0, underlay.Kernel)
 		il, err := provider.NewInternalLink(
 			internal, 64, metrics.NewInterfaceMetrics(0, ia, 0),
 		)

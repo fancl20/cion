@@ -10,6 +10,7 @@ import (
 
 	"github.com/fancl20/cion/internal/services"
 	"github.com/fancl20/cion/pkg/apps"
+	"github.com/fancl20/cion/pkg/libs/underlay"
 )
 
 // addSharedNodeFlags registers the node arguments every assembling command
@@ -101,7 +102,7 @@ func runDaemon(ctx context.Context, cfg services.NodeConfig, tuning services.Dat
 		return fmt.Errorf("--trust.enroll-auth is required on the founding core: " +
 			"cidrs=<comma-separated prefix list> or telegram=<chat>:<token>")
 	}
-	return services.Run(ctx, cfg, tuning)
+	return services.Run(ctx, cfg, tuning, underlay.Kernel)
 }
 
 // newRunCommand builds `cion run`: the daemon's two roles as subcommands.

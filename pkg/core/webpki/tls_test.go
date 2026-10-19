@@ -23,6 +23,7 @@ import (
 	"github.com/mholt/acmez/v3/acme"
 
 	"github.com/fancl20/cion/pkg/core/webpki/webpkitest"
+	"github.com/fancl20/cion/pkg/libs/underlay"
 )
 
 // idPEACMEIdentifierV1 is the certificate extension an ACME TLS-ALPN
@@ -66,7 +67,7 @@ func TestServeHTTPSHTTP11(t *testing.T) {
 	mux.HandleFunc("/mounted", func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte("mounted"))
 	})
-	ln, err := manager.ListenHTTPS("127.0.0.1:0")
+	ln, err := manager.ListenHTTPS("127.0.0.1:0", underlay.Kernel)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -117,7 +118,7 @@ func TestServeHTTPSReleasesOnCancel(t *testing.T) {
 	}
 	// The package's own loopback host, where only a wildcard bind can take
 	// the port between the release and the rebind below.
-	ln, err := manager.ListenHTTPS("127.0.0.129:0")
+	ln, err := manager.ListenHTTPS("127.0.0.129:0", underlay.Kernel)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -225,7 +226,7 @@ func acmeManager(t *testing.T, domain string, identifier acme.Identifier) (*Cert
 		magic:  magic,
 		domain: domain,
 	}
-	ln, err := manager.ListenHTTPS("127.0.0.1:0")
+	ln, err := manager.ListenHTTPS("127.0.0.1:0", underlay.Kernel)
 	if err != nil {
 		t.Fatal(err)
 	}

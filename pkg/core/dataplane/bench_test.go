@@ -16,6 +16,8 @@ import (
 	"github.com/scionproto/scion/pkg/slayers/path"
 	"github.com/scionproto/scion/pkg/slayers/path/onehop"
 	"github.com/scionproto/scion/pkg/slayers/path/scion"
+
+	"github.com/fancl20/cion/pkg/libs/underlay"
 )
 
 // The benchmark topology: a transit node in AS 1-ff00:0:1, the source AS's
@@ -113,7 +115,7 @@ func newBenchNode(tb testing.TB, rc RunConfig) *benchNode {
 	if err != nil {
 		tb.Fatal(err)
 	}
-	provider := NewUDPProvider(rc.BatchSize, rc.ReceiveBufferSize, rc.SendBufferSize)
+	provider := NewUDPProvider(rc.BatchSize, rc.ReceiveBufferSize, rc.SendBufferSize, underlay.Kernel)
 	srcEnd, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
 	if err != nil {
 		tb.Fatal(err)
@@ -169,7 +171,7 @@ func newBenchNode(tb testing.TB, rc RunConfig) *benchNode {
 	}
 	for _, c := range provider.allConnections {
 		if l, ok := c.link.(*externalLink); ok && l.ifID == 1 {
-			n.if1Addr = c.conn.conn.LocalAddr().(*net.UDPAddr).AddrPort()
+			n.if1Addr = c.conn.LocalAddr().AddrPort()
 		}
 	}
 	tb.Cleanup(func() {

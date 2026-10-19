@@ -46,7 +46,7 @@ func (n *node) assembleHTTPS() error {
 		return nil
 	}
 	addr := n.httpsBindAddr()
-	ln, err := n.certMgr.ListenHTTPS(addr)
+	ln, err := n.certMgr.ListenHTTPS(addr, n.sockets)
 	if err != nil {
 		return err
 	}

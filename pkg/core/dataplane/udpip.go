@@ -29,11 +29,9 @@ import (
 	"slices"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"unsafe"
 
 	"golang.org/x/net/ipv4"
-	"golang.org/x/net/ipv6"
 
 	"github.com/scionproto/scion/pkg/addr"
 	"github.com/scionproto/scion/pkg/slayers"
@@ -50,7 +48,9 @@ var (
 
 // UDPProvider implements UnderlayProvider over UDP/IP. External links get an
 // exclusive unconnected socket keyed by interface ID; the internal link uses
-// a single unconnected socket of its own.
+// a single unconnected socket of its own. Every socket binds through the
+// socket source the constructor takes, so a whole node can boot on one
+// network.
 type UDPProvider struct {
 	mu                 sync.Mutex // Prevents race between adding connections and Start/Stop.
 	batchSize          int
@@ -61,6 +61,7 @@ type UDPProvider struct {
 	internalHashSeed   uint32
 	receiveBufferSize  int
 	sendBufferSize     int
+	sockets            underlay.Sockets
 }
 
 // udpLink is the extension of Link implemented by all the links of this
@@ -77,15 +78,47 @@ type udpLink interface {
 	egressAddr(p *Packet) *net.UDPAddr
 }
 
-// NewUDPProvider returns a new provider for exclusive use by the caller.
-func NewUDPProvider(batchSize int, receiveBufferSize int, sendBufferSize int) *UDPProvider {
+// NewUDPProvider returns a new provider for exclusive use by the caller,
+// binding its sockets through the source.
+func NewUDPProvider(
+	batchSize int, receiveBufferSize int, sendBufferSize int, sockets underlay.Sockets,
+) *UDPProvider {
+
 	return &UDPProvider{
 		batchSize:         batchSize,
 		allLinks:          make(map[uint16]udpLink),
 		svc:               NewServices[netip.AddrPort](),
 		receiveBufferSize: receiveBufferSize,
 		sendBufferSize:    sendBufferSize,
+		sockets:           sockets,
 	}
+}
+
+// listen binds one of the provider's sockets through the socket source,
+// sized as the provider's buffers. The provider pins the listen address's
+// own family — the selection its link sockets always performed — by naming
+// it as the hint where the caller names none.
+func (u *UDPProvider) listen(
+	localAddr *net.UDPAddr, remoteHint netip.AddrPort,
+) (underlay.UDPConn, error) {
+
+	if !remoteHint.IsValid() {
+		if ap := localAddr.AddrPort(); ap.IsValid() {
+			remoteHint = netip.AddrPortFrom(ap.Addr(), 0)
+		}
+	}
+	c, err := u.sockets.NewUDP(localAddr, remoteHint)
+	if err != nil {
+		return nil, err
+	}
+	if u.receiveBufferSize != 0 {
+		// Not all platforms support this; best effort only.
+		_ = c.SetReadBuffer(u.receiveBufferSize)
+	}
+	if u.sendBufferSize != 0 {
+		_ = c.SetWriteBuffer(u.sendBufferSize)
+	}
+	return c, nil
 }
 
 func (u *UDPProvider) NumConnections() int {
@@ -205,7 +238,7 @@ func (u *UDPProvider) newExternalLink(
 	ifID uint16,
 	metrics *InterfaceMetrics,
 ) (Link, error) {
-	c, err := newUDPConn(localAddr, remoteAddr, u.receiveBufferSize, u.sendBufferSize)
+	c, err := u.listen(localAddr, remoteAddr)
 	if err != nil {
 		return nil, err
 	}
@@ -291,7 +324,7 @@ func (u *UDPProvider) NewInternalLink(
 	if err != nil {
 		return nil, fmt.Errorf("resolving local address: %w", err)
 	}
-	c, err := newUDPConn(localAddr, netip.AddrPort{}, u.receiveBufferSize, u.sendBufferSize)
+	c, err := u.listen(localAddr, netip.AddrPort{})
 	if err != nil {
 		return nil, err
 	}
@@ -322,7 +355,7 @@ func (u *UDPProvider) NewInternalLink(
 // udpConnection is essentially a batch socket with a sending queue and a
 // demultiplexer. The rest is about logs and metrics.
 type udpConnection struct {
-	conn         *udpBatchConn
+	conn         underlay.UDPConn
 	name         string  // for logs. It's more informative than ifID.
 	link         udpLink // Link with exclusive use of the connection.
 	queue        chan *Packet
@@ -580,7 +613,7 @@ type externalLink struct {
 	bfdSession Session
 	// raw is the link's own socket: the writer a BFD session sends its
 	// prebuilt control packets through, beneath the egress queue.
-	raw *udpBatchConn
+	raw underlay.UDPConn
 	// locator is the entry's current remote address: the destination every
 	// queued send and every raw write carries, replaced in place by a re-aim.
 	locator atomic.Pointer[net.UDPAddr]
@@ -949,93 +982,6 @@ const fnv1aOffset32 uint32 = 2166136261
 func hashFNV1a(state uint32, c byte) uint32 {
 	const prime32 = 16777619
 	return (state ^ uint32(c)) * prime32
-}
-
-// udpBatchConn is a UDP socket supporting batch reads and writes. ipv4.Message
-// and ipv6.Message are type aliases of the same underlying type, so one
-// message slice serves both address families.
-type udpBatchConn struct {
-	conn *net.UDPConn
-	pc4  *ipv4.PacketConn
-	pc6  *ipv6.PacketConn
-}
-
-// newUDPConn opens a UDP socket bound to listen, unconnected. A valid
-// remoteHint names the family the link's initial locator spells, so a
-// wildcard listen host of the other family — the wildcard-bound link's
-// recorded local address, whose port alone it names — binds that family's
-// wildcard at the same port; without a hint the local address names the
-// family (any address means dual-stack IPv6).
-func newUDPConn(
-	listen *net.UDPAddr,
-	remoteHint netip.AddrPort,
-	receiveBufferSize int,
-	sendBufferSize int,
-) (*udpBatchConn, error) {
-
-	network := "udp"
-	switch {
-	case remoteHint.IsValid():
-		wildcard := net.IPv6zero
-		if remoteHint.Addr().Is4() || remoteHint.Addr().Is4In6() {
-			network = "udp4"
-			wildcard = net.IPv4zero
-		} else {
-			network = "udp6"
-		}
-		if listen.IP.IsUnspecified() && (listen.IP.To4() != nil) != (wildcard.To4() != nil) {
-			listen = &net.UDPAddr{IP: wildcard, Port: listen.Port}
-		}
-	case listen.IP != nil:
-		if listen.IP.To4() != nil {
-			network = "udp4"
-		} else {
-			network = "udp6"
-		}
-	}
-
-	c, err := net.ListenUDP(network, listen)
-	if err != nil {
-		return nil, err
-	}
-	if receiveBufferSize != 0 {
-		// Not all platforms support this; best effort only.
-		_ = c.SetReadBuffer(receiveBufferSize)
-	}
-	if sendBufferSize != 0 {
-		_ = c.SetWriteBuffer(sendBufferSize)
-	}
-	uc := &udpBatchConn{conn: c}
-	if c.LocalAddr().(*net.UDPAddr).IP.To4() != nil {
-		uc.pc4 = ipv4.NewPacketConn(c)
-	} else {
-		uc.pc6 = ipv6.NewPacketConn(c)
-	}
-	return uc, nil
-}
-
-func (c *udpBatchConn) ReadBatch(msgs []ipv4.Message) (int, error) {
-	if c.pc4 != nil {
-		return c.pc4.ReadBatch(msgs, syscall.MSG_WAITFORONE)
-	}
-	return c.pc6.ReadBatch(msgs, syscall.MSG_WAITFORONE)
-}
-
-// WriteToUDP sends one packet to the given destination — the BFD session's
-// send path, safe to call beside the forwarder's batched writes.
-func (c *udpBatchConn) WriteToUDP(b []byte, addr *net.UDPAddr) (int, error) {
-	return c.conn.WriteToUDP(b, addr)
-}
-
-func (c *udpBatchConn) WriteBatch(msgs []ipv4.Message) (int, error) {
-	if c.pc4 != nil {
-		return c.pc4.WriteBatch(msgs, 0)
-	}
-	return c.pc6.WriteBatch(msgs, 0)
-}
-
-func (c *udpBatchConn) Close() error {
-	return c.conn.Close()
 }
 
 // messages is a list of socket messages for the batch read/write APIs.

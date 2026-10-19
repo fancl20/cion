@@ -102,7 +102,7 @@ func bootAssembly(t *testing.T, mutate func(*services.NodeConfig)) *assemblyNode
 	if cfg.State == "" {
 		cfg.State = t.TempDir()
 	}
-	app, err := services.BootApp(t.Context(), cfg)
+	app, err := services.BootApp(t.Context(), cfg, underlay.Kernel)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -514,7 +514,7 @@ func TestBootstrapWithoutAnswer(t *testing.T) {
 			Neighbors: []string{dead},
 			RootCAs:   wpki.Pool,
 			Pacing:    fastPacing,
-		})
+		}, underlay.Kernel)
 		defer cancel()
 		if err == nil {
 			t.Fatal("a first start whose bootstrap neighbor never answered succeeded")
@@ -579,7 +579,7 @@ func TestHeldHostPortRefusesBoot(t *testing.T) {
 			Wireguard: apps.WireguardArguments{HostPort: apps.DefaultHostPort},
 		},
 	}
-	_, err = services.BootApp(t.Context(), cfg)
+	_, err = services.BootApp(t.Context(), cfg, underlay.Kernel)
 	_ = held.Close()
 	if err == nil {
 		t.Fatal("a boot against a held shared port succeeded")
@@ -588,7 +588,7 @@ func TestHeldHostPortRefusesBoot(t *testing.T) {
 		t.Errorf("the boot's refusal = %v, want it to name %q", err, want)
 	}
 
-	app, err := services.BootApp(t.Context(), cfg)
+	app, err := services.BootApp(t.Context(), cfg, underlay.Kernel)
 	if err != nil {
 		t.Fatalf("a boot on the refused boot's host and state: %v", err)
 	}
@@ -622,7 +622,7 @@ func TestHeldStateRefusesBoot(t *testing.T) {
 		Control:      FreeUDPAddrOn(t, ip),
 		CertFile:     wpki.CertFile,
 		KeyFile:      wpki.KeyFile,
-	})
+	}, underlay.Kernel)
 	if err == nil {
 		_ = app.Close()
 		t.Fatal("a second boot on the held state directory succeeded")
