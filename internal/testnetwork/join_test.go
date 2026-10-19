@@ -11,6 +11,7 @@ import (
 	"github.com/scionproto/scion/pkg/addr"
 
 	"github.com/fancl20/cion/internal/services"
+	"github.com/fancl20/cion/internal/testnetwork/fabric"
 	"github.com/fancl20/cion/pkg/apps"
 	"github.com/fancl20/cion/pkg/apps/ping"
 	"github.com/fancl20/cion/pkg/core/liveness"
@@ -89,8 +90,20 @@ func (n *assemblyNode) forwardingKey(t *testing.T) []byte {
 }
 
 // bootAssembly boots a full node assembly — the run command's own wiring —
-// and serves it underneath the test, stopping it at cleanup.
+// and serves it underneath the test, stopping it at cleanup, on the kernel
+// the process shares.
 func bootAssembly(t *testing.T, mutate func(*services.NodeConfig)) *assemblyNode {
+	t.Helper()
+	return bootOn(t, underlay.Kernel, mutate)
+}
+
+// bootOn boots a full node assembly binding every underlay socket through
+// the source, the kernel's or a fabric's, and serves it underneath the
+// test.
+func bootOn(
+	t *testing.T, sockets underlay.Sockets, mutate func(*services.NodeConfig),
+) *assemblyNode {
+
 	t.Helper()
 	cfg := services.NodeConfig{
 		Domain: webpkitest.Domain,
@@ -102,7 +115,7 @@ func bootAssembly(t *testing.T, mutate func(*services.NodeConfig)) *assemblyNode
 	if cfg.State == "" {
 		cfg.State = t.TempDir()
 	}
-	app, err := services.BootApp(t.Context(), cfg, underlay.Kernel)
+	app, err := services.BootApp(t.Context(), cfg, sockets)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -121,6 +134,29 @@ func bootAssembly(t *testing.T, mutate func(*services.NodeConfig)) *assemblyNode
 	}
 	n.host = ap.Addr()
 	return n
+}
+
+// bootOnFabric boots a full node assembly on the fabric's node for the
+// host — the same wiring as bootAssembly, every underlay socket bound on
+// the node's stack, no kernel port held.
+func bootOnFabric(
+	t *testing.T, f *fabric.Fabric, host netip.Addr,
+	mutate func(*services.NodeConfig),
+) *assemblyNode {
+
+	t.Helper()
+	node := f.Node(host)
+	return bootOn(t, node.Sockets(), func(cfg *services.NodeConfig) {
+		if cfg.Internal == "" {
+			cfg.Internal = PinnedUDPAddrOn(t, host)
+		}
+		if cfg.Control == "" {
+			cfg.Control = FreeUDPAddrOn(t, host)
+		}
+		if mutate != nil {
+			mutate(cfg)
+		}
+	})
 }
 
 // pingFrom pings the destination once through the node's own assembly,
