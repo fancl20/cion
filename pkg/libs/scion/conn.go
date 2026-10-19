@@ -94,8 +94,9 @@ type Conn struct {
 	// ifDown is the node's shared negative cache of interface-down signals;
 	// nil drops them as before.
 	ifDown *InterfaceDownCache
-	// advertise resolves the host the service-resolution replies name in
-	// place of the bound one; nil keeps the bound address.
+	// advertise resolves the host the conn names for itself under a wildcard
+	// bind; nil names nothing, and no packet leaves the bind until a host
+	// lands.
 	advertise func(ctx context.Context) netip.Addr
 
 	conn *net.UDPConn
@@ -123,10 +124,11 @@ type ConnConfig struct {
 	// interface-down signals; the conn's receive paths recognize the signal
 	// and record it. Nil drops them.
 	InterfaceDown *InterfaceDownCache
-	// Advertise resolves the host the conn's service-resolution replies
-	// name under a wildcard bind, which names no host a peer could dial;
-	// a concrete bind names itself whatever this returns. Nil names
-	// nothing under the wildcard.
+	// Advertise resolves the host the conn names for itself where a wildcard
+	// bind names none: the packets' source host, which the peer's replies are
+	// addressed to and the local router delivers them by, and the
+	// service-resolution replies' answer alike. Nil names nothing under the
+	// wildcard, and no packet leaves one until a host lands.
 	Advertise func(ctx context.Context) netip.Addr
 }
 
@@ -198,17 +200,32 @@ func (c *Conn) LocalAddr() net.Addr {
 // wildcard bind has no host to name yet, the reply naming nothing and the
 // requester's retry re-asking.
 func (c *Conn) AdvertisedAddr() (netip.AddrPort, bool) {
-	if !c.local.Addr().IsUnspecified() {
-		return c.local, true
-	}
-	if c.advertise == nil {
-		return netip.AddrPort{}, false
-	}
-	host := c.advertise(context.Background())
-	if !host.IsValid() || host.IsUnspecified() {
+	host, err := c.sourceHost()
+	if err != nil {
 		return netip.AddrPort{}, false
 	}
 	return netip.AddrPortFrom(host, c.local.Port()), true
+}
+
+// errWildcardNamesNoHost is a wildcard bind's send before any host landed:
+// the packet it would name carries a source no reply could deliver to.
+var errWildcardNamesNoHost = errors.New("the wildcard bind names no host a reply could reach")
+
+// sourceHost returns the host the conn's packets name as their source — the
+// one the peer's replies are addressed to and this node's own router
+// delivers them by: the bound address while it names a host, else the
+// advertised one, for the wildcard names none itself. A wildcard bind that
+// has learned no host sends nothing.
+func (c *Conn) sourceHost() (netip.Addr, error) {
+	if host := c.local.Addr(); !host.IsUnspecified() {
+		return host, nil
+	}
+	if c.advertise != nil {
+		if host := c.advertise(context.Background()); host.IsValid() && !host.IsUnspecified() {
+			return host, nil
+		}
+	}
+	return netip.Addr{}, errWildcardNamesNoHost
 }
 
 // Close releases the underlay socket.
@@ -274,7 +291,9 @@ func (c *Conn) WriteTo(b []byte, addr net.Addr) (int, error) {
 
 // writePacket serializes a full SCION packet addressing the peer — with
 // nextHdr as the layer after the SCION header — through the builder; the
-// mutex guards the MAC hasher one-hop paths use.
+// mutex guards the MAC hasher one-hop paths use. The source host resolves
+// before the lock, for the advertise resolver may spend a lookup's time and
+// no send waits on another's.
 func (c *Conn) writePacket(
 	peer *Addr,
 	nextHdr slayers.L4ProtocolType,
@@ -288,12 +307,16 @@ func (c *Conn) writePacket(
 			return nil, err
 		}
 	}
+	srcHost, err := c.sourceHost()
+	if err != nil {
+		return nil, err
+	}
 	c.mtx.Lock()
 	defer c.mtx.Unlock()
 	if c.closed {
 		return nil, net.ErrClosed
 	}
-	scn, err := c.scionHeader(peer, ifID, nextHdr)
+	scn, err := c.scionHeader(peer, ifID, nextHdr, srcHost)
 	if err != nil {
 		return nil, err
 	}
@@ -329,10 +352,12 @@ func (c *Conn) resolveLink(neighborIA addr.IA) (uint16, error) {
 }
 
 // scionHeader returns the SCION layer addressing the peer, over the peer's
-// supplied path or over a fresh one-hop path on the given interface. It must
-// be called with the mutex held: the one-hop hop-field MAC uses the shared
-// hasher.
-func (c *Conn) scionHeader(peer *Addr, ifID uint16, nextHdr slayers.L4ProtocolType) (*slayers.SCION, error) {
+// supplied path or over a fresh one-hop path on the given interface, naming
+// srcHost as the source. It must be called with the mutex held: the one-hop
+// hop-field MAC uses the shared hasher.
+func (c *Conn) scionHeader(
+	peer *Addr, ifID uint16, nextHdr slayers.L4ProtocolType, srcHost netip.Addr,
+) (*slayers.SCION, error) {
 	scn := &slayers.SCION{
 		NextHdr: nextHdr,
 		SrcIA:   c.localIA,
@@ -356,7 +381,7 @@ func (c *Conn) scionHeader(peer *Addr, ifID uint16, nextHdr slayers.L4ProtocolTy
 		scn.PathType = onehop.PathType
 		scn.Path = &onehop.Path{Info: info, FirstHop: firstHop}
 	}
-	if err := scn.SetSrcAddr(addr.HostIP(c.local.Addr())); err != nil {
+	if err := scn.SetSrcAddr(addr.HostIP(srcHost)); err != nil {
 		return nil, err
 	}
 	dstHost := addr.HostIP(peer.Addr.Addr())
@@ -414,8 +439,8 @@ func peerAddr(scn *slayers.SCION) (*Addr, error) {
 		return nil, err
 	}
 	srcAddr := src.IP()
-	if !srcAddr.IsValid() {
-		return nil, errors.New("no source IP")
+	if !srcAddr.IsValid() || srcAddr.IsUnspecified() {
+		return nil, errors.New("no source host a reply could address")
 	}
 	if scn.SrcIA.IsWildcard() {
 		return nil, errors.New("wildcard source IA")

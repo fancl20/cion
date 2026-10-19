@@ -174,6 +174,84 @@ func TestConnDatagrams(t *testing.T) {
 	}
 }
 
+// TestConnWildcardAdvertisedSource checks the source host a wildcard-bound
+// conn's packets carry: none until one is learned — the write fails rather
+// than naming an address no reply could deliver to — and the advertised one
+// after, which the peer reads as the reply route and the wildcard's own
+// delivery receives.
+func TestConnWildcardAdvertisedSource(t *testing.T) {
+	iaA := addr.MustIAFrom(20, 0xff0000000041)
+	iaB := addr.MustIAFrom(20, 0xff0000000042)
+	extA, extB := freeUDPAddr(t), freeUDPAddr(t)
+	a := startTestNode(t, iaA, iaB, extA, extB)
+	b := startTestNode(t, iaB, iaA, extB, extA)
+
+	newWildConn := func(n *testNode, host func() netip.Addr) *Conn {
+		conn, err := NewConn(ConnConfig{
+			IA:           n.IA,
+			Bind:         netip.AddrPortFrom(netip.MustParseAddr("0.0.0.0"), 0).String(),
+			InternalAddr: n.Internal,
+			MACKey:       n.MACKey,
+			Links:        n.Links,
+			Advertise: func(context.Context) netip.Addr {
+				return host()
+			},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = conn.Close() })
+		return conn
+	}
+	learned := netip.Addr{}
+	connA := newWildConn(a, func() netip.Addr { return learned })
+	connB := newWildConn(b, func() netip.Addr { return b.ControlIP })
+
+	// The dial names the peer by its advertised host, as a deployment does.
+	peerB := &Addr{IA: iaB, Addr: netip.AddrPortFrom(b.ControlIP, connB.LocalPort())}
+	if _, err := connA.WriteTo([]byte("hello"), peerB); err == nil {
+		t.Error("a wildcard conn without a learned host sent a packet")
+	}
+	learned = a.ControlIP
+	if _, err := connA.WriteTo([]byte("hello"), peerB); err != nil {
+		t.Fatal(err)
+	}
+	buf := make([]byte, 128)
+	if err := connB.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	n, from, err := connB.ReadFrom(buf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(buf[:n]) != "hello" {
+		t.Fatalf("datagram = %q, want %q", buf[:n], "hello")
+	}
+	fromA, ok := from.(*Addr)
+	if !ok {
+		t.Fatalf("peer address type %T", from)
+	}
+	if fromA.Addr.Addr() != a.ControlIP {
+		t.Errorf("the arrival's source host = %v, want the advertised %v",
+			fromA.Addr.Addr(), a.ControlIP)
+	}
+
+	// The reply rides the advertised source back through the wildcard's own
+	// delivery.
+	if _, err := connB.WriteTo([]byte("welcome"), from); err != nil {
+		t.Fatal(err)
+	}
+	if err := connA.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if n, _, err = connA.ReadFrom(buf); err != nil {
+		t.Fatal(err)
+	}
+	if string(buf[:n]) != "welcome" {
+		t.Fatalf("reply = %q, want %q", buf[:n], "welcome")
+	}
+}
+
 // TestConnWriteWithoutLink checks that writing to a neighbor without a
 // configured link fails instead of sending a bogus path.
 func TestConnWriteWithoutLink(t *testing.T) {

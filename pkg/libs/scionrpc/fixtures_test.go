@@ -1,6 +1,7 @@
 package scionrpc
 
 import (
+	"context"
 	"log/slog"
 	"net/http"
 	"net/netip"
@@ -91,6 +92,29 @@ func (n *testNode) newConn(t *testing.T, port uint16) *scion.Conn {
 		InternalAddr: n.Internal,
 		MACKey:       n.MACKey,
 		Links:        n.Links,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	return conn
+}
+
+// newWildcardConn returns a SCION connection of the node bound to the
+// wildcard with an ephemeral port, naming itself by the given host — the
+// learned external host's stand-in, the deployment shape the default control
+// address spells.
+func (n *testNode) newWildcardConn(t *testing.T, host netip.Addr) *scion.Conn {
+	t.Helper()
+	conn, err := scion.NewConn(scion.ConnConfig{
+		IA:           n.IA,
+		Bind:         netip.AddrPortFrom(netip.MustParseAddr("0.0.0.0"), 0).String(),
+		InternalAddr: n.Internal,
+		MACKey:       n.MACKey,
+		Links:        n.Links,
+		Advertise: func(context.Context) netip.Addr {
+			return host
+		},
 	})
 	if err != nil {
 		t.Fatal(err)

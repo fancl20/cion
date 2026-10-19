@@ -3,6 +3,7 @@ package scionrpc
 import (
 	"context"
 	"errors"
+	"io"
 	"net"
 	"net/http"
 	"net/netip"
@@ -11,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/quic-go/quic-go"
 	"github.com/scionproto/scion/pkg/addr"
 	"github.com/scionproto/scion/pkg/scrypto/cppki"
 
@@ -109,4 +111,64 @@ func TestServeHTTP3JoinsItsHandlers(t *testing.T) {
 	}
 	// The endpoint's port binds again: the serve released its socket.
 	core.newConn(t, EndpointPort)
+}
+
+// TestSCIONNativeRoundTripBetweenWildcardBinds checks the channel between two
+// wildcard-bound endpoints — the deployment shape the default control
+// address spells, both sockets binding the wildcard and naming themselves by
+// their advertised hosts: the request names the server's, the reply
+// addresses the client's, and each node's own delivery completes the round
+// trip a wildcard source would blackhole.
+func TestSCIONNativeRoundTripBetweenWildcardBinds(t *testing.T) {
+	f := newMTLSFixture(t)
+	extA, extB := freeUDPAddr(t), freeUDPAddr(t)
+	core := startTestNode(t, nodeIATest, iaLineC, extA, extB)
+	peer := startTestNode(t, iaLineC, nodeIATest, extB, extA)
+
+	endpoint := core.newWildcardConn(t, core.ControlIP)
+	handler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("round trip"))
+	})
+	served := make(chan error, 1)
+	t.Cleanup(func() {
+		select {
+		case <-served:
+		case <-time.After(5 * time.Second):
+			t.Error("the endpoint did not stop with the test's context")
+		}
+	})
+	go func() {
+		served <- ServeHTTP3(t.Context(), endpoint, handler,
+			EndpointTLS(EndpointTLSConfig{Credentials: f.engine, Key: f.engine.Key}))
+	}()
+
+	conn := peer.newWildcardConn(t, peer.ControlIP)
+	qclt := &quic.Transport{Conn: conn}
+	t.Cleanup(func() { _ = qclt.Close() })
+	hclt := NewSCIONClient(PeerClientConfig{
+		Credentials: f.peer,
+		Key:         f.peer.Key,
+		Conn:        conn,
+	}, qclt, true)
+
+	server := &scion.Addr{IA: nodeIATest, Addr: netip.AddrPortFrom(core.ControlIP, endpoint.LocalPort())}
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, "GET",
+		"https://"+PeerAuthority(server)+"/probe", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := hclt.Do(req)
+	if err != nil {
+		t.Fatalf("the wildcard-bound round trip: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(body) != "round trip" {
+		t.Fatalf("the response = %q, want %q", body, "round trip")
+	}
 }
