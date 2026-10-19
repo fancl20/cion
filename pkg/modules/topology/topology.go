@@ -24,6 +24,7 @@ package topology
 import (
 	"context"
 	"net/http"
+	"net/netip"
 	"time"
 
 	"github.com/scionproto/scion/pkg/addr"
@@ -101,6 +102,12 @@ type Environment struct {
 	// Latencies receives the selection loop's per-link one-way delay
 	// estimates; the beaconer's entries declare them.
 	Latencies LatencyRecorder
+	// Observed returns a serving link's last observed underlay source by
+	// interface ID, and the zero AddrPort when no serving link holds the
+	// interface: the record the authenticated link request's agreement rule
+	// reads, the data plane's own witness of where the peer's packets come
+	// from. Nil serves none.
+	Observed func(ifID uint16) netip.AddrPort
 }
 
 // PeerChannel is the node's channel to its peers.
@@ -108,6 +115,12 @@ type PeerChannel interface {
 	// VerifiedClient returns the client of the channel's mutually verified
 	// side.
 	VerifiedClient() *http.Client
+	// OneHopClient returns the client of the channel's mutually verified
+	// side that dials one-hop paths alone: the confirm's channel, whose
+	// requests ride the direct link of the entry they confirm, so the
+	// observation they carry names the peer's link socket and not a
+	// transit's address.
+	OneHopClient() *http.Client
 }
 
 // Paths resolves the node's paths to a destination ISD-AS.

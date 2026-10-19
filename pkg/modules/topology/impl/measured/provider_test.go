@@ -214,7 +214,7 @@ func TestProviderRunReturnsAndCloseReleases(t *testing.T) {
 		z.Run(ctx)
 		close(returned)
 	}()
-	if _, _, _, err := RendezvousEcho(context.Background(), host,
+	if _, _, _, err := RendezvousEcho(context.Background(), netip.AddrPortFrom(host, 0),
 		netip.AddrPortFrom(host, RendezvousPort), addr.IA(0),
 		netip.AddrPortFrom(host, 4242)); err != nil {
 		t.Fatalf("the acceptor did not answer while Run served: %v", err)

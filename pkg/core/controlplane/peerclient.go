@@ -25,9 +25,12 @@ import (
 type PeerClient struct {
 	qclt *quic.Transport
 	// beaconHCLT pools connections for beacon sends; verifiedHCLT for the
-	// mutually verified RPCs. Both ride the same QUIC transport.
+	// mutually verified RPCs; oneHopHCLT for the mutually verified RPCs that
+	// dial one-hop paths alone — the confirm's channel. All ride the same
+	// QUIC transport.
 	beaconHCLT   *http.Client
 	verifiedHCLT *http.Client
+	oneHopHCLT   *http.Client
 
 	mtx         sync.Mutex
 	beaconClt   map[string]*Client
@@ -51,6 +54,11 @@ func NewPeerClient(cfg scionrpc.PeerClientConfig) *PeerClient {
 	beaconCfg.PathTo = nil
 	c.beaconHCLT = scionrpc.NewSCIONClient(beaconCfg, c.qclt, false)
 	c.verifiedHCLT = scionrpc.NewSCIONClient(cfg, c.qclt, true)
+	// The one-hop channel keeps the beacon dial's discipline with the
+	// verified channel's mutual authentication: a request it carries rides
+	// the direct link of the entry it names, so the observation the peer's
+	// link records is the sender's link socket.
+	c.oneHopHCLT = scionrpc.NewSCIONClient(beaconCfg, c.qclt, true)
 	return c
 }
 
@@ -105,6 +113,13 @@ func (c *PeerClient) Segments(
 // client's transport and connection pool.
 func (c *PeerClient) VerifiedClient() *http.Client {
 	return c.verifiedHCLT
+}
+
+// OneHopClient returns the HTTP client of the mutually verified channel's
+// one-hop side: the confirm's dial, whose requests ride the direct link of
+// the entry they confirm.
+func (c *PeerClient) OneHopClient() *http.Client {
+	return c.oneHopHCLT
 }
 
 // Close releases the underlying QUIC transport.

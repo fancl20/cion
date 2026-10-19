@@ -267,5 +267,30 @@ re-run.
 
 ## Implementation history
 
-*   Not yet landed; this record guides the realization of
-    [ADR-0021](/docs/adrs/0021-certify-the-neighbor-observe-its-locator.md).
+*   The observed record, the confirm, the unconnected socket, and the
+    confirm pass all landed together, realizing
+    [ADR-0021](/docs/adrs/0021-certify-the-neighbor-observe-its-locator.md):
+    the exchange dials from the entry's link address and the acceptor
+    records the observation whole for named claims
+    ([rendezvous.go](/pkg/modules/topology/impl/measured/rendezvous.go));
+    the link service installs the arrival link's observation under the
+    agreement rule, the selection seeds by rendezvous and confirms over
+    the peer's control service, the chain-existence evidence is retired,
+    and the provider confirms its held entries at start
+    ([linkservice.go](/pkg/modules/topology/impl/measured/linkservice.go),
+    [selection.go](/pkg/modules/topology/impl/measured/selection.go),
+    [provider.go](/pkg/modules/topology/impl/measured/provider.go));
+    the external links bind unconnected, their locators live state the
+    serving generation re-aims in place and reads at egress, each link
+    records its last observed source through the seam the confirm reads,
+    and the socket table keys on the interface
+    ([udpip.go](/pkg/core/dataplane/udpip.go),
+    [dataplane.go](/internal/services/dataplane.go)).
+*   The full-fidelity translation lab — the mapping-carried data path held
+    up by the BFD stream alone, and the restarted node's fresh mapping
+    re-aiming its former neighbor — wants a translation the packets
+    traverse without being addressed to it; the userspace relay the
+    exchange-level lab rides cannot stand in for that, so
+    [translate_test.go](/internal/testnetwork/translate_test.go) proves
+    the observed record behind port remapping and leaves the rest to the
+    unconnected socket's and the confirm's own tests.

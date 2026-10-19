@@ -10,9 +10,11 @@ import (
 	"time"
 
 	"connectrpc.com/connect"
+	"github.com/quic-go/quic-go/http3"
 	"github.com/scionproto/scion/pkg/addr"
 
 	"github.com/fancl20/cion/pkg/libs/peeria"
+	"github.com/fancl20/cion/pkg/libs/scion"
 	"github.com/fancl20/cion/pkg/modules/links"
 	"github.com/fancl20/cion/pkg/modules/links/impl/memory"
 	nodev1 "github.com/fancl20/cion/proto/node/v1"
@@ -281,4 +283,135 @@ func TestLinkServiceRateCap(t *testing.T) {
 	if _, err := linkRequest(context.Background(), svc, linkIA, "127.0.0.1:4242", 1); err == nil {
 		t.Error("a burst of requests from one peer was admitted twice inside the interval")
 	}
+}
+
+// arriving dials the handler as a peer whose request arrived on the given
+// interface — the one-hop arrival's mark, the interface the channel names
+// the connection by.
+func arriving(
+	ctx context.Context, svc *LinkService, peer addr.IA, local string, ifID uint32,
+	arrival uint16,
+) (*nodev1.LinkReply, error) {
+
+	sctx := context.WithValue(ctx, peeria.AuthenticatedIAContextKey(), peer)
+	sctx = context.WithValue(sctx, http3.RemoteAddrContextKey,
+		&scion.Addr{IA: peer, IfID: arrival})
+	resp, err := svc.Request(sctx, connect.NewRequest(&nodev1.LinkRequest{
+		LocalAddr: local,
+		IfId:      ifID,
+	}))
+	if err != nil {
+		return nil, err
+	}
+	return resp.Msg, nil
+}
+
+// TestLinkServiceConfirmInstallsObservation checks the confirm's agreement
+// rule: a request that arrived on the entry's own link — the one-hop arrival
+// the channel names — takes that link's last observed source as the entry's
+// locator and establishes the candidate it landed on; a request whose
+// arrival the entry does not name — a composed path's zero mark, another
+// link's interface — refreshes the identity and the peer's interface ID
+// without moving the locator; and a peer the table lacks records the
+// observation of the link its request rode.
+func TestLinkServiceConfirmInstallsObservation(t *testing.T) {
+	observed := netip.MustParseAddrPort("192.0.2.9:54321")
+	// observing builds a service whose interface 7 observed the address.
+	observing := func() *LinkService {
+		return newLinkService(t, func(s *LinkService) {
+			s.MinInterval = time.Millisecond
+			s.Observed = func(ifID uint16) netip.AddrPort {
+				if ifID == 7 {
+					return observed
+				}
+				return netip.AddrPort{}
+			}
+		})
+	}
+
+	t.Run("the entry's own link", func(t *testing.T) {
+		svc := observing()
+		candidate := liveLink(linkIA, 40001)
+		candidate.State = links.StateCandidate
+		// The entry's interface is the one the arrival names: the link the
+		// request rode and the entry's are one.
+		candidate.IfID = 7
+		if err := svc.Store.Insert(context.Background(), candidate); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := arriving(context.Background(), svc, linkIA,
+			"127.0.0.1:4242", 9, 7); err != nil {
+			t.Fatal(err)
+		}
+		entry := linkEntry(t, svc, linkIA)
+		if entry.State != links.StateEstablished {
+			t.Errorf("the candidate the confirm landed on is %v, want established", entry.State)
+		}
+		if entry.Remote != observed {
+			t.Errorf("entry remote = %v, want the link's observation %v", entry.Remote, observed)
+		}
+		if entry.RemoteIfID != 9 {
+			t.Errorf("entry remote interface = %d, want the request's 9", entry.RemoteIfID)
+		}
+	})
+
+	t.Run("another link's arrival", func(t *testing.T) {
+		svc := observing()
+		held := liveLink(linkIA, 40001)
+		if err := svc.Store.Insert(context.Background(), held); err != nil {
+			t.Fatal(err)
+		}
+		if held.IfID == 7 {
+			t.Fatal("the fixture drew the observing interface; the test needs another")
+		}
+		// The arrival names the interface the data plane keyed on, which the
+		// entry does not hold: the observation installs nothing.
+		if _, err := arriving(context.Background(), svc, linkIA,
+			"127.0.0.1:4242", 9, 7); err != nil {
+			t.Fatal(err)
+		}
+		entry := linkEntry(t, svc, linkIA)
+		if entry.Remote != held.Remote {
+			t.Errorf("entry remote = %v, want the recorded %v untouched", entry.Remote, held.Remote)
+		}
+		if entry.RemoteIfID != 9 {
+			t.Errorf("entry remote interface = %d, want the identity refreshed to 9",
+				entry.RemoteIfID)
+		}
+	})
+
+	t.Run("a composed path", func(t *testing.T) {
+		svc := observing()
+		held := liveLink(linkIA, 40001)
+		if err := svc.Store.Insert(context.Background(), held); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := arriving(context.Background(), svc, linkIA,
+			"127.0.0.1:4243", 11, 0); err != nil {
+			t.Fatal(err)
+		}
+		entry := linkEntry(t, svc, linkIA)
+		if entry.Remote != held.Remote {
+			t.Errorf("entry remote = %v, want the recorded %v untouched", entry.Remote, held.Remote)
+		}
+		if entry.RemoteIfID != 11 {
+			t.Errorf("entry remote interface = %d, want 11", entry.RemoteIfID)
+		}
+	})
+
+	t.Run("a peer the table lacks", func(t *testing.T) {
+		svc := observing()
+		if _, err := arriving(context.Background(), svc, linkIA2,
+			"127.0.0.1:4242", 4, 7); err != nil {
+			t.Fatal(err)
+		}
+		entry := linkEntry(t, svc, linkIA2)
+		if entry.State != links.StateEstablished {
+			t.Errorf("state = %v, want established", entry.State)
+		}
+		if entry.Remote != observed {
+			t.Errorf("entry remote = %v, want the arrival link's observation %v",
+				entry.Remote, observed)
+		}
+	})
 }

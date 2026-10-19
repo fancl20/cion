@@ -87,7 +87,7 @@ func TestExternalLinkSendReceive(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	extLink, ok := link.(*connectedLink)
+	extLink, ok := link.(*externalLink)
 	if !ok {
 		t.Fatalf("unexpected link type: %T", link)
 	}
@@ -136,11 +136,11 @@ func TestExternalLinkSendReceive(t *testing.T) {
 	}
 }
 
-// TestNewUDPConnWildcardFamily checks the connected socket's family pairing:
-// the remote names the family, and a wildcard listen host of the other family
-// — the wildcard-bound link's recorded local address, whose port alone it
-// names — binds the remote family's wildcard at the same port instead of
-// failing the dial.
+// TestNewUDPConnWildcardFamily checks the unconnected socket's family
+// pairing: the remote hint names the family, and a wildcard listen host of
+// the other family — the wildcard-bound link's recorded local address,
+// whose port alone it names — binds the hint family's wildcard at the same
+// port instead of failing the bind.
 func TestNewUDPConnWildcardFamily(t *testing.T) {
 	v4Peer, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
 	if err != nil {
@@ -150,14 +150,15 @@ func TestNewUDPConnWildcardFamily(t *testing.T) {
 	c, err := newUDPConn(&net.UDPAddr{IP: net.IPv6zero},
 		v4Peer.LocalAddr().(*net.UDPAddr).AddrPort(), 0, 0)
 	if err != nil {
-		t.Fatalf("dialing the v4 remote from the v6 wildcard: %v", err)
+		t.Fatalf("binding for the v4 remote from the v6 wildcard: %v", err)
 	}
 	defer func() { _ = c.Close() }()
 	if local := c.conn.LocalAddr().(*net.UDPAddr); local.IP.To4() == nil {
 		t.Errorf("the socket's local address = %v, want the v4 wildcard", local)
 	}
 	out := []byte("v4 from the v6 wildcard")
-	if _, err := c.Write(out); err != nil {
+	v4Addr := v4Peer.LocalAddr().(*net.UDPAddr)
+	if _, err := c.WriteToUDP(out, v4Addr); err != nil {
 		t.Fatalf("writing to the v4 remote: %v", err)
 	}
 	_ = v4Peer.SetReadDeadline(time.Now().Add(testTimeout))
@@ -178,7 +179,7 @@ func TestNewUDPConnWildcardFamily(t *testing.T) {
 	c6, err := newUDPConn(&net.UDPAddr{IP: net.IPv4zero},
 		v6Peer.LocalAddr().(*net.UDPAddr).AddrPort(), 0, 0)
 	if err != nil {
-		t.Fatalf("dialing the v6 remote from the v4 wildcard: %v", err)
+		t.Fatalf("binding for the v6 remote from the v4 wildcard: %v", err)
 	}
 	defer func() { _ = c6.Close() }()
 	if local := c6.conn.LocalAddr().(*net.UDPAddr); local.IP.To4() != nil {
@@ -304,6 +305,126 @@ func TestInternalLinkResolveErrors(t *testing.T) {
 		if err := intLink.Resolve(pkt, host, 30041); err == nil {
 			t.Errorf("%s: Resolve succeeded, want error", name)
 		}
+	}
+}
+
+// newPeerSocket binds a loopback UDP socket the test reads a link's sends
+// at.
+func newPeerSocket(t *testing.T) *net.UDPConn {
+	t.Helper()
+	c, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = c.Close() })
+	return c
+}
+
+// TestExternalLinkReaimAndObserved checks the unconnected link's live state:
+// an arrival from a source the recorded locator does not name is processed
+// all the same and records itself as the link's last observed source — the
+// new answer the control plane reads — while the locator it names moves
+// nothing; a re-aim then changes the send destination, the queued send and
+// the raw write alike, without rebuilding anything.
+func TestExternalLinkReaimAndObserved(t *testing.T) {
+	aimed := newPeerSocket(t)
+	moved := newPeerSocket(t)
+	stranger := newPeerSocket(t)
+
+	provider := NewUDPProvider(64, 0, 0)
+	link, err := provider.NewExternalLink(
+		64, nil, "127.0.0.1:0", aimed.LocalAddr().String(), 3, newTestMetrics(t, 3),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	el := link.(*externalLink)
+
+	ctx := context.Background()
+	pool := newTestPool(256, 512)
+	procQs := []chan *Packet{make(chan *Packet, 4)}
+	provider.Start(ctx, pool, procQs)
+	defer provider.Stop()
+
+	// An arrival from a source the entry does not name: dispatched — the
+	// source filter is the discriminator's, above this layer — and recorded
+	// as the link's last observed source, moving no locator.
+	in := scionLikeDatagram([]byte("from a stranger"))
+	if _, err := stranger.WriteToUDP(in, el.raw.conn.LocalAddr().(*net.UDPAddr)); err != nil {
+		t.Fatal(err)
+	}
+	rpkt := recvFromQueues(t, procQs)
+	if rpkt.Link.IfID() != 3 || !bytes.Equal(rpkt.RawPacket, in) {
+		t.Fatalf("arrival from the stranger dispatched as %d/%q", rpkt.Link.IfID(), rpkt.RawPacket)
+	}
+	if got := provider.Observed(3); got != stranger.LocalAddr().(*net.UDPAddr).AddrPort() {
+		t.Errorf("observed source = %v, want the stranger's %v", got, stranger.LocalAddr())
+	}
+
+	// The locator the arrival named moved nothing: a queued send still
+	// lands at the recorded address.
+	out := scionLikeDatagram([]byte("still aimed"))
+	pkt := pool.Get()
+	pkt.RawPacket = pkt.RawPacket[:len(out)]
+	copy(pkt.RawPacket, out)
+	if !el.Send(pkt) {
+		t.Fatal("send queue full")
+	}
+	_ = aimed.SetReadDeadline(time.Now().Add(testTimeout))
+	got := make([]byte, bufSize)
+	n, err := aimed.Read(got)
+	if err != nil {
+		t.Fatalf("the pre-re-aim send did not arrive at the recorded address: %v", err)
+	}
+	if !bytes.Equal(got[:n], out) {
+		t.Fatalf("received %q, want %q", got[:n], out)
+	}
+
+	// The re-aim: one field, no rebuild. The queued send and the raw write
+	// both follow the new locator.
+	provider.Aim(3, moved.LocalAddr().(*net.UDPAddr).AddrPort())
+	pkt2 := pool.Get()
+	pkt2.RawPacket = pkt2.RawPacket[:len(out)]
+	copy(pkt2.RawPacket, out)
+	if !el.Send(pkt2) {
+		t.Fatal("send queue full")
+	}
+	if err := el.WriteRaw(out); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		_ = moved.SetReadDeadline(time.Now().Add(testTimeout))
+		n, err := moved.Read(got)
+		if err != nil {
+			t.Fatalf("a post-re-aim send did not arrive at the new locator: %v", err)
+		}
+		if !bytes.Equal(got[:n], out) {
+			t.Fatalf("received %q, want %q", got[:n], out)
+		}
+	}
+	// The link's own recorded side is unchanged by any of it: the local
+	// address the serving generation bound still answers.
+	if got := provider.Observed(4); got.IsValid() {
+		t.Errorf("an interface no link holds observed %v", got)
+	}
+}
+
+// TestExternalLinksShareLocator checks that two links whose locators
+// coincide both build: the socket table keys on the interface, the remote
+// address having stopped naming the link.
+func TestExternalLinksShareLocator(t *testing.T) {
+	shared := newPeerSocket(t)
+	provider := NewUDPProvider(64, 0, 0)
+	for _, ifID := range []uint16{1, 2} {
+		if _, err := provider.NewExternalLink(
+			64, nil, "127.0.0.1:0", shared.LocalAddr().String(), ifID,
+			newTestMetrics(t, ifID),
+		); err != nil {
+			t.Fatalf("the second link at one locator did not build: %v", err)
+		}
+	}
+	if provider.NumConnections() != 2 {
+		t.Errorf("connections = %d, want the two links'", provider.NumConnections())
 	}
 }
 

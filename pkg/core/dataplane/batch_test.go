@@ -116,7 +116,7 @@ func TestProcessorDrainsInBatches(t *testing.T) {
 	// The egress queue of interface 2, where the transit template lands.
 	var egress chan *Packet
 	for _, c := range n.provider.allConnections {
-		if cl, ok := c.link.(*connectedLink); ok && cl.IfID() == 2 {
+		if cl, ok := c.link.(*externalLink); ok && cl.IfID() == 2 {
 			egress = c.queue
 		}
 	}
@@ -190,7 +190,7 @@ func TestProcessorQueueFullDrops(t *testing.T) {
 	n := newBenchNode(t, benchRunConfig)
 	pool := newTestPool(64, minHeadroom)
 	q := make(chan *Packet, 1)
-	el := n.if1.(*connectedLink)
+	el := n.if1.(*externalLink)
 	el.start(context.Background(), []chan *Packet{q}, pool)
 
 	tmpl := serializeUDP(t, benchSrcAS, benchDstAS,
@@ -228,12 +228,7 @@ func TestIngestCounterStaging(t *testing.T) {
 	})
 
 	// The internal link's bound address, where a local host writes.
-	var internal *net.UDPAddr
-	for _, c := range n.provider.allConnections {
-		if !c.connected {
-			internal = c.conn.conn.LocalAddr().(*net.UDPAddr)
-		}
-	}
+	internal := n.provider.internalConnection.conn.conn.LocalAddr().(*net.UDPAddr)
 	host, err := net.DialUDP("udp4", nil, internal)
 	if err != nil {
 		t.Fatal(err)

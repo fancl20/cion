@@ -206,8 +206,9 @@ func Serving(entries []*Link) []*Link {
 // Notifying returns db with every successful write signaled: notify runs
 // after each Insert or Update that returns no error, and a refused write,
 // a read, and Close run it never. The node wraps its store with the signal
-// that rebuilds the data plane, so whatever writes the store reloads the
-// node; no writer signals on its own.
+// that lands the data plane's next state — a locator change re-aimed in
+// place, a membership change rebuilt — so whatever writes the store moves
+// the node; no writer signals on its own.
 func Notifying(db DB, notify func()) DB {
 	return &notifying{DB: db, notify: notify}
 }

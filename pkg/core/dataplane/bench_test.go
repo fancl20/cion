@@ -168,7 +168,7 @@ func newBenchNode(tb testing.TB, rc RunConfig) *benchNode {
 		dstEnd:   dstEnd,
 	}
 	for _, c := range provider.allConnections {
-		if l, ok := c.link.(*connectedLink); ok && l.ifID == 1 {
+		if l, ok := c.link.(*externalLink); ok && l.ifID == 1 {
 			n.if1Addr = c.conn.conn.LocalAddr().(*net.UDPAddr).AddrPort()
 		}
 	}

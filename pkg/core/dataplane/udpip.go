@@ -42,19 +42,19 @@ import (
 )
 
 var (
-	errDuplicateRemote       = errors.New("duplicate remote address")
 	errResolveOnExternalLink = errors.New("cannot resolve on external link")
 	errInvalidServiceAddress = errors.New("invalid service address")
 	errAlreadyInternalLink   = errors.New("internal link already exists")
+	errDuplicateInterface    = errors.New("duplicate interface ID")
 )
 
 // UDPProvider implements UnderlayProvider over UDP/IP. External links get an
-// exclusive connected socket; the internal link uses a single unconnected
-// socket.
+// exclusive unconnected socket keyed by interface ID; the internal link uses
+// a single unconnected socket of its own.
 type UDPProvider struct {
 	mu                 sync.Mutex // Prevents race between adding connections and Start/Stop.
 	batchSize          int
-	allLinks           map[netip.AddrPort]udpLink
+	allLinks           map[uint16]udpLink
 	allConnections     []*udpConnection
 	svc                *Services[netip.AddrPort]
 	internalConnection *udpConnection
@@ -70,13 +70,18 @@ type udpLink interface {
 	start(ctx context.Context, procQs []chan *Packet, pool PacketPool)
 	stop()
 	receive(size int, srcAddr *net.UDPAddr, p *Packet)
+	// egressAddr returns the underlay destination one packet queued on the
+	// link's connection carries: the packet's own for a link that resolves
+	// per packet — the internal link's hosts — and the link's live locator
+	// for an external one, whose packets carry none.
+	egressAddr(p *Packet) *net.UDPAddr
 }
 
 // NewUDPProvider returns a new provider for exclusive use by the caller.
 func NewUDPProvider(batchSize int, receiveBufferSize int, sendBufferSize int) *UDPProvider {
 	return &UDPProvider{
 		batchSize:         batchSize,
-		allLinks:          make(map[netip.AddrPort]udpLink),
+		allLinks:          make(map[uint16]udpLink),
 		svc:               NewServices[netip.AddrPort](),
 		receiveBufferSize: receiveBufferSize,
 		sendBufferSize:    sendBufferSize,
@@ -159,8 +164,11 @@ func (u *UDPProvider) Stop() {
 	}
 }
 
-// NewExternalLink returns an external link over the UDP/IP underlay, always
-// implemented with a connectedLink.
+// NewExternalLink returns an external link over the UDP/IP underlay: an
+// unconnected socket bound to the entry's local address and aimed at the
+// entry's recorded remote — the link's initial locator, live state the
+// serving generation re-aims in place. Two links may aim at one address;
+// the store's write-time rules are the duplicate check that stands.
 func (u *UDPProvider) NewExternalLink(
 	qSize int,
 	bfd Session,
@@ -181,15 +189,15 @@ func (u *UDPProvider) NewExternalLink(
 	u.mu.Lock()
 	defer u.mu.Unlock()
 
-	// Duplicate external links are not supported. That they happen at all
-	// would denote a serious configuration error.
-	if l := u.allLinks[remoteAddr]; l != nil {
-		return nil, fmt.Errorf("%w: %v", errDuplicateRemote, remote)
+	// A duplicate interface ID would denote a serious configuration error:
+	// the store allocates one interface ID per live entry.
+	if l := u.allLinks[ifID]; l != nil {
+		return nil, fmt.Errorf("%w: %d", errDuplicateInterface, ifID)
 	}
-	return u.newConnectedLink(qSize, bfd, localAddr, remoteAddr, ifID, metrics)
+	return u.newExternalLink(qSize, bfd, localAddr, remoteAddr, ifID, metrics)
 }
 
-func (u *UDPProvider) newConnectedLink(
+func (u *UDPProvider) newExternalLink(
 	qSize int,
 	bfd Session,
 	localAddr *net.UDPAddr,
@@ -202,7 +210,7 @@ func (u *UDPProvider) newConnectedLink(
 		return nil, err
 	}
 	queue := make(chan *Packet, qSize)
-	el := &connectedLink{
+	el := &externalLink{
 		name:       remoteAddr.String(),
 		egressQ:    queue,
 		metrics:    metrics,
@@ -211,6 +219,7 @@ func (u *UDPProvider) newConnectedLink(
 		seed:       makeHashSeed(),
 		ifID:       ifID,
 	}
+	el.locator.Store(udpAddrPointer(remoteAddr))
 	if bfd != nil {
 		// The link hands the session its writer for prebuilt packets: a send
 		// beneath the egress queue and the validation above it. Every
@@ -227,11 +236,44 @@ func (u *UDPProvider) newConnectedLink(
 		metrics:      metrics, // send() needs them.
 		receiverDone: make(chan struct{}),
 		senderDone:   make(chan struct{}),
-		connected:    true,
 	}
 	u.allConnections = append(u.allConnections, uc)
-	u.allLinks[remoteAddr] = el
+	u.allLinks[ifID] = el
 	return el, nil
+}
+
+// Aim re-aims the interface's external link at a new locator in place — one
+// field of live state, not a generational replacement: the link's queued
+// sends and its BFD session's raw writes follow from the next packet on. A
+// missing or internal interface aims nothing.
+func (u *UDPProvider) Aim(ifID uint16, remote netip.AddrPort) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	if l, ok := u.allLinks[ifID].(*externalLink); ok {
+		l.locator.Store(udpAddrPointer(remote))
+	}
+}
+
+// Observed returns the interface's external link's last observed underlay
+// source — the data plane's witness of where the peer's packets come from,
+// the record the authenticated link request's agreement rule reads — and
+// the zero AddrPort when no external link holds the interface or none of
+// its arrivals recorded one.
+func (u *UDPProvider) Observed(ifID uint16) netip.AddrPort {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	if l, ok := u.allLinks[ifID].(*externalLink); ok {
+		if ap := l.observed.Load(); ap != nil {
+			return *ap
+		}
+	}
+	return netip.AddrPort{}
+}
+
+// udpAddrPointer builds the destination form of an address; the copy is the
+// caller's, safe to share across the sends that read it.
+func udpAddrPointer(ap netip.AddrPort) *net.UDPAddr {
+	return &net.UDPAddr{IP: ap.Addr().AsSlice(), Zone: ap.Addr().Zone(), Port: int(ap.Port())}
 }
 
 // NewInternalLink returns an internal link over the UDP/IP underlay. At most
@@ -270,9 +312,8 @@ func (u *UDPProvider) NewInternalLink(
 		metrics:      metrics, // send() needs them.
 		receiverDone: make(chan struct{}),
 		senderDone:   make(chan struct{}),
-		connected:    false,
 	}
-	u.allLinks[netip.AddrPort{}] = il
+	u.allLinks[0] = il
 	u.internalConnection = uc
 	u.allConnections = append(u.allConnections, uc)
 	return il, nil
@@ -291,7 +332,6 @@ type udpConnection struct {
 	senderDone   chan struct{}
 	running      atomic.Bool
 	stopped      atomic.Bool // Set by stop; a stopped connection cannot start.
-	connected    bool        // If true, the underlying UDP socket is connected
 }
 
 // start puts the connection in the running state. In that state, the
@@ -474,16 +514,12 @@ func (u *udpConnection) send(ctx context.Context, batchSize int, pool PacketPool
 		toWrite += readUpTo(queue, batchSize-toWrite, false, pkts[toWrite:])
 
 		// Turn the packets into underlay messages that WriteBatch can send.
+		// The connection's link names each packet's destination: the packet's
+		// own resolved one for the internal link, the link's live locator for
+		// an external one.
 		for i, p := range pkts[:toWrite] {
 			msgs[i].Buffers[0] = p.RawPacket
-			msgs[i].Addr = nil
-			// If we're using a connected socket we must not specify the
-			// address. It might cause redundant route queries and the address
-			// might not even be set in the packet. Otherwise, we must specify
-			// the address.
-			if !u.connected {
-				msgs[i].Addr = (*net.UDPAddr)(p.RemoteAddr)
-			}
+			msgs[i].Addr = u.link.egressAddr(p)
 		}
 
 		written, _ := conn.WriteBatch(msgs[:toWrite])
@@ -525,10 +561,17 @@ func (u *udpConnection) drain(queue <-chan *Packet, pool PacketPool) {
 	}
 }
 
-// A connectedLink creates an exclusive underlying point-to-point connection.
-// Such a link does not need to specify a destination address and receives all
-// the traffic from that connection.
-type connectedLink struct {
+// An externalLink is one neighbor's exclusive unconnected socket, bound to
+// the entry's local address and aimed at the entry's current locator — live
+// state the serving generation re-aims in place, read at egress. The
+// kernel's connected-socket filter is replaced by two software tiers:
+// arrivals are processed on the discriminator's echo — the BFD session's
+// return-routability and blind-guess barrier, no weaker than the address
+// match the connected socket bought — and only the authenticated confirm
+// moves the locator; bare arrival never does, though every arrival records
+// the source the link last observed, the record the confirm's agreement
+// rule reads.
+type externalLink struct {
 	procQs     []chan *Packet
 	name       string // For logs
 	egressQ    chan<- *Packet
@@ -537,12 +580,17 @@ type connectedLink struct {
 	bfdSession Session
 	// raw is the link's own socket: the writer a BFD session sends its
 	// prebuilt control packets through, beneath the egress queue.
-	raw  *udpBatchConn
-	seed uint32
-	ifID uint16
+	raw *udpBatchConn
+	// locator is the entry's current remote address: the destination every
+	// queued send and every raw write carries, replaced in place by a re-aim.
+	locator atomic.Pointer[net.UDPAddr]
+	// observed is the source of the link's last arrival.
+	observed atomic.Pointer[netip.AddrPort]
+	seed     uint32
+	ifID     uint16
 }
 
-func (l *connectedLink) start(
+func (l *externalLink) start(
 	ctx context.Context,
 	procQs []chan *Packet,
 	pool PacketPool,
@@ -554,45 +602,52 @@ func (l *connectedLink) start(
 	l.pool = pool
 }
 
-func (l *connectedLink) stop() {}
+func (l *externalLink) stop() {}
 
-func (l *connectedLink) IfID() uint16 {
+func (l *externalLink) IfID() uint16 {
 	return l.ifID
 }
 
-func (l *connectedLink) Metrics() *InterfaceMetrics {
+func (l *externalLink) Metrics() *InterfaceMetrics {
 	return l.metrics
 }
 
-func (l *connectedLink) Scope() LinkScope {
+func (l *externalLink) Scope() LinkScope {
 	return External
 }
 
-func (l *connectedLink) BFDSession() Session {
+func (l *externalLink) BFDSession() Session {
 	return l.bfdSession
 }
 
-func (l *connectedLink) IsUp() bool {
+func (l *externalLink) IsUp() bool {
 	if l.bfdSession == nil {
 		return true
 	}
 	return l.bfdSession.IsUp()
 }
 
+// egressAddr returns the link's live locator: the packet carries no
+// destination of its own on this connection.
+func (l *externalLink) egressAddr(*Packet) *net.UDPAddr {
+	return l.locator.Load()
+}
+
 // WriteRaw sends a prebuilt packet on the link's own socket, beneath the
 // forwarding queue — the BFD session's send path, which must keep
-// transmitting while the link is down.
-func (l *connectedLink) WriteRaw(b []byte) error {
-	_, err := l.raw.Write(b)
+// transmitting while the link is down — aimed at the link's locator, for
+// the prebuilt control packet carries no destination of its own.
+func (l *externalLink) WriteRaw(b []byte) error {
+	_, err := l.raw.WriteToUDP(b, l.locator.Load())
 	return err
 }
 
 // Resolve should not be useful on an external link so we don't implement it.
-func (l *connectedLink) Resolve(p *Packet, host addr.Host, port uint16) error {
+func (l *externalLink) Resolve(p *Packet, host addr.Host, port uint16) error {
 	return errResolveOnExternalLink
 }
 
-func (l *connectedLink) Send(p *Packet) bool {
+func (l *externalLink) Send(p *Packet) bool {
 	select {
 	case l.egressQ <- p:
 	default:
@@ -601,19 +656,21 @@ func (l *connectedLink) Send(p *Packet) bool {
 	return true
 }
 
-func (l *connectedLink) SendBlocking(p *Packet) {
-	// We use a bound and connected socket so we don't need to specify the
-	// destination.
+func (l *externalLink) SendBlocking(p *Packet) {
 	l.egressQ <- p
 }
 
-func (l *connectedLink) receive(size int, srcAddr *net.UDPAddr, p *Packet) {
+func (l *externalLink) receive(size int, srcAddr *net.UDPAddr, p *Packet) {
 	metrics := l.metrics
 	sc := ClassOfSize(size)
 
+	// The arrival's source is the link's latest observation; the packet
+	// itself carries none, for every send on this connection follows the
+	// locator.
+	ap := netip.AddrPortFrom(srcAddr.AddrPort().Addr().Unmap(), srcAddr.AddrPort().Port())
+	l.observed.Store(&ap)
+
 	p.Link = l
-	// The src address does not need to be recorded in the packet. The link has
-	// all the relevant information.
 
 	procID, ok := computeProcID(p.RawPacket, len(l.procQs), l.seed)
 	if !ok {
@@ -780,6 +837,13 @@ func (l *internalLink) Resolve(p *Packet, dst addr.Host, port uint16) error {
 	return nil
 }
 
+// egressAddr returns the destination the packet's own resolution carries:
+// the internal link resolves each packet's host to an underlay address
+// before it queues.
+func (l *internalLink) egressAddr(p *Packet) *net.UDPAddr {
+	return (*net.UDPAddr)(p.RemoteAddr)
+}
+
 // The packet's destination is already in the packet's meta-data.
 func (l *internalLink) Send(p *Packet) bool {
 	select {
@@ -896,32 +960,29 @@ type udpBatchConn struct {
 	pc6  *ipv6.PacketConn
 }
 
-// newUDPConn opens a UDP socket bound to listen and, if remote is valid,
-// connected to it. The socket's family is determined by the remote address if
-// set, otherwise by the local address (any address means dual-stack IPv6);
-// a wildcard listen host of the family the remote excludes binds the remote
-// family's wildcard at the same port.
+// newUDPConn opens a UDP socket bound to listen, unconnected. A valid
+// remoteHint names the family the link's initial locator spells, so a
+// wildcard listen host of the other family — the wildcard-bound link's
+// recorded local address, whose port alone it names — binds that family's
+// wildcard at the same port; without a hint the local address names the
+// family (any address means dual-stack IPv6).
 func newUDPConn(
 	listen *net.UDPAddr,
-	remote netip.AddrPort,
+	remoteHint netip.AddrPort,
 	receiveBufferSize int,
 	sendBufferSize int,
 ) (*udpBatchConn, error) {
 
 	network := "udp"
 	switch {
-	case remote.IsValid():
+	case remoteHint.IsValid():
 		wildcard := net.IPv6zero
-		if remote.Addr().Is4() || remote.Addr().Is4In6() {
+		if remoteHint.Addr().Is4() || remoteHint.Addr().Is4In6() {
 			network = "udp4"
 			wildcard = net.IPv4zero
 		} else {
 			network = "udp6"
 		}
-		// A wildcard listen host of the other family names the port alone —
-		// the wildcard-bound link's recorded local address rides whichever
-		// family its peer dials — so the bind takes the remote family's
-		// wildcard at the recorded port.
 		if listen.IP.IsUnspecified() && (listen.IP.To4() != nil) != (wildcard.To4() != nil) {
 			listen = &net.UDPAddr{IP: wildcard, Port: listen.Port}
 		}
@@ -933,13 +994,7 @@ func newUDPConn(
 		}
 	}
 
-	var c *net.UDPConn
-	var err error
-	if remote.IsValid() {
-		c, err = net.DialUDP(network, listen, net.UDPAddrFromAddrPort(remote))
-	} else {
-		c, err = net.ListenUDP(network, listen)
-	}
+	c, err := net.ListenUDP(network, listen)
 	if err != nil {
 		return nil, err
 	}
@@ -966,10 +1021,10 @@ func (c *udpBatchConn) ReadBatch(msgs []ipv4.Message) (int, error) {
 	return c.pc6.ReadBatch(msgs, syscall.MSG_WAITFORONE)
 }
 
-// Write sends one packet on the connected socket — the BFD session's send
-// path, safe to call beside the forwarder's batched writes.
-func (c *udpBatchConn) Write(b []byte) (int, error) {
-	return c.conn.Write(b)
+// WriteToUDP sends one packet to the given destination — the BFD session's
+// send path, safe to call beside the forwarder's batched writes.
+func (c *udpBatchConn) WriteToUDP(b []byte, addr *net.UDPAddr) (int, error) {
+	return c.conn.WriteToUDP(b, addr)
 }
 
 func (c *udpBatchConn) WriteBatch(msgs []ipv4.Message) (int, error) {

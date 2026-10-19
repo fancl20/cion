@@ -4,16 +4,13 @@ import (
 	"context"
 	"crypto"
 	"crypto/tls"
-	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
 	"net/netip"
 	"sync"
-	"time"
 
 	"github.com/scionproto/scion/pkg/addr"
-	"github.com/scionproto/scion/pkg/scrypto/cppki"
 
 	"github.com/fancl20/cion/internal/supervise"
 	"github.com/fancl20/cion/pkg/apps"
@@ -56,7 +53,9 @@ type node struct {
 	publishedHost func(context.Context) netip.Addr
 
 	// Link state: the neighbor table as the one source of truth, wrapped so
-	// that every write signals linkChanges and lands as a generation swap.
+	// that every write signals linkChanges and lands as the data plane's
+	// next state — a locator change re-aimed in place, a membership change
+	// rebuilt.
 	linkStore   links.DB
 	linkChanges chan struct{}
 
@@ -202,7 +201,6 @@ func (n *node) selectProvider() error {
 		NewConn: func() (*scion.Conn, error) {
 			return n.scionConn(0)
 		},
-		Evidence:  n.linkEvidence,
 		CoreRoute: n.coreRoute,
 		Pacing: measured.Pacing{
 			RendezvousRate:  n.cfg.Pacing.RendezvousRate,
@@ -343,44 +341,16 @@ func (n *node) start(gen *generation) {
 	}
 }
 
-// linkEvidence reports whether a candidate's peer has proven itself by its
-// admission: a chain of the peer valid now. The node's database answers
-// first — the chains a core issued, and those a verified beacon's
-// signatures resolved through — and on a miss an enrolled node asks its
-// core for the chain the core issued, through the provider its engine
-// resolves chains with. A non-issuing node gets a single-link peer's chain
-// no other way: the peer sends no beacon back over the link its beacons
-// arrive on. A core that does not answer proves nothing this pass.
-func (n *node) linkEvidence(ctx context.Context, l *links.Link) (bool, error) {
-	if l.NeighborIA.IsZero() {
-		return false, nil
+// observedSource returns a serving link's last observed underlay source,
+// the zero AddrPort while no generation serves the interface — the record
+// the authenticated link request's agreement rule reads, the data plane's
+// own witness of where the peer's packets come from.
+func (n *node) observedSource(ifID uint16) netip.AddrPort {
+	n.backendsMtx.Lock()
+	gen := n.gen
+	n.backendsMtx.Unlock()
+	if gen == nil {
+		return netip.AddrPort{}
 	}
-	now := time.Now()
-	q := trustdb.ChainQuery{
-		IA:       l.NeighborIA,
-		Validity: cppki.Validity{NotBefore: now, NotAfter: now},
-	}
-	chains, err := n.trustDB.Chains(ctx, q)
-	if err != nil {
-		return false, fmt.Errorf("querying the chains of %s: %w", l.NeighborIA, err)
-	}
-	if len(chains) > 0 {
-		return true, nil
-	}
-	// An un-enrolled node holds no TRC to verify an answer with, nor a
-	// route its core answers on.
-	own, err := n.engine.Chain(ctx)
-	if err != nil {
-		return false, err
-	}
-	if own == nil {
-		return false, nil
-	}
-	fetched, err := (&trust.NetworkProvider{DB: n.trustDB, Remote: n.remote}).GetChains(ctx, q)
-	if err != nil {
-		slog.Debug("Asking the core for a candidate's chain",
-			"neighbor", l.NeighborIA, "err", err)
-		return false, nil
-	}
-	return len(fetched) > 0, nil
+	return gen.provider.Observed(ifID)
 }

@@ -466,8 +466,9 @@ func (n *node) buildBeaconing() error {
 // wireTopology delivers the phases' products to the loaded provider: the
 // completed identity, the store its decisions land in, the peer client its
 // in-band requests ride, the path provider its comparator baselines with,
-// the trust engine its directory channel authenticates with, and the
-// monitor's verdicts. The last step before the provider mounts and runs,
+// the trust engine its directory channel authenticates with, the monitor's
+// verdicts, and the data plane's per-link observations the confirm's
+// agreement rule reads. The last step before the provider mounts and runs,
 // and the one direction the dependency ever crosses: the application
 // imports the core and the shared libraries, never the reverse.
 func (n *node) wireTopology() {
@@ -479,6 +480,7 @@ func (n *node) wireTopology() {
 		Engine:    n.engine,
 		Verdicts:  n.monitor.Verdicts,
 		Latencies: n.linkLatency,
+		Observed:  n.observedSource,
 	})
 }
 

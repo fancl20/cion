@@ -2,7 +2,6 @@ package measured
 
 import (
 	"context"
-	"errors"
 	"net"
 	"net/netip"
 	"slices"
@@ -15,7 +14,6 @@ import (
 	"github.com/scionproto/scion/pkg/addr"
 	"github.com/scionproto/scion/pkg/slayers"
 	"github.com/scionproto/scion/pkg/slayers/path/empty"
-	spath "github.com/scionproto/scion/pkg/slayers/path/scion"
 
 	"github.com/fancl20/cion/pkg/core/controlplane"
 	"github.com/fancl20/cion/pkg/libs/scion"
@@ -140,9 +138,6 @@ func newSelFixture(t *testing.T, neighbors ...addr.IA) *selFixture {
 	}
 	f.sel.cfg.Directory = func() []DirectoryEntry { return f.directory }
 	f.sel.cfg.Verdicts = func() map[uint16]bool { return f.verdicts }
-	// Every established neighbor holds its verdict up unless a test says
-	// otherwise.
-	f.sel.cfg.Evidence = func(context.Context, *links.Link) (bool, error) { return false, nil }
 	f.sel.aliveFn = func(l *links.Link) bool { return f.alive[l.NeighborIA] }
 	f.refresh()
 	return f
@@ -895,85 +890,30 @@ func TestSelectionCapCountsCandidates(t *testing.T) {
 	}
 }
 
-// TestSelectionSweepCandidateWindow checks the candidate sweep: an unproven
-// candidate retires once the window passes, a proven one is established.
-// The sweep reads the clock, so the test runs in a bubble: the window's
-// passage is a fake-time sleep — instant, and never a real-time race.
+// TestSelectionSweepCandidateWindow checks the candidate sweep: a candidate
+// whose confirm never lands retires once the window passes — the sweep
+// establishes nothing on its own, the authenticated link request alone does,
+// and the chain's existence no longer promotes. The sweep reads the clock,
+// so the test runs in a bubble: the window's passage is a fake-time sleep —
+// instant, and never a real-time race.
 func TestSelectionSweepCandidateWindow(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		f := newSelFixture(t)
 		f.sel.cfg.Window = 10 * time.Millisecond
-		unproven := &links.Link{
-			Local:  netip.MustParseAddrPort("127.0.0.1:40001"),
-			Remote: netip.MustParseAddrPort("127.0.0.1:40002"),
-			State:  links.StateCandidate,
-		}
-		if err := f.store.Insert(context.Background(), unproven); err != nil {
-			t.Fatal(err)
-		}
-		proven := &links.Link{
+		unconfirmed := &links.Link{
 			NeighborIA: selPeer,
 			Local:      netip.MustParseAddrPort("127.0.0.1:40003"),
 			Remote:     netip.MustParseAddrPort("127.0.0.1:40004"),
 			State:      links.StateCandidate,
 		}
-		if err := f.store.Insert(context.Background(), proven); err != nil {
+		if err := f.store.Insert(context.Background(), unconfirmed); err != nil {
 			t.Fatal(err)
-		}
-		f.sel.cfg.Evidence = func(_ context.Context, l *links.Link) (bool, error) {
-			return l.IfID == proven.IfID, nil
 		}
 
 		time.Sleep(20 * time.Millisecond)
-		f.pass(t)
-		if f.state(t, selPeer) != links.StateEstablished {
-			t.Error("the proven candidate was not established")
-		}
-		entries, err := f.store.All(context.Background())
-		if err != nil {
-			t.Fatal(err)
-		}
-		found := false
-		for _, l := range entries {
-			if l.IfID == unproven.IfID {
-				found = true
-				if l.State != links.StateRetired {
-					t.Error("the unproven candidate outlived the window")
-				}
-			}
-		}
-		if !found {
-			t.Error("the unproven candidate vanished instead of retiring")
-		}
-	})
-}
-
-// TestSelectionSweepEvidenceReadFails checks the logged retry of a failed
-// evidence read: past its window, a candidate whose evidence the pass cannot
-// read is neither established nor retired, and the next pass that reads no
-// evidence retires it. The test runs in a bubble, like the window's own.
-func TestSelectionSweepEvidenceReadFails(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		f := newSelFixture(t)
-		f.sel.cfg.Window = 10 * time.Millisecond
-		if err := f.store.Insert(context.Background(),
-			neighborLink(selPeer, links.StateCandidate)); err != nil {
-			t.Fatal(err)
-		}
-		f.sel.cfg.Evidence = func(context.Context, *links.Link) (bool, error) {
-			return false, errors.New("the trust database is unreadable")
-		}
-
-		time.Sleep(20 * time.Millisecond)
-		f.pass(t)
-		if got := f.state(t, selPeer); got != links.StateCandidate {
-			t.Errorf("after the failed read the candidate is %v, want it still a candidate", got)
-		}
-		f.sel.cfg.Evidence = func(context.Context, *links.Link) (bool, error) { return false, nil }
 		f.pass(t)
 		if got := f.state(t, selPeer); got != links.StateRetired {
-			t.Errorf("after an unproven read past the window the candidate is %v, want it retired",
-				got)
+			t.Errorf("the candidate no confirm landed on is %v, want it retired", got)
 		}
 	})
 }
@@ -1426,23 +1366,6 @@ func TestSelectionRendezvousGuard(t *testing.T) {
 	}
 }
 
-// stubPaths resolves a composed path or refuses one — the establishment's
-// stand-in for the path provider, deciding which arm a promotion takes.
-type stubPaths struct {
-	path bool
-}
-
-func (p stubPaths) Path(context.Context, addr.IA) (*spath.Decoded, error) {
-	if !p.path {
-		return nil, errors.New("no path")
-	}
-	return nil, nil
-}
-
-func (p stubPaths) Enumerate(context.Context, addr.IA) ([]scion.Candidate, error) {
-	return nil, nil
-}
-
 // linkRequester adapts a function to the establishment's client seam.
 type linkRequester func(context.Context, *scion.Addr, netip.AddrPort, uint16) (*nodev1.LinkReply, error)
 
@@ -1452,98 +1375,103 @@ func (f linkRequester) Link(
 	return f(ctx, peer, local, ifID)
 }
 
-// TestEstablishmentAppliesClaimRule checks the claim rule at the
-// establishment's two arms: the in-band reply's claim records on the host
-// the request dialed when the claim names none, and the rendezvous reply's
-// claim records on the reply's observed source host the same way — a
-// concrete claim records verbatim either way.
-func TestEstablishmentAppliesClaimRule(t *testing.T) {
-	t.Run("in-band on the dialed host", func(t *testing.T) {
-		store := memory.New()
-		claimed := "0.0.0.0:4242"
-		var dialed netip.AddrPort
-		s := &selection{
-			streaks: make(map[addr.IA]*peerStreak),
-			cfg: SelectionConfig{
-				IA:       selIA,
-				Store:    store,
-				Paths:    stubPaths{path: true},
-				LinkHost: netip.MustParseAddr("127.0.0.1"),
-				Link: linkRequester(func(_ context.Context, peer *scion.Addr,
-					_ netip.AddrPort, _ uint16) (*nodev1.LinkReply, error) {
-					dialed = peer.Addr
-					return &nodev1.LinkReply{LocalAddr: claimed, IfId: 9}, nil
-				}),
-			}}
-		published := netip.MustParseAddr("198.51.100.7")
-		e := DirectoryEntry{IA: selB, ControlAddr: netip.AddrPortFrom(published, 30042)}
-		if !s.establishLink(context.Background(), e, "the test") {
-			t.Fatal("the in-band establishment failed")
-		}
-		entry, err := store.ByNeighbor(context.Background(), selB)
-		if err != nil || entry == nil {
-			t.Fatalf("no entry recorded (%v)", err)
-		}
-		if entry.State != links.StateEstablished {
-			t.Errorf("entry state = %v, want established", entry.State)
-		}
-		if want := netip.AddrPortFrom(published, 4242); entry.Remote != want {
-			t.Errorf("entry remote = %v, want the dialed host under the claim's port %v",
-				entry.Remote, want)
-		}
-		if dialed.Addr() != published {
-			t.Errorf("the request dialed %v, want the published host %v", dialed.Addr(), published)
-		}
-
-		// A reply naming a host records it verbatim.
-		claimed = "127.0.0.1:4343"
-		if !s.establishLink(context.Background(), e, "the test") {
-			t.Fatal("the re-establishment failed")
-		}
-		entry, err = store.ByNeighbor(context.Background(), selB)
-		if err != nil || entry == nil {
-			t.Fatalf("no entry recorded (%v)", err)
-		}
-		if want := netip.MustParseAddrPort(claimed); entry.Remote != want {
-			t.Errorf("the concrete claim's remote = %v, want it verbatim %v", entry.Remote, want)
-		}
+// TestEstablishmentSeedsAndConfirms checks the establishment's flip: the
+// rendezvous exchange seeds and names — its dial leaving from the entry's
+// own link address, the state it leaves the candidate the confirm waits on,
+// the acceptor's entry aimed at the observed mapping — and the link request
+// over the one-hop path establishes on the reply, the claim rule recording
+// the reply's side on the host the request dialed; a reply naming a host
+// records it verbatim, and an entry already holding its remote skips the
+// exchange.
+func TestEstablishmentSeedsAndConfirms(t *testing.T) {
+	f := newRendezvousFixture(t, func(cfg *RendezvousConfig) {
+		cfg.IA = selB
 	})
+	store := memory.New()
+	claimed := "0.0.0.0:4242"
+	var dialed *scion.Addr
+	var dialedIfID uint16
+	s := &selection{
+		streaks: make(map[addr.IA]*peerStreak),
+		cfg: SelectionConfig{
+			IA:       selIA,
+			Store:    store,
+			LinkHost: netip.MustParseAddr("127.0.0.1"),
+			Link: linkRequester(func(_ context.Context, peer *scion.Addr,
+				_ netip.AddrPort, ifID uint16) (*nodev1.LinkReply, error) {
+				dialed = peer
+				dialedIfID = ifID
+				return &nodev1.LinkReply{LocalAddr: claimed, IfId: 9}, nil
+			}),
+		}}
+	published := netip.MustParseAddr("198.51.100.7")
+	e := DirectoryEntry{
+		IA:             selB,
+		ControlAddr:    netip.AddrPortFrom(published, 30042),
+		RendezvousAddr: netip.AddrPortFrom(netip.MustParseAddr("127.0.0.1"), f.addr.Port()),
+	}
+	if !s.establishLink(context.Background(), e, "the test") {
+		t.Fatal("the establishment failed")
+	}
+	entry, err := store.ByNeighbor(context.Background(), selB)
+	if err != nil || entry == nil {
+		t.Fatalf("no entry recorded (%v)", err)
+	}
+	// The confirm's reply establishes, the claim rule recording the claim's
+	// port on the published host — the peer's address as the directory
+	// spells it.
+	if entry.State != links.StateEstablished {
+		t.Errorf("entry state = %v, want established", entry.State)
+	}
+	if want := netip.AddrPortFrom(published, 4242); entry.Remote != want {
+		t.Errorf("entry remote = %v, want the published host under the claim's port %v",
+			entry.Remote, want)
+	}
+	if entry.RemoteIfID != 9 {
+		t.Errorf("entry remote interface = %d, want the reply's 9", entry.RemoteIfID)
+	}
+	// The confirm dialed the peer's control service — the receiving AS's
+	// own resolution names the endpoint, no host of the peer spelled — over
+	// the seeded entry's interface.
+	if dialed == nil || dialed.IA != selB || dialed.Service != addr.SvcCS || dialed.Path != nil {
+		t.Errorf("the request dialed %+v, want the peer's control service one-hop", dialed)
+	}
+	if dialedIfID != entry.IfID {
+		t.Errorf("the request offered interface %d, want the entry's %d", dialedIfID, entry.IfID)
+	}
+	// The exchange seeded the far side: the acceptor's entry a candidate
+	// aimed at the establishment dial's observation — the entry's own link
+	// address, the socket that will serve.
+	accepted, err := f.store.ByNeighbor(context.Background(), selIA)
+	if err != nil || accepted == nil {
+		t.Fatalf("the acceptor recorded no entry (%v)", err)
+	}
+	if accepted.State != links.StateCandidate {
+		t.Errorf("the acceptor's entry is %v, want the candidate the confirm lands on",
+			accepted.State)
+	}
+	if accepted.Remote != entry.Local {
+		t.Errorf("the acceptor's entry aims at %v, want the joiner's link address %v",
+			accepted.Remote, entry.Local)
+	}
 
-	t.Run("rendezvous on the observed source", func(t *testing.T) {
-		f := newRendezvousFixture(t, func(cfg *RendezvousConfig) {
-			cfg.IA = selB
-			cfg.Bind = "0.0.0.0:0"
-			cfg.LinkHost = netip.MustParseAddr("0.0.0.0")
-		})
-		store := memory.New()
-		s := &selection{
-			streaks: make(map[addr.IA]*peerStreak),
-			cfg: SelectionConfig{
-				IA:       selIA,
-				Store:    store,
-				Paths:    stubPaths{},
-				LinkHost: netip.MustParseAddr("127.0.0.1"),
-			},
-		}
-		loopback := netip.MustParseAddr("127.0.0.1")
-		e := DirectoryEntry{IA: selB, RendezvousAddr: netip.AddrPortFrom(loopback, f.addr.Port())}
-		if !s.establishLink(context.Background(), e, "the test") {
-			t.Fatal("the rendezvous establishment failed")
-		}
-		entry, err := store.ByNeighbor(context.Background(), selB)
-		if err != nil || entry == nil {
-			t.Fatalf("no entry recorded (%v)", err)
-		}
-		// The acceptor's answer names its wildcard bind; the dialer records
-		// its port on the host the reply arrived from.
-		if entry.Remote.Addr() != loopback {
-			t.Errorf("entry remote = %v, want the reply's observed host %v",
-				entry.Remote, loopback)
-		}
-		if entry.Remote.Port() < LinkPortBase || entry.Remote.Port() >= LinkPortBase+LinkPortSpan {
-			t.Errorf("entry remote = %v, want the answer's band port", entry.Remote)
-		}
-	})
+	// A reply naming a host records it verbatim, the entry already holding
+	// its remote: the exchange is skipped, the confirm re-run alone.
+	claimed = "127.0.0.1:4343"
+	if !s.establishLink(context.Background(), e, "the test") {
+		t.Fatal("the re-establishment failed")
+	}
+	entry, err = store.ByNeighbor(context.Background(), selB)
+	if err != nil || entry == nil {
+		t.Fatalf("no entry recorded (%v)", err)
+	}
+	if want := netip.MustParseAddrPort(claimed); entry.Remote != want {
+		t.Errorf("the concrete claim's remote = %v, want it verbatim %v", entry.Remote, want)
+	}
+	entries, err := f.store.All(context.Background())
+	if err != nil || len(entries) != 1 {
+		t.Errorf("the acceptor holds %v, want the one seeded entry", entries)
+	}
 }
 
 // TestSelectionLosesRecordRace checks a promotion that loses the race to

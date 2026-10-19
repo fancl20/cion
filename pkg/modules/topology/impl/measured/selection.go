@@ -17,7 +17,6 @@ import (
 
 	"github.com/fancl20/cion/pkg/libs/loops"
 	"github.com/fancl20/cion/pkg/libs/scion"
-	"github.com/fancl20/cion/pkg/libs/scionrpc"
 	"github.com/fancl20/cion/pkg/libs/underlay"
 	"github.com/fancl20/cion/pkg/modules/links"
 	"github.com/fancl20/cion/pkg/modules/topology"
@@ -54,12 +53,16 @@ const (
 	ProbeRuns = 3
 	// ProbeWait bounds the wait for each echo reply.
 	ProbeWait = time.Second
-	// CandidateWindow is how long an unproven candidate lives: a peer that
-	// produces no verified beacon or enrollment within it retires.
+	// CandidateWindow is how long an unproven candidate lives: a peer whose
+	// confirm never lands within it retires.
 	CandidateWindow = time.Minute
-	// EstablishTimeout bounds one in-band request: a link request, or the
-	// read of a candidate's evidence, which can ask the node's core.
+	// EstablishTimeout bounds one in-band request: the link request of an
+	// establishment or a confirm pass.
 	EstablishTimeout = 5 * time.Second
+	// ConfirmRetryPause spaces one confirm's retries: the first attempt can
+	// race the generation swap the entry's own store write signals, and the
+	// pause is the milliseconds the swap takes.
+	ConfirmRetryPause = 100 * time.Millisecond
 )
 
 // LinkRequester establishes a link over the control endpoint's authenticated
@@ -112,12 +115,6 @@ type SelectionConfig struct {
 	// Learn records the external host a rendezvous reply's observed source
 	// names for the node, latest observation winning; nil discards it.
 	Learn func(netip.Addr)
-	// Evidence reports whether a candidate's peer has proven itself — a
-	// verified beacon or an enrollment the node has seen, or one its core
-	// answers for — or the failure of the read that would tell, which leaves
-	// the candidate to the next pass. The context bounds a read that asks
-	// the core.
-	Evidence func(context.Context, *links.Link) (bool, error)
 	// Stranded, when set, records the window's finding that the node holds
 	// fewer up links than the floor and no directory candidate answered its
 	// probe — the flag the joiner's dial loop reads to re-dial the
@@ -286,16 +283,18 @@ func (s *selection) pass(ctx context.Context) {
 	s.prune(ctx, entries, samples, ts)
 }
 
-// sweep settles the candidate entries: proven peers are established, and
-// peers that produced no verified beacon or enrollment within the window
-// retire — unless this window's probe of the candidate answers, for a peer
-// that answers its rendezvous socket is alive and trying, exactly the joiner
-// whose enrollment is still in flight; it retires when it goes silent. Push
-// became pull: the same UDP round trip to the same rendezvous socket the
-// window's measurement already rides is now the grace's only evidence, and
-// it is spent on named candidates alone — the unnamed entries the probes
-// themselves mint on their targets retire with the window, or the cap they
-// bound would fill with them.
+// sweep settles the candidate entries: a peer that produced no confirmed
+// link within the window retires — unless this window's probe of the
+// candidate answers, for a peer that answers its rendezvous socket is alive
+// and trying, exactly the joiner whose confirm is still in flight; it
+// retires when it goes silent. Push became pull: the same UDP round trip to
+// the same rendezvous socket the window's measurement already rides is now
+// the grace's only evidence, and it is spent on named candidates alone —
+// the unnamed entries the probes themselves mint on their targets retire
+// with the window, or the cap they bound would fill with them. A candidate
+// establishes by the authenticated link request alone — the confirm the
+// establishment or the returning node's pass sends — never by the sweep's
+// own reading.
 func (s *selection) sweep(ctx context.Context, entries []*links.Link) {
 	window := s.cfg.Window
 	if window == 0 {
@@ -306,39 +305,15 @@ func (s *selection) sweep(ctx context.Context, entries []*links.Link) {
 		if l.State != links.StateCandidate {
 			continue
 		}
-		proven, err := s.proven(ctx, l)
-		if err != nil {
-			slog.Error("Reading a candidate's evidence", "neighbor", l.NeighborIA, "err", err)
+		if now.Sub(l.Created) <= window {
 			continue
 		}
-		if proven {
-			l.State = links.StateEstablished
-			if err := s.cfg.Store.Update(ctx, l); err != nil {
-				slog.Error("Establishing a candidate", "neighbor", l.NeighborIA, "err", err)
-				continue
-			}
-			delete(s.streaks, l.NeighborIA)
-			slog.Info("Candidate proven; link established",
-				"neighbor", l.NeighborIA, "interface", l.IfID)
-		} else if now.Sub(l.Created) > window {
-			// An echo the context's end cut short is no silence.
-			if s.candidateAlive(ctx, l) || ctx.Err() != nil {
-				continue
-			}
-			s.retire(ctx, l, "candidate window elapsed without a proven peer")
+		// An echo the context's end cut short is no silence.
+		if s.candidateAlive(ctx, l) || ctx.Err() != nil {
+			continue
 		}
+		s.retire(ctx, l, "candidate window elapsed without a confirmed link")
 	}
-}
-
-// proven reads the candidate's evidence, bounded like an in-band request;
-// without an evidence source no candidate is proven.
-func (s *selection) proven(ctx context.Context, l *links.Link) (bool, error) {
-	if s.cfg.Evidence == nil {
-		return false, nil
-	}
-	ctx, cancel := context.WithTimeout(ctx, EstablishTimeout)
-	defer cancel()
-	return s.cfg.Evidence(ctx, l)
 }
 
 // candidateAlive runs one rendezvous echo against the candidate's own
@@ -356,7 +331,7 @@ func (s *selection) candidateAlive(ctx context.Context, l *links.Link) bool {
 	if !target.IsValid() {
 		return false
 	}
-	_, _, _, err := s.echo(ctx, s.cfg.ControlAddr.Addr(), target,
+	_, _, _, err := s.echo(ctx, netip.AddrPortFrom(s.cfg.ControlAddr.Addr(), 0), target,
 		addr.IA(0), s.cfg.ControlAddr)
 	return err == nil
 }
@@ -379,10 +354,13 @@ func rendezvousTarget(l *links.Link) netip.AddrPort {
 // echo dials one rendezvous exchange, recording the external host the
 // reply's observed source names for the node — every dial teaches the
 // dialer its external host — and returning the reply's source beside the
-// reply, the observation an unspecified answer records under.
+// reply, the observation an unspecified answer records under. The dial binds
+// the given address: the establishment's own link address when the exchange
+// records an entry's locator, port 0 — ephemeral — when the measurement
+// probe records nothing.
 func (s *selection) echo(
 	ctx context.Context,
-	bind netip.Addr,
+	bind netip.AddrPort,
 	target netip.AddrPort,
 	ia addr.IA,
 	linkAddr netip.AddrPort,
@@ -554,7 +532,7 @@ func (s *selection) probe(ctx context.Context, e DirectoryEntry, l *links.Link) 
 			IA:   e.IA,
 			Addr: netip.AddrPortFrom(e.ControlAddr.Addr(), underlay.EndhostPort),
 		})
-	} else if _, _, rtt, err := s.echo(ctx, s.cfg.ControlAddr.Addr(),
+	} else if _, _, rtt, err := s.echo(ctx, netip.AddrPortFrom(s.cfg.ControlAddr.Addr(), 0),
 		e.RendezvousAddr, addr.IA(0), s.cfg.ControlAddr); err == nil {
 		m.direct = rtt
 	}
@@ -932,12 +910,14 @@ func (s *selection) retire(ctx context.Context, l *links.Link, why string) bool 
 	return true
 }
 
-// establish lands a promoted candidate: in-band over the composed path when
-// one resolves and answers — the authenticated request — else the rendezvous
-// exchange a joiner with no paths uses, whose entries the candidate sweep
-// settles on the peer's evidence. A path that resolves but carries nothing —
-// the composed route crossing the very link that went down — fails the
-// in-band request, and the rendezvous establishment takes over.
+// establishLink lands a promoted candidate: the rendezvous exchange seeds
+// and names — the plaintext exchange beneath every path and every identity,
+// the state it leaves the candidate the confirm waits on — and the
+// authenticated link request over the seeded entry's one-hop path
+// establishes both sides, the peer's entry when the request lands and this
+// one when the reply answers. An entry already holding its remote — seeded
+// by an earlier window or the joiner's own dial — skips the exchange: the
+// seed taught both sides already.
 func (s *selection) establishLink(ctx context.Context, e DirectoryEntry, why string) bool {
 	entry, err := s.ownEntry(ctx, e)
 	if err != nil {
@@ -945,64 +925,30 @@ func (s *selection) establishLink(ctx context.Context, e DirectoryEntry, why str
 			"neighbor", e.IA, "err", err)
 		return false
 	}
-	probeCtx, cancel := context.WithTimeout(ctx, EstablishTimeout)
-	defer cancel()
-	if path, err := s.cfg.Paths.Path(probeCtx, e.IA); err == nil {
-		peer := &scion.Addr{
-			IA:   e.IA,
-			Addr: netip.AddrPortFrom(e.ControlAddr.Addr(), scionrpc.EndpointPort),
-			Path: path,
-		}
-		rpcCtx, rpcCancel := context.WithTimeout(ctx, EstablishTimeout)
-		defer rpcCancel()
-		reply, err := s.cfg.Link.Link(rpcCtx, peer, entry.Local, entry.IfID)
-		if err != nil {
-			// The path resolved but did not answer; the rendezvous exchange
-			// below is the establishment that reaches the peer regardless.
-			slog.Warn("The in-band link request failed", "neighbor", e.IA, "err", err)
-		} else if remote, err := netip.ParseAddrPort(reply.LocalAddr); err != nil {
-			slog.Error("The link reply carries a malformed address", "err", err)
-			return false
-		} else {
-			// The rule's in-band side: an unspecified claim's port records
-			// on the host the request dialed — the published host the fixed
-			// ports and the link band sit on.
-			entry.Remote = recordedLinkAddr(remote, peer.Addr)
-			entry.RemoteIfID = uint16(reply.IfId)
-			entry.State = links.StateEstablished
-			if err := s.cfg.Store.Update(ctx, entry); err != nil {
-				slog.Error("Establishing a link", "neighbor", e.IA, "err", err)
-				return false
-			}
-			s.streak(e.IA).promote = 0
-			slog.Info("Link established", "neighbor", e.IA, "why", why,
-				"interface", entry.IfID, "local", entry.Local, "remote", entry.Remote)
-			return true
-		}
-	}
-	// No composed path, or one that did not answer: the rendezvous exchange
-	// is the establishment, the entries starting as candidates the peer's
-	// evidence settles.
-	if !s.establishByRendezvous(ctx, e, entry) {
+	if !entry.Remote.IsValid() && !s.establishByRendezvous(ctx, e, entry) {
 		return false
 	}
 	s.streak(e.IA).promote = 0
-	slog.Info("Link joined by rendezvous", "neighbor", e.IA, "why", why,
+	slog.Info("Link seeded by rendezvous", "neighbor", e.IA, "why", why,
 		"interface", entry.IfID, "local", entry.Local, "remote", entry.Remote)
+	s.confirm(ctx, e, entry, why)
 	return true
 }
 
-// establishByRendezvous lands a promotion through the rendezvous exchange —
-// the establishment a joiner with no paths uses. The reply must name the
-// entry's ISD-AS: the published address can be a learned public host, and an
-// answer arriving from a different node — a colliding subnet's real peer —
-// must not mint an entry naming one ISD-AS at another's address. The reply's
-// link address records under the claim rule, its port on the reply's
-// observed source host when the answer names none.
+// establishByRendezvous seeds a promotion through the rendezvous exchange —
+// the establishment a joiner with no paths uses, whose dial leaves from the
+// entry's own link address so the mapping the acceptor observes is the
+// socket that will serve. The reply must name the entry's ISD-AS: the
+// published address can be a learned public host, and an answer arriving
+// from a different node — a colliding subnet's real peer — must not seed an
+// entry naming one ISD-AS at another's address. The reply's link address
+// records under the claim rule, its port on the reply's observed source
+// host when the answer names none; the entry stays the candidate the
+// confirm waits on.
 func (s *selection) establishByRendezvous(
 	ctx context.Context, e DirectoryEntry, entry *links.Link,
 ) bool {
-	reply, observed, _, err := s.echo(ctx, s.cfg.LinkHost, e.RendezvousAddr, s.cfg.IA, entry.Local)
+	reply, observed, _, err := s.echo(ctx, entry.Local, e.RendezvousAddr, s.cfg.IA, entry.Local)
 	if err != nil {
 		slog.Warn("The rendezvous establishment failed", "neighbor", e.IA, "err", err)
 		return false
@@ -1018,6 +964,69 @@ func (s *selection) establishByRendezvous(
 		slog.Error("Recording the rendezvous establishment", "neighbor", e.IA, "err", err)
 		return false
 	}
+	return true
+}
+
+// confirm sends the entry's link request over the one-hop path of the link
+// it confirms — the resolution the path library already performs for the
+// node's own one-hop egress — so the request's underlay source, the channel
+// observes, is the peer's link socket and not a transit's address. The
+// destination is the peer's control service: the receiving AS's own
+// resolution names the endpoint, so the dial names no host of the peer it
+// could spell wrong. The generation serves the seeded entry once the store
+// write's signal has swapped it in, so the dial retries inside the
+// establishment's bound; a confirm that never lands leaves the candidate to
+// the window, the next window's promotion re-running it.
+func (s *selection) confirm(
+	ctx context.Context, e DirectoryEntry, entry *links.Link, why string,
+) bool {
+
+	rpcCtx, cancel := context.WithTimeout(ctx, EstablishTimeout)
+	defer cancel()
+	peer := &scion.Addr{IA: e.IA, Service: addr.SvcCS}
+	for {
+		reply, err := s.cfg.Link.Link(rpcCtx, peer, entry.Local, entry.IfID)
+		if err == nil {
+			return s.landConfirm(rpcCtx, e.IA, entry, reply, e.ControlAddr.Addr(), why)
+		}
+		if rpcCtx.Err() != nil {
+			slog.Warn("The link request did not answer", "neighbor", e.IA, "err", err)
+			return false
+		}
+		if !loops.Sleep(rpcCtx, ConfirmRetryPause) {
+			return false
+		}
+	}
+}
+
+// landConfirm records the reply's side: the acceptor's link address under
+// the claim rule — the reply leaves the acceptor's endpoint, whose arrival
+// the dialer cannot observe, so the claimed address is the record and the
+// peer's own confirm corrects it — beside the established state, the
+// requester's answer to the possession the acceptor just recorded.
+func (s *selection) landConfirm(
+	ctx context.Context,
+	ia addr.IA,
+	entry *links.Link,
+	reply *nodev1.LinkReply,
+	published netip.Addr,
+	why string,
+) bool {
+
+	remote, err := netip.ParseAddrPort(reply.LocalAddr)
+	if err != nil {
+		slog.Error("The link reply carries a malformed address", "err", err)
+		return false
+	}
+	entry.Remote = recordedLinkAddr(remote, netip.AddrPortFrom(published, remote.Port()))
+	entry.RemoteIfID = uint16(reply.IfId)
+	entry.State = links.StateEstablished
+	if err := s.cfg.Store.Update(ctx, entry); err != nil {
+		slog.Error("Establishing a link", "neighbor", ia, "err", err)
+		return false
+	}
+	slog.Info("Link established", "neighbor", ia, "why", why,
+		"interface", entry.IfID, "local", entry.Local, "remote", entry.Remote)
 	return true
 }
 
@@ -1040,7 +1049,7 @@ func (s *selection) ownEntry(ctx context.Context, e DirectoryEntry) (*links.Link
 // neighbor's latest retired entry while no live entry holds it, else a
 // fresh one: the neighbor's side of a link this node retired stays
 // established until the neighbor's own verdict retires it, its socket
-// connected to that address, and its acceptor answers a rendezvous claim
+// still aimed at that address, and its acceptor answers a rendezvous claim
 // with that side unchanged.
 func (s *selection) recordEntry(ctx context.Context, e DirectoryEntry) (*links.Link, error) {
 	entry, err := s.cfg.Store.ByNeighbor(ctx, e.IA)

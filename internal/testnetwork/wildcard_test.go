@@ -53,11 +53,12 @@ func TestWildcardControlBoots(t *testing.T) {
 	// A wildcard-bound dial claiming the wildcard reaches the acceptor
 	// through the loopback: the reply carries the acceptor's wildcard bind
 	// value and the source the dial proved routable, and the acceptor
-	// records the claim's port on the observed host.
+	// records the observed source whole — the loopback host under the bound
+	// port.
 	wildcard := netip.MustParseAddr("0.0.0.0")
 	claim := netip.AddrPortFrom(wildcard, 31001)
 	peer := addr.MustIAFrom(20, 0xfd00000000f1)
-	reply, observed, _, err := measured.RendezvousEcho(ctx, wildcard,
+	reply, observed, _, err := measured.RendezvousEcho(ctx, claim,
 		netip.MustParseAddrPort("127.0.0.1:30043"), peer, claim)
 	if err != nil {
 		t.Fatalf("the wildcard's rendezvous did not answer: %v", err)

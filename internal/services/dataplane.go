@@ -50,16 +50,50 @@ func DefaultDataplaneOptions() DataplaneOptions {
 	}
 }
 
-// generation is one serving data plane instance. The data plane never mutates
-// while serving: a topology change retires the serving generation and brings
-// up its replacement, built from the link store's non-retired entries with
-// each link's stable local address rebound identically — the swap invisible to
-// the peers' connected sockets.
+// generation is one serving data plane instance. The data plane's link set
+// never mutates while serving: a membership change retires the serving
+// generation and brings up its replacement, built from the link store's
+// non-retired entries with each link's stable local address rebound
+// identically — the swap invisible to the peers. A locator change is not a
+// membership change: the serving generation re-aims the link in place, the
+// locator live state its sends read at egress.
 type generation struct {
 	provider *dataplane.UDPProvider
 	dp       *dataplane.DataPlane
 	cancel   context.CancelFunc
 	done     chan struct{} // closed when Serve returned
+	// entries is the serving set the generation was built from, the
+	// membership a store change is diffed against.
+	entries []*links.Link
+}
+
+// reaim lands a locator change without a generational replacement: a store
+// change whose serving set holds the same interfaces on the same local
+// addresses re-aims each link whose remote moved, in place. It reports
+// false — the change calls for the swap — on any membership or local
+// address difference, and true with the generation's record advanced to
+// the new locators. Retiring the plane per locator change would gap the
+// very BFD session stream the design leans on; a re-aim is one store write
+// and one field.
+func (g *generation) reaim(entries []*links.Link) bool {
+	if len(g.entries) != len(entries) {
+		return false
+	}
+	built := make(map[uint16]*links.Link, len(g.entries))
+	for _, l := range g.entries {
+		built[l.IfID] = l
+	}
+	for _, l := range entries {
+		b, ok := built[l.IfID]
+		if !ok || b.Local != l.Local {
+			return false
+		}
+		if b.Remote != l.Remote {
+			g.provider.Aim(l.IfID, l.Remote)
+		}
+	}
+	g.entries = entries
+	return true
 }
 
 // stop gracefully retires the generation: the provider stops ingesting, the
@@ -145,7 +179,7 @@ func (n *node) startGeneration(ctx context.Context) (*generation, error) {
 	}
 	genCtx, cancel := context.WithCancel(ctx)
 	done := make(chan struct{})
-	g := &generation{provider: provider, dp: d, cancel: cancel, done: done}
+	g := &generation{provider: provider, dp: d, cancel: cancel, done: done, entries: entries}
 	go func() {
 		defer close(done)
 		if err := d.Serve(genCtx); err != nil {
@@ -156,7 +190,8 @@ func (n *node) startGeneration(ctx context.Context) (*generation, error) {
 }
 
 // serveGenerations is the data plane loop: it serves the generation boot
-// built and, on each link-store change, retires the serving one — stop
+// built and, on each link-store change, lands it — a locator change re-aims
+// the link in place, anything else retires the serving generation — stop
 // ingest, drain, close — and brings up its replacement, the same link
 // addresses rebound. The control plane never restarts: its sockets are its
 // own, and it submits packets to the internal link's address, which each
@@ -170,10 +205,17 @@ func (n *node) serveGenerations(ctx context.Context, gen *generation) error {
 			gen.stop()
 			return nil
 		case <-n.linkChanges:
+			entries, err := n.servingLinks(ctx)
+			if err != nil {
+				slog.Error("Reading the link store for the data plane", "err", err)
+				continue
+			}
+			if gen.reaim(entries) {
+				continue
+			}
 			gen.stop()
 			n.setGeneration(nil)
 			var next *generation
-			var err error
 			for attempt := range bindAttempts {
 				next, err = n.startGeneration(ctx)
 				if err == nil {
