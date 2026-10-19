@@ -8,11 +8,13 @@
 ## Context and problem statement
 
 A link today binds the neighbor's identity to one underlay address. The
-rendezvous exchange records the observed host beside the *claimed* port —
-the port the joiner's socket binds, on the assumption that address
-translation, where it stands between the peers, preserves it. Each
-external link is a connected socket aimed at that recorded address, so
-the kernel delivers nothing from anywhere else. And the selection's
+rendezvous exchange records the *claimed* address when the claim names a
+host, and otherwise the observed host beside the claimed port — the port
+the joiner's socket binds, on the assumption that address translation,
+where it stands between the peers, preserves it; the observed port is
+never recorded. Each external link is a connected socket aimed at that
+recorded address, so the kernel delivers nothing from anywhere else.
+And the selection's
 evidence that a candidate is its claimed self is a chain for that
 ISD-AS existing — not a chain the speaker holds.
 
@@ -40,10 +42,11 @@ What exists to build on: the SCION-native channel verifies both peers'
 chains against the TRC anchors on every request
 (ADR-0020), so a request that arrives names its sender by possession;
 the in-band link service already refreshes a returning neighbor's
-recorded addresses over that channel without re-admission; and every
-link's BFD session already transmits each interval through its own down
-verdict (data plane draft, Section 6.1) — a standing keepalive stream
-at a cadence no translation's idle timeout starves. The drafts
+recorded addresses over that channel without re-admission, though from
+the peer's claimed address rather than the channel's observed one; and
+every link's BFD session already transmits each interval through its
+own down verdict (data plane draft, Section 6.1) — a standing keepalive
+stream at a cadence no translation's idle timeout starves. The drafts
 themselves configure neighbors out of band (control plane draft,
 Section 2.2.5), so the underlay's address semantics are CION's own
 seam, as ADR-0017 already holds for the instruments the drafts hand to
@@ -77,8 +80,9 @@ configuration.
 
 How the recorded locator is derived:
 
-*   **The claim's port, as today:** The exchange records the port the
-    joiner's socket binds beside the observed host.
+*   **The claim's port, as today:** The exchange records the address
+    the claim names — the observed host standing in only where the
+    claim binds a wildcard — the observed port never.
 *   **The observed mapping, from the receiving socket:** The dial
     leaves from the link's own port, and the reply's observation names
     host and port both.
@@ -117,7 +121,8 @@ Chosen options: **the observed mapping, recorded from the receiving
 socket**, **possession on the native channel**, and **software tiers on
 unconnected per-link sockets** — the stance **roaming in scope wherever
 one side of a link holds a stable address**, withdrawing ADR-0017
-decision 17's exclusion. Realized as follows:
+decision 17's exclusion and narrowing decision 15's identically
+rebound address to the link's local side. Realized as follows:
 
 1.  **The neighbor's identity and its locator are separate facts.** The
     identity is certified, proven only by the chain on the native
@@ -138,17 +143,30 @@ decision 17's exclusion. Realized as follows:
 3.  **Confirmation is possession.** A link is established — and a live
     link's locator refreshed — only by a request that arrived over a
     channel verifying the requester's chain against the TRC anchors,
-    naming the peer the handshake proved. The selection's
+    naming the peer the handshake proved. The request rides the
+    one-hop path of the link it confirms, and the locator it installs
+    is the source that link observes — its own arrival the latest
+    witness — for the channel's observation names the egress of the
+    path the request traveled: the peer's link socket exactly when the
+    hop is direct, a transit's address on any composed path, so a
+    confirm over a composed path proves the identity without moving a
+    locator. A joiner behind first contact has no composed path to pay
+    the round trip on; its confirm rides the link the exchange seeded,
+    which serves ingress while the entry waits unproven, and the far
+    side's entry establishes when the confirm lands. The selection's
     chain-existence evidence retires in favor of it. A third party may
     still claim an absent node's ISD-AS at a new address; what it can
     no longer do is make the claim stick.
 4.  **Relocation rides the same confirm.** A returning node's
     enrollment stands; its authenticated request re-registers the
     locator on every former neighbor it re-reaches, refreshing the
-    recorded address without a new interface. The stale entry on the
-    far side retires on the existing down-window rule until then, and
-    the returning node's own entries retarget on the exchange's reply,
-    as they already do.
+    recorded address without a new interface. The re-reach is the
+    returning node's own dial pass over the entries it holds — the
+    loop that already re-dials them on start, each answered dial
+    leaving a confirm behind it — for the far side polls nothing. The
+    stale entry on the far side retires on the existing down-window
+    rule until then, and the returning node's own entries retarget on
+    the exchange's reply, as they already do.
 5.  **The link's socket is unconnected and per-link.** Each link keeps
     its own socket bound to its own port — classification by receiving
     socket, and therefore by interface and neighbor, is unchanged —
@@ -159,7 +177,14 @@ decision 17's exclusion. Realized as follows:
     address match it replaces — a spoofer who knows the recorded
     address passes the kernel today — and re-aim, the moving of a live
     entry's locator, only on the authenticated confirmation of point 3.
-    Bare arrival never moves a locator.
+    Bare arrival never moves a locator. The locator those sends carry
+    is live state within the serving generation — a second mutable edge
+    beside ADR-0017 decision 13's verdict, read at egress — so a
+    re-aim crosses the store without a generational replacement:
+    retiring and rebuilding the plane per locator change would gap the
+    very session stream point 6 leans on and price each move beyond
+    one round trip. The local address keeps ADR-0017 decision 15's
+    binding, rebound identically by every generation.
 6.  **The keepalive stream is the one BFD already runs.** The
     interval-long transmissions through down verdicts hold each
     direction's mapping open; no new cadence, probe, or keepalive
@@ -179,7 +204,8 @@ decision 17's exclusion. Realized as follows:
 *   Joiners behind port-remapping translation join and can be joined;
     the measured-selection floor stops standing in for reachability.
 *   Relocation converges on one authenticated round trip per former
-    neighbor, with no re-admission and no new state.
+    neighbor, with no re-admission, no new state, and no generational
+    rebuild.
 *   The impersonation of an absent node loses its establishment path:
     existence was the impostor's currency, and it is retired.
 *   Nothing new runs: no new channels, keepalives, or exchanges — the
@@ -198,6 +224,10 @@ decision 17's exclusion. Realized as follows:
     usual cost of crossing it.
 *   The recorded locator becomes live state rather than configuration;
     diagnosing where a link points reads observation, not argument.
+*   The recorded address stops naming the link: the socket table, the
+    duplicate refusal, and the store's by-address lookups key on the
+    interface and the neighbor instead, and two neighbors behind one
+    shared translation may collide on a single observed address.
 *   The both-ends-translated case is named and left unsolved; operators
     behind symmetric translation on both sides of a would-be link still
     need a relay this design does not provide.
@@ -252,6 +282,9 @@ decision 17's exclusion. Realized as follows:
 *   Bad, because it prices confirmation at a round trip the
     un-enrolled cannot pay — the bootstrap window's degraded exchanges
     must keep their existing role in first enrollment.
+*   Bad, because the observation rides the path: only a request over
+    the direct hop names the peer's link socket, so the confirm's dial
+    cannot take a composed path.
 
 ### The kernel, as today
 
