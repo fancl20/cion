@@ -35,6 +35,8 @@ import (
 
 	"github.com/scionproto/scion/pkg/addr"
 	"github.com/scionproto/scion/pkg/slayers"
+	"github.com/scionproto/scion/pkg/slayers/path"
+	"github.com/scionproto/scion/pkg/slayers/path/onehop"
 
 	"github.com/fancl20/cion/pkg/libs/underlay"
 )
@@ -45,6 +47,11 @@ var (
 	errAlreadyInternalLink   = errors.New("internal link already exists")
 	errDuplicateInterface    = errors.New("duplicate interface ID")
 )
+
+// pathTypeOffset is the SCION header's path-type byte, the mark that tells
+// an external link's egress a packet is the node's own one-hop conversation
+// with the peer rather than transit.
+const pathTypeOffset = 8
 
 // UDPProvider implements UnderlayProvider over UDP/IP. External links get an
 // exclusive unconnected socket keyed by interface ID; the internal link uses
@@ -276,9 +283,9 @@ func (u *UDPProvider) newExternalLink(
 }
 
 // Aim re-aims the interface's external link at a new locator in place — one
-// field of live state, not a generational replacement: the link's queued
-// sends and its BFD session's raw writes follow from the next packet on. A
-// missing or internal interface aims nothing.
+// field of live state, not a generational replacement: the link's transit and
+// its BFD session's answers follow from the next packet on. A missing or
+// internal interface aims nothing.
 func (u *UDPProvider) Aim(ifID uint16, remote netip.AddrPort) {
 	u.mu.Lock()
 	defer u.mu.Unlock()
@@ -289,15 +296,15 @@ func (u *UDPProvider) Aim(ifID uint16, remote netip.AddrPort) {
 
 // Observed returns the interface's external link's last observed underlay
 // source — the data plane's witness of where the peer's packets come from,
-// the record the authenticated link request's agreement rule reads — and
-// the zero AddrPort when no external link holds the interface or none of
-// its arrivals recorded one.
+// the record the authenticated link request's agreement rule reads and the
+// address its answers pay back — and the zero AddrPort when no external link
+// holds the interface or none of its arrivals recorded one.
 func (u *UDPProvider) Observed(ifID uint16) netip.AddrPort {
 	u.mu.Lock()
 	defer u.mu.Unlock()
 	if l, ok := u.allLinks[ifID].(*externalLink); ok {
-		if ap := l.observed.Load(); ap != nil {
-			return *ap
+		if addr := l.observed.Load(); addr != nil {
+			return addr.AddrPort()
 		}
 	}
 	return netip.AddrPort{}
@@ -603,7 +610,14 @@ func (u *udpConnection) drain(queue <-chan *Packet, pool PacketPool) {
 // match the connected socket bought — and only the authenticated confirm
 // moves the locator; bare arrival never does, though every arrival records
 // the source the link last observed, the record the confirm's agreement
-// rule reads.
+// rule reads and the address the link's own conversation answers: the
+// node's one-hop sends — replies and the confirm's dial alike, the only
+// one-hop traffic an external link carries, for the router forwards no
+// one-hop packet but the local AS's own — and the BFD session's stream pay
+// the observation back while it stands apart from the locator, so a peer
+// that moved keeps reaching the link whose entry still names its former
+// address. Transit carries the locator: the authenticated record alone
+// steers the traffic that forwards through the node.
 type externalLink struct {
 	procQs     []chan *Packet
 	name       string // For logs
@@ -614,11 +628,12 @@ type externalLink struct {
 	// raw is the link's own socket: the writer a BFD session sends its
 	// prebuilt control packets through, beneath the egress queue.
 	raw underlay.UDPConn
-	// locator is the entry's current remote address: the destination every
-	// queued send and every raw write carries, replaced in place by a re-aim.
+	// locator is the entry's current remote address: the destination transit
+	// carries, replaced in place by a re-aim.
 	locator atomic.Pointer[net.UDPAddr]
-	// observed is the source of the link's last arrival.
-	observed atomic.Pointer[netip.AddrPort]
+	// observed is the source of the link's last arrival, the destination its
+	// answers carry — nil until one arrives.
+	observed atomic.Pointer[net.UDPAddr]
 	seed     uint32
 	ifID     uint16
 }
@@ -660,18 +675,35 @@ func (l *externalLink) IsUp() bool {
 	return l.bfdSession.IsUp()
 }
 
-// egressAddr returns the link's live locator: the packet carries no
-// destination of its own on this connection.
-func (l *externalLink) egressAddr(*Packet) *net.UDPAddr {
+// egressAddr returns the packet's underlay destination: the link's live
+// locator for transit, and the answer address for the node's own one-hop
+// conversation with the peer — the path type marks it, for the router
+// forwards no one-hop packet but one this AS originated.
+func (l *externalLink) egressAddr(p *Packet) *net.UDPAddr {
+	if len(p.RawPacket) > pathTypeOffset &&
+		path.Type(p.RawPacket[pathTypeOffset]) == onehop.PathType {
+		return l.answerAddr()
+	}
+	return l.locator.Load()
+}
+
+// answerAddr returns the destination the link's own conversation with the
+// peer carries: its last observed source — the address the peer's latest
+// arrival proved answers — else the locator until an arrival names one.
+func (l *externalLink) answerAddr() *net.UDPAddr {
+	if addr := l.observed.Load(); addr != nil {
+		return addr
+	}
 	return l.locator.Load()
 }
 
 // WriteRaw sends a prebuilt packet on the link's own socket, beneath the
 // forwarding queue — the BFD session's send path, which must keep
-// transmitting while the link is down — aimed at the link's locator, for
-// the prebuilt control packet carries no destination of its own.
+// transmitting while the link is down — aimed at the link's answer address,
+// for the prebuilt control packet carries no destination of its own: the
+// keepalive answers the peer's stream where its own packets came from.
 func (l *externalLink) WriteRaw(b []byte) error {
-	_, err := l.raw.WriteToUDP(b, l.locator.Load())
+	_, err := l.raw.WriteToUDP(b, l.answerAddr())
 	return err
 }
 
@@ -697,11 +729,11 @@ func (l *externalLink) receive(size int, srcAddr *net.UDPAddr, p *Packet) {
 	metrics := l.metrics
 	sc := ClassOfSize(size)
 
-	// The arrival's source is the link's latest observation; the packet
-	// itself carries none, for every send on this connection follows the
-	// locator.
+	// The arrival's source is the link's latest observation, the address its
+	// answers carry; the packet itself carries none, for every send on this
+	// connection follows the link's own addresses.
 	ap := netip.AddrPortFrom(srcAddr.AddrPort().Addr().Unmap(), srcAddr.AddrPort().Port())
-	l.observed.Store(&ap)
+	l.observed.Store(net.UDPAddrFromAddrPort(ap))
 
 	p.Link = l
 

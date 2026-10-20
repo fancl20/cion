@@ -971,15 +971,17 @@ func (s *selection) establishByRendezvous(
 }
 
 // confirm sends the entry's link request over the one-hop path of the link
-// it confirms — the resolution the path library already performs for the
-// node's own one-hop egress — so the request's underlay source, the channel
-// observes, is the peer's link socket and not a transit's address. The
-// destination is the peer's control service: the receiving AS's own
-// resolution names the endpoint, so the dial names no host of the peer it
-// could spell wrong. The generation serves the seeded entry once the store
-// write's signal has swapped it in, so the dial retries inside the
-// establishment's bound; a confirm that never lands leaves the candidate to
-// the window, the next window's promotion re-running it.
+// it confirms — the dial naming the entry's own interface, the egress the
+// peer's own replies already take, so the link's verdict gates nothing: the
+// confirm is the authenticated instrument that restores the locator a down
+// verdict waits on, and the request's underlay source, the channel observes,
+// is the peer's link socket and not a transit's address. The destination is
+// the peer's control service: the receiving AS's own resolution names the
+// endpoint, so the dial names no host of the peer it could spell wrong. The
+// generation serves the seeded entry once the store write's signal has
+// swapped it in, so the dial retries inside the establishment's bound; a
+// confirm that never lands leaves the candidate to the window, the next
+// window's promotion re-running it.
 func (s *selection) confirm(
 	ctx context.Context, e DirectoryEntry, entry *links.Link, why string,
 ) bool {

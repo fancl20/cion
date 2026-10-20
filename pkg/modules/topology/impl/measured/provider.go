@@ -619,6 +619,10 @@ func (z *Provider) runConfirmPass(ctx context.Context) {
 			started = true
 		}
 		if started && len(pending) == 0 {
+			// The pass is complete — every held entry answered. The loop's
+			// contract is to run until the context ends, so it holds here
+			// rather than logging an exit.
+			<-ctx.Done()
 			return
 		}
 		if !loops.Sleep(ctx, interval) {
@@ -628,10 +632,10 @@ func (z *Provider) runConfirmPass(ctx context.Context) {
 }
 
 // confirmEntry sends one held entry's link request over the link's one-hop
-// path — the peer's control service addressed by it, the channel resolving
-// the egress from the link table — and lands the reply's side: the peer's
-// recorded addresses, the claim rule's record, and the established state a
-// candidate was waiting on.
+// path — the peer's control service addressed by it, the dial naming the
+// entry's own interface so the link's verdict gates nothing — and lands the
+// reply's side: the peer's recorded addresses, the claim rule's record, and
+// the established state a candidate was waiting on.
 func (z *Provider) confirmEntry(ctx context.Context, l *links.Link) bool {
 	rpcCtx, cancel := context.WithTimeout(ctx, EstablishTimeout)
 	defer cancel()
@@ -704,10 +708,13 @@ func localHeld(entries []*links.Link, l *links.Link) bool {
 // linkClient establishes links in-band over the peer client's mutually
 // verified one-hop channel — the drafts' client machinery consumed as a
 // library, a client per peer keyed by its encoded authority so the transport
-// reuses the connection. The one-hop dial is the point: the request rides
-// the direct link of the entry it confirms, so the underlay source the
-// peer's link observes is the requester's link socket and not a transit's
-// address.
+// reuses the connection. The one-hop dial is the point, and it names the
+// entry's own interface: the request rides the direct link of the entry it
+// confirms whatever the link's verdict — the confirm is the authenticated
+// instrument that restores the locator a down verdict waits on, so gating
+// its egress on the verdict would deadlock the very recovery it serves —
+// and the underlay source the peer's link observes is the requester's link
+// socket and not a transit's address.
 type linkClient struct {
 	peer topology.PeerChannel
 
@@ -726,7 +733,12 @@ func (c *linkClient) Link(
 	ifID uint16,
 ) (*nodev1.LinkReply, error) {
 
-	authority := scionrpc.PeerAuthority(peer)
+	authority := scionrpc.PeerAuthority(&scion.Addr{
+		IA:      peer.IA,
+		Addr:    peer.Addr,
+		Service: peer.Service,
+		IfID:    ifID,
+	})
 	c.mtx.Lock()
 	if c.clts == nil {
 		c.clts = make(map[string]nodev1connect.LinkServiceClient)

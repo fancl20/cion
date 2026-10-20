@@ -11,6 +11,7 @@ import (
 
 	"github.com/scionproto/scion/pkg/addr"
 	"github.com/scionproto/scion/pkg/slayers"
+	"github.com/scionproto/scion/pkg/slayers/path/onehop"
 
 	"github.com/fancl20/cion/pkg/libs/underlay"
 )
@@ -271,12 +272,23 @@ func newPeerSocket(t *testing.T) *net.UDPConn {
 	return c
 }
 
+// onehopDatagram returns a datagram whose SCION-like header carries the
+// one-hop path type — the mark of the node's own conversation with the peer,
+// the traffic an external link's answer tier carries.
+func onehopDatagram(payload []byte) []byte {
+	buf := scionLikeDatagram(payload)
+	buf[8] = byte(onehop.PathType)
+	return buf
+}
+
 // TestExternalLinkReaimAndObserved checks the unconnected link's live state:
 // an arrival from a source the recorded locator does not name is processed
 // all the same and records itself as the link's last observed source — the
 // new answer the control plane reads — while the locator it names moves
-// nothing; a re-aim then changes the send destination, the queued send and
-// the raw write alike, without rebuilding anything.
+// nothing; the link's own conversation answers that source — the one-hop
+// send and the raw write alike — while transit keeps the recorded locator; a
+// re-aim then changes transit's destination without rebuilding anything, and
+// the answers follow only an arrival from the new locator itself.
 func TestExternalLinkReaimAndObserved(t *testing.T) {
 	aimed := newPeerSocket(t)
 	moved := newPeerSocket(t)
@@ -312,7 +324,7 @@ func TestExternalLinkReaimAndObserved(t *testing.T) {
 		t.Errorf("observed source = %v, want the stranger's %v", got, stranger.LocalAddr())
 	}
 
-	// The locator the arrival named moved nothing: a queued send still
+	// The locator the arrival named moved nothing: a transit send still
 	// lands at the recorded address.
 	out := scionLikeDatagram([]byte("still aimed"))
 	pkt := pool.Get()
@@ -321,37 +333,75 @@ func TestExternalLinkReaimAndObserved(t *testing.T) {
 	if !el.Send(pkt) {
 		t.Fatal("send queue full")
 	}
+	// The link's own conversation answers the arrival's source instead: the
+	// one-hop send and the session's raw write both land at the stranger.
 	_ = aimed.SetReadDeadline(time.Now().Add(testTimeout))
 	got := make([]byte, bufSize)
 	n, err := aimed.Read(got)
 	if err != nil {
-		t.Fatalf("the pre-re-aim send did not arrive at the recorded address: %v", err)
+		t.Fatalf("the pre-re-aim transit did not arrive at the recorded address: %v", err)
 	}
 	if !bytes.Equal(got[:n], out) {
 		t.Fatalf("received %q, want %q", got[:n], out)
 	}
-
-	// The re-aim: one field, no rebuild. The queued send and the raw write
-	// both follow the new locator.
-	provider.Aim(3, moved.LocalAddr().(*net.UDPAddr).AddrPort())
+	answer := onehopDatagram([]byte("the answer"))
 	pkt2 := pool.Get()
-	pkt2.RawPacket = pkt2.RawPacket[:len(out)]
-	copy(pkt2.RawPacket, out)
+	pkt2.RawPacket = pkt2.RawPacket[:len(answer)]
+	copy(pkt2.RawPacket, answer)
 	if !el.Send(pkt2) {
 		t.Fatal("send queue full")
 	}
-	if err := el.WriteRaw(out); err != nil {
+	if err := el.WriteRaw(answer); err != nil {
 		t.Fatal(err)
 	}
 	for range 2 {
-		_ = moved.SetReadDeadline(time.Now().Add(testTimeout))
-		n, err := moved.Read(got)
+		_ = stranger.SetReadDeadline(time.Now().Add(testTimeout))
+		n, err := stranger.Read(got)
 		if err != nil {
-			t.Fatalf("a post-re-aim send did not arrive at the new locator: %v", err)
+			t.Fatalf("an answer did not arrive at the observed source: %v", err)
 		}
-		if !bytes.Equal(got[:n], out) {
-			t.Fatalf("received %q, want %q", got[:n], out)
+		if !bytes.Equal(got[:n], answer) {
+			t.Fatalf("received %q, want %q", got[:n], answer)
 		}
+	}
+
+	// The re-aim: one field, no rebuild. Transit follows the new locator at
+	// once; the answers keep paying the observation back until the new
+	// locator's own arrival names it.
+	provider.Aim(3, moved.LocalAddr().(*net.UDPAddr).AddrPort())
+	pkt3 := pool.Get()
+	pkt3.RawPacket = pkt3.RawPacket[:len(out)]
+	copy(pkt3.RawPacket, out)
+	if !el.Send(pkt3) {
+		t.Fatal("send queue full")
+	}
+	_ = moved.SetReadDeadline(time.Now().Add(testTimeout))
+	n, err = moved.Read(got)
+	if err != nil {
+		t.Fatalf("the post-re-aim transit did not arrive at the new locator: %v", err)
+	}
+	if !bytes.Equal(got[:n], out) {
+		t.Fatalf("received %q, want %q", got[:n], out)
+	}
+	if err := el.WriteRaw(answer); err != nil {
+		t.Fatal(err)
+	}
+	_ = stranger.SetReadDeadline(time.Now().Add(testTimeout))
+	if n, err := stranger.Read(got); err != nil || !bytes.Equal(got[:n], answer) {
+		t.Fatalf("the raw write followed the re-aim: %v", err)
+	}
+	if _, err := moved.WriteToUDP(in, el.raw.LocalAddr()); err != nil {
+		t.Fatal(err)
+	}
+	if rpkt := recvFromQueues(t, procQs); rpkt.Link.IfID() != 3 {
+		t.Fatalf("the new locator's arrival dispatched as %d", rpkt.Link.IfID())
+	}
+	if err := el.WriteRaw(answer); err != nil {
+		t.Fatal(err)
+	}
+	_ = moved.SetReadDeadline(time.Now().Add(testTimeout))
+	if n, err := moved.Read(got); err != nil || !bytes.Equal(got[:n], answer) {
+		t.Fatalf("the raw write did not follow the new locator's arrival: %v", err)
 	}
 	// The link's own recorded side is unchanged by any of it: the local
 	// address the serving generation bound still answers.

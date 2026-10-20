@@ -16,19 +16,15 @@ import (
 // the founding core A beyond the boundary, and the joiner J inside it, whose
 // every packet leaves through the gateway and never names its own host. The
 // joiner's neighbor is the gateway — the one address a node behind a
-// translation can dial. The mutation lands on both nodes' run arguments.
+// translation can dial. Each node's run arguments take their own mutation.
 func bootTranslatedLine(
-	t *testing.T, wpki *webpkitest.CA, mutate func(*services.NodeConfig),
+	t *testing.T, wpki *webpkitest.CA,
+	mutateA, mutateJ func(*services.NodeConfig),
 ) (
 	f *fabric.Fabric, b *fabric.Boundary, a, j *assemblyNode, gw netip.Addr,
 ) {
 
 	t.Helper()
-	both := func(cfg *services.NodeConfig) {
-		if mutate != nil {
-			mutate(cfg)
-		}
-	}
 	f = fabric.New(t)
 	ipA, gw, ipJ := hostSlot(t), hostSlot(t), hostSlot(t)
 	b = f.Translate(gw, ipA, measured.RendezvousPort, ipJ)
@@ -36,12 +32,16 @@ func bootTranslatedLine(
 		cfg.Core = true
 		cfg.CertFile = wpki.CertFile
 		cfg.KeyFile = wpki.KeyFile
-		both(cfg)
+		if mutateA != nil {
+			mutateA(cfg)
+		}
 	})
 	j = bootOnFabric(t, f, ipJ, func(cfg *services.NodeConfig) {
 		cfg.Neighbors = []string{gw.String()}
 		cfg.RootCAs = wpki.Pool
-		both(cfg)
+		if mutateJ != nil {
+			mutateJ(cfg)
+		}
 	})
 	return f, b, a, j, gw
 }
@@ -59,7 +59,7 @@ func TestTranslatedJoinerRecordsTheObservation(t *testing.T) {
 		return
 	}
 	wpki := webpkitest.New(t)
-	_, _, a, j, gw := bootTranslatedLine(t, wpki, nil)
+	_, _, a, j, gw := bootTranslatedLine(t, wpki, nil, nil)
 	ctx := t.Context()
 
 	// The joiner's identity completes through the translation, and the
@@ -88,7 +88,7 @@ func TestTranslatedLinkRidesTheMapping(t *testing.T) {
 		return
 	}
 	wpki := webpkitest.New(t)
-	_, b, a, j, _ := bootTranslatedLine(t, wpki, nil)
+	_, b, a, j, _ := bootTranslatedLine(t, wpki, nil, nil)
 	ctx := t.Context()
 	PollFor(t, RestartTimeout, "the translated joiner's link to A", func() bool {
 		e := entryOf(ctx, j, a.app.IA())
@@ -127,22 +127,16 @@ func TestTranslatedLinkRidesTheMapping(t *testing.T) {
 // deterministic core: a translated node's restart draws a fresh mapping —
 // the stopped node's gone with its socket, the founder's entry and the
 // boundary's mapping retired under the silence that follows — and the
-// founder's fresh entry records the observed mapping the join spells,
-// never the address the claim names and never the port the stopped node's
-// socket drew. The re-establishment over the new mapping — the returning
-// node's confirm re-aiming the entry the founder still holds — is the
-// piece that stays deferred: the confirm's one-hop egress wants its link's
-// verdict up, the verdict wants the very locator the confirm would re-aim,
-// and the retired-entry recovery the design lands instead rides a chain of
-// sweeps and revivals too serial for a lab to hold. The same cycle stands
-// between a plain relocated node and its confirm, so the gap is the
-// confirm's own, not the translation's.
+// founder's fresh entry records the observed mapping the join spells, never
+// the address the claim names and never the port the stopped node's socket
+// drew. The re-aim of an entry still standing — the restart that waits out
+// no retirement — is the relocation lab's own proof below.
 func TestTranslatedRestartDrawsAFreshMapping(t *testing.T) {
 	if !solo(t) {
 		return
 	}
 	wpki := webpkitest.New(t)
-	f, b, a, j, gw := bootTranslatedLine(t, wpki, nil)
+	f, b, a, j, gw := bootTranslatedLine(t, wpki, nil, nil)
 	jHost, jState := j.host, j.stateDir
 	ctx := t.Context()
 	PollFor(t, RestartTimeout, "the translated joiner's link to A", func() bool {
@@ -178,5 +172,64 @@ func TestTranslatedRestartDrawsAFreshMapping(t *testing.T) {
 		e := entryOf(ctx, a, j2.app.IA())
 		return e != nil && e.Live() && e.Remote.Addr() == gw &&
 			fabric.MappingPort(e.Remote) && e.Remote.Port() != before.Remote.Port()
+	})
+}
+
+// TestTranslatedReturnReAimsTheStandingEntry is the relocation proof proposal
+// 0061 deferred: a node returns at a fresh mapping while its former neighbor
+// still holds the standing entry aimed at the dead one — no retirement waited
+// out — and the returning node's confirm pass re-aims that very entry, the
+// interface kept, no re-admission, the link's verdict recovering on the BFD
+// stream itself. The founder's selection runs at the production window, for
+// the labs' compressed one retires a down entry inside a loaded runner's boot
+// time, a race production never sees: three production windows hold the
+// entry long past the returning node's first confirm.
+func TestTranslatedReturnReAimsTheStandingEntry(t *testing.T) {
+	if !solo(t) {
+		return
+	}
+	wpki := webpkitest.New(t)
+	f, b, a, j, gw := bootTranslatedLine(t, wpki, func(cfg *services.NodeConfig) {
+		cfg.Pacing.Selection = measured.SelectionInterval
+	}, nil)
+	jHost, jState := j.host, j.stateDir
+	ctx := t.Context()
+	Poll(t, "the translated joiner's link to A", func() bool {
+		e := entryOf(ctx, j, a.app.IA())
+		return e != nil && e.State == links.StateEstablished
+	})
+	standing := entryOf(ctx, a, j.app.IA())
+	if standing == nil || standing.Remote.Addr() != gw || !fabric.MappingPort(standing.Remote) {
+		t.Fatalf("A's standing entry = %v, want the gateway under a drawn port", standing)
+	}
+
+	// The return: the joiner stops and boots again at once — the same state
+	// and host, the node's stack rebound — while the founder's entry still
+	// stands on the old mapping. The boundary retires that mapping outright,
+	// the changed mapping a restart's proof needs: the founder's own BFD
+	// stream would keep refreshing it past the node's stop, and the
+	// returning node's sockets rebind the same inside addresses.
+	j.stop(t)
+	b.Rebind()
+	j2 := bootOnFabric(t, f, jHost, func(cfg *services.NodeConfig) {
+		cfg.State = jState
+		cfg.Neighbors = []string{gw.String()}
+		cfg.RootCAs = wpki.Pool
+	})
+	Poll(t, "the founder's standing entry to re-aim on the confirm", func() bool {
+		e := entryOf(ctx, a, j2.app.IA())
+		return e != nil && e.Live() && e.IfID == standing.IfID &&
+			e.Remote.Addr() == gw && fabric.MappingPort(e.Remote) &&
+			e.Remote.Port() != standing.Remote.Port()
+	})
+	Poll(t, "the returning joiner's link to A", func() bool {
+		e := entryOf(ctx, j2, a.app.IA())
+		return e != nil && e.State == links.StateEstablished
+	})
+	Poll(t, "the re-aimed link's verdict to recover", func() bool {
+		return !markedDown(ctx, a, standing.IfID)
+	})
+	Poll(t, "the data to ride the re-aimed mapping", func() bool {
+		return pingFrom(ctx, j2, a.app.IA(), a.host)
 	})
 }

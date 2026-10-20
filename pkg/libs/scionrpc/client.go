@@ -84,9 +84,15 @@ func NewSCIONClient(
 // PeerAuthority encodes the peer address as a URL authority: hexadecimal, so
 // it survives URL parsing unchanged and never collides with a real host. The
 // form every SCION-native client names its peer's endpoint by — an underlay
-// or a service destination.
+// or a service destination, the egress interface named beside them when the
+// address carries one: the one-hop dial that rides a chosen link rather than
+// resolving one, the confirm's own form.
 func PeerAuthority(peer *scion.Addr) string {
-	return hex.EncodeToString([]byte(peer.String()))
+	endpoint := peer.String()
+	if peer.IfID != 0 {
+		endpoint += fmt.Sprintf(",%d", peer.IfID)
+	}
+	return hex.EncodeToString([]byte(endpoint))
 }
 
 // peerFromAuthority decodes the URL authority back into a peer address. The
@@ -101,23 +107,33 @@ func peerFromAuthority(authority string) (*scion.Addr, error) {
 		return nil, fmt.Errorf("decoding peer authority: %w", err)
 	}
 	parts := strings.Split(string(raw), ",")
-	if len(parts) != 2 {
+	if len(parts) != 2 && len(parts) != 3 {
 		return nil, fmt.Errorf("malformed peer authority %q", authority)
 	}
 	ia, err := addr.ParseIA(parts[0])
 	if err != nil {
 		return nil, fmt.Errorf("parsing peer ISD-AS: %w", err)
 	}
+	peer := &scion.Addr{IA: ia}
 	if value, ok := strings.CutPrefix(parts[1], "svc:"); ok {
 		svc, err := strconv.ParseUint(value, 16, 16)
 		if err != nil {
 			return nil, fmt.Errorf("parsing peer service: %w", err)
 		}
-		return &scion.Addr{IA: ia, Service: addr.SVC(svc)}, nil
+		peer.Service = addr.SVC(svc)
+	} else {
+		ap, err := netip.ParseAddrPort(parts[1])
+		if err != nil {
+			return nil, fmt.Errorf("parsing peer underlay address: %w", err)
+		}
+		peer.Addr = ap
 	}
-	ap, err := netip.ParseAddrPort(parts[1])
-	if err != nil {
-		return nil, fmt.Errorf("parsing peer underlay address: %w", err)
+	if len(parts) == 3 {
+		ifID, err := strconv.ParseUint(parts[2], 10, 16)
+		if err != nil {
+			return nil, fmt.Errorf("parsing peer egress interface: %w", err)
+		}
+		peer.IfID = uint16(ifID)
 	}
-	return &scion.Addr{IA: ia, Addr: ap}, nil
+	return peer, nil
 }

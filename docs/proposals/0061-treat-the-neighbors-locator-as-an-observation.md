@@ -141,10 +141,10 @@ requires.
 
 The link request the selection's establishment already sends becomes the
 only establishment. Its dial rides the one-hop path of the entry it
-confirms — the resolution the path library already performs for the node's
-own one-hop egress
-([links.go](/pkg/modules/links/links.go)) — so the request's underlay
-source, the channel observes, is the peer's link socket and not a
+confirms — naming the entry's interface, the egress form a reply already
+takes, so the link's verdict gates nothing: the confirm is the instrument
+that restores the locator a down verdict waits on — and the request's
+underlay source, the channel observes, is the peer's link socket and not a
 transit's address.
 
 The service installs what the link observes. The handler reads the
@@ -186,11 +186,16 @@ The kernel's filter moves into two tiers. Every arrival pays the software
 check the connected socket paid the kernel: the BFD branch's discriminator
 echo — return-routability plus the blind-guess barrier — processes
 arrivals from any source, and nothing else in the receive path reads the
-source except to record it. The record is the re-aim tier's evidence:
-each link answers its last observed underlay source, the shape the
-liveness monitor's verdicts already set
-([monitor.go](/pkg/core/liveness/monitor.go)), and only the authenticated
-confirm of the preceding section moves the locator it names.
+source except to record it. The record is the re-aim tier's evidence and
+the answer tier's address: each link answers its last observed underlay
+source — the BFD session's stream and the link's one-hop sends, replies
+and the confirm's dial alike, the only one-hop traffic an external link
+carries, for the router forwards no one-hop packet but the local AS's own
+— while that observation stands apart from the locator, so a peer that
+moved keeps reaching the link whose entry still names its former address;
+transit carries the locator, the authenticated record alone steering the
+traffic that forwards through the node; and only the authenticated confirm
+of the preceding section moves the locator the record names.
 
 The locator is live state within the serving generation — a second
 mutable edge beside the verdict, read at egress — so the generation loop
@@ -208,8 +213,10 @@ leans on.
 Relocation rides the same confirm from the other end. A node's start and
 identity completion run a pass over the entries it holds: each entry gets
 the link request over its one-hop path, the dial the establishment
-already makes, and each answered request leaves a confirm behind it — the
-far side polls nothing. Entries the pass cannot yet reach retry on the
+already makes — naming the entry's interface, ungated by the link's
+verdict, its answers riding the observation the arrival itself just
+recorded — and each answered request leaves a confirm behind it, the far
+side polling nothing. Entries the pass cannot yet reach retry on the
 selection's cadence until they answer or retire; the exchange's replies
 retarget the returning node's own entries on the way, as they already do.
 A former neighbor's stale entry retires on the existing down-window rule
@@ -286,11 +293,30 @@ re-run.
     and the socket table keys on the interface
     ([udpip.go](/pkg/core/dataplane/udpip.go),
     [dataplane.go](/internal/services/dataplane.go)).
+*   The relocation the confirm pass promises landed after a cycle the first
+    landing left: the returning node's one-hop dial resolved its egress
+    through the usable set, whose verdict waited on the peer's replies, and
+    the peer's replies — BFD and the confirm's own handshake alike —
+    followed the recorded locator, the very address the confirm would
+    re-aim, so no re-aim could complete against a standing entry. The dial
+    now names the entry's interface — the peer authority carrying it beside
+    the service destination, the egress form the replies and the core
+    route's shortcut already take — so the verdict gates nothing
+    ([client.go](/pkg/libs/scionrpc/client.go),
+    [provider.go](/pkg/modules/topology/impl/measured/provider.go)); and
+    the link's own conversation — its BFD session's stream and its one-hop
+    sends — answers the last observed source rather than the recorded
+    locator, transit alone carrying the locator
+    ([udpip.go](/pkg/core/dataplane/udpip.go)). The translated return lab
+    proves the standing entry's re-aim — same interface, fresh mapping, no
+    re-admission — beside the fresh-mapping record the retirement path
+    keeps ([translate_test.go](/internal/testnetwork/translate_test.go)).
 *   The full-fidelity translation lab — the mapping-carried data path held
     up by the BFD stream alone, and the restarted node's fresh mapping
-    re-aiming its former neighbor — wants a translation the packets
-    traverse without being addressed to it; the userspace relay the
-    exchange-level lab rides cannot stand in for that, so
-    [translate_test.go](/internal/testnetwork/translate_test.go) proves
-    the observed record behind port remapping and leaves the rest to the
-    unconnected socket's and the confirm's own tests.
+    re-aiming its former neighbor — wanted a translation the packets
+    traverse without being addressed to it, which the userspace relay the
+    exchange-level lab once rode could not stand in for;
+    [proposal 0063](/docs/proposals/0063-give-the-integration-labs-a-userspace-fabric.md)'s
+    boundary stands in, and the translation labs prove the record, the
+    mapping ride, and the restart's fresh record beside the re-aim above
+    ([translate_test.go](/internal/testnetwork/translate_test.go)).

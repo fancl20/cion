@@ -14,18 +14,21 @@ import (
 )
 
 // TestPeerAuthorityRoundTrip checks the authority encoding both destination
-// forms keep: an underlay peer and a service peer decode back to themselves.
+// forms and the named egress interface keep: an underlay peer, a service
+// peer, and the one-hop form beside either decode back to themselves.
 func TestPeerAuthorityRoundTrip(t *testing.T) {
 	ia := addr.MustIAFrom(20, 0xff0000000021)
 	for _, peer := range []*scion.Addr{
 		{IA: ia, Addr: netip.MustParseAddrPort("192.0.2.7:30042")},
 		{IA: ia, Service: addr.SVC(0x7ff2)},
+		{IA: ia, Service: addr.SVC(0x7ff2), IfID: 7},
 	} {
 		got, err := peerFromAuthority(PeerAuthority(peer))
 		if err != nil {
 			t.Fatalf("decoding the authority of %s: %v", peer, err)
 		}
-		if !got.IA.Equal(peer.IA) || got.Addr != peer.Addr || got.Service != peer.Service {
+		if !got.IA.Equal(peer.IA) || got.Addr != peer.Addr ||
+			got.Service != peer.Service || got.IfID != peer.IfID {
 			t.Errorf("authority round trip = %v, want %v", got, peer)
 		}
 	}
