@@ -361,7 +361,7 @@ func (d *DataPlane) runSlowPathProcessor(ctx context.Context, id int, q <-chan *
 		}
 		err := processor.processPacket(p)
 		if err != nil {
-			slog.Debug("Error processing packet", "err", err)
+			processor.discards.log("Error processing packet", "err", err)
 			sc := ClassOfSize(len(p.RawPacket))
 			p.Link.Metrics()[sc].DroppedPacketsInvalid.Add(ctx, 1)
 			d.packetPool.Put(p)

@@ -20,9 +20,11 @@
 package dataplane
 
 import (
+	"context"
 	"crypto/subtle"
 	"fmt"
 	"hash"
+	"log/slog"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -51,6 +53,13 @@ const (
 	// packet itself is dropped either way; over-cap ones merely take no
 	// notification with them.
 	notifyCapPerSecond = 10
+
+	// discardCapPerSecond bounds the discard lines a processor logs per
+	// second. The aggregate volume lives in the drop counter the endpoint's
+	// mount serves; the log's job is the reason, not the count, and ten
+	// lines a second name it without drowning the deployment that asked
+	// for debug.
+	discardCapPerSecond = 10
 
 	// macCacheEntries is the number of MAC cache slots a processor keeps:
 	// a few hundred flow positions, direct-mapped. A power of two, so the
@@ -82,6 +91,45 @@ func (l *scmpNotifyLimiter) allow(ifID uint16, now time.Time) bool {
 		count++
 		if v.CompareAndSwap(old, uint64(sec)<<20|uint64(count)) {
 			return count <= notifyCapPerSecond
+		}
+	}
+}
+
+// discardLog is the processor's voice for the packets it drops: the reason
+// at debug, capped per processor per second, the fast path and the slow
+// path sharing one. The level check comes first — a deployment not asking
+// for debug pays one check per discard — and past it the window the SCMP
+// notify limiter carries (second and count packed in one atomic word, so
+// the check stays lock-free) decides. Past the cap the discard is silent;
+// the next second's window opens clean.
+type discardLog struct {
+	window atomic.Uint64 // second<<20 | count
+}
+
+// log speaks one discard at debug with the caller's key-values, if the
+// level and the window allow it.
+func (l *discardLog) log(msg string, keyvals ...any) {
+	if !slog.Default().Enabled(context.Background(), slog.LevelDebug) {
+		return
+	}
+	if !l.allow(time.Now()) {
+		return
+	}
+	slog.Debug(msg, keyvals...)
+}
+
+// allow reports whether one more discard line fits the window's second.
+func (l *discardLog) allow(now time.Time) bool {
+	sec := now.Unix()
+	for {
+		old := l.window.Load()
+		second, count := int64(old>>20), int32(old&(1<<20-1))
+		if second != sec {
+			count = 0
+		}
+		count++
+		if l.window.CompareAndSwap(old, uint64(sec)<<20|uint64(count)) {
+			return count <= discardCapPerSecond
 		}
 	}
 }
@@ -171,6 +219,8 @@ type scionPacketProcessor struct {
 	// staged in. See macCache.
 	macCache macCache
 	macKey   [path.MACBufferSize]byte
+	// discards speaks the packets this processor drops, capped.
+	discards discardLog
 	bfdLayer layers.BFD // Reusable buffer for parsing BFD messages
 }
 
@@ -191,10 +241,12 @@ func (p *scionPacketProcessor) reset() {
 	p.e2eLayer = slayers.EndToEndExtnSkipper{}
 }
 
-// Convenience function to log an error and return the pDiscard disposition.
-// We do almost nothing with errors, so, we shouldn't invest in creating them.
-func errorDiscard(ctx ...any) disposition {
-	// TODO: logging discard
+// errorDiscard speaks the packet's discard — the reason the caller passes
+// as key-values, at debug under the processor's per-second cap — and
+// returns the discard disposition. The discard itself is free: a
+// deployment not asking for debug pays one level check.
+func (p *scionPacketProcessor) errorDiscard(keyvals ...any) disposition {
+	p.discards.log("Discarding packet", keyvals...)
 	return pDiscard
 }
 
@@ -207,7 +259,7 @@ func (p *scionPacketProcessor) processPkt(pkt *Packet) disposition {
 	var err error
 	p.lastLayer, err = decodeLayers(pkt.RawPacket, &p.scionLayer, &p.hbhLayer, &p.e2eLayer)
 	if err != nil {
-		return errorDiscard("error", err)
+		return p.errorDiscard("error", err)
 	}
 
 	pld := p.lastLayer.LayerPayload()
@@ -218,13 +270,13 @@ func (p *scionPacketProcessor) processPkt(pkt *Packet) disposition {
 		if p.lastLayer.NextLayerType() == layers.LayerTypeBFD {
 			return p.processBFD(pld)
 		}
-		return errorDiscard("error", errUnsupportedPathTypeNextHeader)
+		return p.errorDiscard("error", errUnsupportedPathTypeNextHeader)
 
 	case onehop.PathType:
 		if p.lastLayer.NextLayerType() == layers.LayerTypeBFD {
 			_, ok := p.scionLayer.Path.(*onehop.Path)
 			if !ok {
-				return errorDiscard("error", errMalformedPath)
+				return p.errorDiscard("error", errMalformedPath)
 			}
 			return p.processBFD(pld)
 		}
@@ -232,20 +284,20 @@ func (p *scionPacketProcessor) processPkt(pkt *Packet) disposition {
 	case scion.PathType:
 		return p.processSCION()
 	case epic.PathType:
-		return errorDiscard("error", errUnsupportedPathType)
+		return p.errorDiscard("error", errUnsupportedPathType)
 	default:
-		return errorDiscard("error", errUnsupportedPathType)
+		return p.errorDiscard("error", errUnsupportedPathType)
 	}
 }
 
 func (p *scionPacketProcessor) processBFD(data []byte) disposition {
 	session := p.pkt.Link.BFDSession()
 	if session == nil {
-		return errorDiscard("error", errNoBFDSessionFound)
+		return p.errorDiscard("error", errNoBFDSessionFound)
 	}
 	bfd := &p.bfdLayer
 	if err := bfd.DecodeFromBytes(data, gopacket.NilDecodeFeedback); err != nil {
-		return errorDiscard("error", err)
+		return p.errorDiscard("error", err)
 	}
 	session.ReceiveMessage(bfd)
 	return pDone // All's fine. That packet's journey ends here.
@@ -256,7 +308,7 @@ func (p *scionPacketProcessor) processSCION() disposition {
 	p.path, ok = p.scionLayer.Path.(*scion.Raw)
 	if !ok {
 		// TODO(lukedirtwalker) parameter problem invalid path?
-		return errorDiscard("error", errMalformedPath)
+		return p.errorDiscard("error", errMalformedPath)
 	}
 	return p.process()
 }
@@ -265,26 +317,26 @@ func (p *scionPacketProcessor) processOHP() disposition {
 	s := p.scionLayer
 	ohp, ok := s.Path.(*onehop.Path)
 	if !ok {
-		return errorDiscard("error", errMalformedPath)
+		return p.errorDiscard("error", errMalformedPath)
 	}
 	if !ohp.Info.ConsDir {
-		return errorDiscard("error", errMalformedPath)
+		return p.errorDiscard("error", errMalformedPath)
 	}
 
 	// OHP leaving our IA
 	if p.ingressFromLink == 0 {
 		if !p.d.localIA.Equal(s.SrcIA) {
-			return errorDiscard("error", errCannotRoute)
+			return p.errorDiscard("error", errCannotRoute)
 		}
 		mac := path.MAC(p.mac, ohp.Info, ohp.FirstHop, p.macInputBuffer[:path.MACBufferSize])
 		if subtle.ConstantTimeCompare(ohp.FirstHop.Mac[:], mac[:]) == 0 {
 			// TODO parameter problem -> invalid MAC
-			return errorDiscard("error", errMacVerificationFailed)
+			return p.errorDiscard("error", errMacVerificationFailed)
 		}
 		ohp.Info.UpdateSegID(ohp.FirstHop.Mac)
 
 		if err := updateSCIONLayer(p.pkt.RawPacket, s); err != nil {
-			return errorDiscard("error", err)
+			return p.errorDiscard("error", err)
 		}
 		p.pkt.egress = ohp.FirstHop.ConsEgress
 		return pForward
@@ -292,7 +344,7 @@ func (p *scionPacketProcessor) processOHP() disposition {
 
 	// OHP entering our IA
 	if !p.d.localIA.Equal(s.DstIA) {
-		return errorDiscard("error", errCannotRoute)
+		return p.errorDiscard("error", errCannotRoute)
 	}
 
 	ohp.SecondHop = path.HopField{
@@ -306,11 +358,11 @@ func (p *scionPacketProcessor) processOHP() disposition {
 		p.macInputBuffer[:path.MACBufferSize])
 
 	if err := updateSCIONLayer(p.pkt.RawPacket, s); err != nil {
-		return errorDiscard("error", err)
+		return p.errorDiscard("error", err)
 	}
 	err := p.d.resolveLocalDst(p.pkt, s, p.lastLayer)
 	if err != nil {
-		return errorDiscard("error", err)
+		return p.errorDiscard("error", err)
 	}
 
 	return pForward
@@ -321,12 +373,12 @@ func (p *scionPacketProcessor) parsePath() disposition {
 	p.hopField, err = p.path.GetCurrentHopField()
 	if err != nil {
 		// TODO(lukedirtwalker) parameter problem invalid path?
-		return errorDiscard("error", err)
+		return p.errorDiscard("error", err)
 	}
 	p.infoField, err = p.path.GetCurrentInfoField()
 	if err != nil {
 		// TODO(lukedirtwalker) parameter problem invalid path?
-		return errorDiscard("error", err)
+		return p.errorDiscard("error", err)
 	}
 	// Segments without the Peering flag must consist of at least two HFs:
 	// https://github.com/scionproto/scion/issues/4524
@@ -334,10 +386,10 @@ func (p *scionPacketProcessor) parsePath() disposition {
 		p.path.PathMeta.SegLen[1] == 1 ||
 		p.path.PathMeta.SegLen[2] == 1
 	if !p.infoField.Peer && hasSingletonSegment {
-		return errorDiscard("error", errMalformedPath)
+		return p.errorDiscard("error", errMalformedPath)
 	}
 	if !p.path.CurrINFMatchesCurrHF() {
-		return errorDiscard("error", errMalformedPath)
+		return p.errorDiscard("error", errMalformedPath)
 	}
 	return pForward
 }
@@ -370,7 +422,7 @@ func (p *scionPacketProcessor) determinePeer() disposition {
 	peer, err := determinePeer(p.path.PathMeta, p.infoField)
 	p.peering = peer
 	if err != nil {
-		return errorDiscard("error", err)
+		return p.errorDiscard("error", err)
 	}
 	return pForward
 }
@@ -470,7 +522,7 @@ func (p *scionPacketProcessor) validateTransitUnderlaySrc() disposition {
 	// comparison should be cheap. Links are implemented by pointers.
 	if ingressLink != p.pkt.Link {
 		// Drop
-		return errorDiscard("error", errInvalidSrcAddrForTransit)
+		return p.errorDiscard("error", errInvalidSrcAddrForTransit)
 	}
 	return pForward
 }
@@ -513,7 +565,7 @@ func (p *scionPacketProcessor) updateNonConsDirIngressSegID() disposition {
 	if !p.infoField.ConsDir && p.ingressFromLink != 0 && !p.peering {
 		p.infoField.UpdateSegID(p.hopField.Mac)
 		if err := p.path.SetInfoField(p.infoField, int(p.path.PathMeta.CurrINF)); err != nil {
-			return errorDiscard("error", err)
+			return p.errorDiscard("error", err)
 		}
 	}
 	return pForward
@@ -575,7 +627,7 @@ func (p *scionPacketProcessor) resolveInbound() disposition {
 		}
 		return pSlowPath
 	default:
-		return errorDiscard("error", err)
+		return p.errorDiscard("error", err)
 	}
 }
 
@@ -589,12 +641,12 @@ func (p *scionPacketProcessor) processEgress() disposition {
 		p.infoField.UpdateSegID(p.hopField.Mac)
 		if err := p.path.SetInfoField(p.infoField, int(p.path.PathMeta.CurrINF)); err != nil {
 			// TODO parameter problem invalid path
-			return errorDiscard("error", err)
+			return p.errorDiscard("error", err)
 		}
 	}
 	if err := p.path.IncPath(); err != nil {
 		// TODO parameter problem invalid path
-		return errorDiscard("error", err)
+		return p.errorDiscard("error", err)
 	}
 	return pForward
 }
@@ -603,16 +655,16 @@ func (p *scionPacketProcessor) doXover() disposition {
 	p.effectiveXover = true
 	if err := p.path.IncPath(); err != nil {
 		// TODO parameter problem invalid path
-		return errorDiscard("error", err)
+		return p.errorDiscard("error", err)
 	}
 	var err error
 	if p.hopField, err = p.path.GetCurrentHopField(); err != nil {
 		// TODO parameter problem invalid path
-		return errorDiscard("error", err)
+		return p.errorDiscard("error", err)
 	}
 	if p.infoField, err = p.path.GetCurrentInfoField(); err != nil {
 		// TODO parameter problem invalid path
-		return errorDiscard("error", err)
+		return p.errorDiscard("error", err)
 	}
 	return pForward
 }
@@ -651,7 +703,7 @@ func (p *scionPacketProcessor) validateEgressUp() disposition {
 		if !p.d.scmpCap.allow(egressID, time.Now()) {
 			// Over the per-interface cap: the notification is dropped with
 			// the packet (Section 6.2's rate limiting).
-			return errorDiscard("error", errSCMPNotifyCapExceeded)
+			return p.errorDiscard("error", errSCMPNotifyCapExceeded)
 		}
 		if egressLink.Scope() != External {
 			p.pkt.slowPathRequest = slowPathRequest{
@@ -679,7 +731,7 @@ func (p *scionPacketProcessor) handleIngressRouterAlert() disposition {
 	}
 	*alert = false
 	if err := p.path.SetHopField(p.hopField, int(p.path.PathMeta.CurrHF)); err != nil {
-		return errorDiscard("error", err)
+		return p.errorDiscard("error", err)
 	}
 	p.pkt.slowPathRequest = slowPathRequest{
 		spType: slowPathRouterAlertIngress,
@@ -705,7 +757,7 @@ func (p *scionPacketProcessor) handleEgressRouterAlert() disposition {
 	}
 	*alert = false
 	if err := p.path.SetHopField(p.hopField, int(p.path.PathMeta.CurrHF)); err != nil {
-		return errorDiscard("error", err)
+		return p.errorDiscard("error", err)
 	}
 	p.pkt.slowPathRequest = slowPathRequest{
 		spType: slowPathRouterAlertEgress,
@@ -921,6 +973,8 @@ type slowPathPacketProcessor struct {
 	// authentication experimental — so the field is nil and SCMP messages
 	// are sent unauthenticated; see needsAuth and hasValidAuth.
 	drkeyProvider drkeyProvider
+	// discards speaks the packets this processor drops, capped.
+	discards discardLog
 }
 
 func (p *slowPathPacketProcessor) reset() {

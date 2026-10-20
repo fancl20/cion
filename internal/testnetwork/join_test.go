@@ -49,6 +49,9 @@ type assemblyNode struct {
 	app      *services.App
 	stateDir string
 	host     netip.Addr
+	// internal is the internal link's UDP address as the run arguments
+	// carried it, where a lab submits raw packets as a local host.
+	internal string
 }
 
 // rendezvousOf returns the node's advertised rendezvous address: the
@@ -119,7 +122,7 @@ func bootOn(
 	if err != nil {
 		t.Fatal(err)
 	}
-	n := &assemblyNode{app: app, stateDir: cfg.State}
+	n := &assemblyNode{app: app, stateDir: cfg.State, internal: cfg.Internal}
 	t.Cleanup(func() {
 		if err := app.Close(); err != nil {
 			t.Errorf("stopping %v: %v", app.IA(), err)

@@ -2,7 +2,9 @@ package dataplane
 
 import (
 	"bytes"
+	"log/slog"
 	"math/rand"
+	"strings"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -266,6 +268,63 @@ func TestHopExpiryBatchClock(t *testing.T) {
 		if disp, code := drive(); disp != pSlowPath || code != slayers.SCMPCodePathExpired {
 			t.Fatalf("fresh reading after the stale edge: disposition %v, code %v, want %v/%v",
 				disp, code, pSlowPath, slayers.SCMPCodePathExpired)
+		}
+	})
+}
+
+// TestErrorDiscardCapped checks the discard voice's window arithmetic: the
+// level check comes first — a deployment not asking for debug hears nothing
+// and pays no window — and past it the first ten discards of a second log,
+// each line carrying the caller's reason, the eleventh is silent, and the
+// next second's first logs again.
+func TestErrorDiscardCapped(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		n := newBenchNode(t, benchRunConfig)
+		proc := newPacketProcessor(n.d)
+
+		prev := slog.Default()
+		t.Cleanup(func() { slog.SetDefault(prev) })
+		var lines bytes.Buffer
+		hear := func(level slog.Level) {
+			lines.Reset()
+			slog.SetDefault(slog.New(slog.NewTextHandler(&lines,
+				&slog.HandlerOptions{Level: level})))
+		}
+
+		// The level alone gates: an info handler hears the discard not, and
+		// the window the later episodes count stays untouched by it.
+		hear(slog.LevelInfo)
+		proc.errorDiscard("error", errMalformedPath)
+		if lines.Len() != 0 {
+			t.Fatalf("an info-level deployment heard %q, want nothing", lines.String())
+		}
+
+		hear(slog.LevelDebug)
+		for range discardCapPerSecond {
+			proc.errorDiscard("error", errMalformedPath)
+		}
+		if got := strings.Count(lines.String(), "\n"); got != discardCapPerSecond {
+			t.Fatalf("the second's first %d discards logged %d lines, want %d",
+				discardCapPerSecond, got, discardCapPerSecond)
+		}
+		if !strings.Contains(lines.String(), errMalformedPath.Error()) {
+			t.Fatalf("the discard lines carry no reason, want %q on each",
+				errMalformedPath.Error())
+		}
+
+		// The eleventh of the same second is silent; the counter carries
+		// the volume.
+		lines.Reset()
+		proc.errorDiscard("error", errMalformedPath)
+		if lines.Len() != 0 {
+			t.Fatalf("the eleventh discard logged %q, want silence", lines.String())
+		}
+
+		// The next second's window opens clean.
+		time.Sleep(1100 * time.Millisecond)
+		proc.errorDiscard("error", errMalformedPath)
+		if got := strings.Count(lines.String(), "\n"); got != 1 {
+			t.Fatalf("the next second's first discard logged %d lines, want 1", got)
 		}
 	})
 }

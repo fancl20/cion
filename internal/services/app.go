@@ -43,15 +43,21 @@ func Run(
 	return n.group.Wait()
 }
 
-// boot assembles the node, builds its first data plane generation, and
-// starts its loops, all on one group. The generation builds synchronously,
-// so a bind failure surfaces here instead of as a lost packet, and the
-// loops start after it. A failed boot stops the group, releasing what the
-// boot acquired.
+// boot installs the process's meter provider, assembles the node, builds
+// its first data plane generation, and starts its loops, all on one group.
+// The generation builds synchronously, so a bind failure surfaces here
+// instead of as a lost packet, and the loops start after it. A failed boot
+// stops the group, releasing what the boot acquired.
 func boot(
 	ctx context.Context, cfg NodeConfig, opts DataplaneOptions, sockets underlay.Sockets,
 ) (*node, error) {
 
+	// Ahead of the assembly it instruments: the provider the data plane's
+	// counters land in, so the instruments NewMetrics builds bind to the
+	// exporter's reader rather than the no-op.
+	if err := installMeterProvider(); err != nil {
+		return nil, err
+	}
 	group, loops := supervise.New(ctx)
 	n, err := setupNode(ctx, group, cfg, opts, sockets)
 	if err != nil {

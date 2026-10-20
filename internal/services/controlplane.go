@@ -529,6 +529,14 @@ func (n *node) assembleEndpoint() error {
 	if err != nil {
 		return err
 	}
+	// The exporter's registry beside the provider's mounts, the same
+	// middleware around it: nothing new binds, for the endpoint's socket is
+	// the listener.
+	metrics, err := metricsMount()
+	if err != nil {
+		return err
+	}
+	mounts = append(mounts, metrics)
 	n.services = &controlplane.Services{
 		TrustService: &controlplane.TrustService{
 			DB:          n.trustDB,
