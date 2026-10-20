@@ -55,7 +55,9 @@ func bootTranslatedLine(
 // boundary without being addressed to it, so the link-level proofs the lab
 // once deferred stand beside this one on the same fabric.
 func TestTranslatedJoinerRecordsTheObservation(t *testing.T) {
-	t.Parallel()
+	if !solo(t) {
+		return
+	}
 	wpki := webpkitest.New(t)
 	_, _, a, j, gw := bootTranslatedLine(t, wpki, nil)
 	ctx := t.Context()
@@ -82,7 +84,9 @@ func TestTranslatedJoinerRecordsTheObservation(t *testing.T) {
 // it — and under silence the link falls with the BFD detection and the
 // mapping expires after it.
 func TestTranslatedLinkRidesTheMapping(t *testing.T) {
-	t.Parallel()
+	if !solo(t) {
+		return
+	}
 	wpki := webpkitest.New(t)
 	_, b, a, j, _ := bootTranslatedLine(t, wpki, nil)
 	ctx := t.Context()
@@ -134,7 +138,9 @@ func TestTranslatedLinkRidesTheMapping(t *testing.T) {
 // between a plain relocated node and its confirm, so the gap is the
 // confirm's own, not the translation's.
 func TestTranslatedRestartDrawsAFreshMapping(t *testing.T) {
-	t.Parallel()
+	if !solo(t) {
+		return
+	}
 	wpki := webpkitest.New(t)
 	f, b, a, j, gw := bootTranslatedLine(t, wpki, nil)
 	jHost, jState := j.host, j.stateDir

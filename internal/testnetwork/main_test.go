@@ -2,6 +2,7 @@ package testnetwork
 
 import (
 	"os"
+	"strconv"
 	"testing"
 
 	"tailscale.com/net/netns"
@@ -28,6 +29,12 @@ func TestMain(m *testing.M) {
 	// out the container's eth0 instead. A process embedding the client
 	// disables the wrapper; the harness is one.
 	netns.SetEnabled(false)
+	// A lab re-executed alone starts its host pool at the draw its outer
+	// run carried, a band above every draw the outer and the earlier
+	// re-executed runs can reach.
+	if base, err := strconv.ParseUint(os.Getenv(soloBase), 10, 32); err == nil && base > 0 {
+		hostDraws.Store(uint32(base))
+	}
 	// The CA's directory lives for the process's lifetime: the fixture's own
 	// choice — os.Exit at the run's end skips any cleanup beside it, and the
 	// three certificate files are the operating system's to reap.

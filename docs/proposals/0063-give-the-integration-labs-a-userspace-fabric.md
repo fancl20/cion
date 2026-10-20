@@ -358,3 +358,14 @@ gains nothing: `gvisor.dev/gvisor` is already direct.
     `raiseLoopback` staying for the wildcard lab alone
     ([stranded_test.go](/internal/testnetwork/stranded_test.go),
     [netns_test.go](/internal/testnetwork/netns_test.go)).
+*   The labs that boot whole tiers run in processes of their own
+    ([solo_test.go](/internal/testnetwork/solo_test.go)) — the isolation
+    the namespace re-exec once gave them by accident, kept now that the
+    fabric needs neither namespace nor privileges. Under the race
+    detector a full tier crawls late in a suite process that has hosted
+    every other lab's nodes — the same lab that joins in half a minute
+    alone takes thirty inside it — and a fresh process runs it at its own
+    pace. Each inner run draws its loopback hosts from a band of its own
+    above every draw the outer and the earlier inner runs can reach, for
+    a fabric node's resident applications still bind their fixed ports on
+    the kernel loopback the processes share.

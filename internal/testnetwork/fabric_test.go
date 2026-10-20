@@ -16,7 +16,9 @@ import (
 // stacks both ways. The labs that follow draw their impairments on this
 // network; this one proves the network itself carries the whole node.
 func TestFabricJoin(t *testing.T) {
-	t.Parallel()
+	if !solo(t) {
+		return
+	}
 	wpki := webpkitest.New(t)
 	f := fabric.New(t)
 	ipA, ipB := hostSlot(t), hostSlot(t)

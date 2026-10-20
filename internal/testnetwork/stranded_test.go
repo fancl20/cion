@@ -35,7 +35,9 @@ import (
 // round trip neither beats nor seconds it. The lab draws its bands as taps
 // on the fabric, in no namespace and with no privileges.
 func TestStrandedTierHeals(t *testing.T) {
-	t.Parallel()
+	if !solo(t) {
+		return
+	}
 	fab := fabric.New(t)
 	wpki := webpkitest.New(t)
 	ipA, ipF, ipG := hostSlot(t), hostSlot(t), hostSlot(t)
