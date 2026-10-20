@@ -132,7 +132,10 @@ func TestSCIONNativeRoundTripBetweenWildcardBinds(t *testing.T) {
 	served := make(chan error, 1)
 	t.Cleanup(func() {
 		select {
-		case <-served:
+		case err := <-served:
+			if !errors.Is(err, net.ErrClosed) {
+				t.Errorf("ServeHTTP3 returned (%v), want the closed socket's error", err)
+			}
 		case <-time.After(5 * time.Second):
 			t.Error("the endpoint did not stop with the test's context")
 		}
