@@ -522,8 +522,12 @@ func TestLineCutHeals(t *testing.T) {
 	})
 
 	// The dead link retires once the new segments serve the tier: the
-	// verdict stayed down across the sustained window.
-	Poll(t, "the dead link to retire", func() bool {
+	// verdict stayed down across the sustained window. The wait runs on
+	// RestartTimeout: the retirement counts out three selection windows
+	// past the verdict, and a window's pass stretches several-fold in the
+	// loaded suite the lab shares its process with, where the fixed
+	// TestTimeout missed a loop still converging.
+	PollFor(t, RestartTimeout, "the dead link to retire", func() bool {
 		e := entryOf(ctx, c, b.app.IA())
 		return e != nil && e.State == links.StateRetired
 	})
