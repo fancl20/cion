@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/asn1"
 	"encoding/json/v2"
 	"errors"
@@ -356,6 +357,80 @@ func TestPrepareTLSCertAddressIdentity(t *testing.T) {
 	}
 	if issuer.Profile != "" {
 		t.Errorf("a domain identity's issuer profile = %q, want the default", issuer.Profile)
+	}
+}
+
+// TestGetCertificateNamelessHello checks the ACME arm's certificate
+// selection for the nameless hello: an address identity's clients arrive
+// nameless — RFC 6066 admits DNS names alone in SNI — so the identity
+// stands as the fallback server name and the hello serves the identity's
+// cached certificate, where certmagic's own derivation from the connection's
+// local address — the SCION transport's wildcard shape on the QUIC endpoint
+// — would name nothing the cache holds.
+func TestGetCertificateNamelessHello(t *testing.T) {
+	identity := "192.0.2.20"
+	ca := webpkitest.NewFor(t, netip.MustParseAddr(identity))
+	manager, err := PrepareTLSCert(TLSCertConfig{
+		Domain:  identity,
+		Storage: t.TempDir(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = manager.Close() })
+	seedManagedCert(t, manager, ca.AddrCertFile, ca.AddrKeyFile, identity)
+
+	// The connection the hello arrives on, its local address naming nothing
+	// the way the QUIC endpoint's own reports the SCION wildcard.
+	conn, peer := net.Pipe()
+	t.Cleanup(func() {
+		_ = conn.Close()
+		_ = peer.Close()
+	})
+	cert, err := manager.TLSConfig().GetCertificate(&tls.ClientHelloInfo{Conn: conn})
+	if err != nil {
+		t.Fatalf("the nameless hello against the identity's certificate: %v", err)
+	}
+	leaf, err := x509.ParseCertificate(cert.Certificate[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(leaf.IPAddresses) != 1 || leaf.IPAddresses[0].String() != identity {
+		t.Errorf("the nameless hello served a certificate for %v, want the "+
+			"identity %s alone", leaf.IPAddresses, identity)
+	}
+}
+
+// seedManagedCert stores the identity's certificate the way a completed
+// issuance leaves it — the storage the maintenance owns, its metadata beside
+// the pair — and loads it into the cache a serving handshake reads.
+func seedManagedCert(t *testing.T, m *CertManager, certFile, keyFile, name string) {
+	t.Helper()
+	issuer, ok := m.magic.Issuers[0].(*certmagic.ACMEIssuer)
+	if !ok {
+		t.Fatal("certmagic did not configure an ACME issuer")
+	}
+	certPEM, err := os.ReadFile(certFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyPEM, err := os.ReadFile(keyFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := issuer.IssuerKey()
+	ctx := context.Background()
+	for path, value := range map[string][]byte{
+		certmagic.StorageKeys.SiteCert(key, name):       certPEM,
+		certmagic.StorageKeys.SitePrivateKey(key, name): keyPEM,
+		certmagic.StorageKeys.SiteMeta(key, name):       []byte("{}"),
+	} {
+		if err := m.magic.Storage.Store(ctx, path, value); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := m.magic.CacheManagedCertificate(ctx, name); err != nil {
+		t.Fatal(err)
 	}
 }
 

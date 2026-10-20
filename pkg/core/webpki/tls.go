@@ -122,7 +122,16 @@ func PrepareTLSCert(cfg TLSCertConfig) (*CertManager, error) {
 			return magic, nil
 		},
 	})
-	magic = certmagic.New(cache, certmagic.Config{Storage: storage})
+	magic = certmagic.New(cache, certmagic.Config{
+		Storage: storage,
+		// The identity is the fallback server name, the name a nameless
+		// ClientHello resolves to: an address identity's clients arrive
+		// nameless — RFC 6066 admits DNS names alone in SNI — and the
+		// local-address name certmagic would derive instead names nothing
+		// served, the QUIC endpoint's connection reporting the SCION
+		// transport's wildcard address.
+		DefaultServerName: cfg.Domain,
+	})
 	issuer, ok := magic.Issuers[0].(*certmagic.ACMEIssuer)
 	if !ok {
 		cache.Stop()
