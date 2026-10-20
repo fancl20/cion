@@ -66,8 +66,8 @@ const PayloadBudget = wireguard.OverlayMTU - 20 - 8 - 10
 // is a monotonic total since start.
 type counters struct {
 	// droppedPackets counts packets and datagrams the service dropped:
-	// protocols it carries none of — internet ICMP, retired with the echo
-	// relay — fragmented or malformed datagrams, and bound refusals.
+	// protocols it carries none of — internet ICMP — fragmented or
+	// malformed datagrams, and bound refusals.
 	droppedPackets atomic.Int64
 }
 
@@ -226,8 +226,7 @@ func New(cfg Config) (*App, error) {
 // Inbound takes a plaintext packet the borrowed router delivered to the node's
 // own address: TCP and UDP — the listener's legs and the associations' relays
 // — enter the netstack, and everything else is dropped and counted, internet
-// ICMP included. The echo relay that served it retired with the default it
-// served, and no protocol exists to inherit it.
+// ICMP included.
 func (a *App) Inbound(pkt []byte) {
 	if len(pkt) < header.IPv4MinimumSize || pkt[0]>>4 != 4 {
 		a.cnt.droppedPackets.Add(1)

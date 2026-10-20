@@ -175,15 +175,15 @@ func TestTranslatedRestartDrawsAFreshMapping(t *testing.T) {
 	})
 }
 
-// TestTranslatedReturnReAimsTheStandingEntry is the relocation proof proposal
-// 0061 deferred: a node returns at a fresh mapping while its former neighbor
-// still holds the standing entry aimed at the dead one — no retirement waited
-// out — and the returning node's confirm pass re-aims that very entry, the
-// interface kept, no re-admission, the link's verdict recovering on the BFD
-// stream itself. The founder's selection runs at the production window, for
-// the labs' compressed one retires a down entry inside a loaded runner's boot
-// time, a race production never sees: three production windows hold the
-// entry long past the returning node's first confirm.
+// TestTranslatedReturnReAimsTheStandingEntry checks a node's return at a
+// fresh mapping while its former neighbor still holds the standing entry
+// aimed at the dead one — no retirement waited out — and the returning
+// node's confirm pass re-aims that very entry, the interface kept, no
+// re-admission, the link's verdict recovering on the BFD stream itself. The
+// founder's selection runs at the production window, for the labs'
+// compressed one retires a down entry inside a loaded runner's boot time, a
+// race production never sees: three production windows hold the entry long
+// past the returning node's first confirm.
 func TestTranslatedReturnReAimsTheStandingEntry(t *testing.T) {
 	if !solo(t) {
 		return

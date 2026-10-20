@@ -25,9 +25,8 @@ func TestDirectoryStoreContract(t *testing.T) {
 }
 
 // TestDirectoryStoreIgnoresRetiredFields checks the store's leniency toward
-// the older stored shape: a stored entry carrying the retired port and
-// underlay fields decodes with them ignored, and a re-publish replaces it
-// with the new shape.
+// a stored entry carrying port and underlay fields the struct does not
+// name: they decode ignored, and a re-publish replaces the entry wholesale.
 func TestDirectoryStoreIgnoresRetiredFields(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "directory.db")
 	store, err := New(path, nil)
@@ -36,8 +35,8 @@ func TestDirectoryStoreIgnoresRetiredFields(t *testing.T) {
 	}
 	db := store.(*directoryDB).db
 	key := dbtest.MustKey(0x01)
-	// An entry in the older stored shape: gatewayPort and underlay beside
-	// the fields that remain.
+	// An entry carrying gatewayPort and underlay beside the fields that
+	// remain.
 	old := `{"publicKey":"` + hex.EncodeToString(key[:]) + `",` +
 		`"gatewayPort":51820,"underlay":"192.0.2.1","overlay":"100.64.1.0/24"}`
 	if err := db.Update(func(tx *bbolt.Tx) error {
@@ -62,9 +61,8 @@ func TestDirectoryStoreIgnoresRetiredFields(t *testing.T) {
 		t.Errorf("decoded entry = %+v, want %+v", entries.Nodes[0], want)
 	}
 
-	// A re-publish replaces the old-shape entry wholesale — and keeps the
-	// slice the older state held, an ISD-AS that already holds one keeping
-	// it.
+	// A re-publish replaces the stored entry wholesale — and keeps the
+	// slice it held, an ISD-AS that already holds one keeping it.
 	if _, err := store.Publish(context.Background(), want); err != nil {
 		t.Fatal(err)
 	}
@@ -81,10 +79,9 @@ func TestDirectoryStoreIgnoresRetiredFields(t *testing.T) {
 }
 
 // TestDirectoryStoreHostWithoutMachineKey checks the store's leniency toward
-// the older host shape: a stored host entry carrying no machine key decodes
-// with none — the record from before the machine claim, which the
-// coordination application binds at the first presentation after the
-// upgrade — and the bound record round-trips.
+// a stored host entry carrying no machine key: it decodes with none — the
+// coordination application binds the machine claim at the first presentation
+// — and the bound record round-trips.
 func TestDirectoryStoreHostWithoutMachineKey(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "directory.db")
 	store, err := New(path, nil)
@@ -93,8 +90,7 @@ func TestDirectoryStoreHostWithoutMachineKey(t *testing.T) {
 	}
 	db := store.(*directoryDB).db
 	key := dbtest.MustKey(0x01)
-	// A host entry in the older stored shape: no machine key beside the
-	// fields that remain.
+	// A host entry carrying no machine key beside the fields that remain.
 	old := `{"addr":"100.64.1.2","ia":"20-ff00:0:1","note":"telegram operator"}`
 	if err := db.Update(func(tx *bbolt.Tx) error {
 		return tx.Bucket(hostsBucket).Put([]byte(key.String()), []byte(old))

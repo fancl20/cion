@@ -180,7 +180,7 @@ func scmpPacket(
 
 // TestTwoNodeSCMPEcho sends an SCMP echo request from a host in AS A through
 // both routers to an echo server in AS B, which replies through the reverse
-// path. This is the packet-forwarding test of the direct-link proposal.
+// path.
 func TestTwoNodeSCMPEcho(t *testing.T) {
 	key := []byte("0123456789abcdef")
 	a, b := startTwoNodes(t)

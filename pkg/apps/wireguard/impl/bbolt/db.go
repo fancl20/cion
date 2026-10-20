@@ -131,9 +131,9 @@ func (b *directoryDB) PublishHost(ctx context.Context, entry wireguard.HostEntry
 	})
 }
 
-// List returns every published entry, nodes and hosts together. Stored
-// entries from older states carry their retired port and underlay fields
-// beside these; the JSON decode ignores what the struct no longer names.
+// List returns every published entry, nodes and hosts together. A stored
+// entry may carry port and underlay fields beside these; the JSON decode
+// ignores fields the struct does not name.
 func (b *directoryDB) List(ctx context.Context) (wireguard.Directory, error) {
 	var directory wireguard.Directory
 	err := b.db.View(func(tx *bbolt.Tx) error {

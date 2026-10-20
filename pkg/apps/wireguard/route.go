@@ -10,11 +10,11 @@ import (
 	"github.com/fancl20/cion/pkg/libs/segment"
 )
 
-// The route pick's hysteresis, code constants per ADR-0017's decision 17 — the
-// selection loop's promotion shape scaled to route choice. Two near-equal
-// routes trade the lead back and forth as their declared sums move, and every
-// trade costs in-flight datagrams their place in line: one ratio a challenger
-// must beat, one streak of consecutive windows naming the same challenger.
+// The route pick's hysteresis — the selection loop's promotion shape scaled
+// to route choice. Two near-equal routes trade the lead back and forth as
+// their declared sums move, and every trade costs in-flight datagrams their
+// place in line: one ratio a challenger must beat, one streak of consecutive
+// windows naming the same challenger.
 const (
 	// SwitchRatio is the fraction of the incumbent's declared sum a
 	// challenger must beat — a challenger a fifth faster.

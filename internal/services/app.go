@@ -68,8 +68,8 @@ func boot(
 
 // App is a fully assembled node booted for an application: the node's loops
 // and data plane serve in the background while the application sends over
-// its own conn and resolves paths through the node's provider — proposal
-// 0005's in-process entry, the form tests and embedded use share with the
+// its own conn and resolves paths through the node's provider — the
+// in-process entry, the form tests and embedded use share with the
 // subcommand.
 type App struct {
 	node *node

@@ -27,8 +27,7 @@ var TailnetRange = wireguard.Tailnet
 // wireguard topology, assembled through the run command's own wiring, the core
 // serving the coordination endpoint beside its WireGuard application. The
 // hosts are real tailnet clients in-process — the vendored client engine
-// (tsnet) — the way real wireguard-go clients served as the hosts of proposal
-// 0006's proofs. Each suite holds its own loopback pair — the fixed endpoint,
+// (tsnet). Each suite holds its own loopback pair — the fixed endpoint,
 // rendezvous, and shared host ports bind on them — so the suites run
 // parallel, the hosts dialing the default port unasked.
 

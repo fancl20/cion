@@ -420,10 +420,10 @@ func TestWireguardAppliesDirectoryDiff(t *testing.T) {
 	}
 }
 
-// TestWireguardAppliesHostEntries checks the host device's diff (proposal
-// 0022): an owned entry's key gains its /32 on the one host device, a
-// departed key loses it, and a foreign-owned key changes nothing — exactly
-// as the mesh diff treats the node's own entry.
+// TestWireguardAppliesHostEntries checks the host device's diff: an owned
+// entry's key gains its /32 on the one host device, a departed key loses
+// it, and a foreign-owned key changes nothing — exactly as the mesh diff
+// treats the node's own entry.
 func TestWireguardAppliesHostEntries(t *testing.T) {
 	ia := addr.MustIAFrom(20, 0xff0000000221)
 	other := addr.MustIAFrom(20, 0xff0000000233)

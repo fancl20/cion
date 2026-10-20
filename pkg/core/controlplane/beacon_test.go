@@ -1372,11 +1372,11 @@ func TestHandleRegistration(t *testing.T) {
 	}
 }
 
-// TestHandleRegistrationFabricatedIdentity checks the binding of proposal
-// 0015 at registration: a down segment whose first entry claims this core
-// but is signed by another's key is refused, so the core's down-segment
-// store inherits no fabrication — checkRegistered's origin claim is the
-// signer's own now.
+// TestHandleRegistrationFabricatedIdentity checks the identity binding at
+// registration: a down segment whose first entry claims this core but is
+// signed by another's key is refused, so the core's down-segment store
+// inherits no fabrication — checkRegistered's origin claim is the signer's
+// own.
 func TestHandleRegistrationFabricatedIdentity(t *testing.T) {
 	f := newBeaconFixture(t)
 	ctx := context.Background()

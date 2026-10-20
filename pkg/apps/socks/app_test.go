@@ -503,9 +503,7 @@ func TestDropsICMP(t *testing.T) {
 	}
 }
 
-// internetChecksum is the ones-complement checksum IPv4 and ICMP carry —
-// the helper the echo machinery carried, kept for the packet builders
-// here.
+// internetChecksum is the ones-complement checksum IPv4 and ICMP carry.
 func internetChecksum(b []byte) uint16 {
 	var sum uint32
 	for i := 0; i+1 < len(b); i += 2 {

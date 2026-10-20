@@ -42,12 +42,12 @@ func (a *App) serve(ctx context.Context, conn net.Conn) {
 	}
 }
 
-// connect serves CONNECT — the old handleTCP told from the other end: one
-// accepted leg spliced to one outbound connection dialed from the node's
-// own sockets under the standing dial timeout, each direction a copy with
-// half-close propagation, the flow entering the TCP table, counting against
-// the bound, and swept by the idle sweep. A refusal is told, not implied:
-// the client learns the cause on its own leg.
+// connect serves CONNECT: one accepted leg spliced to one outbound
+// connection dialed from the node's own sockets under the standing dial
+// timeout, each direction a copy with half-close propagation, the flow
+// entering the TCP table, counting against the bound, and swept by the idle
+// sweep. A refusal is told, not implied: the client learns the cause on its
+// own leg.
 func (a *App) connect(ctx context.Context, conn net.Conn, dst destination) {
 	a.mtx.Lock()
 	full := a.atCapacityLocked()

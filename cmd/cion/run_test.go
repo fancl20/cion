@@ -197,10 +197,8 @@ func refuse(t *testing.T, command, flag string, flags *pflag.FlagSet) {
 }
 
 // TestRunCommandsRefuseForeignArguments checks the partition's bookkeeping
-// the parse performs: each command refuses the other role's arguments as
-// unknown flags naming the argument, the unprefixed spelling of every
-// renamed argument beside the retired --core, --wireguard-config,
-// --behind-nat, and --slice.
+// the parse performs: each command refuses a foreign argument as an
+// unknown flag naming the argument.
 func TestRunCommandsRefuseForeignArguments(t *testing.T) {
 	for _, command := range []struct {
 		name string

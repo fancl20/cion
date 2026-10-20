@@ -154,12 +154,12 @@ func (f *Provider) load() error {
 	return nil
 }
 
-// CompleteIdentity completes a first start's identity offline, per the
-// ADR: the first entry's ISD with the node's drawn AS, so the entries'
-// completed ISD-ASes name a network the node belongs to. The founding
-// core's draw is its network's name already — a static lab starts its
-// founding node first, or any node whose name is already final; the
-// ordering is the file provider's one operational ceremony.
+// CompleteIdentity completes a first start's identity offline: the first
+// entry's ISD with the node's drawn AS, so the entries' completed ISD-ASes
+// name a network the node belongs to. The founding core's draw is its
+// network's name already — a static lab starts its founding node first, or
+// any node whose name is already final; the ordering is the file provider's
+// one operational ceremony.
 func (f *Provider) CompleteIdentity(_ context.Context, ia addr.IA) (addr.IA, error) {
 	if f.cfg.Core {
 		return ia, nil

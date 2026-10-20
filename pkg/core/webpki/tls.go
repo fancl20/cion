@@ -82,8 +82,7 @@ type CertManager struct {
 // answered on the dedicated port 80 until Close, and the maintenance runs
 // under Manage. Every core takes this half and serves it on the node's
 // HTTPS server — ListenHTTPS and ServeHTTPS below — where the TLS-ALPN-01
-// challenge is answered beside the mounted apps' own protocols (proposal
-// 0023).
+// challenge is answered beside the mounted apps' own protocols.
 func PrepareTLSCert(cfg TLSCertConfig) (*CertManager, error) {
 	if cfg.CertFile != "" || cfg.KeyFile != "" {
 		cert, err := tls.LoadX509KeyPair(cfg.CertFile, cfg.KeyFile)

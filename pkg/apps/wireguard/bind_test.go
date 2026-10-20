@@ -225,7 +225,7 @@ func TestMeshBindEndpointRoundTrip(t *testing.T) {
 		"no-comma",
 		"nope,wireguard",         // malformed ISD-AS
 		ia.String(),              // no service
-		ia.String() + ",gateway", // the retired service name
+		ia.String() + ",gateway", // a service name nothing serves
 		ia.String() + ",bogus",   // unknown service
 		ia.String() + ",1.2.3.4", // an underlay form names no service
 	} {

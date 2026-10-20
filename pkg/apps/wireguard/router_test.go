@@ -10,8 +10,7 @@ import (
 	"gvisor.dev/gvisor/pkg/tcpip/header"
 )
 
-// netipToAddress converts an overlay address for a netstack header — the
-// helper the egress machinery carried, kept for the packet builders here.
+// netipToAddress converts an overlay address for a netstack header.
 func netipToAddress(ip netip.Addr) tcpip.Address {
 	return tcpip.AddrFromSlice(ip.AsSlice())
 }

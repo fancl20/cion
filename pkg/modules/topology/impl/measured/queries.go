@@ -7,10 +7,9 @@ import (
 	"github.com/fancl20/cion/pkg/libs/segment"
 )
 
-// The comparator's queries over the enumerated candidates — the questions
-// ADR-0017's loop asks of the path layer, answered beside the selection loop
-// that owns them: the baseline echo's carrier, the route count into a tier,
-// and the price of the cheapest route.
+// The comparator's queries over the enumerated candidates, answered beside
+// the selection loop that owns them: the baseline echo's carrier, the route
+// count into a tier, and the price of the cheapest route.
 
 // freshest returns the freshest clean candidate of an enumeration: freshness
 // picks the route the baseline echo measures, never a freshness value

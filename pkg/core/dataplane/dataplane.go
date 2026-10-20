@@ -86,14 +86,12 @@ type DataPlane struct {
 
 	RunConfig RunConfig
 
-	// The pool that stores all the packet buffers as described in the design document. See
-	// https://github.com/scionproto/scion/blob/master/doc/dev/design/BorderRouter.rst
-	// To avoid garbage collection, most the meta-data that is produced during the processing of a
-	// packet is kept in a data structure (packet struct) that is pooled and recycled along with
-	// corresponding packet buffer. The packet struct refers permanently to the packet buffer. The
-	// packet structure is fetched from the pool passed-around through the various channels and
-	// returned to the pool. To reduce the cost of copying, the packet structure is passed by
-	// reference.
+	// The pool that stores all the packet buffers. To avoid garbage collection, most of the
+	// metadata produced during the processing of a packet is kept in a data structure (packet
+	// struct) that is pooled and recycled along with the corresponding packet buffer. The packet
+	// struct refers permanently to the packet buffer. The packet structure is fetched from the
+	// pool, passed around through the various channels, and returned to the pool. To reduce the
+	// cost of copying, the packet structure is passed by reference.
 	packetPool PacketPool
 
 	// underlayHeadRoom is the minimum headroom that must be reserved at the front of every packet

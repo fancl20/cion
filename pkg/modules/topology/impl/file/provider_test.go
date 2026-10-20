@@ -280,11 +280,10 @@ func TestFileReconcileChanges(t *testing.T) {
 	}
 }
 
-// TestFileSilentPeerKeepsEntry checks the negative the ADR names: a
-// link-set naming a silent peer keeps its established entry — the operator
-// vouched, and the file provider runs no candidate sweep — while
-// discovery's freshness and the beaconer treat the link as timed out on
-// their own.
+// TestFileSilentPeerKeepsEntry checks the negative case: a link-set naming
+// a silent peer keeps its established entry — the operator vouched, and
+// the file provider runs no candidate sweep — while discovery's freshness
+// and the beaconer treat the link as timed out on their own.
 func TestFileSilentPeerKeepsEntry(t *testing.T) {
 	f := newFileFixture(t,
 		Entry{IA: fileIA.String(), Local: "127.0.0.1:1", Remote: "127.0.0.1:1"})

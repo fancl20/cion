@@ -12,16 +12,16 @@ import (
 )
 
 // TestPathLayerServesTwoCores is the path seam's integration proof: a
-// founder and an authoritative core joined per 0037, with a node under each
-// and a third node under the founder. Both cores originate, and each core's
-// path database holds a core segment of the other; the node under the
-// authoritative holds up segments of both origins over its one ingress — the
-// collision 0034 keyed the beacon store against, arrived on the real path —
-// and registers its down segments with both cores; the third node's lookups
-// fetch down segments from each core and compose paths to either child; the
-// node first started under the authoritative alone enrolls and pins the
-// successor, its retries riding the alternation of the bootstrap slot to the
-// founder's fresher beacon.
+// founder and an authoritative core joined by rendezvous, with a node under
+// each and a third node under the founder. Both cores originate, and each
+// core's path database holds a core segment of the other; the node under
+// the authoritative holds up segments of both origins over its one ingress —
+// the core-segment collision the beacon store keys against, arrived on the
+// real path — and registers its down segments with both cores; the third
+// node's lookups fetch down segments from each core and compose paths to
+// either child; the node first started under the authoritative alone
+// enrolls and pins the successor, its retries riding the alternation of the
+// bootstrap slot to the founder's fresher beacon.
 func TestPathLayerServesTwoCores(t *testing.T) {
 	t.Parallel()
 	wpki := webpkitest.New(t)
@@ -37,8 +37,8 @@ func TestPathLayerServesTwoCores(t *testing.T) {
 		cfg.KeyFile = wpki.KeyFile
 		cfg.EnrollAuth = votingAuth
 	})
-	// The authoritative core, joined per 0037: the core flag beside the
-	// founder's rendezvous address.
+	// The authoritative core: the core flag beside the founder's rendezvous
+	// address.
 	b := bootAssembly(t, func(cfg *services.NodeConfig) {
 		cfg.Core = true
 		cfg.State = t.TempDir()
