@@ -2,12 +2,11 @@ package wireguard
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 	"net/netip"
 
-	"connectrpc.com/connect"
+	"connectrpc.com/connect/v2"
 	"github.com/scionproto/scion/pkg/addr"
 
 	"github.com/fancl20/cion/pkg/libs/peeria"
@@ -42,21 +41,21 @@ var (
 // overlay never enters — and the response answers with it.
 func (s *DirectoryService) Publish(
 	ctx context.Context,
-	req *connect.Request[wireguardv1.PublishRequest],
-) (*connect.Response[wireguardv1.PublishResponse], error) {
+	req *wireguardv1.PublishRequest,
+) (*wireguardv1.PublishResponse, error) {
 
 	publisher := AuthenticatedIA(ctx)
 	if publisher.IsZero() {
 		return nil, connect.NewError(connect.CodePermissionDenied,
-			errors.New("no authenticated ISD-AS; the channel verified no chain"))
+			"no authenticated ISD-AS; the channel verified no chain")
 	}
-	if req.Msg == nil || req.Msg.Entry == nil {
-		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("no entry"))
+	if req == nil || req.Entry == nil {
+		return nil, connect.NewError(connect.CodeInvalidArgument, "no entry")
 	}
-	entry, err := entryFromPB(req.Msg.Entry)
+	entry, err := entryFromPB(req.Entry)
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInvalidArgument,
-			fmt.Errorf("malformed entry: %w", err))
+			"malformed entry").WithCause(err)
 	}
 	if !entry.IA.Equal(publisher) {
 		slog.Warn("Directory publish claims another ISD-AS; recording the authenticated one",
@@ -66,24 +65,24 @@ func (s *DirectoryService) Publish(
 	recorded, err := s.Store.Publish(ctx, entry)
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInternal,
-			fmt.Errorf("storing the entry: %w", err))
+			"storing the entry").WithCause(err)
 	}
 	s.Cnt.published.Add(1)
-	return connect.NewResponse(&wireguardv1.PublishResponse{
+	return &wireguardv1.PublishResponse{
 		OverlaySubnet: recorded.Overlay.String(),
-	}), nil
+	}, nil
 }
 
 // List returns every published entry, nodes and hosts together.
 func (s *DirectoryService) List(
 	ctx context.Context,
-	req *connect.Request[wireguardv1.ListRequest],
-) (*connect.Response[wireguardv1.ListResponse], error) {
+	req *wireguardv1.ListRequest,
+) (*wireguardv1.ListResponse, error) {
 
 	directory, err := s.Store.List(ctx)
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInternal,
-			fmt.Errorf("reading the directory: %w", err))
+			"reading the directory").WithCause(err)
 	}
 	resp := &wireguardv1.ListResponse{}
 	for _, e := range directory.Nodes {
@@ -92,7 +91,7 @@ func (s *DirectoryService) List(
 	for _, h := range directory.Hosts {
 		resp.Hosts = append(resp.Hosts, h.pb())
 	}
-	return connect.NewResponse(resp), nil
+	return resp, nil
 }
 
 // entryFromPB decodes a wire entry. A publish request's entry carries no

@@ -12,7 +12,7 @@ import (
 	"net/netip"
 	"testing"
 
-	"connectrpc.com/connect"
+	"connectrpc.com/connect/v2"
 	"github.com/scionproto/scion/pkg/addr"
 	"github.com/scionproto/scion/pkg/scrypto/cppki"
 
@@ -94,13 +94,13 @@ func TestDirectoryPublishRecordsAuthenticatedIA(t *testing.T) {
 		Overlay:   netip.MustParsePrefix("10.64.1.0/24"),
 	}
 	resp, err := svc.Publish(requestWithIA(t, publisher),
-		connect.NewRequest(&wireguardv1.PublishRequest{Entry: entry.pb()}))
+		&wireguardv1.PublishRequest{Entry: entry.pb()})
 	if err != nil {
 		t.Fatalf("publishing: %v", err)
 	}
-	if want := "100.64.0.0/24"; resp.Msg.OverlaySubnet != want {
+	if want := "100.64.0.0/24"; resp.OverlaySubnet != want {
 		t.Errorf("the publish answer = %q, want the assigned %q",
-			resp.Msg.OverlaySubnet, want)
+			resp.OverlaySubnet, want)
 	}
 	entries, err := store.List(context.Background())
 	if err != nil {
@@ -116,7 +116,7 @@ func TestDirectoryPublishRecordsAuthenticatedIA(t *testing.T) {
 
 	// A publish without an authenticated ISD-AS never records.
 	_, err = svc.Publish(context.Background(),
-		connect.NewRequest(&wireguardv1.PublishRequest{Entry: entry.pb()}))
+		&wireguardv1.PublishRequest{Entry: entry.pb()})
 	if err == nil {
 		t.Error("publishing without an authenticated ISD-AS succeeded")
 	}
@@ -139,7 +139,7 @@ func TestDirectoryListServesEntries(t *testing.T) {
 		HostEndpoint: netip.MustParseAddrPort("198.51.100.20:51820"),
 	}
 	if _, err := svc.Publish(requestWithIA(t, ia),
-		connect.NewRequest(&wireguardv1.PublishRequest{Entry: entry.pb()})); err != nil {
+		&wireguardv1.PublishRequest{Entry: entry.pb()}); err != nil {
 		t.Fatalf("publishing: %v", err)
 	}
 	entry.Overlay = netip.MustParsePrefix("100.64.0.0/24")
@@ -152,25 +152,24 @@ func TestDirectoryListServesEntries(t *testing.T) {
 	if err := store.PublishHost(context.Background(), host); err != nil {
 		t.Fatalf("publishing the host: %v", err)
 	}
-	resp, err := svc.List(context.Background(),
-		connect.NewRequest(&wireguardv1.ListRequest{}))
+	resp, err := svc.List(context.Background(), &wireguardv1.ListRequest{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(resp.Msg.Entries) != 1 {
-		t.Fatalf("list served %d entries, want 1", len(resp.Msg.Entries))
+	if len(resp.Entries) != 1 {
+		t.Fatalf("list served %d entries, want 1", len(resp.Entries))
 	}
-	got, err := entryFromPB(resp.Msg.Entries[0])
+	got, err := entryFromPB(resp.Entries[0])
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got != entry {
 		t.Errorf("entry = %+v, want %+v", got, entry)
 	}
-	if len(resp.Msg.Hosts) != 1 {
-		t.Fatalf("list served %d hosts, want 1", len(resp.Msg.Hosts))
+	if len(resp.Hosts) != 1 {
+		t.Fatalf("list served %d hosts, want 1", len(resp.Hosts))
 	}
-	gotHost, err := hostEntryFromPB(resp.Msg.Hosts[0])
+	gotHost, err := hostEntryFromPB(resp.Hosts[0])
 	if err != nil {
 		t.Fatal(err)
 	}

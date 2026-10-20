@@ -5,108 +5,97 @@
 package votingv1connect
 
 import (
-	connect "connectrpc.com/connect"
+	connect "connectrpc.com/connect/v2"
 	context "context"
-	errors "errors"
 	v1 "github.com/fancl20/cion/proto/voting/v1"
-	http "net/http"
-	strings "strings"
+	sync "sync"
 )
-
-// This is a compile-time assertion to ensure that this generated file and the connect package are
-// compatible. If you get a compiler error that this constant is not defined, this code was
-// generated with a version of connect newer than the one compiled into your binary. You can fix the
-// problem by either regenerating this code with an older version of connect or updating the connect
-// version compiled into your binary.
-const _ = connect.IsAtLeastVersion1_13_0
 
 const (
 	// VotingServiceName is the fully-qualified name of the VotingService service.
 	VotingServiceName = "voting.v1.VotingService"
 )
 
-// These constants are the fully-qualified names of the RPCs defined in this package. They're
-// exposed at runtime as Spec.Procedure and as the final two segments of the HTTP route.
+// These constants are the procedure names of the RPCs defined in this package. They're exposed at
+// runtime as Spec.Procedure and as the final two segments of the HTTP route.
 //
 // Note that these are different from the fully-qualified method names used by
 // google.golang.org/protobuf/reflect/protoreflect. To convert from these constants to
 // reflection-formatted method names, remove the leading slash and convert the remaining slash to a
 // period.
 const (
-	// VotingServiceSubmitProcedure is the fully-qualified name of the VotingService's Submit RPC.
+	// VotingServiceSubmitProcedure is the procedure name of the VotingService's Submit RPC.
 	VotingServiceSubmitProcedure = "/voting.v1.VotingService/Submit"
+)
+
+var (
+	votingServiceSubmitSpec = sync.OnceValue(func() connect.Spec {
+		return connect.Spec{
+			StreamType: connect.StreamTypeUnary,
+			Schema:     v1.File_proto_voting_v1_voting_proto.Services().ByName("VotingService").Methods().ByName("Submit"),
+			Procedure:  VotingServiceSubmitProcedure,
+		}
+	})
 )
 
 // VotingServiceClient is a client for the voting.v1.VotingService service.
 type VotingServiceClient interface {
 	// Submit hands the submitted successor to the control plane's decision
 	// and answers with the TRC it pinned.
-	Submit(context.Context, *connect.Request[v1.SubmitRequest]) (*connect.Response[v1.SubmitResponse], error)
+	Submit(context.Context, *v1.SubmitRequest) (*v1.SubmitResponse, error)
 }
 
-// NewVotingServiceClient constructs a client for the voting.v1.VotingService service. By default,
-// it uses the Connect protocol with the binary Protobuf Codec, asks for gzipped responses, and
-// sends uncompressed requests. To use the gRPC or gRPC-Web protocols, supply the connect.WithGRPC()
-// or connect.WithGRPCWeb() options.
-//
-// The URL supplied here should be the base URL for the Connect or gRPC server (for example,
-// http://api.acme.com or https://acme.com/grpc).
-func NewVotingServiceClient(httpClient connect.HTTPClient, baseURL string, opts ...connect.ClientOption) VotingServiceClient {
-	baseURL = strings.TrimRight(baseURL, "/")
-	votingServiceMethods := v1.File_proto_voting_v1_voting_proto.Services().ByName("VotingService").Methods()
-	return &votingServiceClient{
-		submit: connect.NewClient[v1.SubmitRequest, v1.SubmitResponse](
-			httpClient,
-			baseURL+VotingServiceSubmitProcedure,
-			connect.WithSchema(votingServiceMethods.ByName("Submit")),
-			connect.WithClientOptions(opts...),
-		),
-	}
-}
-
-// votingServiceClient implements VotingServiceClient.
-type votingServiceClient struct {
-	submit *connect.Client[v1.SubmitRequest, v1.SubmitResponse]
-}
-
-// Submit calls voting.v1.VotingService.Submit.
-func (c *votingServiceClient) Submit(ctx context.Context, req *connect.Request[v1.SubmitRequest]) (*connect.Response[v1.SubmitResponse], error) {
-	return c.submit.CallUnary(ctx, req)
+// NewVotingServiceClient constructs a client for the voting.v1.VotingService service. Multiple
+// service clients may share a single connect.Client.
+func NewVotingServiceClient(client *connect.Client) VotingServiceClient {
+	return &votingServiceClient{client: client}
 }
 
 // VotingServiceHandler is an implementation of the voting.v1.VotingService service.
 type VotingServiceHandler interface {
 	// Submit hands the submitted successor to the control plane's decision
 	// and answers with the TRC it pinned.
-	Submit(context.Context, *connect.Request[v1.SubmitRequest]) (*connect.Response[v1.SubmitResponse], error)
+	Submit(context.Context, *v1.SubmitRequest) (*v1.SubmitResponse, error)
 }
 
-// NewVotingServiceHandler builds an HTTP handler from the service implementation. It returns the
-// path on which to mount the handler and the handler itself.
-//
-// By default, handlers support the Connect, gRPC, and gRPC-Web protocols with the binary Protobuf
-// and JSON codecs. They also support gzip compression.
-func NewVotingServiceHandler(svc VotingServiceHandler, opts ...connect.HandlerOption) (string, http.Handler) {
-	votingServiceMethods := v1.File_proto_voting_v1_voting_proto.Services().ByName("VotingService").Methods()
-	votingServiceSubmitHandler := connect.NewUnaryHandler(
-		VotingServiceSubmitProcedure,
-		svc.Submit,
-		connect.WithSchema(votingServiceMethods.ByName("Submit")),
-		connect.WithHandlerOptions(opts...),
+// RegisterVotingServiceHandler registers svc as the voting.v1.VotingService implementation on
+// server.
+func RegisterVotingServiceHandler(server *connect.Server, svc VotingServiceHandler) {
+	adapter := votingServiceHandler{svc: svc}
+	server.Register(
+		connect.Method{Spec: votingServiceSubmitSpec(), Handler: adapter.submit},
 	)
-	return "/voting.v1.VotingService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case VotingServiceSubmitProcedure:
-			votingServiceSubmitHandler.ServeHTTP(w, r)
-		default:
-			http.NotFound(w, r)
-		}
-	})
 }
 
 // UnimplementedVotingServiceHandler returns CodeUnimplemented from all methods.
 type UnimplementedVotingServiceHandler struct{}
 
-func (UnimplementedVotingServiceHandler) Submit(context.Context, *connect.Request[v1.SubmitRequest]) (*connect.Response[v1.SubmitResponse], error) {
-	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("voting.v1.VotingService.Submit is not implemented"))
+func (UnimplementedVotingServiceHandler) Submit(context.Context, *v1.SubmitRequest) (*v1.SubmitResponse, error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, "voting.v1.VotingService.Submit is not implemented")
+}
+
+type votingServiceClient struct {
+	client *connect.Client
+}
+
+func (c *votingServiceClient) Submit(ctx context.Context, req *v1.SubmitRequest) (*v1.SubmitResponse, error) {
+	var res v1.SubmitResponse
+	if err := c.client.CallUnary(ctx, votingServiceSubmitSpec(), req, &res); err != nil {
+		return nil, err
+	}
+	return &res, nil
+}
+
+type votingServiceHandler struct{ svc VotingServiceHandler }
+
+func (h votingServiceHandler) submit(ctx context.Context, _ connect.Spec, stream connect.ServerStream) error {
+	var req v1.SubmitRequest
+	if err := stream.Receive(&req); err != nil {
+		return err
+	}
+	res, err := h.svc.Submit(ctx, &req)
+	if err != nil {
+		return err
+	}
+	return stream.Send(res)
 }

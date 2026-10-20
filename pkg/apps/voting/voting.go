@@ -14,14 +14,13 @@ package voting
 
 import (
 	"context"
-	"errors"
 	"log/slog"
 	"net/http"
 	"net/netip"
 
-	"connectrpc.com/connect"
+	"connectrpc.com/connect/v2"
+	"connectrpc.com/connect/v2/connecthttp"
 	"github.com/scionproto/scion/pkg/addr"
-	"github.com/scionproto/scion/pkg/private/serrors"
 	"github.com/scionproto/scion/pkg/scrypto/cppki"
 
 	"github.com/fancl20/cion/pkg/libs/peeria"
@@ -66,10 +65,16 @@ var _ interface {
 	HTTPSHandler() http.Handler
 } = (*App)(nil)
 
-// New mounts the application's submission service on the control endpoint.
+// New mounts the application's submission service on the control endpoint:
+// the service registered on a connect server, which connecthttp.Mount
+// spreads over a private mux mounted at the service name's canonical
+// pattern.
 func New(cfg Config) *App {
-	pattern, handler := votingv1connect.NewVotingServiceHandler(&service{decide: cfg.Decide})
-	cfg.MountControlEndpoint(pattern, handler)
+	server := connect.NewServer()
+	votingv1connect.RegisterVotingServiceHandler(server, &service{decide: cfg.Decide})
+	mux := http.NewServeMux()
+	connecthttp.Mount(mux, server)
+	cfg.MountControlEndpoint("/"+votingv1connect.VotingServiceName+"/", mux)
 	slog.Info("Serving the TRC voting application", "isd_as", cfg.IA)
 	return &App{cfg: cfg}
 }
@@ -97,28 +102,29 @@ type service struct {
 // verified; the decision is the control plane's alone.
 func (s *service) Submit(
 	ctx context.Context,
-	req *connect.Request[votingv1.SubmitRequest],
-) (*connect.Response[votingv1.SubmitResponse], error) {
+	req *votingv1.SubmitRequest,
+) (*votingv1.SubmitResponse, error) {
 
 	presenter := peeria.AuthenticatedIA(ctx)
 	if presenter.IsZero() {
 		return nil, connect.NewError(connect.CodePermissionDenied,
-			errors.New("no authenticated ISD-AS: the channel verified no chain"))
+			"no authenticated ISD-AS: the channel verified no chain")
 	}
-	if len(req.Msg.Trc) == 0 {
+	if len(req.Trc) == 0 {
 		return nil, connect.NewError(connect.CodeInvalidArgument,
-			errors.New("the submission carries no TRC"))
+			"the submission carries no TRC")
 	}
-	trc, err := cppki.DecodeSignedTRC(req.Msg.Trc)
+	trc, err := cppki.DecodeSignedTRC(req.Trc)
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInvalidArgument,
-			serrors.Wrap("parsing the submitted TRC", err))
+			"parsing the submitted TRC").WithCause(err)
 	}
 	pinned, err := s.decide.DecideTRC(ctx, presenter, scionrpc.RemoteUnderlay(ctx), trc)
 	if err != nil {
-		return nil, connect.NewError(connect.CodeFailedPrecondition, err)
+		return nil, connect.NewError(connect.CodeFailedPrecondition,
+			"the control plane's decision refused the submission").WithCause(err)
 	}
 	// The pinned bytes, so every holder of the pinned TRC holds the same DER
 	// the control plane verified.
-	return connect.NewResponse(&votingv1.SubmitResponse{Trc: pinned.Raw}), nil
+	return &votingv1.SubmitResponse{Trc: pinned.Raw}, nil
 }

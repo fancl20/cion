@@ -9,7 +9,8 @@ import (
 	"sync"
 	"time"
 
-	"connectrpc.com/connect"
+	"connectrpc.com/connect/v2"
+	"connectrpc.com/connect/v2/connecthttp"
 	"github.com/quic-go/quic-go"
 	"github.com/scionproto/scion/pkg/addr"
 	spath "github.com/scionproto/scion/pkg/slayers/path/scion"
@@ -107,21 +108,21 @@ var _ nodev1connect.DirectoryServiceHandler = (*DirectoryService)(nil)
 // authenticated one all the same.
 func (s *DirectoryService) Publish(
 	ctx context.Context,
-	req *connect.Request[nodev1.PublishRequest],
-) (*connect.Response[nodev1.PublishResponse], error) {
+	req *nodev1.PublishRequest,
+) (*nodev1.PublishResponse, error) {
 
 	publisher := peeria.AuthenticatedIA(ctx)
 	if publisher.IsZero() {
 		return nil, connect.NewError(connect.CodePermissionDenied,
-			errors.New("no authenticated ISD-AS; the channel verified no chain"))
+			"no authenticated ISD-AS; the channel verified no chain")
 	}
-	if req.Msg == nil || req.Msg.Entry == nil {
-		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("no entry"))
+	if req == nil || req.Entry == nil {
+		return nil, connect.NewError(connect.CodeInvalidArgument, "no entry")
 	}
-	entry, err := entryFromPB(req.Msg.Entry)
+	entry, err := entryFromPB(req.Entry)
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInvalidArgument,
-			fmt.Errorf("malformed entry: %w", err))
+			"malformed entry").WithCause(err)
 	}
 	if !entry.IA.Equal(publisher) {
 		slog.Warn("Node directory publish claims another ISD-AS; recording the authenticated one",
@@ -130,21 +131,21 @@ func (s *DirectoryService) Publish(
 	entry.IA = publisher
 	entry.Published = time.Now()
 	s.Store.Publish(entry)
-	return connect.NewResponse(&nodev1.PublishResponse{}), nil
+	return &nodev1.PublishResponse{}, nil
 }
 
 // List returns every published entry.
 func (s *DirectoryService) List(
 	ctx context.Context,
-	req *connect.Request[nodev1.ListRequest],
-) (*connect.Response[nodev1.ListResponse], error) {
+	req *nodev1.ListRequest,
+) (*nodev1.ListResponse, error) {
 
 	entries := s.Store.List(time.Now())
 	resp := &nodev1.ListResponse{}
 	for _, e := range entries {
 		resp.Entries = append(resp.Entries, e.pb())
 	}
-	return connect.NewResponse(resp), nil
+	return resp, nil
 }
 
 func entryFromPB(pb *nodev1.Entry) (DirectoryEntry, error) {
@@ -235,7 +236,8 @@ func (c *rpcDirectoryClient) client() (nodev1connect.DirectoryServiceClient, err
 			return path
 		},
 	}, c.qclt, true)
-	c.clt = nodev1connect.NewDirectoryServiceClient(hclt, "https://"+authority)
+	c.clt = nodev1connect.NewDirectoryServiceClient(connect.NewClient(
+		connecthttp.NewTransport(hclt, "https://"+authority)))
 	c.authority = authority
 	return c.clt, nil
 }
@@ -246,9 +248,9 @@ func (c *rpcDirectoryClient) Publish(ctx context.Context, entry DirectoryEntry) 
 	if err != nil {
 		return err
 	}
-	_, err = clt.Publish(ctx, connect.NewRequest(&nodev1.PublishRequest{
+	_, err = clt.Publish(ctx, &nodev1.PublishRequest{
 		Entry: entry.pb(),
-	}))
+	})
 	return err
 }
 
@@ -258,12 +260,12 @@ func (c *rpcDirectoryClient) List(ctx context.Context) ([]DirectoryEntry, error)
 	if err != nil {
 		return nil, err
 	}
-	resp, err := clt.List(ctx, connect.NewRequest(&nodev1.ListRequest{}))
+	resp, err := clt.List(ctx, &nodev1.ListRequest{})
 	if err != nil {
 		return nil, err
 	}
-	entries := make([]DirectoryEntry, 0, len(resp.Msg.Entries))
-	for _, pb := range resp.Msg.Entries {
+	entries := make([]DirectoryEntry, 0, len(resp.Entries))
+	for _, pb := range resp.Entries {
 		entry, err := entryFromPB(pb)
 		if err != nil {
 			return nil, fmt.Errorf("decoding an entry: %w", err)

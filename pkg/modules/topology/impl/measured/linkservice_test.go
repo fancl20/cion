@@ -9,7 +9,6 @@ import (
 	"testing/synctest"
 	"time"
 
-	"connectrpc.com/connect"
 	"github.com/quic-go/quic-go/http3"
 	"github.com/scionproto/scion/pkg/addr"
 
@@ -50,14 +49,14 @@ func linkRequest(
 ) (*nodev1.LinkReply, error) {
 
 	sctx := context.WithValue(ctx, peeria.AuthenticatedIAContextKey(), peer)
-	resp, err := svc.Request(sctx, connect.NewRequest(&nodev1.LinkRequest{
+	reply, err := svc.Request(sctx, &nodev1.LinkRequest{
 		LocalAddr: local,
 		IfId:      ifID,
-	}))
+	})
 	if err != nil {
 		return nil, err
 	}
-	return resp.Msg, nil
+	return reply, nil
 }
 
 // linkEntry returns the peer's recorded entry.
@@ -296,14 +295,14 @@ func arriving(
 	sctx := context.WithValue(ctx, peeria.AuthenticatedIAContextKey(), peer)
 	sctx = context.WithValue(sctx, http3.RemoteAddrContextKey,
 		&scion.Addr{IA: peer, IfID: arrival})
-	resp, err := svc.Request(sctx, connect.NewRequest(&nodev1.LinkRequest{
+	reply, err := svc.Request(sctx, &nodev1.LinkRequest{
 		LocalAddr: local,
 		IfId:      ifID,
-	}))
+	})
 	if err != nil {
 		return nil, err
 	}
-	return resp.Msg, nil
+	return reply, nil
 }
 
 // TestLinkServiceConfirmInstallsObservation checks the confirm's agreement

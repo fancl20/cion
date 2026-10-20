@@ -2,17 +2,22 @@ package measured
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"net/netip"
+	"strings"
 	"testing"
 	"testing/synctest"
 	"time"
 
-	"connectrpc.com/connect"
+	"connectrpc.com/connect/v2"
+	"connectrpc.com/connect/v2/connecthttp"
 	"github.com/scionproto/scion/pkg/addr"
 
 	"github.com/fancl20/cion/pkg/libs/peeria"
 	"github.com/fancl20/cion/pkg/libs/scionrpc"
 	nodev1 "github.com/fancl20/cion/proto/node/v1"
+	nodev1connect "github.com/fancl20/cion/proto/node/v1/nodev1connect"
 )
 
 var directoryIA = addr.MustIAFrom(20, 0xfd0000000041)
@@ -23,17 +28,17 @@ func directoryPublish(
 ) error {
 
 	sctx := context.WithValue(ctx, peeria.AuthenticatedIAContextKey(), publisher)
-	_, err := svc.Publish(sctx, connect.NewRequest(&nodev1.PublishRequest{Entry: entry}))
+	_, err := svc.Publish(sctx, &nodev1.PublishRequest{Entry: entry})
 	return err
 }
 
 func directoryList(ctx context.Context, svc *DirectoryService) ([]DirectoryEntry, error) {
-	resp, err := svc.List(ctx, connect.NewRequest(&nodev1.ListRequest{}))
+	resp, err := svc.List(ctx, &nodev1.ListRequest{})
 	if err != nil {
 		return nil, err
 	}
 	var out []DirectoryEntry
-	for _, pb := range resp.Msg.Entries {
+	for _, pb := range resp.Entries {
 		entry, err := entryFromPB(pb)
 		if err != nil {
 			return nil, err
@@ -82,6 +87,44 @@ func TestDirectoryPublishRecordsAuthenticatedIA(t *testing.T) {
 	if err := directoryPublish(context.Background(), svc, directoryIA,
 		directoryEntryPB("nope", "192.0.2.7:30043")); err == nil {
 		t.Error("a publish with a malformed address was recorded")
+	}
+}
+
+// clientOf returns an HTTP client whose every request the handler serves —
+// the connect machinery's round trip with no network beneath it.
+func clientOf(h http.Handler) *http.Client {
+	return &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		return w.Result(), nil
+	})}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+// TestDirectoryReadBound checks the channel's adopted default read bound: a
+// publish past the 4 MiB the connect server reads is refused where it
+// enters, the entry never reaching the store.
+func TestDirectoryReadBound(t *testing.T) {
+	svc := &DirectoryService{Store: NewDirectoryStore()}
+	server := connect.NewServer()
+	nodev1connect.RegisterDirectoryServiceHandler(server, svc)
+	mux := http.NewServeMux()
+	connecthttp.Mount(mux, server)
+	clt := nodev1connect.NewDirectoryServiceClient(connect.NewClient(
+		connecthttp.NewTransport(clientOf(mux), "https://core")))
+
+	oversized := directoryEntryPB(strings.Repeat("a", 5<<20), "192.0.2.7:30043")
+	ctx := context.WithValue(context.Background(),
+		peeria.AuthenticatedIAContextKey(), directoryIA)
+	_, err := clt.Publish(ctx, &nodev1.PublishRequest{Entry: oversized})
+	if code := connect.CodeOf(err); code != connect.CodeResourceExhausted {
+		t.Errorf("the oversized publish = %v, want resource exhaustion", err)
+	}
+	if entries := svc.Store.List(time.Now()); len(entries) != 0 {
+		t.Errorf("the refused publish recorded %d entries, want none", len(entries))
 	}
 }
 

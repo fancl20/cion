@@ -3,13 +3,12 @@ package measured
 import (
 	"context"
 	"errors"
-	"fmt"
 	"log/slog"
 	"net/netip"
 	"sync"
 	"time"
 
-	"connectrpc.com/connect"
+	"connectrpc.com/connect/v2"
 	"github.com/scionproto/scion/pkg/addr"
 
 	"github.com/fancl20/cion/pkg/libs/peeria"
@@ -82,30 +81,29 @@ var _ nodev1connect.LinkServiceHandler = (*LinkService)(nil)
 // entry's locator.
 func (s *LinkService) Request(
 	ctx context.Context,
-	req *connect.Request[nodev1.LinkRequest],
-) (*connect.Response[nodev1.LinkReply], error) {
+	req *nodev1.LinkRequest,
+) (*nodev1.LinkReply, error) {
 
-	if req.Msg == nil {
-		return nil, connect.NewError(connect.CodeInvalidArgument,
-			errors.New("no link request"))
+	if req == nil {
+		return nil, connect.NewError(connect.CodeInvalidArgument, "no link request")
 	}
 	peer := peeria.AuthenticatedIA(ctx)
 	if peer.IsZero() {
 		return nil, connect.NewError(connect.CodePermissionDenied,
-			errors.New("no authenticated ISD-AS; the channel verified no chain"))
+			"no authenticated ISD-AS; the channel verified no chain")
 	}
 	if !s.rateLimiter().Admit(peer) {
-		return nil, connect.NewError(connect.CodeResourceExhausted,
-			fmt.Errorf("peer %s exceeds the admission rate", peer))
+		return nil, connect.Errorf(connect.CodeResourceExhausted,
+			"peer %s exceeds the admission rate", peer)
 	}
-	linkAddr, err := netip.ParseAddrPort(req.Msg.LocalAddr)
+	linkAddr, err := netip.ParseAddrPort(req.LocalAddr)
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInvalidArgument,
-			fmt.Errorf("parsing the requester's link address: %w", err))
+			"parsing the requester's link address").WithCause(err)
 	}
-	if req.Msg.IfId > 0xffff {
+	if req.IfId > 0xffff {
 		return nil, connect.NewError(connect.CodeInvalidArgument,
-			errors.New("interface ID out of range"))
+			"interface ID out of range")
 	}
 	// The request's arrival link, the interface the channel names the
 	// request's connection by: nonzero exactly when the request rode a
@@ -122,19 +120,19 @@ func (s *LinkService) Request(
 	// its own on a fresh address.
 	s.mtx.Lock()
 	defer s.mtx.Unlock()
-	entry, err := s.record(ctx, peer, linkAddr, uint16(req.Msg.IfId), arrival)
+	entry, err := s.record(ctx, peer, linkAddr, uint16(req.IfId), arrival)
 	if errors.Is(err, links.ErrDuplicateNeighbor) || errors.Is(err, links.ErrDuplicateLocal) {
-		entry, err = s.record(ctx, peer, linkAddr, uint16(req.Msg.IfId), arrival)
+		entry, err = s.record(ctx, peer, linkAddr, uint16(req.IfId), arrival)
 	}
 	if err != nil {
 		return nil, err
 	}
 	slog.Info("Link established", "neighbor", peer, "local", entry.Local,
 		"remote", entry.Remote, "interface", entry.IfID)
-	return connect.NewResponse(&nodev1.LinkReply{
+	return &nodev1.LinkReply{
 		LocalAddr: entry.Local.String(),
 		IfId:      uint32(entry.IfID),
-	}), nil
+	}, nil
 }
 
 // record lands the peer's entry as established: a peer the table lacks is
@@ -157,7 +155,8 @@ func (s *LinkService) record(
 	observed := s.arrivalSource(arrival)
 	entry, err := s.Store.ByNeighbor(ctx, peer)
 	if err != nil {
-		return nil, connect.NewError(connect.CodeInternal, err)
+		return nil, connect.NewError(connect.CodeInternal,
+			"reading the neighbor table").WithCause(err)
 	}
 	if entry == nil {
 		// A request that arrived over a direct hop names its own locator:
@@ -170,15 +169,16 @@ func (s *LinkService) record(
 		entries, err := s.Store.All(ctx)
 		if err != nil {
 			return nil, connect.NewError(connect.CodeInternal,
-				fmt.Errorf("reading the link store: %w", err))
+				"reading the link store").WithCause(err)
 		}
 		if live := liveLinks(entries); live >= s.MaxLinks {
-			return nil, connect.NewError(connect.CodeResourceExhausted,
-				fmt.Errorf("link cap reached (%d)", live))
+			return nil, connect.Errorf(connect.CodeResourceExhausted,
+				"link cap reached (%d)", live)
 		}
 		local, err := AllocateLinkAddr(s.Sockets, s.LinkHost, entries)
 		if err != nil {
-			return nil, connect.NewError(connect.CodeInternal, err)
+			return nil, connect.NewError(connect.CodeInternal,
+				"allocating the link address").WithCause(err)
 		}
 		entry = &links.Link{
 			NeighborIA: peer,
@@ -188,7 +188,8 @@ func (s *LinkService) record(
 			State:      links.StateEstablished,
 		}
 		if err := s.Store.Insert(ctx, entry); err != nil {
-			return nil, connect.NewError(connect.CodeInternal, err)
+			return nil, connect.NewError(connect.CodeInternal,
+				"recording the entry").WithCause(err)
 		}
 	} else {
 		// A peer already in the table re-answers with its recorded side; a
@@ -201,7 +202,8 @@ func (s *LinkService) record(
 			entry.Remote = observed
 		}
 		if err := s.Store.Update(ctx, entry); err != nil {
-			return nil, connect.NewError(connect.CodeInternal, err)
+			return nil, connect.NewError(connect.CodeInternal,
+				"recording the entry").WithCause(err)
 		}
 	}
 	return entry, nil

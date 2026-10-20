@@ -9,7 +9,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"connectrpc.com/connect"
+	"connectrpc.com/connect/v2"
+	"connectrpc.com/connect/v2/connecthttp"
 	"github.com/quic-go/quic-go/http3"
 	"github.com/scionproto/scion/pkg/addr"
 	"github.com/scionproto/scion/pkg/scrypto/cppki"
@@ -84,12 +85,13 @@ func submit(
 ) (cppki.SignedTRC, error) {
 
 	t.Helper()
-	clt := votingv1connect.NewVotingServiceClient(clientOf(h), "https://core")
-	resp, err := clt.Submit(ctx, connect.NewRequest(&votingv1.SubmitRequest{Trc: trc.Raw}))
+	clt := votingv1connect.NewVotingServiceClient(connect.NewClient(
+		connecthttp.NewTransport(clientOf(h), "https://core")))
+	resp, err := clt.Submit(ctx, &votingv1.SubmitRequest{Trc: trc.Raw})
 	if err != nil {
 		return cppki.SignedTRC{}, err
 	}
-	return cppki.DecodeSignedTRC(resp.Msg.Trc)
+	return cppki.DecodeSignedTRC(resp.Trc)
 }
 
 // fixtureTRC returns a decodable signed TRC, the artifact's shape alone

@@ -10,13 +10,15 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/http"
 	"net/netip"
 	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"time"
 
-	"connectrpc.com/connect"
+	"connectrpc.com/connect/v2"
+	"connectrpc.com/connect/v2/connecthttp"
 	"github.com/scionproto/scion/pkg/addr"
 
 	"github.com/fancl20/cion/pkg/libs/loops"
@@ -396,17 +398,31 @@ func (z *Provider) assemble() error {
 }
 
 // Mounts returns the measured provider's services: the in-band link service
-// on every node, the node directory's beside it on the core.
+// on every node, the node directory's beside it on the core. Both register
+// on the one connect server, which connecthttp.Mount spreads over a private
+// mux; the tuples carry each service name's canonical pattern with that mux
+// as their handler.
 func (z *Provider) Mounts() ([]scionrpc.Mount, error) {
 	if err := z.assemble(); err != nil {
 		return nil, err
 	}
-	path, handler := nodev1connect.NewLinkServiceHandler(z.links)
-	mounts := []scionrpc.Mount{{Pattern: path, Handler: handler}}
+	server := connect.NewServer()
+	nodev1connect.RegisterLinkServiceHandler(server, z.links)
 	if z.directoryStore != nil {
-		path, handler := nodev1connect.NewDirectoryServiceHandler(
+		nodev1connect.RegisterDirectoryServiceHandler(server,
 			&DirectoryService{Store: z.directoryStore})
-		mounts = append(mounts, scionrpc.Mount{Pattern: path, Handler: handler})
+	}
+	mux := http.NewServeMux()
+	connecthttp.Mount(mux, server)
+	mounts := []scionrpc.Mount{{
+		Pattern: "/" + nodev1connect.LinkServiceName + "/",
+		Handler: mux,
+	}}
+	if z.directoryStore != nil {
+		mounts = append(mounts, scionrpc.Mount{
+			Pattern: "/" + nodev1connect.DirectoryServiceName + "/",
+			Handler: mux,
+		})
 	}
 	return mounts, nil
 }
@@ -745,17 +761,17 @@ func (c *linkClient) Link(
 	}
 	clt, ok := c.clts[authority]
 	if !ok {
-		clt = nodev1connect.NewLinkServiceClient(c.peer.OneHopClient(),
-			"https://"+authority)
+		clt = nodev1connect.NewLinkServiceClient(connect.NewClient(
+			connecthttp.NewTransport(c.peer.OneHopClient(), "https://"+authority)))
 		c.clts[authority] = clt
 	}
 	c.mtx.Unlock()
-	resp, err := clt.Request(ctx, connect.NewRequest(&nodev1.LinkRequest{
+	reply, err := clt.Request(ctx, &nodev1.LinkRequest{
 		LocalAddr: local.String(),
 		IfId:      uint32(ifID),
-	}))
+	})
 	if err != nil {
 		return nil, err
 	}
-	return resp.Msg, nil
+	return reply, nil
 }

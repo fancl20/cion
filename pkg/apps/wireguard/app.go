@@ -14,6 +14,8 @@ import (
 	"sync"
 	"time"
 
+	"connectrpc.com/connect/v2"
+	"connectrpc.com/connect/v2/connecthttp"
 	"github.com/scionproto/scion/pkg/addr"
 	spath "github.com/scionproto/scion/pkg/slayers/path/scion"
 	"golang.zx2c4.com/wireguard/device"
@@ -620,14 +622,16 @@ func (a *App) serveDirectory(ctx context.Context) {
 func (a *App) HTTPSHandler() http.Handler { return nil }
 
 // DirectoryHandler is the core's directory HTTP handler: the ConnectRPC
-// service behind the middleware that peers each request's verified chain
-// into its context.
+// service registered on a connect server, connecthttp.Mount spreading it
+// over a private mux, behind the middleware that peers each request's
+// verified chain into its context.
 func (a *App) DirectoryHandler() http.Handler {
-	path, handler := wireguardv1connect.NewDirectoryServiceHandler(
+	server := connect.NewServer()
+	wireguardv1connect.RegisterDirectoryServiceHandler(server,
 		&DirectoryService{Store: a.cfg.Store, Cnt: a.cnt})
 	mux := http.NewServeMux()
-	mux.Handle(path, Authenticate(handler))
-	return mux
+	connecthttp.Mount(mux, server)
+	return Authenticate(mux)
 }
 
 // Close releases what New bound: the devices close, the sockets retire with

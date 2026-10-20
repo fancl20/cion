@@ -4,6 +4,7 @@ go 1.27.0
 
 require (
 	connectrpc.com/connect v1.21.0
+	connectrpc.com/connect/v2 v2.0.1
 	github.com/caddyserver/certmagic v0.25.4
 	github.com/google/go-cmp v0.7.0
 	github.com/gopacket/gopacket v1.7.3

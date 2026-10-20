@@ -5,137 +5,133 @@
 package nodev1connect
 
 import (
-	connect "connectrpc.com/connect"
+	connect "connectrpc.com/connect/v2"
 	context "context"
-	errors "errors"
 	v1 "github.com/fancl20/cion/proto/node/v1"
-	http "net/http"
-	strings "strings"
+	sync "sync"
 )
-
-// This is a compile-time assertion to ensure that this generated file and the connect package are
-// compatible. If you get a compiler error that this constant is not defined, this code was
-// generated with a version of connect newer than the one compiled into your binary. You can fix the
-// problem by either regenerating this code with an older version of connect or updating the connect
-// version compiled into your binary.
-const _ = connect.IsAtLeastVersion1_13_0
 
 const (
 	// DirectoryServiceName is the fully-qualified name of the DirectoryService service.
 	DirectoryServiceName = "node.v1.DirectoryService"
 )
 
-// These constants are the fully-qualified names of the RPCs defined in this package. They're
-// exposed at runtime as Spec.Procedure and as the final two segments of the HTTP route.
+// These constants are the procedure names of the RPCs defined in this package. They're exposed at
+// runtime as Spec.Procedure and as the final two segments of the HTTP route.
 //
 // Note that these are different from the fully-qualified method names used by
 // google.golang.org/protobuf/reflect/protoreflect. To convert from these constants to
 // reflection-formatted method names, remove the leading slash and convert the remaining slash to a
 // period.
 const (
-	// DirectoryServicePublishProcedure is the fully-qualified name of the DirectoryService's Publish
-	// RPC.
+	// DirectoryServicePublishProcedure is the procedure name of the DirectoryService's Publish RPC.
 	DirectoryServicePublishProcedure = "/node.v1.DirectoryService/Publish"
-	// DirectoryServiceListProcedure is the fully-qualified name of the DirectoryService's List RPC.
+	// DirectoryServiceListProcedure is the procedure name of the DirectoryService's List RPC.
 	DirectoryServiceListProcedure = "/node.v1.DirectoryService/List"
+)
+
+var (
+	directoryServicePublishSpec = sync.OnceValue(func() connect.Spec {
+		return connect.Spec{
+			StreamType: connect.StreamTypeUnary,
+			Schema:     v1.File_proto_node_v1_directory_proto.Services().ByName("DirectoryService").Methods().ByName("Publish"),
+			Procedure:  DirectoryServicePublishProcedure,
+		}
+	})
+	directoryServiceListSpec = sync.OnceValue(func() connect.Spec {
+		return connect.Spec{
+			StreamType: connect.StreamTypeUnary,
+			Schema:     v1.File_proto_node_v1_directory_proto.Services().ByName("DirectoryService").Methods().ByName("List"),
+			Procedure:  DirectoryServiceListProcedure,
+		}
+	})
 )
 
 // DirectoryServiceClient is a client for the node.v1.DirectoryService service.
 type DirectoryServiceClient interface {
 	// Publish records the caller's entry.
-	Publish(context.Context, *connect.Request[v1.PublishRequest]) (*connect.Response[v1.PublishResponse], error)
+	Publish(context.Context, *v1.PublishRequest) (*v1.PublishResponse, error)
 	// List returns every published entry.
-	List(context.Context, *connect.Request[v1.ListRequest]) (*connect.Response[v1.ListResponse], error)
+	List(context.Context, *v1.ListRequest) (*v1.ListResponse, error)
 }
 
-// NewDirectoryServiceClient constructs a client for the node.v1.DirectoryService service. By
-// default, it uses the Connect protocol with the binary Protobuf Codec, asks for gzipped responses,
-// and sends uncompressed requests. To use the gRPC or gRPC-Web protocols, supply the
-// connect.WithGRPC() or connect.WithGRPCWeb() options.
-//
-// The URL supplied here should be the base URL for the Connect or gRPC server (for example,
-// http://api.acme.com or https://acme.com/grpc).
-func NewDirectoryServiceClient(httpClient connect.HTTPClient, baseURL string, opts ...connect.ClientOption) DirectoryServiceClient {
-	baseURL = strings.TrimRight(baseURL, "/")
-	directoryServiceMethods := v1.File_proto_node_v1_directory_proto.Services().ByName("DirectoryService").Methods()
-	return &directoryServiceClient{
-		publish: connect.NewClient[v1.PublishRequest, v1.PublishResponse](
-			httpClient,
-			baseURL+DirectoryServicePublishProcedure,
-			connect.WithSchema(directoryServiceMethods.ByName("Publish")),
-			connect.WithClientOptions(opts...),
-		),
-		list: connect.NewClient[v1.ListRequest, v1.ListResponse](
-			httpClient,
-			baseURL+DirectoryServiceListProcedure,
-			connect.WithSchema(directoryServiceMethods.ByName("List")),
-			connect.WithClientOptions(opts...),
-		),
-	}
-}
-
-// directoryServiceClient implements DirectoryServiceClient.
-type directoryServiceClient struct {
-	publish *connect.Client[v1.PublishRequest, v1.PublishResponse]
-	list    *connect.Client[v1.ListRequest, v1.ListResponse]
-}
-
-// Publish calls node.v1.DirectoryService.Publish.
-func (c *directoryServiceClient) Publish(ctx context.Context, req *connect.Request[v1.PublishRequest]) (*connect.Response[v1.PublishResponse], error) {
-	return c.publish.CallUnary(ctx, req)
-}
-
-// List calls node.v1.DirectoryService.List.
-func (c *directoryServiceClient) List(ctx context.Context, req *connect.Request[v1.ListRequest]) (*connect.Response[v1.ListResponse], error) {
-	return c.list.CallUnary(ctx, req)
+// NewDirectoryServiceClient constructs a client for the node.v1.DirectoryService service. Multiple
+// service clients may share a single connect.Client.
+func NewDirectoryServiceClient(client *connect.Client) DirectoryServiceClient {
+	return &directoryServiceClient{client: client}
 }
 
 // DirectoryServiceHandler is an implementation of the node.v1.DirectoryService service.
 type DirectoryServiceHandler interface {
 	// Publish records the caller's entry.
-	Publish(context.Context, *connect.Request[v1.PublishRequest]) (*connect.Response[v1.PublishResponse], error)
+	Publish(context.Context, *v1.PublishRequest) (*v1.PublishResponse, error)
 	// List returns every published entry.
-	List(context.Context, *connect.Request[v1.ListRequest]) (*connect.Response[v1.ListResponse], error)
+	List(context.Context, *v1.ListRequest) (*v1.ListResponse, error)
 }
 
-// NewDirectoryServiceHandler builds an HTTP handler from the service implementation. It returns the
-// path on which to mount the handler and the handler itself.
-//
-// By default, handlers support the Connect, gRPC, and gRPC-Web protocols with the binary Protobuf
-// and JSON codecs. They also support gzip compression.
-func NewDirectoryServiceHandler(svc DirectoryServiceHandler, opts ...connect.HandlerOption) (string, http.Handler) {
-	directoryServiceMethods := v1.File_proto_node_v1_directory_proto.Services().ByName("DirectoryService").Methods()
-	directoryServicePublishHandler := connect.NewUnaryHandler(
-		DirectoryServicePublishProcedure,
-		svc.Publish,
-		connect.WithSchema(directoryServiceMethods.ByName("Publish")),
-		connect.WithHandlerOptions(opts...),
+// RegisterDirectoryServiceHandler registers svc as the node.v1.DirectoryService implementation on
+// server.
+func RegisterDirectoryServiceHandler(server *connect.Server, svc DirectoryServiceHandler) {
+	adapter := directoryServiceHandler{svc: svc}
+	server.Register(
+		connect.Method{Spec: directoryServicePublishSpec(), Handler: adapter.publish},
+		connect.Method{Spec: directoryServiceListSpec(), Handler: adapter.list},
 	)
-	directoryServiceListHandler := connect.NewUnaryHandler(
-		DirectoryServiceListProcedure,
-		svc.List,
-		connect.WithSchema(directoryServiceMethods.ByName("List")),
-		connect.WithHandlerOptions(opts...),
-	)
-	return "/node.v1.DirectoryService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case DirectoryServicePublishProcedure:
-			directoryServicePublishHandler.ServeHTTP(w, r)
-		case DirectoryServiceListProcedure:
-			directoryServiceListHandler.ServeHTTP(w, r)
-		default:
-			http.NotFound(w, r)
-		}
-	})
 }
 
 // UnimplementedDirectoryServiceHandler returns CodeUnimplemented from all methods.
 type UnimplementedDirectoryServiceHandler struct{}
 
-func (UnimplementedDirectoryServiceHandler) Publish(context.Context, *connect.Request[v1.PublishRequest]) (*connect.Response[v1.PublishResponse], error) {
-	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("node.v1.DirectoryService.Publish is not implemented"))
+func (UnimplementedDirectoryServiceHandler) Publish(context.Context, *v1.PublishRequest) (*v1.PublishResponse, error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, "node.v1.DirectoryService.Publish is not implemented")
 }
 
-func (UnimplementedDirectoryServiceHandler) List(context.Context, *connect.Request[v1.ListRequest]) (*connect.Response[v1.ListResponse], error) {
-	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("node.v1.DirectoryService.List is not implemented"))
+func (UnimplementedDirectoryServiceHandler) List(context.Context, *v1.ListRequest) (*v1.ListResponse, error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, "node.v1.DirectoryService.List is not implemented")
+}
+
+type directoryServiceClient struct {
+	client *connect.Client
+}
+
+func (c *directoryServiceClient) Publish(ctx context.Context, req *v1.PublishRequest) (*v1.PublishResponse, error) {
+	var res v1.PublishResponse
+	if err := c.client.CallUnary(ctx, directoryServicePublishSpec(), req, &res); err != nil {
+		return nil, err
+	}
+	return &res, nil
+}
+
+func (c *directoryServiceClient) List(ctx context.Context, req *v1.ListRequest) (*v1.ListResponse, error) {
+	var res v1.ListResponse
+	if err := c.client.CallUnary(ctx, directoryServiceListSpec(), req, &res); err != nil {
+		return nil, err
+	}
+	return &res, nil
+}
+
+type directoryServiceHandler struct{ svc DirectoryServiceHandler }
+
+func (h directoryServiceHandler) publish(ctx context.Context, _ connect.Spec, stream connect.ServerStream) error {
+	var req v1.PublishRequest
+	if err := stream.Receive(&req); err != nil {
+		return err
+	}
+	res, err := h.svc.Publish(ctx, &req)
+	if err != nil {
+		return err
+	}
+	return stream.Send(res)
+}
+
+func (h directoryServiceHandler) list(ctx context.Context, _ connect.Spec, stream connect.ServerStream) error {
+	var req v1.ListRequest
+	if err := stream.Receive(&req); err != nil {
+		return err
+	}
+	res, err := h.svc.List(ctx, &req)
+	if err != nil {
+		return err
+	}
+	return stream.Send(res)
 }

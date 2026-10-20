@@ -6,7 +6,8 @@ import (
 	"net/http"
 	"sync"
 
-	"connectrpc.com/connect"
+	"connectrpc.com/connect/v2"
+	"connectrpc.com/connect/v2/connecthttp"
 	"github.com/scionproto/scion/pkg/scrypto/cppki"
 
 	"github.com/fancl20/cion/pkg/core/trust"
@@ -58,12 +59,13 @@ func (s *Submitter) SubmitTRC(
 	authority := scionrpc.PeerAuthority(core)
 	s.mtx.Lock()
 	if s.clt == nil || s.authority != authority {
-		s.clt = votingv1connect.NewVotingServiceClient(s.hclt, "https://"+authority)
+		s.clt = votingv1connect.NewVotingServiceClient(connect.NewClient(
+			connecthttp.NewTransport(s.hclt, "https://"+authority)))
 		s.authority = authority
 	}
 	clt := s.clt
 	s.mtx.Unlock()
-	resp, err := clt.Submit(ctx, connect.NewRequest(&votingv1.SubmitRequest{Trc: trc.Raw}))
+	resp, err := clt.Submit(ctx, &votingv1.SubmitRequest{Trc: trc.Raw})
 	if err != nil {
 		// The endpoint answered, but no voting application is mounted on
 		// it: the drafts' services and the mounted ones share the socket,
@@ -74,5 +76,5 @@ func (s *Submitter) SubmitTRC(
 		}
 		return cppki.SignedTRC{}, err
 	}
-	return cppki.DecodeSignedTRC(resp.Msg.Trc)
+	return cppki.DecodeSignedTRC(resp.Trc)
 }

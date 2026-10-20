@@ -5,106 +5,94 @@
 package nodev1connect
 
 import (
-	connect "connectrpc.com/connect"
+	connect "connectrpc.com/connect/v2"
 	context "context"
-	errors "errors"
 	v1 "github.com/fancl20/cion/proto/node/v1"
-	http "net/http"
-	strings "strings"
+	sync "sync"
 )
-
-// This is a compile-time assertion to ensure that this generated file and the connect package are
-// compatible. If you get a compiler error that this constant is not defined, this code was
-// generated with a version of connect newer than the one compiled into your binary. You can fix the
-// problem by either regenerating this code with an older version of connect or updating the connect
-// version compiled into your binary.
-const _ = connect.IsAtLeastVersion1_13_0
 
 const (
 	// LinkServiceName is the fully-qualified name of the LinkService service.
 	LinkServiceName = "node.v1.LinkService"
 )
 
-// These constants are the fully-qualified names of the RPCs defined in this package. They're
-// exposed at runtime as Spec.Procedure and as the final two segments of the HTTP route.
+// These constants are the procedure names of the RPCs defined in this package. They're exposed at
+// runtime as Spec.Procedure and as the final two segments of the HTTP route.
 //
 // Note that these are different from the fully-qualified method names used by
 // google.golang.org/protobuf/reflect/protoreflect. To convert from these constants to
 // reflection-formatted method names, remove the leading slash and convert the remaining slash to a
 // period.
 const (
-	// LinkServiceRequestProcedure is the fully-qualified name of the LinkService's Request RPC.
+	// LinkServiceRequestProcedure is the procedure name of the LinkService's Request RPC.
 	LinkServiceRequestProcedure = "/node.v1.LinkService/Request"
+)
+
+var (
+	linkServiceRequestSpec = sync.OnceValue(func() connect.Spec {
+		return connect.Spec{
+			StreamType: connect.StreamTypeUnary,
+			Schema:     v1.File_proto_node_v1_link_proto.Services().ByName("LinkService").Methods().ByName("Request"),
+			Procedure:  LinkServiceRequestProcedure,
+		}
+	})
 )
 
 // LinkServiceClient is a client for the node.v1.LinkService service.
 type LinkServiceClient interface {
 	// Request admits the caller's link and answers the acceptor's side of it.
-	Request(context.Context, *connect.Request[v1.LinkRequest]) (*connect.Response[v1.LinkReply], error)
+	Request(context.Context, *v1.LinkRequest) (*v1.LinkReply, error)
 }
 
-// NewLinkServiceClient constructs a client for the node.v1.LinkService service. By default, it uses
-// the Connect protocol with the binary Protobuf Codec, asks for gzipped responses, and sends
-// uncompressed requests. To use the gRPC or gRPC-Web protocols, supply the connect.WithGRPC() or
-// connect.WithGRPCWeb() options.
-//
-// The URL supplied here should be the base URL for the Connect or gRPC server (for example,
-// http://api.acme.com or https://acme.com/grpc).
-func NewLinkServiceClient(httpClient connect.HTTPClient, baseURL string, opts ...connect.ClientOption) LinkServiceClient {
-	baseURL = strings.TrimRight(baseURL, "/")
-	linkServiceMethods := v1.File_proto_node_v1_link_proto.Services().ByName("LinkService").Methods()
-	return &linkServiceClient{
-		request: connect.NewClient[v1.LinkRequest, v1.LinkReply](
-			httpClient,
-			baseURL+LinkServiceRequestProcedure,
-			connect.WithSchema(linkServiceMethods.ByName("Request")),
-			connect.WithClientOptions(opts...),
-		),
-	}
-}
-
-// linkServiceClient implements LinkServiceClient.
-type linkServiceClient struct {
-	request *connect.Client[v1.LinkRequest, v1.LinkReply]
-}
-
-// Request calls node.v1.LinkService.Request.
-func (c *linkServiceClient) Request(ctx context.Context, req *connect.Request[v1.LinkRequest]) (*connect.Response[v1.LinkReply], error) {
-	return c.request.CallUnary(ctx, req)
+// NewLinkServiceClient constructs a client for the node.v1.LinkService service. Multiple service
+// clients may share a single connect.Client.
+func NewLinkServiceClient(client *connect.Client) LinkServiceClient {
+	return &linkServiceClient{client: client}
 }
 
 // LinkServiceHandler is an implementation of the node.v1.LinkService service.
 type LinkServiceHandler interface {
 	// Request admits the caller's link and answers the acceptor's side of it.
-	Request(context.Context, *connect.Request[v1.LinkRequest]) (*connect.Response[v1.LinkReply], error)
+	Request(context.Context, *v1.LinkRequest) (*v1.LinkReply, error)
 }
 
-// NewLinkServiceHandler builds an HTTP handler from the service implementation. It returns the path
-// on which to mount the handler and the handler itself.
-//
-// By default, handlers support the Connect, gRPC, and gRPC-Web protocols with the binary Protobuf
-// and JSON codecs. They also support gzip compression.
-func NewLinkServiceHandler(svc LinkServiceHandler, opts ...connect.HandlerOption) (string, http.Handler) {
-	linkServiceMethods := v1.File_proto_node_v1_link_proto.Services().ByName("LinkService").Methods()
-	linkServiceRequestHandler := connect.NewUnaryHandler(
-		LinkServiceRequestProcedure,
-		svc.Request,
-		connect.WithSchema(linkServiceMethods.ByName("Request")),
-		connect.WithHandlerOptions(opts...),
+// RegisterLinkServiceHandler registers svc as the node.v1.LinkService implementation on server.
+func RegisterLinkServiceHandler(server *connect.Server, svc LinkServiceHandler) {
+	adapter := linkServiceHandler{svc: svc}
+	server.Register(
+		connect.Method{Spec: linkServiceRequestSpec(), Handler: adapter.request},
 	)
-	return "/node.v1.LinkService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case LinkServiceRequestProcedure:
-			linkServiceRequestHandler.ServeHTTP(w, r)
-		default:
-			http.NotFound(w, r)
-		}
-	})
 }
 
 // UnimplementedLinkServiceHandler returns CodeUnimplemented from all methods.
 type UnimplementedLinkServiceHandler struct{}
 
-func (UnimplementedLinkServiceHandler) Request(context.Context, *connect.Request[v1.LinkRequest]) (*connect.Response[v1.LinkReply], error) {
-	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("node.v1.LinkService.Request is not implemented"))
+func (UnimplementedLinkServiceHandler) Request(context.Context, *v1.LinkRequest) (*v1.LinkReply, error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, "node.v1.LinkService.Request is not implemented")
+}
+
+type linkServiceClient struct {
+	client *connect.Client
+}
+
+func (c *linkServiceClient) Request(ctx context.Context, req *v1.LinkRequest) (*v1.LinkReply, error) {
+	var res v1.LinkReply
+	if err := c.client.CallUnary(ctx, linkServiceRequestSpec(), req, &res); err != nil {
+		return nil, err
+	}
+	return &res, nil
+}
+
+type linkServiceHandler struct{ svc LinkServiceHandler }
+
+func (h linkServiceHandler) request(ctx context.Context, _ connect.Spec, stream connect.ServerStream) error {
+	var req v1.LinkRequest
+	if err := stream.Receive(&req); err != nil {
+		return err
+	}
+	res, err := h.svc.Request(ctx, &req)
+	if err != nil {
+		return err
+	}
+	return stream.Send(res)
 }

@@ -7,7 +7,8 @@ import (
 	"net/netip"
 	"sync"
 
-	"connectrpc.com/connect"
+	"connectrpc.com/connect/v2"
+	"connectrpc.com/connect/v2/connecthttp"
 	"github.com/quic-go/quic-go"
 	"github.com/scionproto/scion/pkg/addr"
 	spath "github.com/scionproto/scion/pkg/slayers/path/scion"
@@ -86,7 +87,8 @@ func (c *rpcDirectoryClient) client() (wireguardv1connect.DirectoryServiceClient
 			return path
 		},
 	}, c.qclt, true)
-	c.clt = wireguardv1connect.NewDirectoryServiceClient(hclt, "https://"+authority)
+	c.clt = wireguardv1connect.NewDirectoryServiceClient(connect.NewClient(
+		connecthttp.NewTransport(hclt, "https://"+authority)))
 	c.authority = authority
 	return c.clt, nil
 }
@@ -98,13 +100,13 @@ func (c *rpcDirectoryClient) Publish(ctx context.Context, entry Entry) (netip.Pr
 	if err != nil {
 		return netip.Prefix{}, err
 	}
-	resp, err := clt.Publish(ctx, connect.NewRequest(&wireguardv1.PublishRequest{
+	resp, err := clt.Publish(ctx, &wireguardv1.PublishRequest{
 		Entry: entry.pb(),
-	}))
+	})
 	if err != nil {
 		return netip.Prefix{}, err
 	}
-	subnet, err := netip.ParsePrefix(resp.Msg.OverlaySubnet)
+	subnet, err := netip.ParsePrefix(resp.OverlaySubnet)
 	if err != nil {
 		return netip.Prefix{}, fmt.Errorf("parsing the assigned slice: %w", err)
 	}
@@ -117,21 +119,21 @@ func (c *rpcDirectoryClient) List(ctx context.Context) (Directory, error) {
 	if err != nil {
 		return Directory{}, err
 	}
-	resp, err := clt.List(ctx, connect.NewRequest(&wireguardv1.ListRequest{}))
+	resp, err := clt.List(ctx, &wireguardv1.ListRequest{})
 	if err != nil {
 		return Directory{}, err
 	}
 	var directory Directory
-	directory.Nodes = make([]Entry, 0, len(resp.Msg.Entries))
-	for _, pb := range resp.Msg.Entries {
+	directory.Nodes = make([]Entry, 0, len(resp.Entries))
+	for _, pb := range resp.Entries {
 		entry, err := entryFromPB(pb)
 		if err != nil {
 			return Directory{}, fmt.Errorf("decoding an entry: %w", err)
 		}
 		directory.Nodes = append(directory.Nodes, entry)
 	}
-	directory.Hosts = make([]HostEntry, 0, len(resp.Msg.Hosts))
-	for _, pb := range resp.Msg.Hosts {
+	directory.Hosts = make([]HostEntry, 0, len(resp.Hosts))
+	for _, pb := range resp.Hosts {
 		entry, err := hostEntryFromPB(pb)
 		if err != nil {
 			return Directory{}, fmt.Errorf("decoding a host entry: %w", err)

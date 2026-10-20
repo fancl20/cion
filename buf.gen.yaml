@@ -4,8 +4,9 @@
 # connect package beside the messages, the pattern the vendored SCION
 # control-plane protos follow.
 # Requires
-# protoc-gen-go v1.36.12 and protoc-gen-connect-go v1.21.0 on PATH, matching
-# the module's protobuf and connect versions.
+# protoc-gen-go v1.36.12 and protoc-gen-connect-go v2.0.1 on PATH, the
+# connect plugin installed from the connectrpc.com/connect/v2 module,
+# matching the module's protobuf and connect versions.
 version: v2
 plugins:
   - local: protoc-gen-go
