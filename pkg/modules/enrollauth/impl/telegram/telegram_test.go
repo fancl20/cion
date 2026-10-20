@@ -32,15 +32,17 @@ import (
 // testChat is the configured chat of the authorizers under test.
 const testChat = int64(-1002147483647)
 
-// botDouble is a local Bot API double: it records the messages sent and the
-// acknowledgements answered, and long-polls the updates the test presses and
-// sends.
+// botDouble is a local Bot API double: it records the messages sent, the
+// rewrites made, the acknowledgements answered, and the commands registered,
+// and long-polls the updates the test presses and sends.
 type botDouble struct {
-	mtx     sync.Mutex
-	prompts []tgSendMessage
-	answers []tgAnswer
-	updates []tgUpdate
-	nextID  int64
+	mtx      sync.Mutex
+	prompts  []tgSendMessage
+	answers  []tgAnswer
+	edits    []tgEditMessage
+	commands []tgCommand
+	updates  []tgUpdate
+	nextID   int64
 	// url is the double's base URL.
 	url string
 	// waiting is closed and rebuilt on every press, waking the long polls.
@@ -63,7 +65,7 @@ func newBotDouble(t *testing.T) *botDouble {
 	return d
 }
 
-// handle serves the Bot API's three calls.
+// handle serves the Bot API's calls.
 func (d *botDouble) handle(w http.ResponseWriter, r *http.Request) {
 	var body []byte
 	if r.Body != nil {
@@ -124,21 +126,57 @@ func (d *botDouble) handle(w http.ResponseWriter, r *http.Request) {
 		default:
 		}
 		writeJSON(w, true)
+	case "/bot7:test/editMessageText":
+		var m tgEditMessage
+		if err := json.Unmarshal(body, &m); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		d.mtx.Lock()
+		d.edits = append(d.edits, m)
+		d.mtx.Unlock()
+		writeJSON(w, tgSent{MessageID: m.MessageID})
+	case "/bot7:test/setMyCommands":
+		var c tgSetCommands
+		if err := json.Unmarshal(body, &c); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		d.mtx.Lock()
+		d.commands = c.Commands
+		d.mtx.Unlock()
+		writeJSON(w, true)
 	default:
 		http.Error(w, "unknown method", http.StatusNotFound)
 	}
 }
 
-// press enqueues one answer button press from the given chat.
+// press enqueues one answer button press from the given chat, riding the
+// recorded message whose button the data names — the message a real press
+// rides — or a bare one when the data belongs to no sent button.
 func (d *botDouble) press(chat int64, data string) {
 	d.mtx.Lock()
 	d.nextID++
+	var text string
+	for _, p := range d.prompts {
+		for _, row := range p.ReplyMarkup.InlineKeyboard {
+			for _, b := range row {
+				if b.CallbackData == data {
+					text = p.Text
+				}
+			}
+		}
+	}
 	d.updates = append(d.updates, tgUpdate{
 		UpdateID: d.nextID,
 		Callback: &tgCallbackQuery{
-			ID:      fmt.Sprintf("%d", d.nextID),
-			Data:    data,
-			Message: &tgMessage{Chat: tgChat{ID: chat}},
+			ID:   fmt.Sprintf("%d", d.nextID),
+			Data: data,
+			Message: &tgMessage{
+				MessageID: d.nextID,
+				Chat:      tgChat{ID: chat},
+				Text:      text,
+			},
 		},
 	})
 	waiting := d.waiting
@@ -148,7 +186,7 @@ func (d *botDouble) press(chat int64, data string) {
 }
 
 // say enqueues one chat message from the given chat — the operator's own
-// words, the invitation flow's side of the conversation.
+// words, the auth key flow's side of the conversation.
 func (d *botDouble) say(chat int64, text string) {
 	d.mtx.Lock()
 	d.nextID++
@@ -174,6 +212,20 @@ func (d *botDouble) promptCount() int {
 	d.mtx.Lock()
 	defer d.mtx.Unlock()
 	return len(d.prompts)
+}
+
+// edit returns the recorded rewrite number i.
+func (d *botDouble) edit(i int) tgEditMessage {
+	d.mtx.Lock()
+	defer d.mtx.Unlock()
+	return d.edits[i]
+}
+
+// editCount returns the number of messages rewritten.
+func (d *botDouble) editCount() int {
+	d.mtx.Lock()
+	defer d.mtx.Unlock()
+	return len(d.edits)
 }
 
 // setFail makes every send fail.
@@ -347,6 +399,18 @@ func TestTelegramPromptAndDecide(t *testing.T) {
 	if got := tg.Authorize(context.Background(), facts).Note; got == "" {
 		t.Error("an approved decision carries no note for the registry to record")
 	}
+	// The decided prompt is rewritten to its verdict: the text gains the
+	// outcome's last line, and the edit carries no keyboard — the buttons
+	// leave with the verdict.
+	waitFor(t, "the approved prompt to be rewritten", func() bool {
+		return d.editCount() == 1
+	})
+	edit := d.edit(0)
+	if edit.ChatID != testChat || !strings.HasSuffix(edit.Text, "\nApproved") ||
+		!strings.Contains(edit.Text, facts.Keys[0]) {
+
+		t.Errorf("approved edit = %+v, want the prompt's text ending in the verdict", edit)
+	}
 
 	// Deny denies a fresh identity.
 	key2 := newKey(t)
@@ -386,6 +450,14 @@ func TestTelegramPromptAndDecide(t *testing.T) {
 	waitFor(t, "the deny to land", func() bool {
 		return pendingOf(tg, context.Background(), facts2) == enrollauth.AdmissionDeny
 	})
+	// The denied prompt is rewritten the same way, and the ignored answers
+	// along the way rewrote nothing.
+	waitFor(t, "the denied prompt to be rewritten", func() bool {
+		return d.editCount() == 2
+	})
+	if got := d.edit(1).Text; !strings.HasSuffix(got, "\nDenied") {
+		t.Errorf("denied edit text = %q, want it ending in the verdict", got)
+	}
 }
 
 // TestTelegramRegistrationPrompts checks the registration boundary's bare
@@ -616,41 +688,57 @@ func TestTelegramSweepExpiredDecisions(t *testing.T) {
 	})
 }
 
-// lastInvitation waits for the operator's mint request to be answered and
-// returns the invitation the reply carries.
-func lastInvitation(t *testing.T, d *botDouble) string {
+// lastAuthKey waits for the operator's mint request to be answered and
+// returns the auth key the reply carries.
+func lastAuthKey(t *testing.T, d *botDouble) string {
 	t.Helper()
-	waitFor(t, "the minted invitation's reply", func() bool {
+	waitFor(t, "the minted auth key's reply", func() bool {
 		if d.promptCount() == 0 {
 			return false
 		}
-		return strings.Contains(d.prompt(d.promptCount()-1).Text, invitePrefix)
+		return strings.Contains(d.prompt(d.promptCount()-1).Text, authKeyPrefix)
 	})
 	for line := range strings.SplitSeq(d.prompt(d.promptCount()-1).Text, "\n") {
-		if strings.HasPrefix(line, invitePrefix) {
+		if strings.HasPrefix(line, authKeyPrefix) {
 			return line
 		}
 	}
-	t.Fatalf("reply = %q, want an invitation in it", d.prompt(d.promptCount()-1).Text)
+	t.Fatalf("reply = %q, want an auth key in it", d.prompt(d.promptCount()-1).Text)
 	return ""
 }
 
-// TestTelegramInvitation walks the invitation flow: the configured chat asks,
+// TestTelegramAuthKey walks the auth key flow: the configured chat asks,
 // the bot mints and replies, a registration presenting the unspent key
 // approves and spends it, and a second presentation is a bare joiner's prompt
-// — a stale invitation fails toward the human, not closed. Another chat can
+// — a stale auth key fails toward the human, not closed. Another chat can
 // neither mint nor retire.
-func TestTelegramInvitation(t *testing.T) {
+func TestTelegramAuthKey(t *testing.T) {
 	d := newBotDouble(t)
 	tg := runTelegram(t, d, nil)
+
+	// The console's two commands are registered for the clients' menus.
+	waitFor(t, "the console's commands to register", func() bool {
+		d.mtx.Lock()
+		defer d.mtx.Unlock()
+		return len(d.commands) == 2
+	})
+	d.mtx.Lock()
+	first, second := d.commands[0], d.commands[1]
+	d.mtx.Unlock()
+	if first.Command != "create_auth_key" || second.Command != "delete_auth_key" ||
+		first.Description == "" || second.Description == "" {
+
+		t.Errorf("registered commands = %+v, want the mint and the retire offered", d.commands)
+	}
 
 	// Another chat's mint request is ignored: the configured chat is the
 	// only console. Its update is ordered before the configured chat's, so
 	// by the time the mint's reply arrived, the stranger's was processed —
-	// and produced nothing.
-	d.say(testChat+1, "invite")
-	d.say(testChat, "invite")
-	key := lastInvitation(t, d)
+	// and produced nothing. The configured chat addresses the bot by name,
+	// the way a group's clients write commands.
+	d.say(testChat+1, "/create_auth_key")
+	d.say(testChat, "/create_auth_key@cion_bot")
+	key := lastAuthKey(t, d)
 	if got := d.promptCount(); got != 1 {
 		t.Fatalf("messages after both mints = %d, want the configured chat's one", got)
 	}
@@ -659,43 +747,54 @@ func TestTelegramInvitation(t *testing.T) {
 	presented := registerFactsOf(t, newKey(t), newKey(t), key)
 	answer := tg.Authorize(context.Background(), presented)
 	if answer.Admission != enrollauth.AdmissionAllow {
-		t.Fatalf("an invited registration's verdict = %v, want allow", answer.Admission)
+		t.Fatalf("an auth-keyed registration's verdict = %v, want allow", answer.Admission)
 	}
 	if answer.Note == "" {
-		t.Error("an invited approval carries no note for the registry to record")
+		t.Error("an auth-key approval carries no note for the registry to record")
 	}
 
 	// The spent key is a bare joiner's: the next presentation prompts.
 	bare := registerFactsOf(t, newKey(t), newKey(t), key)
 	if got := pendingOf(tg, context.Background(), bare); got != enrollauth.AdmissionPending {
-		t.Fatalf("a spent invitation's verdict = %v, want the bare joiner's pending", got)
+		t.Fatalf("a spent auth key's verdict = %v, want the bare joiner's pending", got)
 	}
 	waitFor(t, "the bare joiner's prompt to send", func() bool {
 		return d.promptCount() == 2
 	})
 
 	// An unknown credential prompts the same way.
-	unknown := registerFactsOf(t, newKey(t), newKey(t), invitePrefix+"deadbeef")
+	unknown := registerFactsOf(t, newKey(t), newKey(t), authKeyPrefix+"deadbeef")
 	if got := pendingOf(tg, context.Background(), unknown); got != enrollauth.AdmissionPending {
 		t.Fatalf("an unknown credential's verdict = %v, want the bare joiner's pending", got)
 	}
+
+	// A retirement that matches no unspent key answers exactly that, and a
+	// word that is no command answers the usage.
+	d.say(testChat, "/delete_auth_key "+authKeyPrefix+"deadbeef")
+	waitFor(t, "the unmatched retirement's reply", func() bool {
+		return strings.Contains(d.prompt(d.promptCount()-1).Text, "No unspent auth key matched")
+	})
+	d.say(testChat, "hello")
+	waitFor(t, "the usage's reply", func() bool {
+		return strings.Contains(d.prompt(d.promptCount()-1).Text, "/create_auth_key")
+	})
 }
 
-// TestTelegramInvitationPersistence checks the invitations' own state: an
+// TestTelegramAuthKeyPersistence checks the auth keys' own state: an
 // unspent key survives a restart in the state directory and is answerable
-// after it, a spent one is gone for good, and a retired one — sent back by
-// the operator — prompts as a bare joiner's. One instance answers one
+// after it, a spent one is gone for good, and a retired one — named by the
+// retire command — prompts as a bare joiner's. One instance answers one
 // double per phase, the way one process runs per core.
-func TestTelegramInvitationPersistence(t *testing.T) {
+func TestTelegramAuthKeyPersistence(t *testing.T) {
 	state := t.TempDir()
 
 	// The first instance mints at its operator's request.
 	d1 := newBotDouble(t)
 	runTelegram(t, d1, func(cfg *Config) { cfg.State = state })
-	d1.say(testChat, "invite")
-	key := lastInvitation(t, d1)
+	d1.say(testChat, "/create_auth_key")
+	key := lastAuthKey(t, d1)
 
-	// A restart carries the unspent invitation; the fresh instance spends
+	// A restart carries the unspent auth key; the fresh instance spends
 	// it on presentation, and the spent key prompts the next time.
 	d2 := newBotDouble(t)
 	second, err := New(Config{
@@ -703,42 +802,42 @@ func TestTelegramInvitationPersistence(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	invited := registerFactsOf(t, newKey(t), newKey(t), key)
-	if got := second.Authorize(context.Background(), invited).Admission; got != enrollauth.AdmissionAllow {
-		t.Fatalf("a surviving invitation's verdict = %v, want allow", got)
+	presented := registerFactsOf(t, newKey(t), newKey(t), key)
+	if got := second.Authorize(context.Background(), presented).Admission; got != enrollauth.AdmissionAllow {
+		t.Fatalf("a surviving auth key's verdict = %v, want allow", got)
 	}
 	if got := second.Authorize(context.Background(),
 		registerFactsOf(t, newKey(t), newKey(t), key)).Admission; got != enrollauth.AdmissionPending {
 
-		t.Fatalf("the spent invitation's second presentation = %v, want the bare pending", got)
+		t.Fatalf("the spent auth key's second presentation = %v, want the bare pending", got)
 	}
 
-	// Retirement is conversational: the operator sends an unspent key back,
+	// Retirement is a command: the operator names an unspent key beside it,
 	// the bot retires it, and the next presentation prompts.
 	d3 := newBotDouble(t)
 	runTelegram(t, d3, func(cfg *Config) { cfg.State = state })
-	d3.say(testChat, "invite")
-	key2 := lastInvitation(t, d3)
-	d3.say(testChat, key2)
+	d3.say(testChat, "/create_auth_key")
+	key2 := lastAuthKey(t, d3)
+	d3.say(testChat, "/delete_auth_key "+key2)
 	waitFor(t, "the retirement's reply", func() bool {
 		last := d3.prompt(d3.promptCount() - 1).Text
 		return strings.Contains(last, "retired")
 	})
-	raw, err := os.ReadFile(filepath.Join(state, "enrollauth", invitationsFile))
+	raw, err := os.ReadFile(filepath.Join(state, "enrollauth", authKeysFile))
 	if err != nil {
-		t.Fatalf("reading the persisted invitations: %v", err)
+		t.Fatalf("reading the persisted auth keys: %v", err)
 	}
 	var keys []string
 	if err := json.Unmarshal(raw, &keys); err != nil {
-		t.Fatalf("parsing the persisted invitations: %v", err)
+		t.Fatalf("parsing the persisted auth keys: %v", err)
 	}
 	for _, k := range keys {
 		if k == key2 {
-			t.Errorf("the retired invitation %q persists", key2)
+			t.Errorf("the retired auth key %q persists", key2)
 		}
 	}
 
-	// A restart after the retirement still knows the invitation is spent.
+	// A restart after the retirement still knows the auth key is spent.
 	d4 := newBotDouble(t)
 	third, err := New(Config{
 		API: d4.url, Chat: testChat, Token: "7:test", State: state})
@@ -747,15 +846,15 @@ func TestTelegramInvitationPersistence(t *testing.T) {
 	}
 	retired := registerFactsOf(t, newKey(t), newKey(t), key2)
 	if got := third.Authorize(context.Background(), retired).Admission; got != enrollauth.AdmissionPending {
-		t.Fatalf("a retired invitation's verdict = %v, want the bare joiner's pending", got)
+		t.Fatalf("a retired auth key's verdict = %v, want the bare joiner's pending", got)
 	}
 }
 
-// TestTelegramInvitationsRequireState checks the persistence precondition:
+// TestTelegramAuthKeysRequireState checks the persistence precondition:
 // an authorizer with no state directory configured refuses to build — a
-// lost invitation file must never be a silent behavior — and a mint
+// lost auth key file must never be a silent behavior — and a mint
 // persists exactly the unspent set.
-func TestTelegramInvitationsRequireState(t *testing.T) {
+func TestTelegramAuthKeysRequireState(t *testing.T) {
 	_, err := New(Config{Chat: testChat, Token: "7:test"})
 	if err == nil {
 		t.Fatal("building without a state directory succeeded, want refusal")
@@ -767,17 +866,17 @@ func TestTelegramInvitationsRequireState(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	key := tg.mintInvite()
-	raw, err := os.ReadFile(filepath.Join(state, "enrollauth", invitationsFile))
+	key := tg.mintAuthKey()
+	raw, err := os.ReadFile(filepath.Join(state, "enrollauth", authKeysFile))
 	if err != nil {
-		t.Fatalf("reading the persisted invitations: %v", err)
+		t.Fatalf("reading the persisted auth keys: %v", err)
 	}
 	var keys []string
 	if err := json.Unmarshal(raw, &keys); err != nil {
-		t.Fatalf("parsing the persisted invitations: %v", err)
+		t.Fatalf("parsing the persisted auth keys: %v", err)
 	}
 	if len(keys) != 1 || keys[0] != key {
-		t.Fatalf("persisted invitations = %v, want the one minted %q", keys, key)
+		t.Fatalf("persisted auth keys = %v, want the one minted %q", keys, key)
 	}
 }
 

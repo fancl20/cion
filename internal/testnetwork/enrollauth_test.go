@@ -128,7 +128,7 @@ func (b *operatorBot) press(t *testing.T, i, button int) {
 }
 
 // say speaks one message in the configured chat — the operator's side of
-// the invitation conversation, a mint request among them.
+// the auth key conversation, a mint command among them.
 func (b *operatorBot) say(text string) {
 	b.mtx.Lock()
 	defer b.mtx.Unlock()

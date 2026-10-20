@@ -50,30 +50,30 @@ const (
 	pollRetry = time.Second
 )
 
-// invitePrefix marks a minted invitation among the credentials a
-// registration may carry; inviteBytes is the random body's length.
+// authKeyPrefix marks a minted auth key among the credentials a
+// registration may carry; authKeyBytes is the random body's length.
 const (
-	invitePrefix = "cion-"
-	inviteBytes  = 16
+	authKeyPrefix = "cion-"
+	authKeyBytes  = 16
 )
 
-// invitationsFile holds the unspent invitations beneath the core's state.
-const invitationsFile = "telegram-invitations.json"
+// authKeysFile holds the unspent auth keys beneath the core's state.
+const authKeysFile = "telegram-auth-keys.json"
 
 // Config configures the Telegram authorizer.
 type Config struct {
 	// API is the Bot API's base URL; empty is the public one.
 	API string
 	// Chat is the chat the prompts go to and the only one whose answers
-	// count — and the only one the operator can mint or retire invitations
+	// count — and the only one the operator can mint or retire auth keys
 	// from.
 	Chat int64
 	// Token is the bot's token. It rides the run argument and so the
 	// process list — an accepted consequence of argument-driven
 	// configuration, the file indirection deliberately not built.
 	Token string
-	// State is the core's state directory: the unspent invitations's
-	// persistent home, so an invitation survives a restart while the
+	// State is the core's state directory: the unspent auth keys'
+	// persistent home, so an auth key survives a restart while the
 	// transient asks stay in memory.
 	State string
 	// Window overrides how long one prompt's verdict stands; zero uses the
@@ -85,16 +85,17 @@ type Config struct {
 // identity — the boundary, the claim, and the presented keys' fingerprints
 // keyed together — it prompts the configured chat over the Bot API with the
 // facts and an approve and a deny button, and answers on the long-polled
-// callbacks, one prompt per identity inside a decision window. The invitation
+// callbacks, one prompt per identity inside a decision window — a decided
+// prompt rewritten to its verdict with its buttons gone. The auth key
 // reverses the flow: the operator asks the bot for a key in the configured
 // chat, hands it to the headless client, and a registration presenting a key
 // the plugin minted and has not spent approves on the plugin's own records and
 // spends it; a spent or unknown key is a bare joiner's, prompted as ever — a
-// stale invitation fails toward the human, not closed. It speaks the API
+// stale auth key fails toward the human, not closed. It speaks the API
 // directly over net/http — no SDK, for a vendored tree prices every
 // dependency, and the handful of calls this needs are plain HTTPS and JSON.
 // The prompts' decisions live in memory: a restart forgets pending and denied
-// entries and a join still in flight asks again, while the unspent invitations
+// entries and a join still in flight asks again, while the unspent auth keys
 // persist in the state directory.
 type Authorizer struct {
 	api    string
@@ -104,11 +105,11 @@ type Authorizer struct {
 	window time.Duration
 	hc     *http.Client
 
-	// mtx guards asks and invites, shared by the admission handlers and the
-	// poll loop.
-	mtx     sync.Mutex
-	asks    map[askKey]*decision
-	invites map[string]struct{}
+	// mtx guards asks and authKeys, shared by the admission handlers and
+	// the poll loop.
+	mtx      sync.Mutex
+	asks     map[askKey]*decision
+	authKeys map[string]struct{}
 }
 
 // askKey names one identity: the boundary asking, the exchange's claim,
@@ -131,8 +132,8 @@ type decision struct {
 	expires   time.Time
 }
 
-// New builds the authorizer; Run launches its poll loop. Unspent
-// invitations load from the state directory when its file exists.
+// New builds the authorizer; Run launches its poll loop. Unspent auth keys
+// load from the state directory when its file exists.
 func New(cfg Config) (*Authorizer, error) {
 	api := cfg.API
 	if api == "" {
@@ -143,16 +144,16 @@ func New(cfg Config) (*Authorizer, error) {
 		window = decisionWindow
 	}
 	t := &Authorizer{
-		api:     api,
-		chat:    cfg.Chat,
-		token:   cfg.Token,
-		state:   cfg.State,
-		window:  window,
-		hc:      &http.Client{},
-		asks:    make(map[askKey]*decision),
-		invites: make(map[string]struct{}),
+		api:      api,
+		chat:     cfg.Chat,
+		token:    cfg.Token,
+		state:    cfg.State,
+		window:   window,
+		hc:       &http.Client{},
+		asks:     make(map[askKey]*decision),
+		authKeys: make(map[string]struct{}),
 	}
-	if err := t.loadInvites(); err != nil {
+	if err := t.loadAuthKeys(); err != nil {
 		return nil, err
 	}
 	return t, nil
@@ -170,10 +171,10 @@ func (t *Authorizer) Authorize(
 ) enrollauth.AdmissionAnswer {
 
 	if f.Boundary == enrollauth.BoundaryRegistration && f.Credential != "" {
-		if t.spendInvite(f.Credential) {
+		if t.spendAuthKey(f.Credential) {
 			return enrollauth.AdmissionAnswer{
 				Admission: enrollauth.AdmissionAllow,
-				Note:      "telegram invitation",
+				Note:      "telegram auth key",
 			}
 		}
 	}
@@ -227,11 +228,12 @@ func (d *decision) note() string {
 	}
 }
 
-// Run receives the operator's chat until the context is canceled: one
-// getUpdates long poll after another, under the caller's supervision, each
-// pass sweeping the decisions whose window has passed and answering the
-// buttons pressed and the messages sent.
+// Run receives the operator's chat until the context is canceled: it offers
+// the console's commands once, then one getUpdates long poll after another,
+// under the caller's supervision, each pass sweeping the decisions whose
+// window has passed and answering the buttons pressed and the messages sent.
 func (t *Authorizer) Run(ctx context.Context) {
+	t.offerCommands(ctx)
 	var offset int64
 	for ctx.Err() == nil {
 		updates, err := t.getUpdates(ctx, offset)
@@ -266,6 +268,22 @@ func (t *Authorizer) sweep() {
 	}
 }
 
+// offerCommands registers the console's two commands in the clients' menus,
+// so the operator types them offered rather than from memory. A failure to
+// register takes no command away: they answer unregistered, merely unoffered.
+func (t *Authorizer) offerCommands(ctx context.Context) {
+	actx, cancel := context.WithTimeout(ctx, sendTimeout)
+	defer cancel()
+	if _, err := call[bool](t, actx, "setMyCommands", tgSetCommands{
+		Commands: []tgCommand{
+			{Command: "create_auth_key", Description: "Mint a one-use auth key"},
+			{Command: "delete_auth_key", Description: "Retire an unspent auth key"},
+		},
+	}); err != nil {
+		slog.Warn("Registering the console's commands", "err", err)
+	}
+}
+
 // getUpdates long-polls one batch of updates from the confirmed offset.
 func (t *Authorizer) getUpdates(ctx context.Context, offset int64) ([]tgUpdate, error) {
 	ctx, cancel := context.WithTimeout(ctx, pollTimeout+pollRetry)
@@ -279,7 +297,9 @@ func (t *Authorizer) getUpdates(ctx context.Context, offset int64) ([]tgUpdate, 
 // decide applies one answer button: only the configured chat's count — an
 // answer from any other chat is logged and ignored — and only a pending
 // identity is decided, its verdict standing for the window's remainder, the
-// strong no-prompt guarantee being the registry's, not the map's.
+// strong no-prompt guarantee being the registry's, not the map's. The decided
+// prompt is rewritten to its verdict without its buttons, so the chat shows
+// the outcome and offers nothing to press again.
 func (t *Authorizer) decide(ctx context.Context, cb *tgCallbackQuery) {
 	if cb == nil {
 		return // an update that carries no answer button
@@ -313,11 +333,13 @@ func (t *Authorizer) decide(ctx context.Context, cb *tgCallbackQuery) {
 		"claim", key.claim, "keys", label, "approved", approve)
 	t.answer(ctx, cb.ID, fmt.Sprintf("admission of %s %s", label,
 		map[bool]string{true: "approved", false: "denied"}[approve]))
+	t.settle(ctx, cb.Message, approve)
 }
 
-// converse handles the operator's own messages — the invitation flow's
-// mint and retire. Only the configured chat's count: it is the one chat the
-// prompts went to, and the one channel this plugin treats as its console.
+// converse handles the operator's own messages — the auth key flow's mint
+// and retire, the two slash commands the console offers. Only the
+// configured chat's count: it is the one chat the prompts went to, and the
+// one channel this plugin treats as its console.
 func (t *Authorizer) converse(ctx context.Context, msg *tgMessage) {
 	if msg == nil {
 		return // an update that carries no message
@@ -326,90 +348,109 @@ func (t *Authorizer) converse(ctx context.Context, msg *tgMessage) {
 		slog.Warn("Ignoring a message from another chat", "chat", msg.Chat.ID)
 		return
 	}
-	text := strings.TrimSpace(msg.Text)
+	cmd, arg := commandOf(strings.TrimSpace(msg.Text))
 	switch {
-	case strings.EqualFold(text, "invite"):
-		key := t.mintInvite()
-		slog.Info("Invitation minted", "chat", t.chat)
-		t.reply(ctx, fmt.Sprintf("Invitation (one use):\n%s\nRetire it by sending it back.", key))
-	case t.retireInvite(text):
-		slog.Info("Invitation retired", "chat", t.chat)
-		t.reply(ctx, "Invitation retired.")
+	case cmd == "/create_auth_key":
+		key := t.mintAuthKey()
+		slog.Info("Auth key minted", "chat", t.chat)
+		t.reply(ctx, fmt.Sprintf(
+			"Auth key (one use):\n%s\nRetire it with /delete_auth_key <key>.", key))
+	case cmd == "/delete_auth_key" && arg != "":
+		if t.retireAuthKey(arg) {
+			slog.Info("Auth key retired", "chat", t.chat)
+			t.reply(ctx, "Auth key retired.")
+		} else {
+			t.reply(ctx, "No unspent auth key matched.")
+		}
 	default:
-		t.reply(ctx, "Send \"invite\" to mint an invitation, or an unspent one to retire it.")
+		t.reply(ctx, "Send /create_auth_key to mint an auth key, or /delete_auth_key <key> to retire one.")
 	}
 }
 
-// mintInvite creates one unspent invitation and persists the set.
-func (t *Authorizer) mintInvite() string {
-	raw := make([]byte, inviteBytes)
+// commandOf splits one console message into its command and the argument
+// after it: the command lowercased and its @addressed suffix dropped, both
+// empty when the message is no command.
+func commandOf(text string) (string, string) {
+	if !strings.HasPrefix(text, "/") {
+		return "", ""
+	}
+	cmd, arg, _ := strings.Cut(text, " ")
+	if at := strings.IndexByte(cmd, '@'); at >= 0 {
+		cmd = cmd[:at]
+	}
+	return strings.ToLower(cmd), strings.TrimSpace(arg)
+}
+
+// mintAuthKey creates one unspent auth key and persists the set.
+func (t *Authorizer) mintAuthKey() string {
+	raw := make([]byte, authKeyBytes)
 	if _, err := rand.Read(raw); err != nil {
 		// crypto/rand's failure is the process's own catastrophe; an empty
-		// invitation can never be presented and so never admits.
-		slog.Error("Minting an invitation", "err", err)
-		return invitePrefix + strings.Repeat("0", 2*inviteBytes)
+		// auth key can never be presented and so never admits.
+		slog.Error("Minting an auth key", "err", err)
+		return authKeyPrefix + strings.Repeat("0", 2*authKeyBytes)
 	}
-	key := invitePrefix + hex.EncodeToString(raw)
+	key := authKeyPrefix + hex.EncodeToString(raw)
 	t.mtx.Lock()
-	t.invites[key] = struct{}{}
-	err := t.persistInvitesLocked()
+	t.authKeys[key] = struct{}{}
+	err := t.persistAuthKeysLocked()
 	t.mtx.Unlock()
 	if err != nil {
-		slog.Warn("Persisting the invitations", "err", err)
+		slog.Warn("Persisting the auth keys", "err", err)
 	}
 	return key
 }
 
-// spendInvite removes one unspent invitation and persists the set,
+// spendAuthKey removes one unspent auth key and persists the set,
 // reporting whether the credential spent.
-func (t *Authorizer) spendInvite(key string) bool {
+func (t *Authorizer) spendAuthKey(key string) bool {
 	t.mtx.Lock()
 	defer t.mtx.Unlock()
-	if _, ok := t.invites[key]; !ok {
+	if _, ok := t.authKeys[key]; !ok {
 		return false
 	}
-	delete(t.invites, key)
-	if err := t.persistInvitesLocked(); err != nil {
-		slog.Warn("Persisting the invitations", "err", err)
+	delete(t.authKeys, key)
+	if err := t.persistAuthKeysLocked(); err != nil {
+		slog.Warn("Persisting the auth keys", "err", err)
 	}
 	return true
 }
 
-// retireInvite removes one unspent invitation by its own text and persists
-// the set, reporting whether the text named one.
-func (t *Authorizer) retireInvite(text string) bool {
-	return t.spendInvite(text)
+// retireAuthKey removes one unspent auth key the retire command named and
+// persists the set, reporting whether the command named one.
+func (t *Authorizer) retireAuthKey(text string) bool {
+	return t.spendAuthKey(text)
 }
 
-// loadInvites reads the persisted unspent invitations. A missing file is a
-// fresh start; a present one the invitations an operator minted before the
+// loadAuthKeys reads the persisted unspent auth keys. A missing file is a
+// fresh start; a present one the auth keys an operator minted before the
 // restart.
-func (t *Authorizer) loadInvites() error {
+func (t *Authorizer) loadAuthKeys() error {
 	if t.state == "" {
-		return errors.New("no state directory configured for the invitations")
+		return errors.New("no state directory configured for the auth keys")
 	}
-	raw, err := os.ReadFile(t.invitesPath())
+	raw, err := os.ReadFile(t.authKeysPath())
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil
 		}
-		return fmt.Errorf("reading the invitations: %w", err)
+		return fmt.Errorf("reading the auth keys: %w", err)
 	}
 	var keys []string
 	if err := json.Unmarshal(raw, &keys); err != nil {
-		return fmt.Errorf("parsing the invitations: %w", err)
+		return fmt.Errorf("parsing the auth keys: %w", err)
 	}
 	for _, key := range keys {
-		t.invites[key] = struct{}{}
+		t.authKeys[key] = struct{}{}
 	}
 	return nil
 }
 
-// persistInvitesLocked writes the unspent invitations back, whole; the
+// persistAuthKeysLocked writes the unspent auth keys back, whole; the
 // caller holds the mutex.
-func (t *Authorizer) persistInvitesLocked() error {
-	keys := make([]string, 0, len(t.invites))
-	for key := range t.invites {
+func (t *Authorizer) persistAuthKeysLocked() error {
+	keys := make([]string, 0, len(t.authKeys))
+	for key := range t.authKeys {
 		keys = append(keys, key)
 	}
 	slices.Sort(keys)
@@ -417,21 +458,21 @@ func (t *Authorizer) persistInvitesLocked() error {
 	if err != nil {
 		return err
 	}
-	if err := statefile.Write(t.invitesPath(), raw); err != nil {
-		return fmt.Errorf("writing the invitations: %w", err)
+	if err := statefile.Write(t.authKeysPath(), raw); err != nil {
+		return fmt.Errorf("writing the auth keys: %w", err)
 	}
 	return nil
 }
 
-func (t *Authorizer) invitesPath() string {
-	return filepath.Join(t.state, "enrollauth", invitationsFile)
+func (t *Authorizer) authKeysPath() string {
+	return filepath.Join(t.state, "enrollauth", authKeysFile)
 }
 
 // answer acknowledges an answer button on the operator's phone.
 func (t *Authorizer) answer(ctx context.Context, id, text string) {
 	actx, cancel := context.WithTimeout(ctx, sendTimeout)
 	defer cancel()
-	if _, err := call[tgSent](t, actx, "answerCallbackQuery", tgAnswer{
+	if _, err := call[bool](t, actx, "answerCallbackQuery", tgAnswer{
 		QueryID: id,
 		Text:    text,
 	}); err != nil {
@@ -439,7 +480,7 @@ func (t *Authorizer) answer(ctx context.Context, id, text string) {
 	}
 }
 
-// reply sends the chat one plain message — the invitation flow's side of
+// reply sends the chat one plain message — the auth key flow's side of
 // the conversation.
 func (t *Authorizer) reply(ctx context.Context, text string) {
 	actx, cancel := context.WithTimeout(ctx, sendTimeout)
@@ -449,6 +490,28 @@ func (t *Authorizer) reply(ctx context.Context, text string) {
 		Text:   text,
 	}); err != nil {
 		slog.Warn("Replying in the operator's chat", "err", err)
+	}
+}
+
+// settle rewrites the decided prompt: the verdict joins the text and the
+// buttons leave with it. A failed edit changes no decision — the press's own
+// acknowledgement already told the operator — so it is logged and lived with.
+func (t *Authorizer) settle(ctx context.Context, msg *tgMessage, approve bool) {
+	if msg == nil {
+		return // an answer with no message to rewrite
+	}
+	verdict := "Denied"
+	if approve {
+		verdict = "Approved"
+	}
+	actx, cancel := context.WithTimeout(ctx, sendTimeout)
+	defer cancel()
+	if _, err := call[tgSent](t, actx, "editMessageText", tgEditMessage{
+		ChatID:    msg.Chat.ID,
+		MessageID: msg.MessageID,
+		Text:      msg.Text + "\n" + verdict,
+	}); err != nil {
+		slog.Debug("Rewriting the decided prompt", "err", err)
 	}
 }
 
@@ -620,7 +683,7 @@ func botAPIError(method string, err error) error {
 	return fmt.Errorf("%s failed: %w", method, err)
 }
 
-// The Bot API's JSON shapes, only as much as the four calls need.
+// The Bot API's JSON shapes, only as much as the calls need.
 
 // tgUpdate is one polled update: a pressed answer button or a message.
 type tgUpdate struct {
@@ -645,10 +708,12 @@ func (c *tgCallbackQuery) Chat() int64 {
 	return c.Message.Chat.ID
 }
 
-// tgMessage is the message a button rides on or the operator sent.
+// tgMessage is the message a button rides on or the operator sent; the id
+// names the message a decided prompt rewrites.
 type tgMessage struct {
-	Chat tgChat `json:"chat"`
-	Text string `json:"text"`
+	MessageID int64  `json:"message_id"`
+	Chat      tgChat `json:"chat"`
+	Text      string `json:"text"`
 }
 
 // tgChat names a chat by its id.
@@ -667,6 +732,14 @@ type tgSendMessage struct {
 	ChatID      int64         `json:"chat_id"`
 	Text        string        `json:"text"`
 	ReplyMarkup tgReplyMarkup `json:"reply_markup,omitzero"`
+}
+
+// tgEditMessage rewrites one sent message; a decided prompt's edit carries
+// no markup, for the keyboard left out is the keyboard removed.
+type tgEditMessage struct {
+	ChatID    int64  `json:"chat_id"`
+	MessageID int64  `json:"message_id"`
+	Text      string `json:"text"`
 }
 
 // tgReplyMarkup carries a message's inline keyboard; empty on a plain
@@ -691,4 +764,15 @@ type tgGetUpdates struct {
 type tgAnswer struct {
 	QueryID string `json:"callback_query_id"`
 	Text    string `json:"text"`
+}
+
+// tgSetCommands registers the commands the clients' menus offer.
+type tgSetCommands struct {
+	Commands []tgCommand `json:"commands"`
+}
+
+// tgCommand is one offered command and its menu description.
+type tgCommand struct {
+	Command     string `json:"command"`
+	Description string `json:"description"`
 }

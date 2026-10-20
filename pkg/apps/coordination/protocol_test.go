@@ -324,10 +324,10 @@ func TestProtocolRegistrationVerdicts(t *testing.T) {
 	// the joiner presented; the entry records the note.
 	auth.answer = enrollauth.AdmissionAnswer{
 		Admission: enrollauth.AdmissionAllow,
-		Note:      "telegram invitation",
+		Note:      "telegram auth key",
 	}
-	invited := key.NewNode()
-	if resp, status := register(t, client, invited, "cion-0123456789abcdef"); status != http.StatusOK {
+	presented := key.NewNode()
+	if resp, status := register(t, client, presented, "cion-0123456789abcdef"); status != http.StatusOK {
 		t.Fatalf("allow status = %d, want 200", status)
 	} else if !resp.MachineAuthorized {
 		t.Error("the allowed registration is not machine-authorized")
@@ -336,7 +336,7 @@ func TestProtocolRegistrationVerdicts(t *testing.T) {
 	if len(hosts) != 1 {
 		t.Fatalf("the registry holds %d hosts, want the one", len(hosts))
 	}
-	if hosts[0].Note != "telegram invitation" {
+	if hosts[0].Note != "telegram auth key" {
 		t.Errorf("the entry's note = %q, want the plugin's", hosts[0].Note)
 	}
 	asks := auth.asks()

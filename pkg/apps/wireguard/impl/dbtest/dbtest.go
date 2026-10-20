@@ -181,7 +181,7 @@ func TestDirectoryStore(t *testing.T, open func(t *testing.T) wireguard.Director
 	}
 	// A host's re-registration replaces its own record and no one else's.
 	reRegistered := hosts[0]
-	reRegistered.Note = "telegram invitation"
+	reRegistered.Note = "telegram auth key"
 	if err := store.PublishHost(ctx, reRegistered); err != nil {
 		t.Fatalf("re-publishing the host %s: %v", reRegistered.PublicKey, err)
 	}
@@ -210,7 +210,7 @@ func TestDirectoryStore(t *testing.T, open func(t *testing.T) wireguard.Director
 		}
 	}
 	for _, h := range got.Hosts {
-		if h.PublicKey == hosts[0].PublicKey && h.Note != "telegram invitation" {
+		if h.PublicKey == hosts[0].PublicKey && h.Note != "telegram auth key" {
 			t.Errorf("re-registration left the old note %q", h.Note)
 		}
 	}

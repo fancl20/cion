@@ -137,7 +137,7 @@ func tailnetHost(t *testing.T, name, controlURL, authKey string) *tsnet.Server {
 }
 
 // hostUp logs the host in and waits for its netmap, returning its tailnet
-// addresses — the open default, an invitation's key, or an operator's
+// addresses — the open default, an auth key, or an operator's
 // approval deciding how long it takes.
 func hostUp(t *testing.T, srv *tsnet.Server) []netip.Addr {
 	t.Helper()

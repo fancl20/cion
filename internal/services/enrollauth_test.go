@@ -39,7 +39,7 @@ func TestLoadEnrollAuth(t *testing.T) {
 		"telegram=chat:token",   // unparsable chat
 		"telegram=-1002147483647",
 		"telegram=-1002147483647:",
-		"telegram=-1002147483647:token", // no state for the invitations
+		"telegram=-1002147483647:token", // no state for the auth keys
 	} {
 		if _, _, err := loadEnrollAuth(spec, "", ""); err == nil {
 			t.Errorf("loading %q succeeded, want refusal", spec)

@@ -10,13 +10,13 @@ import (
 	"github.com/fancl20/cion/internal/services"
 )
 
-// mintedInvitation asks the bot for an invitation in the configured chat
+// mintedAuthKey asks the bot for an auth key in the configured chat
 // and returns the key its reply carries.
-func mintedInvitation(t *testing.T, bot *operatorBot) string {
+func mintedAuthKey(t *testing.T, bot *operatorBot) string {
 	t.Helper()
-	bot.say("invite")
-	var invitation string
-	Poll(t, "the bot to answer with an invitation", func() bool {
+	bot.say("/create_auth_key")
+	var authKey string
+	Poll(t, "the bot to answer with an auth key", func() bool {
 		bot.mtx.Lock()
 		prompts := append([]map[string]any(nil), bot.prompts...)
 		bot.mtx.Unlock()
@@ -24,22 +24,22 @@ func mintedInvitation(t *testing.T, bot *operatorBot) string {
 			text, _ := m["text"].(string)
 			for line := range strings.SplitSeq(text, "\n") {
 				if strings.HasPrefix(line, "cion-") {
-					invitation = line
+					authKey = line
 					return true
 				}
 			}
 		}
 		return false
 	})
-	return invitation
+	return authKey
 }
 
-// TestCoordinationInvitationJoin is the invitation join's proof: the
+// TestCoordinationAuthKeyJoin is the auth key join's proof: the
 // operator asks the bot for a key in the configured chat, hands it to the
 // headless client, and the client joins unattended — the registration
 // presenting the minted key approving on the plugin's own records, the
 // note it answers recorded with the entry.
-func TestCoordinationInvitationJoin(t *testing.T) {
+func TestCoordinationAuthKeyJoin(t *testing.T) {
 	t.Parallel()
 	wpki := packageWebPKI
 	place := placeCoordination(t)
@@ -50,20 +50,20 @@ func TestCoordinationInvitationJoin(t *testing.T) {
 	})
 	_ = coordLeaf(t, wpki, hostSlot(t), a, place, nil)
 
-	key := mintedInvitation(t, bot)
+	key := mintedAuthKey(t, bot)
 
-	// The headless client joins unattended: the invitation approves on the
+	// The headless client joins unattended: the auth key approves on the
 	// plugin's own records, the login completing with no operator in the
 	// loop.
-	host := tailnetHost(t, "invited", place.controlURL, key)
+	host := tailnetHost(t, "keyed", place.controlURL, key)
 	ips := hostUp(t, host)
 	if len(ips) != 1 || !TailnetRange.Contains(ips[0]) {
-		t.Fatalf("the invited host's addresses = %v", ips)
+		t.Fatalf("the keyed host's addresses = %v", ips)
 	}
 	// The registry records the approving note beside the entry.
-	Poll(t, "the entry carrying the invitation's note", func() bool {
+	Poll(t, "the entry carrying the auth key's note", func() bool {
 		hosts := wireguardOf(a).HostPeers()
-		return len(hosts) == 1 && hosts[0].Note == "telegram invitation"
+		return len(hosts) == 1 && hosts[0].Note == "telegram auth key"
 	})
 }
 
