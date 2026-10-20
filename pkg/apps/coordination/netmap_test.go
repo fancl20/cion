@@ -19,7 +19,8 @@ import (
 // node's key, the host-facing endpoint, allowed IPs covering the tailnet
 // and nothing else, wireguard-only with no disco key — a single packet
 // filter rule admitting the member's traffic, and the DERP map naming the
-// core's region.
+// core's region. Both nodes carry the stable id the client's records key
+// on, each its own key's.
 func TestNetmapHoldsOnePeer(t *testing.T) {
 	store := &dbtest.MemStore{}
 	nodeEntry := testNode(mustIA("1-ff00:0:1"), "100.64.1.0/24", "198.51.100.10:51820")
@@ -56,6 +57,10 @@ func TestNetmapHoldsOnePeer(t *testing.T) {
 		t.Errorf("the map advertises capability %d, want the served %d",
 			resp.Node.Cap, servedCapabilityVersion)
 	}
+	if resp.Node.StableID != stableID(hostKey) {
+		t.Errorf("the map's own stable id = %q, want the host key's %q",
+			resp.Node.StableID, stableID(hostKey))
+	}
 
 	if len(resp.Peers) != 1 {
 		t.Fatalf("the map holds %d peers, want exactly the node", len(resp.Peers))
@@ -63,6 +68,10 @@ func TestNetmapHoldsOnePeer(t *testing.T) {
 	peer := resp.Peers[0]
 	if peer.Key != nodePublicOf(nodeEntry.PublicKey) {
 		t.Errorf("the peer key = %v, want the node's", peer.Key)
+	}
+	if peer.StableID != stableID(nodeEntry.PublicKey) {
+		t.Errorf("the peer's stable id = %q, want the node key's %q",
+			peer.StableID, stableID(nodeEntry.PublicKey))
 	}
 	// The peer's allowed IPs are the registry's occupied space — the
 	// allocated /32s beside the node's own address, the slice's first —

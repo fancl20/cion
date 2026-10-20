@@ -3,6 +3,7 @@ package coordination
 import (
 	"context"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json/v2"
 	"errors"
 	"fmt"
@@ -233,6 +234,7 @@ func (a *App) netmap(ctx context.Context, node key.NodePublic,
 		ID:                2,
 		User:              registerUserID,
 		Key:               nodePublicOf(owner.PublicKey),
+		StableID:          stableID(owner.PublicKey),
 		AllowedIPs:        routed,
 		Addresses:         routed,
 		Endpoints:         []netip.AddrPort{owner.HostEndpoint},
@@ -252,6 +254,7 @@ func (a *App) netmap(ctx context.Context, node key.NodePublic,
 			ID:         1,
 			User:       registerUserID,
 			Key:        node,
+			StableID:   stableID(self.PublicKey),
 			Machine:    machine,
 			Addresses:  []netip.Prefix{address},
 			AllowedIPs: []netip.Prefix{address},
@@ -274,6 +277,15 @@ func (a *App) netmap(ctx context.Context, node key.NodePublic,
 		}},
 		Domain: a.cfg.Domain,
 	}, nil
+}
+
+// stableID names a node for the client's own records: the first bytes of
+// its key in hex, stable by the key's own durability. The client lines key
+// the profile a login persists in on the map's own node id, and a host
+// whose map carries none stays unprofiled — every start a fresh login, a
+// fresh node key, a fresh admission.
+func stableID(k wireguard.PublicKey) tailcfg.StableNodeID {
+	return tailcfg.StableNodeID("n" + hex.EncodeToString(k[:6]))
 }
 
 // routedAddresses lists every routed address as a /32, sorted: the registry's
