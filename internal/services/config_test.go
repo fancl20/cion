@@ -1,6 +1,7 @@
 package services
 
 import (
+	"context"
 	"net/netip"
 	"strings"
 	"testing"
@@ -8,6 +9,7 @@ import (
 	"github.com/fancl20/cion/pkg/apps"
 	"github.com/fancl20/cion/pkg/core/trust"
 	"github.com/fancl20/cion/pkg/core/webpki/webpkitest"
+	"github.com/fancl20/cion/pkg/modules/enrollauth"
 )
 
 // nodeConfig builds a minimal valid run-argument set for the validation and
@@ -152,6 +154,43 @@ func TestNodeConfigResolve(t *testing.T) {
 			mutate(&cfg)
 			if _, err := cfg.resolve(); err == nil {
 				t.Error("the malformed run arguments were accepted")
+			}
+		})
+	}
+}
+
+// denyAll is a harness admission policy that denies every exchange.
+type denyAll struct{}
+
+func (denyAll) Authorize(context.Context, enrollauth.AdmissionFacts) enrollauth.AdmissionAnswer {
+	return enrollauth.AdmissionAnswer{}
+}
+
+// TestNodeConfigAdmission checks the harness's admission policy: it loads
+// in place of a method on the founding core, no loop of its own run, and
+// it refuses to combine with --trust.enroll-auth and to load off the
+// founding core.
+func TestNodeConfigAdmission(t *testing.T) {
+	cfg := nodeConfig()
+	cfg.Admission = denyAll{}
+	rc, err := cfg.resolve()
+	if err != nil {
+		t.Fatalf("resolving the harness's policy: %v", err)
+	}
+	if rc.enrollAuth != (denyAll{}) || rc.enrollRun != nil {
+		t.Errorf("the gate = %v, a loop beside it %v, want the harness's policy alone",
+			rc.enrollAuth, rc.enrollRun != nil)
+	}
+	for name, mutate := range map[string]func(*NodeConfig){
+		"beside a method":       func(c *NodeConfig) { c.EnrollAuth = "cidrs=192.0.2.0/24" },
+		"off the founding core": func(c *NodeConfig) { c.Neighbors = []string{"192.0.2.7:30043"} },
+	} {
+		t.Run(name, func(t *testing.T) {
+			cfg := nodeConfig()
+			cfg.Admission = denyAll{}
+			mutate(&cfg)
+			if _, err := cfg.resolve(); err == nil {
+				t.Error("the harness's policy loaded, want refusal")
 			}
 		})
 	}

@@ -67,6 +67,11 @@ const (
 // authKeysFile holds the unspent auth keys beneath the core's state.
 const authKeysFile = "telegram-auth-keys.json"
 
+// usage is the console's answer to a message it does not take.
+const usage = "Send /create_auth_key [ISD-AS] to mint an auth key for a host of " +
+	"that node — the founding core without one — or /delete_auth_key <key> " +
+	"to retire one."
+
 // Config configures the Telegram authorizer.
 type Config struct {
 	// API is the Bot API's base URL; empty is the public one.
@@ -88,23 +93,23 @@ type Config struct {
 	Window time.Duration
 }
 
-// Authorizer is the admission authorizer of the operator's phone: per new
-// identity — the boundary, the claim, and the presented keys' fingerprints
-// keyed together — it prompts the configured chat over the Bot API with the
-// facts and an approve and a deny button, and answers on the long-polled
-// callbacks, one prompt per identity inside a decision window — a decided
-// prompt rewritten to its verdict with its buttons gone. The auth key
-// reverses the flow: the operator asks the bot for a key in the configured
-// chat, hands it to the headless client, and a registration presenting a key
-// the plugin minted and has not spent approves on the plugin's own records and
-// spends it, the approval standing for the presenting machine for a window,
-// as a press's does; a spent or unknown key is a bare joiner's, prompted as
-// ever — a stale auth key fails toward the human, not closed. It speaks the
-// API directly over net/http — no SDK, for a vendored tree prices every
-// dependency, and the handful of calls this needs are plain HTTPS and JSON.
-// The prompts' decisions live in memory: a restart forgets pending and denied
-// entries and a join still in flight asks again, while the unspent auth keys
-// persist in the state directory.
+// Authorizer is the admission authorizer of the operator's phone. Per new
+// node identity — an enrollment's or a vote's boundary, claim, and
+// presented keys' fingerprints keyed together — it prompts the configured
+// chat over the Bot API with the facts and an approve and a deny button,
+// and answers on the long-polled callbacks, one prompt per identity inside
+// a decision window — a decided prompt rewritten to its verdict with its
+// buttons gone. A host never prompts: the operator asks the bot for an auth
+// key in the configured chat, naming the node its host lands on, and hands
+// it to the headless client; a registration presenting a key the plugin
+// minted and has not spent approves on the plugin's own records onto that
+// node and spends it, the approval standing for the presenting machine for
+// a window, and any other registration is denied — a host comes with a key
+// or not at all. It speaks the API directly over net/http — no SDK, for a
+// vendored tree prices every dependency, and the handful of calls this
+// needs are plain HTTPS and JSON. The prompts' decisions live in memory: a
+// restart forgets pending and denied entries and a join still in flight
+// asks again, while the unspent auth keys persist in the state directory.
 type Authorizer struct {
 	api    string
 	chat   int64
@@ -114,10 +119,11 @@ type Authorizer struct {
 	hc     *http.Client
 
 	// mtx guards asks and authKeys, shared by the admission handlers and
-	// the poll loop.
+	// the poll loop. authKeys maps each unspent key to the node its host
+	// lands on, the zero IA naming the founding core.
 	mtx      sync.Mutex
 	asks     map[askKey]*decision
-	authKeys map[string]struct{}
+	authKeys map[string]addr.IA
 }
 
 // askKey names one identity: the boundary asking, the exchange's claim,
@@ -133,14 +139,13 @@ type askKey struct {
 }
 
 // decision is one identity's standing verdict and the moment it stops
-// standing.
+// standing; a registration's is an auth key's approval, carrying the node
+// the key named.
 type decision struct {
 	admission enrollauth.AdmissionVerdict
 	label     string
 	expires   time.Time
-	// keyed marks an approval an auth key's presentation made rather than
-	// the operator's press.
-	keyed bool
+	node      addr.IA
 }
 
 // New builds the authorizer; Run launches its poll loop. Unspent auth keys
@@ -162,7 +167,7 @@ func New(cfg Config) (*Authorizer, error) {
 		window:   window,
 		hc:       &http.Client{},
 		asks:     make(map[askKey]*decision),
-		authKeys: make(map[string]struct{}),
+		authKeys: make(map[string]addr.IA),
 	}
 	if err := t.loadAuthKeys(); err != nil {
 		return nil, err
@@ -170,15 +175,13 @@ func New(cfg Config) (*Authorizer, error) {
 	return t, nil
 }
 
-// Authorize answers one admission exchange. A registration presenting a
-// credential the plugin minted and has not spent approves and spends it,
-// the approval standing for the presenting machine for the window: the
-// caller may refuse an approved registration — no slice yet to allocate in
-// — and the machine's retry rides the approval rather than the spent key. A
-// standing decision returns for its window's remainder, and the first ask —
-// or the first past the window — sends the chat one prompt and pends. A
-// prompt that cannot be sent denies: with the API unreachable admission
-// fails closed, safe, but unavailable until it returns.
+// Authorize answers one admission exchange. A registration is answered by
+// admitHostLocked, on the plugin's own records alone, and never prompts.
+// For an enrollment or a vote, a standing decision returns for its window's
+// remainder, and the first ask — or the first past the window — sends the
+// chat one prompt and pends. A prompt that cannot be sent denies: with the
+// API unreachable admission fails closed, safe, but unavailable until it
+// returns.
 func (t *Authorizer) Authorize(
 	ctx context.Context,
 	f enrollauth.AdmissionFacts,
@@ -194,20 +197,10 @@ func (t *Authorizer) Authorize(
 	}
 	now := time.Now()
 	t.mtx.Lock()
-	if f.Boundary == enrollauth.BoundaryRegistration && f.Credential != "" &&
-		t.spendAuthKeyLocked(f.Credential) {
-
-		t.asks[key] = &decision{
-			admission: enrollauth.AdmissionAllow,
-			label:     strings.Join(f.Keys, ","),
-			expires:   now.Add(t.window),
-			keyed:     true,
-		}
+	if f.Boundary == enrollauth.BoundaryRegistration {
+		answer := t.admitHostLocked(f, key, now)
 		t.mtx.Unlock()
-		return enrollauth.AdmissionAnswer{
-			Admission: enrollauth.AdmissionAllow,
-			Note:      authKeyNote,
-		}
+		return answer
 	}
 	if d, ok := t.asks[key]; ok && now.Before(d.expires) {
 		answer := enrollauth.AdmissionAnswer{Admission: d.admission, Note: d.note()}
@@ -238,17 +231,46 @@ func (t *Authorizer) Authorize(
 	return enrollauth.AdmissionAnswer{Admission: enrollauth.AdmissionPending}
 }
 
-// note is the standing decision's own account of itself, the string the
-// registry records beside an entry the decision approved.
-func (d *decision) note() string {
-	switch {
-	case d.admission != enrollauth.AdmissionAllow:
-		return ""
-	case d.keyed:
-		return authKeyNote
-	default:
-		return operatorNote
+// admitHostLocked answers a registration on the plugin's own records: a
+// key it minted and has not spent approves onto the key's node and is
+// spent, the approval standing for the presenting machine for the window —
+// the caller may refuse an approved registration, no slice yet to allocate
+// in, and the machine's retry rides the approval rather than the spent key;
+// any other registration is denied without a prompt, for a host comes with
+// a key or not at all. The caller holds the mutex.
+func (t *Authorizer) admitHostLocked(f enrollauth.AdmissionFacts, key askKey,
+	now time.Time) enrollauth.AdmissionAnswer {
+
+	if node, ok := t.spendAuthKeyLocked(f.Credential); ok {
+		t.asks[key] = &decision{
+			admission: enrollauth.AdmissionAllow,
+			label:     strings.Join(f.Keys, ","),
+			expires:   now.Add(t.window),
+			node:      node,
+		}
+		return enrollauth.AdmissionAnswer{
+			Admission: enrollauth.AdmissionAllow,
+			Note:      authKeyNote,
+			Node:      node,
+		}
 	}
+	if d, ok := t.asks[key]; ok && now.Before(d.expires) {
+		return enrollauth.AdmissionAnswer{
+			Admission: enrollauth.AdmissionAllow,
+			Note:      authKeyNote,
+			Node:      d.node,
+		}
+	}
+	return enrollauth.AdmissionAnswer{Admission: enrollauth.AdmissionDeny}
+}
+
+// note is the standing decision's own account of itself, the string an
+// approval answers with.
+func (d *decision) note() string {
+	if d.admission != enrollauth.AdmissionAllow {
+		return ""
+	}
+	return operatorNote
 }
 
 // Run receives the operator's chat until the context is canceled: it offers
@@ -299,7 +321,7 @@ func (t *Authorizer) offerCommands(ctx context.Context) {
 	defer cancel()
 	if _, err := call[bool](t, actx, "setMyCommands", tgSetCommands{
 		Commands: []tgCommand{
-			{Command: "create_auth_key", Description: "Mint a one-use auth key"},
+			{Command: "create_auth_key", Description: "Mint a one-use auth key, optionally naming its node"},
 			{Command: "delete_auth_key", Description: "Retire an unspent auth key"},
 		},
 	}); err != nil {
@@ -374,10 +396,16 @@ func (t *Authorizer) converse(ctx context.Context, msg *tgMessage) {
 	cmd, arg := commandOf(strings.TrimSpace(msg.Text))
 	switch {
 	case cmd == "/create_auth_key":
-		key := t.mintAuthKey()
-		slog.Info("Auth key minted", "chat", t.chat)
+		node, ok := nodeOf(arg)
+		if !ok {
+			t.reply(ctx, usage)
+			return
+		}
+		key := t.mintAuthKey(node)
+		slog.Info("Auth key minted", "chat", t.chat, "node", node)
 		t.reply(ctx, fmt.Sprintf(
-			"Auth key (one use):\n%s\nRetire it with /delete_auth_key <key>.", key))
+			"Auth key (one use), connects to %s:\n%s\nRetire it with /delete_auth_key <key>.",
+			nodeName(node), key))
 	case cmd == "/delete_auth_key" && arg != "":
 		if t.retireAuthKey(arg) {
 			slog.Info("Auth key retired", "chat", t.chat)
@@ -386,8 +414,28 @@ func (t *Authorizer) converse(ctx context.Context, msg *tgMessage) {
 			t.reply(ctx, "No unspent auth key matched.")
 		}
 	default:
-		t.reply(ctx, "Send /create_auth_key to mint an auth key, or /delete_auth_key <key> to retire one.")
+		t.reply(ctx, usage)
 	}
+}
+
+// nodeOf reads the node a mint names: none for the founding core, else an
+// ISD-AS, reporting whether the argument parsed. The bot holds no view of
+// the directory, so the syntax is all it checks.
+func nodeOf(arg string) (addr.IA, bool) {
+	if arg == "" {
+		return 0, true
+	}
+	ia, err := addr.ParseIA(arg)
+	return ia, err == nil
+}
+
+// nodeName names a key's node for the operator: its ISD-AS, or the founding
+// core for the zero IA.
+func nodeName(node addr.IA) string {
+	if node.IsZero() {
+		return "the founding core"
+	}
+	return node.String()
 }
 
 // commandOf splits one console message into its command and the argument
@@ -404,8 +452,9 @@ func commandOf(text string) (string, string) {
 	return strings.ToLower(cmd), strings.TrimSpace(arg)
 }
 
-// mintAuthKey creates one unspent auth key and persists the set.
-func (t *Authorizer) mintAuthKey() string {
+// mintAuthKey creates one unspent auth key naming the node and persists the
+// set.
+func (t *Authorizer) mintAuthKey(node addr.IA) string {
 	raw := make([]byte, authKeyBytes)
 	if _, err := rand.Read(raw); err != nil {
 		// crypto/rand's failure is the process's own catastrophe; an empty
@@ -415,7 +464,7 @@ func (t *Authorizer) mintAuthKey() string {
 	}
 	key := authKeyPrefix + hex.EncodeToString(raw)
 	t.mtx.Lock()
-	t.authKeys[key] = struct{}{}
+	t.authKeys[key] = node
 	err := t.persistAuthKeysLocked()
 	t.mtx.Unlock()
 	if err != nil {
@@ -425,16 +474,18 @@ func (t *Authorizer) mintAuthKey() string {
 }
 
 // spendAuthKeyLocked removes one unspent auth key and persists the set,
-// reporting whether the credential spent; the caller holds the mutex.
-func (t *Authorizer) spendAuthKeyLocked(key string) bool {
-	if _, ok := t.authKeys[key]; !ok {
-		return false
+// answering the node it named and whether the credential spent; the caller
+// holds the mutex.
+func (t *Authorizer) spendAuthKeyLocked(key string) (addr.IA, bool) {
+	node, ok := t.authKeys[key]
+	if !ok {
+		return 0, false
 	}
 	delete(t.authKeys, key)
 	if err := t.persistAuthKeysLocked(); err != nil {
 		slog.Warn("Persisting the auth keys", "err", err)
 	}
-	return true
+	return node, true
 }
 
 // retireAuthKey removes one unspent auth key the retire command named and
@@ -442,12 +493,21 @@ func (t *Authorizer) spendAuthKeyLocked(key string) bool {
 func (t *Authorizer) retireAuthKey(text string) bool {
 	t.mtx.Lock()
 	defer t.mtx.Unlock()
-	return t.spendAuthKeyLocked(text)
+	_, ok := t.spendAuthKeyLocked(text)
+	return ok
+}
+
+// storedKey is one unspent auth key as the state file holds it: the key
+// and the node its host lands on, omitted for the founding core.
+type storedKey struct {
+	Key  string  `json:"key"`
+	Node addr.IA `json:"node,omitzero"`
 }
 
 // loadAuthKeys reads the persisted unspent auth keys. A missing file is a
 // fresh start; a present one the auth keys an operator minted before the
-// restart.
+// restart — a file of the earlier form, a list of bare keys, naming the
+// founding core for each.
 func (t *Authorizer) loadAuthKeys() error {
 	if t.state == "" {
 		return errors.New("no state directory configured for the auth keys")
@@ -459,12 +519,18 @@ func (t *Authorizer) loadAuthKeys() error {
 		}
 		return fmt.Errorf("reading the auth keys: %w", err)
 	}
-	var keys []string
+	var keys []storedKey
 	if err := json.Unmarshal(raw, &keys); err != nil {
-		return fmt.Errorf("parsing the auth keys: %w", err)
+		var bare []string
+		if json.Unmarshal(raw, &bare) != nil {
+			return fmt.Errorf("parsing the auth keys: %w", err)
+		}
+		for _, key := range bare {
+			keys = append(keys, storedKey{Key: key})
+		}
 	}
-	for _, key := range keys {
-		t.authKeys[key] = struct{}{}
+	for _, k := range keys {
+		t.authKeys[k.Key] = k.Node
 	}
 	return nil
 }
@@ -472,11 +538,11 @@ func (t *Authorizer) loadAuthKeys() error {
 // persistAuthKeysLocked writes the unspent auth keys back, whole; the
 // caller holds the mutex.
 func (t *Authorizer) persistAuthKeysLocked() error {
-	keys := make([]string, 0, len(t.authKeys))
-	for key := range t.authKeys {
-		keys = append(keys, key)
+	keys := make([]storedKey, 0, len(t.authKeys))
+	for key, node := range t.authKeys {
+		keys = append(keys, storedKey{Key: key, Node: node})
 	}
-	slices.Sort(keys)
+	slices.SortFunc(keys, func(a, b storedKey) int { return strings.Compare(a.Key, b.Key) })
 	raw, err := json.Marshal(keys)
 	if err != nil {
 		return err
@@ -560,9 +626,10 @@ func (t *Authorizer) sendPrompt(
 }
 
 // identityOf is the stable identity an ask keys by and a button answers:
-// the enrollment's subject key, the registration's machine key — the one
-// fact that survives the client's own retries, for a registration attempt
-// presents a freshly generated node key each time until one completes.
+// the enrollment's subject key, the vote's added keys, the registration's
+// machine key — the one fact that survives the client's own retries, for a
+// registration attempt presents a freshly generated node key each time
+// until one completes.
 func identityOf(f enrollauth.AdmissionFacts) string {
 	if f.Boundary == enrollauth.BoundaryRegistration {
 		return f.Keys[0]
@@ -570,17 +637,14 @@ func identityOf(f enrollauth.AdmissionFacts) string {
 	return strings.Join(f.Keys, ",")
 }
 
-// promptText renders one prompt: the enrollment's claimed name, the
-// registration's offered keys, the voting submission's added keys, the
-// source beside them.
+// promptText renders one prompt: the enrollment's claimed name or the
+// voting submission's presenter, the presented keys, the source beside
+// them.
 func promptText(f enrollauth.AdmissionFacts) string {
 	var b strings.Builder
-	switch f.Boundary {
-	case enrollauth.BoundaryRegistration:
-		b.WriteString("CION registration request")
-	case enrollauth.BoundaryVoting:
+	if f.Boundary == enrollauth.BoundaryVoting {
 		b.WriteString("CION voting power request")
-	default:
+	} else {
 		b.WriteString("CION enrollment request")
 	}
 	if !f.Claim.IsZero() {
@@ -633,8 +697,6 @@ func parseCallbackData(s string) (bool, askKey, bool) {
 	switch b[1] {
 	case boundaryByte(enrollauth.BoundaryEnrollment):
 		boundary = enrollauth.BoundaryEnrollment
-	case boundaryByte(enrollauth.BoundaryRegistration):
-		boundary = enrollauth.BoundaryRegistration
 	case boundaryByte(enrollauth.BoundaryVoting):
 		boundary = enrollauth.BoundaryVoting
 	default:
@@ -654,16 +716,13 @@ func keyDigest(keys string) []byte {
 	return sum[:sha256.Size/2]
 }
 
-// boundaryByte is the boundary as an answer button carries it.
+// boundaryByte is the boundary as an answer button carries it: an
+// enrollment's or a vote's, the two boundaries that prompt.
 func boundaryByte(b enrollauth.Boundary) byte {
-	switch b {
-	case enrollauth.BoundaryRegistration:
-		return 'r'
-	case enrollauth.BoundaryVoting:
+	if b == enrollauth.BoundaryVoting {
 		return 'v'
-	default:
-		return 'e'
 	}
+	return 'e'
 }
 
 // call posts one Bot API method and decodes its envelope, the result

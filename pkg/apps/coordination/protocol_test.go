@@ -219,7 +219,7 @@ func fetchMap(t *testing.T, client *http.Client,
 }
 
 // TestProtocolRegisterAndMap drives the client protocol's own transport
-// end to end: the key fetch over TLS, the noise handshake, an open
+// end to end: the key fetch over TLS, the noise handshake, an admitted
 // registration issuing the allocated address, and the map answering with
 // the tailnet-holding netmap — the same conversation a tailnet client
 // runs at login.
@@ -234,10 +234,10 @@ func TestProtocolRegisterAndMap(t *testing.T) {
 	client := noiseHTTP(t, addr, roots, a.machineKey.Public())
 	host := key.NewNode()
 
-	// An open registration completes the login on the spot.
+	// An admitted registration completes the login on the spot.
 	resp, status := register(t, client, host, "")
 	if status != http.StatusOK {
-		t.Fatalf("the open registration status = %d, want 200", status)
+		t.Fatalf("the admitted registration status = %d, want 200", status)
 	}
 	if !resp.MachineAuthorized || resp.AuthURL != "" {
 		t.Fatalf("the registration response = %+v, want the machine authorized with no URL", resp)

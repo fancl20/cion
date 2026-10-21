@@ -460,43 +460,22 @@ func TestTelegramPromptAndDecide(t *testing.T) {
 	}
 }
 
-// TestTelegramRegistrationPrompts checks the registration boundary's bare
-// joiner: the machine and node fingerprints prompt the configured chat the
-// same way, and the approve button answers that identity alone.
-func TestTelegramRegistrationPrompts(t *testing.T) {
+// TestTelegramRegistrationNeedsKey checks that a host comes with a key or
+// not at all: a bare registration, and one presenting a credential the bot
+// never minted, are denied and prompt nothing.
+func TestTelegramRegistrationNeedsKey(t *testing.T) {
 	d := newBotDouble(t)
 	tg := runTelegram(t, d, nil)
 
-	facts := registerFactsOf(t, newKey(t), newKey(t), "")
-	if got := pendingOf(tg, context.Background(), facts); got != enrollauth.AdmissionPending {
-		t.Fatalf("first ask verdict = %v, want pending", got)
-	}
-	waitFor(t, "the prompt to send", func() bool { return d.promptCount() == 1 })
-	prompt := d.prompt(0)
-	for _, key := range facts.Keys {
-		if !strings.Contains(prompt.Text, key) {
-			t.Errorf("prompt text = %q, want the fingerprint %s in it", prompt.Text, key)
+	for _, credential := range []string{"", authKeyPrefix + "deadbeef"} {
+		facts := registerFactsOf(t, newKey(t), newKey(t), credential)
+		if got := pendingOf(tg, context.Background(), facts); got != enrollauth.AdmissionDeny {
+			t.Errorf("a registration presenting %q = %v, want deny", credential, got)
 		}
 	}
-	buttons := prompt.ReplyMarkup.InlineKeyboard[0]
-	_, wantKey, ok := parseCallbackData(buttons[0].CallbackData)
-	if !ok || wantKey.boundary != enrollauth.BoundaryRegistration {
-		t.Errorf("button data = %q, want the registration identity", buttons[0].CallbackData)
-	}
-	// A different registration identity pends separately: one prompt per
-	// identity, the machine and node keys together.
-	other := registerFactsOf(t, newKey(t), newKey(t), "")
-	if got := pendingOf(tg, context.Background(), other); got != enrollauth.AdmissionPending {
-		t.Fatalf("a second identity's first ask verdict = %v, want pending", got)
-	}
-	waitFor(t, "the second prompt to send", func() bool { return d.promptCount() == 2 })
-
-	d.press(testChat, buttons[0].CallbackData)
-	waitFor(t, "the approve to land", func() bool {
-		return pendingOf(tg, context.Background(), facts) == enrollauth.AdmissionAllow
-	})
-	if got := pendingOf(tg, context.Background(), other); got != enrollauth.AdmissionPending {
-		t.Fatalf("the other identity after the first's approve = %v, want pending", got)
+	// The prompt is sent within the ask, so none sent by now is none sent.
+	if got := d.promptCount(); got != 0 {
+		t.Errorf("keyless registrations sent %d prompts, want none", got)
 	}
 }
 
@@ -561,7 +540,7 @@ func TestTelegramPressDuringSend(t *testing.T) {
 	}
 	d.mtx.Unlock()
 
-	facts := registerFactsOf(t, newKey(t), newKey(t), "")
+	facts := enrollFactsOf(t, newKey(t))
 	if got := pendingOf(tg, context.Background(), facts); got != enrollauth.AdmissionPending {
 		t.Fatalf("first ask verdict = %v, want pending", got)
 	}
@@ -747,10 +726,11 @@ func lastAuthKey(t *testing.T, d *botDouble) string {
 }
 
 // TestTelegramAuthKey walks the auth key flow: the configured chat asks,
-// the bot mints and replies, a registration presenting the unspent key
-// approves and spends it, and another machine's presentation is a bare
-// joiner's prompt — a stale auth key fails toward the human, not closed.
-// Another chat can neither mint nor retire.
+// naming a node or none, and the bot mints and replies with the node the
+// key connects to; a registration presenting the unspent key approves onto
+// that node and spends it, and another machine's presentation — or an
+// unknown credential's — is denied without a prompt. A malformed node
+// answers the usage, and another chat can neither mint nor retire.
 func TestTelegramAuthKey(t *testing.T) {
 	d := newBotDouble(t)
 	tg := runTelegram(t, d, nil)
@@ -774,39 +754,61 @@ func TestTelegramAuthKey(t *testing.T) {
 	// only console. Its update is ordered before the configured chat's, so
 	// by the time the mint's reply arrived, the stranger's was processed —
 	// and produced nothing. The configured chat addresses the bot by name,
-	// the way a group's clients write commands.
+	// the way a group's clients write commands, and names the leaf.
+	leaf := addr.MustParseIA("20-ff00:0:111")
 	d.say(testChat+1, "/create_auth_key")
-	d.say(testChat, "/create_auth_key@cion_bot")
+	d.say(testChat, "/create_auth_key@cion_bot "+leaf.String())
 	key := lastAuthKey(t, d)
 	if got := d.promptCount(); got != 1 {
 		t.Fatalf("messages after both mints = %d, want the configured chat's one", got)
 	}
+	if reply := d.prompt(0).Text; !strings.Contains(reply, "connects to "+leaf.String()) {
+		t.Errorf("the mint's reply = %q, want the leaf it connects to", reply)
+	}
 
-	// A registration presenting the unspent key approves and spends it.
+	// A registration presenting the unspent key approves onto its node and
+	// spends it.
 	presented := registerFactsOf(t, newKey(t), newKey(t), key)
-	answer := tg.Authorize(context.Background(), presented)
-	if answer.Admission != enrollauth.AdmissionAllow {
-		t.Fatalf("an auth-keyed registration's verdict = %v, want allow", answer.Admission)
+	want := enrollauth.AdmissionAnswer{
+		Admission: enrollauth.AdmissionAllow,
+		Note:      authKeyNote,
+		Node:      leaf,
 	}
-	if answer.Note == "" {
-		t.Error("an auth-key approval carries no note for the registry to record")
+	if answer := tg.Authorize(context.Background(), presented); answer != want {
+		t.Fatalf("an auth-keyed registration's answer = %+v, want %+v", answer, want)
 	}
 
-	// The spent key is a bare joiner's: another machine's presentation
-	// prompts.
-	bare := registerFactsOf(t, newKey(t), newKey(t), key)
-	if got := pendingOf(tg, context.Background(), bare); got != enrollauth.AdmissionPending {
-		t.Fatalf("a spent auth key's verdict = %v, want the bare joiner's pending", got)
+	// The spent key admits no other machine, nor does an unknown
+	// credential, and neither prompts.
+	for _, credential := range []string{key, authKeyPrefix + "deadbeef"} {
+		facts := registerFactsOf(t, newKey(t), newKey(t), credential)
+		if got := pendingOf(tg, context.Background(), facts); got != enrollauth.AdmissionDeny {
+			t.Errorf("a registration presenting %q = %v, want deny", credential, got)
+		}
 	}
-	waitFor(t, "the bare joiner's prompt to send", func() bool {
-		return d.promptCount() == 2
+	if got := d.promptCount(); got != 1 {
+		t.Errorf("messages after the denials = %d, want the mint's reply alone", got)
+	}
+
+	// A mint naming no node connects to the founding core.
+	d.say(testChat, "/create_auth_key")
+	waitFor(t, "the second mint's reply", func() bool { return d.promptCount() == 2 })
+	if reply := d.prompt(1).Text; !strings.Contains(reply, "connects to the founding core") {
+		t.Errorf("the unnamed mint's reply = %q, want the founding core", reply)
+	}
+	founder := lastAuthKey(t, d)
+	if answer := tg.Authorize(context.Background(),
+		registerFactsOf(t, newKey(t), newKey(t), founder)); answer.Admission != enrollauth.AdmissionAllow ||
+		!answer.Node.IsZero() {
+		t.Errorf("the unnamed key's answer = %+v, want allow naming no node", answer)
+	}
+
+	// A malformed node mints nothing and answers the usage.
+	d.say(testChat, "/create_auth_key not-a-node")
+	waitFor(t, "the malformed mint's reply", func() bool {
+		return d.promptCount() == 3 &&
+			strings.Contains(d.prompt(2).Text, "/create_auth_key [ISD-AS]")
 	})
-
-	// An unknown credential prompts the same way.
-	unknown := registerFactsOf(t, newKey(t), newKey(t), authKeyPrefix+"deadbeef")
-	if got := pendingOf(tg, context.Background(), unknown); got != enrollauth.AdmissionPending {
-		t.Fatalf("an unknown credential's verdict = %v, want the bare joiner's pending", got)
-	}
 
 	// A retirement that matches no unspent key answers exactly that, and a
 	// word that is no command answers the usage.
@@ -824,48 +826,51 @@ func TestTelegramAuthKey(t *testing.T) {
 // for the machine that presented it, for the window: the machine's retry
 // with a fresh node key — how a client retries a registration the caller
 // refused after the approval, no slice yet to allocate in — rides it with
-// the key's note; another machine presenting the spent key prompts; and
-// past the window the machine prompts too.
+// the key's note and node; another machine presenting the spent key is
+// denied; and past the window the machine is denied too.
 func TestTelegramAuthKeyStandsForItsMachine(t *testing.T) {
 	d := newBotDouble(t)
 	tg := runTelegram(t, d, func(cfg *Config) { cfg.Window = time.Second })
-	key := tg.mintAuthKey()
+	leaf := addr.MustParseIA("20-ff00:0:111")
+	key := tg.mintAuthKey(leaf)
 
 	machine := newKey(t)
 	first := tg.Authorize(context.Background(), registerFactsOf(t, machine, newKey(t), key))
-	if first.Admission != enrollauth.AdmissionAllow || first.Note != authKeyNote {
-		t.Fatalf("the auth-keyed registration answered %+v, want allow with the key's note", first)
+	if first.Admission != enrollauth.AdmissionAllow || first.Note != authKeyNote || first.Node != leaf {
+		t.Fatalf("the auth-keyed registration answered %+v, want allow onto %s with the key's note", first, leaf)
 	}
 	retry := tg.Authorize(context.Background(), registerFactsOf(t, machine, newKey(t), key))
 	if retry != first {
 		t.Errorf("the machine's retry answered %+v, want the key's approval %+v", retry, first)
 	}
 	other := registerFactsOf(t, newKey(t), newKey(t), key)
-	if got := pendingOf(tg, context.Background(), other); got != enrollauth.AdmissionPending {
-		t.Errorf("another machine presenting the spent key = %v, want the bare joiner's pending", got)
+	if got := pendingOf(tg, context.Background(), other); got != enrollauth.AdmissionDeny {
+		t.Errorf("another machine presenting the spent key = %v, want deny", got)
 	}
 	waitFor(t, "the machine's approval to lapse", func() bool {
 		facts := registerFactsOf(t, machine, newKey(t), key)
-		return pendingOf(tg, context.Background(), facts) == enrollauth.AdmissionPending
+		return pendingOf(tg, context.Background(), facts) == enrollauth.AdmissionDeny
 	})
 }
 
 // TestTelegramAuthKeyPersistence checks the auth keys' own state: an
-// unspent key survives a restart in the state directory and is answerable
-// after it, a spent one is gone for good, and a retired one — named by the
-// retire command — prompts as a bare joiner's. One instance answers one
-// double per phase, the way one process runs per core.
+// unspent key survives a restart in the state directory with its node and
+// is answerable after it, a spent one is gone for good, and a retired one —
+// named by the retire command — is denied. One instance answers one double
+// per phase, the way one process runs per core.
 func TestTelegramAuthKeyPersistence(t *testing.T) {
 	state := t.TempDir()
+	leaf := addr.MustParseIA("20-ff00:0:111")
 
 	// The first instance mints at its operator's request.
 	d1 := newBotDouble(t)
 	runTelegram(t, d1, func(cfg *Config) { cfg.State = state })
-	d1.say(testChat, "/create_auth_key")
+	d1.say(testChat, "/create_auth_key "+leaf.String())
 	key := lastAuthKey(t, d1)
 
-	// A restart carries the unspent auth key; the fresh instance spends
-	// it on presentation, and the spent key prompts the next time.
+	// A restart carries the unspent auth key and its node; the fresh
+	// instance spends it on presentation, and the spent key is denied the
+	// next time.
 	d2 := newBotDouble(t)
 	second, err := New(Config{
 		API: d2.url, Chat: testChat, Token: "7:test", State: state})
@@ -873,17 +878,18 @@ func TestTelegramAuthKeyPersistence(t *testing.T) {
 		t.Fatal(err)
 	}
 	presented := registerFactsOf(t, newKey(t), newKey(t), key)
-	if got := second.Authorize(context.Background(), presented).Admission; got != enrollauth.AdmissionAllow {
-		t.Fatalf("a surviving auth key's verdict = %v, want allow", got)
+	if answer := second.Authorize(context.Background(), presented); answer.Admission != enrollauth.AdmissionAllow ||
+		answer.Node != leaf {
+		t.Fatalf("a surviving auth key's answer = %+v, want allow onto %s", answer, leaf)
 	}
 	if got := second.Authorize(context.Background(),
-		registerFactsOf(t, newKey(t), newKey(t), key)).Admission; got != enrollauth.AdmissionPending {
+		registerFactsOf(t, newKey(t), newKey(t), key)).Admission; got != enrollauth.AdmissionDeny {
 
-		t.Fatalf("the spent auth key's second presentation = %v, want the bare pending", got)
+		t.Fatalf("the spent auth key's second presentation = %v, want deny", got)
 	}
 
 	// Retirement is a command: the operator names an unspent key beside it,
-	// the bot retires it, and the next presentation prompts.
+	// the bot retires it, and the next presentation is denied.
 	d3 := newBotDouble(t)
 	runTelegram(t, d3, func(cfg *Config) { cfg.State = state })
 	d3.say(testChat, "/create_auth_key")
@@ -897,12 +903,12 @@ func TestTelegramAuthKeyPersistence(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reading the persisted auth keys: %v", err)
 	}
-	var keys []string
+	var keys []storedKey
 	if err := json.Unmarshal(raw, &keys); err != nil {
 		t.Fatalf("parsing the persisted auth keys: %v", err)
 	}
 	for _, k := range keys {
-		if k == key2 {
+		if k.Key == key2 {
 			t.Errorf("the retired auth key %q persists", key2)
 		}
 	}
@@ -915,8 +921,30 @@ func TestTelegramAuthKeyPersistence(t *testing.T) {
 		t.Fatal(err)
 	}
 	retired := registerFactsOf(t, newKey(t), newKey(t), key2)
-	if got := third.Authorize(context.Background(), retired).Admission; got != enrollauth.AdmissionPending {
-		t.Fatalf("a retired auth key's verdict = %v, want the bare joiner's pending", got)
+	if got := third.Authorize(context.Background(), retired).Admission; got != enrollauth.AdmissionDeny {
+		t.Fatalf("a retired auth key's verdict = %v, want deny", got)
+	}
+}
+
+// TestTelegramAuthKeysEarlierForm checks a state file of the earlier form —
+// a list of bare keys — loads, each key naming the founding core.
+func TestTelegramAuthKeysEarlierForm(t *testing.T) {
+	state := t.TempDir()
+	const key = authKeyPrefix + "0123456789abcdef0123456789abcdef"
+	path := filepath.Join(state, "enrollauth", authKeysFile)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(`["`+key+`"]`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	tg, err := New(Config{Chat: testChat, Token: "7:test", State: state})
+	if err != nil {
+		t.Fatal(err)
+	}
+	answer := tg.Authorize(context.Background(), registerFactsOf(t, newKey(t), newKey(t), key))
+	if answer.Admission != enrollauth.AdmissionAllow || !answer.Node.IsZero() {
+		t.Errorf("an earlier-form key's answer = %+v, want allow naming no node", answer)
 	}
 }
 
@@ -936,17 +964,17 @@ func TestTelegramAuthKeysRequireState(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	key := tg.mintAuthKey()
+	key := tg.mintAuthKey(0)
 	raw, err := os.ReadFile(filepath.Join(state, "enrollauth", authKeysFile))
 	if err != nil {
 		t.Fatalf("reading the persisted auth keys: %v", err)
 	}
-	var keys []string
+	var keys []storedKey
 	if err := json.Unmarshal(raw, &keys); err != nil {
 		t.Fatalf("parsing the persisted auth keys: %v", err)
 	}
-	if len(keys) != 1 || keys[0] != key {
-		t.Fatalf("persisted auth keys = %v, want the one minted %q", keys, key)
+	if len(keys) != 1 || keys[0].Key != key || !keys[0].Node.IsZero() {
+		t.Fatalf("persisted auth keys = %+v, want the one minted %q naming no node", keys, key)
 	}
 }
 

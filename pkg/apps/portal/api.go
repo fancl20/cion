@@ -10,12 +10,14 @@ import (
 	"log/slog"
 	"net/http"
 	"net/netip"
+	"slices"
 	"strings"
 	"time"
 	"unicode"
 	"unicode/utf8"
 
 	"github.com/go-webauthn/webauthn/protocol"
+	"github.com/scionproto/scion/pkg/addr"
 
 	"github.com/fancl20/cion/pkg/modules/enrollauth"
 )
@@ -265,6 +267,7 @@ type hostView struct {
 	NodeKey    string    `json:"nodeKey"`
 	MachineKey string    `json:"machineKey,omitempty"`
 	Owner      string    `json:"owner"`
+	Endpoint   string    `json:"endpoint,omitempty"`
 	Note       string    `json:"note,omitempty"`
 	Hostname   string    `json:"hostname,omitempty"`
 	OS         string    `json:"os,omitempty"`
@@ -272,8 +275,9 @@ type hostView struct {
 	LastSeen   time.Time `json:"lastSeen,omitzero"`
 }
 
-// handleHosts lists the hosts beside the registration asks; a core running
-// no coordination application answers none available.
+// handleHosts lists the hosts, each beside the host endpoint of the node it
+// connects to; a core running no coordination application answers none
+// available.
 func (a *App) handleHosts(w http.ResponseWriter, r *http.Request) {
 	hosts, err := a.records.Hosts(r.Context())
 	available := !errors.Is(err, ErrNoCoordination)
@@ -284,7 +288,7 @@ func (a *App) handleHosts(w http.ResponseWriter, r *http.Request) {
 	}
 	views := make([]hostView, 0, len(hosts))
 	for _, h := range hosts {
-		views = append(views, hostView{
+		v := hostView{
 			Addr:       h.Addr.String(),
 			NodeKey:    h.NodeKey,
 			MachineKey: h.MachineKey,
@@ -294,13 +298,16 @@ func (a *App) handleHosts(w http.ResponseWriter, r *http.Request) {
 			OS:         h.OS,
 			Connected:  h.Connected,
 			LastSeen:   h.LastSeen,
-		})
+		}
+		if h.Endpoint.IsValid() {
+			v.Endpoint = h.Endpoint.String()
+		}
+		views = append(views, v)
 	}
 	writeJSON(w, http.StatusOK, struct {
 		Available bool       `json:"available"`
 		Hosts     []hostView `json:"hosts"`
-		Asks      []askView  `json:"asks"`
-	}{available, views, askViews(a.operator.Asks(enrollauth.BoundaryRegistration))})
+	}{available, views})
 }
 
 // handleRemoveHost releases the host the path's node key names.
@@ -326,18 +333,16 @@ func (a *App) handleRemoveHost(w http.ResponseWriter, r *http.Request) {
 
 // askView is one ask as the API answers it.
 type askView struct {
-	ID         string    `json:"id"`
-	Boundary   string    `json:"boundary"`
-	Claim      string    `json:"claim,omitempty"`
-	Keys       []string  `json:"keys"`
-	Label      string    `json:"label,omitempty"`
-	Source     string    `json:"source,omitempty"`
-	Credential bool      `json:"credential"`
-	FirstSeen  time.Time `json:"firstSeen"`
-	LastSeen   time.Time `json:"lastSeen"`
-	Attempts   int       `json:"attempts"`
-	State      string    `json:"state"`
-	Until      time.Time `json:"until,omitzero"`
+	ID        string    `json:"id"`
+	Boundary  string    `json:"boundary"`
+	Claim     string    `json:"claim,omitempty"`
+	Keys      []string  `json:"keys"`
+	Source    string    `json:"source,omitempty"`
+	FirstSeen time.Time `json:"firstSeen"`
+	LastSeen  time.Time `json:"lastSeen"`
+	Attempts  int       `json:"attempts"`
+	State     string    `json:"state"`
+	Until     time.Time `json:"until,omitzero"`
 }
 
 // askViews renders the method's asks as the API answers them.
@@ -345,16 +350,14 @@ func askViews(asks []enrollauth.Ask) []askView {
 	views := make([]askView, 0, len(asks))
 	for _, ask := range asks {
 		v := askView{
-			ID:         ask.ID,
-			Boundary:   boundaryName(ask.Boundary),
-			Keys:       ask.Keys,
-			Label:      ask.Label,
-			Credential: ask.Credential,
-			FirstSeen:  ask.FirstSeen,
-			LastSeen:   ask.LastSeen,
-			Attempts:   ask.Attempts,
-			State:      stateName(ask.Verdict),
-			Until:      ask.Until,
+			ID:        ask.ID,
+			Boundary:  boundaryName(ask.Boundary),
+			Keys:      ask.Keys,
+			FirstSeen: ask.FirstSeen,
+			LastSeen:  ask.LastSeen,
+			Attempts:  ask.Attempts,
+			State:     stateName(ask.Verdict),
+			Until:     ask.Until,
 		}
 		if !ask.Claim.IsZero() {
 			v.Claim = ask.Claim.String()
@@ -367,15 +370,13 @@ func askViews(asks []enrollauth.Ask) []askView {
 	return views
 }
 
+// boundaryName names an ask's boundary: a node's enrollment or a core's
+// vote, the two that pend.
 func boundaryName(b enrollauth.Boundary) string {
-	switch b {
-	case enrollauth.BoundaryRegistration:
-		return "registration"
-	case enrollauth.BoundaryVoting:
+	if b == enrollauth.BoundaryVoting {
 		return "voting"
-	default:
-		return "enrollment"
 	}
+	return "enrollment"
 }
 
 func stateName(v enrollauth.AdmissionVerdict) string {
@@ -400,7 +401,8 @@ func (a *App) handleDecide(approve bool) http.HandlerFunc {
 	}
 }
 
-// keyView is one auth key as the API answers it.
+// keyView is one auth key as the API answers it: Node is the node its
+// hosts land on, omitted for the founding core.
 type keyView struct {
 	ID          string              `json:"id"`
 	Description string              `json:"description,omitempty"`
@@ -409,6 +411,7 @@ type keyView struct {
 	Expires     time.Time           `json:"expires"`
 	Uses        int                 `json:"uses"`
 	State       enrollauth.KeyState `json:"state"`
+	Node        addr.IA             `json:"node,omitzero"`
 }
 
 // handleKeys lists the auth keys, newest first.
@@ -423,13 +426,16 @@ func (a *App) handleKeys(w http.ResponseWriter, _ *http.Request) {
 	}{views})
 }
 
-// handleMintKey mints an auth key; the response carries the key, the one
-// time it leaves the core.
+// handleMintKey mints an auth key whose hosts land on the node it names —
+// one of the nodes holding a slice; the response carries the key, the one
+// time it leaves the core, beside the node and the host endpoint its hosts
+// connect to.
 func (a *App) handleMintKey(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Description string `json:"description"`
 		Reusable    bool   `json:"reusable"`
 		Days        int    `json:"days"`
+		Node        string `json:"node"`
 	}
 	if !readJSON(w, r, &req) {
 		return
@@ -440,19 +446,51 @@ func (a *App) handleMintKey(w http.ResponseWriter, r *http.Request) {
 			enrollauth.MinKeyDays, enrollauth.MaxKeyDays))
 		return
 	}
+	node, ok := a.servingNode(w, r, req.Node)
+	if !ok {
+		return
+	}
 	key, record, err := a.operator.MintKey(enrollauth.KeyRequest{
 		Description: clean(req.Description, descriptionCap),
 		Reusable:    req.Reusable,
 		Days:        req.Days,
+		Node:        node.IA,
 	})
 	if err != nil {
 		writeFailure(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, struct {
-		ID  string `json:"id"`
-		Key string `json:"key"`
-	}{record.ID, key})
+		ID       string  `json:"id"`
+		Key      string  `json:"key"`
+		Node     addr.IA `json:"node"`
+		Endpoint string  `json:"endpoint"`
+	}{record.ID, key, record.Node, node.Endpoint.String()})
+}
+
+// servingNode finds the node a mint names among the nodes holding a slice,
+// answering a name that is no such node itself.
+func (a *App) servingNode(w http.ResponseWriter, r *http.Request, name string) (Node, bool) {
+	ia, err := addr.ParseIA(name)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "name the node the key's hosts connect to")
+		return Node{}, false
+	}
+	nodes, err := a.records.Nodes(r.Context())
+	if err != nil {
+		slog.Error("Listing the nodes for the portal", "err", err)
+		writeError(w, http.StatusInternalServerError, "the records are unavailable")
+		return Node{}, false
+	}
+	i := slices.IndexFunc(nodes, func(n Node) bool {
+		return n.IA.Equal(ia) && n.Overlay.IsValid() && n.Endpoint.IsValid()
+	})
+	if i < 0 {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("%s serves no hosts: pick a node "+
+			"that holds a slice", ia))
+		return Node{}, false
+	}
+	return nodes[i], true
 }
 
 // handleRevokeKey retires the auth key the path names.

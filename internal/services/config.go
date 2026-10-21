@@ -69,12 +69,13 @@ type NodeConfig struct {
 	Control  string
 	// EnrollAuth selects the enrollment authorizer that gates first issuance,
 	// host registration, and the founding core's sensitive vote on a core's
-	// TRC submission: "cidrs=" with a comma-separated prefix list,
-	// "telegram=" with <chat>:<token>, or the bare "portal", whose asks the
-	// portal application — the operator's passkey console at /admin/ —
-	// decides. Empty is open enrollment and registration — the zero-conf
-	// default — with the vote denied, and the argument refuses to load off
-	// the founding core, the only node that issues chains.
+	// TRC submission: "cidrs=" with a comma-separated prefix list, admitting
+	// nodes alone, "telegram=" with <chat>:<token>, or the bare "portal",
+	// whose asks the portal application — the operator's passkey console at
+	// /admin/ — decides; a host registers on an auth key one of the latter
+	// two minted. Empty is open enrollment — the zero-conf default — with
+	// every registration and the vote denied, and the argument refuses to
+	// load off the founding core, the only node that issues chains.
 	EnrollAuth string
 	// TelegramAPI overrides the Telegram Bot API's base URL for the
 	// telegram method of EnrollAuth; empty uses the public one. The
@@ -101,6 +102,10 @@ type NodeConfig struct {
 	// certificate; nil uses the system roots. The integration tests inject
 	// their CA with it.
 	RootCAs *x509.CertPool
+	// Admission is the integration harness's stand-in policy, loaded in
+	// place of the method EnrollAuth names; the two refuse to combine, and
+	// it refuses to load off the founding core.
+	Admission enrollauth.AdmissionAuthorizer
 
 	// Pacing shortens the loops' periods; zero values keep the production
 	// constants. The daemon never sets it — the integration tests do.
@@ -165,10 +170,11 @@ type resolvedConfig struct {
 	controlAddr  netip.AddrPort
 	internalAddr netip.AddrPort
 	// enrollAuth gates the trust service's first issuance, the coordination
-	// application's registrations, and the TRC decision's sensitive vote;
-	// nil leaves the first two open and denies the vote. enrollRun runs the
-	// selected method's own loops — the Telegram authorizer's poll, the
-	// portal's sweep — nil when the method has none.
+	// application's registrations, and the TRC decision's sensitive vote:
+	// the method EnrollAuth names or the harness's Admission; nil leaves the
+	// first open and denies the other two. enrollRun runs the selected
+	// method's own loops — the Telegram authorizer's poll, the portal's
+	// sweep — nil when the method has none.
 	enrollAuth enrollauth.AdmissionAuthorizer
 	enrollRun  func(context.Context)
 	// apps is the selected resident applications, in table order.
@@ -219,14 +225,22 @@ func (c NodeConfig) resolve() (resolvedConfig, error) {
 		c.Internal, netip.MustParseAddrPort(DefaultInternal).Port()); err != nil {
 		return resolvedConfig{}, fmt.Errorf("parsing internal address: %w", err)
 	}
-	if c.EnrollAuth != "" {
-		// A silently inert gate is the misleading configuration the
-		// role-aware checks exist to refuse: only the founding core issues
-		// chains, so only the founding core's gate means anything.
-		if !founding {
-			return resolvedConfig{}, fmt.Errorf("--trust.enroll-auth requires the founding core: " +
-				"the founding core is the only node that issues chains")
-		}
+	// A silently inert gate is the misleading configuration the role-aware
+	// checks exist to refuse: only the founding core issues chains, so only
+	// the founding core's gate means anything.
+	switch {
+	case c.EnrollAuth != "" && c.Admission != nil:
+		return resolvedConfig{}, fmt.Errorf("--trust.enroll-auth refuses the harness's " +
+			"admission policy: one policy per process")
+	case c.EnrollAuth != "" && !founding:
+		return resolvedConfig{}, fmt.Errorf("--trust.enroll-auth requires the founding core: " +
+			"the founding core is the only node that issues chains")
+	case c.Admission != nil && !founding:
+		return resolvedConfig{}, fmt.Errorf("the harness's admission policy requires the " +
+			"founding core: the founding core is the only node that issues chains")
+	case c.Admission != nil:
+		r.enrollAuth = c.Admission
+	case c.EnrollAuth != "":
 		r.enrollAuth, r.enrollRun, err = loadEnrollAuth(c.EnrollAuth, c.TelegramAPI, c.State)
 		if err != nil {
 			return resolvedConfig{}, fmt.Errorf("parsing --trust.enroll-auth: %w", err)

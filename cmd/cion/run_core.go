@@ -28,10 +28,11 @@ func addCoreNodeFlags(flags *pflag.FlagSet, opts *services.NodeConfig) {
 		"the founding core's TLS key file, the offline fallback to ACME")
 	_ = flags.MarkHidden("trust.key-file")
 	flags.StringVar(&opts.EnrollAuth, "trust.enroll-auth", "",
-		"gate first issuance and the founder's TRC votes with a policy: "+
-			"cidrs=<comma-separated prefix list> admits by source address, "+
-			"telegram=<chat>:<token> prompts the chat per joiner, "+
-			"portal serves a passkey console at https://<trust.domain>/admin/ "+
+		"gate first issuance, host registration, and the founder's TRC votes with a policy: "+
+			"cidrs=<comma-separated prefix list> admits nodes by source address and no host, "+
+			"telegram=<chat>:<token> prompts the chat per joining node, "+
+			"portal serves a passkey console at https://<trust.domain>/admin/; "+
+			"the latter two mint the auth keys hosts join with, each naming the host's node "+
 			"(required on the founding core)")
 }
 

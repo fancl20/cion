@@ -85,12 +85,22 @@ func registeredHost(key wireguard.PublicKey) wireguard.HostEntry {
 func machineZero() key.MachinePublic { return key.MachinePublic{} }
 
 // testApp builds an application around the given registry with the test
-// core's identity, its surfaces mounted on a mux of its own unless the
+// core's identity — 1-ff00:0:1, where a host lands when its admission
+// names no node — admitting every registration unless the configuration
+// names an authorizer, its surfaces mounted on a mux of its own unless the
 // configuration names a mounter.
 func testApp(t *testing.T, cfg Config) *App {
 	t.Helper()
 	cfg.Domain = webpkitest.Domain
 	cfg.StateDir = t.TempDir()
+	if cfg.IA.IsZero() {
+		cfg.IA = mustIA("1-ff00:0:1")
+	}
+	if cfg.Authorizer == nil {
+		cfg.Authorizer = &askAuthorizer{
+			answer: enrollauth.AdmissionAnswer{Admission: enrollauth.AdmissionAllow},
+		}
+	}
 	if cfg.MountHTTPS == nil {
 		cfg.MountHTTPS = http.NewServeMux().Handle
 	}

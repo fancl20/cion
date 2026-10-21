@@ -9,18 +9,18 @@ import (
 	"github.com/fancl20/cion/pkg/modules/enrollauth"
 )
 
-// Authorizer is the admission authorizer of addressing: it admits an exchange
-// whose source address falls in one of the listed prefixes and denies
-// everything else — a request carrying no address among them, for a gate that
-// opens when its signal is missing is no gate. The address is self-claimed but
-// return-routable: a joiner behind translation presents its private address,
-// and a private-range entry is what admits such joiners; a fabricated address
-// inside an allowed prefix completes no exchange at all. The posture answers
-// every boundary alike — joiner nodes and voting submissions by SCION
-// source, joiner hosts by the internet address their TLS connection named —
-// the one prefix list standing for the one network's addressing. The check
-// is stateless and instant, and its denials are as quiet as its admissions:
-// the caller's log line is the whole of the record.
+// Authorizer is the admission authorizer of addressing: it admits a joiner
+// node or a voting submission whose SCION source address falls in one of
+// the listed prefixes and denies everything else — a request carrying no
+// address among them, for a gate that opens when its signal is missing is
+// no gate. The address is self-claimed but return-routable: a joiner behind
+// translation presents its private address, and a private-range entry is
+// what admits such joiners; a fabricated address inside an allowed prefix
+// completes no exchange at all. It mints no keys, so it admits no host: a
+// host is admitted on a key alone, and the posture denies every
+// registration whatever its source. The check is stateless and instant,
+// and its denials are as quiet as its admissions: the caller's log line is
+// the whole of the record.
 type Authorizer struct {
 	prefixes []netip.Prefix
 }
@@ -42,14 +42,14 @@ func New(spec string) (*Authorizer, error) {
 	return &Authorizer{prefixes: prefixes}, nil
 }
 
-// Authorize allows exactly an exchange whose source address a listed prefix
-// contains.
+// Authorize allows exactly an enrollment or a voting submission whose
+// source address a listed prefix contains, and denies every registration.
 func (c *Authorizer) Authorize(
 	_ context.Context,
 	f enrollauth.AdmissionFacts,
 ) enrollauth.AdmissionAnswer {
 
-	if !f.Source.IsValid() {
+	if f.Boundary == enrollauth.BoundaryRegistration || !f.Source.IsValid() {
 		return enrollauth.AdmissionAnswer{Admission: enrollauth.AdmissionDeny}
 	}
 	for _, prefix := range c.prefixes {

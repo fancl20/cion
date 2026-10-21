@@ -223,3 +223,22 @@ flips ADR-0023 to accepted.
     sources, the leaf enrolls and a host's login never completes.
 
 ## Implementation history
+
+*   The labs' policy and its `lab:<isd-as>` credential live beside the
+    coordination labs' helpers, and the core's helper loads the policy
+    whenever a suite names no method
+    ([coordination_test.go](/internal/testnetwork/coordination_test.go)).
+    The open join lab becomes `TestCoordinationJoin`. The Telegram prompt
+    lab becomes `TestCoordinationTelegramRefusesBareHost`, which boots no
+    leaf, so the chat shows no prompt at all; the auth-key lab approves
+    the leaf's enrollment before it mints, for the key's node must publish
+    its slice first
+    ([admission_test.go](/internal/testnetwork/admission_test.go)).
+*   The console's dialog reads the node list when it opens, each option
+    naming the node's ISD-AS, host endpoint, and free addresses. The keys'
+    listing omits the node of a key naming the founding core — a record
+    from before the field — and the page shows the founding core in its
+    place ([api.go](/pkg/apps/portal/api.go),
+    [portal.js](/pkg/apps/portal/portal.js)). A release's confirmation
+    says a removed client rejoins only on a key that still admits it, a
+    one-use key's holder among them.

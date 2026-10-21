@@ -28,7 +28,9 @@ const (
 	maxAsks       = 256
 )
 
-// The notes the registry records beside an approved host.
+// The notes the method answers with an approval: the operator's on a
+// decided ask, an auth key's on a host it admits — the note the registry
+// records beside the host.
 const (
 	operatorNote   = "portal operator"
 	authKeyNotePre = "portal auth key "
@@ -47,13 +49,12 @@ type askKey struct {
 // it presented, how often and since when it asked, and the operator's
 // standing decision.
 type ask struct {
-	facts      enrollauth.AdmissionFacts
-	credential bool
-	firstSeen  time.Time
-	lastSeen   time.Time
-	attempts   int
-	verdict    enrollauth.AdmissionVerdict
-	decided    time.Time
+	facts     enrollauth.AdmissionFacts
+	firstSeen time.Time
+	lastSeen  time.Time
+	attempts  int
+	verdict   enrollauth.AdmissionVerdict
+	decided   time.Time
 	// admitted marks an approval its joiner's retry has consumed; the ask
 	// stands for the rest of its window but leaves the list.
 	admitted bool
@@ -83,17 +84,15 @@ func (k askKey) id() string {
 	return hex.EncodeToString(append(b, k.digest[:]...))
 }
 
-// parseAskID decodes an identity the console names.
+// parseAskID decodes an identity the console names: an enrollment's or a
+// vote's, the boundaries that pend.
 func parseAskID(s string) (askKey, bool) {
 	b, err := hex.DecodeString(s)
 	if err != nil || len(b) != 1+8+sha256.Size/2 {
 		return askKey{}, false
 	}
 	boundary := enrollauth.Boundary(b[0])
-	switch boundary {
-	case enrollauth.BoundaryEnrollment, enrollauth.BoundaryRegistration,
-		enrollauth.BoundaryVoting:
-	default:
+	if boundary != enrollauth.BoundaryEnrollment && boundary != enrollauth.BoundaryVoting {
 		return askKey{}, false
 	}
 	k := askKey{boundary: boundary, claim: addr.IA(binary.BigEndian.Uint64(b[1:9]))}
@@ -127,12 +126,11 @@ func (a *ask) until() time.Time {
 }
 
 // Authorize answers one admission exchange: facts presenting no keys are
-// denied; a registration presenting an auth key that stands for its
-// identity is admitted on the key; an identity the operator decided
-// answers the standing decision; any other pends, listed for the operator
-// with the facts it presented. A credential matching no standing key falls
-// through to the operator, a stale key failing toward the human rather
-// than closed.
+// denied; a registration is admitted on an auth key that stands for its
+// identity, onto the node the key names, and denied on anything else — a
+// host comes with a key or not at all; an enrollment or a vote the
+// operator decided answers the standing decision, and any other pends,
+// listed for the operator with the facts it presented.
 func (p *Portal) Authorize(
 	_ context.Context,
 	f enrollauth.AdmissionFacts,
@@ -145,12 +143,15 @@ func (p *Portal) Authorize(
 	key := keyOf(f)
 	p.mtx.Lock()
 	defer p.mtx.Unlock()
-	if f.Boundary == enrollauth.BoundaryRegistration && f.Credential != "" {
-		if id, ok := p.spendLocked(f.Credential, key.id(), now); ok {
-			return enrollauth.AdmissionAnswer{
-				Admission: enrollauth.AdmissionAllow,
-				Note:      authKeyNotePre + id,
-			}
+	if f.Boundary == enrollauth.BoundaryRegistration {
+		id, node, ok := p.spendLocked(f.Credential, key.id(), now)
+		if !ok {
+			return enrollauth.AdmissionAnswer{Admission: enrollauth.AdmissionDeny}
+		}
+		return enrollauth.AdmissionAnswer{
+			Admission: enrollauth.AdmissionAllow,
+			Note:      authKeyNotePre + id,
+			Node:      node,
 		}
 	}
 	a := p.asks[key]
@@ -164,8 +165,6 @@ func (p *Portal) Authorize(
 		p.asks[key] = a
 	}
 	a.facts = f
-	a.facts.Credential = ""
-	a.credential = f.Credential != ""
 	a.lastSeen = now
 	a.attempts++
 	switch a.verdict {
@@ -236,18 +235,16 @@ func (p *Portal) Asks(boundaries ...enrollauth.Boundary) []enrollauth.Ask {
 			continue
 		}
 		asks = append(asks, enrollauth.Ask{
-			ID:         key.id(),
-			Boundary:   key.boundary,
-			Claim:      key.claim,
-			Keys:       a.facts.Keys,
-			Label:      a.facts.Label,
-			Source:     a.facts.Source,
-			Credential: a.credential,
-			FirstSeen:  a.firstSeen,
-			LastSeen:   a.lastSeen,
-			Attempts:   a.attempts,
-			Verdict:    a.verdict,
-			Until:      a.until(),
+			ID:        key.id(),
+			Boundary:  key.boundary,
+			Claim:     key.claim,
+			Keys:      a.facts.Keys,
+			Source:    a.facts.Source,
+			FirstSeen: a.firstSeen,
+			LastSeen:  a.lastSeen,
+			Attempts:  a.attempts,
+			Verdict:   a.verdict,
+			Until:     a.until(),
 		})
 	}
 	slices.SortFunc(asks, func(a, b enrollauth.Ask) int { return a.FirstSeen.Compare(b.FirstSeen) })

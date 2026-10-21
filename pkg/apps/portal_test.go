@@ -126,13 +126,20 @@ func TestPortalRecordsNodes(t *testing.T) {
 }
 
 // TestPortalRecordsHosts checks the console's view of the hosts: the
-// registry's entries sorted by address with the claims their admission
-// recorded and a legacy record's empty machine key; a release reaching the
-// registry through the coordination application; and neither without it.
+// registry's entries sorted by address, each beside its node's host
+// endpoint, with the claims their admission recorded and a legacy record's
+// empty machine key; a release reaching the registry through the
+// coordination application; and neither without it.
 func TestPortalRecordsHosts(t *testing.T) {
 	ctx := t.Context()
 	owner := addr.MustParseIA("1-ff00:0:1")
+	endpoint := netip.MustParseAddrPort("198.51.100.10:41641")
 	registry := &dbtest.MemStore{}
+	registry.Seed(wireguard.Entry{
+		IA:           owner,
+		Overlay:      netip.MustParsePrefix("100.64.0.0/24"),
+		HostEndpoint: endpoint,
+	})
 	recorded := []wireguard.HostEntry{
 		{
 			PublicKey: dbtest.MustKey(0x82),
@@ -144,7 +151,7 @@ func TestPortalRecordsHosts(t *testing.T) {
 			MachineKey: dbtest.MustKey(0x91),
 			Addr:       netip.MustParseAddr("100.64.0.2"),
 			IA:         owner,
-			Note:       "portal operator",
+			Note:       "portal auth key 0a1b2c3d",
 			Hostname:   "laptop",
 			OS:         "linux",
 		},
@@ -175,17 +182,20 @@ func TestPortalRecordsHosts(t *testing.T) {
 			NodeKey:    strings.Repeat("81", 32),
 			MachineKey: strings.Repeat("91", 32),
 			Owner:      owner,
-			Note:       "portal operator",
+			Endpoint:   endpoint,
+			Note:       "portal auth key 0a1b2c3d",
 			Hostname:   "laptop",
 			OS:         "linux",
 		},
 		{
-			Addr:    netip.MustParseAddr("100.64.0.3"),
-			NodeKey: strings.Repeat("82", 32),
-			Owner:   owner,
+			Addr:     netip.MustParseAddr("100.64.0.3"),
+			NodeKey:  strings.Repeat("82", 32),
+			Owner:    owner,
+			Endpoint: endpoint,
 		},
 	}
-	if diff := cmp.Diff(want, hosts, cmpopts.EquateComparable(netip.Addr{})); diff != "" {
+	if diff := cmp.Diff(want, hosts,
+		cmpopts.EquateComparable(netip.Addr{}, netip.AddrPort{})); diff != "" {
 		t.Errorf("the hosts mismatch (-want +got):\n%s", diff)
 	}
 

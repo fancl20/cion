@@ -135,8 +135,9 @@ func TestEgressSocksService(t *testing.T) {
 	tcpNet := internetTCPEcho(t)
 	udpNet := internetUDPEcho(t)
 
-	// One host, one login — the netmap it holds naming every exit.
-	host := tailnetHost(t, "host-egress", place.controlURL, "")
+	// One host, one login — the netmap it holds naming every exit — on the
+	// leaf its key names.
+	host := tailnetHost(t, "host-egress", place.controlURL, labKey(b.app.IA()))
 	ips := hostUp(t, host)
 	if len(ips) != 1 || !ips[0].Is4() || !TailnetRange.Contains(ips[0]) {
 		t.Fatalf("the host's addresses = %v, want one of the tailnet range", ips)
@@ -265,10 +266,10 @@ func TestWithheldExitOffer(t *testing.T) {
 	})
 
 	// One host, one login — the netmap it holds naming every exit's
-	// address, the offered and the withheld alike. The host's slice is the
-	// allocator's choice; whichever node owns it, the flows below cross
-	// the mesh to the exit they name.
-	host := tailnetHost(t, "host-withheld", place.controlURL, "")
+	// address, the offered and the withheld alike. The host lands on the
+	// core its key names, so the withheld flow below crosses the mesh to
+	// the exit it names.
+	host := tailnetHost(t, "host-withheld", place.controlURL, labKey(a.app.IA()))
 	ips := hostUp(t, host)
 	if len(ips) != 1 || !ips[0].Is4() || !TailnetRange.Contains(ips[0]) {
 		t.Fatalf("the host's addresses = %v, want one of the tailnet range", ips)

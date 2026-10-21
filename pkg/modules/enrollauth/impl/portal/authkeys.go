@@ -13,6 +13,8 @@ import (
 	"slices"
 	"time"
 
+	"github.com/scionproto/scion/pkg/addr"
+
 	"github.com/fancl20/cion/pkg/libs/statefile"
 	"github.com/fancl20/cion/pkg/modules/enrollauth"
 )
@@ -56,6 +58,9 @@ type authKey struct {
 	Created     time.Time `json:"created"`
 	Expires     time.Time `json:"expires"`
 	Uses        int       `json:"uses,omitempty"`
+	// Node is the node the key's hosts land on; zero — omitted — names the
+	// founding core.
+	Node addr.IA `json:"node,omitzero"`
 	// Holder names the identity a one-use key admitted, hex encoded: the
 	// caller may refuse an admitted registration after the policy answered
 	// — no slice yet to allocate in — so the holder's retries pass on the
@@ -89,6 +94,7 @@ func (k *authKey) view(now time.Time) enrollauth.AuthKey {
 		Expires:     k.Expires,
 		Uses:        k.Uses,
 		State:       k.state(now),
+		Node:        k.Node,
 	}
 }
 
@@ -112,6 +118,7 @@ func (p *Portal) MintKey(req enrollauth.KeyRequest) (string, enrollauth.AuthKey,
 		Reusable:    req.Reusable,
 		Created:     now,
 		Expires:     now.AddDate(0, 0, req.Days),
+		Node:        req.Node,
 	}
 	p.keys = append(p.keys, record)
 	if err := p.persistKeysLocked(now); err != nil {
@@ -119,16 +126,17 @@ func (p *Portal) MintKey(req enrollauth.KeyRequest) (string, enrollauth.AuthKey,
 		return "", enrollauth.AuthKey{}, err
 	}
 	slog.Info("The portal minted an auth key", "id", record.ID,
-		"reusable", record.Reusable, "expires", record.Expires)
+		"reusable", record.Reusable, "expires", record.Expires, "node", record.Node)
 	return key, record.view(now), nil
 }
 
 // spendLocked admits a credential matching a key that stands for the
 // identity — a reusable key, counting the use; a one-use key's first
 // presentation, binding the identity as its holder; or its holder's retry
-// — persisting the set, and answers the key's ID. A failed write keeps the
-// admission: the use is counted in memory, and the next write carries it.
-func (p *Portal) spendLocked(credential, identity string, now time.Time) (string, bool) {
+// — persisting the set, and answers the key's ID and node. A failed write
+// keeps the admission: the use is counted in memory, and the next write
+// carries it.
+func (p *Portal) spendLocked(credential, identity string, now time.Time) (string, addr.IA, bool) {
 	digest := sha256.Sum256([]byte(credential))
 	for _, k := range p.keys {
 		if subtle.ConstantTimeCompare(k.Digest[:], digest[:]) != 1 {
@@ -136,22 +144,22 @@ func (p *Portal) spendLocked(credential, identity string, now time.Time) (string
 		}
 		switch {
 		case k.Revoked || !now.Before(k.Expires):
-			return "", false
+			return "", 0, false
 		case k.Reusable:
 			k.Uses++
 		case k.Uses == 0:
 			k.Uses, k.Holder = 1, identity
 		case k.Holder != identity:
-			return "", false
+			return "", 0, false
 		default:
-			return k.ID, true
+			return k.ID, k.Node, true
 		}
 		if err := p.persistKeysLocked(now); err != nil {
 			slog.Warn("Persisting the portal's auth keys", "err", err)
 		}
-		return k.ID, true
+		return k.ID, k.Node, true
 	}
-	return "", false
+	return "", 0, false
 }
 
 // RevokeKey retires the key the ID names, reporting whether it named one.

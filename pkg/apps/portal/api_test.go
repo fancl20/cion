@@ -121,10 +121,10 @@ func (c *console) doWith(method, path string, body any,
 }
 
 // TestRecordsAPI checks the console's views of the records: the nodes beside
-// the method's node and vote asks, the slice's capacity counted; the hosts
-// beside its registration asks, none available without the coordination
-// application; and a release reaching the records, a malformed key refused
-// before it.
+// the method's node and vote asks, the slice's capacity counted; the hosts,
+// each beside its node's host endpoint and no asks beside them, none
+// available without the coordination application; and a release reaching
+// the records, a malformed key refused before it.
 func TestRecordsAPI(t *testing.T) {
 	f, c, _ := signedIn(t)
 	f.records.nodes = []Node{{
@@ -140,37 +140,24 @@ func TestRecordsAPI(t *testing.T) {
 		Addr:      netip.MustParseAddr("100.64.0.2"),
 		NodeKey:   strings.Repeat("ab", 32),
 		Owner:     mustIA("1-ff00:0:110"),
-		Note:      "portal operator",
+		Endpoint:  netip.MustParseAddrPort("198.51.100.10:41641"),
+		Note:      "portal auth key 0a1b2c3d",
 		Hostname:  "laptop",
 		OS:        "linux",
 		Connected: true,
 	}}
 	seen := time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC)
-	f.operator.asks = []enrollauth.Ask{
-		{
-			ID:        "e1",
-			Boundary:  enrollauth.BoundaryEnrollment,
-			Claim:     mustIA("1-ff00:0:111"),
-			Keys:      []string{"bb02"},
-			Source:    netip.MustParseAddrPort("192.0.2.7:30042"),
-			FirstSeen: seen,
-			LastSeen:  seen,
-			Attempts:  3,
-			Verdict:   enrollauth.AdmissionPending,
-		},
-		{
-			ID:         "r1",
-			Boundary:   enrollauth.BoundaryRegistration,
-			Keys:       []string{"mkey:01", "nodekey:01"},
-			Label:      "phone (ios)",
-			Credential: true,
-			FirstSeen:  seen,
-			LastSeen:   seen,
-			Attempts:   1,
-			Verdict:    enrollauth.AdmissionDeny,
-			Until:      seen.Add(24 * time.Hour),
-		},
-	}
+	f.operator.asks = []enrollauth.Ask{{
+		ID:        "e1",
+		Boundary:  enrollauth.BoundaryEnrollment,
+		Claim:     mustIA("1-ff00:0:111"),
+		Keys:      []string{"bb02"},
+		Source:    netip.MustParseAddrPort("192.0.2.7:30042"),
+		FirstSeen: seen,
+		LastSeen:  seen,
+		Attempts:  3,
+		Verdict:   enrollauth.AdmissionPending,
+	}}
 
 	nodes := decodeJSON[struct {
 		Nodes []nodeView `json:"nodes"`
@@ -204,29 +191,27 @@ func TestRecordsAPI(t *testing.T) {
 		t.Errorf("the nodes' asks mismatch (-want +got):\n%s", diff)
 	}
 
-	hosts := decodeJSON[struct {
+	type hostsList struct {
 		Available bool       `json:"available"`
 		Hosts     []hostView `json:"hosts"`
 		Asks      []askView  `json:"asks"`
-	}](t, c.expect(http.StatusOK, http.MethodGet, "/admin/api/hosts", nil))
-	if !hosts.Available || len(hosts.Hosts) != 1 || hosts.Hosts[0].Hostname != "laptop" ||
-		!hosts.Hosts[0].Connected {
-		t.Errorf("the hosts = %+v, want the laptop connected", hosts)
 	}
-	wantAsk = askView{
-		ID:         "r1",
-		Boundary:   "registration",
-		Keys:       []string{"mkey:01", "nodekey:01"},
-		Label:      "phone (ios)",
-		Credential: true,
-		FirstSeen:  seen,
-		LastSeen:   seen,
-		Attempts:   1,
-		State:      "rejected",
-		Until:      seen.Add(24 * time.Hour),
+	hosts := decodeJSON[hostsList](t, c.expect(http.StatusOK, http.MethodGet, "/admin/api/hosts", nil))
+	wantHosts := hostsList{
+		Available: true,
+		Hosts: []hostView{{
+			Addr:      "100.64.0.2",
+			NodeKey:   strings.Repeat("ab", 32),
+			Owner:     "1-ff00:0:110",
+			Endpoint:  "198.51.100.10:41641",
+			Note:      "portal auth key 0a1b2c3d",
+			Hostname:  "laptop",
+			OS:        "linux",
+			Connected: true,
+		}},
 	}
-	if diff := cmp.Diff([]askView{wantAsk}, hosts.Asks); diff != "" {
-		t.Errorf("the hosts' asks mismatch (-want +got):\n%s", diff)
+	if diff := cmp.Diff(wantHosts, hosts); diff != "" {
+		t.Errorf("the hosts mismatch (-want +got):\n%s", diff)
 	}
 
 	c.expect(http.StatusBadRequest, http.MethodDelete, "/admin/api/hosts/nodekey", nil)
@@ -236,11 +221,7 @@ func TestRecordsAPI(t *testing.T) {
 	}
 
 	f.records.noCoordination = true
-	hosts = decodeJSON[struct {
-		Available bool       `json:"available"`
-		Hosts     []hostView `json:"hosts"`
-		Asks      []askView  `json:"asks"`
-	}](t, c.expect(http.StatusOK, http.MethodGet, "/admin/api/hosts", nil))
+	hosts = decodeJSON[hostsList](t, c.expect(http.StatusOK, http.MethodGet, "/admin/api/hosts", nil))
 	if hosts.Available || len(hosts.Hosts) != 0 {
 		t.Errorf("without coordination the hosts read %+v, want none available", hosts)
 	}
@@ -269,29 +250,55 @@ func TestDecideAPI(t *testing.T) {
 }
 
 // TestKeysAPI checks the auth keys over the API: an expiry outside the
-// contract's bounds refuses before the method is asked; a minting reaches
-// the method with its description cleaned and answers the key once, the
-// listing never; and a revocation lands, an unknown ID not found.
+// contract's bounds, a missing or malformed node, and a node holding no
+// slice each refuse before the method is asked; a minting reaches the
+// method with its description cleaned and its node, and answers the key
+// once beside the node and its host endpoint, the listing never the key but
+// the node; and a revocation lands, an unknown ID not found.
 func TestKeysAPI(t *testing.T) {
 	f, c, _ := signedIn(t)
-	for _, days := range []int{enrollauth.MinKeyDays - 1, enrollauth.MaxKeyDays + 1} {
-		c.expect(http.StatusBadRequest, http.MethodPost, "/admin/api/keys",
-			map[string]any{"days": days})
+	f.records.nodes = []Node{
+		{
+			IA:       mustIA("1-ff00:0:110"),
+			Role:     RoleFounder,
+			Overlay:  netip.MustParsePrefix("100.64.0.0/24"),
+			Endpoint: netip.MustParseAddrPort("198.51.100.10:41641"),
+		},
+		{IA: mustIA("1-ff00:0:111"), Role: RoleNode},
+	}
+	for _, req := range []map[string]any{
+		{"days": enrollauth.MinKeyDays - 1, "node": "1-ff00:0:110"},
+		{"days": enrollauth.MaxKeyDays + 1, "node": "1-ff00:0:110"},
+		{"days": 7},
+		{"days": 7, "node": "1-ff00"},
+		{"days": 7, "node": "1-ff00:0:111"},
+		{"days": 7, "node": "1-ff00:0:112"},
+	} {
+		c.expect(http.StatusBadRequest, http.MethodPost, "/admin/api/keys", req)
 	}
 	if len(f.operator.minted) != 0 {
 		t.Fatalf("the refused mintings reached the method: %+v", f.operator.minted)
 	}
 	minted := decodeJSON[struct {
-		ID  string `json:"id"`
-		Key string `json:"key"`
-	}](t, c.expect(http.StatusOK, http.MethodPost, "/admin/api/keys",
-		map[string]any{"description": " ci\x00 runner ", "reusable": true, "days": 7}))
-	want := []enrollauth.KeyRequest{{Description: "ci runner", Reusable: true, Days: 7}}
+		ID       string `json:"id"`
+		Key      string `json:"key"`
+		Node     string `json:"node"`
+		Endpoint string `json:"endpoint"`
+	}](t, c.expect(http.StatusOK, http.MethodPost, "/admin/api/keys", map[string]any{
+		"description": " ci\x00 runner ", "reusable": true, "days": 7, "node": "1-ff00:0:110",
+	}))
+	want := []enrollauth.KeyRequest{{
+		Description: "ci runner",
+		Reusable:    true,
+		Days:        7,
+		Node:        mustIA("1-ff00:0:110"),
+	}}
 	if diff := cmp.Diff(want, f.operator.minted); diff != "" {
 		t.Errorf("the method's mintings mismatch (-want +got):\n%s", diff)
 	}
-	if minted.Key != "cion-auth-"+minted.ID+"-secret" {
-		t.Fatalf("the minting answered %+v, want the method's key", minted)
+	if minted.Key != "cion-auth-"+minted.ID+"-secret" || minted.Node != "1-ff00:0:110" ||
+		minted.Endpoint != "198.51.100.10:41641" {
+		t.Fatalf("the minting answered %+v, want the method's key beside the node and its endpoint", minted)
 	}
 	listing := c.expect(http.StatusOK, http.MethodGet, "/admin/api/keys", nil)
 	if strings.Contains(listing.Body.String(), minted.Key) {
@@ -301,8 +308,8 @@ func TestKeysAPI(t *testing.T) {
 		Keys []keyView `json:"keys"`
 	}](t, listing).Keys
 	if len(keys) != 1 || keys[0].Description != "ci runner" || !keys[0].Reusable ||
-		keys[0].State != enrollauth.KeyActive {
-		t.Fatalf("the keys list %+v, want the active reusable key", keys)
+		keys[0].State != enrollauth.KeyActive || keys[0].Node != mustIA("1-ff00:0:110") {
+		t.Fatalf("the keys list %+v, want the active reusable key naming the node", keys)
 	}
 	c.expect(http.StatusNoContent, http.MethodDelete, "/admin/api/keys/"+minted.ID, nil)
 	c.expect(http.StatusNotFound, http.MethodDelete, "/admin/api/keys/ffffffff", nil)

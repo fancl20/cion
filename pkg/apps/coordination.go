@@ -36,8 +36,9 @@ func newCoordination(env *Environment, loaded []Loaded) (Application, error) {
 	return coordination.New(coordination.Config{
 		Domain: env.Domain,
 		Store:  wg.Registry(),
-		// The selected policy's verdict — open where none loads, the
-		// gate answering what the node admits.
+		IA:     env.IA,
+		// The selected policy's verdict — no host where none loads, the
+		// gate answering what the node admits and where each host lands.
 		Authorizer: env.Authorizer,
 		DERP:       relay,
 		StateDir:   filepath.Join(env.StateRoot, "coordination"),

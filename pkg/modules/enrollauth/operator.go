@@ -14,10 +14,12 @@ const (
 )
 
 // Operator is the surface an operator's console decides through: the asks
-// a method holds pending, the decisions on them, and the auth keys the
-// method mints and retires. A method that pends for an operator implements
-// it beside AdmissionAuthorizer, and its console reaches it through the
-// authorizer the operator selected — never through the implementation.
+// a method holds pending — node enrollments and the founder's votes — the
+// decisions on them, and the auth keys the method mints and retires, each
+// the whole admission of a host. A method that pends for an operator
+// implements it beside AdmissionAuthorizer, and its console reaches it
+// through the authorizer the operator selected — never through the
+// implementation.
 type Operator interface {
 	// Asks lists the standing asks at the boundaries, oldest first: the
 	// pending, the approved whose joiner has not yet returned, and the
@@ -42,16 +44,12 @@ type Operator interface {
 type Ask struct {
 	// ID names the ask to Decide.
 	ID string
-	// Boundary, Claim, Keys, Label, and Source are the latest facts the
-	// identity presented.
+	// Boundary, Claim, Keys, and Source are the latest facts the identity
+	// presented.
 	Boundary Boundary
 	Claim    addr.IA
 	Keys     []string
-	Label    string
 	Source   netip.AddrPort
-	// Credential reports that the identity carried a credential matching
-	// no standing key.
-	Credential bool
 	// FirstSeen, LastSeen, and Attempts count the identity's asking.
 	FirstSeen time.Time
 	LastSeen  time.Time
@@ -63,12 +61,14 @@ type Ask struct {
 }
 
 // KeyRequest is what the operator asks of a new auth key: its description,
-// whether it admits more than one host, and its lifetime, between
-// MinKeyDays and MaxKeyDays.
+// whether it admits more than one host, its lifetime, between MinKeyDays
+// and MaxKeyDays, and the node its hosts land on — the zero IA naming the
+// founding core.
 type KeyRequest struct {
 	Description string
 	Reusable    bool
 	Days        int
+	Node        addr.IA
 }
 
 // KeyState is an auth key's standing.
@@ -82,7 +82,8 @@ const (
 	KeyExpired KeyState = "expired"
 )
 
-// AuthKey is one minted key as the operator reads it, never the key itself.
+// AuthKey is one minted key as the operator reads it, never the key itself:
+// Node is the node its hosts land on, the zero IA naming the founding core.
 type AuthKey struct {
 	ID          string
 	Description string
@@ -91,4 +92,5 @@ type AuthKey struct {
 	Expires     time.Time
 	Uses        int
 	State       KeyState
+	Node        addr.IA
 }

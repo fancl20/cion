@@ -1,21 +1,23 @@
 package coordination
 
 import (
-	"errors"
 	"fmt"
 	"net/netip"
+
+	"github.com/scionproto/scion/pkg/addr"
 
 	"github.com/fancl20/cion/pkg/apps/wireguard"
 )
 
-// allocate issues one host's address: the next free address in the owning
+// allocate issues one host's address: the next free address in the named
 // node's slice of the tailnet range, keyed by the host's public key —
-// unique by construction, stable per key, idempotent to repeat, nothing
-// ever freed. The owning node is chosen at registration — the slice with
-// the most free addresses, ties to the lowest ISD-AS, over slices the
-// directory assigned and so cannot overlap — and the record never moves: a
-// re-registering host changes nothing.
-func allocate(key wireguard.PublicKey, directory wireguard.Directory) (
+// unique by construction, stable per key, idempotent to repeat. The node is
+// the admission's to name, and the allocation is strict: a node the
+// directory holds no entry of, an entry publishing no host endpoint, and a
+// full slice each refuse rather than place the host elsewhere. The record
+// never moves: a re-registering host changes nothing, whatever node its
+// admission would name.
+func allocate(key wireguard.PublicKey, directory wireguard.Directory, node addr.IA) (
 	wireguard.HostEntry, error) {
 
 	// Admission is durable: the registry's own record answers a key it
@@ -26,24 +28,21 @@ func allocate(key wireguard.PublicKey, directory wireguard.Directory) (
 		}
 	}
 
-	// The freest slice takes the host; ties go to the lowest ISD-AS.
 	var owner *wireguard.Entry
-	free := 0
 	for i := range directory.Nodes {
-		entry := &directory.Nodes[i]
-		count := freeAddresses(entry.Overlay, directory.Hosts)
-		if count > free || (count == free && owner != nil &&
-			uint64(entry.IA) < uint64(owner.IA)) {
-
-			free = count
-			owner = entry
+		if directory.Nodes[i].IA.Equal(node) {
+			owner = &directory.Nodes[i]
+			break
 		}
 	}
 	switch {
 	case owner == nil:
-		return wireguard.HostEntry{}, errors.New(
-			"the directory holds no node entry to place a host in")
-	case free == 0:
+		return wireguard.HostEntry{}, fmt.Errorf(
+			"the directory holds no entry of %s to place a host in", node)
+	case !owner.HostEndpoint.IsValid():
+		return wireguard.HostEntry{}, fmt.Errorf(
+			"%s publishes no host endpoint", node)
+	case freeAddresses(owner.Overlay, directory.Hosts) == 0:
 		return wireguard.HostEntry{}, fmt.Errorf(
 			"the slice %s of %s is full", owner.Overlay, owner.IA)
 	}

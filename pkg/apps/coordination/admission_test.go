@@ -12,10 +12,12 @@ import (
 	"testing/synctest"
 	"time"
 
+	"github.com/google/go-cmp/cmp"
 	"tailscale.com/tailcfg"
 	"tailscale.com/types/key"
 
 	"github.com/fancl20/cion/pkg/apps/wireguard/impl/dbtest"
+	"github.com/fancl20/cion/pkg/core/webpki/webpkitest"
 	"github.com/fancl20/cion/pkg/modules/enrollauth"
 )
 
@@ -121,7 +123,7 @@ func TestRegisterRateCaps(t *testing.T) {
 // regression: registrations of many distinct keys fired concurrently, with a
 // deliberately slow seam answer between the read and the write, allocate
 // distinct addresses — each admission reads every record the last one wrote,
-// the freest slice chosen from what the registry holds.
+// the next free address chosen from what the registry holds.
 func TestRegisterSerializesAllocation(t *testing.T) {
 	store := &dbtest.MemStore{}
 	store.Seed(testNode(mustIA("1-ff00:0:1"), "100.64.1.0/24", "198.51.100.10:51820"))
@@ -200,5 +202,96 @@ func TestRegisterConvergesRacingKey(t *testing.T) {
 	hosts := storeHosts(t, store)
 	if len(hosts) != 1 || hosts[0].PublicKey != nodeKeyOf(joiner.Public()) {
 		t.Fatalf("the registry holds %+v, want the one record", hosts)
+	}
+}
+
+// TestRegisterPlacesOnTheNamedNode checks where an admitted host lands: on
+// the node the answer names, on the founding core when the answer names
+// none, and nowhere while the named node holds no entry — the registration
+// refused and nothing recorded, the client's retry landing once the node
+// publishes. The admission intervals pass in a fake-time bubble.
+func TestRegisterPlacesOnTheNamedNode(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		store := &dbtest.MemStore{}
+		store.Seed(testNode(mustIA("1-ff00:0:1"), "100.64.1.0/24", "198.51.100.10:51820"))
+		store.Seed(testNode(mustIA("1-ff00:0:2"), "100.64.2.0/24", "198.51.100.20:51820"))
+		auth := &askAuthorizer{}
+		a := testApp(t, Config{Store: store, Authorizer: auth})
+		admit := func(node string) int {
+			t.Helper()
+			auth.answer = enrollauth.AdmissionAnswer{Admission: enrollauth.AdmissionAllow}
+			if node != "" {
+				auth.answer.Node = mustIA(node)
+			}
+			time.Sleep(admissionMinInterval)
+			return postRegister(a, "192.0.2.10:1111", key.NewMachine(), key.NewNode()).Code
+		}
+		owners := func() map[string]string {
+			owned := make(map[string]string)
+			for _, host := range storeHosts(t, store) {
+				owned[host.Addr.String()] = host.IA.String()
+			}
+			return owned
+		}
+
+		if status := admit("1-ff00:0:2"); status != http.StatusOK {
+			t.Fatalf("the registration naming 1-ff00:0:2 = %d, want 200", status)
+		}
+		if status := admit(""); status != http.StatusOK {
+			t.Fatalf("the registration naming no node = %d, want 200", status)
+		}
+		want := map[string]string{"100.64.2.2": "1-ff00:0:2", "100.64.1.2": "1-ff00:0:1"}
+		if diff := cmp.Diff(want, owners()); diff != "" {
+			t.Fatalf("the placements mismatch (-want +got):\n%s", diff)
+		}
+
+		// A named node without an entry refuses, and the retry lands once
+		// the node publishes.
+		auth.answer = enrollauth.AdmissionAnswer{
+			Admission: enrollauth.AdmissionAllow,
+			Node:      mustIA("1-ff00:0:3"),
+		}
+		machine, node := key.NewMachine(), key.NewNode()
+		time.Sleep(admissionMinInterval)
+		if w := postRegister(a, "192.0.2.10:1111", machine, node); w.Code != http.StatusServiceUnavailable {
+			t.Fatalf("the registration naming an absent node = %d, want 503", w.Code)
+		}
+		if diff := cmp.Diff(want, owners()); diff != "" {
+			t.Fatalf("the refused registration recorded a host (-want +got):\n%s", diff)
+		}
+		store.Seed(testNode(mustIA("1-ff00:0:3"), "100.64.3.0/24", "198.51.100.30:51820"))
+		time.Sleep(admissionMinInterval)
+		if w := postRegister(a, "192.0.2.10:1111", machine, node); w.Code != http.StatusOK {
+			t.Fatalf("the retry once the node published = %d, want 200", w.Code)
+		}
+		want["100.64.3.2"] = "1-ff00:0:3"
+		if diff := cmp.Diff(want, owners()); diff != "" {
+			t.Errorf("the retry's placement mismatches (-want +got):\n%s", diff)
+		}
+	})
+}
+
+// TestRegisterWithoutAuthorizerDenies checks that no policy admits no
+// host: with no authorizer the registration is denied and nothing is
+// recorded.
+func TestRegisterWithoutAuthorizerDenies(t *testing.T) {
+	store := &dbtest.MemStore{}
+	store.Seed(testNode(mustIA("1-ff00:0:1"), "100.64.1.0/24", "198.51.100.10:51820"))
+	a, err := New(Config{
+		Domain:     webpkitest.Domain,
+		Store:      store,
+		IA:         mustIA("1-ff00:0:1"),
+		StateDir:   t.TempDir(),
+		MountHTTPS: http.NewServeMux().Handle,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(a.Close)
+	if w := postRegister(a, "192.0.2.10:1111", key.NewMachine(), key.NewNode()); w.Code != http.StatusForbidden {
+		t.Errorf("a registration with no authorizer = %d, want 403", w.Code)
+	}
+	if hosts := storeHosts(t, store); len(hosts) != 0 {
+		t.Errorf("the registry holds %+v, want nothing", hosts)
 	}
 }

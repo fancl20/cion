@@ -1,7 +1,8 @@
-// The CION portal's page: the operator's console for the asks at every
-// admission boundary, the nodes and hosts admitted, the auth keys, and the
-// passkeys. Every string a joiner, host, or client supplied reaches the page
-// as text, through h() or textContent, never as markup.
+// The CION portal's page: the operator's console for the nodes' asks, the
+// nodes and hosts admitted, the auth keys that admit hosts onto the nodes
+// they name, and the passkeys. Every string a joiner, host, or client
+// supplied reaches the page as text, through h() or textContent, never as
+// markup.
 "use strict";
 
 const POLL_MS = 5000;
@@ -22,7 +23,6 @@ const LISTS = {
 const BOUNDARIES = {
   enrollment: ["Enrollment", "amber"],
   voting: ["Core vote", "violet"],
-  registration: ["Registration", "amber"],
 };
 const ROLES = { "founding core": ["Founding core", "blue"], core: ["Core", "blue-outline"] };
 const KEY_STATES = { spent: "Spent", revoked: "Revoked", expired: "Expired" };
@@ -368,11 +368,12 @@ function signOut(event) {
 
 // ---- Data ----
 
-// Fetches the open tab's list beside the node and host lists, whose asks the
-// tab counts need, and renders them unless the operator is mid-interaction.
+// Fetches the open tab's list beside the node list, whose asks the tab
+// count needs and whose nodes the auth keys name, and renders them unless
+// the operator is mid-interaction.
 async function refresh() {
   const seq = ++refreshSeq;
-  const names = [...new Set(["nodes", "hosts", tab])];
+  const names = [...new Set(["nodes", tab])];
   try {
     const lists = await Promise.all(names.map(name => get(LISTS[name])));
     if (seq !== refreshSeq) return; // a later refresh supersedes this one
@@ -396,17 +397,13 @@ function canRender() {
   return selection.isCollapsed || !$("#app-view").contains(selection.anchorNode);
 }
 
-// Counts the pending asks on their tabs and in the page's title.
+// Counts the pending asks on the Nodes tab and in the page's title.
 function renderCounts() {
-  let total = 0;
-  for (const name of ["nodes", "hosts"]) {
-    const pending = (data[name]?.asks ?? []).filter(ask => ask.state === "pending").length;
-    const count = $(`[data-tab="${name}"] .count`);
-    count.hidden = pending === 0;
-    count.replaceChildren(String(pending), h("span", { class: "sr-only" }, " pending"));
-    total += pending;
-  }
-  document.title = `${total > 0 ? `(${total}) ` : ""}${TABS[tab]} · CION`;
+  const pending = (data.nodes?.asks ?? []).filter(ask => ask.state === "pending").length;
+  const count = $('[data-tab="nodes"] .count');
+  count.hidden = pending === 0;
+  count.replaceChildren(String(pending), h("span", { class: "sr-only" }, " pending"));
+  document.title = `${pending > 0 ? `(${pending}) ` : ""}${TABS[tab]} · CION`;
 }
 
 // Renders the open tab from the data at hand.
@@ -425,27 +422,26 @@ function renderView() {
 
 // ---- Asks ----
 
-// Renders a tab's asks: the pending and approved ones in the amber card
-// above its table, pending first, and the rejected ones in the card below.
-function renderAsks(name, asks) {
+// Renders the nodes' asks — enrollments and core votes: the pending and
+// approved ones in the amber card above the table, pending first, and the
+// rejected ones in the card below.
+function renderAsks(asks) {
   const open = asks
     .filter(ask => ask.state !== "rejected")
     .sort((a, b) => (a.state === "approved") - (b.state === "approved"));
   const rejected = asks.filter(ask => ask.state === "rejected");
   const pending = open.filter(ask => ask.state === "pending").length;
-  update($(`#${name}-asks`), open.length > 0 && h("div", { class: "card card-amber" },
+  update($("#nodes-asks"), open.length > 0 && h("div", { class: "card card-amber" },
     h("div", { class: "card-head" }, pending > 0 ? `Needs approval · ${pending}` : "Approved"),
     open.map(askRow)));
-  update($(`#${name}-rejected`), rejected.length > 0 && h("div", { class: "card card-rejected" },
+  update($("#nodes-rejected"), rejected.length > 0 && h("div", { class: "card card-rejected" },
     h("div", { class: "card-head" }, "Rejected"),
     rejected.map(rejectedRow)));
 }
 
-// An ask's identity: the ISD-AS a node claims, else the first key presented,
-// a host's machine key.
-function askIdentity(ask) {
-  return ask.claim ? h("span", { class: "id" }, ask.claim) : shortKey(ask.keys[0], "id");
-}
+// An ask's identity: the ISD-AS the node claims, or the core presenting
+// the vote.
+const askIdentity = ask => h("span", { class: "id" }, ask.claim);
 
 // One pending or approved ask: its identity and facts, and while it pends,
 // the decision.
@@ -457,8 +453,7 @@ function askRow(ask) {
       h("div", { class: "ask-title" },
         askIdentity(ask),
         badge(kind, tone),
-        approved && badge("Approved", "green"),
-        ask.label && h("span", { class: "claim" }, `claims ${ask.label}`)),
+        approved && badge("Approved", "green")),
       h("div", { class: "ask-facts" }, askFacts(ask))),
     approved
       ? h("span", { class: "ask-note", title: `The approval lapses ${relativeTime(ask.until)}.` }, "admitted at its next retry")
@@ -475,17 +470,14 @@ function askRow(ask) {
         }, "Approve")));
 }
 
-// The facts under an ask: its keys, source, and attempts. A registration's
-// first key, its machine key, is the row's identity already.
+// The facts under an ask: its keys, source, and attempts.
 function askFacts(ask) {
-  const keys = ask.boundary === "registration" ? ask.keys.slice(1) : ask.keys;
-  const keyList = join(keys.map(key => shortKey(key)), ", ");
+  const keyList = join(ask.keys.map(key => shortKey(key)), ", ");
   return join([
-    keys.length > 0 && (ask.boundary === "voting" ? [`adds ${plural(keys.length, "key")}: `, keyList] : keyList),
+    ask.keys.length > 0 && (ask.boundary === "voting" ? [`adds ${plural(ask.keys.length, "key")}: `, keyList] : keyList),
     ask.source && `from ${ask.source}`,
     `first seen ${relativeTime(ask.firstSeen)}`,
     plural(ask.attempts, "attempt"),
-    ask.credential && "carried an auth key that matched nothing",
   ]);
 }
 
@@ -518,7 +510,7 @@ function decide(button, ask, verdict) {
 // ---- Nodes ----
 
 function renderNodes(list) {
-  renderAsks("nodes", list?.asks ?? []);
+  renderAsks(list?.asks ?? []);
   const query = $("#nodes-filter").value;
   const nodes = (list?.nodes ?? []).filter(node => matches(query, [node.ia, node.key, node.overlay, node.endpoint]));
   fillTable($("#nodes-rows"), nodes.map(nodeRow), emptyText(list, query, "No node holds a chain from this core yet."));
@@ -552,21 +544,20 @@ function renderHosts(list) {
   $("#hosts-unavailable").hidden = available;
   for (const el of $("#hosts-view").querySelectorAll("[data-coordination]")) el.hidden = !available;
   if (!available) return;
-  renderAsks("hosts", list?.asks ?? []);
   const query = $("#hosts-filter").value;
   const hosts = (list?.hosts ?? []).filter(host =>
-    matches(query, [host.addr, host.hostname, host.os, host.nodeKey, host.machineKey, host.owner, host.note]));
+    matches(query, [host.addr, host.hostname, host.os, host.nodeKey, host.machineKey, host.owner, host.endpoint, host.note]));
   fillTable($("#hosts-rows"), hosts.map(hostRow), emptyText(list, query, "No host holds an address yet."));
 }
 
-// One host: its address and claims, keys, owning node, approval, and
-// presence, with its menu.
+// One host: its address and claims, keys, the node it connects to, its
+// approval, and its presence, with its menu.
 function hostRow(host) {
   const claims = [host.hostname, host.os].filter(Boolean).join(" · ");
   return h("tr", null,
     h("td", null, h("div", { class: "id" }, host.addr), claims && h("div", { class: "below claim" }, `claims ${claims}`)),
     h("td", null, h("div", null, shortKey(host.nodeKey)), h("div", { class: "below muted" }, shortKey(host.machineKey))),
-    h("td", null, mono(host.owner)),
+    h("td", null, connectsTo(host.owner, host.endpoint)),
     h("td", null, approval(host.note)),
     h("td", null, presence(host)),
     h("td", { class: "cell-action" }, h("button", {
@@ -577,6 +568,11 @@ function hostRow(host) {
       "data-key": `menu:${host.nodeKey}`,
       onclick: event => toggleMenu(event.currentTarget, [{ label: "Remove…", danger: true, action: () => removeHost(host) }]),
     }, "⋯")));
+}
+
+// A node hosts connect to: its ISD-AS above its host endpoint.
+function connectsTo(ia, endpoint) {
+  return [h("div", { class: "mono" }, ia), endpoint && h("div", { class: "below muted mono" }, endpoint)];
 }
 
 // The note the host was admitted with, without the portal's own prefix: an
@@ -599,7 +595,7 @@ function removeHost(host) {
   confirmAction({
     title: `Remove ${host.addr}?`,
     message: "Its registry entry is deleted and the address is released. Its node drops the peer within 30 seconds. " +
-      "If the client is still running, it shows up as pending the next time it logs in.",
+      "The client can join again only with an auth key that still admits it.",
     label: "Remove",
     run: async () => {
       await del(`/admin/api/hosts/${encodeURIComponent(host.nodeKey)}`);
@@ -614,11 +610,13 @@ function renderKeys(list) {
   fillTable($("#keys-rows"), (list?.keys ?? []).map(keyRow), emptyText(list, "", "No auth keys yet."));
 }
 
-// One auth key, with Revoke while it is active and its state after.
+// One auth key, with the node its hosts connect to, and Revoke while it is
+// active and its state after.
 function keyRow(key) {
   return h("tr", null,
     h("td", null, mono(key.id)),
     h("td", null, key.description || dash()),
+    h("td", null, keyNode(key)),
     h("td", null, badge(key.reusable ? "Reusable" : "One use", "muted")),
     h("td", { class: "muted" }, timeEl(key.created)),
     h("td", { class: "muted" }, timeEl(key.expires)),
@@ -626,6 +624,13 @@ function keyRow(key) {
     h("td", { class: "cell-action" }, key.state === "active"
       ? h("button", { class: "link", "data-key": `revoke:${key.id}`, onclick: () => revokeKey(key) }, "Revoke")
       : badge(KEY_STATES[key.state], "muted")));
+}
+
+// The node a key's hosts connect to — the founding core where the key names
+// none — above its host endpoint while the node is listed.
+function keyNode(key) {
+  const node = (data.nodes?.nodes ?? []).find(n => (key.node ? n.ia === key.node : n.role === "founding core"));
+  return connectsTo(node?.ia ?? key.node ?? "founding core", node?.endpoint);
 }
 
 function revokeKey(key) {
@@ -640,27 +645,44 @@ function revokeKey(key) {
   });
 }
 
-function openKeyDialog() {
-  const form = $("#key-form");
-  form.reset();
-  form.hidden = false;
-  $("#key-result").hidden = true;
-  $("#key-dialog").showModal();
+// Opens the key dialog once the nodes a key can name are fresh.
+function openKeyDialog(event) {
+  act(event.currentTarget, async () => {
+    const { nodes } = await get(LISTS.nodes);
+    const form = $("#key-form");
+    form.reset();
+    fillNodes(form.elements.node, nodes);
+    form.hidden = false;
+    $("#key-result").hidden = true;
+    $("#key-dialog").showModal();
+  });
+}
+
+// Offers the nodes holding a slice, each with its host endpoint and free
+// addresses, the founding core selected.
+function fillNodes(select, nodes) {
+  const serving = nodes.filter(node => node.overlay && node.endpoint);
+  update(select, serving.length > 0
+    ? serving.map(node => h("option", { value: node.ia, selected: node.role === "founding core" },
+      `${node.ia} · ${node.endpoint} · ${node.capacity - node.issued} free`))
+    : h("option", { value: "" }, "No node serves hosts yet"));
 }
 
 // Mints the key, then shows it in place of the form, the one time it is
-// shown.
+// shown, beside the node its hosts connect to.
 function submitKey(event) {
   event.preventDefault();
   const fields = event.currentTarget.elements;
   act(event.submitter, async () => {
-    const { key } = await post("/admin/api/keys", {
+    const { key, node, endpoint } = await post("/admin/api/keys", {
       description: fields.description.value.trim(),
       reusable: fields.reusable.checked,
       days: fields.days.valueAsNumber,
+      node: fields.node.value,
     });
     $("#key-form").hidden = true;
     $("#key-value").textContent = key;
+    $("#key-node").textContent = `${node} · ${endpoint}`;
     $("#key-result").hidden = false;
     $("#key-copy").focus();
     refresh();

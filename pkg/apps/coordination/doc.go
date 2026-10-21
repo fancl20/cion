@@ -5,7 +5,7 @@
 // registration behind the generalized admission seam, the netmap holding one
 // peer — the host's node — and the DERP relay a client expects as its fallback
 // path. Hosts are logins, not configuration edits: admission allocates the
-// next free address in the owning node's slice of the tailnet range and
+// next free address in the slice of the node the admission names and
 // records one registry entry that distributes by the directory every node
 // already fetches.
 package coordination

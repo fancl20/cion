@@ -40,8 +40,7 @@ func postRegisterClaiming(t *testing.T, a *App, source string, machine key.Machi
 }
 
 // TestRegisterRecordsClaims checks a registration's claims about itself:
-// the seam hears them as the joiner's label, and the admitted entry records
-// them, capped.
+// the admitted entry records them, capped.
 func TestRegisterRecordsClaims(t *testing.T) {
 	store := &dbtest.MemStore{}
 	store.Seed(testNode(mustIA("1-ff00:0:1"), "100.64.1.0/24", "198.51.100.10:51820"))
@@ -54,27 +53,9 @@ func TestRegisterRecordsClaims(t *testing.T) {
 		t.Fatalf("the registration status = %d, want 200", status)
 	}
 	capped := strings.Repeat("é", claimCap/2)
-	asks := auth.asks()
-	if len(asks) != 1 || asks[0].Label != "laptop ("+capped+")" {
-		t.Fatalf("the seam heard %+v, want the claims as the label", asks)
-	}
 	hosts := storeHosts(t, store)
 	if len(hosts) != 1 || hosts[0].Hostname != "laptop" || hosts[0].OS != capped {
 		t.Errorf("the registry holds %+v, want the capped claims recorded", hosts)
-	}
-}
-
-// TestClaimLabels checks how a client's claims render as the label.
-func TestClaimLabels(t *testing.T) {
-	for _, tc := range []struct{ hostname, os, want string }{
-		{"laptop", "linux", "laptop (linux)"},
-		{"laptop", "", "laptop"},
-		{"", "linux", "linux"},
-		{"", "", ""},
-	} {
-		if got := labelOf(tc.hostname, tc.os); got != tc.want {
-			t.Errorf("labelOf(%q, %q) = %q, want %q", tc.hostname, tc.os, got, tc.want)
-		}
 	}
 	if got := capClaim("a\x00b\xffc"); got != "abc" {
 		t.Errorf("capClaim stripped to %q, want the control and invalid bytes gone", got)

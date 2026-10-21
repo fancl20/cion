@@ -49,7 +49,7 @@
       </div>
       <nav class="tabs" aria-label="Console">
         <a href="/admin/nodes" data-tab="nodes">Nodes <span class="count" hidden></span></a>
-        <a href="/admin/hosts" data-tab="hosts">Hosts <span class="count" hidden></span></a>
+        <a href="/admin/hosts" data-tab="hosts">Hosts</a>
         <a href="/admin/keys" data-tab="keys">Auth keys</a>
         <a href="/admin/settings" data-tab="settings">Settings</a>
       </nav>
@@ -80,23 +80,21 @@
         <div class="page-head">
           <div>
             <h1>Hosts</h1>
-            <p class="muted" data-coordination>Tailscale clients registered with this core's coordination service. Removing one releases its address.</p>
+            <p class="muted" data-coordination>Tailscale clients registered with this core's coordination service, each admitted by an auth key and connected to the node it names. Removing one releases its address.</p>
           </div>
           <button class="btn btn-primary" data-action="generate-key" data-coordination>Generate auth key…</button>
         </div>
         <div id="hosts-unavailable" class="card card-pad notice" hidden>Tailscale coordination isn't running on this core.</div>
         <div data-coordination>
           <input id="hosts-filter" type="search" class="input search" placeholder="Search by address, name, key, or node…" aria-label="Search hosts">
-          <div id="hosts-asks"></div>
           <div class="card table-card">
             <table>
               <thead>
-                <tr><th>Address</th><th>Keys</th><th>Owning node</th><th>Approved via</th><th>Last seen</th><th><span class="sr-only">Actions</span></th></tr>
+                <tr><th>Address</th><th>Keys</th><th>Connects to</th><th>Approved via</th><th>Last seen</th><th><span class="sr-only">Actions</span></th></tr>
               </thead>
               <tbody id="hosts-rows"></tbody>
             </table>
           </div>
-          <div id="hosts-rejected"></div>
         </div>
       </section>
 
@@ -104,14 +102,14 @@
         <div class="page-head">
           <div>
             <h1>Auth keys</h1>
-            <p class="muted">Pre-authorize Tailscale clients: <code id="login-hint" class="hint"></code></p>
+            <p class="muted">A Tailscale client joins with a key and connects to the node the key names: <code id="login-hint" class="hint"></code></p>
           </div>
           <button class="btn btn-primary" data-action="generate-key">Generate auth key…</button>
         </div>
         <div class="card table-card">
           <table>
             <thead>
-              <tr><th>ID</th><th>Description</th><th>Type</th><th>Created</th><th>Expires</th><th>Uses</th><th><span class="sr-only">Status</span></th></tr>
+              <tr><th>ID</th><th>Description</th><th>Connects to</th><th>Type</th><th>Created</th><th>Expires</th><th>Uses</th><th><span class="sr-only">Status</span></th></tr>
             </thead>
             <tbody id="keys-rows"></tbody>
           </table>
@@ -149,10 +147,16 @@
     </main>
   </div>
 
-  <dialog id="key-dialog" class="dialog" aria-labelledby="key-dialog-title">
+  <dialog id="key-dialog" class="dialog dialog-wide" aria-labelledby="key-dialog-title">
     <form id="key-form" method="dialog">
       <h2 id="key-dialog-title">Generate auth key</h2>
-      <p class="dialog-lead">A host presenting this key registers without waiting for approval.</p>
+      <p class="dialog-lead">A host presenting this key joins at once, connected to the node you choose.</p>
+      <label class="field">
+        <span class="field-label">Node</span>
+        <span class="select">
+          <select name="node" class="input" required></select>
+        </span>
+      </label>
       <label class="field">
         <span class="field-label">Description</span>
         <input name="description" class="input" placeholder="e.g. laptops" autocomplete="off">
@@ -180,6 +184,7 @@
         <code id="key-value"></code>
         <button id="key-copy" type="button" class="btn">Copy</button>
       </div>
+      <p class="key-node muted">Connects to <span id="key-node" class="mono"></span></p>
       <div class="dialog-actions">
         <button type="button" class="btn btn-primary" data-close>Done</button>
       </div>

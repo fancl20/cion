@@ -6,6 +6,7 @@ import (
 	"crypto/x509"
 	"encoding/hex"
 	"fmt"
+	"net/netip"
 	"path/filepath"
 	"slices"
 
@@ -133,9 +134,10 @@ func (r *portalRecords) Nodes(ctx context.Context) ([]portal.Node, error) {
 	return nodes, nil
 }
 
-// Hosts lists the registry's hosts, sorted by address, each with the
-// presence the coordination application observed — whose claims, the
-// latest a client made, stand over the ones its admission recorded.
+// Hosts lists the registry's hosts, sorted by address, each beside the host
+// endpoint of the node it connects to and the presence the coordination
+// application observed — whose claims, the latest a client made, stand over
+// the ones its admission recorded.
 func (r *portalRecords) Hosts(ctx context.Context) ([]portal.Host, error) {
 	if r.coord == nil {
 		return nil, portal.ErrNoCoordination
@@ -145,12 +147,17 @@ func (r *portalRecords) Hosts(ctx context.Context) ([]portal.Host, error) {
 		return nil, fmt.Errorf("reading the registry: %w", err)
 	}
 	presence := r.coord.Presence()
+	endpoints := make(map[addr.IA]netip.AddrPort, len(directory.Nodes))
+	for _, entry := range directory.Nodes {
+		endpoints[entry.IA] = entry.HostEndpoint
+	}
 	hosts := make([]portal.Host, 0, len(directory.Hosts))
 	for _, h := range directory.Hosts {
 		host := portal.Host{
 			Addr:     h.Addr,
 			NodeKey:  h.PublicKey.String(),
 			Owner:    h.IA,
+			Endpoint: endpoints[h.IA],
 			Note:     h.Note,
 			Hostname: h.Hostname,
 			OS:       h.OS,

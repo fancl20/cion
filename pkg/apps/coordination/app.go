@@ -9,6 +9,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/scionproto/scion/pkg/addr"
 	"golang.org/x/time/rate"
 	"tailscale.com/types/key"
 
@@ -54,9 +55,13 @@ type Config struct {
 	// Store is the registry: node entries read for the netmap and
 	// allocation, host entries written at admission.
 	Store Store
+	// IA is the founding core's ISD-AS: the node a host lands on when its
+	// admission names none.
+	IA addr.IA
 	// Authorizer gates registrations — the same seam the trust service
 	// asks at first issuance, asked here with the registration boundary's
-	// facts. Nil is open admission, the zero-conf default.
+	// facts — and names the node each admitted host lands on. Nil admits
+	// no host.
 	Authorizer enrollauth.AdmissionAuthorizer
 	// DERP names the relay the netmap advertises beside the coordination
 	// endpoint's own identity.
@@ -98,10 +103,9 @@ type App struct {
 	// admissions read in order and allocate distinct addresses, and a key
 	// racing itself converges on its record. A release and the map path's
 	// binding of a record from before the machine claim hold it too, so
-	// neither interleaves with an admission or undoes the other. A Telegram
-	// prompt's send holds a later registration behind it for as long as its
-	// timeout; registration is rare enough that the queue is the honest
-	// price of one key, one address.
+	// neither interleaves with an admission or undoes the other. A slow
+	// seam holds a later registration behind it; registration is rare
+	// enough that the queue is the honest price of one key, one address.
 	admissionMtx sync.Mutex
 	// bySource and overall pace the seam's asks — one admission per interval
 	// per source address beside one per interval at the door — the bounds

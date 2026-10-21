@@ -100,13 +100,15 @@ type portalAsk struct {
 }
 
 type portalNode struct {
-	IA string `json:"ia"`
+	IA       string `json:"ia"`
+	Endpoint string `json:"endpoint"`
 }
 
 type portalHost struct {
 	Addr      string `json:"addr"`
 	NodeKey   string `json:"nodeKey"`
 	Owner     string `json:"owner"`
+	Endpoint  string `json:"endpoint"`
 	Note      string `json:"note"`
 	Connected bool   `json:"connected"`
 }
@@ -149,9 +151,10 @@ func programsHost(n *assemblyNode, ip netip.Addr) bool {
 // TestPortalConsole is the console's proof on a running network: the
 // operator registers the first passkey with the token the founder printed;
 // a joining node's enrollment pends in the console and completes on its
-// approval; a host joins unattended with an auth key the console minted,
-// listed with the key's note and its presence; and its release closes its
-// tunnel, its owning node dropping the peer.
+// approval; a host joins unattended with an auth key the console minted
+// naming the leaf, landing on the leaf and listed with the key's note, the
+// leaf's host endpoint, and its presence; and its release closes its
+// tunnel, the leaf dropping the peer.
 func TestPortalConsole(t *testing.T) {
 	t.Parallel()
 	wpki := packageWebPKI
@@ -195,30 +198,36 @@ func TestPortalConsole(t *testing.T) {
 	}
 	console.expect(http.StatusNoContent, http.MethodPost, "/admin/api/asks/"+ask+"/approve", nil)
 	Poll(t, "the approved leaf to enroll", func() bool { return holdsChain(t.Context(), b) })
-	Poll(t, "the leaf listed among the nodes", func() bool {
+
+	// A key naming the leaf mints once the console lists the leaf with its
+	// host endpoint, and the response names both.
+	var endpoint string
+	Poll(t, "the leaf listed with its host endpoint", func() bool {
 		nodes, _ := console.nodes()
 		for _, n := range nodes {
-			if n.IA == leaf {
+			if n.IA == leaf && n.Endpoint != "" {
+				endpoint = n.Endpoint
 				return true
 			}
 		}
 		return false
 	})
-
-	// A host joins unattended with a minted key, listed with the key's note
-	// and its open stream, once both nodes hold a slice to place it in.
-	Poll(t, "both nodes' slices in the directory", func() bool {
-		directory, err := wireguardOf(a).Directory(t.Context())
-		return err == nil && len(directory.Nodes) == 2
-	})
 	var minted struct {
-		ID  string `json:"id"`
-		Key string `json:"key"`
+		ID       string `json:"id"`
+		Key      string `json:"key"`
+		Node     string `json:"node"`
+		Endpoint string `json:"endpoint"`
 	}
 	if err := json.Unmarshal(console.expect(http.StatusOK, http.MethodPost, "/admin/api/keys",
-		map[string]any{"description": "lab", "days": 1}), &minted); err != nil {
+		map[string]any{"description": "lab", "days": 1, "node": leaf}), &minted); err != nil {
 		t.Fatal(err)
 	}
+	if minted.Node != leaf || minted.Endpoint != endpoint {
+		t.Fatalf("the minting answered %+v, want the leaf at %s", minted, endpoint)
+	}
+
+	// The host joins unattended onto the leaf, listed with the key's note,
+	// the leaf's endpoint, and its open stream.
 	ips := hostUp(t, tailnetHost(t, "keyed", place.controlURL, minted.Key))
 	if len(ips) != 1 {
 		t.Fatalf("the keyed host's addresses = %v", ips)
@@ -233,16 +242,15 @@ func TestPortalConsole(t *testing.T) {
 		}
 		return false
 	})
-
-	// The release closes the host's tunnel: its owning node drops the peer,
-	// and the console lists it no more.
-	owner := a
-	if listed.Owner == leaf {
-		owner = b
+	if listed.Owner != leaf || listed.Endpoint != endpoint {
+		t.Fatalf("the host is listed on %s at %s, want the leaf at %s", listed.Owner, listed.Endpoint, endpoint)
 	}
-	Poll(t, "the owner programming the host", func() bool { return programsHost(owner, ips[0]) })
+
+	// The release closes the host's tunnel: the leaf drops the peer, and
+	// the console lists it no more.
+	Poll(t, "the leaf programming the host", func() bool { return programsHost(b, ips[0]) })
 	console.expect(http.StatusNoContent, http.MethodDelete, "/admin/api/hosts/"+listed.NodeKey, nil)
-	Poll(t, "the owner dropping the released host", func() bool { return !programsHost(owner, ips[0]) })
+	Poll(t, "the leaf dropping the released host", func() bool { return !programsHost(b, ips[0]) })
 	for _, h := range console.hosts() {
 		if h.NodeKey == listed.NodeKey {
 			t.Errorf("the console still lists the released host: %+v", h)

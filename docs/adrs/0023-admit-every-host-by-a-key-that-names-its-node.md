@@ -1,6 +1,6 @@
 # Admit Every Host by a Key That Names Its Node
 
-*   Status: proposed
+*   Status: accepted
 *   Date: 2026-10-21
 
 [TOC]

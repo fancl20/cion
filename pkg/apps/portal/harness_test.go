@@ -267,6 +267,7 @@ func (f *fakeOperator) MintKey(req enrollauth.KeyRequest) (string, enrollauth.Au
 		Created:     now,
 		Expires:     now.AddDate(0, 0, req.Days),
 		State:       enrollauth.KeyActive,
+		Node:        req.Node,
 	}
 	f.keys = append(f.keys, key)
 	f.minted = append(f.minted, req)

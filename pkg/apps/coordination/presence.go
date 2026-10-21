@@ -109,19 +109,6 @@ func claimsOf(hostinfo tailcfg.HostinfoView) (string, string) {
 	return capClaim(hostinfo.Hostname()), capClaim(hostinfo.OS())
 }
 
-// labelOf renders a client's claims as the one label the admission seam
-// hands its plugin: the hostname with the operating system beside it.
-func labelOf(hostname, osName string) string {
-	switch {
-	case hostname != "" && osName != "":
-		return hostname + " (" + osName + ")"
-	case hostname != "":
-		return hostname
-	default:
-		return osName
-	}
-}
-
 // capClaim strips control characters and invalid encoding from a claim and
 // cuts it to claimCap bytes on a rune boundary.
 func capClaim(s string) string {

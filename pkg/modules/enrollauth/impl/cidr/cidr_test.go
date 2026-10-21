@@ -25,9 +25,9 @@ func TestCIDRParse(t *testing.T) {
 	}
 }
 
-// TestCIDRAuthorize checks the posture at both boundaries: the one prefix
-// list answers enrollment and registration alike by source, failing closed
-// when the fact is missing.
+// TestCIDRAuthorize checks the posture: the prefix list answers enrollment
+// and the vote by source, failing closed when the fact is missing, and
+// every registration is denied, from inside the prefixes too.
 func TestCIDRAuthorize(t *testing.T) {
 	cidrs, err := New("192.0.2.0/24,198.51.100.0/24")
 	if err != nil {
@@ -50,6 +50,10 @@ func TestCIDRAuthorize(t *testing.T) {
 		},
 		"registration from a match": {
 			addr(enrollauth.BoundaryRegistration, "192.0.2.7:41234"),
+			enrollauth.AdmissionDeny,
+		},
+		"vote from a match": {
+			addr(enrollauth.BoundaryVoting, "192.0.2.7:30042"),
 			enrollauth.AdmissionAllow,
 		},
 		"registration miss": {

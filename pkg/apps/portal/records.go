@@ -54,8 +54,11 @@ type Host struct {
 	// MachineKey is the machine key the registration presented, hex
 	// encoded; empty for a record from before the machine claim.
 	MachineKey string
-	// Owner is the node whose slice the address came from.
-	Owner addr.IA
+	// Owner is the node whose slice the address came from — the node the
+	// host connects to — and Endpoint that node's host endpoint, zero while
+	// the directory holds no entry of it.
+	Owner    addr.IA
+	Endpoint netip.AddrPort
 	// Note is the approving plugin's note the registry recorded.
 	Note string
 	// Hostname and OS are the client's latest claims about itself.

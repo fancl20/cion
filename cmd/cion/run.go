@@ -95,9 +95,9 @@ func runDaemon(ctx context.Context, cfg services.NodeConfig, tuning services.Dat
 		}
 	}
 	// The founding core — the core flag without a neighbor — must name an
-	// enrollment policy: unset, the gate would run enrollment and
-	// registration open. A joining core carries no gate, for only the
-	// founding core issues chains.
+	// enrollment policy: unset, the gate would run enrollment open and
+	// admit no host. A joining core carries no gate, for only the founding
+	// core issues chains.
 	if cfg.Core && len(cfg.Neighbors) == 0 && cfg.EnrollAuth == "" {
 		return fmt.Errorf("--trust.enroll-auth is required on the founding core: " +
 			"cidrs=<comma-separated prefix list>, telegram=<chat>:<token>, or portal")

@@ -1,9 +1,9 @@
 // Package portal is the admission method the operator's passkey console
-// decides: every boundary's new identity pends until the operator approves
-// or rejects it, and a registration presenting an auth key the method
-// minted is admitted on the key. The console reaches the asks and the keys
-// through the Operator surface the method implements beside the
-// authorizer.
+// decides: a node's enrollment and a core's vote pend until the operator
+// approves or rejects them, and a host is admitted on an auth key the
+// method minted alone, onto the node the key names. The console reaches the
+// asks and the keys through the Operator surface the method implements
+// beside the authorizer.
 //
 // The asks live in memory; the auth keys persist beneath the state
 // directory.

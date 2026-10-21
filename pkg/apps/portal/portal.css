@@ -83,7 +83,7 @@ body {
 h1, h2, p { margin: 0; }
 h1 { font-size: 20px; line-height: 28px; font-weight: 600; }
 h2 { font-size: 16px; line-height: 24px; font-weight: 600; }
-button, input { font: inherit; color: inherit; }
+button, input, select { font: inherit; color: inherit; }
 time { white-space: nowrap; }
 
 code {
@@ -368,6 +368,22 @@ table.plain th:last-child, table.plain td:last-child { padding-right: 0; }
 .input.mono { font-size: 13px; }
 .input.days { width: 96px; }
 
+/* A select keeps the input's look; the chevron is drawn, no image loaded. */
+.select { position: relative; display: block; }
+.select .input { padding-right: 32px; cursor: pointer; }
+.select::after {
+  content: "";
+  position: absolute;
+  top: 50%;
+  right: 14px;
+  width: 6px;
+  height: 6px;
+  border-right: 1.5px solid var(--muted);
+  border-bottom: 1.5px solid var(--muted);
+  pointer-events: none;
+  transform: translateY(-70%) rotate(45deg);
+}
+
 .field { display: block; margin-bottom: 16px; }
 .field-label { display: block; margin-bottom: 6px; font-weight: 500; }
 .inline { display: flex; align-items: center; gap: 8px; }
@@ -411,11 +427,13 @@ table.plain th:last-child, table.plain td:last-child { padding-right: 0; }
   box-shadow: var(--shadow-lg);
 }
 .dialog::backdrop { background: rgb(0 0 0 / 0.45); }
+.dialog-wide { width: min(520px, calc(100vw - 32px)); }
 .dialog h2 { margin-bottom: 4px; font-size: 18px; }
 .dialog-lead { margin-bottom: 16px; color: var(--muted); }
 .dialog-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 24px; }
 
 .key-box { display: flex; align-items: stretch; gap: 8px; }
+.key-node { margin-top: 12px; }
 .key-box code {
   flex: 1;
   min-width: 0;

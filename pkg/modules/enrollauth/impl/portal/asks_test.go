@@ -131,22 +131,21 @@ func askID(t *testing.T, p *Portal, claim string) string {
 	return askState(t, p, claim).ID
 }
 
-// TestAsksIdentity checks what an ask names: a registration's machine key —
-// its retries' fresh node keys asking once — and an enrollment's claim and
-// key together, so two strangers claiming one name ask twice; the
-// boundaries list apart.
+// TestAsksIdentity checks what an ask names: an enrollment's claim and key
+// together, so two strangers claiming one name ask twice; and that a bare
+// registration asks nothing at all, denied without a listing.
 func TestAsksIdentity(t *testing.T) {
 	p := newPortal(t)
-	verdict(p, registration("mkey:01", "nodekey:01", ""))
-	verdict(p, registration("mkey:01", "nodekey:02", ""))
-	hosts := p.Asks(enrollauth.BoundaryRegistration)
-	if len(hosts) != 1 || hosts[0].Attempts != 2 || hosts[0].Keys[1] != "nodekey:02" {
-		t.Fatalf("one machine's retries list %+v, want one ask with the latest node key", hosts)
-	}
 	verdict(p, enrollment("1-ff00:0:110", "aa01"))
 	verdict(p, enrollment("1-ff00:0:110", "bb02"))
 	if nodes := p.Asks(enrollauth.BoundaryEnrollment); len(nodes) != 2 {
 		t.Errorf("two keys claiming one name list %d asks, want 2", len(nodes))
+	}
+	if got := verdict(p, registration("mkey:01", "nodekey:01", "")); got != enrollauth.AdmissionDeny {
+		t.Errorf("a bare registration answered %d, want deny", got)
+	}
+	if hosts := p.Asks(enrollauth.BoundaryRegistration); len(hosts) != 0 {
+		t.Errorf("a bare registration listed %+v, want no ask", hosts)
 	}
 	if p.Decide("not-an-id", true) {
 		t.Error("a malformed ask ID decided")
@@ -176,25 +175,4 @@ func TestAsksEvictLeastRecent(t *testing.T) {
 			}
 		}
 	})
-}
-
-// TestLabelDecidesNothing checks the joiner's label is for the operator's
-// eyes: facts differing in the label alone name one ask and answer one
-// verdict, and the listing carries the latest label.
-func TestLabelDecidesNothing(t *testing.T) {
-	p := newPortal(t)
-	plain := registration("mkey:07", "nodekey:07", "")
-	labeled := plain
-	labeled.Label = "laptop (linux)"
-	if a, b := verdict(p, plain), verdict(p, labeled); a != b {
-		t.Errorf("the label changed the verdict: %d without, %d with", a, b)
-	}
-	asks := p.Asks(enrollauth.BoundaryRegistration)
-	if len(asks) != 1 || asks[0].Label != "laptop (linux)" {
-		t.Fatalf("the labels list %+v, want one ask carrying the latest label", asks)
-	}
-	p.Decide(asks[0].ID, true)
-	if a, b := verdict(p, labeled), verdict(p, plain); a != enrollauth.AdmissionAllow || a != b {
-		t.Errorf("an approval answered %d with the label and %d without, want allow for both", a, b)
-	}
 }

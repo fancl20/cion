@@ -45,10 +45,10 @@ var (
 // registry already holds answers from the record, admission being durable,
 // and the record names the machine: the machine that earned the key answers,
 // any other meets the refusal the denied registration carries. A new key
-// asks the seam — past the door's rate caps — and approve allocates and
-// records while deny and pending leave the request refused and unanswered —
-// the client's own polling carries the wait, the registration retry loop
-// the protocol's clients already run.
+// asks the seam — past the door's rate caps — and approve allocates in the
+// node the answer names and records, while deny and pending leave the
+// request refused and unanswered — the client's own polling carries the
+// wait, the registration retry loop the protocol's clients already run.
 func (a *App) handleRegister(w http.ResponseWriter, r *http.Request,
 	machine key.MachinePublic) {
 
@@ -120,10 +120,10 @@ func (a *App) handleRegister(w http.ResponseWriter, r *http.Request,
 	// The door's rate caps, ahead of the seam's ask: one admission per
 	// interval per source address — an internet source's port is ephemeral —
 	// beside the door's own overall pace against many slow sources, so a
-	// flood of fresh keys prompts no operator and writes no record. The
-	// refusal rides the pending refusal's own path and status, for the
-	// vendored client answers the rate's own status — 429 — by failing a
-	// headless host's login outright instead of retrying it.
+	// flood of fresh keys tries auth keys no faster than the caps and writes
+	// no record. The refusal rides the pending refusal's own path and
+	// status, for the vendored client answers the rate's own status — 429 —
+	// by failing a headless host's login outright instead of retrying it.
 	if !a.bySource.Admit(source.Addr()) || !a.overall.Allow() {
 		http.Error(w, "registration exceeds the admission rate",
 			http.StatusServiceUnavailable)
@@ -138,27 +138,28 @@ func (a *App) handleRegister(w http.ResponseWriter, r *http.Request,
 		},
 		Source:     source,
 		Credential: credential,
-		Label:      labelOf(hostname, osName),
 	}
 	var answer enrollauth.AdmissionAnswer
-	if a.cfg.Authorizer == nil {
-		// No authorizer selected keeps registration open — the zero-conf
-		// default.
-		answer.Admission = enrollauth.AdmissionAllow
-	} else {
+	if a.cfg.Authorizer != nil {
+		// No authorizer selected admits no host: the zero answer denies.
 		answer = a.cfg.Authorizer.Authorize(r.Context(), facts)
 	}
 	switch answer.Admission {
 	case enrollauth.AdmissionAllow:
-		// Approve allocates the next free address in the owning node's
-		// slice and records the one registry entry: the key, the machine,
-		// the address, the owning node, the approving plugin's note, and the
-		// client's claims about itself.
-		host, err := allocate(nodeKey, directory)
+		// Approve allocates the next free address in the slice of the node
+		// the answer names — the founding core where it names none — and
+		// records the one registry entry: the key, the machine, the address,
+		// the owning node, the approving plugin's note, and the client's
+		// claims about itself.
+		node := answer.Node
+		if node.IsZero() {
+			node = a.cfg.IA
+		}
+		host, err := allocate(nodeKey, directory, node)
 		if err != nil {
 			http.Error(w, "no address to allocate", http.StatusServiceUnavailable)
 			slog.Warn("Coordination allocating a host address",
-				"node_key", req.NodeKey.ShortString(), "err", err)
+				"node_key", req.NodeKey.ShortString(), "node", node, "err", err)
 			return
 		}
 		host.Note = answer.Note

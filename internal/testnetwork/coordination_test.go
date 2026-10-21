@@ -8,6 +8,8 @@ import (
 	"net"
 	"net/netip"
 	"path/filepath"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -18,6 +20,7 @@ import (
 	"github.com/fancl20/cion/pkg/apps"
 	"github.com/fancl20/cion/pkg/apps/wireguard"
 	"github.com/fancl20/cion/pkg/core/webpki/webpkitest"
+	"github.com/fancl20/cion/pkg/modules/enrollauth"
 )
 
 // TailnetRange is the overlay's host space, mirrored from the application.
@@ -57,10 +60,45 @@ func placeCoordination(t *testing.T) coordinationPlacement {
 	}
 }
 
+// labKeyPrefix opens the credential a lab host presents to the labs'
+// admission policy.
+const labKeyPrefix = "lab:"
+
+// labKey is the credential that lands a lab host on the node: the labs'
+// stand-in for an auth key an operator minted naming the node.
+func labKey(node addr.IA) string { return labKeyPrefix + node.String() }
+
+// labPolicy is the labs' admission policy, loaded through the harness's
+// field: nodes enroll openly, the founder's vote is denied, and a
+// registration presenting lab:<isd-as> is admitted onto that node while
+// any other is denied.
+type labPolicy struct{}
+
+func (labPolicy) Authorize(_ context.Context, f enrollauth.AdmissionFacts) enrollauth.AdmissionAnswer {
+	switch f.Boundary {
+	case enrollauth.BoundaryEnrollment:
+		return enrollauth.AdmissionAnswer{Admission: enrollauth.AdmissionAllow}
+	case enrollauth.BoundaryRegistration:
+		name, keyed := strings.CutPrefix(f.Credential, labKeyPrefix)
+		node, err := addr.ParseIA(name)
+		if !keyed || err != nil {
+			return enrollauth.AdmissionAnswer{Admission: enrollauth.AdmissionDeny}
+		}
+		return enrollauth.AdmissionAnswer{
+			Admission: enrollauth.AdmissionAllow,
+			Note:      "lab key",
+			Node:      node,
+		}
+	default:
+		return enrollauth.AdmissionAnswer{Admission: enrollauth.AdmissionDeny}
+	}
+}
+
 // coordCore boots the core of the coordination topology on its suite's
 // loopback host: the WebPKI certificate files, the wireguard application —
 // its tailnet slice the directory's assignment, its hosts dialed on the
-// default shared port — and the coordination endpoint beside it.
+// default shared port — and the coordination endpoint beside it, the labs'
+// policy admitting where the suite names no method.
 func coordCore(t *testing.T, wpki *webpkitest.CA, host netip.Addr,
 	place coordinationPlacement, mutate func(*services.NodeConfig)) *assemblyNode {
 
@@ -80,6 +118,9 @@ func coordCore(t *testing.T, wpki *webpkitest.CA, host netip.Addr,
 		}
 		if mutate != nil {
 			mutate(cfg)
+		}
+		if cfg.EnrollAuth == "" {
+			cfg.Admission = labPolicy{}
 		}
 	})
 }
@@ -137,8 +178,7 @@ func tailnetHost(t *testing.T, name, controlURL, authKey string) *tsnet.Server {
 }
 
 // hostUp logs the host in and waits for its netmap, returning its tailnet
-// addresses — the open default, an auth key, or an operator's
-// approval deciding how long it takes.
+// addresses.
 func hostUp(t *testing.T, srv *tsnet.Server) []netip.Addr {
 	t.Helper()
 	ips, failed := hostUpErr(t, srv, TestTimeout)
@@ -208,6 +248,19 @@ func ownerOf(t *testing.T, a *assemblyNode, ip netip.Addr) addr.IA {
 	}
 	t.Fatalf("no node's slice holds %s", ip)
 	return 0
+}
+
+// holdsHostEndpoint reports whether the core's registry holds the node's
+// entry with its host endpoint: until it does, a registration naming the
+// node is refused.
+func holdsHostEndpoint(t *testing.T, core *assemblyNode, node addr.IA) bool {
+	directory, err := wireguardOf(core).Directory(t.Context())
+	if err != nil {
+		return false
+	}
+	return slices.ContainsFunc(directory.Nodes, func(entry wireguard.Entry) bool {
+		return entry.IA.Equal(node) && entry.HostEndpoint.IsValid()
+	})
 }
 
 // echoOverTailnet exchanges one message between two hosts through the
@@ -284,13 +337,14 @@ func echoOverTailnet(t *testing.T, dst *tsnet.Server, dstAddr netip.Addr,
 	}
 }
 
-// TestCoordinationOpenJoin is the coordination join proof on the two-node
-// topology: a host registers through the open default, its login
-// completing on the spot; the node programs itself from the fetched
-// registry within one cadence; and two hosts exchange traffic through the
-// mesh — the tunnel carrying the tailnet and nothing else. The core then
-// stops before its hosts leave, and its Close returns.
-func TestCoordinationOpenJoin(t *testing.T) {
+// TestCoordinationJoin is the coordination join proof on the two-node
+// topology: each host registers with a key naming one node, its login
+// completing on the spot and its address from that node's slice; each
+// node programs itself from the fetched registry within one cadence; and
+// the two hosts exchange traffic through the mesh — the tunnel carrying
+// the tailnet and nothing else. The core then stops before its hosts
+// leave, and its Close returns.
+func TestCoordinationJoin(t *testing.T) {
 	t.Parallel()
 	// The package CA: its certificate file is the one the vendored
 	// clients' root store trusts.
@@ -320,34 +374,27 @@ func TestCoordinationOpenJoin(t *testing.T) {
 	// can place in its slice: the directory's own convergence, the same
 	// one the mesh rides.
 	Poll(t, "the core's registry holding B's entry", func() bool {
-		directory, err := wireguardOf(a).Directory(t.Context())
-		if err != nil {
-			return false
-		}
-		for _, entry := range directory.Nodes {
-			if entry.IA.Equal(b.app.IA()) && entry.HostEndpoint.IsValid() {
-				return true
-			}
-		}
-		return false
+		return holdsHostEndpoint(t, a, b.app.IA())
 	})
 
-	// The two hosts place in the two nodes' slices — the freest slice
-	// takes each host, ties to the lower ISD-AS — and own distinct
-	// addresses of the tailnet range.
-	hostA := tailnetHost(t, "host-a", place.controlURL, "")
+	// The two hosts land on the nodes their keys name, one on each, and own
+	// distinct addresses of the tailnet range.
+	hostA := tailnetHost(t, "host-a", place.controlURL, labKey(a.app.IA()))
 	ipsA := hostUp(t, hostA)
 	if len(ipsA) != 1 || !ipsA[0].Is4() || !TailnetRange.Contains(ipsA[0]) {
 		t.Fatalf("the host's addresses = %v, want one of the tailnet range", ipsA)
 	}
-	hostB := tailnetHost(t, "host-b", place.controlURL, "")
+	hostB := tailnetHost(t, "host-b", place.controlURL, labKey(b.app.IA()))
 	ipsB := hostUp(t, hostB)
 	if len(ipsB) != 1 || !ipsB[0].Is4() || !TailnetRange.Contains(ipsB[0]) {
 		t.Fatalf("the far host's addresses = %v, want one of the tailnet range",
 			ipsB)
 	}
-	if ipsA[0] == ipsB[0] {
-		t.Fatalf("both hosts allocated %s", ipsA[0])
+	if got := ownerOf(t, a, ipsA[0]); got != a.app.IA() {
+		t.Fatalf("the core's host landed on %s, want the core its key names", got)
+	}
+	if got := ownerOf(t, a, ipsB[0]); got != b.app.IA() {
+		t.Fatalf("the leaf's host landed on %s, want the leaf its key names", got)
 	}
 
 	// The join completes at the directory's cadence: both owning nodes
@@ -368,14 +415,8 @@ func TestCoordinationOpenJoin(t *testing.T) {
 	warmSession(t, hostA, ipsB[0])
 	warmSession(t, hostB, ipsA[0])
 
-	// The echo runs from the leaf's host: the leaf's own composition to
-	// the core is the mesh's warmable direction, and the core's replies
-	// ride the reversed arrival path the exchange seeds.
-	src, dstHost, dstIP := hostA, hostB, ipsB[0]
-	if ownerOf(t, a, ipsA[0]) == b.app.IA() {
-		src, dstHost, dstIP = hostB, hostA, ipsA[0]
-	}
-	echoOverTailnet(t, dstHost, dstIP, src, "through the tailnet")
+	// The echo crosses the mesh: the core's host dials the leaf's.
+	echoOverTailnet(t, hostB, ipsB[0], hostA, "through the tailnet")
 
 	// The core stops before its hosts leave: its Close returns with their
 	// conversations and relay connections still open.
@@ -426,24 +467,15 @@ func TestCoordinationByAddressIdentity(t *testing.T) {
 	// can place in its slice: the directory's own convergence, the same
 	// one the mesh rides.
 	Poll(t, "the core's registry holding B's entry", func() bool {
-		directory, err := wireguardOf(a).Directory(t.Context())
-		if err != nil {
-			return false
-		}
-		for _, entry := range directory.Nodes {
-			if entry.IA.Equal(b.app.IA()) && entry.HostEndpoint.IsValid() {
-				return true
-			}
-		}
-		return false
+		return holdsHostEndpoint(t, a, b.app.IA())
 	})
 
-	hostA := tailnetHost(t, "host-a", place.controlURL, "")
+	hostA := tailnetHost(t, "host-a", place.controlURL, labKey(a.app.IA()))
 	ipsA := hostUp(t, hostA)
 	if len(ipsA) != 1 || !ipsA[0].Is4() || !TailnetRange.Contains(ipsA[0]) {
 		t.Fatalf("the host's addresses = %v, want one of the tailnet range", ipsA)
 	}
-	hostB := tailnetHost(t, "host-b", place.controlURL, "")
+	hostB := tailnetHost(t, "host-b", place.controlURL, labKey(b.app.IA()))
 	ipsB := hostUp(t, hostB)
 	if len(ipsB) != 1 || !ipsB[0].Is4() || !TailnetRange.Contains(ipsB[0]) {
 		t.Fatalf("the far host's addresses = %v, want one of the tailnet range", ipsB)
@@ -459,9 +491,5 @@ func TestCoordinationByAddressIdentity(t *testing.T) {
 	warmSession(t, hostA, ipsB[0])
 	warmSession(t, hostB, ipsA[0])
 
-	src, dstHost, dstIP := hostA, hostB, ipsB[0]
-	if ownerOf(t, a, ipsA[0]) == b.app.IA() {
-		src, dstHost, dstIP = hostB, hostA, ipsA[0]
-	}
-	echoOverTailnet(t, dstHost, dstIP, src, "through the address identity")
+	echoOverTailnet(t, hostB, ipsB[0], hostA, "through the address identity")
 }

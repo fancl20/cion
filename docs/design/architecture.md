@@ -114,9 +114,11 @@ composition root, policy and the source by the operator's run arguments.
     host, and what the founder votes on; `--trust.enroll-auth` selects
     exactly one method
     ([ADR-0010](/docs/adrs/0010-gate-enrollment-with-a-pluggable-authorizer.md)):
-    by source address, from the operator's chat, or from the operator's
-    passkey console
-    ([ADR-0022](/docs/adrs/0022-serve-the-operators-console-as-a-passkey-portal.md)).
+    by source address, admitting nodes alone, or from the operator's chat
+    or passkey console
+    ([ADR-0022](/docs/adrs/0022-serve-the-operators-console-as-a-passkey-portal.md)),
+    whose auth keys admit hosts, each key naming its host's node
+    ([ADR-0023](/docs/adrs/0023-admit-every-host-by-a-key-that-names-its-node.md)).
 *   **Topology source** — source: where topology decisions come from; the
     measured provider by default — loading it is what makes a node
     zero-conf — the file provider when `--topology.link-set` names a
@@ -139,14 +141,15 @@ load refuses the boot with the fix named
     client names is the exit it uses
     ([ADR-0012](/docs/adrs/0012-serve-egress-as-an-overlay-socks-service.md)).
 *   **Coordination** — the network's headscale, minimal by decision: hosts
-    join by logging in with a standard tailnet client against the core's
-    coordination endpoint, registration asks the admission seam, and the
-    registry distributes by the directory
+    join by logging in with a standard tailnet client and an auth key
+    against the core's coordination endpoint, registration asks the
+    admission seam, the host's address comes from the node its key names,
+    and the registry distributes by the directory
     ([ADR-0011](/docs/adrs/0011-serve-hosts-with-a-tailscale-coordination-service.md)).
 *   **Portal** — the operator's passkey console, which the founding core
     serves beneath `/admin/` beside the portal admission method it pairs
-    with: it decides the method's asks, mints its auth keys, lists the
-    nodes and hosts, and releases hosts
+    with: it decides the method's node and vote asks, mints its auth keys,
+    each naming a node, lists the nodes and hosts, and releases hosts
     ([ADR-0022](/docs/adrs/0022-serve-the-operators-console-as-a-passkey-portal.md)).
 *   **Ping** — the network's probe, and the selection loop's measuring
     instrument.
@@ -196,11 +199,12 @@ changes are damped.
 
 ### Endhost service
 
-Hosts are tailnet clients of their node: they join by logging in against
-the core's coordination service and run no CION software. The tunnel
-carries the tailnet alone — no default route is advertised — and internet
-reachability is a service every node offers by default at its own tailnet
-address: the exit a flow uses is the destination it names
+Hosts are tailnet clients of their node, the node their auth key names:
+they join by logging in with the key against the core's coordination
+service and run no CION software. The tunnel carries the tailnet alone —
+no default route is advertised — and internet reachability is a service
+every node offers by default at its own tailnet address: the exit a flow
+uses is the destination it names
 ([ADR-0012](/docs/adrs/0012-serve-egress-as-an-overlay-socks-service.md)).
 Host-to-host and exit traffic alike cross the SCION mesh between nodes. A
 join completes at the directory's fetch cadence.
