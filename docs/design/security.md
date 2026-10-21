@@ -59,11 +59,10 @@ Untrusted:
     boundary: a node's first issuance, a host's registration, and a core's
     TRC submission that needs the founder's sensitive vote ask the same
     plugin with the keys the exchange presented and a return-routable
-    source, never the joiner's claims about itself. Enrollment and
-    registration are open by default, while the founder casts no such vote
-    without a plugin, and a gate that cannot reach its signal denies. The
-    approving plugin's note is recorded with the entry — the registry's own
-    audit.
+    source, never the joiner's claims about itself. No boundary is open by
+    default — the founding core does not start without a plugin — and a
+    gate that cannot reach its signal denies. The approving plugin's note
+    is recorded with the entry — the registry's own audit.
 *   **Bounds rather than revocation.** No revocation exists: admission rate
     caps bound strangers at the doors, expiration retires stale trust, and
     liveness is the node's own probe.
