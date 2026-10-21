@@ -1,6 +1,6 @@
 # Serve the Operator's Console as a Passkey Portal
 
-*   Status: proposed
+*   Status: accepted
 *   Date: 2026-10-21
 
 [TOC]

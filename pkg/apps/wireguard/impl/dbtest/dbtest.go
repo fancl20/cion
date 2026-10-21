@@ -5,6 +5,7 @@ package dbtest
 import (
 	"context"
 	"net/netip"
+	"slices"
 	"sync"
 	"testing"
 
@@ -17,8 +18,8 @@ import (
 
 // MemStore is the in-memory directory-store double the suites share: publish
 // assigns slices the store's way, host entries record keyed by their public
-// key, and Seed records a node entry verbatim — the fixture form that names
-// its own slice.
+// key and delete by it, and Seed records a node entry verbatim — the fixture
+// form that names its own slice.
 type MemStore struct {
 	mtx   sync.Mutex
 	nodes []wireguard.Entry
@@ -72,6 +73,17 @@ func (s *MemStore) PublishHost(_ context.Context, entry wireguard.HostEntry) err
 	return nil
 }
 
+// DeleteHost removes the host entry keyed by the public key; an absent key
+// deletes nothing.
+func (s *MemStore) DeleteHost(_ context.Context, key wireguard.PublicKey) error {
+	s.mtx.Lock()
+	defer s.mtx.Unlock()
+	s.hosts = slices.DeleteFunc(s.hosts, func(h wireguard.HostEntry) bool {
+		return h.PublicKey == key
+	})
+	return nil
+}
+
 // List returns a snapshot of everything recorded.
 func (s *MemStore) List(context.Context) (wireguard.Directory, error) {
 	s.mtx.Lock()
@@ -99,7 +111,8 @@ func MustKey(fill byte) wireguard.PublicKey {
 // store assigns each publisher the first free /24 of the tailnet range by
 // address order — unique across publishers, stable per ISD-AS across
 // re-publications, the claimed overlay ignored — beside host entries that
-// round-trip and a re-registration that replaces.
+// round-trip, a re-registration that replaces, and a deletion that removes
+// exactly the entry its key names.
 func TestDirectoryStore(t *testing.T, open func(t *testing.T) wireguard.DirectoryStore) {
 	ctx := context.Background()
 	store := open(t)
@@ -140,6 +153,8 @@ func TestDirectoryStore(t *testing.T, open func(t *testing.T) wireguard.Director
 			Addr:       netip.MustParseAddr("100.64.0.4"),
 			IA:         mustIA(t, "20-ff00:0:1"),
 			Note:       "telegram operator",
+			Hostname:   "laptop",
+			OS:         "linux",
 		},
 		{
 			PublicKey:  MustKey(0x82),
@@ -213,6 +228,26 @@ func TestDirectoryStore(t *testing.T, open func(t *testing.T) wireguard.Director
 		if h.PublicKey == hosts[0].PublicKey && h.Note != "telegram auth key" {
 			t.Errorf("re-registration left the old note %q", h.Note)
 		}
+	}
+
+	// A deletion removes the entry its key names and no other, and a key
+	// the store does not hold deletes nothing and succeeds.
+	if err := store.DeleteHost(ctx, hosts[0].PublicKey); err != nil {
+		t.Fatalf("deleting the host %s: %v", hosts[0].PublicKey, err)
+	}
+	if err := store.DeleteHost(ctx, MustKey(0x8f)); err != nil {
+		t.Fatalf("deleting an absent host: %v", err)
+	}
+	got, err = store.List(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if diff := cmp.Diff([]wireguard.HostEntry{hosts[1]}, got.Hosts,
+		cmpopts.EquateComparable(netip.Addr{}, wireguard.PublicKey{})); diff != "" {
+		t.Errorf("hosts after the deletion mismatch (-want +got):\n%s", diff)
+	}
+	if len(got.Nodes) != 2 {
+		t.Errorf("a host deletion left %d node entries, want 2", len(got.Nodes))
 	}
 }
 

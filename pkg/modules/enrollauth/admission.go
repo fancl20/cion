@@ -2,8 +2,10 @@
 // gating a joiner node's first issuance, a joiner host's login, and the
 // founder's sensitive vote on a core's TRC submission — with its
 // implementations filed one package each beneath this root: the CIDR
-// authorizer admitting by addressing at every boundary, and the Telegram
-// one admitting one by one from an operator's phone — and a shared
+// authorizer admitting by addressing at every boundary, the Telegram
+// one admitting one by one from an operator's phone, and the portal one
+// pending every new identity for the operator's passkey console to decide
+// through the Operator surface — and a shared
 // contract suite in impl/authtest every implementation runs. The
 // --trust.enroll-auth run argument selects exactly one method, the caller
 // importing the implementation it names; unset is open enrollment and
@@ -41,11 +43,12 @@ const (
 // AdmissionFacts are the verified facts of one admission exchange: the
 // boundary asking, fingerprints of the keys the exchange presented, the
 // return-routable source, the credential the joiner carried, and the
-// exchange's claim — all of it in the clear, handed to the plugin,
-// nothing else considered. The source is bound by the completed handshake
-// at every boundary, yet it remains the joiner's own claim otherwise: a
-// node behind translation presents its private address, a host behind it
-// the translated public one, so a private-range entry is what admits such
+// exchange's claim — all of it in the clear, handed to the plugin, nothing
+// else decided on. Beside them rides the joiner's own label, for a human's
+// eyes alone. The source is bound by the completed handshake at every
+// boundary, yet it remains the joiner's own claim otherwise: a node behind
+// translation presents its private address, a host behind it the
+// translated public one, so a private-range entry is what admits such
 // joiners.
 type AdmissionFacts struct {
 	// Boundary is the boundary asking.
@@ -71,6 +74,11 @@ type AdmissionFacts struct {
 	// self-assertion, the voting submission's channel-verified presenter;
 	// zero at registration.
 	Claim addr.IA
+	// Label is the joiner's own description of itself — a registration's
+	// claimed hostname and operating system, empty at the other
+	// boundaries — shown to a human beside the facts above and decided on
+	// by no implementation.
+	Label string
 }
 
 // AdmissionVerdict is an authorizer's decision. Deny is the zero value: an

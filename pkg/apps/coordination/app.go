@@ -18,12 +18,14 @@ import (
 )
 
 // Store is the registry the coordination application works on: the core's
-// directory store, read for node entries and written with host entries. The
-// store stays the WireGuard application's — this application borrows the
-// view beside it, never the file.
+// directory store, read for node entries, written with host entries, and
+// pruned of the hosts the console releases. The store stays the WireGuard
+// application's — this application borrows the view beside it, never the
+// file.
 type Store interface {
 	List(ctx context.Context) (wireguard.Directory, error)
 	PublishHost(ctx context.Context, entry wireguard.HostEntry) error
+	DeleteHost(ctx context.Context, key wireguard.PublicKey) error
 }
 
 // DERPConfig names the relay a netmap advertises: the core's own HTTPS
@@ -94,10 +96,12 @@ type App struct {
 	// the idempotency check, the seam's ask, the allocation, and the record
 	// hold it together, whatever the seam's latency — so concurrent
 	// admissions read in order and allocate distinct addresses, and a key
-	// racing itself converges on its record. A Telegram prompt's send holds
-	// a later registration behind it for as long as its timeout;
-	// registration is rare enough that the queue is the honest price of one
-	// key, one address.
+	// racing itself converges on its record. A release and the map path's
+	// binding of a record from before the machine claim hold it too, so
+	// neither interleaves with an admission or undoes the other. A Telegram
+	// prompt's send holds a later registration behind it for as long as its
+	// timeout; registration is rare enough that the queue is the honest
+	// price of one key, one address.
 	admissionMtx sync.Mutex
 	// bySource and overall pace the seam's asks — one admission per interval
 	// per source address beside one per interval at the door — the bounds
@@ -110,6 +114,11 @@ type App struct {
 	// conversations counts the served noise conversations: past the bound
 	// the upgrade refuses before the handshake begins.
 	conversations atomic.Int64
+
+	// presenceMtx guards presence: what the map handler last observed of
+	// each registered host, keyed by its node key.
+	presenceMtx sync.Mutex
+	presence    map[wireguard.PublicKey]*sighting
 
 	// convMtx guards the open conversations, the relay's client
 	// connections, and the closed flag. A conversation or a relay client
@@ -148,6 +157,7 @@ func New(cfg Config) (*App, error) {
 		bySource:   ratelimit.NewKeyed[netip.Addr](admissionMinInterval),
 		overall:    rate.NewLimiter(rate.Every(admissionMinInterval), 1),
 		mapStreams: make(chan struct{}, maxMapStreams),
+		presence:   make(map[wireguard.PublicKey]*sighting),
 		convs:      make(map[*conversationConn]struct{}),
 		relays:     make(map[net.Conn]struct{}),
 	}

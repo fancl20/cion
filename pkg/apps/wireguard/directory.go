@@ -56,7 +56,8 @@ type Entry struct {
 // service's gate allocates and the directory distributes. The host's key is
 // its identity — the same key re-registering meets the same entry — and the
 // address, the owning node, the presenting machine, and the approving
-// plugin's note ride beside it.
+// plugin's note ride beside it, with the client's own description of
+// itself, which stays on the core.
 type HostEntry struct {
 	// PublicKey is the host's WireGuard public key.
 	PublicKey PublicKey
@@ -74,6 +75,11 @@ type HostEntry struct {
 	IA addr.IA
 	// Note is the approving plugin's own account of its decision.
 	Note string
+	// Hostname and OS are the client's claimed hostname and operating
+	// system at admission: shown to the operator, decided on by nothing,
+	// and kept on the core — the directory's wire form carries neither.
+	Hostname string
+	OS       string
 }
 
 // Directory is one fetch of the directory: node entries beside host entries,
@@ -98,6 +104,9 @@ type DirectoryStore interface {
 	// entries enter the store locally, through the coordination application
 	// the core alone runs — never through the node-authenticated publish.
 	PublishHost(ctx context.Context, entry HostEntry) error
+	// DeleteHost removes the host entry the public key names, releasing its
+	// address; a key the store does not hold deletes nothing and succeeds.
+	DeleteHost(ctx context.Context, key PublicKey) error
 	// List returns every published entry, nodes and hosts together.
 	List(ctx context.Context) (Directory, error)
 	Close() error
@@ -144,12 +153,13 @@ func AssignSlice(ia addr.IA, entries []Entry) (netip.Prefix, error) {
 }
 
 // Registry is the coordination surface of the core's store: node entries read
-// for the netmap and allocation, host entries written at admission. The store
-// stays this application's; the coordination application borrows the view
-// beside it, never the file.
+// for the netmap and allocation, host entries written at admission and
+// deleted at release. The store stays this application's; the coordination
+// application borrows the view beside it, never the file.
 type Registry interface {
 	List(ctx context.Context) (Directory, error)
 	PublishHost(ctx context.Context, entry HostEntry) error
+	DeleteHost(ctx context.Context, key PublicKey) error
 }
 
 // directoryClient is the publish and list surface, whichever side of the

@@ -72,6 +72,7 @@ func (a *App) handleRegister(w http.ResponseWriter, r *http.Request,
 	if req.Auth != nil {
 		credential = req.Auth.AuthKey
 	}
+	hostname, osName := claimsOf(req.Hostinfo.View())
 
 	// The admission transaction: one lock holds the read, the idempotency
 	// check, the seam's ask, the allocation, and the record — the renewal
@@ -137,6 +138,7 @@ func (a *App) handleRegister(w http.ResponseWriter, r *http.Request,
 		},
 		Source:     source,
 		Credential: credential,
+		Label:      labelOf(hostname, osName),
 	}
 	var answer enrollauth.AdmissionAnswer
 	if a.cfg.Authorizer == nil {
@@ -150,7 +152,8 @@ func (a *App) handleRegister(w http.ResponseWriter, r *http.Request,
 	case enrollauth.AdmissionAllow:
 		// Approve allocates the next free address in the owning node's
 		// slice and records the one registry entry: the key, the machine,
-		// the address, the owning node, and the approving plugin's note.
+		// the address, the owning node, the approving plugin's note, and the
+		// client's claims about itself.
 		host, err := allocate(nodeKey, directory)
 		if err != nil {
 			http.Error(w, "no address to allocate", http.StatusServiceUnavailable)
@@ -160,6 +163,7 @@ func (a *App) handleRegister(w http.ResponseWriter, r *http.Request,
 		}
 		host.Note = answer.Note
 		host.MachineKey = machineKeyOf(machine)
+		host.Hostname, host.OS = hostname, osName
 		if err := a.cfg.Store.PublishHost(r.Context(), host); err != nil {
 			http.Error(w, "recording the registration",
 				http.StatusInternalServerError)
@@ -192,7 +196,8 @@ func (a *App) handleRegister(w http.ResponseWriter, r *http.Request,
 // it, one write on the answer path, the honest migration for a record that
 // never held the fact; a record naming another machine does not answer. It
 // reports whether the record answers the machine, and errors only on the
-// store's write.
+// store's write. The caller holds the admission lock, for the binding
+// writes the record.
 func (a *App) bindMachine(ctx context.Context, host *wireguard.HostEntry,
 	machine key.MachinePublic) (bool, error) {
 
@@ -211,6 +216,53 @@ func (a *App) bindMachine(ctx context.Context, host *wireguard.HostEntry,
 		"node_key", nodePublicOf(host.PublicKey).ShortString(),
 		"machine", machine.ShortString())
 	return true, nil
+}
+
+// bindOnMap settles the record's machine claim on the map path, which holds
+// no lock of its own: a record naming a machine answers that machine alone,
+// and a record from before the claim binds under the admission lock, read
+// again first, so a release that landed since the map read the registry is
+// never undone by the binding's write.
+func (a *App) bindOnMap(ctx context.Context, host *wireguard.HostEntry,
+	machine key.MachinePublic) (bool, error) {
+
+	if presented := machineKeyOf(machine); host.MachineKey == presented {
+		return true, nil
+	}
+	if host.MachineKey != (wireguard.PublicKey{}) {
+		return false, nil
+	}
+	a.admissionMtx.Lock()
+	defer a.admissionMtx.Unlock()
+	directory, err := a.cfg.Store.List(ctx)
+	if err != nil {
+		return false, err
+	}
+	for i := range directory.Hosts {
+		if directory.Hosts[i].PublicKey == host.PublicKey {
+			return a.bindMachine(ctx, &directory.Hosts[i], machine)
+		}
+	}
+	return false, nil
+}
+
+// RemoveHost releases the host the node key names: its registry entry is
+// deleted under the admission lock — no admission and no binding
+// interleaves with the delete — and its address returns to the allocator.
+// An open map stream for the key closes at its next re-read, as for any
+// vanished registration, and each node drops the peer at its next
+// directory fetch. A key the registry does not hold releases nothing and
+// succeeds.
+func (a *App) RemoveHost(ctx context.Context, nodeKey wireguard.PublicKey) error {
+	a.admissionMtx.Lock()
+	defer a.admissionMtx.Unlock()
+	if err := a.cfg.Store.DeleteHost(ctx, nodeKey); err != nil {
+		return err
+	}
+	a.forget(nodeKey)
+	slog.Info("Coordination released a host",
+		"node_key", nodePublicOf(nodeKey).ShortString())
+	return nil
 }
 
 // writeRegisterResponse completes the login on the spot: no AuthURL, the

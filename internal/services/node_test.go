@@ -2,6 +2,8 @@ package services
 
 import (
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"net/netip"
 	"testing"
 
@@ -9,6 +11,8 @@ import (
 	"github.com/scionproto/scion/pkg/addr"
 
 	"github.com/fancl20/cion/internal/supervise"
+	"github.com/fancl20/cion/pkg/apps"
+	"github.com/fancl20/cion/pkg/apps/portal"
 	"github.com/fancl20/cion/pkg/core/trust"
 	"github.com/fancl20/cion/pkg/core/webpki/webpkitest"
 	"github.com/fancl20/cion/pkg/libs/underlay"
@@ -136,6 +140,44 @@ func TestSetupFounderRunsTheAuthorizer(t *testing.T) {
 	want := []string{"enrollment", "rotation watch", "enrollment authorizer"}
 	if diff := cmp.Diff(want, roleLoopNames(n)); diff != "" {
 		t.Errorf("the founder's loops (-want +got):\n%s", diff)
+	}
+}
+
+// TestSetupFounderServesTheConsole checks the portal's assembly on the
+// founder: the method's loop joins the role's, the console application
+// loads beside it, the HTTPS server binds for it though nothing else mounts
+// and the identity is static files, and the server answers its page and its
+// API beneath /admin/.
+func TestSetupFounderServesTheConsole(t *testing.T) {
+	n := setupFounderNode(t, func(c *NodeConfig) {
+		c.EnrollAuth = "portal"
+		c.Coordination = &CoordinationOptions{Addr: "127.0.0.124:0"}
+	})
+	want := []string{"enrollment", "rotation watch", "enrollment authorizer"}
+	if diff := cmp.Diff(want, roleLoopNames(n)); diff != "" {
+		t.Errorf("the founder's loops (-want +got):\n%s", diff)
+	}
+	console, ok := apps.AppOf(n.apps, "portal").(*portal.App)
+	if !ok {
+		t.Fatalf("the founder loaded %v, want the portal application", n.apps)
+	}
+	if console.SetupLink() == "" {
+		t.Error("the fresh console holds no setup link")
+	}
+	if n.httpsLn == nil {
+		t.Fatal("the console's founder bound no HTTPS listener")
+	}
+	for path, status := range map[string]int{
+		"/admin/":            http.StatusOK,
+		"/admin/api/session": http.StatusOK,
+		"/admin/api/nodes":   http.StatusUnauthorized,
+	} {
+		rec := httptest.NewRecorder()
+		n.httpsHandler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet,
+			"https://"+webpkitest.Domain+path, nil))
+		if rec.Code != status {
+			t.Errorf("GET %s = %d, want %d", path, rec.Code, status)
+		}
 	}
 }
 

@@ -4,11 +4,13 @@ import (
 	"context"
 	"crypto/x509"
 	"fmt"
+	"net"
 	"net/netip"
 	"time"
 
 	"github.com/fancl20/cion/pkg/apps"
 	"github.com/fancl20/cion/pkg/core/trust"
+	"github.com/fancl20/cion/pkg/core/webpki"
 	"github.com/fancl20/cion/pkg/libs/scionrpc"
 	"github.com/fancl20/cion/pkg/libs/underlay"
 	"github.com/fancl20/cion/pkg/modules/enrollauth"
@@ -67,11 +69,12 @@ type NodeConfig struct {
 	Control  string
 	// EnrollAuth selects the enrollment authorizer that gates first issuance,
 	// host registration, and the founding core's sensitive vote on a core's
-	// TRC submission, "method=spec": "cidrs" with a comma-separated prefix
-	// list, "telegram" with <chat>:<token>. Empty is open enrollment and
-	// registration — the zero-conf default — with the vote denied, and the
-	// argument refuses to load off the founding core, the only node that
-	// issues chains.
+	// TRC submission: "cidrs=" with a comma-separated prefix list,
+	// "telegram=" with <chat>:<token>, or the bare "portal", whose asks the
+	// portal application — the operator's passkey console at /admin/ —
+	// decides. Empty is open enrollment and registration — the zero-conf
+	// default — with the vote denied, and the argument refuses to load off
+	// the founding core, the only node that issues chains.
 	EnrollAuth string
 	// TelegramAPI overrides the Telegram Bot API's base URL for the
 	// telegram method of EnrollAuth; empty uses the public one. The
@@ -164,8 +167,8 @@ type resolvedConfig struct {
 	// enrollAuth gates the trust service's first issuance, the coordination
 	// application's registrations, and the TRC decision's sensitive vote;
 	// nil leaves the first two open and denies the vote. enrollRun runs the
-	// selected method's own loops — the Telegram authorizer's poll — nil
-	// when the method has none.
+	// selected method's own loops — the Telegram authorizer's poll, the
+	// portal's sweep — nil when the method has none.
 	enrollAuth enrollauth.AdmissionAuthorizer
 	enrollRun  func(context.Context)
 	// apps is the selected resident applications, in table order.
@@ -229,8 +232,21 @@ func (c NodeConfig) resolve() (resolvedConfig, error) {
 			return resolvedConfig{}, fmt.Errorf("parsing --trust.enroll-auth: %w", err)
 		}
 	}
-	if r.apps, err = apps.Select(c.Applications, founding, c.AppArguments); err != nil {
+	if r.apps, err = apps.Select(c.Applications, founding, c.AppArguments,
+		admissionMethod(c.EnrollAuth)); err != nil {
 		return resolvedConfig{}, err
 	}
 	return r, nil
+}
+
+// httpsOrigin is the origin the founding core's HTTPS server answers on:
+// its domain over HTTPS, the port joining it when the harness's placement
+// binds one other than HTTPS's own.
+func (c NodeConfig) httpsOrigin() string {
+	if o := c.Coordination; o != nil && o.Addr != "" {
+		if _, port, err := net.SplitHostPort(o.Addr); err == nil && port != webpki.HTTPSPort {
+			return "https://" + net.JoinHostPort(c.Domain, port)
+		}
+	}
+	return "https://" + c.Domain
 }

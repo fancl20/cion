@@ -113,7 +113,10 @@ composition root, policy and the source by the operator's run arguments.
 *   **Enrollment authorizer** — policy: who is admitted, joiner node or
     host, and what the founder votes on; `--trust.enroll-auth` selects
     exactly one method
-    ([ADR-0010](/docs/adrs/0010-gate-enrollment-with-a-pluggable-authorizer.md)).
+    ([ADR-0010](/docs/adrs/0010-gate-enrollment-with-a-pluggable-authorizer.md)):
+    by source address, from the operator's chat, or from the operator's
+    passkey console
+    ([ADR-0022](/docs/adrs/0022-serve-the-operators-console-as-a-passkey-portal.md)).
 *   **Topology source** — source: where topology decisions come from; the
     measured provider by default — loading it is what makes a node
     zero-conf — the file provider when `--topology.link-set` names a
@@ -140,6 +143,11 @@ load refuses the boot with the fix named
     coordination endpoint, registration asks the admission seam, and the
     registry distributes by the directory
     ([ADR-0011](/docs/adrs/0011-serve-hosts-with-a-tailscale-coordination-service.md)).
+*   **Portal** — the operator's passkey console, which the founding core
+    serves beneath `/admin/` beside the portal admission method it pairs
+    with: it decides the method's asks, mints its auth keys, lists the
+    nodes and hosts, and releases hosts
+    ([ADR-0022](/docs/adrs/0022-serve-the-operators-console-as-a-passkey-portal.md)).
 *   **Ping** — the network's probe, and the selection loop's measuring
     instrument.
 

@@ -2,18 +2,19 @@
 // node's resident applications, the seam they assemble through, and the
 // environment their constructors adapt. Each entry carries its name, the
 // registration of its own run arguments, its role bounds, the
-// applications it requires beside it, and its constructor; the
-// --applications run argument selects among the entries — unset to keep
-// the inference the run arguments practice, empty to run the deliberate
-// core, given to load exactly the names it lists. The application
-// packages sit one beneath the roof and import the core, the libraries,
-// and the siblings their entries require — never the assembly, the
-// harness, the commands, or this root; the table imports them, and the
-// assembly imports the table.
+// applications it requires beside it, the admission method it pairs with,
+// and its constructor; the --applications run argument selects among the
+// entries — unset to keep the inference the run arguments practice, empty
+// to run the deliberate core, given to load exactly the names it lists.
+// The application packages sit one beneath the roof and import the core,
+// the libraries, and the siblings their entries require — never the
+// assembly, the harness, the commands, or this root; the table imports
+// them, and the assembly imports the table.
 package apps
 
 import (
 	"context"
+	"crypto/x509"
 	"net/http"
 	"net/netip"
 	"time"
@@ -70,10 +71,17 @@ type Environment struct {
 	// Domain is the core's WebPKI identity — the founding core's own when
 	// Core is set, the network's core identity otherwise.
 	Domain string
+	// HTTPSOrigin is the origin the founding core's HTTPS server answers
+	// on: https:// and the domain, with the harness's port when its
+	// placement binds one other than HTTPS's own.
+	HTTPSOrigin string
 	// Engine provides the node's chain for the directory channel; Paths
 	// resolves the paths the mesh datagrams ride.
 	Engine *trust.Engine
 	Paths  Paths
+	// IssuedChains lists the certificate chains valid now that the node's
+	// trust database holds — on the founding core, every chain it issued.
+	IssuedChains func(ctx context.Context) ([][]*x509.Certificate, error)
 	// NewConn binds the node's sending conn on an ephemeral port: the
 	// socket the application's own services ride.
 	NewConn func() (*scion.Conn, error)
@@ -87,7 +95,7 @@ type Environment struct {
 	UnregisterSvc func(svc addr.SVC, port uint16) error
 	// Authorizer is the selected admission policy the applications ask —
 	// open where none loads. The coordination application's registrations
-	// ask its verdict.
+	// ask its verdict, and the portal application decides through it.
 	Authorizer enrollauth.AdmissionAuthorizer
 	// TRCDecision is the control plane's decision on the TRC updates the
 	// cores submit: the founder's own gates, the pin of what verifies as

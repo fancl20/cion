@@ -520,3 +520,51 @@ drive real ceremonies without a browser.
     stream and its owning node drops the peer.
 
 ## Implementation history
+
+*   The HTTPS seam landed first, in a commit of its own: the environment's
+    mount, the node's recorded mounts, and the coordination application's
+    three paths
+    ([https.go](/internal/services/https.go),
+    [apps.go](/pkg/apps/apps.go),
+    [app.go](/pkg/apps/coordination/app.go)).
+*   The console landed as planned in [portal](/pkg/apps/portal) beside the
+    method in [portal](/pkg/modules/enrollauth/impl/portal), the page a
+    plain script and style embedded beside the Go files. Its ceremonies
+    read and parse the request body before they take the console's lock
+    and verify with the library's `CreateCredential` and
+    `ValidatePasskeyLogin`, the same verification `FinishRegistration` and
+    `FinishPasskeyLogin` run, so no network read waits under the lock
+    ([passkeys.go](/pkg/apps/portal/passkeys.go)). The setup token is
+    checked when the ceremony begins, and the first passkey's registration
+    closes setup whichever ceremony completes first.
+*   A one-use key binds to the machine that first presents it rather than
+    spending at that first answer: the coordination application can still
+    refuse an admitted registration — the lab caught one arriving before
+    any node had published a slice to allocate in — and a key spent at the
+    answer stranded the client's retry behind an operator's approval. The
+    holder's retries pass on the key until their admission lands, and no
+    other machine's do; the state file records the holder
+    ([authkeys.go](/pkg/modules/enrollauth/impl/portal/authkeys.go)).
+*   Three bounds the plan left open: a pending ask lapses after ten
+    minutes without a retry, and an approval its joiner's retry consumed
+    leaves the list and refuses a second decision
+    ([asks.go](/pkg/modules/enrollauth/impl/portal/asks.go)); the
+    ceremonies and the sessions each hold at most 64 entries, the soonest
+    to expire leaving past the bound
+    ([passkeys.go](/pkg/apps/portal/passkeys.go)). The rate cap keys on
+    the route beside the source, so a begin and its finish within one
+    second both pass ([api.go](/pkg/apps/portal/api.go)).
+*   The lab reads the setup link where an operator reads the log: the
+    application exports `SetupLink`, the line `Run` logs
+    ([app.go](/pkg/apps/portal/app.go),
+    [portal_test.go](/internal/testnetwork/portal_test.go)). The software
+    authenticator encodes its COSE key and attestation with
+    `fxamacker/cbor/v2`, which becomes a direct requirement
+    ([passkeytest.go](/internal/passkeytest/passkeytest.go)).
+*   The coordination application's release and presence live in
+    [register.go](/pkg/apps/coordination/register.go) and
+    [presence.go](/pkg/apps/coordination/presence.go). The release's
+    stream test runs on the real clock: a map frame's zstd encoder outlives
+    its test in a process-wide pool, and one a fake-time bubble created
+    fails the next test that encodes outside the bubble
+    ([release_test.go](/pkg/apps/coordination/release_test.go)).

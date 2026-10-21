@@ -94,12 +94,14 @@ func TestNodeConfigResolve(t *testing.T) {
 		t.Fatalf("resolving a joining core: %v", err)
 	}
 
-	// Both methods of the selector parse.
+	// Every method of the selector parses.
 	for _, spec := range []string{
 		"cidrs=192.0.2.0/24,198.51.100.0/24",
 		"telegram=-1002147483647:7481532:AAFtoken",
+		"portal",
 	} {
 		cfg := nodeConfig()
+		cfg.State = t.TempDir()
 		cfg.EnrollAuth = spec
 		if _, err := cfg.resolve(); err != nil {
 			t.Errorf("resolving %q: %v", spec, err)
@@ -135,6 +137,9 @@ func TestNodeConfigResolve(t *testing.T) {
 		"chat without token": func(c *NodeConfig) {
 			c.EnrollAuth = "telegram=-1002147483647:"
 		},
+		"portal with a spec": func(c *NodeConfig) {
+			c.EnrollAuth = "portal=/admin"
+		},
 		"link-set plus neighbor": func(c *NodeConfig) {
 			c.Core = false
 			c.LinkSet = "/tmp/link-set.json"
@@ -149,6 +154,26 @@ func TestNodeConfigResolve(t *testing.T) {
 				t.Error("the malformed run arguments were accepted")
 			}
 		})
+	}
+}
+
+// TestHTTPSOrigin checks the HTTPS server's origin: the domain over HTTPS,
+// the harness placement's port joining it unless it is HTTPS's own.
+func TestHTTPSOrigin(t *testing.T) {
+	for _, tc := range []struct {
+		placement *CoordinationOptions
+		want      string
+	}{
+		{nil, "https://" + webpkitest.Domain},
+		{&CoordinationOptions{}, "https://" + webpkitest.Domain},
+		{&CoordinationOptions{Addr: "127.0.0.1:443"}, "https://" + webpkitest.Domain},
+		{&CoordinationOptions{Addr: "127.0.0.1:8443"}, "https://" + webpkitest.Domain + ":8443"},
+	} {
+		cfg := nodeConfig()
+		cfg.Coordination = tc.placement
+		if got := cfg.httpsOrigin(); got != tc.want {
+			t.Errorf("the origin under the placement %+v = %q, want %q", tc.placement, got, tc.want)
+		}
 	}
 }
 
@@ -206,6 +231,17 @@ func TestNodeConfigResolveApplications(t *testing.T) {
 		"wireguard beside the refused port": {
 			func(c *NodeConfig) { c.Applications = []string{"wireguard"} },
 			"--wireguard.host-port is zero",
+		},
+		"the portal method without its console": {
+			func(c *NodeConfig) {
+				c.EnrollAuth = "portal"
+				c.Applications = []string{"voting"}
+			},
+			"--trust.enroll-auth=portal pairs with the portal application",
+		},
+		"the console without its method": {
+			func(c *NodeConfig) { c.Applications = []string{"portal"} },
+			"portal, which pairs with --trust.enroll-auth=portal",
 		},
 	}
 	for name, tc := range refusals {

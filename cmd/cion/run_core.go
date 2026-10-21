@@ -30,7 +30,8 @@ func addCoreNodeFlags(flags *pflag.FlagSet, opts *services.NodeConfig) {
 	flags.StringVar(&opts.EnrollAuth, "trust.enroll-auth", "",
 		"gate first issuance and the founder's TRC votes with a policy: "+
 			"cidrs=<comma-separated prefix list> admits by source address, "+
-			"telegram=<chat>:<token> prompts the chat per joiner "+
+			"telegram=<chat>:<token> prompts the chat per joiner, "+
+			"portal serves a passkey console at https://<trust.domain>/admin/ "+
 			"(required on the founding core)")
 }
 

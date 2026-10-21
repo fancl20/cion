@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>CION</title>
+  <link rel="stylesheet" href="/admin/portal.css">
+  <script src="/admin/portal.js" defer></script>
+</head>
+<body>
+  <noscript><p class="noscript">The CION console needs JavaScript.</p></noscript>
+
+  <main id="setup-view" class="gate" hidden>
+    <form id="setup-form" class="gate-card">
+      <div class="logo logo-lg" aria-hidden="true">C</div>
+      <h1>Create the operator's passkey</h1>
+      <p class="gate-lead"><span data-domain></span> has no passkey yet. The setup token comes from the core's log; opening the logged link fills it in.</p>
+      <label class="field">
+        <span class="field-label">Setup token</span>
+        <input name="token" class="input mono" required autocomplete="off" spellcheck="false">
+      </label>
+      <label class="field">
+        <span class="field-label">Passkey name</span>
+        <input name="name" class="input" value="Passkey" required autocomplete="off">
+      </label>
+      <button class="btn btn-primary btn-block">Create passkey</button>
+      <p class="gate-note">The token lives only in the core's memory. If the link was missed, restart the core to print a new one.</p>
+    </form>
+  </main>
+
+  <main id="signin-view" class="gate" hidden>
+    <div class="gate-card">
+      <div class="logo logo-lg" aria-hidden="true">C</div>
+      <h1>Sign in to CION</h1>
+      <p class="gate-lead" data-domain></p>
+      <button id="signin" class="btn btn-primary btn-block">Sign in with a passkey</button>
+      <p class="gate-note">First time here? When the core starts without a passkey, it prints a one-time setup link in its log.</p>
+    </div>
+  </main>
+
+  <div id="app-view" hidden>
+    <header class="topbar">
+      <div class="bar">
+        <div class="logo" aria-hidden="true">C</div>
+        <span class="brand">CION</span>
+        <span class="domain" data-domain></span>
+        <button class="btn btn-sm" data-action="sign-out">Sign out</button>
+      </div>
+      <nav class="tabs" aria-label="Console">
+        <a href="/admin/nodes" data-tab="nodes">Nodes <span class="count" hidden></span></a>
+        <a href="/admin/hosts" data-tab="hosts">Hosts <span class="count" hidden></span></a>
+        <a href="/admin/keys" data-tab="keys">Auth keys</a>
+        <a href="/admin/settings" data-tab="settings">Settings</a>
+      </nav>
+    </header>
+
+    <main class="content">
+      <section id="nodes-view" hidden>
+        <div class="page-head">
+          <div>
+            <h1>Nodes</h1>
+            <p class="muted">CION nodes holding a valid chain from this core. A node asks once, at first issuance; one that stops renewing drops off when its chain expires.</p>
+          </div>
+        </div>
+        <input id="nodes-filter" type="search" class="input search" placeholder="Search by ISD-AS, key, or endpoint…" aria-label="Search nodes">
+        <div id="nodes-asks"></div>
+        <div class="card table-card">
+          <table>
+            <thead>
+              <tr><th>ISD-AS</th><th>Key</th><th>Overlay</th><th>Host endpoint</th><th>Host addresses</th><th>Certificate</th></tr>
+            </thead>
+            <tbody id="nodes-rows"></tbody>
+          </table>
+        </div>
+        <div id="nodes-rejected"></div>
+      </section>
+
+      <section id="hosts-view" hidden>
+        <div class="page-head">
+          <div>
+            <h1>Hosts</h1>
+            <p class="muted" data-coordination>Tailscale clients registered with this core's coordination service. Removing one releases its address.</p>
+          </div>
+          <button class="btn btn-primary" data-action="generate-key" data-coordination>Generate auth key…</button>
+        </div>
+        <div id="hosts-unavailable" class="card card-pad notice" hidden>Tailscale coordination isn't running on this core.</div>
+        <div data-coordination>
+          <input id="hosts-filter" type="search" class="input search" placeholder="Search by address, name, key, or node…" aria-label="Search hosts">
+          <div id="hosts-asks"></div>
+          <div class="card table-card">
+            <table>
+              <thead>
+                <tr><th>Address</th><th>Keys</th><th>Owning node</th><th>Approved via</th><th>Last seen</th><th><span class="sr-only">Actions</span></th></tr>
+              </thead>
+              <tbody id="hosts-rows"></tbody>
+            </table>
+          </div>
+          <div id="hosts-rejected"></div>
+        </div>
+      </section>
+
+      <section id="keys-view" hidden>
+        <div class="page-head">
+          <div>
+            <h1>Auth keys</h1>
+            <p class="muted">Pre-authorize Tailscale clients: <code id="login-hint" class="hint"></code></p>
+          </div>
+          <button class="btn btn-primary" data-action="generate-key">Generate auth key…</button>
+        </div>
+        <div class="card table-card">
+          <table>
+            <thead>
+              <tr><th>ID</th><th>Description</th><th>Type</th><th>Created</th><th>Expires</th><th>Uses</th><th><span class="sr-only">Status</span></th></tr>
+            </thead>
+            <tbody id="keys-rows"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section id="settings-view" hidden>
+        <div class="page-head">
+          <div>
+            <h1>Settings</h1>
+            <p class="muted">One operator, any number of passkeys.</p>
+          </div>
+        </div>
+        <div class="card card-pad">
+          <div class="split">
+            <h2>Passkeys</h2>
+            <button id="add-passkey" class="btn btn-sm">Add passkey</button>
+          </div>
+          <table class="plain">
+            <thead>
+              <tr><th>Name</th><th>Added</th><th>Last used</th><th><span class="sr-only">Actions</span></th></tr>
+            </thead>
+            <tbody id="passkeys-rows"></tbody>
+          </table>
+        </div>
+        <div class="card card-pad muted">Lost every passkey? Stop the core, delete <code>&lt;state&gt;/portal/passkeys.json</code>, and start it again. Its log prints a new setup link.</div>
+        <div class="card card-pad split">
+          <div>
+            <h2>Session</h2>
+            <p class="muted">Signing out ends this browser's session. Restarting the core ends every session.</p>
+          </div>
+          <button class="btn" data-action="sign-out">Sign out</button>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <dialog id="key-dialog" class="dialog" aria-labelledby="key-dialog-title">
+    <form id="key-form" method="dialog">
+      <h2 id="key-dialog-title">Generate auth key</h2>
+      <p class="dialog-lead">A host presenting this key registers without waiting for approval.</p>
+      <label class="field">
+        <span class="field-label">Description</span>
+        <input name="description" class="input" placeholder="e.g. laptops" autocomplete="off">
+      </label>
+      <label class="check">
+        <input name="reusable" type="checkbox">
+        <span><strong>Reusable</strong><span class="muted">Use this key to admit more than one host.</span></span>
+      </label>
+      <label class="field">
+        <span class="field-label">Expiration</span>
+        <span class="inline">
+          <input name="days" class="input days" type="number" min="1" max="90" step="1" value="7" required>
+          <span class="muted">days (1–90)</span>
+        </span>
+      </label>
+      <div class="dialog-actions">
+        <button type="button" class="btn" data-close>Cancel</button>
+        <button class="btn btn-primary">Generate key</button>
+      </div>
+    </form>
+    <div id="key-result" hidden>
+      <h2>Generated new key</h2>
+      <p class="dialog-lead">Copy it now. It won't be shown in full again.</p>
+      <div class="key-box">
+        <code id="key-value"></code>
+        <button id="key-copy" type="button" class="btn">Copy</button>
+      </div>
+      <div class="dialog-actions">
+        <button type="button" class="btn btn-primary" data-close>Done</button>
+      </div>
+    </div>
+  </dialog>
+
+  <dialog id="passkey-dialog" class="dialog" aria-labelledby="passkey-dialog-title">
+    <form id="passkey-form" method="dialog">
+      <h2 id="passkey-dialog-title">Add passkey</h2>
+      <p class="dialog-lead">Name it after the device or security key that holds it.</p>
+      <label class="field">
+        <span class="field-label">Name</span>
+        <input name="name" class="input" placeholder="e.g. YubiKey 5C" required autocomplete="off">
+      </label>
+      <div class="dialog-actions">
+        <button type="button" class="btn" data-close>Cancel</button>
+        <button class="btn btn-primary">Create passkey</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="confirm-dialog" class="dialog" aria-labelledby="confirm-title" aria-describedby="confirm-message">
+    <form id="confirm-form" method="dialog">
+      <h2 id="confirm-title"></h2>
+      <p id="confirm-message" class="dialog-lead"></p>
+      <div class="dialog-actions">
+        <button type="button" class="btn" data-close>Cancel</button>
+        <button id="confirm-ok" class="btn btn-danger"></button>
+      </div>
+    </form>
+  </dialog>
+
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+</body>
+</html>

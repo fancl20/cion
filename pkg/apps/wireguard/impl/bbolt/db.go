@@ -48,6 +48,8 @@ type wireHostEntry struct {
 	IA         string `json:"ia"`
 	MachineKey string `json:"machineKey,omitempty"`
 	Note       string `json:"note,omitempty"`
+	Hostname   string `json:"hostname,omitempty"`
+	OS         string `json:"os,omitempty"`
 }
 
 // Publish records the entry, keyed by its ISD-AS: a publisher's later entry
@@ -123,11 +125,21 @@ func (b *directoryDB) PublishHost(ctx context.Context, entry wireguard.HostEntry
 			IA:         entry.IA.String(),
 			MachineKey: entry.MachineKey.String(),
 			Note:       entry.Note,
+			Hostname:   entry.Hostname,
+			OS:         entry.OS,
 		})
 		if err != nil {
 			return err
 		}
 		return tx.Bucket(hostsBucket).Put([]byte(entry.PublicKey.String()), raw)
+	})
+}
+
+// DeleteHost removes the host entry keyed by the public key; bbolt deletes
+// an absent key without error.
+func (b *directoryDB) DeleteHost(ctx context.Context, key wireguard.PublicKey) error {
+	return b.db.Update(func(tx *bbolt.Tx) error {
+		return tx.Bucket(hostsBucket).Delete([]byte(key.String()))
 	})
 }
 
@@ -194,6 +206,8 @@ func (b *directoryDB) List(ctx context.Context) (wireguard.Directory, error) {
 				return err
 			}
 			entry.Note = wire.Note
+			entry.Hostname = wire.Hostname
+			entry.OS = wire.OS
 			directory.Hosts = append(directory.Hosts, entry)
 		}
 		return nil

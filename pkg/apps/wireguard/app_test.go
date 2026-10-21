@@ -62,6 +62,10 @@ func (d *recordingDirectory) PublishHost(context.Context, HostEntry) error {
 	return nil
 }
 
+func (d *recordingDirectory) DeleteHost(context.Context, PublicKey) error {
+	return nil
+}
+
 func (d *recordingDirectory) List(context.Context) (Directory, error) {
 	return Directory{Nodes: d.entries}, nil
 }

@@ -9,9 +9,9 @@ import (
 
 // Entry is one resident application's place in the table: the name the
 // list selects by, the registration of the application's own run
-// arguments, its role bounds, the applications it requires beside it, and
-// the constructor that adapts the environment into the application's own
-// configuration.
+// arguments, its role bounds, the applications it requires beside it, the
+// admission method it pairs with, and the constructor that adapts the
+// environment into the application's own configuration.
 type Entry struct {
 	// Name is the application's name, what --applications lists.
 	Name string
@@ -30,6 +30,12 @@ type Entry struct {
 	// regime skips the entry and a list that names it refuses the boot,
 	// the same fact read twice. "" when the entry loads on any arguments.
 	MissingArg func(*Arguments) string
+	// Admission names the admission method the entry pairs with: the entry
+	// loads exactly when --trust.enroll-auth selects the method — the
+	// inference regime loads it beside the method and skips it without, and
+	// a list refuses either without the other. "" when the entry loads
+	// under any method.
+	Admission string
 	// New constructs the application from the environment and the loaded —
 	// the applications earlier in table order, where a borrower finds the
 	// owner's exported surface.
@@ -46,6 +52,7 @@ var Table = []Entry{
 	coordinationEntry,
 	socksEntry,
 	votingEntry,
+	portalEntry,
 }
 
 // Loaded is one constructed application: its name beside what its entry's
@@ -80,26 +87,28 @@ func RegisterFlags(flags *pflag.FlagSet, args *Arguments) {
 }
 
 // Select resolves the applications the list names against the table, core
-// marking the founding core: nil keeps the inference — an entry loads
-// whose role bounds hold, whose requirements load, and whose required
-// arguments are present, the zero-conf default; the empty list loads none,
-// the deliberate core; a given list loads exactly the named entries, in
-// table order whatever order the list spells. Every miscombination
-// refuses, the fix named.
-func Select(list []string, core bool, args Arguments) ([]Entry, error) {
+// marking the founding core and admission naming the selected admission
+// method, "" for none: nil keeps the inference — an entry loads whose role
+// bounds hold, whose requirements load, whose required arguments are
+// present, and whose paired method is the one selected, the zero-conf
+// default; the empty list loads none, the deliberate core; a given list
+// loads exactly the named entries, in table order whatever order the list
+// spells. Every miscombination refuses, the fix named.
+func Select(list []string, core bool, args Arguments, admission string) ([]Entry, error) {
 	if list == nil {
-		return infer(core, args), nil
+		return infer(core, args, admission), nil
 	}
-	return exact(list, core, args)
+	return exact(list, core, args, admission)
 }
 
-// infer loads every entry whose bounds and arguments hold, the
-// requirements beside it loaded by the same rule.
-func infer(core bool, args Arguments) []Entry {
+// infer loads every entry whose bounds, arguments, and paired method hold,
+// the requirements beside it loaded by the same rule.
+func infer(core bool, args Arguments, admission string) []Entry {
 	var loaded []Entry
 	names := make(map[string]bool, len(Table))
 	for _, e := range Table {
-		if e.CoreOnly && !core || missingArg(e, &args) != "" {
+		if e.CoreOnly && !core || missingArg(e, &args) != "" ||
+			e.Admission != "" && e.Admission != admission {
 			continue
 		}
 		beside := true
@@ -117,7 +126,7 @@ func infer(core bool, args Arguments) []Entry {
 
 // exact loads the named entries alone, refusing every miscombination with
 // the fix named.
-func exact(list []string, core bool, args Arguments) ([]Entry, error) {
+func exact(list []string, core bool, args Arguments, admission string) ([]Entry, error) {
 	byName := make(map[string]Entry, len(Table))
 	for _, e := range Table {
 		byName[e.Name] = e
@@ -131,6 +140,11 @@ func exact(list []string, core bool, args Arguments) ([]Entry, error) {
 		wanted[name] = true
 	}
 	for _, e := range Table {
+		if e.Admission != "" && e.Admission == admission && !wanted[e.Name] {
+			return nil, fmt.Errorf("--trust.enroll-auth=%s pairs with the %s "+
+				"application, which --applications leaves out: name it in the "+
+				"list too", admission, e.Name)
+		}
 		if !wanted[e.Name] {
 			continue
 		}
@@ -141,6 +155,10 @@ func exact(list []string, core bool, args Arguments) ([]Entry, error) {
 		if why := missingArg(e, &args); why != "" {
 			return nil, fmt.Errorf("--applications names %s, whose loading "+
 				"argument refuses it: %s", e.Name, why)
+		}
+		if e.Admission != "" && e.Admission != admission {
+			return nil, fmt.Errorf("--applications names %s, which pairs with "+
+				"--trust.enroll-auth=%s", e.Name, e.Admission)
 		}
 		for _, r := range e.Requires {
 			if !wanted[r] {

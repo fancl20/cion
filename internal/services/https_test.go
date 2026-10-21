@@ -55,6 +55,10 @@ func (testRegistry) PublishHost(context.Context, wireguard.HostEntry) error {
 	return nil
 }
 
+func (testRegistry) DeleteHost(context.Context, wireguard.PublicKey) error {
+	return nil
+}
+
 // mountCoordination builds the coordination application with its surfaces
 // mounted on the node's HTTPS server.
 func mountCoordination(t *testing.T, n *node) {

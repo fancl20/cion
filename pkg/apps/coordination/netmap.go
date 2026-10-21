@@ -71,7 +71,8 @@ const servedCapabilityVersion = tailcfg.CurrentCapabilityVersion
 // out at once; a streaming request's body stays open, keepalives holding it
 // and a re-read registry resending the map when what it names changed — and
 // an open stream holds one of a bounded set, past which the map answers
-// once and closes.
+// once and closes. Each answered request is the host's sighting — its
+// arrival, its claims, its open stream — kept in memory as its presence.
 func (a *App) handleMap(w http.ResponseWriter, r *http.Request,
 	machine key.MachinePublic) {
 
@@ -104,6 +105,10 @@ func (a *App) handleMap(w http.ResponseWriter, r *http.Request,
 		http.Error(w, "no registration for the key", http.StatusForbidden)
 		return
 	}
+	// The request is the host's sighting: its arrival, its claims, and —
+	// while it streams — its open stream.
+	nodeKey := nodeKeyOf(req.NodeKey)
+	a.observe(nodeKey, hostinfo)
 	// An open stream holds one of a bounded set, taken before the first map
 	// goes out: past the bound the map answers once, and the stream closes —
 	// no error, the client's own polling carrying the rest.
@@ -113,6 +118,8 @@ func (a *App) handleMap(w http.ResponseWriter, r *http.Request,
 		case a.mapStreams <- struct{}{}:
 			streaming = true
 			defer func() { <-a.mapStreams }()
+			a.streamOpened(nodeKey)
+			defer a.streamClosed(nodeKey)
 		default:
 		}
 	}
@@ -178,19 +185,20 @@ func (a *App) handleMap(w http.ResponseWriter, r *http.Request,
 // netmap builds one host's full map from the registry, for the machine the
 // record names: the node key alone maps nothing, the channel's authenticated
 // machine is what the request owes beside it, and a record from before the
-// machine claim binds the first machine to present it. The peer carries no
-// disco key — a wireguard-only peer with a static endpoint, the model the
-// client lines already serve for third-party exits — and that is the served
-// form, a fact of the code with no runtime switch anywhere. The peer's
-// allowed IPs are the registry's whole occupied space — every allocated host
-// /32 beside every node's own address, the slice's first, each an offered
-// exit's serving address — covering the tailnet and nothing else, no default
-// route anywhere, as single-IP Tailscale addresses rather than the covering
-// /10, the form the client lines route unconditionally: a covering prefix is
-// an advertised subnet route behind the client's own route-all preference,
-// which no host of this network is asked to hold. The packet filter is a
-// single rule admitting the member's traffic: membership is the tailnet's one
-// policy, and no engine stands behind the rule to configure.
+// machine claim binds the first machine to present it, under the admission
+// lock. The peer carries no disco key — a wireguard-only peer with a static
+// endpoint, the model the client lines already serve for third-party exits —
+// and that is the served form, a fact of the code with no runtime switch
+// anywhere. The peer's allowed IPs are the registry's whole occupied space —
+// every allocated host /32 beside every node's own address, the slice's
+// first, each an offered exit's serving address — covering the tailnet and
+// nothing else, no default route anywhere, as single-IP Tailscale addresses
+// rather than the covering /10, the form the client lines route
+// unconditionally: a covering prefix is an advertised subnet route behind
+// the client's own route-all preference, which no host of this network is
+// asked to hold. The packet filter is a single rule admitting the member's
+// traffic: membership is the tailnet's one policy, and no engine stands
+// behind the rule to configure.
 func (a *App) netmap(ctx context.Context, node key.NodePublic,
 	machine key.MachinePublic, directory wireguard.Directory,
 	reqDisco key.DiscoPublic,
@@ -206,7 +214,7 @@ func (a *App) netmap(ctx context.Context, node key.NodePublic,
 	if self == nil {
 		return nil, errors.New("no registration for the key")
 	}
-	bound, err := a.bindMachine(ctx, self, machine)
+	bound, err := a.bindOnMap(ctx, self, machine)
 	if err != nil {
 		return nil, fmt.Errorf("binding the record's machine: %w", err)
 	}

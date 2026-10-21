@@ -10,6 +10,7 @@ import (
 	"crypto/x509/pkix"
 	"math/big"
 	"net/netip"
+	"slices"
 	"testing"
 
 	"connectrpc.com/connect/v2"
@@ -52,6 +53,11 @@ func (s *fakeStore) PublishHost(_ context.Context, entry HostEntry) error {
 		}
 	}
 	s.hosts = append(s.hosts, entry)
+	return nil
+}
+
+func (s *fakeStore) DeleteHost(_ context.Context, key PublicKey) error {
+	s.hosts = slices.DeleteFunc(s.hosts, func(h HostEntry) bool { return h.PublicKey == key })
 	return nil
 }
 
@@ -127,7 +133,8 @@ func TestDirectoryPublishRecordsAuthenticatedIA(t *testing.T) {
 
 // TestDirectoryListServesEntries checks List serves what Publish recorded —
 // nodes beside hosts, one authenticated snapshot, the claimed overlay
-// nowhere in it.
+// nowhere in it, nor a host's claimed hostname and operating system, which
+// stay on the core.
 func TestDirectoryListServesEntries(t *testing.T) {
 	store := &fakeStore{}
 	svc := &DirectoryService{Store: store, Cnt: &counters{}}
@@ -148,6 +155,8 @@ func TestDirectoryListServesEntries(t *testing.T) {
 		Addr:      netip.MustParseAddr("100.64.7.9"),
 		IA:        ia,
 		Note:      "telegram operator",
+		Hostname:  "laptop",
+		OS:        "linux",
 	}
 	if err := store.PublishHost(context.Background(), host); err != nil {
 		t.Fatalf("publishing the host: %v", err)
@@ -173,8 +182,10 @@ func TestDirectoryListServesEntries(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if gotHost != host {
-		t.Errorf("host entry = %+v, want %+v", gotHost, host)
+	wantHost := host
+	wantHost.Hostname, wantHost.OS = "", ""
+	if gotHost != wantHost {
+		t.Errorf("host entry = %+v, want %+v", gotHost, wantHost)
 	}
 }
 

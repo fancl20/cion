@@ -100,7 +100,7 @@ func runDaemon(ctx context.Context, cfg services.NodeConfig, tuning services.Dat
 	// founding core issues chains.
 	if cfg.Core && len(cfg.Neighbors) == 0 && cfg.EnrollAuth == "" {
 		return fmt.Errorf("--trust.enroll-auth is required on the founding core: " +
-			"cidrs=<comma-separated prefix list> or telegram=<chat>:<token>")
+			"cidrs=<comma-separated prefix list>, telegram=<chat>:<token>, or portal")
 	}
 	return services.Run(ctx, cfg, tuning, underlay.Kernel)
 }
