@@ -57,6 +57,13 @@ const (
 	authKeyBytes  = 16
 )
 
+// The notes the registry records beside an entry the plugin allowed: by
+// the operator's press, or by an auth key's presentation.
+const (
+	operatorNote = "telegram operator"
+	authKeyNote  = "telegram auth key"
+)
+
 // authKeysFile holds the unspent auth keys beneath the core's state.
 const authKeysFile = "telegram-auth-keys.json"
 
@@ -90,9 +97,10 @@ type Config struct {
 // reverses the flow: the operator asks the bot for a key in the configured
 // chat, hands it to the headless client, and a registration presenting a key
 // the plugin minted and has not spent approves on the plugin's own records and
-// spends it; a spent or unknown key is a bare joiner's, prompted as ever — a
-// stale auth key fails toward the human, not closed. It speaks the API
-// directly over net/http — no SDK, for a vendored tree prices every
+// spends it, the approval standing for the presenting machine for a window,
+// as a press's does; a spent or unknown key is a bare joiner's, prompted as
+// ever — a stale auth key fails toward the human, not closed. It speaks the
+// API directly over net/http — no SDK, for a vendored tree prices every
 // dependency, and the handful of calls this needs are plain HTTPS and JSON.
 // The prompts' decisions live in memory: a restart forgets pending and denied
 // entries and a join still in flight asks again, while the unspent auth keys
@@ -130,6 +138,9 @@ type decision struct {
 	admission enrollauth.AdmissionVerdict
 	label     string
 	expires   time.Time
+	// keyed marks an approval an auth key's presentation made rather than
+	// the operator's press.
+	keyed bool
 }
 
 // New builds the authorizer; Run launches its poll loop. Unspent auth keys
@@ -160,7 +171,10 @@ func New(cfg Config) (*Authorizer, error) {
 }
 
 // Authorize answers one admission exchange. A registration presenting a
-// credential the plugin minted and has not spent approves and spends it. A
+// credential the plugin minted and has not spent approves and spends it,
+// the approval standing for the presenting machine for the window: the
+// caller may refuse an approved registration — no slice yet to allocate in
+// — and the machine's retry rides the approval rather than the spent key. A
 // standing decision returns for its window's remainder, and the first ask —
 // or the first past the window — sends the chat one prompt and pends. A
 // prompt that cannot be sent denies: with the API unreachable admission
@@ -170,14 +184,6 @@ func (t *Authorizer) Authorize(
 	f enrollauth.AdmissionFacts,
 ) enrollauth.AdmissionAnswer {
 
-	if f.Boundary == enrollauth.BoundaryRegistration && f.Credential != "" {
-		if t.spendAuthKey(f.Credential) {
-			return enrollauth.AdmissionAnswer{
-				Admission: enrollauth.AdmissionAllow,
-				Note:      "telegram auth key",
-			}
-		}
-	}
 	if len(f.Keys) == 0 {
 		return enrollauth.AdmissionAnswer{Admission: enrollauth.AdmissionDeny}
 	}
@@ -188,6 +194,21 @@ func (t *Authorizer) Authorize(
 	}
 	now := time.Now()
 	t.mtx.Lock()
+	if f.Boundary == enrollauth.BoundaryRegistration && f.Credential != "" &&
+		t.spendAuthKeyLocked(f.Credential) {
+
+		t.asks[key] = &decision{
+			admission: enrollauth.AdmissionAllow,
+			label:     strings.Join(f.Keys, ","),
+			expires:   now.Add(t.window),
+			keyed:     true,
+		}
+		t.mtx.Unlock()
+		return enrollauth.AdmissionAnswer{
+			Admission: enrollauth.AdmissionAllow,
+			Note:      authKeyNote,
+		}
+	}
 	if d, ok := t.asks[key]; ok && now.Before(d.expires) {
 		answer := enrollauth.AdmissionAnswer{Admission: d.admission, Note: d.note()}
 		t.mtx.Unlock()
@@ -218,13 +239,15 @@ func (t *Authorizer) Authorize(
 }
 
 // note is the standing decision's own account of itself, the string the
-// registry records beside an entry the prompt approved.
+// registry records beside an entry the decision approved.
 func (d *decision) note() string {
-	switch d.admission {
-	case enrollauth.AdmissionAllow:
-		return "telegram operator"
-	default:
+	switch {
+	case d.admission != enrollauth.AdmissionAllow:
 		return ""
+	case d.keyed:
+		return authKeyNote
+	default:
+		return operatorNote
 	}
 }
 
@@ -401,11 +424,9 @@ func (t *Authorizer) mintAuthKey() string {
 	return key
 }
 
-// spendAuthKey removes one unspent auth key and persists the set,
-// reporting whether the credential spent.
-func (t *Authorizer) spendAuthKey(key string) bool {
-	t.mtx.Lock()
-	defer t.mtx.Unlock()
+// spendAuthKeyLocked removes one unspent auth key and persists the set,
+// reporting whether the credential spent; the caller holds the mutex.
+func (t *Authorizer) spendAuthKeyLocked(key string) bool {
 	if _, ok := t.authKeys[key]; !ok {
 		return false
 	}
@@ -419,7 +440,9 @@ func (t *Authorizer) spendAuthKey(key string) bool {
 // retireAuthKey removes one unspent auth key the retire command named and
 // persists the set, reporting whether the command named one.
 func (t *Authorizer) retireAuthKey(text string) bool {
-	return t.spendAuthKey(text)
+	t.mtx.Lock()
+	defer t.mtx.Unlock()
+	return t.spendAuthKeyLocked(text)
 }
 
 // loadAuthKeys reads the persisted unspent auth keys. A missing file is a

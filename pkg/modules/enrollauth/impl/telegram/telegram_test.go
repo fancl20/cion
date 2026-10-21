@@ -709,9 +709,9 @@ func lastAuthKey(t *testing.T, d *botDouble) string {
 
 // TestTelegramAuthKey walks the auth key flow: the configured chat asks,
 // the bot mints and replies, a registration presenting the unspent key
-// approves and spends it, and a second presentation is a bare joiner's prompt
-// — a stale auth key fails toward the human, not closed. Another chat can
-// neither mint nor retire.
+// approves and spends it, and another machine's presentation is a bare
+// joiner's prompt — a stale auth key fails toward the human, not closed.
+// Another chat can neither mint nor retire.
 func TestTelegramAuthKey(t *testing.T) {
 	d := newBotDouble(t)
 	tg := runTelegram(t, d, nil)
@@ -753,7 +753,8 @@ func TestTelegramAuthKey(t *testing.T) {
 		t.Error("an auth-key approval carries no note for the registry to record")
 	}
 
-	// The spent key is a bare joiner's: the next presentation prompts.
+	// The spent key is a bare joiner's: another machine's presentation
+	// prompts.
 	bare := registerFactsOf(t, newKey(t), newKey(t), key)
 	if got := pendingOf(tg, context.Background(), bare); got != enrollauth.AdmissionPending {
 		t.Fatalf("a spent auth key's verdict = %v, want the bare joiner's pending", got)
@@ -777,6 +778,36 @@ func TestTelegramAuthKey(t *testing.T) {
 	d.say(testChat, "hello")
 	waitFor(t, "the usage's reply", func() bool {
 		return strings.Contains(d.prompt(d.promptCount()-1).Text, "/create_auth_key")
+	})
+}
+
+// TestTelegramAuthKeyStandsForItsMachine checks the key's approval stands
+// for the machine that presented it, for the window: the machine's retry
+// with a fresh node key — how a client retries a registration the caller
+// refused after the approval, no slice yet to allocate in — rides it with
+// the key's note; another machine presenting the spent key prompts; and
+// past the window the machine prompts too.
+func TestTelegramAuthKeyStandsForItsMachine(t *testing.T) {
+	d := newBotDouble(t)
+	tg := runTelegram(t, d, func(cfg *Config) { cfg.Window = time.Second })
+	key := tg.mintAuthKey()
+
+	machine := newKey(t)
+	first := tg.Authorize(context.Background(), registerFactsOf(t, machine, newKey(t), key))
+	if first.Admission != enrollauth.AdmissionAllow || first.Note != authKeyNote {
+		t.Fatalf("the auth-keyed registration answered %+v, want allow with the key's note", first)
+	}
+	retry := tg.Authorize(context.Background(), registerFactsOf(t, machine, newKey(t), key))
+	if retry != first {
+		t.Errorf("the machine's retry answered %+v, want the key's approval %+v", retry, first)
+	}
+	other := registerFactsOf(t, newKey(t), newKey(t), key)
+	if got := pendingOf(tg, context.Background(), other); got != enrollauth.AdmissionPending {
+		t.Errorf("another machine presenting the spent key = %v, want the bare joiner's pending", got)
+	}
+	waitFor(t, "the machine's approval to lapse", func() bool {
+		facts := registerFactsOf(t, machine, newKey(t), key)
+		return pendingOf(tg, context.Background(), facts) == enrollauth.AdmissionPending
 	})
 }
 
