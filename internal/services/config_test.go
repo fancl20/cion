@@ -113,8 +113,8 @@ func TestNodeConfigResolve(t *testing.T) {
 		"missing state":       func(c *NodeConfig) { c.State = "" },
 		"bad neighbor":        func(c *NodeConfig) { c.Core = false; c.Neighbors = []string{"nope"} },
 		"missing internal":    func(c *NodeConfig) { c.Internal = "" },
-		"unparsable internal": func(c *NodeConfig) { c.Internal = "nope" },
-		"unparsable control":  func(c *NodeConfig) { c.Control = "nope" },
+		"unparsable internal": func(c *NodeConfig) { c.Internal = "192.0.2.1:99999" },
+		"unparsable control":  func(c *NodeConfig) { c.Control = "192.0.2.1:99999" },
 		"enroll-auth without the founding core": func(c *NodeConfig) {
 			c.Neighbors = []string{"192.0.2.7:30043"}
 			c.EnrollAuth = "cidrs=192.0.2.0/24"
