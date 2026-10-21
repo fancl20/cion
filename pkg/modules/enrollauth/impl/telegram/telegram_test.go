@@ -500,6 +500,45 @@ func TestTelegramRegistrationPrompts(t *testing.T) {
 	}
 }
 
+// TestTelegramVotingPrompts checks the voting submission's ask: the added
+// keys prompt the configured chat as a voting power request, its buttons
+// answer the vote — not an enrollment of the same claim and keys — and the
+// approve decides the vote.
+func TestTelegramVotingPrompts(t *testing.T) {
+	d := newBotDouble(t)
+	tg := runTelegram(t, d, nil)
+
+	vote := enrollauth.AdmissionFacts{
+		Boundary: enrollauth.BoundaryVoting,
+		Keys:     []string{skidOf(t, newKey(t)), skidOf(t, newKey(t))},
+		Claim:    addr.MustIAFrom(20, 0xff0000000003),
+		Source:   netip.MustParseAddrPort("198.51.100.8:30042"),
+	}
+	if got := pendingOf(tg, context.Background(), vote); got != enrollauth.AdmissionPending {
+		t.Fatalf("first ask verdict = %v, want pending", got)
+	}
+	waitFor(t, "the prompt to send", func() bool { return d.promptCount() == 1 })
+	prompt := d.prompt(0)
+	if !strings.HasPrefix(prompt.Text, "CION voting power request") {
+		t.Errorf("prompt text = %q, want a voting power request", prompt.Text)
+	}
+	buttons := prompt.ReplyMarkup.InlineKeyboard[0]
+	_, key, ok := parseCallbackData(buttons[0].CallbackData)
+	if !ok || key.boundary != enrollauth.BoundaryVoting || key.claim != vote.Claim {
+		t.Fatalf("button data = %q, want the vote's identity", buttons[0].CallbackData)
+	}
+
+	d.press(testChat, buttons[0].CallbackData)
+	waitFor(t, "the approve to decide the vote", func() bool {
+		return pendingOf(tg, context.Background(), vote) == enrollauth.AdmissionAllow
+	})
+	enrollment := vote
+	enrollment.Boundary = enrollauth.BoundaryEnrollment
+	if got := pendingOf(tg, context.Background(), enrollment); got != enrollauth.AdmissionPending {
+		t.Errorf("an enrollment of the vote's claim and keys = %v, want its own pending ask", got)
+	}
+}
+
 // TestTelegramPressDuringSend checks that an answer pressed while its prompt
 // is still being sent — shown in the chat, its sender not yet answered —
 // decides the ask.

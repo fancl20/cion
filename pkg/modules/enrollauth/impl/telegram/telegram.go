@@ -635,6 +635,8 @@ func parseCallbackData(s string) (bool, askKey, bool) {
 		boundary = enrollauth.BoundaryEnrollment
 	case boundaryByte(enrollauth.BoundaryRegistration):
 		boundary = enrollauth.BoundaryRegistration
+	case boundaryByte(enrollauth.BoundaryVoting):
+		boundary = enrollauth.BoundaryVoting
 	default:
 		return false, askKey{}, false
 	}
@@ -652,11 +654,16 @@ func keyDigest(keys string) []byte {
 	return sum[:sha256.Size/2]
 }
 
+// boundaryByte is the boundary as an answer button carries it.
 func boundaryByte(b enrollauth.Boundary) byte {
-	if b == enrollauth.BoundaryRegistration {
+	switch b {
+	case enrollauth.BoundaryRegistration:
 		return 'r'
+	case enrollauth.BoundaryVoting:
+		return 'v'
+	default:
+		return 'e'
 	}
-	return 'e'
 }
 
 // call posts one Bot API method and decodes its envelope, the result
