@@ -39,11 +39,12 @@ func (n *node) setupApplications() error {
 // registration, the admission authorizer, the core route the joiner's
 // directory fetch rides, the relay derivation's inputs with the harness's
 // placement among them, the directory pacing, the control plane's TRC
-// decision the voting application hands its submissions to, and the
-// control-endpoint mounting behind the peer-identity middleware. The
-// environment's core flag marks the founding tier alone: a joining core
-// runs the applications a local node runs, its WireGuard application
-// publishing to and fetching from the founder's directory.
+// decision the voting application hands its submissions to, the
+// control-endpoint mounting behind the peer-identity middleware, and the
+// HTTPS server's mounting. The environment's core flag marks the founding
+// tier alone: a joining core runs the applications a local node runs, its
+// WireGuard application publishing to and fetching from the founder's
+// directory.
 func (n *node) appEnvironment() *apps.Environment {
 	env := &apps.Environment{
 		Arguments:       n.cfg.AppArguments,
@@ -68,6 +69,7 @@ func (n *node) appEnvironment() *apps.Environment {
 				Pattern: pattern, Handler: handler,
 			})
 		},
+		MountHTTPS: n.mountHTTPS,
 	}
 
 	if o := n.cfg.Coordination; o != nil {

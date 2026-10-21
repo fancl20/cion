@@ -66,8 +66,7 @@ func TestCapabilityPin(t *testing.T) {
 // the handshake without.
 func TestKeyEndpoint(t *testing.T) {
 	roots, tlsCfg := testCert(t)
-	a := testApp(t, Config{Store: &dbtest.MemStore{}})
-	addr := serveCoordination(t, a, tlsCfg)
+	a, addr := serveCoordination(t, Config{Store: &dbtest.MemStore{}}, tlsCfg)
 
 	client := &http.Client{Transport: &http.Transport{
 		TLSClientConfig: &tls.Config{RootCAs: roots},
@@ -102,8 +101,7 @@ func TestKeyEndpoint(t *testing.T) {
 // relay carries a datagram from one to the other by key.
 func TestDERPRelay(t *testing.T) {
 	roots, tlsCfg := testCert(t)
-	a := testApp(t, Config{Store: &dbtest.MemStore{}})
-	addr := serveCoordination(t, a, tlsCfg)
+	_, addr := serveCoordination(t, Config{Store: &dbtest.MemStore{}}, tlsCfg)
 
 	aliceKey := key.NewNode()
 	bobKey := key.NewNode()

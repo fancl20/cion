@@ -110,6 +110,9 @@ type node struct {
 
 	// Assembled sockets and services, started by start.
 	endpointConn *scion.Conn
+	// httpsMounts are the handlers the applications mounted on the HTTPS
+	// server as they were constructed, each at its own pattern.
+	httpsMounts []httpsMount
 	// httpsLn and httpsHandler are the node's HTTPS server: the listener the
 	// assembly holds on internet HTTPS's port — answering the ACME TLS-ALPN
 	// challenge beside the mounted apps' handlers — and those handlers. nil when

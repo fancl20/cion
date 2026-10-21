@@ -62,6 +62,10 @@ type Config struct {
 	// StateDir persists the application's own keys: the noise machine key
 	// and the DERP server's node key.
 	StateDir string
+	// MountHTTPS mounts one of the application's surfaces on the node's
+	// HTTPS server; the server, its listener, and its TLS identity are the
+	// assembly's.
+	MountHTTPS func(pattern string, handler http.Handler)
 
 	// MapResend overrides, for tests, how often an open map stream re-reads
 	// the registry — the bound on how long a peer change hides from a
@@ -85,9 +89,6 @@ type App struct {
 	machineKey key.MachinePrivate
 
 	derp derpServer
-	// handler is the mounted surface: the three paths of the client
-	// protocol, one handler.
-	handler http.Handler
 
 	// admissionMtx serializes the admission transaction — the registry read,
 	// the idempotency check, the seam's ask, the allocation, and the record
@@ -125,10 +126,9 @@ type App struct {
 }
 
 // New assembles the application: keys load or create in its own state, the
-// DERP server stands on its node key, and the HTTP surface builds — the
-// /ts2021 upgrade into the noise channel, the /derp relay, and the /key
-// fetch over plain TLS beside them. Handler hands the surface to its
-// mounter.
+// DERP server stands on its node key, and the three surfaces mount through
+// the configuration's MountHTTPS — the /ts2021 upgrade into the noise
+// channel, the /derp relay, and the /key fetch over plain TLS beside them.
 func New(cfg Config) (*App, error) {
 	if cfg.DERP.HostName == "" {
 		cfg.DERP.HostName = cfg.Domain
@@ -151,13 +151,11 @@ func New(cfg Config) (*App, error) {
 		convs:      make(map[*conversationConn]struct{}),
 		relays:     make(map[net.Conn]struct{}),
 	}
-	mux := http.NewServeMux()
-	mux.Handle("/ts2021", http.HandlerFunc(a.handleNoise))
-	mux.Handle("/derp", a.relayHandler())
+	cfg.MountHTTPS("/ts2021", http.HandlerFunc(a.handleNoise))
+	cfg.MountHTTPS("/derp", a.relayHandler())
 	// The client's first exchange is the key fetch over plain TLS: the
 	// noise machine key it must know before the handshake can begin.
-	mux.HandleFunc("/key", a.handleKey)
-	a.handler = mux
+	cfg.MountHTTPS("/key", http.HandlerFunc(a.handleKey))
 	return a, nil
 }
 
@@ -189,10 +187,3 @@ func (a *App) Close() {
 	a.wg.Wait()
 	_ = a.derp.close()
 }
-
-// HTTPSHandler is the application's HTTP surface — the /key fetch, the
-// /ts2021 upgrade into the noise channel, and the /derp relay — for the
-// assembly's mux to mount. The serving server, the listener, and the TLS
-// identity are the assembly's; the keys, the state, and the conversations
-// stay the application's.
-func (a *App) HTTPSHandler() http.Handler { return a.handler }

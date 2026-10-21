@@ -29,13 +29,17 @@ import (
 	"github.com/fancl20/cion/pkg/modules/enrollauth"
 )
 
-// serveCoordination serves the application's handler on an externally
-// assembled HTTPS server over the given certificate, bound on a free port —
-// the node assembly's own shape: the listener and the TLS identity the
-// server's, the three surfaces the application's. The address is bound before
-// the call returns, so a client may dial at once.
-func serveCoordination(t *testing.T, a *App, tlsCfg *tls.Config) string {
+// serveCoordination builds the application over the configuration and serves
+// its surfaces on an externally assembled HTTPS server over the given
+// certificate, bound on a free port — the node assembly's own shape: the
+// listener and the TLS identity the server's, the three surfaces the
+// application's. The address is bound before the call returns, so a client
+// may dial at once.
+func serveCoordination(t *testing.T, cfg Config, tlsCfg *tls.Config) (*App, string) {
 	t.Helper()
+	mux := http.NewServeMux()
+	cfg.MountHTTPS = mux.Handle
+	a := testApp(t, cfg)
 	clone := tlsCfg.Clone()
 	clone.NextProtos = []string{"http/1.1"}
 	listener, err := tls.Listen("tcp", "127.0.0.1:0", clone)
@@ -43,7 +47,7 @@ func serveCoordination(t *testing.T, a *App, tlsCfg *tls.Config) string {
 		t.Fatal(err)
 	}
 	srv := &http.Server{
-		Handler:           a.HTTPSHandler(),
+		Handler:           mux,
 		ReadHeaderTimeout: 30 * time.Second,
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -66,7 +70,7 @@ func serveCoordination(t *testing.T, a *App, tlsCfg *tls.Config) string {
 			t.Error("the coordination endpoint did not stop")
 		}
 	})
-	return listener.Addr().String()
+	return a, listener.Addr().String()
 }
 
 // dialNoise dials the vendored client transport — the same controlhttp the
@@ -225,8 +229,7 @@ func TestProtocolRegisterAndMap(t *testing.T) {
 	nodeEntry.PublicKey = dbtest.MustKey(0x11)
 	store.Seed(nodeEntry)
 	roots, tlsCfg := testCert(t)
-	a := testApp(t, Config{Store: store})
-	addr := serveCoordination(t, a, tlsCfg)
+	a, addr := serveCoordination(t, Config{Store: store}, tlsCfg)
 
 	client := noiseHTTP(t, addr, roots, a.machineKey.Public())
 	host := key.NewNode()
@@ -290,8 +293,7 @@ func TestProtocolRegistrationVerdicts(t *testing.T) {
 	store.Seed(testNode(mustIA("1-ff00:0:1"), "100.64.1.0/24", "198.51.100.10:51820"))
 	auth := &askAuthorizer{}
 	roots, tlsCfg := testCert(t)
-	a := testApp(t, Config{Store: store, Authorizer: auth})
-	addr := serveCoordination(t, a, tlsCfg)
+	a, addr := serveCoordination(t, Config{Store: store, Authorizer: auth}, tlsCfg)
 	client := noiseHTTP(t, addr, roots, a.machineKey.Public())
 
 	// Pending: refused, nothing recorded, and the client's own polling
@@ -366,8 +368,7 @@ func TestProtocolRegistrationVerdicts(t *testing.T) {
 func TestProtocolMapRequiresRegistration(t *testing.T) {
 	store := &dbtest.MemStore{}
 	roots, tlsCfg := testCert(t)
-	a := testApp(t, Config{Store: store})
-	addr := serveCoordination(t, a, tlsCfg)
+	a, addr := serveCoordination(t, Config{Store: store}, tlsCfg)
 	client := noiseHTTP(t, addr, roots, a.machineKey.Public())
 	if _, err := fetchMap(t, client, key.NewNode()); err == nil {
 		t.Error("an unregistered key mapped, want refusal")
@@ -383,8 +384,7 @@ func TestProtocolMachineBinding(t *testing.T) {
 	store := &dbtest.MemStore{}
 	store.Seed(testNode(mustIA("1-ff00:0:1"), "100.64.1.0/24", "198.51.100.10:51820"))
 	roots, tlsCfg := testCert(t)
-	a := testApp(t, Config{Store: store})
-	addr := serveCoordination(t, a, tlsCfg)
+	a, addr := serveCoordination(t, Config{Store: store}, tlsCfg)
 
 	member := noiseHTTP(t, addr, roots, a.machineKey.Public())
 	stranger := noiseHTTP(t, addr, roots, a.machineKey.Public())
@@ -430,8 +430,7 @@ func TestProtocolLegacyRecordBindsFirstPresenter(t *testing.T) {
 		t.Fatal(err)
 	}
 	roots, tlsCfg := testCert(t)
-	a := testApp(t, Config{Store: store})
-	addr := serveCoordination(t, a, tlsCfg)
+	a, addr := serveCoordination(t, Config{Store: store}, tlsCfg)
 
 	first := noiseHTTP(t, addr, roots, a.machineKey.Public())
 	second := noiseHTTP(t, addr, roots, a.machineKey.Public())

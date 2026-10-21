@@ -68,8 +68,7 @@ func TestMapStreamBound(t *testing.T) {
 	store := &dbtest.MemStore{}
 	store.Seed(testNode(mustIA("1-ff00:0:1"), "100.64.1.0/24", "198.51.100.10:51820"))
 	roots, tlsCfg := testCert(t)
-	a := testApp(t, Config{Store: store})
-	addr := serveCoordination(t, a, tlsCfg)
+	a, addr := serveCoordination(t, Config{Store: store}, tlsCfg)
 	client := noiseHTTP(t, addr, roots, a.machineKey.Public())
 	host := key.NewNode()
 	if _, status := register(t, client, host, ""); status != http.StatusOK {
@@ -128,8 +127,7 @@ func TestMapStreamBound(t *testing.T) {
 func TestConversationBound(t *testing.T) {
 	store := &dbtest.MemStore{}
 	roots, tlsCfg := testCert(t)
-	a := testApp(t, Config{Store: store})
-	addr := serveCoordination(t, a, tlsCfg)
+	a, addr := serveCoordination(t, Config{Store: store}, tlsCfg)
 
 	// Two clients hold two conversations.
 	_ = noiseHTTP(t, addr, roots, a.machineKey.Public())
@@ -154,8 +152,7 @@ func TestConversationBound(t *testing.T) {
 func TestCloseEndsConversations(t *testing.T) {
 	store := &dbtest.MemStore{}
 	roots, tlsCfg := testCert(t)
-	a := testApp(t, Config{Store: store})
-	addr := serveCoordination(t, a, tlsCfg)
+	a, addr := serveCoordination(t, Config{Store: store}, tlsCfg)
 
 	open, err := dialNoise(t, addr, roots, a.machineKey.Public())
 	if err != nil {
@@ -192,8 +189,7 @@ func TestCloseEndsConversations(t *testing.T) {
 // the close ends at once, none of the relay's handshake on it.
 func TestCloseEndsRelayClients(t *testing.T) {
 	roots, tlsCfg := testCert(t)
-	a := testApp(t, Config{Store: &dbtest.MemStore{}})
-	addr := serveCoordination(t, a, tlsCfg)
+	a, addr := serveCoordination(t, Config{Store: &dbtest.MemStore{}}, tlsCfg)
 
 	client, _ := derpClientFor(t, addr, roots, key.NewNode())
 	ended := make(chan struct{})

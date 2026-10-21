@@ -28,11 +28,10 @@ import (
 )
 
 // Application is the seam a resident application assembles through: Run
-// launches its loops under the node's supervision, Close releases it in
-// the node's reverse-order release walk, and HTTPSHandler is the surface
-// the node's HTTPS server mounts — nil when the application mounts
-// nothing there, its surfaces its own sockets instead. The concrete
-// applications satisfy it without importing this package.
+// launches its loops under the node's supervision, and Close releases it in
+// the node's reverse-order release walk. Its surfaces mount through the
+// environment as its constructor builds them. The concrete applications
+// satisfy it without importing this package.
 type Application interface {
 	// Run runs the application's loops until the context is canceled,
 	// each in its own goroutine with a panic absorbed and logged, and
@@ -44,10 +43,6 @@ type Application interface {
 	// alone when Run never ran — a failed boot releases applications whose
 	// Run never started. A second call releases nothing again.
 	Close()
-	// HTTPSHandler is the handler the node's HTTPS server mounts at its
-	// root, nil when the application mounts nothing on it; at most one
-	// loaded application contributes one.
-	HTTPSHandler() http.Handler
 }
 
 // Environment is the node's facts the entries' constructors adapt into
@@ -105,6 +100,10 @@ type Environment struct {
 	// node's control endpoint, behind the peer-identity middleware, beside
 	// the drafts' services.
 	MountControlEndpoint func(pattern string, handler http.Handler)
+	// MountHTTPS mounts one of the application's handlers on the founding
+	// core's HTTPS server, beside the ACME challenge, at a pattern no other
+	// application mounts — a pattern mounted twice refuses the boot.
+	MountHTTPS func(pattern string, handler http.Handler)
 	// CoreRoute resolves the route to the founding core the directory's
 	// publish and fetch ride on every other node; the founding core needs
 	// none, serving the directory itself.

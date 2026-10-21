@@ -62,7 +62,6 @@ type App struct {
 var _ interface {
 	Run(context.Context) error
 	Close()
-	HTTPSHandler() http.Handler
 } = (*App)(nil)
 
 // New mounts the application's submission service on the control endpoint:
@@ -88,9 +87,6 @@ func (a *App) Run(ctx context.Context) error {
 
 // Close releases the application; the endpoint releases its mount.
 func (a *App) Close() {}
-
-// HTTPSHandler is nil: the application's surface is the control endpoint's.
-func (a *App) HTTPSHandler() http.Handler { return nil }
 
 // service implements the application's submission RPC.
 type service struct {

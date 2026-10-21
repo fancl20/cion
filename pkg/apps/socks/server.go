@@ -3,7 +3,6 @@ package socks
 import (
 	"context"
 	"fmt"
-	"net/http"
 	"net/netip"
 
 	"github.com/fancl20/cion/pkg/apps/wireguard"
@@ -57,8 +56,3 @@ func (s *Server) Run(ctx context.Context) error {
 // Close releases nothing: the serving form binds nothing of its own, and
 // Run releases the application it assembled before it returns.
 func (s *Server) Close() {}
-
-// HTTPSHandler is nil: the application's serving surface is its own
-// listener on the overlay, and it mounts nothing on the node's HTTPS
-// server.
-func (s *Server) HTTPSHandler() http.Handler { return nil }

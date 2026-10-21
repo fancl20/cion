@@ -50,8 +50,8 @@ var Table = []Entry{
 
 // Loaded is one constructed application: its name beside what its entry's
 // constructor returned. The list grows in table order as the constructors
-// return, and the assembly's walks — the HTTPS mount, the starts, the
-// reverse release — read it.
+// return, and the assembly's walks — the starts, the reverse release — read
+// it.
 type Loaded struct {
 	Name string
 	App  Application

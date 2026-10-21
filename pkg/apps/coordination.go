@@ -41,6 +41,7 @@ func newCoordination(env *Environment, loaded []Loaded) (Application, error) {
 		Authorizer: env.Authorizer,
 		DERP:       relay,
 		StateDir:   filepath.Join(env.StateRoot, "coordination"),
+		MountHTTPS: env.MountHTTPS,
 		RelayOnly:  env.Relay.RelayOnly,
 	})
 }

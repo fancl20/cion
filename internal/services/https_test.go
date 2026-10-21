@@ -4,11 +4,11 @@ import (
 	"context"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
 	"github.com/fancl20/cion/internal/supervise"
-	"github.com/fancl20/cion/pkg/apps"
 	"github.com/fancl20/cion/pkg/apps/coordination"
 	"github.com/fancl20/cion/pkg/apps/wireguard"
 	"github.com/fancl20/cion/pkg/core/webpki"
@@ -55,27 +55,34 @@ func (testRegistry) PublishHost(context.Context, wireguard.HostEntry) error {
 	return nil
 }
 
-// TestAssembleHTTPSBind checks the bind at the harness's placement: the
-// mounted application's handlers name the server, the listener is held
-// when the phase returns, and the port answers before anything serves it.
-func TestAssembleHTTPSBind(t *testing.T) {
+// mountCoordination builds the coordination application with its surfaces
+// mounted on the node's HTTPS server.
+func mountCoordination(t *testing.T, n *node) {
+	t.Helper()
 	app, err := coordination.New(coordination.Config{
-		Domain:   webpkitest.Domain,
-		Store:    testRegistry{},
-		StateDir: t.TempDir(),
+		Domain:     webpkitest.Domain,
+		Store:      testRegistry{},
+		StateDir:   t.TempDir(),
+		MountHTTPS: n.mountHTTPS,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(app.Close)
+}
+
+// TestAssembleHTTPSBind checks the bind at the harness's placement: the
+// mounted application's handlers name the server, the listener is held
+// when the phase returns, and the port answers before anything serves it.
+func TestAssembleHTTPSBind(t *testing.T) {
 	group, _ := supervise.New(context.Background())
 	defer func() { _ = group.Stop() }()
 	n := resolvedNode(t, func(c *NodeConfig) {
 		c.Coordination = &CoordinationOptions{Addr: "127.0.0.1:0"}
 	})
 	n.certMgr = staticCertMgr(t)
-	n.apps = []apps.Loaded{{Name: "coordination", App: app}}
 	n.group = group
+	mountCoordination(t, n)
 	if err := n.assembleHTTPS(); err != nil {
 		t.Fatalf("assembleHTTPS() = %v, want nil", err)
 	}
@@ -120,31 +127,49 @@ func TestAssembleHTTPSNoBind(t *testing.T) {
 	}
 }
 
-// rootApp is an application whose one surface is an HTTPS handler.
-type rootApp struct{}
+// TestAssembleHTTPSMountsByPath checks that the applications share the
+// server by path: the coordination application's surfaces and another
+// application's handler each answer their own patterns, and a path no
+// application mounts is not found.
+func TestAssembleHTTPSMountsByPath(t *testing.T) {
+	group, _ := supervise.New(context.Background())
+	defer func() { _ = group.Stop() }()
+	n := resolvedNode(t, func(c *NodeConfig) {
+		c.Coordination = &CoordinationOptions{Addr: "127.0.0.1:0"}
+	})
+	n.certMgr = staticCertMgr(t)
+	n.group = group
+	mountCoordination(t, n)
+	n.mountHTTPS("/admin/", http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusTeapot)
+	}))
+	if err := n.assembleHTTPS(); err != nil {
+		t.Fatalf("assembleHTTPS() = %v, want nil", err)
+	}
+	for path, status := range map[string]int{
+		"/key":         http.StatusOK,
+		"/admin/nodes": http.StatusTeapot,
+		"/elsewhere":   http.StatusNotFound,
+	} {
+		rec := httptest.NewRecorder()
+		n.httpsHandler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet,
+			"https://"+webpkitest.Domain+path, nil))
+		if rec.Code != status {
+			t.Errorf("GET %s = %d, want %d", path, rec.Code, status)
+		}
+	}
+}
 
-func (rootApp) Run(ctx context.Context) error { <-ctx.Done(); return nil }
-func (rootApp) Close()                        {}
-func (rootApp) HTTPSHandler() http.Handler    { return http.NotFoundHandler() }
-
-// TestAssembleHTTPSRefusesSecondHandler checks the one-handler rule: two
-// loaded applications contributing HTTPS handlers refuse the boot with both
-// named, before the port binds.
-func TestAssembleHTTPSRefusesSecondHandler(t *testing.T) {
+// TestAssembleHTTPSRefusesDuplicateMount checks that a pattern mounted twice
+// refuses the boot, the pattern named, before the port binds.
+func TestAssembleHTTPSRefusesDuplicateMount(t *testing.T) {
 	n := resolvedNode(t, func(*NodeConfig) {})
 	n.certMgr = staticCertMgr(t)
-	n.apps = []apps.Loaded{
-		{Name: "first", App: rootApp{}},
-		{Name: "second", App: rootApp{}},
-	}
+	n.mountHTTPS("/twice", http.NotFoundHandler())
+	n.mountHTTPS("/twice", http.NotFoundHandler())
 	err := n.assembleHTTPS()
-	if err == nil {
-		t.Fatal("two HTTPS handlers assembled, want refusal")
-	}
-	for _, name := range []string{"first", "second"} {
-		if !strings.Contains(err.Error(), name) {
-			t.Errorf("the refusal = %q, want it to name %q", err, name)
-		}
+	if err == nil || !strings.Contains(err.Error(), "/twice") {
+		t.Fatalf("assembleHTTPS() = %v, want a refusal naming the pattern", err)
 	}
 	if n.httpsLn != nil {
 		t.Error("the refused assembly bound the port")

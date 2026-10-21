@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"net/http"
 	"net/netip"
 	"sync"
 	"testing"
@@ -84,11 +85,15 @@ func registeredHost(key wireguard.PublicKey) wireguard.HostEntry {
 func machineZero() key.MachinePublic { return key.MachinePublic{} }
 
 // testApp builds an application around the given registry with the test
-// core's identity, its handler ready for an externally assembled server.
+// core's identity, its surfaces mounted on a mux of its own unless the
+// configuration names a mounter.
 func testApp(t *testing.T, cfg Config) *App {
 	t.Helper()
 	cfg.Domain = webpkitest.Domain
 	cfg.StateDir = t.TempDir()
+	if cfg.MountHTTPS == nil {
+		cfg.MountHTTPS = http.NewServeMux().Handle
+	}
 	a, err := New(cfg)
 	if err != nil {
 		t.Fatal(err)

@@ -9,40 +9,48 @@ import (
 	"github.com/fancl20/cion/pkg/core/webpki"
 )
 
+// httpsMount is one handler an application mounted on the node's HTTPS
+// server: the pattern it answers and the handler.
+type httpsMount struct {
+	pattern string
+	handler http.Handler
+}
+
+// mountHTTPS records one application handler for the node's HTTPS server,
+// the environment's MountHTTPS; assembleHTTPS mounts what was recorded.
+func (n *node) mountHTTPS(pattern string, handler http.Handler) {
+	n.httpsMounts = append(n.httpsMounts, httpsMount{pattern: pattern, handler: handler})
+}
+
 // assembleHTTPS binds the node's HTTPS server: the one server that holds
 // internet HTTPS's port, presents the core's WebPKI identity, and answers the
-// ACME TLS-ALPN challenge beside whatever protocols the mounted app speaks.
-// The identity is every core's already; here, after the applications assemble,
-// the node knows the handler it carries and binds the address it names. The
-// handler mounts at the root, so a second loaded application contributing one
+// ACME TLS-ALPN challenge beside whatever protocols the mounted apps speak.
+// The identity is every core's already; here, after the applications
+// assemble, the node knows the handlers they mounted and binds the address
+// it names. Each handler answers its own pattern, so a pattern mounted twice
 // refuses the boot. The ACME-managed identity binds for the challenge alone
-// when no app contributes a handler, and a static-file identity on a core
-// whose apps mount nothing leaves the port unbound, as the tree behaves today.
-// The listener is held here, before start launches the serving loop and the
-// certificate maintenance, so a first issuance's probe finds the port
-// answered by structure rather than by retry.
+// when nothing mounts, and a static-file identity on a core that mounts
+// nothing leaves the port unbound. The listener is held here, before start
+// launches the serving loop and the certificate maintenance, so a first
+// issuance's probe finds the port answered by structure rather than by
+// retry.
 func (n *node) assembleHTTPS() error {
 	if n.cfg.role != trust.ASTypeCore {
 		// Only the founding core holds a WebPKI identity to serve.
 		return nil
 	}
 	mux := http.NewServeMux()
-	var mounted string
-	for _, l := range n.apps {
-		h := l.App.HTTPSHandler()
-		if h == nil {
-			continue
+	mounted := make(map[string]bool, len(n.httpsMounts))
+	for _, m := range n.httpsMounts {
+		if mounted[m.pattern] {
+			return fmt.Errorf("two applications mount %s on the node's HTTPS server", m.pattern)
 		}
-		if mounted != "" {
-			return fmt.Errorf("the %s and %s applications both contribute an HTTPS "+
-				"handler; the node's HTTPS server mounts one at its root", mounted, l.Name)
-		}
-		mux.Handle("/", h)
-		mounted = l.Name
+		mounted[m.pattern] = true
+		mux.Handle(m.pattern, m.handler)
 	}
-	if mounted == "" && !n.certMgr.ACMEManaged() {
+	if len(mounted) == 0 && !n.certMgr.ACMEManaged() {
 		// Static files with nothing to serve bind nothing — the offline
-		// deployment's shape, as it is today.
+		// deployment's shape.
 		return nil
 	}
 	addr := n.httpsBindAddr()
