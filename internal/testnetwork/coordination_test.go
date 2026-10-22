@@ -342,8 +342,9 @@ func echoOverTailnet(t *testing.T, dst *tsnet.Server, dstAddr netip.Addr,
 // completing on the spot and its address from that node's slice; each
 // node programs itself from the fetched registry within one cadence; and
 // the two hosts exchange traffic through the mesh — the tunnel carrying
-// the tailnet and nothing else. The core then stops before its hosts
-// leave, and its Close returns.
+// the tailnet and nothing else — the exchange counted on the endpoint's
+// metrics. The core then stops before its hosts leave, and its Close
+// returns.
 func TestCoordinationJoin(t *testing.T) {
 	t.Parallel()
 	// The package CA: its certificate file is the one the vendored
@@ -417,6 +418,20 @@ func TestCoordinationJoin(t *testing.T) {
 
 	// The echo crosses the mesh: the core's host dials the leaf's.
 	echoOverTailnet(t, hostB, ipsB[0], hostA, "through the tailnet")
+
+	// The exchange reaches the endpoint's metrics: a scrape of the leaf's
+	// mount carries each node's host datagrams and mesh sends under its own
+	// local_as.
+	Poll(t, "the WireGuard counters served at the leaf's mount", func() bool {
+		body := scrapeMetrics(t, a, b.app.IA())
+		for _, ia := range []addr.IA{a.app.IA(), b.app.IA()} {
+			if servedSum(body, "wireguard_host_datagrams_total", ia) == 0 ||
+				servedSum(body, "wireguard_sent_datagrams_total", ia) == 0 {
+				return false
+			}
+		}
+		return true
+	})
 
 	// The core stops before its hosts leave: its Close returns with their
 	// conversations and relay connections still open.

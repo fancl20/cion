@@ -18,6 +18,7 @@ import (
 	"connectrpc.com/connect/v2/connecthttp"
 	"github.com/scionproto/scion/pkg/addr"
 	spath "github.com/scionproto/scion/pkg/slayers/path/scion"
+	"go.opentelemetry.io/otel"
 	"golang.zx2c4.com/wireguard/device"
 
 	"github.com/fancl20/cion/pkg/libs/loops"
@@ -51,11 +52,6 @@ const (
 // set so sessions and paths stay warm enough that path rotation is exercised
 // rather than discovered at first use.
 const PersistentKeepalive = 25 * time.Second
-
-// CountersInterval is how often the application logs its counters — the
-// overlay's substitute for the operating system's tooling, which cannot see
-// in-process forwarding.
-const CountersInterval = time.Minute
 
 // Paths is the node's path resolution the application calls: the composed
 // candidates the route warm-up ranks, and the path from local state its sends
@@ -550,9 +546,9 @@ func (a *App) Directory(ctx context.Context) (Directory, error) {
 	return a.directory.List(ctx)
 }
 
-// Counters snapshots the application's counters — the overlay's substitute
-// for the operating system's tooling.
-func (a *App) Counters() []any { return a.cnt.snapshot() }
+// Counters snapshots the application's counters by the names the process's
+// meter serves them by.
+func (a *App) Counters() map[string]int64 { return a.cnt.values() }
 
 // Registry returns the coordination surface of the core's store — nil on
 // every other node, which fetches the directory over the core's route
@@ -564,9 +560,15 @@ func (a *App) Registry() Registry {
 // Run serves the application until the context is canceled: the sockets'
 // readers, the host device's drain, the relay presence, the directory —
 // served by the core, published and fetched by everyone — and the counters
-// log. It returns once every goroutine it started has returned, the mesh
-// peers' drains among them, and leaves what New bound to Close.
+// on the process's meter. It returns once every goroutine it started has
+// returned, the mesh peers' drains among them, and leaves what New bound to
+// Close.
 func (a *App) Run(ctx context.Context) error {
+	served, err := a.cnt.serve(otel.GetMeterProvider().Meter(meterScope), a.cfg.IA)
+	if err != nil {
+		return fmt.Errorf("serving the WireGuard counters: %w", err)
+	}
+	defer func() { _ = served.Unregister() }()
 	loops.Go(ctx, &a.wg, "wireguard mesh socket", a.mesh.run)
 	loops.Go(ctx, &a.wg, "wireguard host socket", a.host.run)
 	if a.hosts != nil {
@@ -586,17 +588,9 @@ func (a *App) Run(ctx context.Context) error {
 	slog.Info("Serving the WireGuard application",
 		"ia", a.cfg.IA, "listenPort", a.cfg.ListenPort,
 		"publicKey", a.PublicKey())
-	logTick := time.NewTicker(CountersInterval)
-	defer logTick.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			a.wg.Wait()
-			return nil
-		case <-logTick.C:
-			slog.Info("WireGuard counters", a.cnt.snapshot()...)
-		}
-	}
+	<-ctx.Done()
+	a.wg.Wait()
+	return nil
 }
 
 // serveDirectory serves the core's directory on the socket New bound and

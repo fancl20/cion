@@ -71,7 +71,7 @@ func TestMetricsScrapedOverTheVerifiedChannel(t *testing.T) {
 	// also proves a member's reader reaches the mount at all.
 	var base map[string]map[addr.IA]int64
 	Poll(t, "C reads B's mount", func() bool {
-		base = servedSums(scrapeMetrics(t, c, b.app.IA()))
+		base = servedSums(scrapeMetrics(t, c.assemblyNode, b.app.IA()))
 		return base != nil
 	})
 
@@ -94,7 +94,7 @@ func TestMetricsScrapedOverTheVerifiedChannel(t *testing.T) {
 	// The pings' counters, each node's share named by its own local_as.
 	var flowed map[string]map[addr.IA]int64
 	Poll(t, "the pings reached the counters", func() bool {
-		if flowed = servedSums(scrapeMetrics(t, c, b.app.IA())); flowed == nil {
+		if flowed = servedSums(scrapeMetrics(t, c.assemblyNode, b.app.IA())); flowed == nil {
 			return false
 		}
 		return servedGrew(base, flowed, "dataplane_input_packets_total", a, b, c)
@@ -133,7 +133,7 @@ func TestMetricsScrapedOverTheVerifiedChannel(t *testing.T) {
 	var lines lockedLines
 	prev := slog.Default()
 	dropped := func(ia addr.IA) int64 {
-		return servedSum(scrapeMetrics(t, c, b.app.IA()),
+		return servedSum(scrapeMetrics(t, c.assemblyNode, b.app.IA()),
 			"dataplane_dropped_packets_total", ia)
 	}
 	droppedBaseB, droppedBaseC := dropped(b.app.IA()), dropped(c.app.IA())
@@ -183,7 +183,7 @@ func TestMetricsScrapedOverTheVerifiedChannel(t *testing.T) {
 // the member's chain presented, the peer's verified, the request riding
 // the SCION path the client's own provider resolves. An empty body
 // reports a scrape still warming, for the episodes poll.
-func scrapeMetrics(t *testing.T, from *staticNode, dst addr.IA) string {
+func scrapeMetrics(t *testing.T, from *assemblyNode, dst addr.IA) string {
 	t.Helper()
 	clt := from.app.PeerClient().VerifiedClient()
 	peer := &scion.Addr{IA: dst, Service: addr.SvcCS}
@@ -211,7 +211,7 @@ func servedSums(body string) map[string]map[addr.IA]int64 {
 	}
 	sums := make(map[string]map[addr.IA]int64)
 	for line := range strings.SplitSeq(body, "\n") {
-		if !strings.HasPrefix(line, "dataplane_") {
+		if strings.HasPrefix(line, "#") {
 			continue
 		}
 		// The family's name, then its label block and value.
