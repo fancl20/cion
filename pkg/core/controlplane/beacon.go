@@ -61,12 +61,12 @@ type SegmentSender interface {
 // authoritative alike — originate signed path-segment beacons on their links
 // and terminate core beacons into core segments, every node verifies the
 // accumulated signatures against the TRC before storing or propagating them,
-// propagation floods outward with the TRC naming the cores whose interfaces
-// are pruned, and non-cores terminate accepted beacons into registered
-// segments. Link roles are not configured: the interface a beacon arrives on
-// is the node's parent side, the interfaces beacons are propagated to are
-// child sides, and a link whose neighbor the TRC names as a core is a core
-// link.
+// propagation floods outward — pruning the interfaces toward the cores the
+// TRC names and toward the neighbors a beacon already crosses — and
+// non-cores terminate accepted beacons into registered segments. Link roles
+// are not configured: the interface a beacon arrives on is the node's parent
+// side, the interfaces beacons are propagated to are child sides, and a link
+// whose neighbor the TRC names as a core is a core link.
 type Beaconer struct {
 	ia           addr.IA
 	engine       *trust.Engine
@@ -550,8 +550,8 @@ func (b *Beaconer) trcPinned() (bool, error) {
 
 // coreASes returns the ISD's core ASes named by the pinned TRC; empty when
 // the TRC is not pinned yet, in which case propagation floods upward too —
-// harmless, since every beacon already contains the core and the core drops
-// any beacon containing itself.
+// harmless, since every beacon already crosses its originating core, a
+// neighbor propagation never sends it to.
 func (b *Beaconer) coreASes() (map[addr.IA]bool, error) {
 	ias, err := b.engine.CoreASes(b.ia.ISD())
 	if err != nil {
@@ -610,9 +610,12 @@ func (b *Beaconer) originateOnce(ctx context.Context) {
 
 // propagateOnce selects the fixed bounded set of freshest candidates, appends
 // this AS's signed entry, and propagates each on every external interface
-// except the one the beacon arrived on and except interfaces whose neighbor
-// the TRC names as a core — beacons never travel toward a core (Section
-// 2.3.5). The propagation targets are the neighbors' control services as
+// except interfaces whose neighbor the TRC names as a core — beacons never
+// travel toward a core (Section 2.3.5) — and except interfaces whose
+// neighbor the beacon already crosses, which would discard it as a loop
+// (Section 2.3.1): the neighbor it arrived from, and on links between
+// non-cores, which carry beacons both ways, any neighbor it passed on its way
+// here. The propagation targets are the neighbors' control services as
 // service destinations on the one-hop paths. Each neighbor's beacons go out
 // off the loop in candidate order; a neighbor whose previous beacons are
 // still in flight gets none this round.
@@ -622,7 +625,7 @@ func (b *Beaconer) propagateOnce(ctx context.Context) {
 		slog.Error("Propagating beacons", "err", err)
 		return
 	}
-	cands := b.store.BestSet(BestSetSize)
+	cands := b.bestSet()
 	for egress, neighborIA := range b.linkTable() {
 		if neighborIA.IsZero() {
 			continue // a link whose neighbor establishment has not named
@@ -639,7 +642,7 @@ func (b *Beaconer) propagateOnce(ctx context.Context) {
 		}
 		var beacons []*control_plane.PathSegment
 		for _, cand := range cands {
-			if egress == cand.Ingress {
+			if cand.PCB.ContainsIA(neighborIA) {
 				continue
 			}
 			extended, err := cand.PCB.Clone()
@@ -686,7 +689,7 @@ func (b *Beaconer) propagateOnce(ctx context.Context) {
 // dial that fails logs and a later pass retries.
 func (b *Beaconer) registerOnce(ctx context.Context) {
 	peers := make(map[addr.IA][]*control_plane.PathSegment)
-	for _, cand := range b.store.BestSet(BestSetSize) {
+	for _, cand := range b.bestSet() {
 		terminated, err := b.terminate(cand)
 		if err != nil {
 			slog.Error("Terminating beacon", "err", err)
@@ -726,8 +729,8 @@ func (b *Beaconer) registerCoreOnce(ctx context.Context) {
 		slog.Error("Terminating core beacons", "err", err)
 		return
 	}
-	for _, cand := range b.store.BestSet(BestSetSize) {
-		if !cores[b.linkTable()[cand.Ingress]] {
+	for _, cand := range b.bestSet() {
+		if !cores[cand.PCB.LastIA()] {
 			continue
 		}
 		terminated, err := b.terminate(cand)
@@ -744,6 +747,21 @@ func (b *Beaconer) registerCoreOnce(ctx context.Context) {
 			slog.Error("Storing core segment", "err", err)
 		}
 	}
+}
+
+// bestSet selects the fixed bounded set of freshest candidates among those
+// whose arrival interface the link table still binds to the neighbor that
+// sent them — the beacon's last entry, the binding reception checked. A
+// beacon that arrived over a link since retired, or since re-established
+// under a new interface ID, names an ingress interface that no longer leads
+// to its sender, and a hop extended or terminated through it would publish a
+// route the data plane cannot carry: the beaconer neither propagates nor
+// terminates it.
+func (b *Beaconer) bestSet() []Candidate {
+	links := b.linkTable()
+	return b.store.BestSet(BestSetSize, func(c Candidate) bool {
+		return links[c.Ingress].Equal(c.PCB.LastIA())
+	})
 }
 
 // terminate appends the terminating AS entry to a candidate: ingress the

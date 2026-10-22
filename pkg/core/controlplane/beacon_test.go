@@ -135,7 +135,7 @@ func newBeaconFixture(t *testing.T) *beaconFixture {
 	}
 	t.Cleanup(func() { _ = pathDB.Close() })
 	engines := make(map[addr.IA]*trust.Engine)
-	for _, ia := range []addr.IA{coreIATest, iaCore2Test, nodeIATest, iaLineC} {
+	for _, ia := range []addr.IA{coreIATest, iaCore2Test, nodeIATest, iaLineC, iaLineD} {
 		engines[ia] = founder.Engine(t, ia)
 	}
 
@@ -242,6 +242,9 @@ func originatedSegment(
 	return pcb
 }
 
+// keepAll admits every candidate to a best set.
+func keepAll(Candidate) bool { return true }
+
 // TestBeaconStoreKeysByOrigin checks the store's key widened by the origin:
 // two candidates of distinct origins over one ingress and one segment ID are
 // two candidates — both stored, both returned by BestSet — while one origin's
@@ -259,7 +262,7 @@ func TestBeaconStoreKeysByOrigin(t *testing.T) {
 		t.Fatalf("store length = %d, want 2: distinct origins are distinct candidates", got)
 	}
 	stored := map[addr.IA]time.Time{}
-	for _, cand := range f.store.BestSet(2) {
+	for _, cand := range f.store.BestSet(2, keepAll) {
 		stored[cand.PCB.FirstIA()] = cand.PCB.Timestamp()
 	}
 	if len(stored) != 2 {
@@ -273,7 +276,7 @@ func TestBeaconStoreKeysByOrigin(t *testing.T) {
 		t.Fatalf("store length after re-origination = %d, want 2: one segment, one slot", got)
 	}
 	stored = map[addr.IA]time.Time{}
-	for _, cand := range f.store.BestSet(2) {
+	for _, cand := range f.store.BestSet(2, keepAll) {
 		stored[cand.PCB.FirstIA()] = cand.PCB.Timestamp()
 	}
 	if !stored[nodeIATest].Equal(fresher.Timestamp()) {
@@ -284,7 +287,7 @@ func TestBeaconStoreKeysByOrigin(t *testing.T) {
 	// A staler re-origination never replaces the fresher entry.
 	f.store.Insert(1, originatedSegment(t, f, nodeIATest, 7, now))
 	stored = map[addr.IA]time.Time{}
-	for _, cand := range f.store.BestSet(2) {
+	for _, cand := range f.store.BestSet(2, keepAll) {
 		stored[cand.PCB.FirstIA()] = cand.PCB.Timestamp()
 	}
 	if !stored[nodeIATest].Equal(fresher.Timestamp()) {
@@ -310,7 +313,7 @@ func TestBeaconStoreCapBoundsWidenedKeys(t *testing.T) {
 			got, storePerInterface)
 	}
 	ids := map[uint16]bool{}
-	for _, cand := range f.store.BestSet(storePerInterface) {
+	for _, cand := range f.store.BestSet(storePerInterface, keepAll) {
 		ids[cand.PCB.ID()] = true
 	}
 	if ids[0] || ids[1] {
@@ -835,6 +838,180 @@ func TestPropagateOnce(t *testing.T) {
 			parsed.Entries[i].Signed, parsed.AssociatedData(i)...); err != nil {
 			t.Fatalf("propagated entry %d does not verify: %v", i, err)
 		}
+	}
+}
+
+// crossingBeacon builds the beacon the hops forwarded in order to B: the
+// first hop originates it, each entry names the next hop, and the last entry
+// names B.
+func crossingBeacon(
+	t *testing.T, f *beaconFixture, now time.Time, hops ...addr.IA) *segment.PCB {
+
+	t.Helper()
+	pcb, err := segment.NewPCB(now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, ia := range hops {
+		opts := segment.EntryOptions{Next: nodeIATest, EgressIfID: 1}
+		if i > 0 {
+			opts.IngressIfID = 2
+		}
+		if i+1 < len(hops) {
+			opts.Next = hops[i+1]
+		}
+		if err := pcb.AppendEntry(context.Background(), ia, opts, macFactory(),
+			f.engines[ia]); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return pcb
+}
+
+// beaconerOver builds B's beaconer over the fixture's stores and sender, its
+// link table read through links on every pass.
+func beaconerOver(t *testing.T, f *beaconFixture, links func() map[uint16]addr.IA) *Beaconer {
+	t.Helper()
+	beaconer, err := NewBeaconer(BeaconerConfig{
+		IA:     nodeIATest,
+		Engine: f.engines[nodeIATest],
+		MACKey: []byte(testMACKey),
+		Store:  f.store,
+		DB:     f.pathDB,
+		Links:  links,
+		Sender: f.sender,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return beaconer
+}
+
+// propagatedHops returns the ISD-ASes each sent beacon crosses, by the peer
+// it was sent to.
+func propagatedHops(t *testing.T, f *beaconFixture) map[addr.IA][][]addr.IA {
+	t.Helper()
+	out := make(map[addr.IA][][]addr.IA)
+	for _, sent := range snapshotBeacons(t, f) {
+		parsed, err := segment.ParsePCB(sent.pcb)
+		if err != nil {
+			t.Fatal(err)
+		}
+		hops := make([]addr.IA, 0, len(parsed.Entries))
+		for _, e := range parsed.Entries {
+			hops = append(hops, e.IA)
+		}
+		out[sent.peer.IA] = append(out[sent.peer.IA], hops)
+	}
+	return out
+}
+
+// TestPropagateOnceSkipsNeighborsTheBeaconCrosses checks the loop filter on
+// the sending side. Links between non-cores carry beacons both ways, so B —
+// under the core A on link 1, beside C on link 2 and D on link 4 — holds
+// [A, C, D] from D beside [A] from A: [A, C, D] goes to neither C nor D, each
+// of which would discard it as a loop, while [A] reaches both.
+func TestPropagateOnceSkipsNeighborsTheBeaconCrosses(t *testing.T) {
+	f := newBeaconFixture(t)
+	ctx := context.Background()
+	b := beaconerOver(t, f, func() map[uint16]addr.IA {
+		return map[uint16]addr.IA{1: coreIATest, 2: iaLineC, 4: iaLineD}
+	})
+	now := time.Now()
+	if err := b.HandleBeacon(ctx, lineBeacon(t, f, now), 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.HandleBeacon(ctx,
+		crossingBeacon(t, f, now, coreIATest, iaLineC, iaLineD), 4); err != nil {
+		t.Fatal(err)
+	}
+	b.propagateOnce(ctx)
+	b.sends.Wait()
+
+	want := map[addr.IA][][]addr.IA{
+		iaLineC: {{coreIATest, nodeIATest}},
+		iaLineD: {{coreIATest, nodeIATest}},
+	}
+	if diff := cmp.Diff(want, propagatedHops(t, f)); diff != "" {
+		t.Errorf("propagated hops by peer (-want +got):\n%s", diff)
+	}
+}
+
+// TestBeaconerSkipsCandidatesOfDepartedInterfaces checks the candidates the
+// passes select against the link table of the moment. B holds [A] from the
+// core over link 1 and [A, C] from C over link 2; then the core's link
+// re-establishes at interface 5, C's at 6, and interface 2, revived, names
+// D. Every held candidate names an interface that no longer leads to its
+// sender, so B propagates and terminates none of them — [A, C] would return
+// to C as a loop, and either would publish a hop through an interface that
+// no longer carries it. A fresh beacon over interface 5 then propagates and
+// terminates through it.
+func TestBeaconerSkipsCandidatesOfDepartedInterfaces(t *testing.T) {
+	f := newBeaconFixture(t)
+	ctx := context.Background()
+	table := map[uint16]addr.IA{1: coreIATest, 2: iaLineC}
+	b := beaconerOver(t, f, func() map[uint16]addr.IA { return table })
+	now := time.Now()
+	if err := b.HandleBeacon(ctx, lineBeacon(t, f, now), 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.HandleBeacon(ctx, crossingBeacon(t, f, now, coreIATest, iaLineC), 2); err != nil {
+		t.Fatal(err)
+	}
+
+	table = map[uint16]addr.IA{5: coreIATest, 6: iaLineC, 2: iaLineD}
+	b.propagateOnce(ctx)
+	b.registerOnce(ctx)
+	b.sends.Wait()
+	if got := propagatedHops(t, f); len(got) != 0 {
+		t.Fatalf("propagated %v over departed interfaces, want nothing", got)
+	}
+	ups, err := f.pathDB.Get(ctx, pathdb.Query{Type: pathdb.SegmentTypeUp})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ups) != 0 {
+		t.Fatalf("up segments = %d over departed interfaces, want none", len(ups))
+	}
+	f.sender.mtx.Lock()
+	regs := len(f.sender.registrations)
+	f.sender.mtx.Unlock()
+	if regs != 0 {
+		t.Fatalf("registrations = %d over departed interfaces, want none", regs)
+	}
+
+	// A fresh beacon over the core's new interface.
+	if err := b.HandleBeacon(ctx, lineBeacon(t, f, now.Add(time.Second)), 5); err != nil {
+		t.Fatal(err)
+	}
+	b.propagateOnce(ctx)
+	b.registerOnce(ctx)
+	b.sends.Wait()
+	want := map[addr.IA][][]addr.IA{
+		iaLineC: {{coreIATest, nodeIATest}},
+		iaLineD: {{coreIATest, nodeIATest}},
+	}
+	if diff := cmp.Diff(want, propagatedHops(t, f)); diff != "" {
+		t.Errorf("propagated hops by peer (-want +got):\n%s", diff)
+	}
+	for _, sent := range snapshotBeacons(t, f) {
+		parsed, err := segment.ParsePCB(sent.pcb)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if in := parsed.Entries[1].Hop.ConsIngress; in != 5 {
+			t.Errorf("beacon to %v enters B at interface %d, want 5", sent.peer.IA, in)
+		}
+	}
+	ups, err = f.pathDB.Get(ctx, pathdb.Query{Type: pathdb.SegmentTypeUp})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ups) != 1 {
+		t.Fatalf("up segments = %d, want the fresh beacon's alone", len(ups))
+	}
+	if in := ups[0].PCB.Entries[len(ups[0].PCB.Entries)-1].Hop.ConsIngress; in != 5 {
+		t.Errorf("up segment enters B at interface %d, want 5", in)
 	}
 }
 

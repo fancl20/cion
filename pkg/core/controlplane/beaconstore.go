@@ -97,16 +97,17 @@ func (s *BeaconStore) evictStale(ingress uint16) {
 	}
 }
 
-// BestSet returns the fixed bounded set of freshest unexpired candidates — the
-// store's per-key freshness ordering is the only selection rule (no policy
-// engine).
-func (s *BeaconStore) BestSet(n int) []Candidate {
+// BestSet returns the fixed bounded set of freshest unexpired candidates keep
+// admits — the store's per-key freshness ordering is the only selection rule
+// (no policy engine). keep runs before the bound, so a refused candidate
+// never takes the place of an admitted one; it runs under the store's lock.
+func (s *BeaconStore) BestSet(n int, keep func(Candidate) bool) []Candidate {
 	s.mtx.Lock()
 	defer s.mtx.Unlock()
 	now := time.Now()
 	cands := make([]candidate, 0, len(s.beacons))
 	for _, cand := range s.beacons {
-		if cand.PCB.Expiration().After(now) {
+		if cand.PCB.Expiration().After(now) && keep(cand.Candidate) {
 			cands = append(cands, cand)
 		}
 	}
