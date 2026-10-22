@@ -108,7 +108,7 @@ func (r *portalRecords) Nodes(ctx context.Context) ([]portal.Node, error) {
 			IA:      ia,
 			Key:     hex.EncodeToString(chain[0].SubjectKeyId),
 			Expires: chain[0].NotAfter,
-			Role:    portal.RoleNode,
+			Role:    portal.RoleNormal,
 		}
 		switch {
 		case ia.Equal(r.founder):

@@ -18,11 +18,11 @@ type Role string
 
 const (
 	// RoleFounder is the founding core, the issuer of every chain.
-	RoleFounder Role = "founding core"
+	RoleFounder Role = "founder"
 	// RoleCore is a core the TRC names beside the founder.
 	RoleCore Role = "core"
-	// RoleNode is every other enrolled node.
-	RoleNode Role = "node"
+	// RoleNormal is every other enrolled node.
+	RoleNormal Role = "normal"
 )
 
 // Node is one node holding a chain valid now, as the founder's records hold

@@ -117,7 +117,7 @@ func TestPortalRecordsNodes(t *testing.T) {
 			Issued:   2,
 		},
 		{IA: core, Key: "0202", Expires: now.Add(60 * time.Hour), Role: portal.RoleCore},
-		{IA: node, Key: "0303", Expires: now.Add(48 * time.Hour), Role: portal.RoleNode},
+		{IA: node, Key: "0303", Expires: now.Add(48 * time.Hour), Role: portal.RoleNormal},
 	}
 	if diff := cmp.Diff(want, nodes,
 		cmpopts.EquateComparable(netip.Prefix{}, netip.AddrPort{})); diff != "" {

@@ -24,7 +24,11 @@ const BOUNDARIES = {
   enrollment: ["Enrollment", "amber"],
   voting: ["Core vote", "violet"],
 };
-const ROLES = { "founding core": ["Founding core", "blue"], core: ["Core", "blue-outline"] };
+const ROLES = {
+  founder: ["Founder", "blue"],
+  core: ["Core", "blue-outline"],
+  normal: ["Normal", "muted-outline"],
+};
 const KEY_STATES = { spent: "Spent", revoked: "Revoked", expired: "Expired" };
 // The endpoints answering without a session, whose 401 signs nobody out.
 const PUBLIC_API = /^\/admin\/api\/(session|setup\/|login\/)/;
@@ -519,9 +523,8 @@ function renderNodes(list) {
 // One node: its ISD-AS and role, key, overlay, endpoint, issued addresses,
 // and certificate.
 function nodeRow(node) {
-  const role = ROLES[node.role];
   return h("tr", null,
-    h("td", null, h("div", { class: "id" }, node.ia), role && h("div", { class: "below" }, badge(...role))),
+    h("td", null, h("div", { class: "id" }, node.ia), h("div", { class: "below" }, badge(...ROLES[node.role]))),
     h("td", null, shortKey(node.key)),
     h("td", null, node.overlay ? mono(node.overlay) : dash()),
     h("td", null, node.endpoint ? mono(node.endpoint) : dash()),
@@ -629,7 +632,7 @@ function keyRow(key) {
 // The node a key's hosts connect to — the founding core where the key names
 // none — above its host endpoint while the node is listed.
 function keyNode(key) {
-  const node = (data.nodes?.nodes ?? []).find(n => (key.node ? n.ia === key.node : n.role === "founding core"));
+  const node = (data.nodes?.nodes ?? []).find(n => (key.node ? n.ia === key.node : n.role === "founder"));
   return connectsTo(node?.ia ?? key.node ?? "founding core", node?.endpoint);
 }
 
@@ -663,7 +666,7 @@ function openKeyDialog(event) {
 function fillNodes(select, nodes) {
   const serving = nodes.filter(node => node.overlay && node.endpoint);
   update(select, serving.length > 0
-    ? serving.map(node => h("option", { value: node.ia, selected: node.role === "founding core" },
+    ? serving.map(node => h("option", { value: node.ia, selected: node.role === "founder" },
       `${node.ia} · ${node.endpoint} · ${node.capacity - node.issued} free`))
     : h("option", { value: "" }, "No node serves hosts yet"));
 }

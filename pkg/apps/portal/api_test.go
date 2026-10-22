@@ -264,7 +264,7 @@ func TestKeysAPI(t *testing.T) {
 			Overlay:  netip.MustParsePrefix("100.64.0.0/24"),
 			Endpoint: netip.MustParseAddrPort("198.51.100.10:41641"),
 		},
-		{IA: mustIA("1-ff00:0:111"), Role: RoleNode},
+		{IA: mustIA("1-ff00:0:111"), Role: RoleNormal},
 	}
 	for _, req := range []map[string]any{
 		{"days": enrollauth.MinKeyDays - 1, "node": "1-ff00:0:110"},

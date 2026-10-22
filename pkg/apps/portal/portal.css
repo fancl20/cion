@@ -5,6 +5,7 @@
   --card: #ffffff;
   --fg: #18181b;
   --muted: #6b6b75;
+  --muted-line: rgb(107 107 117 / 0.45);
   --border: #e4e4e7;
   --hover: #f4f4f5;
   --chip: #ececee;
@@ -40,6 +41,7 @@
     --card: #18181b;
     --fg: #ededf0;
     --muted: #a1a1aa;
+    --muted-line: rgb(161 161 170 / 0.5);
     --border: #2b2b31;
     --hover: #222227;
     --chip: #2a2a30;
@@ -299,6 +301,7 @@ table.plain th:last-child, table.plain td:last-child { padding-right: 0; }
 .badge-green { background: var(--green-bg); color: var(--green); }
 .badge-red { background: var(--red-bg); color: var(--red); }
 .badge-muted { background: var(--chip); color: var(--muted); }
+.badge-muted-outline { box-shadow: inset 0 0 0 1px var(--muted-line); color: var(--muted); }
 
 /* Buttons */
 
