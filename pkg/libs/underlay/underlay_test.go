@@ -70,3 +70,34 @@ func TestResolveLocalAddr(t *testing.T) {
 		t.Errorf("ResolveLocalAddr IP = %#v, want the four-byte 192.0.2.1", mapped.IP)
 	}
 }
+
+// TestRouteSource checks the routing table's answer: a destination an
+// interface carries routes from itself, and a destination off every
+// interface routes from an address one of the host's interfaces carries —
+// the answer a local socket receives on, never the destination.
+func TestRouteSource(t *testing.T) {
+	loopback := netip.MustParseAddr("127.0.0.1")
+	got, err := RouteSource(loopback)
+	if err != nil {
+		t.Fatalf("RouteSource(%v): %v", loopback, err)
+	}
+	if got != loopback {
+		t.Errorf("RouteSource(%v) = %v, want the destination itself", loopback, got)
+	}
+
+	remote := netip.MustParseAddr("192.0.2.1")
+	src, err := RouteSource(remote)
+	if err != nil {
+		t.Skipf("the host holds no route toward %v: %v", remote, err)
+	}
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, a := range addrs {
+		if n, ok := a.(*net.IPNet); ok && n.IP.Equal(src.AsSlice()) {
+			return
+		}
+	}
+	t.Errorf("RouteSource(%v) = %v, want an address of the host's interfaces %v", remote, src, addrs)
+}

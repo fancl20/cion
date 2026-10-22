@@ -557,9 +557,10 @@ func (n *node) assembleEndpoint() error {
 // with the given port, sending through the node's internal link. Every conn
 // resolves its one-hop writes over the links the node can send over and
 // shares the node's interface-down cache — each receive path recognizes the
-// signal the data plane's egress-down branch sends back — and names the
-// published host to the service-resolution replies it answers, for the
-// bound wildcard names no host a peer could dial.
+// signal the data plane's egress-down branch sends back — and, under the
+// wildcard bind, which names no host itself, names the wildcard host as its
+// packets' source and its service-resolution answers' host: an address the
+// node's own router delivers to.
 func (n *node) scionConn(port uint16) (*scion.Conn, error) {
 	return scion.NewConn(scion.ConnConfig{
 		IA:            n.ident.ia,
@@ -568,7 +569,7 @@ func (n *node) scionConn(port uint16) (*scion.Conn, error) {
 		MACKey:        n.ident.key,
 		Links:         n.usableLinks,
 		InterfaceDown: n.ifDown,
-		Advertise:     n.publishedHost,
+		Advertise:     n.wildcardHost.resolve,
 		Sockets:       n.sockets,
 	})
 }

@@ -53,6 +53,10 @@ type node struct {
 	// provider's the control host a concrete bind names, for it learns
 	// nothing. The zero address publishes nothing.
 	publishedHost func(context.Context) netip.Addr
+	// wildcardHost resolves the host the node's conns name for themselves
+	// under a wildcard bind: the local address routing toward the published
+	// host, which the node's own router delivers to.
+	wildcardHost *wildcardHost
 
 	// Link state: the neighbor table as the one source of truth, wrapped so
 	// that every write signals linkChanges and lands as the data plane's
@@ -260,6 +264,7 @@ func setupNode(
 	if err := n.selectProvider(); err != nil {
 		return nil, err
 	}
+	n.wildcardHost = newWildcardHost(n.publishedHost)
 	if created {
 		// The one moment before the phases: the provider completes the
 		// provisional ISD draw — the measured provider's from a bootstrap
