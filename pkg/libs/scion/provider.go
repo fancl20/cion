@@ -172,8 +172,11 @@ func (c *Candidate) Before(o *Candidate) bool {
 // beyond it — with one candidate per up segment containing the destination,
 // its truncated reversal, beside them: the branch LocalPath short-circuits,
 // enumerated so the peers its own up segments hold join the candidate space.
-// A candidate naming one of the node's own interfaces the live snapshot
-// lacks never composes, the snapshot taken once per call; a signaled
+// A pair meeting at the local node or at the destination leaves one part no
+// travel and composes nothing: its path is the down-only meeting's or the
+// containing branch's, which carry it once rather than once per segment of
+// the idle part. A candidate naming one of the node's own interfaces the live
+// snapshot lacks never composes, the snapshot taken once per call; a signaled
 // interface keeps its demote-to-last-resort semantics, a flagged candidate.
 // The local ISD-AS is the one error, a caller mistake failed fast at entry;
 // an unreachable destination is the empty answer.
@@ -196,17 +199,23 @@ func (p *PathProvider) Enumerate(ctx context.Context, dst addr.IA) ([]Candidate,
 		return nil
 	}
 	for _, down := range downs {
-		// The local node's own entry on the down segment is a meeting no up
-		// segment names — the core the segment starts at, or an AS below it
-		// the node happens to be.
+		// The local node's own entry on the down segment is a meeting of its
+		// own — the core the segment starts at, or an AS below it the node
+		// happens to be: the segment's tail from that entry is the path,
+		// whichever up segment ends at the node.
 		if mDown := down.PCB.IndexOfIA(p.IA); mDown >= 0 {
 			if err := emit(nil, -1, down, mDown); err != nil {
 				return nil, err
 			}
 		}
 		for _, up := range ups {
+			// A meeting at the up segment's terminator, the local node, or at
+			// the down segment's terminator, the destination, leaves that part
+			// no travel: the down-only meeting above or the containing branch
+			// below emits the path, fresher by its one piece and fewer in
+			// entries than the pair.
 			mUp, mDown, ok := meeting(up, down)
-			if !ok {
+			if !ok || mUp == len(up.PCB.Entries)-1 || mDown == len(down.PCB.Entries)-1 {
 				continue
 			}
 			if err := emit(up, mUp, down, mDown); err != nil {

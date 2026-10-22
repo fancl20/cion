@@ -47,6 +47,15 @@ func unmarshalStored(raw []byte) (*storedSegment, error) {
 	return &storedSegment{Type: pathdb.SegmentType(raw[0]), PB: pb}, nil
 }
 
+// unmarshalSegment parses a stored value into its typed segment.
+func unmarshalSegment(raw []byte) (*pathdb.Segment, error) {
+	stored, err := unmarshalStored(raw)
+	if err != nil {
+		return nil, err
+	}
+	return pathdb.NewSegment(stored.Type, stored.PB)
+}
+
 type bboltDB struct {
 	db *bbolt.DB
 }
@@ -60,28 +69,32 @@ func New(path string, opts *bbolt.Options) (pathdb.DB, error) {
 	return &bboltDB{db: db}, nil
 }
 
-// Insert inserts the segment, replacing the stored segment with the same
-// identity: originating core, segment ID, and creation timestamp.
+// Insert stores the segment under its route key unless the stored segment
+// with that key is at least as fresh.
 func (b *bboltDB) Insert(ctx context.Context, seg *pathdb.Segment) (bool, error) {
-	key, err := marshalKey(seg.Key())
-	if err != nil {
-		return false, err
-	}
+	key := marshalKey(seg.Key())
 	value, err := marshalStored(&storedSegment{Type: seg.Type, PB: seg.PCB.PB})
 	if err != nil {
 		return false, err
 	}
-	var existed bool
+	var stored bool
 	if err := b.db.Update(func(tx *bbolt.Tx) error {
 		bucket := tx.Bucket([]byte(bucketName))
-		if bucket.Get(key) != nil {
-			existed = true
+		if raw := bucket.Get(key); raw != nil {
+			incumbent, err := unmarshalSegment(raw)
+			if err != nil {
+				return err
+			}
+			if !seg.PCB.Timestamp().After(incumbent.PCB.Timestamp()) {
+				return nil
+			}
 		}
+		stored = true
 		return bucket.Put(key, value)
 	}); err != nil {
 		return false, err
 	}
-	return !existed, nil
+	return stored, nil
 }
 
 // Get returns the segments matching the query whose hops have not expired.
@@ -99,11 +112,7 @@ func (b *bboltDB) Get(ctx context.Context, q pathdb.Query) ([]*pathdb.Segment, e
 	if err := b.db.View(func(tx *bbolt.Tx) error {
 		c := tx.Bucket([]byte(bucketName)).Cursor()
 		for k, v := c.Seek(prefix); k != nil && matchPrefix(k, prefix); k, v = c.Next() {
-			stored, err := unmarshalStored(v)
-			if err != nil {
-				return err
-			}
-			seg, err := pathdb.NewSegment(stored.Type, stored.PB)
+			seg, err := unmarshalSegment(v)
 			if err != nil {
 				return err
 			}
@@ -131,11 +140,7 @@ func (b *bboltDB) DeleteExpired(ctx context.Context, t time.Time) (int, error) {
 	if err := b.db.View(func(tx *bbolt.Tx) error {
 		c := tx.Bucket([]byte(bucketName)).Cursor()
 		for k, v := c.First(); k != nil; k, v = c.Next() {
-			stored, err := unmarshalStored(v)
-			if err != nil {
-				return err
-			}
-			seg, err := pathdb.NewSegment(stored.Type, stored.PB)
+			seg, err := unmarshalSegment(v)
 			if err != nil {
 				return err
 			}
@@ -167,17 +172,18 @@ func (b *bboltDB) Close() error {
 	return b.db.Close()
 }
 
-// marshalKey encodes the segment identity: originating IA, segment ID,
-// creation timestamp.
-func marshalKey(k pathdb.Key) ([]byte, error) {
-	if k.Origin.AS() == 0 && k.Origin.ISD() == 0 {
-		return nil, fmt.Errorf("segment identity needs an origin IA")
+// marshalKey encodes the key: the ISD-AS and the ingress and egress interface
+// IDs of each hop in route order, then the segment type. The route opens with
+// the originating core, so a key's first eight bytes are the prefix a query
+// by origin seeks.
+func marshalKey(k pathdb.Key) []byte {
+	key := make([]byte, 0, 12*len(k.Route)+1)
+	for _, h := range k.Route {
+		key = binary.BigEndian.AppendUint64(key, uint64(h.IA))
+		key = binary.BigEndian.AppendUint16(key, h.Ingress)
+		key = binary.BigEndian.AppendUint16(key, h.Egress)
 	}
-	key := make([]byte, 0, 20)
-	key = binary.BigEndian.AppendUint64(key, uint64(k.Origin))
-	key = binary.BigEndian.AppendUint32(key, uint32(k.ID))
-	key = binary.BigEndian.AppendUint64(key, uint64(k.Timestamp.Unix()))
-	return key, nil
+	return append(key, byte(k.Type))
 }
 
 // iaPrefix returns the key prefix selecting one originating IA.

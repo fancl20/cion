@@ -782,8 +782,8 @@ func TestEnumerateTruncatedFacts(t *testing.T) {
 }
 
 // TestEnumerateCoverage checks the containing branch beside the joins: a
-// destination both serve yields the joins and one candidate per containing
-// up segment.
+// destination both serve yields one candidate per containing up segment,
+// the pair meeting at the destination composing nothing beside it.
 func TestEnumerateCoverage(t *testing.T) {
 	up := linePCB(t, time.Now(), iaCore, iaMid, iaLeaf)
 	down := linePCB(t, time.Now(), iaCore, iaMid)
@@ -802,19 +802,93 @@ func TestEnumerateCoverage(t *testing.T) {
 		},
 	}
 
-	// The join at the middle and the containing up segment's truncated
-	// reversal beside it.
+	// The containing up segment's truncated reversal: the join at the
+	// middle would travel the same two hops, the down part idle.
 	candidates, err := p.Enumerate(context.Background(), iaMid)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(candidates) != 2 {
-		t.Fatalf("candidates = %d, want the join and the containing reversal", len(candidates))
+	if len(candidates) != 1 {
+		t.Fatalf("candidates = %d, want the containing reversal alone", len(candidates))
 	}
-	for i, c := range candidates {
-		if c.Hops != 2 || len(c.Path.HopFields) != 2 {
-			t.Errorf("candidate %d = %d hops, want the truncated 2", i, c.Hops)
+	c := candidates[0]
+	if c.Entries != len(up.Entries) || c.Path.InfoFields[0].ConsDir {
+		t.Errorf("candidate = %d entries (consDir %v), want the up segment's reversal",
+			c.Entries, c.Path.InfoFields[0].ConsDir)
+	}
+	checkHops(t, c.Path, up.Entries[2], up.Entries[1])
+}
+
+// TestEnumerateIdlePartsComposeNothing checks the meetings that leave a part
+// no travel against a store of many originations per route: from the middle
+// of a line, down segments through the node enumerate one candidate apiece
+// whatever its up segments number, and from below the middle, up segments
+// through the destination one candidate apiece whatever the destination's
+// down segments number — never a candidate per pair.
+func TestEnumerateIdlePartsComposeNothing(t *testing.T) {
+	const originations = 7
+	now := time.Now()
+	segments := func(typ pathdb.SegmentType, n int, ias ...addr.IA) []*pathdb.Segment {
+		segs := make([]*pathdb.Segment, n)
+		for i := range segs {
+			segs[i] = &pathdb.Segment{
+				Type: typ,
+				PCB:  linePCB(t, now.Add(-time.Duration(i)*time.Minute), ias...),
+			}
 		}
+		return segs
+	}
+	for _, tc := range []struct {
+		name     string
+		local    addr.IA
+		dst      addr.IA
+		ups      []*pathdb.Segment
+		downs    []*pathdb.Segment
+		want     int
+		reversed bool
+	}{{
+		// The middle's up segments end at it, the destination's down
+		// segments cross it: each down segment's tail, once.
+		name:  "meeting at the local node",
+		local: iaMid,
+		dst:   iaDest,
+		ups:   segments(pathdb.SegmentTypeUp, originations, iaCore, iaMid),
+		downs: segments(pathdb.SegmentTypeDown, originations-2, iaCore, iaMid, iaDest),
+		want:  originations - 2,
+	}, {
+		// The leaf's up segments cross the middle, the middle's down
+		// segments end at it: each up segment's reversal, once.
+		name:     "meeting at the destination",
+		local:    iaLeaf,
+		dst:      iaMid,
+		ups:      segments(pathdb.SegmentTypeUp, originations, iaCore, iaMid, iaLeaf),
+		downs:    segments(pathdb.SegmentTypeDown, originations-2, iaCore, iaMid),
+		want:     originations,
+		reversed: true,
+	}} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := &PathProvider{
+				IA: tc.local,
+				DB: &fakePathDB{segs: tc.ups},
+				Lookup: func(context.Context, addr.IA) []*pathdb.Segment {
+					return tc.downs
+				},
+			}
+			candidates, err := p.Enumerate(context.Background(), tc.dst)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(candidates) != tc.want {
+				t.Fatalf("candidates = %d, want %d: one per segment of the travelling part",
+					len(candidates), tc.want)
+			}
+			for i, c := range candidates {
+				if c.Hops != 2 || c.Path.InfoFields[0].ConsDir == tc.reversed {
+					t.Errorf("candidate %d = %d hops (consDir %v), want the truncated 2 "+
+						"in the travelling part's direction", i, c.Hops, c.Path.InfoFields[0].ConsDir)
+				}
+			}
+		})
 	}
 }
 
@@ -1008,18 +1082,18 @@ func TestEnumerateSkipsRetiredInterfaces(t *testing.T) {
 	}
 
 	// The join over the up segment leaves through 14; the meeting at the
-	// node's entry on the second down segment — enumerated twice, as the
-	// down-only meeting and as the up segment's meeting there — through 33.
+	// node's entry on the second down segment — the down-only meeting, the
+	// up segment's pair there composing nothing beside it — through 33.
 	for _, tc := range []struct {
 		name          string
 		live          map[uint16]addr.IA
 		join, meeting int
 	}{
-		{"every interface live", map[uint16]addr.IA{14: iaCore, 32: iaCore, 33: iaDest}, 1, 2},
-		{"the up part's interface retired", map[uint16]addr.IA{32: iaCore, 33: iaDest}, 0, 2},
+		{"every interface live", map[uint16]addr.IA{14: iaCore, 32: iaCore, 33: iaDest}, 1, 1},
+		{"the up part's interface retired", map[uint16]addr.IA{32: iaCore, 33: iaDest}, 0, 1},
 		{"the entry's core-ward interface retired", map[uint16]addr.IA{14: iaCore, 33: iaDest}, 1, 0},
 		{"the entry's onward interface retired", map[uint16]addr.IA{14: iaCore, 32: iaCore}, 1, 0},
-		{"a nil snapshot", nil, 1, 2},
+		{"a nil snapshot", nil, 1, 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			live = tc.live

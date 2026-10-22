@@ -19,6 +19,9 @@ import (
 // where beacons propagate A→B→C with signatures verified at each hop, C
 // enrolls through the reversed beacon over B, C registers a down segment at
 // A through B, and the provider resolves an end-to-end path from C to A.
+// Fresher originations then replace their route's segment in every path
+// database, and the enumerations between B and C — whose meetings leave a
+// part idle — compose one candidate each.
 func TestLineTopology(t *testing.T) {
 	t.Parallel()
 	nodes := bootTopology(t, webpkitest.New(t), staticTopology{
@@ -88,6 +91,60 @@ func TestLineTopology(t *testing.T) {
 	if !ups[0].FirstIA().Equal(coreIA) || !ups[0].LastIA().Equal(lineCIA) {
 		t.Errorf("up segment = %v..%v, want the full line",
 			ups[0].FirstIA(), ups[0].LastIA())
+	}
+
+	// Once C terminates a fresher origination, every path database still
+	// holds one segment per route: the line has one route to each node.
+	first := ups[0].PCB.Timestamp()
+	Poll(t, "a fresher origination at C", func() bool {
+		segs, err := c.app.PathDB().Get(ctx, pathdb.Query{Type: pathdb.SegmentTypeUp})
+		if err != nil {
+			return false
+		}
+		for _, seg := range segs {
+			if seg.PCB.Timestamp().After(first) {
+				return true
+			}
+		}
+		return false
+	})
+	for _, h := range []struct {
+		name string
+		node *staticNode
+		q    pathdb.Query
+	}{
+		{"B's up segments", b, pathdb.Query{Type: pathdb.SegmentTypeUp}},
+		{"C's up segments", c, pathdb.Query{Type: pathdb.SegmentTypeUp}},
+		{"A's down segments to B", a, pathdb.Query{Type: pathdb.SegmentTypeDown, DstIA: nodeIA}},
+		{"A's down segments to C", a, pathdb.Query{Type: pathdb.SegmentTypeDown, DstIA: lineCIA}},
+	} {
+		held := 0
+		Poll(t, h.name, func() bool {
+			segs, err := h.node.app.PathDB().Get(ctx, h.q)
+			held = len(segs)
+			return err == nil && held > 0
+		})
+		if held != 1 {
+			t.Errorf("%s = %d, want the route's one", h.name, held)
+		}
+	}
+	// B meets C's down segment at B itself, and C meets B's down segment at
+	// B, the destination: either way one part idles, and the one route
+	// composes one candidate.
+	for _, e := range []struct {
+		name string
+		from *staticNode
+		to   addr.IA
+	}{{"from B to C", b, lineCIA}, {"from C to B", c, nodeIA}} {
+		composed := 0
+		Poll(t, "candidates "+e.name, func() bool {
+			candidates, err := e.from.app.Provider().Enumerate(ctx, e.to)
+			composed = len(candidates)
+			return err == nil && composed > 0
+		})
+		if composed != 1 {
+			t.Errorf("candidates %s = %d, want the route's one", e.name, composed)
+		}
 	}
 }
 

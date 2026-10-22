@@ -175,11 +175,11 @@ Cores originate beacons; each AS on the way appends a signed entry of its
 own and forwards the beacon to its neighbors, which verify every entry
 against the TRC. Receiving nodes keep candidates briefly, then terminate
 selected beacons into segments — up segments kept locally, down segments
-registered with the originating core — where they persist in the path
-database until they expire. The path provider composes registered segments
-into end-to-end paths and is the single seam every consumer uses: the control
-endpoint's own transport rides it, and applications reach it through the
-SCION library's socket.
+registered with the originating core — where the freshest segment of each
+route persists in the path database until it expires. The path provider
+composes registered segments into end-to-end paths and is the single seam
+every consumer uses: the control endpoint's own transport rides it, and
+applications reach it through the SCION library's socket.
 
 ### Topology and liveness
 

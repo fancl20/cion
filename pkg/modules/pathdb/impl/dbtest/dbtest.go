@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/go-cmp/cmp"
 	"github.com/scionproto/scion/pkg/addr"
 	cppb "github.com/scionproto/scion/pkg/proto/control_plane"
 	cryptopb "github.com/scionproto/scion/pkg/proto/crypto"
@@ -30,10 +31,11 @@ type TestableDB interface {
 // has at least one test that calls this suite.
 func Run(t *testing.T, db TestableDB) {
 	tests := map[string]func(*testing.T, TestableDB){
-		"insert and get":      testInsertGet,
-		"replace by identity": testReplaceByIdentity,
-		"evict expired":       testEvictExpired,
-		"persist across open": testPersist,
+		"insert and get":       testInsertGet,
+		"one segment by route": testOneSegmentByRoute,
+		"types keep apart":     testTypesKeepApart,
+		"evict expired":        testEvictExpired,
+		"persist across open":  testPersist,
 	}
 	for name, test := range tests {
 		t.Run("DB: "+name, func(t *testing.T) {
@@ -46,35 +48,36 @@ func Run(t *testing.T, db TestableDB) {
 	}
 }
 
-// segment builds a terminated segment fixture: entries [core, middle, end],
-// signed bodies well-formed but cryptographically meaningless — the database
-// stores parsed segments, it does not verify them.
-func segment(t *testing.T, core, middle, end addr.IA, ts time.Time) *pathdb.Segment {
+// segment builds a terminated down segment fixture crossing the given ASes
+// in order, each entry's ingress interface 1 and egress interface 2 but the
+// segment's ends', whose outer interface is zero. Its segment ID derives
+// from the timestamp, so fixtures of one route at different instants differ
+// in both, as two originations do. The signed bodies are well-formed but
+// cryptographically meaningless: the database stores parsed segments, it
+// does not verify them.
+func segment(t *testing.T, ts time.Time, route ...addr.IA) *pathdb.Segment {
 	t.Helper()
 	pcb := &cppb.PathSegment{}
-	info := &cppb.SegmentInformation{Timestamp: ts.Unix(), SegmentId: 4242}
+	info := &cppb.SegmentInformation{Timestamp: ts.Unix(), SegmentId: uint32(ts.Unix() & 0xffff)}
 	raw, err := proto.Marshal(info)
 	if err != nil {
 		t.Fatal(err)
 	}
 	pcb.SegmentInfo = raw
-	for _, e := range []struct {
-		ia, next addr.IA
-	}{
-		{core, middle},
-		{middle, end},
-		{end, 0},
-	} {
+	for i, ia := range route {
+		var next addr.IA
+		hop := &cppb.HopField{ExpTime: 10}
+		if i > 0 {
+			hop.Ingress = 1
+		}
+		if i < len(route)-1 {
+			next = route[i+1]
+			hop.Egress = 2
+		}
 		body := &cppb.ASEntrySignedBody{
-			IsdAs:     uint64(e.ia),
-			NextIsdAs: uint64(e.next),
-			HopEntry: &cppb.HopEntry{
-				HopField: &cppb.HopField{
-					Ingress: 1,
-					Egress:  2,
-					ExpTime: 10,
-				},
-			},
+			IsdAs:     uint64(ia),
+			NextIsdAs: uint64(next),
+			HopEntry:  &cppb.HopEntry{HopField: hop},
 		}
 		rawBody, err := proto.Marshal(body)
 		if err != nil {
@@ -96,15 +99,16 @@ func segment(t *testing.T, core, middle, end addr.IA, ts time.Time) *pathdb.Segm
 }
 
 var (
-	iaCore   = addr.MustIAFrom(20, 0xff0000000001)
-	iaCoreB  = addr.MustIAFrom(20, 0xff0000000009)
-	iaMiddle = addr.MustIAFrom(20, 0xff0000000002)
-	iaEnd    = addr.MustIAFrom(20, 0xff0000000003)
+	iaCore    = addr.MustIAFrom(20, 0xff0000000001)
+	iaCoreB   = addr.MustIAFrom(20, 0xff0000000009)
+	iaMiddle  = addr.MustIAFrom(20, 0xff0000000002)
+	iaMiddleB = addr.MustIAFrom(20, 0xff0000000004)
+	iaEnd     = addr.MustIAFrom(20, 0xff0000000003)
 )
 
 func testInsertGet(t *testing.T, db TestableDB) {
 	ctx := context.Background()
-	seg := segment(t, iaCore, iaMiddle, iaEnd, time.Now())
+	seg := segment(t, time.Now(), iaCore, iaMiddle, iaEnd)
 
 	if in, err := db.Insert(ctx, seg); err != nil || !in {
 		t.Fatalf("Insert = (%v, %v), want (true, nil)", in, err)
@@ -130,6 +134,13 @@ func testInsertGet(t *testing.T, db TestableDB) {
 	if len(segs) != 1 {
 		t.Fatalf("Get by destination = %d, want 1", len(segs))
 	}
+	segs, err = db.Get(ctx, pathdb.Query{SrcIA: iaCore})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(segs) != 1 {
+		t.Fatalf("Get by origin = %d, want 1", len(segs))
+	}
 	for _, q := range []pathdb.Query{
 		{DstIA: iaMiddle},
 		{Type: pathdb.SegmentTypeUp},
@@ -145,45 +156,90 @@ func testInsertGet(t *testing.T, db TestableDB) {
 	}
 }
 
-func testReplaceByIdentity(t *testing.T, db TestableDB) {
+// testOneSegmentByRoute checks the identity: the originations of one route
+// share one slot, which holds the freshest of them, and another route is
+// another slot.
+func testOneSegmentByRoute(t *testing.T, db TestableDB) {
 	ctx := context.Background()
 	now := time.Now()
-	first := segment(t, iaCore, iaMiddle, iaEnd, now)
-	second := segment(t, iaCore, iaMiddle, iaEnd, now) // same origin, ID, timestamp
+	only := func(want *pathdb.Segment) {
+		t.Helper()
+		segs, err := db.Get(ctx, pathdb.Query{DstIA: iaEnd})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(segs) != 1 {
+			t.Fatalf("Get = %d segments, want the route's one", len(segs))
+		}
+		if got := segs[0].PCB.Timestamp(); !got.Equal(want.PCB.Timestamp()) {
+			t.Errorf("stored origination = %v, want %v", got, want.PCB.Timestamp())
+		}
+	}
 
+	first := segment(t, now, iaCore, iaMiddle, iaEnd)
 	if in, err := db.Insert(ctx, first); err != nil || !in {
 		t.Fatalf("first Insert = (%v, %v), want (true, nil)", in, err)
 	}
-	if in, err := db.Insert(ctx, second); err != nil || in {
-		t.Fatalf("second Insert = (%v, %v), want (false, nil)", in, err)
+	// The same origination registered again changes nothing.
+	if in, err := db.Insert(ctx, segment(t, now, iaCore, iaMiddle, iaEnd)); err != nil || in {
+		t.Fatalf("repeated Insert = (%v, %v), want (false, nil)", in, err)
 	}
-	segs, err := db.Get(ctx, pathdb.Query{})
-	if err != nil {
-		t.Fatal(err)
+	only(first)
+	// A fresher origination of the route takes the slot.
+	fresher := segment(t, now.Add(time.Minute), iaCore, iaMiddle, iaEnd)
+	if in, err := db.Insert(ctx, fresher); err != nil || !in {
+		t.Fatalf("fresher Insert = (%v, %v), want (true, nil)", in, err)
 	}
-	if len(segs) != 1 {
-		t.Fatalf("Get = %d segments, want 1 after replacement", len(segs))
+	only(fresher)
+	// A staler one arriving late leaves the slot alone.
+	if in, err := db.Insert(ctx, segment(t, now.Add(-time.Minute), iaCore, iaMiddle, iaEnd)); err != nil || in {
+		t.Fatalf("staler Insert = (%v, %v), want (false, nil)", in, err)
 	}
-	// A different creation timestamp is a different segment.
-	third := segment(t, iaCore, iaMiddle, iaEnd, now.Add(time.Second))
-	if in, err := db.Insert(ctx, third); err != nil || !in {
-		t.Fatalf("third Insert = (%v, %v), want (true, nil)", in, err)
+	only(fresher)
+
+	// Another route to the same end is a slot of its own.
+	other := segment(t, now, iaCore, iaMiddleB, iaEnd)
+	if in, err := db.Insert(ctx, other); err != nil || !in {
+		t.Fatalf("other route's Insert = (%v, %v), want (true, nil)", in, err)
 	}
-	segs, err = db.Get(ctx, pathdb.Query{})
+	segs, err := db.Get(ctx, pathdb.Query{DstIA: iaEnd})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(segs) != 2 {
-		t.Fatalf("Get = %d segments, want 2", len(segs))
+		t.Fatalf("Get = %d segments, want one per route", len(segs))
+	}
+}
+
+// testTypesKeepApart checks that one route stored as two types holds two
+// slots: the type is part of the identity.
+func testTypesKeepApart(t *testing.T, db TestableDB) {
+	ctx := context.Background()
+	down := segment(t, time.Now(), iaCore, iaEnd)
+	up := segment(t, time.Now(), iaCore, iaEnd)
+	up.Type = pathdb.SegmentTypeUp
+	for _, seg := range []*pathdb.Segment{down, up} {
+		if in, err := db.Insert(ctx, seg); err != nil || !in {
+			t.Fatalf("Insert %v = (%v, %v), want (true, nil)", seg.Type, in, err)
+		}
+	}
+	for _, typ := range []pathdb.SegmentType{pathdb.SegmentTypeDown, pathdb.SegmentTypeUp} {
+		segs, err := db.Get(ctx, pathdb.Query{Type: typ})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(segs) != 1 {
+			t.Errorf("Get type %v = %d segments, want 1", typ, len(segs))
+		}
 	}
 }
 
 func testEvictExpired(t *testing.T, db TestableDB) {
 	ctx := context.Background()
 	now := time.Now()
-	fresh := segment(t, iaCore, iaMiddle, iaEnd, now)
+	fresh := segment(t, now, iaCore, iaMiddle, iaEnd)
 	// ExpTime 10 → expiration ~56 minutes after the timestamp.
-	stale := segment(t, iaCore, iaMiddle, iaEnd, now.Add(-2*time.Hour))
+	stale := segment(t, now.Add(-2*time.Hour), iaCore, iaMiddleB, iaEnd)
 
 	for _, seg := range []*pathdb.Segment{fresh, stale} {
 		if _, err := db.Insert(ctx, seg); err != nil {
@@ -195,7 +251,7 @@ func testEvictExpired(t *testing.T, db TestableDB) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(segs) != 1 || !segs[0].Key().Timestamp.Equal(fresh.Key().Timestamp) {
+	if len(segs) != 1 || !segs[0].PCB.Timestamp().Equal(fresh.PCB.Timestamp()) {
 		t.Fatalf("Get = %v segments, want only the fresh one", len(segs))
 	}
 	// The sweep removes it for good.
@@ -220,7 +276,7 @@ func testEvictExpired(t *testing.T, db TestableDB) {
 // period.
 func testPersist(t *testing.T, db TestableDB) {
 	ctx := context.Background()
-	seg := segment(t, iaCore, iaMiddle, iaEnd, time.Now())
+	seg := segment(t, time.Now(), iaCore, iaMiddle, iaEnd)
 	if _, err := db.Insert(ctx, seg); err != nil {
 		t.Fatal(err)
 	}
@@ -232,7 +288,10 @@ func testPersist(t *testing.T, db TestableDB) {
 	if len(segs) != 1 {
 		t.Fatalf("Get after reopen = %d segments, want 1", len(segs))
 	}
-	if got := segs[0].Key(); got != seg.Key() {
-		t.Errorf("segment key = %v, want %v", got, seg.Key())
+	if diff := cmp.Diff(seg.Key(), segs[0].Key()); diff != "" {
+		t.Errorf("segment key after reopen (-want +got):\n%s", diff)
+	}
+	if got := segs[0].PCB.Timestamp(); !got.Equal(seg.PCB.Timestamp()) {
+		t.Errorf("segment timestamp after reopen = %v, want %v", got, seg.PCB.Timestamp())
 	}
 }

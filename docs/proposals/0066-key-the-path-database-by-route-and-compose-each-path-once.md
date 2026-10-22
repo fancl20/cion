@@ -131,3 +131,7 @@ and WireGuard's ranking read the same distinct paths.
     database and one candidate in each enumeration between B and C.
 
 ## Implementation history
+
+*   Landed as proposed ([pathdb.go](/pkg/modules/pathdb/pathdb.go),
+    [db.go](/pkg/modules/pathdb/impl/bbolt/db.go),
+    [provider.go](/pkg/libs/scion/provider.go)).

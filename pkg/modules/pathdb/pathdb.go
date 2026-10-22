@@ -51,20 +51,33 @@ func NewSegment(t SegmentType, pb *cppb.PathSegment) (*Segment, error) {
 	return &Segment{Type: t, PCB: pcb}, nil
 }
 
-// Key identifies a segment by origin, segment ID, and creation timestamp; a
-// newly registered segment replaces the stored segment with the same identity.
+// Key identifies a segment by its type and its route. Every origination over
+// one route shares the key — each draws a fresh segment ID and timestamp, but
+// the links it crosses are the route's — so a store holds one segment per
+// route and type, however often the route is beaconed.
 type Key struct {
-	// Origin is the ISD-AS of the first AS entry.
-	Origin addr.IA
-	// ID is the segment identifier.
-	ID uint16
-	// Timestamp is the creation timestamp.
-	Timestamp time.Time
+	// Type is the segment's role for this node.
+	Type SegmentType
+	// Route is the segment's AS entries in construction order, the
+	// originating core first.
+	Route []Hop
+}
+
+// Hop is one AS entry's place on a route: its ISD-AS and its ingress and
+// egress interface IDs in construction direction, zero at the segment's ends.
+type Hop struct {
+	IA      addr.IA
+	Ingress uint16
+	Egress  uint16
 }
 
 // Key returns the segment's identity.
 func (s *Segment) Key() Key {
-	return Key{Origin: s.PCB.FirstIA(), ID: s.PCB.ID(), Timestamp: s.PCB.Timestamp()}
+	route := make([]Hop, len(s.PCB.Entries))
+	for i, e := range s.PCB.Entries {
+		route[i] = Hop{IA: e.IA, Ingress: e.Hop.ConsIngress, Egress: e.Hop.ConsEgress}
+	}
+	return Key{Type: s.Type, Route: route}
 }
 
 // FirstIA returns the ISD-AS of the first entry: the core the segment
@@ -87,10 +100,11 @@ type Query struct {
 	DstIA addr.IA
 }
 
-// DB is the database of registered path segments.
+// DB is the database of registered path segments: one segment per key, the
+// freshest by creation timestamp.
 type DB interface {
-	// Insert inserts the segment, replacing the stored segment with the same
-	// identity. It reports whether the segment was newly inserted.
+	// Insert stores the segment unless the stored segment with its key is at
+	// least as fresh, and reports whether it stored the segment.
 	Insert(ctx context.Context, seg *Segment) (bool, error)
 	// Get returns the unexpired segments matching the query.
 	Get(ctx context.Context, q Query) ([]*Segment, error)
