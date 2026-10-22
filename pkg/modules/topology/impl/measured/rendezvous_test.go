@@ -518,6 +518,89 @@ func TestRendezvousEchoEndsWithItsContext(t *testing.T) {
 	}
 }
 
+// TestRendezvousEchoSpeaksForTheLink checks the answered dial of an exchange
+// that binds a link address: before the socket is released, one empty
+// datagram leaves it for the acceptor's link address — the answer's port on
+// the host the reply arrived from, the claim rule's record — so a translator
+// maps the link's own flow first. A probe's ephemeral dial sends none: the
+// first datagram the link socket reads after the probe returned is a
+// sentinel sent after it.
+func TestRendezvousEchoSpeaksForTheLink(t *testing.T) {
+	host := netip.MustParseAddr("127.0.0.1")
+	listen := func() *net.UDPConn {
+		t.Helper()
+		c, err := net.ListenUDP("udp", net.UDPAddrFromAddrPort(netip.AddrPortFrom(host, 0)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = c.Close() })
+		return c
+	}
+	// A stand-in acceptor answering every request with the wildcard at the
+	// link socket's port, the answer a wildcard-bound acceptor gives.
+	acceptor, link := listen(), listen()
+	linkPort := link.LocalAddr().(*net.UDPAddr).AddrPort().Port()
+	go func() {
+		buf := make([]byte, 192)
+		for {
+			n, src, err := acceptor.ReadFromUDP(buf)
+			if err != nil {
+				return
+			}
+			req, err := ParseRendezvousRequest(buf[:n])
+			if err != nil {
+				continue
+			}
+			reply := RendezvousReply{
+				Nonce:    req.Nonce,
+				LinkAddr: netip.AddrPortFrom(netip.IPv4Unspecified(), linkPort),
+				IA:       rendezvousIA,
+				Observed: observedAddr(src),
+			}
+			_, _ = acceptor.WriteToUDP(reply.Marshal(), src)
+		}
+	}()
+	target := acceptor.LocalAddr().(*net.UDPAddr).AddrPort()
+	// The datagrams the reads wait on left before each dial returned: the
+	// deadline only bounds a regression's hang.
+	if err := link.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	buf := make([]byte, 16)
+
+	local := linkAddr(t)
+	if _, _, _, err := RendezvousEcho(context.Background(), underlay.Kernel,
+		local, target, rendezvousIA, local); err != nil {
+		t.Fatal(err)
+	}
+	n, src, err := link.ReadFromUDP(buf)
+	if err != nil {
+		t.Fatalf("the link socket heard nothing from the dial: %v", err)
+	}
+	if got := observedAddr(src); n != 0 || got != local {
+		t.Errorf("the link socket read %d bytes from %v, want an empty datagram from the dial's bind %v",
+			n, got, local)
+	}
+
+	if _, _, _, err := RendezvousEcho(context.Background(), underlay.Kernel,
+		netip.AddrPortFrom(host, 0), target, addr.IA(0),
+		netip.AddrPortFrom(host, scionrpc.EndpointPort)); err != nil {
+		t.Fatal(err)
+	}
+	sentinel := listen()
+	if _, err := sentinel.WriteToUDP([]byte("sentinel"), link.LocalAddr().(*net.UDPAddr)); err != nil {
+		t.Fatal(err)
+	}
+	n, src, err = link.ReadFromUDP(buf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := observedAddr(src), sentinel.LocalAddr().(*net.UDPAddr).AddrPort(); got != want {
+		t.Errorf("the link socket's next datagram came from %v (%d bytes), want the sentinel from %v",
+			got, n, want)
+	}
+}
+
 // TestRendezvousRecordsTheObservation checks the acceptor's record: a named
 // claim — the joiner's dial from the socket that will serve — records the
 // request's observed source whole, host and port both, whatever the claim

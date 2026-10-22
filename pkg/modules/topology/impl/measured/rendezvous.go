@@ -517,11 +517,14 @@ func rendezvousSilenceHint(target netip.AddrPort) string {
 // socket held for the round trip alone and released before the store write
 // lands and the generation binds, the same probe-and-release the band
 // allocation performs — while a probe that records nothing binds port 0 and
-// dials ephemeral. The requester claims the given address; a probe claims its
-// control address, a promotion its link address. The context's end moves the
-// read deadline to the past, ending a wait in flight; each attempt reads the
-// context after setting its own deadline, so no attempt overrides the move
-// unseen.
+// dials ephemeral. An answered exchange of the former sends one empty
+// datagram from the held socket to the acceptor's link address — the
+// answer's, under the claim rule — before the release, so a translator maps
+// the link's own flow before the acceptor's link can claim it. The requester
+// claims the given address; a probe claims its control address, a promotion
+// its link address. The context's end moves the read deadline to the past,
+// ending a wait in flight; each attempt reads the context after setting its
+// own deadline, so no attempt overrides the move unseen.
 func RendezvousEcho(
 	ctx context.Context,
 	sockets underlay.Sockets,
@@ -570,7 +573,19 @@ func RendezvousEcho(
 			if err != nil || reply.Nonce != req.Nonce {
 				continue
 			}
-			return reply, observedAddr(src), time.Since(sent), nil
+			rtt, observed := time.Since(sent), observedAddr(src)
+			if bind.Port() != 0 {
+				// The link's flow speaks before the acceptor's link can: a
+				// translator keeps the dial's port for the flow toward the
+				// acceptor's link socket only while no packet of that socket
+				// has reached the mapping first, and the acceptor's link
+				// sends to the recorded mapping from the moment its entry
+				// lands. The acceptor's data plane drops the empty datagram
+				// as malformed; a lost one costs only the race it would have
+				// won.
+				_, _ = conn.WriteToUDP(nil, udpAddr(recordedLinkAddr(reply.LinkAddr, observed)))
+			}
+			return reply, observed, rtt, nil
 		}
 	}
 	return RendezvousReply{}, netip.AddrPort{}, 0,
