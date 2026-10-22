@@ -12,12 +12,17 @@ import (
 
 	"github.com/gopacket/gopacket"
 	"github.com/scionproto/scion/pkg/addr"
+	"github.com/scionproto/scion/pkg/proto/control_plane"
 	"github.com/scionproto/scion/pkg/slayers"
 	"github.com/scionproto/scion/pkg/slayers/path/empty"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/fancl20/cion/pkg/core/controlplane"
+	"github.com/fancl20/cion/pkg/core/dataplane/dataplanetest"
 	"github.com/fancl20/cion/pkg/libs/scion"
+	"github.com/fancl20/cion/pkg/libs/scionrpc"
 	"github.com/fancl20/cion/pkg/libs/segment"
+	"github.com/fancl20/cion/pkg/libs/underlay"
 	"github.com/fancl20/cion/pkg/modules/links"
 	"github.com/fancl20/cion/pkg/modules/links/impl/memory"
 	"github.com/fancl20/cion/pkg/modules/pathdb"
@@ -1239,6 +1244,95 @@ func TestProbeSendsNothingOverAnUnusableLink(t *testing.T) {
 	}
 	if n, _, err := router.ReadFromUDP(make([]byte, 2048)); err == nil {
 		t.Errorf("the probe sent %d bytes toward the down neighbor", n)
+	}
+}
+
+// probeHost is the loopback host the probe's two-node episode binds on, one
+// no other test of any package takes: the peer's responder holds the fixed
+// endhost port.
+var probeHost = netip.MustParseAddr("127.0.0.132")
+
+// TestProbeEchoesTheHostThePeerResolves checks the host a neighbor's echoes
+// address: the one the peer's own resolution names, never the directory's
+// published host. The peer publishes a host none of its sockets hold — a
+// translator's public side — while its control service answers the drafts'
+// resolution with the host it binds and its responder answers the echoes
+// there: the direct sample measures, and the window keeps the resolved host
+// for the echoes after it.
+func TestProbeEchoesTheHostThePeerResolves(t *testing.T) {
+	extP, extQ := dataplanetest.FreeUDPAddr(t, probeHost), dataplanetest.FreeUDPAddr(t, probeHost)
+	p := dataplanetest.StartNode(t, probeHost, selIA, selPeer, extP, extQ)
+	q := dataplanetest.StartNode(t, probeHost, selPeer, selIA, extQ, extP)
+	newConn := func(n *dataplanetest.Node, port uint16) *scion.Conn {
+		t.Helper()
+		conn, err := scion.NewConn(scion.ConnConfig{
+			IA:           n.IA,
+			Bind:         netip.AddrPortFrom(n.ControlIP, port).String(),
+			InternalAddr: n.Internal,
+			MACKey:       n.MACKey,
+			Links:        n.Links,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = conn.Close() })
+		return conn
+	}
+
+	// The peer's control service answers the resolution with its own
+	// socket's address, the endpoint's answer; its responder answers the
+	// echoes on the endhost port beside it.
+	endpoint := newConn(q, 0)
+	q.MapService(t, addr.SvcCS, endpoint.LocalPort())
+	go func() {
+		buf := make([]byte, 64)
+		for {
+			_, from, err := endpoint.ReadFrom(buf)
+			if err != nil {
+				return
+			}
+			local, _ := endpoint.SourceAddr()
+			resp, err := proto.Marshal(&control_plane.ServiceResolutionResponse{
+				Transports: map[string]*control_plane.Transport{
+					scionrpc.TransportQUIC: {Address: local.String()},
+				},
+			})
+			if err == nil {
+				_, _ = endpoint.WriteTo(resp, from)
+			}
+		}
+	}()
+	responder := newConn(q, underlay.EndhostPort)
+	go func() {
+		for {
+			echo, from, err := responder.ReadEchoFrom()
+			if err != nil {
+				return
+			}
+			if !echo.Reply {
+				_ = responder.WriteEchoReplyTo(from, echo.Identifier, echo.Seq, echo.Payload)
+			}
+		}
+	}()
+
+	s := &selection{cfg: SelectionConfig{
+		IA:   selIA,
+		Conn: newConn(p, 0),
+		Paths: &scion.PathProvider{
+			IA:     selIA,
+			DB:     emptyPathDB{},
+			Lookup: func(context.Context, addr.IA) []*pathdb.Segment { return nil },
+		},
+	}}
+	translated := netip.MustParseAddr("192.0.2.1")
+	sm := s.probe(t.Context(),
+		DirectoryEntry{IA: selPeer, ControlAddr: netip.AddrPortFrom(translated, 30042)},
+		&links.Link{NeighborIA: selPeer, IfID: dataplanetest.IfID, State: links.StateEstablished})
+	if sm.m.direct <= 0 {
+		t.Errorf("direct sample = %v, want the round trip to the resolved host", sm.m.direct)
+	}
+	if got := s.hosts[selPeer]; got != q.ControlIP {
+		t.Errorf("the window's host of the peer = %v, want the resolved %v", got, q.ControlIP)
 	}
 }
 

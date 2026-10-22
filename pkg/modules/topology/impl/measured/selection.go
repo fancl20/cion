@@ -17,6 +17,7 @@ import (
 
 	"github.com/fancl20/cion/pkg/libs/loops"
 	"github.com/fancl20/cion/pkg/libs/scion"
+	"github.com/fancl20/cion/pkg/libs/scionrpc"
 	"github.com/fancl20/cion/pkg/libs/underlay"
 	"github.com/fancl20/cion/pkg/modules/links"
 	"github.com/fancl20/cion/pkg/modules/topology"
@@ -102,7 +103,8 @@ type SelectionConfig struct {
 	// Paths resolves the freshest path to a candidate — the baseline — and
 	// enumerates the composed ones.
 	Paths SelectionPaths
-	// Conn carries the SCMP echo probes; its port is the reply address.
+	// Conn carries the SCMP echo probes and the service resolution that
+	// names each peer's host for them; its port is the reply address.
 	Conn *scion.Conn
 	// Sockets is the socket source the dials and the band probes construct
 	// through; the zero value is the kernel's.
@@ -176,6 +178,9 @@ type selection struct {
 	// eviction: each departure changes the routes every other exclusion was
 	// measured against, so one up link leaves per window.
 	upLeft bool
+	// hosts are the hosts the peers' own resolution named this window, the
+	// ones their echoes address; each window asks anew.
+	hosts map[addr.IA]netip.Addr
 	// probeFn, pathEchoFn, aliveFn, and establishFn override the
 	// measurement, the excluded measurement's echo, the candidate-grace
 	// probe, and the establishment in tests; nil uses the real ones.
@@ -223,6 +228,7 @@ func (s *selection) pass(ctx context.Context) {
 	if s.streaks == nil {
 		s.streaks = make(map[addr.IA]*peerStreak)
 	}
+	s.hosts = nil
 	entries, err := s.cfg.Store.All(ctx)
 	if err != nil {
 		slog.Error("Selection reading the link store", "err", err)
@@ -239,14 +245,12 @@ func (s *selection) pass(ctx context.Context) {
 	// echo. The scope filter skips what the viewer cannot dial, whoever
 	// published it.
 	samples := make(map[addr.IA]sample)
-	entriesByIA := make(map[addr.IA]DirectoryEntry)
 	candidates := make([]DirectoryEntry, 0, len(directory))
 	for _, e := range directory {
 		if e.IA.Equal(s.cfg.IA) ||
 			!probeable(s.cfg.ControlAddr.Addr(), e.RendezvousAddr.Addr()) {
 			continue
 		}
-		entriesByIA[e.IA] = e
 		if l, ok := neighbors[e.IA]; ok {
 			samples[e.IA] = s.measure(ctx, e, l)
 			continue
@@ -254,7 +258,7 @@ func (s *selection) pass(ctx context.Context) {
 		candidates = append(candidates, e)
 		samples[e.IA] = s.measure(ctx, e, nil)
 	}
-	ts := s.windowTiers(ctx, neighbors, entriesByIA, samples)
+	ts := s.windowTiers(ctx, neighbors, samples)
 	if ctx.Err() != nil {
 		return
 	}
@@ -519,7 +523,7 @@ func (s *selection) establish(ctx context.Context, e DirectoryEntry, why string)
 // reversed arrival path — and a candidate's (a demoted neighbor included)
 // by the rendezvous echo that reaches where no path and no interface exist.
 // A neighbor whose link the conn cannot send over — its verdict down —
-// fails each run's write at once, and the zero sample is what it would
+// fails its writes at once, and the zero sample is what it would
 // measure. The baseline is the same SCMP echo instrument over the
 // freshest clean composed route of the enumeration the probe keeps beside
 // the sample, the route recorded as the sample's carrier: one destination,
@@ -527,14 +531,12 @@ func (s *selection) establish(ctx context.Context, e DirectoryEntry, why string)
 // the baseline unmeasured for the window rather than measured over a route
 // the network would not serve. The rendezvous echo claims the zero ISD-AS —
 // a probe mints no entry a candidate sweep could mistake for a peer —
-// deduplicated by the control address it claims.
+// deduplicated by the control address it claims. Both SCMP echoes address
+// the host the peer's own resolution names.
 func (s *selection) probe(ctx context.Context, e DirectoryEntry, l *links.Link) sample {
 	var m measurement
 	if l != nil {
-		m.direct = s.echoRTT(ctx, &scion.Addr{
-			IA:   e.IA,
-			Addr: netip.AddrPortFrom(e.ControlAddr.Addr(), underlay.EndhostPort),
-		})
+		m.direct = s.peerEcho(ctx, e.IA, nil)
 	} else if _, _, rtt, err := s.echo(ctx, netip.AddrPortFrom(s.cfg.ControlAddr.Addr(), 0),
 		e.RendezvousAddr, addr.IA(0), s.cfg.ControlAddr); err == nil {
 		m.direct = rtt
@@ -551,24 +553,61 @@ func (s *selection) probe(ctx context.Context, e DirectoryEntry, l *links.Link) 
 	// comparator reads the two round trips against each other.
 	if c := s.freshest(candidates); c != nil {
 		sm.carrier = c
-		sm.m.path = s.pathEcho(ctx, e, c)
+		sm.m.path = s.pathEcho(ctx, e.IA, c)
 	}
 	return sm
 }
 
 // pathEcho takes the median SCMP echo round trip to the peer over the
 // candidate's path, through the test seam when set.
-func (s *selection) pathEcho(
-	ctx context.Context, e DirectoryEntry, c *scion.Candidate,
-) time.Duration {
+func (s *selection) pathEcho(ctx context.Context, ia addr.IA, c *scion.Candidate) time.Duration {
 	if s.pathEchoFn != nil {
-		return s.pathEchoFn(e.IA, c)
+		return s.pathEchoFn(ia, c)
+	}
+	return s.peerEcho(ctx, ia, c.Path)
+}
+
+// peerEcho takes the median SCMP echo round trip to the peer over the path —
+// nil for the one-hop path the conn resolves — addressed to the host the
+// peer's own resolution names, at the endhost port its responder binds
+// beside the endpoint. A peer whose resolution answers over no route of the
+// window measures nothing.
+func (s *selection) peerEcho(ctx context.Context, ia addr.IA, path *spath.Decoded) time.Duration {
+	if s.cfg.Conn == nil {
+		return 0
+	}
+	host, ok := s.peerHost(ctx, ia, path)
+	if !ok {
+		return 0
 	}
 	return s.echoRTT(ctx, &scion.Addr{
-		IA:   e.IA,
-		Addr: netip.AddrPortFrom(e.ControlAddr.Addr(), underlay.EndhostPort),
-		Path: c.Path,
+		IA:   ia,
+		Addr: netip.AddrPortFrom(host, underlay.EndhostPort),
+		Path: path,
 	})
+}
+
+// peerHost returns the host the peer's own resolution names — the drafts'
+// service resolution of its control service over the path the echo is about
+// to ride, answered with the host its router delivers to — memoized for the
+// window. The directory's published host is the peer as the network sees
+// it, which behind a translation no socket of the peer's holds. A route the
+// resolution goes unanswered over memoizes nothing, so the window's next
+// route asks again.
+func (s *selection) peerHost(ctx context.Context, ia addr.IA, path *spath.Decoded) (netip.Addr, bool) {
+	if host, ok := s.hosts[ia]; ok {
+		return host, true
+	}
+	resolved, err := scionrpc.ResolveService(ctx, s.cfg.Conn,
+		&scion.Addr{IA: ia, Service: addr.SvcCS, Path: path})
+	if err != nil {
+		return netip.Addr{}, false
+	}
+	if s.hosts == nil {
+		s.hosts = make(map[addr.IA]netip.Addr)
+	}
+	s.hosts[ia] = resolved.Addr()
+	return resolved.Addr(), true
 }
 
 // declare lands the window's per-link one-way estimates in the shared table

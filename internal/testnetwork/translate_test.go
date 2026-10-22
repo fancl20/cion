@@ -81,8 +81,8 @@ func TestTranslatedJoinerRecordsTheObservation(t *testing.T) {
 // proofs the exchange-level lab deferred: a translated joiner's link
 // carries its BFD stream and data through the mapping, holding Established
 // past idle timeouts the mapping outlives only because the stream refreshes
-// it — and under silence the link falls with the BFD detection and the
-// mapping expires after it.
+// it — and under silence the link falls with the BFD detection, the founder
+// retires it, and the mapping expires after the retirement.
 func TestTranslatedLinkRidesTheMapping(t *testing.T) {
 	if !solo(t) {
 		return
@@ -111,12 +111,18 @@ func TestTranslatedLinkRidesTheMapping(t *testing.T) {
 		t.Fatalf("the boundary holds no mapping after %v of link", 3*fabric.MappingIdle)
 	}
 
-	// Silence: the joiner stops, the founder's BFD runs out its detection,
-	// and the mapping — nothing crossing any more — expires after it.
+	// Silence: the joiner stops and the founder's BFD runs out its detection.
+	// The founder's stream outlives its down verdict and refreshes the
+	// mapping until the founder retires the link; the mapping — nothing
+	// crossing any more — expires after the retirement.
 	ifID := entryOf(ctx, a, j.app.IA()).IfID
 	j.stop(t)
 	Poll(t, "A to mark the translated link down", func() bool {
 		return markedDown(ctx, a, ifID)
+	})
+	Poll(t, "A to retire the translated link", func() bool {
+		e := entryOf(ctx, a, j.app.IA())
+		return e == nil || !e.Live()
 	})
 	PollFor(t, 4*fabric.MappingIdle, "the mapping to expire under silence", func() bool {
 		return len(b.Mappings()) == 0

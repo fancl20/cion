@@ -81,9 +81,6 @@ func TestWindowTierFacts(t *testing.T) {
 	up := &links.Link{NeighborIA: selA, IfID: 3, State: links.StateEstablished}
 	dead := &links.Link{NeighborIA: selB, IfID: 4, State: links.StateEstablished}
 	neighbors := map[addr.IA]*links.Link{selA: up, selB: dead}
-	entries := map[addr.IA]DirectoryEntry{
-		selA: entryOf(selA), selB: entryOf(selB), selC: entryOf(selC), selD: entryOf(selD),
-	}
 	s := &selection{
 		cfg: SelectionConfig{
 			IA:       selIA,
@@ -115,7 +112,7 @@ func TestWindowTierFacts(t *testing.T) {
 	d.carrier = &d.candidates[0]
 	samples := map[addr.IA]sample{selA: a, selB: b, selC: c, selD: d}
 
-	ts := s.windowTiers(t.Context(), neighbors, entries, samples)
+	ts := s.windowTiers(t.Context(), neighbors, samples)
 	if len(ts) != 2 {
 		t.Fatalf("tiers = %d, want the fast one and the slow one", len(ts))
 	}

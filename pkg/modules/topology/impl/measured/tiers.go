@@ -108,7 +108,6 @@ func deriveTiers(samples map[addr.IA]sample) []tier {
 func (s *selection) windowTiers(
 	ctx context.Context,
 	neighbors map[addr.IA]*links.Link,
-	entries map[addr.IA]DirectoryEntry,
 	samples map[addr.IA]sample,
 ) []tier {
 
@@ -146,7 +145,7 @@ func (s *selection) windowTiers(
 		t.stranded = len(t.upLinks) == 0 && t.baseline == 0
 		t.excluded = make(map[addr.IA]excludedSample, len(up))
 		for ia, link := range up {
-			t.excluded[ia] = s.measureExcluded(ctx, t, clean, samples, entries, link)
+			t.excluded[ia] = s.measureExcluded(ctx, t, clean, samples, link)
 		}
 	}
 	return ts
@@ -165,7 +164,6 @@ func (s *selection) measureExcluded(
 	t *tier,
 	clean map[addr.IA][]*scion.Candidate,
 	samples map[addr.IA]sample,
-	entries map[addr.IA]DirectoryEntry,
 	link segment.LinkID,
 ) excludedSample {
 
@@ -191,7 +189,7 @@ func (s *selection) measureExcluded(
 	if freshest == nil {
 		return ex
 	}
-	ex.echo = s.pathEcho(ctx, entries[dst], freshest)
+	ex.echo = s.pathEcho(ctx, dst, freshest)
 	echoes := []time.Duration{ex.echo}
 	probed := map[*scion.Candidate]bool{freshest: true}
 	for _, m := range t.members {

@@ -179,9 +179,6 @@ func TestMeasureExcluded(t *testing.T) {
 		selD: {NeighborIA: selD, IfID: 4, State: links.StateEstablished},
 		selE: {NeighborIA: selE, IfID: 5, State: links.StateEstablished},
 	}
-	entries := map[addr.IA]DirectoryEntry{
-		selA: entryOf(selA), selB: entryOf(selB), selD: entryOf(selD), selE: entryOf(selE),
-	}
 	// A's carrier leaves through B's link; A's other route through its own.
 	// B's carrier leaves through its own link; B's other route through a
 	// third, declaring.
@@ -212,7 +209,7 @@ func TestMeasureExcluded(t *testing.T) {
 			return echoes[routeKey(c)]
 		},
 	}
-	ts := s.windowTiers(t.Context(), neighbors, entries, samples)
+	ts := s.windowTiers(t.Context(), neighbors, samples)
 	if len(ts) != 2 {
 		t.Fatalf("tiers = %d, want the fast one and E's", len(ts))
 	}
