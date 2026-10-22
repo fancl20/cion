@@ -102,8 +102,8 @@ func (n *testNode) newConn(t *testing.T, port uint16) *scion.Conn {
 
 // newWildcardConn returns a SCION connection of the node bound to the
 // wildcard with an ephemeral port, naming itself by the given host — the
-// learned external host's stand-in, the deployment shape the default control
-// address spells.
+// wildcard host's stand-in, the deployment shape the default control address
+// spells.
 func (n *testNode) newWildcardConn(t *testing.T, host netip.Addr) *scion.Conn {
 	t.Helper()
 	conn, err := scion.NewConn(scion.ConnConfig{
@@ -112,7 +112,7 @@ func (n *testNode) newWildcardConn(t *testing.T, host netip.Addr) *scion.Conn {
 		InternalAddr: n.Internal,
 		MACKey:       n.MACKey,
 		Links:        n.Links,
-		Advertise: func(context.Context) netip.Addr {
+		WildcardHost: func(context.Context) netip.Addr {
 			return host
 		},
 	})

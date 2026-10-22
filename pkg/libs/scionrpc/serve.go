@@ -100,11 +100,11 @@ func (c *resolutionConn) SetWriteDeadline(t time.Time) error { return c.conn.Set
 
 // answer replies to one resolution request with the endpoint's QUIC
 // transport address: the socket the request arrived on, the address the
-// registered service maps to — the advertised host at its port when the
-// bind names no host a peer could dial, and nothing while none has
-// resolved, the requester's retry re-asking.
+// registered service maps to — the wildcard host at its port when the bind
+// names no host a peer could dial, and nothing while none has resolved, the
+// requester's retry re-asking.
 func (c *resolutionConn) answer(from net.Addr) {
-	local, ok := c.conn.AdvertisedAddr()
+	local, ok := c.conn.SourceAddr()
 	if !ok {
 		slog.Debug("Answering service resolution without a host", "peer", from)
 		return

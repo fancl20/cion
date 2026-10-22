@@ -569,7 +569,7 @@ func (n *node) scionConn(port uint16) (*scion.Conn, error) {
 		MACKey:        n.ident.key,
 		Links:         n.usableLinks,
 		InterfaceDown: n.ifDown,
-		Advertise:     n.wildcardHost.resolve,
+		WildcardHost:  n.wildcardHost.resolve,
 		Sockets:       n.sockets,
 	})
 }

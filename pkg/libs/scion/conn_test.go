@@ -56,14 +56,14 @@ func (n *testNode) newConn(t *testing.T, port uint16) *Conn {
 // before its rebind.
 var testHost = netip.MustParseAddr("127.0.0.127")
 
-// TestConnAdvertisedAddr checks the address the conn's service-resolution
-// replies name: a concrete bind names itself whatever the advertise
-// resolver answers, and the wildcard bind names the advertised host at its
-// port — nothing while the resolver has learned none, for the bound
-// wildcard names no host a peer could dial.
-func TestConnAdvertisedAddr(t *testing.T) {
+// TestConnSourceAddr checks the address the conn names for itself: a
+// concrete bind names itself whatever the wildcard host resolves, and the
+// wildcard bind names the wildcard host at its port — nothing while the
+// resolver has resolved none, for the bound wildcard names no host a peer
+// could dial.
+func TestConnSourceAddr(t *testing.T) {
 	var host netip.Addr
-	advertise := func(context.Context) netip.Addr { return host }
+	wildcardHost := func(context.Context) netip.Addr { return host }
 	conn, err := NewConn(ConnConfig{
 		IA:           addr.MustIAFrom(20, 0xff0000000001),
 		Bind:         netip.AddrPortFrom(testHost, 0).String(),
@@ -74,10 +74,10 @@ func TestConnAdvertisedAddr(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = conn.Close() }()
-	conn.advertise = advertise
-	if advertised, ok := conn.AdvertisedAddr(); !ok || advertised != conn.local {
-		t.Errorf("a concrete bind's AdvertisedAddr() = %v, %v, want the bound %v",
-			advertised, ok, conn.local)
+	conn.wildcardHost = wildcardHost
+	if named, ok := conn.SourceAddr(); !ok || named != conn.local {
+		t.Errorf("a concrete bind's SourceAddr() = %v, %v, want the bound %v",
+			named, ok, conn.local)
 	}
 
 	wild, err := NewConn(ConnConfig{
@@ -90,15 +90,15 @@ func TestConnAdvertisedAddr(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = wild.Close() }()
-	wild.advertise = advertise
-	if _, ok := wild.AdvertisedAddr(); ok {
-		t.Error("an unresolved advertise resolver named an address")
+	wild.wildcardHost = wildcardHost
+	if _, ok := wild.SourceAddr(); ok {
+		t.Error("an unresolved wildcard host named an address")
 	}
 	host = netip.MustParseAddr("203.0.113.7")
-	advertised, ok := wild.AdvertisedAddr()
-	if !ok || advertised != netip.AddrPortFrom(host, wild.local.Port()) {
-		t.Errorf("the wildcard's AdvertisedAddr() = %v, %v, want %v at the bound port %v",
-			advertised, ok, host, wild.local.Port())
+	named, ok := wild.SourceAddr()
+	if !ok || named != netip.AddrPortFrom(host, wild.local.Port()) {
+		t.Errorf("the wildcard's SourceAddr() = %v, %v, want %v at the bound port %v",
+			named, ok, host, wild.local.Port())
 	}
 }
 
@@ -174,12 +174,12 @@ func TestConnDatagrams(t *testing.T) {
 	}
 }
 
-// TestConnWildcardAdvertisedSource checks the source host a wildcard-bound
-// conn's packets carry: none until one is learned — the write fails rather
-// than naming an address no reply could deliver to — and the advertised one
-// after, which the peer reads as the reply route and the wildcard's own
-// delivery receives.
-func TestConnWildcardAdvertisedSource(t *testing.T) {
+// TestConnWildcardSource checks the source host a wildcard-bound conn's
+// packets carry: none until one is resolved — the write fails rather than
+// naming an address no reply could deliver to — and the wildcard host after,
+// which the peer reads as the reply route and the wildcard's own delivery
+// receives.
+func TestConnWildcardSource(t *testing.T) {
 	iaA := addr.MustIAFrom(20, 0xff0000000041)
 	iaB := addr.MustIAFrom(20, 0xff0000000042)
 	extA, extB := freeUDPAddr(t), freeUDPAddr(t)
@@ -193,7 +193,7 @@ func TestConnWildcardAdvertisedSource(t *testing.T) {
 			InternalAddr: n.Internal,
 			MACKey:       n.MACKey,
 			Links:        n.Links,
-			Advertise: func(context.Context) netip.Addr {
+			WildcardHost: func(context.Context) netip.Addr {
 				return host()
 			},
 		})
@@ -207,7 +207,8 @@ func TestConnWildcardAdvertisedSource(t *testing.T) {
 	connA := newWildConn(a, func() netip.Addr { return learned })
 	connB := newWildConn(b, func() netip.Addr { return b.ControlIP })
 
-	// The dial names the peer by its advertised host, as a deployment does.
+	// The dial names the peer by the host it names for itself, as a
+	// deployment does.
 	peerB := &Addr{IA: iaB, Addr: netip.AddrPortFrom(b.ControlIP, connB.LocalPort())}
 	if _, err := connA.WriteTo([]byte("hello"), peerB); err == nil {
 		t.Error("a wildcard conn without a learned host sent a packet")
@@ -232,11 +233,11 @@ func TestConnWildcardAdvertisedSource(t *testing.T) {
 		t.Fatalf("peer address type %T", from)
 	}
 	if fromA.Addr.Addr() != a.ControlIP {
-		t.Errorf("the arrival's source host = %v, want the advertised %v",
+		t.Errorf("the arrival's source host = %v, want the wildcard host %v",
 			fromA.Addr.Addr(), a.ControlIP)
 	}
 
-	// The reply rides the advertised source back through the wildcard's own
+	// The reply rides the wildcard host back through the wildcard's own
 	// delivery.
 	if _, err := connB.WriteTo([]byte("welcome"), from); err != nil {
 		t.Fatal(err)

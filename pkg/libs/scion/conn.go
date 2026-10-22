@@ -77,8 +77,9 @@ func (a *Addr) String() string {
 // (scmp.go).
 type Conn struct {
 	localIA addr.IA
-	// local is the advertised underlay address of the endpoint. Incoming
-	// packets addressed to it are delivered here by the router.
+	// local is the bound underlay address of the endpoint: incoming packets
+	// addressed to its port — on its host, or on the wildcard host under the
+	// wildcard bind — are delivered here by the router.
 	local netip.AddrPort
 	// internal is the router's internal link address; raw SCION packets are
 	// submitted there for forwarding.
@@ -94,10 +95,10 @@ type Conn struct {
 	// ifDown is the node's shared negative cache of interface-down signals;
 	// nil drops them as before.
 	ifDown *InterfaceDownCache
-	// advertise resolves the host the conn names for itself under a wildcard
-	// bind; nil names nothing, and no packet leaves the bind until a host
-	// lands.
-	advertise func(ctx context.Context) netip.Addr
+	// wildcardHost resolves the host the conn names for itself under a
+	// wildcard bind; nil names nothing, and no packet leaves the bind until a
+	// host lands.
+	wildcardHost func(ctx context.Context) netip.Addr
 
 	conn underlay.UDPConn
 
@@ -109,8 +110,9 @@ type Conn struct {
 type ConnConfig struct {
 	// IA is the local ISD-AS.
 	IA addr.IA
-	// Bind is the underlay "host:port" address to listen on and advertise.
-	// Port 0 binds an ephemeral one.
+	// Bind is the underlay "host:port" address to listen on, the one the conn
+	// names for itself unless its host is the wildcard. Port 0 binds an
+	// ephemeral one.
 	Bind string
 	// InternalAddr is the router's internal underlay address.
 	InternalAddr string
@@ -124,12 +126,12 @@ type ConnConfig struct {
 	// interface-down signals; the conn's receive paths recognize the signal
 	// and record it. Nil drops them.
 	InterfaceDown *InterfaceDownCache
-	// Advertise resolves the host the conn names for itself where a wildcard
-	// bind names none: the packets' source host, which the peer's replies are
-	// addressed to and the local router delivers them by, and the
+	// WildcardHost resolves the host the conn names for itself where a
+	// wildcard bind names none: the packets' source host, which the peer's
+	// replies are addressed to and the local router delivers them by, and the
 	// service-resolution replies' answer alike. Nil names nothing under the
 	// wildcard, and no packet leaves one until a host lands.
-	Advertise func(ctx context.Context) netip.Addr
+	WildcardHost func(ctx context.Context) netip.Addr
 	// Sockets is the socket source the underlay bind constructs through;
 	// the zero value is the kernel's.
 	Sockets underlay.Sockets
@@ -155,8 +157,8 @@ func NewConn(cfg ConnConfig) (*Conn, error) {
 	if err != nil {
 		return nil, fmt.Errorf("binding endpoint address: %w", err)
 	}
-	// A zero port is replaced by the bound one, so the advertised address is
-	// the one replies can reach.
+	// A zero port is replaced by the bound one, so the address the conn names
+	// for itself is the one replies can reach.
 	bound := conn.LocalAddr()
 	boundIP, ok := netip.AddrFromSlice(bound.IP)
 	if !ok {
@@ -164,14 +166,14 @@ func NewConn(cfg ConnConfig) (*Conn, error) {
 	}
 	local = netip.AddrPortFrom(boundIP.Unmap(), uint16(bound.Port))
 	return &Conn{
-		localIA:   cfg.IA,
-		local:     local,
-		internal:  internal,
-		mac:       mac,
-		links:     cfg.Links,
-		ifDown:    cfg.InterfaceDown,
-		advertise: cfg.Advertise,
-		conn:      conn,
+		localIA:      cfg.IA,
+		local:        local,
+		internal:     internal,
+		mac:          mac,
+		links:        cfg.Links,
+		ifDown:       cfg.InterfaceDown,
+		wildcardHost: cfg.WildcardHost,
+		conn:         conn,
 	}, nil
 }
 
@@ -197,12 +199,12 @@ func (c *Conn) LocalAddr() net.Addr {
 	return &Addr{IA: c.localIA, Addr: c.local}
 }
 
-// AdvertisedAddr returns the underlay address the conn's service-resolution
-// replies name: the bound address while it names a host, else — under the
-// wildcard bind — the advertised host at the bound port. False when a
-// wildcard bind has no host to name yet, the reply naming nothing and the
-// requester's retry re-asking.
-func (c *Conn) AdvertisedAddr() (netip.AddrPort, bool) {
+// SourceAddr returns the underlay address the conn names for itself — its
+// packets' source and its service-resolution replies' answer: the bound
+// address while it names a host, else — under the wildcard bind — the
+// wildcard host at the bound port. False when a wildcard bind has no host to
+// name yet, the reply naming nothing and the requester's retry re-asking.
+func (c *Conn) SourceAddr() (netip.AddrPort, bool) {
 	host, err := c.sourceHost()
 	if err != nil {
 		return netip.AddrPort{}, false
@@ -217,14 +219,14 @@ var errWildcardNamesNoHost = errors.New("the wildcard bind names no host a reply
 // sourceHost returns the host the conn's packets name as their source — the
 // one the peer's replies are addressed to and this node's own router
 // delivers them by: the bound address while it names a host, else the
-// advertised one, for the wildcard names none itself. A wildcard bind that
-// has learned no host sends nothing.
+// wildcard host, for the wildcard names none itself. A wildcard bind that
+// has resolved no host sends nothing.
 func (c *Conn) sourceHost() (netip.Addr, error) {
 	if host := c.local.Addr(); !host.IsUnspecified() {
 		return host, nil
 	}
-	if c.advertise != nil {
-		if host := c.advertise(context.Background()); host.IsValid() && !host.IsUnspecified() {
+	if c.wildcardHost != nil {
+		if host := c.wildcardHost(context.Background()); host.IsValid() && !host.IsUnspecified() {
 			return host, nil
 		}
 	}
@@ -295,8 +297,8 @@ func (c *Conn) WriteTo(b []byte, addr net.Addr) (int, error) {
 // writePacket serializes a full SCION packet addressing the peer — with
 // nextHdr as the layer after the SCION header — through the builder; the
 // mutex guards the MAC hasher one-hop paths use. The source host resolves
-// before the lock, for the advertise resolver may spend a lookup's time and
-// no send waits on another's.
+// before the lock, for the wildcard host's resolver may spend a lookup's time
+// and no send waits on another's.
 func (c *Conn) writePacket(
 	peer *Addr,
 	nextHdr slayers.L4ProtocolType,

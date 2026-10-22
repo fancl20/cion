@@ -116,7 +116,7 @@ func TestServeHTTP3JoinsItsHandlers(t *testing.T) {
 // TestSCIONNativeRoundTripBetweenWildcardBinds checks the channel between two
 // wildcard-bound endpoints — the deployment shape the default control
 // address spells, both sockets binding the wildcard and naming themselves by
-// their advertised hosts: the request names the server's, the reply
+// their wildcard hosts: the request names the server's, the reply
 // addresses the client's, and each node's own delivery completes the round
 // trip a wildcard source would blackhole.
 func TestSCIONNativeRoundTripBetweenWildcardBinds(t *testing.T) {
