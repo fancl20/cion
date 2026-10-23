@@ -299,6 +299,35 @@ func TestLookupEmptyAnswerNotCached(t *testing.T) {
 	}
 }
 
+// TestLookupDownSkipsCoreDestinations checks the down lookup's core
+// destination: a non-core asks the core nothing toward a core — no down
+// segment ends there, and the handler answers a core destination with core
+// segments alone — while a non-core destination is fetched as ever.
+func TestLookupDownSkipsCoreDestinations(t *testing.T) {
+	fx := newLookupFixture(t)
+	ctx := context.Background()
+
+	for range 2 {
+		if segs := fx.lookup.Down(ctx, coreIATest); len(segs) != 0 {
+			t.Fatalf("down segments toward the core = %d, want none", len(segs))
+		}
+	}
+	fx.fetch.mtx.Lock()
+	if got := len(fx.fetch.calls); got != 0 {
+		t.Errorf("fetches toward the core = %d, want 0", got)
+	}
+	fx.fetch.mtx.Unlock()
+
+	if segs := fx.lookup.Down(ctx, iaLineC); len(segs) != 1 {
+		t.Fatalf("down segments toward a non-core = %d, want the fetched 1", len(segs))
+	}
+	fx.fetch.mtx.Lock()
+	defer fx.fetch.mtx.Unlock()
+	if len(fx.fetch.calls) != 1 || !fx.fetch.calls[0].dst.Equal(iaLineC) {
+		t.Errorf("fetch calls = %v, want the one toward the non-core", fx.fetch.calls)
+	}
+}
+
 // TestLookupFetchesAskTheCoreTheyName checks the fetch's per-core send: the
 // down expansion asks each core of the destination ISD at that core's own
 // address with itself as the source, the core expansion each reachable

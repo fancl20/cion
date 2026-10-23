@@ -3,6 +3,7 @@ package controlplane
 import (
 	"context"
 	"log/slog"
+	"slices"
 	"time"
 
 	"connectrpc.com/connect"
@@ -178,13 +179,21 @@ func (s *LookupService) reachableCores() []addr.IA {
 }
 
 // Down returns the down segments serving dst, fetching and caching them from
-// the core's control service as needed; the path provider composes them.
+// the core's control service as needed; the path provider composes them. A
+// non-core asks nothing for a core destination: down segments end at the
+// non-core ASes that register them, and the core's handler answers a core
+// destination with core segments alone, so the fetch would come back empty —
+// uncached, asked again at every call.
 func (s *LookupService) Down(ctx context.Context, dst addr.IA) []*pathdb.Segment {
 	if s.cfg.IsCore {
 		return s.DBGet(pathdb.Query{Type: pathdb.SegmentTypeDown, DstIA: dst})
 	}
+	cores := s.cores(dst.ISD())
+	if slices.Contains(cores, dst) {
+		return nil
+	}
 	var down []*pathdb.Segment
-	for _, core := range s.cores(dst.ISD()) {
+	for _, core := range cores {
 		down = append(down, s.fetchCached(ctx, core, dst, pathdb.SegmentTypeDown)...)
 	}
 	return down
