@@ -6,8 +6,12 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"net/netip"
 	"testing"
+	"testing/synctest"
+	"time"
 
 	"github.com/scionproto/scion/pkg/addr"
 	"github.com/scionproto/scion/pkg/scrypto/cppki"
@@ -17,6 +21,54 @@ import (
 	"github.com/fancl20/cion/pkg/libs/scion"
 	"github.com/fancl20/cion/pkg/modules/trustdb"
 )
+
+// countingPool answers every request with an empty response and counts the
+// sweeps asked of it.
+type countingPool struct {
+	requests, sweeps int
+}
+
+func (p *countingPool) RoundTrip(*http.Request) (*http.Response, error) {
+	p.requests++
+	return httptest.NewRecorder().Result(), nil
+}
+
+func (p *countingPool) CloseIdleConnections() { p.sweeps++ }
+
+// TestAgedTransportSweepsOncePerAge checks the age cap's cadence: requests
+// within an age of the last sweep sweep nothing, the first request an age
+// past it sweeps once before it rides the pool, and the next age runs from
+// that sweep. The ages pass as fake-time sleeps in the bubble.
+func TestAgedTransportSweepsOncePerAge(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		pool := &countingPool{}
+		aged := newAgedTransport(pool, time.Minute)
+		for i, step := range []struct {
+			wait   time.Duration
+			sweeps int
+		}{
+			{0, 0},
+			{time.Minute - time.Nanosecond, 0},
+			{time.Nanosecond, 1},
+			{0, 1},
+			{time.Minute - time.Nanosecond, 1},
+			{time.Nanosecond, 2},
+		} {
+			time.Sleep(step.wait)
+			resp, err := aged.RoundTrip(httptest.NewRequest(http.MethodGet, "https://core/", nil))
+			if err != nil {
+				t.Fatal(err)
+			}
+			_ = resp.Body.Close()
+			if pool.sweeps != step.sweeps {
+				t.Errorf("sweeps after request %d = %d, want %d", i, pool.sweeps, step.sweeps)
+			}
+		}
+		if pool.requests != 6 {
+			t.Errorf("requests the pool carried = %d, want every one of 6", pool.requests)
+		}
+	})
+}
 
 // TestCoreBaseURLBracketsTheLiteral checks the base URL the client's
 // requests carry: an IPv6 literal takes RFC 3986's brackets, and an IPv4

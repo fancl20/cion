@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"net/netip"
 	"strings"
+	"sync"
 	"time"
 
 	"connectrpc.com/connect"
@@ -96,10 +97,10 @@ func NewCoreClient(cfg CoreClientConfig) (*CoreClient, error) {
 	c.qclt = &quic.Transport{Conn: cfg.Conn}
 
 	// QUIC datagrams are capped so a datagram wrapped in a SCION header
-	// still fits a standard 1500-byte MTU, and idle connections die soon
-	// enough that re-dials pick up fresh paths: keep-alives sustain the
-	// healthy ones while the idle timeout retires one whose route went dark,
-	// the next dial taking the locator's current route.
+	// still fits a standard 1500-byte MTU. A connection rides the route its
+	// dial took: keep-alives sustain the healthy ones while the idle timeout
+	// retires one whose route went dark, and the age cap retires the healthy
+	// ones too, the next dial taking the locator's current route.
 	quicConf := &quic.Config{
 		InitialPacketSize: 1200,
 		MaxIdleTimeout:    5 * time.Second,
@@ -141,8 +142,58 @@ func NewCoreClient(cfg CoreClientConfig) (*CoreClient, error) {
 			return c.qclt.Dial(ctx, peer, tlsCfg, cfg)
 		},
 	}
-	c.clt = newClient(&http.Client{Transport: h3t}, coreBaseURL(cfg.Domain))
+	c.clt = newClient(&http.Client{Transport: newAgedTransport(h3t, maxConnAge)},
+		coreBaseURL(cfg.Domain))
 	return c, nil
+}
+
+// maxConnAge caps how long the client's pooled connection serves. A
+// connection rides the route its dial took for life, so the cap bounds how
+// stale the route grows: the locator's later choice is taken within it, and
+// a path's expiration, hours after its segment's origination, lies far
+// beyond it.
+const maxConnAge = 10 * time.Minute
+
+// connPool is a transport pooling connections: HTTP/3's, or a test's double.
+type connPool interface {
+	http.RoundTripper
+	CloseIdleConnections()
+}
+
+// agedTransport retires its pool's connections by age: the first request an
+// age past the last sweep sweeps again, the pool closing every connection no
+// request rides — the request's own included, which then dials anew. The
+// HTTP/3 pool counts a request as riding until its response's headers
+// arrive, and a connection a request rode through a sweep serves until the
+// next one. The SCION-native channel's client carries its twin: that
+// package's tests import this one, which therefore cannot import it.
+type agedTransport struct {
+	pool   connPool
+	maxAge time.Duration
+
+	mtx   sync.Mutex
+	swept time.Time
+}
+
+// newAgedTransport returns the pool's aged transport, its first sweep an age
+// away.
+func newAgedTransport(pool connPool, maxAge time.Duration) *agedTransport {
+	return &agedTransport{pool: pool, maxAge: maxAge, swept: time.Now()}
+}
+
+func (t *agedTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	t.mtx.Lock()
+	if now := time.Now(); now.Sub(t.swept) >= t.maxAge {
+		t.swept = now
+		t.pool.CloseIdleConnections()
+	}
+	t.mtx.Unlock()
+	return t.pool.RoundTrip(req)
+}
+
+// CloseIdleConnections closes the pool's connections no request rides.
+func (t *agedTransport) CloseIdleConnections() {
+	t.pool.CloseIdleConnections()
 }
 
 // coreBaseURL builds the base URL the client's requests carry: the identity

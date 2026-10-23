@@ -10,6 +10,7 @@ import (
 	"net/netip"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/quic-go/quic-go"
@@ -34,6 +35,13 @@ type PeerClientConfig struct {
 	PathTo func(dst addr.IA) *spath.Decoded
 }
 
+// maxConnAge caps how long a pooled connection over a resolved path serves.
+// A connection rides its dial-time path for life — the far end reverses the
+// first packet's — so the cap bounds how stale the path grows: a route the
+// segments since improved on is taken within it, and the path's
+// expiration, hours after its segment's origination, lies far beyond it.
+const maxConnAge = 10 * time.Minute
+
 // NewSCIONClient returns an HTTP client over the SCION-native channel: HTTP/3
 // (QUIC) riding the connection's SCION paths, presenting the node's chain as
 // the client certificate and — with verifyServer set — verifying the peer's
@@ -46,20 +54,21 @@ func NewSCIONClient(
 ) *http.Client {
 
 	// QUIC datagrams are capped so a datagram wrapped in a SCION header
-	// still fits a standard 1500-byte MTU. Idle connections die soon enough
-	// that re-dials pick up fresh paths: the pool holds a connection by its
-	// peer alone, and one whose route went dark is detectable only by its
-	// silence — keep-alives sustain the healthy ones while an idle timeout
-	// an order below QUIC's half-minute default retires a dark one, the next
-	// request dialing the route the provider resolves now. (A request that
-	// times out on a dark connection leaves it pooled: only the connection's
-	// own silence closes it.)
+	// still fits a standard 1500-byte MTU. The pool holds a connection by its
+	// peer alone, riding the path its dial resolved. One whose route went
+	// dark is detectable only by its silence: keep-alives sustain the healthy
+	// ones while an idle timeout an order below QUIC's half-minute default
+	// retires a dark one. Over resolved paths the age cap retires the healthy
+	// ones too; a one-hop path needs none, created afresh for every packet.
+	// Either way the next request dials the route the provider resolves
+	// then. (A request that times out on a dark connection leaves it pooled:
+	// only the connection's own silence closes it.)
 	quicConf := &quic.Config{
 		InitialPacketSize: 1200,
 		MaxIdleTimeout:    5 * time.Second,
 		KeepAlivePeriod:   2 * time.Second,
 	}
-	return &http.Client{Transport: &http3.Transport{
+	h3t := &http3.Transport{
 		QUICConfig: quicConf,
 		TLSClientConfig: &tls.Config{
 			MinVersion:         tls.VersionTLS13,
@@ -78,7 +87,52 @@ func NewSCIONClient(
 			return qclt.Dial(ctx, peer,
 				nativeClientTLS(peer.IA, cfg.Credentials, cfg.Key, verifyServer), quicCfg)
 		},
-	}}
+	}
+	if cfg.PathTo == nil {
+		return &http.Client{Transport: h3t}
+	}
+	return &http.Client{Transport: newAgedTransport(h3t, maxConnAge)}
+}
+
+// connPool is a transport pooling connections: HTTP/3's, or a test's double.
+type connPool interface {
+	http.RoundTripper
+	CloseIdleConnections()
+}
+
+// agedTransport retires its pool's connections by age: the first request an
+// age past the last sweep sweeps again, the pool closing every connection no
+// request rides — the request's own included, which then dials anew. The
+// HTTP/3 pool counts a request as riding until its response's headers
+// arrive, and a connection a request rode through a sweep serves until the
+// next one.
+type agedTransport struct {
+	pool   connPool
+	maxAge time.Duration
+
+	mtx   sync.Mutex
+	swept time.Time
+}
+
+// newAgedTransport returns the pool's aged transport, its first sweep an age
+// away.
+func newAgedTransport(pool connPool, maxAge time.Duration) *agedTransport {
+	return &agedTransport{pool: pool, maxAge: maxAge, swept: time.Now()}
+}
+
+func (t *agedTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	t.mtx.Lock()
+	if now := time.Now(); now.Sub(t.swept) >= t.maxAge {
+		t.swept = now
+		t.pool.CloseIdleConnections()
+	}
+	t.mtx.Unlock()
+	return t.pool.RoundTrip(req)
+}
+
+// CloseIdleConnections closes the pool's connections no request rides.
+func (t *agedTransport) CloseIdleConnections() {
+	t.pool.CloseIdleConnections()
 }
 
 // PeerAuthority encodes the peer address as a URL authority: hexadecimal, so
