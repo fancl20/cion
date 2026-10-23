@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"net/netip"
 	"sync"
 
@@ -33,8 +34,11 @@ type rpcDirectoryClient struct {
 	qclt *quic.Transport
 
 	mtx sync.Mutex
-	// clt serves the current core endpoint; the authority it is keyed by
-	// replaces it when the core's route moves.
+	// hclt is the one HTTP client every request rides, built at the first
+	// and pooling a connection per endpoint authority; clt serves the
+	// current core endpoint, and the authority it is keyed by replaces it
+	// when the core's route moves.
+	hclt      *http.Client
 	clt       wireguardv1connect.DirectoryServiceClient
 	authority string
 }
@@ -63,7 +67,10 @@ func (c *rpcDirectoryClient) Close() error {
 }
 
 // client returns the ConnectRPC client for the core's directory endpoint,
-// building it — or rebuilding it when the core's route moved — on demand.
+// building it — or rebuilding it when the core's route moved — on demand. A
+// rebuild closes the connections no request rides then: the replaced
+// endpoint's, which its keep-alives would otherwise hold open, unused, until
+// the age cap's next sweep.
 func (c *rpcDirectoryClient) client() (wireguardv1connect.DirectoryServiceClient, error) {
 	core := c.coreRoute()
 	if core == nil {
@@ -75,20 +82,25 @@ func (c *rpcDirectoryClient) client() (wireguardv1connect.DirectoryServiceClient
 	if c.clt != nil && c.authority == authority {
 		return c.clt, nil
 	}
-	hclt := scionrpc.NewSCIONClient(scionrpc.PeerClientConfig{
-		Credentials: c.engine,
-		Key:         c.engine.Key,
-		Conn:        c.conn,
-		PathTo: func(dst addr.IA) *spath.Decoded {
-			path, err := c.resolver.LocalPath(dst)
-			if err != nil {
-				return nil
-			}
-			return path
-		},
-	}, c.qclt, true)
+	if c.hclt == nil {
+		c.hclt = scionrpc.NewSCIONClient(scionrpc.PeerClientConfig{
+			Credentials: c.engine,
+			Key:         c.engine.Key,
+			Conn:        c.conn,
+			PathTo: func(dst addr.IA) *spath.Decoded {
+				path, err := c.resolver.LocalPath(dst)
+				if err != nil {
+					return nil
+				}
+				return path
+			},
+		}, c.qclt, true)
+	}
+	if c.clt != nil {
+		c.hclt.CloseIdleConnections()
+	}
 	c.clt = wireguardv1connect.NewDirectoryServiceClient(connect.NewClient(
-		connecthttp.NewTransport(hclt, "https://"+authority)))
+		connecthttp.NewTransport(c.hclt, "https://"+authority)))
 	c.authority = authority
 	return c.clt, nil
 }

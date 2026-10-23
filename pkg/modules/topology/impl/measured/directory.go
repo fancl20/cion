@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"net/netip"
 	"sync"
 	"time"
@@ -207,12 +208,20 @@ type rpcDirectoryClient struct {
 	qclt *quic.Transport
 
 	mtx sync.Mutex
-	// clt serves the current core endpoint; the authority it is keyed by
-	// replaces it when the core's route moves.
+	// hclt is the one HTTP client every request rides, built at the first
+	// and pooling a connection per endpoint authority; clt serves the
+	// current core endpoint, and the authority it is keyed by replaces it
+	// when the core's route moves.
+	hclt      *http.Client
 	clt       nodev1connect.DirectoryServiceClient
 	authority string
 }
 
+// client returns the ConnectRPC client for the core's endpoint, building it —
+// or rebuilding it when the core's route moved — on demand. A rebuild closes
+// the connections no request rides then: the replaced endpoint's, which its
+// keep-alives would otherwise hold open, unused, until the age cap's next
+// sweep.
 func (c *rpcDirectoryClient) client() (nodev1connect.DirectoryServiceClient, error) {
 	core := c.coreRoute()
 	if core == nil {
@@ -224,20 +233,25 @@ func (c *rpcDirectoryClient) client() (nodev1connect.DirectoryServiceClient, err
 	if c.clt != nil && c.authority == authority {
 		return c.clt, nil
 	}
-	hclt := scionrpc.NewSCIONClient(scionrpc.PeerClientConfig{
-		Credentials: c.engine,
-		Key:         c.engine.Key,
-		Conn:        c.conn,
-		PathTo: func(dst addr.IA) *spath.Decoded {
-			path, err := c.paths.LocalPath(dst)
-			if err != nil {
-				return nil
-			}
-			return path
-		},
-	}, c.qclt, true)
+	if c.hclt == nil {
+		c.hclt = scionrpc.NewSCIONClient(scionrpc.PeerClientConfig{
+			Credentials: c.engine,
+			Key:         c.engine.Key,
+			Conn:        c.conn,
+			PathTo: func(dst addr.IA) *spath.Decoded {
+				path, err := c.paths.LocalPath(dst)
+				if err != nil {
+					return nil
+				}
+				return path
+			},
+		}, c.qclt, true)
+	}
+	if c.clt != nil {
+		c.hclt.CloseIdleConnections()
+	}
 	c.clt = nodev1connect.NewDirectoryServiceClient(connect.NewClient(
-		connecthttp.NewTransport(hclt, "https://"+authority)))
+		connecthttp.NewTransport(c.hclt, "https://"+authority)))
 	c.authority = authority
 	return c.clt, nil
 }
