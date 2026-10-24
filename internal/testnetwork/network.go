@@ -180,12 +180,14 @@ const poolSize = 255 * 254
 // fixed ports held for the wrong reason.
 var hostDraws atomic.Uint32
 
-// HostSlot draws the next loopback host of the pool the package's labs
+// HostSlot draws the next loopback host of the pool the process's labs
 // share, so two labs overlap freely, a repeated run draws fresh hosts, and
 // no two draws name one host. The pool starts at 127.0.1.1, above
 // 127.0.0.0/24 — that /24 belongs to the other packages' fixed loopback
 // mounts, and go test runs the packages' processes in parallel — and a draw
-// past the pool's end refuses instead of wrapping.
+// past the pool's end refuses instead of wrapping. The behavior labs'
+// process draws the same hosts as names on fabrics, where no kernel socket
+// binds them.
 func HostSlot(t *testing.T) netip.Addr {
 	t.Helper()
 	ip, ok := poolHost(int(hostDraws.Add(1)))

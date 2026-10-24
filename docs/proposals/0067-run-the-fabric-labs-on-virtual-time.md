@@ -254,3 +254,24 @@ budget is measured when it lands.
     commit of their own, ahead of the stranded lab, which waited on
     [proposal 0068](/docs/proposals/0068-retire-a-useless-link-from-its-dialing-end-alone.md)
     ([translate_test.go](/internal/testnetwork/translate_test.go)).
+*   The behavior labs took a package of their own,
+    [behavior](/internal/testnetwork/behavior/doc.go), which runs without
+    the race detector in a CI step of its own, beside the e2e labs that
+    keep the detector and share their fixtures: the stranded lab moved
+    there into a bubble at production pacing and left CI's skip list, and
+    the regions lab landed there
+    ([stranded_test.go](/internal/testnetwork/behavior/stranded_test.go),
+    [regions_test.go](/internal/testnetwork/behavior/regions_test.go),
+    [ci.yaml](/.github/workflows/ci.yaml)). At production pacing a node
+    that measures the other side before a route into it answers reads that
+    tier stranded, the case ADR-0017 accepts, and the link its rescue buys
+    can stay as a bridge, so the stranded lab's cut takes every pair a link
+    crosses where it once asserted that only A's did; it passed forty runs
+    of forty. The regions lab holds the settling — the link set unchanged
+    for ten virtual minutes, every node at or above its floor and the links
+    connecting them all — within the hour. The floor binds once the set
+    settles, not throughout: a dialer's useless retirement can leave the
+    accepting end below its floor for the windows its own promotion takes.
+    The lab lands skipped while a partition can freeze, as
+    [proposal 0068](/docs/proposals/0068-retire-a-useless-link-from-its-dialing-end-alone.md)'s
+    history records.

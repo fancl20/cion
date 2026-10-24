@@ -32,9 +32,9 @@ jobs:
       # The WebPKI labs answer the ACME HTTP-01 challenge on port 80,
       # which the runner's unprivileged user cannot bind.
       - run: sudo sysctl -w net.ipv4.ip_unprivileged_port_start=0
-      # The stranded-tier lab outpaces the shared runner; the package's
-      # other labs still run.
-      - run: go test -race -count=2 -skip '^TestStrandedTierHeals$' ./...
+      - run: go test -race -count=2 ./...
+      # The behavior labs skip themselves under the race detector.
+      - run: go test -count=2 ./internal/testnetwork/behavior/
 
   build:
     needs: [lint, test]

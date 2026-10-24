@@ -25,12 +25,16 @@ complex structures, prefer using `https://github.com/google/go-cmp` over
 `time.Sleep(...)` is unreliable. Use `testing/synctest` or other deterministic
 methods to wait system ready.
 
+Whole-network behavior labs go in `internal/testnetwork/behavior`; other labs
+go in `internal/testnetwork`.
+
 ## Commit change
 
 ### Before commit
 
 Review changes to ensure they conform to all style requirements. For code
-changes, run tests with `go test -race -count=2` first, then `golangci-lint`,
+changes, run tests with `go test -race -count=2 ./...` and
+`go test -count=2 ./internal/testnetwork/behavior/` first, then `golangci-lint`,
 then `git ls-files '*.go' ':!:proto/' | xargs -r goimports -w -local
 github.com/fancl20/cion`, `go fmt`, `go fix`, and `go vet`. Run test
 commands one at a time; overlapping runs fail the labs.
