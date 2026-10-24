@@ -16,24 +16,27 @@ import (
 
 // TestStrandedTierHeals is the stranded clause's integration proof with the
 // floor met. Two sides — the founding core A with F and G, and C, D, and E —
-// each a full mesh by its joins, bridged by C's and D's links to A, on the
+// joined outward from A and bridged by C's and D's links to A, on the
 // userspace fabric's taps shaped to one-way delays of 1ms within a side,
 // 15ms between A and C, D, or E, and 40ms between F or G and C, D, or E.
 // While the sides form, F and G are blackholed from the far side and E from
 // A: a node whose joins are not yet proven links any candidate it reaches
 // for its floor, and a third bridge would leave each bridge useless beside
-// the other two. The joins' topology then stands: a detour through a sibling
-// doubles a round trip within a side, so no link within a side is useless;
-// the two bridges are each other's only alternative, so excluding either
+// the other two. Each side then settles with every node at its floor, not
+// meshed: the siblings within a side share a tier, and a sibling's own link
+// prices that tier as cheaply as a further link would, so a node above its
+// floor retires such a link as useless and a node at its floor earns none.
+// The two bridges are each other's only alternative, so excluding either
 // changes the route count; and no direct round trip across the sides beats
 // or seconds the routes through them. Lifting the blackholes while the
 // bridges stand lets every node probe the other side, and nothing strands.
-// Cutting A from C, D, and E then leaves every node its floor and every
-// route into the other side crossing the cut. Only the stranded clause can
-// link the sides: no node falls below the floor, and whatever prices the
-// other side — a stale route's declarations near 34ms, or nothing — an 80ms
-// round trip neither beats nor seconds it. The lab draws its bands as taps
-// on the fabric, in no namespace and with no privileges.
+// Cutting A from C, D, and E then leaves every route into the other side
+// crossing the cut. A node the cut drops below its floor restores it within
+// its side, a sibling answering faster than anything across, so only the
+// stranded clause can link the sides: whatever prices the other side — a
+// stale route's declarations near 34ms, or nothing — an 80ms round trip
+// neither beats nor seconds it. The lab draws its bands as taps on the
+// fabric, in no namespace and with no privileges.
 func TestStrandedTierHeals(t *testing.T) {
 	if !solo(t) {
 		return
@@ -80,8 +83,8 @@ func TestStrandedTierHeals(t *testing.T) {
 	near, far := []*assemblyNode{a, f, g}, []*assemblyNode{c, d, e}
 	ctx := t.Context()
 
-	PollFor(t, 5*time.Minute, "each side to mesh and the bridges to stand", func() bool {
-		return meshed(ctx, near) && meshed(ctx, far) &&
+	PollFor(t, 5*time.Minute, "each side to settle and the bridges to stand", func() bool {
+		return settled(ctx, near) && settled(ctx, far) &&
 			meshed(ctx, []*assemblyNode{a, c}) && meshed(ctx, []*assemblyNode{a, d})
 	})
 
@@ -109,16 +112,32 @@ func TestStrandedTierHeals(t *testing.T) {
 		fab.Cut(ipA, n.host)
 	}
 	PollFor(t, 4*time.Minute, "the stranded clause to link the sides", func() bool {
-		if crossLink(ctx, near[1:], far) == "" || !meshed(ctx, near) {
+		return crossLink(ctx, near[1:], far) != "" && settled(ctx, near) && settled(ctx, far)
+	})
+}
+
+// settled reports whether every one of the nodes holds at least the floor
+// of up links and the up links established at both ends among them connect
+// them all.
+func settled(ctx context.Context, nodes []*assemblyNode) bool {
+	for _, n := range nodes {
+		if upLinks(ctx, n) < measured.NeighborFloor {
 			return false
 		}
-		for _, n := range append(near, far...) {
-			if upLinks(ctx, n) < measured.NeighborFloor {
-				return false
+	}
+	reached := map[*assemblyNode]bool{nodes[0]: true}
+	frontier := []*assemblyNode{nodes[0]}
+	for len(frontier) > 0 {
+		x := frontier[0]
+		frontier = frontier[1:]
+		for _, y := range nodes {
+			if !reached[y] && upTo(ctx, x, y) && upTo(ctx, y, x) {
+				reached[y] = true
+				frontier = append(frontier, y)
 			}
 		}
-		return true
-	})
+	}
+	return len(reached) == len(nodes)
 }
 
 // meshed reports whether every pair of the nodes holds an up link
