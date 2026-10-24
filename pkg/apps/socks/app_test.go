@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/go-cmp/cmp"
 	"gvisor.dev/gvisor/pkg/buffer"
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/adapters/gonet"
@@ -270,6 +271,47 @@ func TestConnectSplices(t *testing.T) {
 	}
 	if got := app.flowCount(); got != 1 {
 		t.Errorf("flows held = %d, want 1", got)
+	}
+}
+
+// tcpTuning is the netstack's TCP configuration as the stack reports it.
+type tcpTuning struct {
+	SACK       tcpip.TCPSACKEnabled
+	Recovery   tcpip.TCPRecovery
+	Congestion tcpip.CongestionControlOption
+	Receive    tcpip.TCPReceiveBufferSizeRangeOption
+	Send       tcpip.TCPSendBufferSizeRangeOption
+}
+
+// TestNetstackTCPTuning checks the netstack's TCP runs tuned for long lossy
+// paths: SACK on, RACK off, reno pinned, and the buffer caps.
+func TestNetstackTCPTuning(t *testing.T) {
+	app, _ := newLab(t, nil)
+	var got tcpTuning
+	for _, opt := range []tcpip.GettableTransportProtocolOption{
+		&got.SACK, &got.Recovery, &got.Congestion, &got.Receive, &got.Send,
+	} {
+		if err := app.stack.TransportProtocolOption(tcp.ProtocolNumber, opt); err != nil {
+			t.Fatalf("reading the netstack's TCP option %T: %v", opt, err)
+		}
+	}
+	want := tcpTuning{
+		SACK:       true,
+		Recovery:   0,
+		Congestion: "reno",
+		Receive: tcpip.TCPReceiveBufferSizeRangeOption{
+			Min:     tcp.MinBufferSize,
+			Default: tcp.DefaultReceiveBufferSize,
+			Max:     maxTCPReceiveBuffer,
+		},
+		Send: tcpip.TCPSendBufferSizeRangeOption{
+			Min:     tcp.MinBufferSize,
+			Default: tcp.DefaultSendBufferSize,
+			Max:     maxTCPSendBuffer,
+		},
+	}
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("the netstack's TCP tuning (-want +got):\n%s", diff)
 	}
 }
 

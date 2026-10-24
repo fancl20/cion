@@ -54,6 +54,14 @@ const (
 	egressDialTimeout = 15 * time.Second
 )
 
+// The netstack's TCP buffer caps: the receive window and the send buffer
+// grow to these, room for the bandwidth-delay product of a long composed
+// path.
+const (
+	maxTCPReceiveBuffer = 8 << 20
+	maxTCPSendBuffer    = 6 << 20
+)
+
 // PayloadBudget is the payload an application should assume one UDP
 // datagram through the service carries: the tunnel's inner MTU less the
 // IPv4 and UDP headers and the ten-byte SOCKS UDP header. It is advisory on
@@ -141,11 +149,11 @@ type App struct {
 }
 
 // New assembles the application: the netstack claims the node's own address
-// on a link endpoint the borrowed router feeds, the SOCKS listener binds the
-// registered port on that address alone, and the flow tables stand empty.
-// The delivery installs here and uninstalls at Close: the address is routed
-// exactly while the application exists. A failed assembly destroys the
-// netstack it created.
+// on a link endpoint the borrowed router feeds, its TCP tuned for long lossy
+// paths, the SOCKS listener binds the registered port on that address alone,
+// and the flow tables stand empty. The delivery installs here and uninstalls
+// at Close: the address is routed exactly while the application exists. A
+// failed assembly destroys the netstack it created.
 func New(cfg Config) (*App, error) {
 	own := firstAddr(cfg.Subnet)
 	s := stack.New(stack.Options{
@@ -154,6 +162,10 @@ func New(cfg Config) (*App, error) {
 		},
 		TransportProtocols: []stack.TransportProtocolFactory{tcp.NewProtocol, udp.NewProtocol},
 	})
+	if err := tuneTCP(s); err != nil {
+		s.Destroy()
+		return nil, err
+	}
 	link := channel.New(512, uint32(wireguard.OverlayMTU), "")
 	a := &App{
 		stack:     s,
@@ -489,6 +501,35 @@ func spliceConns(a, b net.Conn, last *atomic.Int64) {
 	wg.Wait()
 	_ = a.Close()
 	_ = b.Close()
+}
+
+// tuneTCP sets the netstack's TCP for long lossy paths: SACK on, which gVisor
+// ships off; RACK loss detection off, for gVisor's RACK handles ACKs late
+// enough to retransmit spuriously and shrink the congestion window; reno
+// pinned, for gVisor's cubic window arithmetic can overflow; and buffers
+// growing to maxTCPReceiveBuffer and maxTCPSendBuffer.
+func tuneTCP(s *stack.Stack) error {
+	sack := tcpip.TCPSACKEnabled(true)
+	recovery := tcpip.TCPRecovery(0)
+	reno := tcpip.CongestionControlOption("reno")
+	receive := tcpip.TCPReceiveBufferSizeRangeOption{
+		Min:     tcp.MinBufferSize,
+		Default: tcp.DefaultReceiveBufferSize,
+		Max:     maxTCPReceiveBuffer,
+	}
+	send := tcpip.TCPSendBufferSizeRangeOption{
+		Min:     tcp.MinBufferSize,
+		Default: tcp.DefaultSendBufferSize,
+		Max:     maxTCPSendBuffer,
+	}
+	for _, opt := range []tcpip.SettableTransportProtocolOption{
+		&sack, &recovery, &reno, &receive, &send,
+	} {
+		if err := s.SetTransportProtocolOption(tcp.ProtocolNumber, opt); err != nil {
+			return fmt.Errorf("setting the netstack's TCP option %T: %v", opt, err)
+		}
+	}
+	return nil
 }
 
 // firstAddr returns the slice's first address — the node's own, which the
