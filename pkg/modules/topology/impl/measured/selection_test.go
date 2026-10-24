@@ -86,11 +86,27 @@ func scopedEntry(ia addr.IA, rendezvous string) DirectoryEntry {
 
 // neighborLink builds an entry of the neighbor with link addresses no other
 // ISD-AS of the tests holds: the store refuses two serving entries with one
-// remote address.
+// remote address. The entry records the directory's rendezvous address, as
+// a link the loop dialed does.
 func neighborLink(ia addr.IA, state links.State) *links.Link {
 	l := liveLink(ia, uint16(41000+2*(uint64(ia.AS())&0xff)))
+	l.Rendezvous = entryOf(ia).RendezvousAddr
 	l.State = state
 	return l
+}
+
+// accept turns the neighbor's entry into one a peer's dial landed on: it
+// records no rendezvous address.
+func (f *selFixture) accept(t *testing.T, ia addr.IA) {
+	t.Helper()
+	l, err := f.store.ByNeighbor(context.Background(), ia)
+	if err != nil || l == nil {
+		t.Fatalf("no live entry for %s: %v", ia, err)
+	}
+	l.Rendezvous = netip.AddrPort{}
+	if err := f.store.Update(context.Background(), l); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func newSelFixture(t *testing.T, neighbors ...addr.IA) *selFixture {
@@ -451,6 +467,49 @@ func TestSelectionUselessRetirement(t *testing.T) {
 	}
 	if f.state(t, selPeer) != links.StateEstablished || f.state(t, selB) != links.StateEstablished {
 		t.Error("an up link retired at the floor")
+	}
+}
+
+// TestSelectionAcceptedLinkStands checks the useless retirement's owner: a
+// link a peer dialed stands through the windows that retire a dialed one
+// under the same measurements, for the peer judges it; its verdict staying
+// down still retires it, and at the cap the least-harm eviction still takes
+// it.
+func TestSelectionAcceptedLinkStands(t *testing.T) {
+	f := newSelFixture(t, selPeer, selA, selB) // above the floor of two
+	f.accept(t, selA)
+	f.carried(selA, 18*time.Millisecond, 20*time.Millisecond, f.via(t, selPeer, 0, selPeer, selA))
+	for range 2 * DemoteWindows {
+		f.pass(t)
+	}
+	if f.state(t, selA) != links.StateEstablished {
+		t.Fatal("a useless link a peer dialed retired at the accepting end")
+	}
+	f.down[selA] = true
+	for range DemoteWindows {
+		f.pass(t)
+	}
+	if f.state(t, selA) != links.StateRetired {
+		t.Fatal("an accepted link whose verdict stayed down was not retired")
+	}
+
+	// At the cap, B — useless, the least harm, and a peer's dial — is the
+	// victim that admits D, as in TestSelectionCapEviction.
+	neighbors := []addr.IA{selPeer, selA, selB, selC}
+	f = newSelFixture(t, neighbors...)
+	f.sel.cfg.MaxLinks = len(neighbors)
+	f.accept(t, selB)
+	f.carried(selA, 10*time.Millisecond, 20*time.Millisecond, f.via(t, selPeer, 0, selPeer, selA))
+	f.carried(selB, 12*time.Millisecond, 20*time.Millisecond, f.via(t, selPeer, 0, selPeer, selB))
+	f.carried(selC, 10*time.Millisecond, 16*time.Millisecond, f.via(t, selA, 0, selA, selC))
+	f.candidate(selD, 8*time.Millisecond, 20*time.Millisecond)
+	f.pass(t)
+	f.pass(t)
+	if len(f.established) != 1 || !f.established[0].Equal(selD) {
+		t.Fatalf("promoted %v, want the displacing candidate", f.established)
+	}
+	if f.state(t, selB) != links.StateRetired {
+		t.Error("the cap's eviction passed over the accepted least-harm link")
 	}
 }
 

@@ -559,8 +559,10 @@ func TestStrandedRedialRespectsTable(t *testing.T) {
 
 // TestStrandedRedialAcceptorMinted checks the revival of an entry the
 // acceptor minted: it records no rendezvous address, so the re-dial aims at
-// the fixed rendezvous port on its remote host. The acceptor binds that
-// port on a loopback host no other test of the package takes.
+// the fixed rendezvous port on its remote host, and the revived entry
+// records the socket it dialed, for the revival is this node's dial. The
+// acceptor binds that port on a loopback host no other test of the package
+// takes.
 func TestStrandedRedialAcceptorMinted(t *testing.T) {
 	host := netip.MustParseAddr("127.0.0.121")
 	newRendezvousFixture(t, func(cfg *RendezvousConfig) {
@@ -579,6 +581,13 @@ func TestStrandedRedialAcceptorMinted(t *testing.T) {
 	want := []links.State{links.StateCandidate}
 	if got := statesOf(t, store, rendezvousIA); !slices.Equal(got, want) {
 		t.Errorf("the acceptor-minted entry = %v, want %v", got, want)
+	}
+	revived, err := store.ByNeighbor(context.Background(), rendezvousIA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if target := netip.AddrPortFrom(host, RendezvousPort); revived == nil || revived.Rendezvous != target {
+		t.Errorf("the revived entry = %+v, want it recording the dialed %v", revived, target)
 	}
 }
 

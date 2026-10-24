@@ -134,3 +134,18 @@ the links it accepted.
     window bound across repeated runs.
 
 ## Implementation history
+
+*   Landed as proposed: the useless loop's guard and `dialed` in
+    [selection.go](/pkg/modules/topology/impl/measured/selection.go), the
+    revival's recorded address in
+    [provider.go](/pkg/modules/topology/impl/measured/provider.go), and the
+    field's doc in [links.go](/pkg/modules/links/links.go). The regions lab
+    of
+    [proposal 0067](/docs/proposals/0067-run-the-fabric-labs-on-virtual-time.md)
+    settled in 13 of 17 runs with the change; without it, its link set
+    changed 163 times in the hour and never held. Of the four runs that did
+    not settle, three froze partitioned — each side's baseline echo into
+    the other answered, so neither read the other's tier stranded — and one
+    kept churning across four nodes, an accepting end lifted above its
+    floor retiring a link it had dialed. The lab lands skipped until a
+    partition heals.

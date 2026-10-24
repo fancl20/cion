@@ -873,13 +873,16 @@ func (s *selection) count(neighbors map[addr.IA]*links.Link, ts []tier) {
 // one up link retires as useless — none in a window whose eviction took an
 // up link, for each departure changes the routes every other exclusion was
 // measured against — and only while up links exceed the floor: of the up
-// links whose useless count reached DemoteWindows and whose window decides
-// them useless, the one whose exclusion moves its tier's price least, ties
-// to the slower direct sample. The useless test is measured each window and
-// decides only when a route avoiding the link answered, so a cut-critical
-// link never retires as useless; it and promotion's priced cases read the
-// same price with hysteresis between the thresholds — one test serving both
-// directions, each correcting the other's estimation error.
+// links this node dialed whose useless count reached DemoteWindows and
+// whose window decides them useless, the one whose exclusion moves its
+// tier's price least, ties to the slower direct sample. A link a peer
+// dialed is the peer's to judge, so the two ends' tiers never disagree over
+// one link: at this end only its verdict or the cap's eviction retires it.
+// The useless test is measured each window and decides only when a route
+// avoiding the link answered, so a cut-critical link never retires as
+// useless; it and promotion's priced cases read the same price with
+// hysteresis between the thresholds — one test serving both directions,
+// each correcting the other's estimation error.
 func (s *selection) prune(
 	ctx context.Context,
 	entries []*links.Link,
@@ -906,7 +909,7 @@ func (s *selection) prune(
 	var worst *links.Link
 	var worstHarm, worstDirect time.Duration
 	for _, l := range entries {
-		if l.State != links.StateEstablished || !s.linkUp(l.IfID) ||
+		if l.State != links.StateEstablished || !s.linkUp(l.IfID) || !dialed(l) ||
 			s.streak(l.NeighborIA).useless < DemoteWindows {
 			continue
 		}
@@ -924,6 +927,13 @@ func (s *selection) prune(
 	if worst != nil && s.retire(ctx, worst, "its tier served no worse without it") {
 		s.upLeft = true
 	}
+}
+
+// dialed reports whether this node dialed the link: the entries it dials
+// record the peer's rendezvous address, and the ones a peer's dial lands on
+// record none.
+func dialed(l *links.Link) bool {
+	return l.Rendezvous.IsValid()
 }
 
 // streak returns the peer's damping counters.

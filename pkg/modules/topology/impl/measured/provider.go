@@ -511,10 +511,11 @@ func (z *Provider) runJoinDials(ctx context.Context) {
 // retired entry revivable admits re-dials its peer's rendezvous socket too,
 // and an answered re-dial revives the entry as a candidate, the state flip
 // and the recorded sides, for the sweep to settle by the peer's evidence,
-// exactly as it settles a joiner's. A revival keeps the entry's local
-// address unless a live entry now holds it — a later allocation drew the
-// retired entry's port — and then claims a fresh one, the address the
-// revived entry serves. An answer naming a neighbor the table holds live
+// exactly as it settles a joiner's. A revival records the rendezvous socket
+// it dialed, for the revived link is this node's dial whoever dialed the
+// entry before. It keeps the entry's local address unless a live entry now
+// holds it — a later allocation drew the retired entry's port — and then
+// claims a fresh one, the address the revived entry serves. An answer naming a neighbor the table holds live
 // revives nothing, and the store refuses to name a live entry after it:
 // that entry retires, for its re-dials would retarget the peer's unproven
 // entry for this node to an address no generation serves. A revival the
@@ -570,6 +571,7 @@ func (z *Provider) dialJoins(ctx context.Context) {
 		l.Remote = recordedLinkAddr(reply.LinkAddr, observed)
 		l.RemoteIfID = reply.IfID
 		if revival {
+			l.Rendezvous = target
 			l.State = links.StateCandidate
 		}
 		err = z.env.Store.Update(ctx, l)

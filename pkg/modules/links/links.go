@@ -77,7 +77,9 @@ type Link struct {
 	// Remote is the neighbor's link underlay address.
 	Remote netip.AddrPort
 	// Rendezvous is the neighbor's rendezvous underlay address — the target
-	// of first contact, retargeted to Remote once the reply arrives.
+	// of first contact, retargeted to Remote once the reply arrives. Only
+	// the entries whose node dialed the link record it; the entries a
+	// peer's dial lands on leave it zero.
 	Rendezvous netip.AddrPort
 	// State is the entry's lifecycle state.
 	State State

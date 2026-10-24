@@ -24,19 +24,19 @@ import (
 // for its floor, and a third bridge would leave each bridge useless beside
 // the other two. Each side then settles with every node at its floor, not
 // meshed: the siblings within a side share a tier, and a sibling's own link
-// prices that tier as cheaply as a further link would, so a node above its
-// floor retires such a link as useless and a node at its floor earns none.
-// The two bridges are each other's only alternative, so excluding either
-// changes the route count; and no direct round trip across the sides beats
-// or seconds the routes through them. Lifting the blackholes while the
-// bridges stand lets every node probe the other side, and nothing strands.
-// Cutting A from C, D, and E then leaves every route into the other side
-// crossing the cut. A node the cut drops below its floor restores it within
-// its side, a sibling answering faster than anything across, so only the
-// stranded clause can link the sides: whatever prices the other side — a
-// stale route's declarations near 34ms, or nothing — an 80ms round trip
-// neither beats nor seconds it. The lab draws its bands as taps on the
-// fabric, in no namespace and with no privileges.
+// prices that tier as cheaply as a further link would, so the end that
+// dialed such a link retires it as useless above its floor, and a node at
+// its floor earns none. The two bridges are each other's only alternative,
+// so excluding either changes the route count; and no direct round trip
+// across the sides beats or seconds the routes through them. Lifting the
+// blackholes while the bridges stand lets every node probe the other side,
+// and nothing strands. Cutting A from C, D, and E then leaves every route
+// into the other side crossing the cut. A node the cut drops below its floor
+// restores it within its side, a sibling answering faster than anything
+// across, so only the stranded clause can link the sides: whatever prices
+// the other side — a stale route's declarations near 34ms, or nothing — an
+// 80ms round trip neither beats nor seconds it. The lab draws its bands as
+// taps on the fabric, in no namespace and with no privileges.
 func TestStrandedTierHeals(t *testing.T) {
 	if !solo(t) {
 		return
