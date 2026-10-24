@@ -1,6 +1,7 @@
 package underlay
 
 import (
+	"context"
 	"net"
 	"net/netip"
 	"syscall"
@@ -42,10 +43,10 @@ type UDPConn interface {
 }
 
 // Sockets is the node's socket source: the seam the packages that bind
-// underlay sockets construct through, so the whole node can boot on one
-// network. The zero value is the kernel source — the sockets the sites
-// opened before the seam — so a caller that names no network gets the
-// kernel's own semantics.
+// underlay sockets or resolve names construct through, so the whole node
+// can boot on one network. The zero value is the kernel source — the
+// sockets and the resolver the sites used before the seam — so a caller
+// that names no network gets the kernel's own semantics.
 type Sockets struct {
 	// ListenUDP binds an unconnected UDP socket on listen. A valid
 	// remoteHint names the family a wildcard listen host binds under —
@@ -55,10 +56,14 @@ type Sockets struct {
 	// ListenTCP binds a TCP listener on the "host:port" address — the
 	// founder's HTTPS bind.
 	ListenTCP func(addr string) (net.Listener, error)
+	// LookupNetIP resolves a host name to its addresses of the network —
+	// "ip", "ip4", or "ip6" — as net.Resolver's method of the name does:
+	// the founding core's resolution of its own domain.
+	LookupNetIP func(ctx context.Context, network, host string) ([]netip.Addr, error)
 }
 
-// Kernel is the kernel socket source: the sockets the sites opened before
-// the seam.
+// Kernel is the kernel socket source: the sockets and the resolver the sites
+// used before the seam.
 var Kernel = Sockets{}
 
 // NewUDP binds an unconnected UDP socket through the source, the kernel's
@@ -77,6 +82,15 @@ func (s Sockets) NewTCP(addr string) (net.Listener, error) {
 		return s.ListenTCP(addr)
 	}
 	return net.Listen("tcp", addr)
+}
+
+// Lookup resolves the host name through the source, the system resolver's
+// where the source names none.
+func (s Sockets) Lookup(ctx context.Context, network, host string) ([]netip.Addr, error) {
+	if s.LookupNetIP != nil {
+		return s.LookupNetIP(ctx, network, host)
+	}
+	return net.DefaultResolver.LookupNetIP(ctx, network, host)
 }
 
 // kernelConn is the kernel's UDP socket: a net.UDPConn beside the batch

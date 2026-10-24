@@ -276,10 +276,10 @@ func TestContract(t *testing.T) {
 // TestPublishedHostFollowsLearning checks the host the node's own entry
 // publishes: a non-core's follows the learned external host — a restart
 // republishes the persisted one — the wildcard fallback publishing nothing
-// until one is learned, and the founding core resolving its own domain, of
-// the family its control host binds — the wildcard's first answer, which
-// names no family to filter by — holding no address the resolver did not
-// vouch for.
+// until one is learned, and the founding core resolving its own domain
+// through its socket source, of the family its control host binds — the
+// wildcard's first answer, which names no family to filter by — holding no
+// address the resolver did not vouch for.
 func TestPublishedHostFollowsLearning(t *testing.T) {
 	control := netip.MustParseAddr("10.0.0.7")
 	z, err := New(Config{ControlHost: control, StateDir: t.TempDir()})
@@ -321,38 +321,40 @@ func TestPublishedHostFollowsLearning(t *testing.T) {
 		t.Errorf("the learned wildcard host = %v, want %v", got, learned)
 	}
 
+	// The core's domain resolves through its socket source.
+	resolving := func(addrs ...netip.Addr) underlay.Sockets {
+		return underlay.Sockets{LookupNetIP: func(context.Context, string, string) ([]netip.Addr, error) {
+			return addrs, nil
+		}}
+	}
 	core, err := New(Config{
 		Core:        true,
 		Domain:      "core.example.org",
 		ControlHost: control,
 		StateDir:    t.TempDir(),
+		Sockets: resolving(
+			netip.MustParseAddr("2001:db8::1"), // the wrong family
+			netip.MustParseAddr("192.0.2.20"),
+		),
 	})
 	if err != nil {
 		t.Fatal(err)
-	}
-	core.domain.lookup = func(context.Context, string, string) ([]netip.Addr, error) {
-		return []netip.Addr{
-			netip.MustParseAddr("2001:db8::1"), // the wrong family
-			netip.MustParseAddr("192.0.2.20"),
-		}, nil
 	}
 	if got := core.publishedHost(ctx); got != netip.MustParseAddr("192.0.2.20") {
 		t.Errorf("the core's host = %v, want its domain's 192.0.2.20", got)
 	}
 
 	// A wildcard-bound core publishes the resolver's first answer.
+	first := netip.MustParseAddr("2001:db8::2")
 	wildCore, err := New(Config{
 		Core:        true,
 		Domain:      "core.example.org",
 		ControlHost: netip.MustParseAddr("0.0.0.0"),
 		StateDir:    t.TempDir(),
+		Sockets:     resolving(first, netip.MustParseAddr("192.0.2.21")),
 	})
 	if err != nil {
 		t.Fatal(err)
-	}
-	first := netip.MustParseAddr("2001:db8::2")
-	wildCore.domain.lookup = func(context.Context, string, string) ([]netip.Addr, error) {
-		return []netip.Addr{first, netip.MustParseAddr("192.0.2.21")}, nil
 	}
 	if got := wildCore.publishedHost(ctx); got != first {
 		t.Errorf("the wildcard core's host = %v, want the resolver's first answer %v", got, first)
@@ -365,12 +367,12 @@ func TestPublishedHostFollowsLearning(t *testing.T) {
 		Domain:      "core.example.org",
 		ControlHost: control,
 		StateDir:    t.TempDir(),
+		Sockets: underlay.Sockets{LookupNetIP: func(context.Context, string, string) ([]netip.Addr, error) {
+			return nil, errors.New("no such name")
+		}},
 	})
 	if err != nil {
 		t.Fatal(err)
-	}
-	failing.domain.lookup = func(context.Context, string, string) ([]netip.Addr, error) {
-		return nil, errors.New("no such name")
 	}
 	if got := failing.publishedHost(ctx); got.IsValid() {
 		t.Errorf("the core's unresolved host = %v, want the zero address", got)

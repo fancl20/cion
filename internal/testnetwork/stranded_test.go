@@ -89,13 +89,14 @@ func TestStrandedTierHeals(t *testing.T) {
 	})
 
 	// The blackholes lift while A links the sides: every node of each side
-	// probes the other's, landing an entry on its acceptor, and the routes
-	// through A answer, so no tier strands and no link crosses.
+	// probes the other's — the founder among them, standing in the
+	// directory — landing an entry on its acceptor, and the routes through
+	// A answer, so no tier strands and no link crosses.
 	for _, lift := range blackholes {
 		lift()
 	}
 	PollFor(t, 2*time.Minute, "the sides' probes to land", func() bool {
-		for _, x := range near[1:] {
+		for _, x := range near {
 			for _, y := range far {
 				if !probedBy(ctx, x, y) || !probedBy(ctx, y, x) {
 					return false

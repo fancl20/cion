@@ -4,9 +4,10 @@
 // and the network's behaviors are taps the lab draws: delay, loss,
 // blackhole, cut, and the translation boundary. The hosts the labs draw
 // from the loopback pool become plain names, each stack routing its own, so
-// two fabrics may draw the same host and two labs may overlap freely. Every
-// stack and every tap's scheduler read one clock, the seam a deterministic
-// network later builds on.
+// two fabrics may draw the same host and two labs may overlap freely; the
+// host names a lab draws resolve through every node's socket source, and no
+// lookup reaches the system resolver. Every stack and every tap's scheduler
+// read one clock, the seam a deterministic network later builds on.
 package fabric
 
 import (
@@ -41,8 +42,8 @@ import (
 const queueDepth = 512
 
 // Fabric is the userspace network a lab draws: the stacks it booted, the
-// taps it drew between them, the boundaries it placed, and the one clock
-// they all read. It stops with the test.
+// taps it drew between them, the boundaries it placed, the host names it
+// drew, and the one clock they all read. It stops with the test.
 type Fabric struct {
 	t      *testing.T
 	clock  tcpip.Clock
@@ -50,14 +51,15 @@ type Fabric struct {
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
 
-	// mtx guards the drawn network: the stacks by host, the taps, and the
-	// boundaries. A packet's walk from one stack to another reads it twice
-	// — once for the taps, once for the destination — so no tap draw or
-	// node boot waits on a packet in flight.
+	// mtx guards the drawn network: the stacks by host, the taps, the
+	// boundaries, and the names. A packet's walk from one stack to another
+	// reads it twice — once for the taps, once for the destination — so no
+	// tap draw or node boot waits on a packet in flight.
 	mtx    sync.Mutex
 	hosts  map[netip.Addr]*Node
 	taps   []*tap
 	bounds []*Boundary
+	names  map[string]netip.Addr
 	closed bool
 }
 
@@ -72,9 +74,35 @@ func New(t *testing.T) *Fabric {
 		ctx:    ctx,
 		cancel: cancel,
 		hosts:  make(map[netip.Addr]*Node),
+		names:  make(map[string]netip.Addr),
 	}
 	t.Cleanup(f.stop)
 	return f
+}
+
+// Name draws a host name on the fabric: every node's socket source resolves
+// it to the host. A name names one host for the fabric's life.
+func (f *Fabric) Name(name string, host netip.Addr) {
+	f.t.Helper()
+	f.mtx.Lock()
+	defer f.mtx.Unlock()
+	if drawn, ok := f.names[name]; ok && drawn != host {
+		f.t.Fatalf("the fabric's name %q names %v, not %v", name, drawn, host)
+	}
+	f.names[name] = host
+}
+
+// lookup resolves a name the lab drew to its host, and refuses any other as
+// the system resolver refuses a name no server holds. The fabric's hosts are
+// IPv4 alone, so an IPv6 resolution answers nothing.
+func (f *Fabric) lookup(_ context.Context, network, name string) ([]netip.Addr, error) {
+	f.mtx.Lock()
+	host, ok := f.names[name]
+	f.mtx.Unlock()
+	if !ok || network == "ip6" {
+		return nil, &net.DNSError{Err: "no such host", Name: name, IsNotFound: true}
+	}
+	return []netip.Addr{host}, nil
 }
 
 // stop ends the fabric: the forwarders return, and every stack closes and
@@ -168,11 +196,12 @@ type Node struct {
 
 // Sockets is the socket source that binds on the node's stack: the seam the
 // node's sites construct through, its ports the stack's alone and their
-// release immediate.
+// release immediate, its names the ones the lab drew on the fabric.
 func (n *Node) Sockets() underlay.Sockets {
 	return underlay.Sockets{
-		ListenUDP: n.listenUDP,
-		ListenTCP: n.listenTCP,
+		ListenUDP:   n.listenUDP,
+		ListenTCP:   n.listenTCP,
+		LookupNetIP: n.f.lookup,
 	}
 }
 

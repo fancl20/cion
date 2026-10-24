@@ -226,3 +226,15 @@ budget is measured when it lands.
     bubbles.
 
 ## Implementation history
+
+*   The resolver landed first: the socket source's `LookupNetIP` beside
+    its two listeners, the founder's domain resolving through its
+    config's source, and the fabric's drawn names, which `bootOnFabric`
+    draws for every founding core
+    ([sockets.go](/pkg/libs/underlay/sockets.go),
+    [external.go](/pkg/modules/topology/impl/measured/external.go),
+    [fabric.go](/internal/testnetwork/fabric/fabric.go),
+    [join_test.go](/internal/testnetwork/join_test.go)). The stranded
+    lab's probe wait takes in the founder, whom the far side probes only
+    once the founder stands in its directory
+    ([stranded_test.go](/internal/testnetwork/stranded_test.go)).

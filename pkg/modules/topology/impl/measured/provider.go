@@ -65,7 +65,8 @@ type Config struct {
 	// rides on non-core nodes.
 	CoreRoute func() *scion.Addr
 	// Sockets is the socket source the acceptor's bind, the dials, and the
-	// band probes construct through; the zero value is the kernel's.
+	// band probes construct through, and the founding core's domain
+	// resolves through; the zero value is the kernel's.
 	Sockets underlay.Sockets
 
 	// Pacing shortens the loops' periods; zero values keep the production
@@ -132,7 +133,7 @@ func New(cfg Config) (*Provider, error) {
 			path:    externalHostPath(cfg.StateDir),
 			current: host,
 		},
-		domain: newDomainHost(cfg.Domain, cfg.ControlHost),
+		domain: newDomainHost(cfg.Domain, cfg.ControlHost, cfg.Sockets.Lookup),
 	}, nil
 }
 

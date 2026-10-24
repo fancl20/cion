@@ -1,6 +1,7 @@
 package fabric
 
 import (
+	"errors"
 	"net"
 	"net/netip"
 	"testing"
@@ -139,5 +140,29 @@ func TestDropTapsDropAndLiftRestores(t *testing.T) {
 		if !exchange() {
 			t.Fatalf("the pair did not carry after %s lifted", tap.name)
 		}
+	}
+}
+
+// TestNamesResolveOnEveryStack checks the fabric's names: a name the lab
+// drew resolves to its host through every node's socket source, an IPv6
+// resolution of it answers nothing, and a name the lab never drew is refused
+// as no server holds it.
+func TestNamesResolveOnEveryStack(t *testing.T) {
+	f := New(t)
+	a, b := f.Node(insideAddr), f.Node(upstreamAddr)
+	f.Name("core.fabric.test", upstreamAddr)
+	for _, n := range []*Node{a, b} {
+		got, err := n.Sockets().Lookup(t.Context(), "ip", "core.fabric.test")
+		if err != nil || len(got) != 1 || got[0] != upstreamAddr {
+			t.Errorf("%v resolved the drawn name to %v, %v; want [%v]", n.host, got, err, upstreamAddr)
+		}
+	}
+	if got, err := a.Sockets().Lookup(t.Context(), "ip6", "core.fabric.test"); err == nil {
+		t.Errorf("an IPv6 resolution answered %v, want none on an IPv4 fabric", got)
+	}
+	var dnsErr *net.DNSError
+	if got, err := a.Sockets().Lookup(t.Context(), "ip", "stranger.fabric.test"); !errors.As(err, &dnsErr) ||
+		!dnsErr.IsNotFound {
+		t.Errorf("an undrawn name resolved to %v, %v; want a not-found refusal", got, err)
 	}
 }

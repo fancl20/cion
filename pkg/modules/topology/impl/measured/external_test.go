@@ -67,11 +67,11 @@ func TestExternalHostPersistsAcrossRestart(t *testing.T) {
 // publishes.
 func TestDomainHostAnswersTheLiteral(t *testing.T) {
 	lookups := 0
-	d := newDomainHost("2001:db8::1", netip.MustParseAddr("10.0.0.7"))
-	d.lookup = func(context.Context, string, string) ([]netip.Addr, error) {
-		lookups++
-		return nil, errors.New("no such name")
-	}
+	d := newDomainHost("2001:db8::1", netip.MustParseAddr("10.0.0.7"),
+		func(context.Context, string, string) ([]netip.Addr, error) {
+			lookups++
+			return nil, errors.New("no such name")
+		})
 	if got := d.resolve(context.Background()); got != netip.MustParseAddr("2001:db8::1") {
 		t.Errorf("resolved host = %v, want the literal", got)
 	}
@@ -80,11 +80,11 @@ func TestDomainHostAnswersTheLiteral(t *testing.T) {
 	}
 
 	// A domain identity still resolves through the lookup.
-	d = newDomainHost("core.example.org", netip.MustParseAddr("10.0.0.7"))
-	d.lookup = func(context.Context, string, string) ([]netip.Addr, error) {
-		lookups++
-		return []netip.Addr{netip.MustParseAddr("192.0.2.20")}, nil
-	}
+	d = newDomainHost("core.example.org", netip.MustParseAddr("10.0.0.7"),
+		func(context.Context, string, string) ([]netip.Addr, error) {
+			lookups++
+			return []netip.Addr{netip.MustParseAddr("192.0.2.20")}, nil
+		})
 	if got := d.resolve(context.Background()); got != netip.MustParseAddr("192.0.2.20") {
 		t.Errorf("resolved host = %v, want the domain's address", got)
 	}

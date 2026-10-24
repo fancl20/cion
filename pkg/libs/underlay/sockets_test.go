@@ -2,12 +2,38 @@ package underlay
 
 import (
 	"bytes"
+	"context"
+	"fmt"
 	"net"
+	"net/netip"
 	"testing"
 	"time"
 )
 
 const testTimeout = 2 * time.Second
+
+// TestLookupThroughTheSource checks the source's resolver: a source naming
+// one answers through it, and the kernel source through the system
+// resolver, which answers an address literal with the address itself, in
+// its v4-mapped form for an IPv4 literal.
+func TestLookupThroughTheSource(t *testing.T) {
+	want := netip.MustParseAddr("192.0.2.7")
+	s := Sockets{LookupNetIP: func(_ context.Context, network, host string) ([]netip.Addr, error) {
+		if network != "ip" || host != "core.example.org" {
+			return nil, fmt.Errorf("resolving %q on %q", host, network)
+		}
+		return []netip.Addr{want}, nil
+	}}
+	if got, err := s.Lookup(t.Context(), "ip", "core.example.org"); err != nil ||
+		len(got) != 1 || got[0] != want {
+		t.Errorf("the source's resolution = %v, %v; want [%v]", got, err, want)
+	}
+	loopback := netip.MustParseAddr("127.0.0.1")
+	if got, err := Kernel.Lookup(t.Context(), "ip", loopback.String()); err != nil ||
+		len(got) != 1 || got[0].Unmap() != loopback {
+		t.Errorf("the kernel's resolution = %v, %v; want [%v]", got, err, loopback)
+	}
+}
 
 // TestNewUDPConnWildcardFamily checks the kernel socket's family pairing:
 // the remote hint names the family, and a wildcard listen host of the other

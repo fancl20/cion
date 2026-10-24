@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net"
 	"net/netip"
 	"os"
 	"path/filepath"
@@ -108,8 +107,7 @@ type domainHost struct {
 	// change.
 	literal netip.Addr
 
-	// lookup resolves a name; nil uses the system resolver. The field is
-	// the tests' seam.
+	// lookup resolves a name: the socket source's resolver.
 	lookup func(ctx context.Context, network, host string) ([]netip.Addr, error)
 
 	mtx sync.Mutex
@@ -122,8 +120,12 @@ type domainHost struct {
 
 // newDomainHost builds the founder's host resolution, parsing the identity's
 // grammar once: an address needs no lookup and no memoization.
-func newDomainHost(domain string, bind netip.Addr) *domainHost {
-	d := &domainHost{domain: domain, bind: bind}
+func newDomainHost(
+	domain string, bind netip.Addr,
+	lookup func(ctx context.Context, network, host string) ([]netip.Addr, error),
+) *domainHost {
+
+	d := &domainHost{domain: domain, bind: bind, lookup: lookup}
 	if addr, err := netip.ParseAddr(domain); err == nil {
 		d.literal = addr.Unmap()
 	}
@@ -158,13 +160,9 @@ func (d *domainHost) resolve(ctx context.Context) netip.Addr {
 // family alone; a wildcard bind names none, and the resolver's first answer
 // publishes.
 func (d *domainHost) lookupAddr(ctx context.Context) (netip.Addr, bool) {
-	lookup := d.lookup
-	if lookup == nil {
-		lookup = net.DefaultResolver.LookupNetIP
-	}
 	ctx, cancel := context.WithTimeout(ctx, domainLookupTimeout)
 	defer cancel()
-	addrs, err := lookup(ctx, "ip", d.domain)
+	addrs, err := d.lookup(ctx, "ip", d.domain)
 	if err != nil {
 		return netip.Addr{}, false
 	}
