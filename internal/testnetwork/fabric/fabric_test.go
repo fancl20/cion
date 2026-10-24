@@ -5,6 +5,7 @@ import (
 	"net"
 	"net/netip"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/fancl20/cion/pkg/libs/underlay"
@@ -164,5 +165,88 @@ func TestNamesResolveOnEveryStack(t *testing.T) {
 	if got, err := a.Sockets().Lookup(t.Context(), "ip", "stranger.fabric.test"); !errors.As(err, &dnsErr) ||
 		!dnsErr.IsNotFound {
 		t.Errorf("an undrawn name resolved to %v, %v; want a not-found refusal", got, err)
+	}
+}
+
+// TestTapsOnVirtualTime checks the fabric inside a synctest bubble, on
+// UDP-only stacks: a delay tap's round trip takes exactly twice its one-way
+// time on the bubble's clock, a cut drops both directions — the read's
+// deadline expiring at exactly its virtual wait — and the cut's lift
+// restores the pair.
+func TestTapsOnVirtualTime(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		f := New(t, UDPOnly())
+		a, b := f.Node(insideAddr), f.Node(upstreamAddr)
+		ca, aa := listen(t, a)
+		cb, ab := listen(t, b)
+		const oneWay = 30 * time.Second
+		f.Delay(insideAddr, upstreamAddr, oneWay)
+
+		sent := time.Now()
+		send(t, ca, ab, "there")
+		if got, _ := recv(t, cb, 2*oneWay); got != "there" {
+			t.Fatalf("the held datagram did not arrive: %q", got)
+		}
+		send(t, cb, aa, "and back")
+		if got, _ := recv(t, ca, 2*oneWay); got != "and back" {
+			t.Fatalf("the held reply did not arrive: %q", got)
+		}
+		if rtt := time.Since(sent); rtt != 2*oneWay {
+			t.Errorf("the round trip took %v of virtual time, want exactly %v", rtt, 2*oneWay)
+		}
+
+		lift := f.Cut(insideAddr, upstreamAddr)
+		for _, dir := range []struct {
+			from, to underlay.UDPConn
+			at       netip.AddrPort
+		}{{ca, cb, ab}, {cb, ca, aa}} {
+			waited := time.Now()
+			send(t, dir.from, dir.at, "into the cut")
+			if got, _ := recv(t, dir.to, testWait); got != "" {
+				t.Fatalf("the cut let a datagram through as %q", got)
+			}
+			if spent := time.Since(waited); spent != testWait {
+				t.Errorf("the read under the cut gave up after %v, want exactly %v", spent, testWait)
+			}
+		}
+		lift()
+		send(t, ca, ab, "after the lift")
+		if got, _ := recv(t, cb, 2*oneWay); got != "after the lift" {
+			t.Fatalf("the pair did not carry after the cut lifted: %q", got)
+		}
+	})
+}
+
+// TestUDPOnlyRefusesTCP checks the UDP-only stack's one refusal: it binds no
+// TCP listener, and says why.
+func TestUDPOnlyRefusesTCP(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		n := New(t, UDPOnly()).Node(insideAddr)
+		if ln, err := n.Sockets().NewTCP(netip.AddrPortFrom(insideAddr, 8443).String()); err == nil {
+			_ = ln.Close()
+			t.Fatal("a UDP-only stack bound a TCP listener")
+		}
+	})
+}
+
+// TestDrawPortStaysBelowTheEphemeralRange checks the port draws: each draw
+// is a fresh port below the stack's ephemeral range, and the drawn port
+// binds.
+func TestDrawPortStaysBelowTheEphemeralRange(t *testing.T) {
+	n := New(t).Node(insideAddr)
+	first, _ := n.stack.PortRange()
+	seen := map[uint16]bool{}
+	for range 3 {
+		port := n.DrawPort()
+		if port >= first || seen[port] {
+			t.Fatalf("drew port %d after %v, want a fresh one below %d", port, seen, first)
+		}
+		seen[port] = true
+		c, err := n.Sockets().NewUDP(net.UDPAddrFromAddrPort(netip.AddrPortFrom(insideAddr, port)),
+			netip.AddrPort{})
+		if err != nil {
+			t.Fatalf("binding drawn port %d: %v", port, err)
+		}
+		_ = c.Close()
 	}
 }

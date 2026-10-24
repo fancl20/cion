@@ -13,6 +13,7 @@ import (
 	"sync/atomic"
 	"syscall"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
@@ -131,4 +132,36 @@ func PollFor(t *testing.T, budget time.Duration, what string, cond func() bool) 
 		time.Sleep(30 * time.Millisecond)
 	}
 	t.Fatalf("timed out waiting for %s", what)
+}
+
+// virtualPollInterval spaces a virtual-time poll's checks: under the
+// daemon's own pacing nothing a lab watches moves within a second.
+const virtualPollInterval = time.Second
+
+// PollVirtual is PollFor inside a synctest bubble: the budget is virtual
+// time, spent at no wall-clock cost but the work it carries, and each check
+// runs once every other goroutine in the bubble has parked.
+func PollVirtual(t *testing.T, budget time.Duration, what string, cond func() bool) {
+	t.Helper()
+	if !pollUntil(budget, cond) {
+		t.Fatalf("timed out waiting for %s", what)
+	}
+}
+
+// pollUntil reports whether cond held at one of the checks the budget
+// spans, a virtual second apart: the first at once, the last at the
+// budget's end. Each check waits for the bubble to park, so it reads the
+// state every timer due at its instant left.
+func pollUntil(budget time.Duration, cond func() bool) bool {
+	deadline := time.Now().Add(budget)
+	for {
+		synctest.Wait()
+		if cond() {
+			return true
+		}
+		if !time.Now().Before(deadline) {
+			return false
+		}
+		time.Sleep(virtualPollInterval)
+	}
 }

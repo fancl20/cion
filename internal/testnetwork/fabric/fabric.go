@@ -18,6 +18,7 @@ import (
 	"os"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -41,6 +42,11 @@ import (
 // SOCKS application's own choice for the same pump.
 const queueDepth = 512
 
+// drawnPortBase is the first port DrawPort draws. The band from it up to
+// the stack's ephemeral range holds no port a bind of port zero lands on
+// and no fixed port the node binds.
+const drawnPortBase = 10000
+
 // Fabric is the userspace network a lab draws: the stacks it booted, the
 // taps it drew between them, the boundaries it placed, the host names it
 // drew, and the one clock they all read. It stops with the test.
@@ -61,11 +67,28 @@ type Fabric struct {
 	bounds []*Boundary
 	names  map[string]netip.Addr
 	closed bool
+
+	// udpOnly boots every stack with the UDP transport alone.
+	udpOnly bool
+}
+
+// Option shapes the fabric New boots.
+type Option func(*Fabric)
+
+// UDPOnly boots every stack with the UDP transport alone, the fabric a
+// synctest bubble runs: gVisor's TCP transport parks its dispatchers where
+// the bubble cannot see them durably blocked, so a stack carrying it stops
+// the bubble's clock at its first idle moment. A UDP-only stack binds no
+// TCP listener.
+func UDPOnly() Option {
+	return func(f *Fabric) { f.udpOnly = true }
 }
 
 // New boots the fabric on the test's lifetime: the forwarders drain until
-// the test's context ends, then the stacks close with it.
-func New(t *testing.T) *Fabric {
+// the test's context ends, then the stacks close with it. The fabric reads
+// its clock from the moment New runs, so a bubble's fabric is booted inside
+// the bubble.
+func New(t *testing.T, opts ...Option) *Fabric {
 	t.Helper()
 	ctx, cancel := context.WithCancel(t.Context())
 	f := &Fabric{
@@ -75,6 +98,9 @@ func New(t *testing.T) *Fabric {
 		cancel: cancel,
 		hosts:  make(map[netip.Addr]*Node),
 		names:  make(map[string]netip.Addr),
+	}
+	for _, opt := range opts {
+		opt(f)
 	}
 	t.Cleanup(f.stop)
 	return f
@@ -124,7 +150,8 @@ func (f *Fabric) stop() {
 }
 
 // Node boots the host's stack on the fabric: one netstack — IPv4 with UDP
-// and TCP transports — on a channel endpoint the forwarder drains, holding
+// and, unless the fabric is UDP-only, TCP transports — on a channel
+// endpoint the forwarder drains, holding
 // the host the lab drew from the loopback pool as a plain name. No kernel
 // interface carries the host; each stack routes its own; the host's stack
 // stands for the fabric's life, so a node's restart rebinds on it — the
@@ -140,6 +167,10 @@ func (f *Fabric) Node(host netip.Addr) *Node {
 	if n, ok := f.hosts[host]; ok {
 		return n
 	}
+	transports := []stack.TransportProtocolFactory{tcp.NewProtocol, udp.NewProtocol}
+	if f.udpOnly {
+		transports = []stack.TransportProtocolFactory{udp.NewProtocol}
+	}
 	s := stack.New(stack.Options{
 		NetworkProtocols: []stack.NetworkProtocolFactory{
 			// The fabric's hosts are the labs' loopback pool's, carried on a
@@ -148,7 +179,7 @@ func (f *Fabric) Node(host netip.Addr) *Node {
 				AllowExternalLoopbackTraffic: true,
 			}),
 		},
-		TransportProtocols: []stack.TransportProtocolFactory{tcp.NewProtocol, udp.NewProtocol},
+		TransportProtocols: transports,
 		Clock:              f.clock,
 	})
 	n := &Node{
@@ -192,6 +223,23 @@ type Node struct {
 	host  netip.Addr
 	stack *stack.Stack
 	link  *channel.Endpoint
+	// drawn counts the ports DrawPort drew.
+	drawn atomic.Uint32
+}
+
+// DrawPort draws a port of the node's stack for an address the node binds
+// by number — its control or internal address: the band's next port below
+// the stack's ephemeral range. Only the node binds on its stack, and
+// nothing it binds lands in the band unless drawn there, so the draw needs
+// no probe.
+func (n *Node) DrawPort() uint16 {
+	n.f.t.Helper()
+	first, _ := n.stack.PortRange()
+	port := drawnPortBase + n.drawn.Add(1) - 1
+	if port >= uint32(first) {
+		n.f.t.Fatalf("the drawn port band on %v is drawn dry", n.host)
+	}
+	return uint16(port)
 }
 
 // Sockets is the socket source that binds on the node's stack: the seam the
@@ -234,6 +282,9 @@ func (n *Node) listenUDP(
 // listenTCP binds a TCP listener on the node's stack at the concrete
 // address given.
 func (n *Node) listenTCP(addr string) (net.Listener, error) {
+	if n.f.udpOnly {
+		return nil, fmt.Errorf("the fabric's stacks carry UDP alone; no TCP listener binds %s", addr)
+	}
 	ap, err := underlay.ResolveAddrPort(addr)
 	if err != nil {
 		return nil, err

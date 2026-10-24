@@ -238,3 +238,15 @@ budget is measured when it lands.
     lab's probe wait takes in the founder, whom the far side probes only
     once the founder stands in its directory
     ([stranded_test.go](/internal/testnetwork/stranded_test.go)).
+*   The bubble boot landed with the fabric join as its first user:
+    `fabric.UDPOnly` and `DrawPort`, which draws a node's control and
+    internal ports below its stack's ephemeral range where the kernel
+    probes stood, beside `inBubble`, `bootInBubble`, and `PollVirtual`
+    ([fabric.go](/internal/testnetwork/fabric/fabric.go),
+    [bubble_test.go](/internal/testnetwork/bubble_test.go),
+    [network.go](/internal/testnetwork/network.go),
+    [fabric_test.go](/internal/testnetwork/fabric_test.go)). The join
+    gives up its process of its own, so `-count=2` runs two bubbles in
+    one process; at production pacing it joins in 30 virtual seconds.
+    The leak proof is synctest's own: a bubble whose goroutines outlive
+    its cleanups fails, which no lab can host without failing itself.

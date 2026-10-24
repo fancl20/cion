@@ -141,9 +141,10 @@ func bootOn(
 
 // bootOnFabric boots a full node assembly on the fabric's node for the
 // host — the same wiring as bootAssembly, every underlay socket bound on
-// the node's stack, no kernel port held. A founding core's domain names its
-// host on the fabric, so the founder publishes the host its peers reach and
-// stands in the directory, as a production founder does.
+// the node's stack and every port drawn there, no kernel port held or
+// probed. A founding core's domain names its host on the fabric, so the
+// founder publishes the host its peers reach and stands in the directory,
+// as a production founder does.
 func bootOnFabric(
 	t *testing.T, f *fabric.Fabric, host netip.Addr,
 	mutate func(*services.NodeConfig),
@@ -153,10 +154,10 @@ func bootOnFabric(
 	node := f.Node(host)
 	return bootOn(t, node.Sockets(), func(cfg *services.NodeConfig) {
 		if cfg.Internal == "" {
-			cfg.Internal = PinnedUDPAddrOn(t, host)
+			cfg.Internal = netip.AddrPortFrom(host, node.DrawPort()).String()
 		}
 		if cfg.Control == "" {
-			cfg.Control = FreeUDPAddrOn(t, host)
+			cfg.Control = netip.AddrPortFrom(host, node.DrawPort()).String()
 		}
 		if mutate != nil {
 			mutate(cfg)
