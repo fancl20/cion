@@ -250,3 +250,7 @@ budget is measured when it lands.
     one process; at production pacing it joins in 30 virtual seconds.
     The leak proof is synctest's own: a bubble whose goroutines outlive
     its cleanups fails, which no lab can host without failing itself.
+*   The translation labs moved into bubbles at production pacing in a
+    commit of their own, ahead of the stranded lab, which waited on
+    [proposal 0068](/docs/proposals/0068-retire-a-useless-link-from-its-dialing-end-alone.md)
+    ([translate_test.go](/internal/testnetwork/translate_test.go)).
