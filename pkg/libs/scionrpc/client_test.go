@@ -49,7 +49,12 @@ func TestSCIONClientServiceWithoutBackend(t *testing.T) {
 	qclt := &quic.Transport{Conn: conn}
 	t.Cleanup(func() { _ = qclt.Close() })
 	// The dial's TLS is never exercised: no backend answers the handshake.
-	hclt := NewSCIONClient(PeerClientConfig{Conn: conn}, qclt, false)
+	f := newMTLSFixture(t)
+	hclt := NewSCIONClient(PeerClientConfig{
+		Credentials: f.peer,
+		Key:         f.peer.Key,
+		Conn:        conn,
+	}, qclt, false)
 	unregistered := &scion.Addr{IA: iaB, Service: addr.SVC(0x7ff2)}
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()

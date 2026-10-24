@@ -144,8 +144,9 @@ the links it accepted.
     [proposal 0067](/docs/proposals/0067-run-the-fabric-labs-on-virtual-time.md)
     settled in 13 of 17 runs with the change; without it, its link set
     changed 163 times in the hour and never held. Of the four runs that did
-    not settle, three froze partitioned — each side's baseline echo into
-    the other answered, so neither read the other's tier stranded — and one
-    kept churning across four nodes, an accepting end lifted above its
-    floor retiring a link it had dialed. The lab lands skipped until a
-    partition heals.
+    not settle, three froze partitioned — the request for the link across
+    the cut rode a connection the child had dialed to the parent it joined
+    through before it held a chain, and the parent refused it
+    unauthenticated each time — and one kept churning across four nodes, an
+    accepting end lifted above its floor retiring a link it had dialed. The
+    lab lands skipped until both heal.

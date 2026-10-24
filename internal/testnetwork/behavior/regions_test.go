@@ -53,8 +53,8 @@ const (
 // labs' two-second windows the same network settles even with both ends of
 // a link judging it, so only the daemon's own pacing holds the settling.
 func TestRegionsSettle(t *testing.T) {
-	t.Skip("a partition can freeze: across one, each side's baseline echo " +
-		"into the other answers, so neither reads the other's tier stranded")
+	t.Skip("the link set can churn: a link a node accepted frees it to " +
+		"retire one it dialed, whose acceptor then dials again")
 	testnetwork.InBubble(t, func(t *testing.T, fab *fabric.Fabric, wpki *webpkitest.CA) {
 		var hosts [9]netip.Addr
 		for i := range hosts {

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/netip"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -62,7 +63,9 @@ func NewSCIONClient(
 	// ones too; a one-hop path needs none, created afresh for every packet.
 	// Either way the next request dials the route the provider resolves
 	// then. (A request that times out on a dark connection leaves it pooled:
-	// only the connection's own silence closes it.)
+	// only the connection's own silence closes it.) A connection dialed
+	// before the node held a chain retires once it holds one.
+	unchained := &unchainedConns{creds: cfg.Credentials}
 	quicConf := &quic.Config{
 		InitialPacketSize: 1200,
 		MaxIdleTimeout:    5 * time.Second,
@@ -84,14 +87,83 @@ func NewSCIONClient(
 			if cfg.PathTo != nil {
 				peer.Path = cfg.PathTo(peer.IA)
 			}
-			return qclt.Dial(ctx, peer,
+			ephemeral := !holdsChain(ctx, cfg.Credentials)
+			conn, err := qclt.Dial(ctx, peer,
 				nativeClientTLS(peer.IA, cfg.Credentials, cfg.Key, verifyServer), quicCfg)
+			if err == nil && ephemeral {
+				unchained.track(conn)
+			}
+			return conn, err
 		},
 	}
-	if cfg.PathTo == nil {
-		return &http.Client{Transport: h3t}
+	var pool connPool = h3t
+	if cfg.PathTo != nil {
+		pool = newAgedTransport(h3t, maxConnAge)
 	}
-	return &http.Client{Transport: newAgedTransport(h3t, maxConnAge)}
+	return &http.Client{Transport: &chainTransport{pool: pool, unchained: unchained}}
+}
+
+// unchainedConns holds the connections a client dialed while the node held
+// no chain. Each presents the ephemeral certificate for its life, and a peer
+// authenticates no request over it, however long keep-alives hold it open.
+type unchainedConns struct {
+	creds Credentials
+
+	mtx   sync.Mutex
+	conns []*quic.Conn
+}
+
+// track holds a connection dialed while the node held no chain, dropping
+// the held ones already closed.
+func (u *unchainedConns) track(conn *quic.Conn) {
+	u.mtx.Lock()
+	defer u.mtx.Unlock()
+	u.conns = slices.DeleteFunc(u.conns, func(c *quic.Conn) bool {
+		return c.Context().Err() != nil
+	})
+	u.conns = append(u.conns, conn)
+}
+
+// retire closes the held connections once the node holds a chain, reporting
+// whether it closed any.
+func (u *unchainedConns) retire(ctx context.Context) bool {
+	u.mtx.Lock()
+	defer u.mtx.Unlock()
+	if len(u.conns) == 0 || !holdsChain(ctx, u.creds) {
+		return false
+	}
+	for _, conn := range u.conns {
+		_ = conn.CloseWithError(0, "the node holds a chain")
+	}
+	u.conns = nil
+	return true
+}
+
+// holdsChain reports whether the node holds a chain, which a handshake then
+// presents in place of the ephemeral certificate.
+func holdsChain(ctx context.Context, creds Credentials) bool {
+	chain, err := creds.Chain(ctx)
+	return err == nil && len(chain) > 0
+}
+
+// chainTransport retires the unchained connections before a request once
+// the node holds a chain, the pool dropping its idle ones beside them, so
+// the request dials anew and presents the chain.
+type chainTransport struct {
+	pool      connPool
+	unchained *unchainedConns
+}
+
+func (t *chainTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if t.unchained.retire(req.Context()) {
+		t.pool.CloseIdleConnections()
+	}
+	return t.pool.RoundTrip(req)
+}
+
+// CloseIdleConnections closes the pool's connections no request rides.
+func (t *chainTransport) CloseIdleConnections() {
+	t.pool.CloseIdleConnections()
 }
 
 // connPool is a transport pooling connections: HTTP/3's, or a test's double.

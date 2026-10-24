@@ -144,7 +144,7 @@ func newAgeFixture(t *testing.T) *ageFixture {
 			return p
 		},
 	}, qclt, true)
-	fx.hclt.Transport.(*agedTransport).maxAge = 0
+	fx.hclt.Transport.(*chainTransport).pool.(*agedTransport).maxAge = 0
 	server := &scion.Addr{IA: nodeIATest, Addr: netip.AddrPortFrom(core.ControlIP, endpoint.LocalPort())}
 	fx.url = "https://" + PeerAuthority(server)
 	return fx

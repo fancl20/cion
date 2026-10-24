@@ -1,0 +1,137 @@
+package scionrpc
+
+import (
+	"context"
+	"crypto/x509"
+	"errors"
+	"io"
+	"net"
+	"net/http"
+	"net/netip"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/quic-go/quic-go"
+	"github.com/scionproto/scion/pkg/addr"
+	"github.com/scionproto/scion/pkg/scrypto/cppki"
+	spath "github.com/scionproto/scion/pkg/slayers/path/scion"
+
+	"github.com/fancl20/cion/pkg/libs/peeria"
+	"github.com/fancl20/cion/pkg/libs/scion"
+)
+
+// switchedCredentials withholds the chain its credentials hold until it is
+// switched on: a node before and after its enrollment.
+type switchedCredentials struct {
+	Credentials
+	enrolled atomic.Bool
+}
+
+func (c *switchedCredentials) Chain(ctx context.Context) ([]*x509.Certificate, error) {
+	if !c.enrolled.Load() {
+		return nil, nil
+	}
+	return c.Credentials.Chain(ctx)
+}
+
+// unpinnedCredentials withholds the TRC its credentials pinned until it is
+// switched on: a node inside the bootstrap window, which accepts any
+// client certificate unverified.
+type unpinnedCredentials struct {
+	Credentials
+	pinned atomic.Bool
+}
+
+func (c *unpinnedCredentials) AnchorPool() ([]*cppki.TRC, error) {
+	if !c.pinned.Load() {
+		return nil, nil
+	}
+	return c.Credentials.AnchorPool()
+}
+
+// TestSCIONClientRedialsOnceChained checks a client dialed before its node
+// held a chain, its peer inside the bootstrap window: the peer authenticates
+// nothing over the connection dialed then, and once the node holds a chain
+// and the peer a TRC, the next request dials anew and the peer
+// authenticates the node.
+func TestSCIONClientRedialsOnceChained(t *testing.T) {
+	f := newMTLSFixture(t)
+	extA, extB := freeUDPAddr(t), freeUDPAddr(t)
+	core := startTestNode(t, nodeIATest, iaLineC, extA, extB)
+	peer := startTestNode(t, iaLineC, nodeIATest, extB, extA)
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+
+	// The endpoint answers each request with the ISD-AS it authenticated.
+	serverCreds := &unpinnedCredentials{Credentials: f.engine}
+	endpoint := core.newConn(t, 0)
+	served := make(chan error, 1)
+	t.Cleanup(func() {
+		select {
+		case err := <-served:
+			if !errors.Is(err, net.ErrClosed) {
+				t.Errorf("ServeHTTP3 returned (%v), want the closed socket's error", err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Error("the endpoint did not stop with the test's context")
+		}
+	})
+	go func() {
+		served <- ServeHTTP3(t.Context(), endpoint,
+			peeria.Authenticate(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_, _ = w.Write([]byte(peeria.AuthenticatedIA(r.Context()).String()))
+			})),
+			EndpointTLS(EndpointTLSConfig{Credentials: serverCreds, Key: f.engine.Key}))
+	}()
+
+	creds := &switchedCredentials{Credentials: f.peer}
+	conn := peer.newConn(t, 0)
+	qclt := &quic.Transport{Conn: conn}
+	t.Cleanup(func() { _ = qclt.Close() })
+	var dials atomic.Int32
+	hclt := NewSCIONClient(PeerClientConfig{
+		Credentials: creds,
+		Key:         f.peer.Key,
+		Conn:        conn,
+		PathTo: func(addr.IA) *spath.Decoded {
+			dials.Add(1)
+			p, err := pathToCore(peer.MACKey, time.Now())
+			if err != nil {
+				t.Error(err)
+				return nil
+			}
+			return p
+		},
+	}, qclt, true)
+	server := &scion.Addr{IA: nodeIATest, Addr: netip.AddrPortFrom(core.ControlIP, endpoint.LocalPort())}
+	identity := func() string {
+		t.Helper()
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://"+PeerAuthority(server), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp, err := hclt.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = resp.Body.Close() }()
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(body)
+	}
+
+	if got := identity(); got != addr.IA(0).String() {
+		t.Fatalf("the peer authenticated %s before the node held a chain, want none", got)
+	}
+	creds.enrolled.Store(true)
+	serverCreds.pinned.Store(true)
+	if got := identity(); got != iaLineC.String() {
+		t.Errorf("the peer authenticated %s once the node held a chain, want %s", got, iaLineC)
+	}
+	if got := dials.Load(); got != 2 {
+		t.Errorf("dials = %d, want 2: the chained request dialed anew", got)
+	}
+}
