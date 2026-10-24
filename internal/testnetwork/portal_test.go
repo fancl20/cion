@@ -139,7 +139,7 @@ func (c *portalClient) hosts() []portalHost {
 }
 
 // programsHost reports whether the node's host device holds the address.
-func programsHost(n *assemblyNode, ip netip.Addr) bool {
+func programsHost(n *Node, ip netip.Addr) bool {
 	for _, host := range wireguardOf(n).HostPeers() {
 		if host.Addr == ip {
 			return true
@@ -159,10 +159,10 @@ func TestPortalConsole(t *testing.T) {
 	t.Parallel()
 	wpki := packageWebPKI
 	place := placeCoordination(t)
-	a := coordCore(t, wpki, hostSlot(t), place, func(cfg *services.NodeConfig) {
+	a := coordCore(t, wpki, HostSlot(t), place, func(cfg *services.NodeConfig) {
 		cfg.EnrollAuth = "portal"
 	})
-	b := coordLeaf(t, wpki, hostSlot(t), a, place, nil)
+	b := coordLeaf(t, wpki, HostSlot(t), a, place, nil)
 
 	console := newPortalClient(t, wpki, place)
 	portalApp := a.app.Application("portal").(*portal.App)

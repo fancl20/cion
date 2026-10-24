@@ -43,8 +43,8 @@ func TestStrandedTierHeals(t *testing.T) {
 	}
 	fab := fabric.New(t)
 	wpki := webpkitest.New(t)
-	ipA, ipF, ipG := hostSlot(t), hostSlot(t), hostSlot(t)
-	ipC, ipD, ipE := hostSlot(t), hostSlot(t), hostSlot(t)
+	ipA, ipF, ipG := HostSlot(t), HostSlot(t), HostSlot(t)
+	ipC, ipD, ipE := HostSlot(t), HostSlot(t), HostSlot(t)
 	for _, side := range [][]netip.Addr{{ipA, ipF, ipG}, {ipC, ipD, ipE}} {
 		for i := range side {
 			for _, other := range side[i+1:] {
@@ -67,10 +67,10 @@ func TestStrandedTierHeals(t *testing.T) {
 		cfg.CertFile = wpki.CertFile
 		cfg.KeyFile = wpki.KeyFile
 	})
-	join := func(ip netip.Addr, neighbors ...*assemblyNode) *assemblyNode {
+	join := func(ip netip.Addr, neighbors ...*Node) *Node {
 		return bootOnFabric(t, fab, ip, func(cfg *services.NodeConfig) {
 			for _, n := range neighbors {
-				cfg.Neighbors = append(cfg.Neighbors, n.rendezvousOf())
+				cfg.Neighbors = append(cfg.Neighbors, n.Rendezvous())
 			}
 			cfg.RootCAs = wpki.Pool
 		})
@@ -80,12 +80,12 @@ func TestStrandedTierHeals(t *testing.T) {
 	c := join(ipC, a)
 	d := join(ipD, a, c)
 	e := join(ipE, c, d)
-	near, far := []*assemblyNode{a, f, g}, []*assemblyNode{c, d, e}
+	near, far := []*Node{a, f, g}, []*Node{c, d, e}
 	ctx := t.Context()
 
 	PollFor(t, 5*time.Minute, "each side to settle and the bridges to stand", func() bool {
 		return settled(ctx, near) && settled(ctx, far) &&
-			meshed(ctx, []*assemblyNode{a, c}) && meshed(ctx, []*assemblyNode{a, d})
+			meshed(ctx, []*Node{a, c}) && meshed(ctx, []*Node{a, d})
 	})
 
 	// The blackholes lift while A links the sides: every node of each side
@@ -120,14 +120,14 @@ func TestStrandedTierHeals(t *testing.T) {
 // settled reports whether every one of the nodes holds at least the floor
 // of up links and the up links established at both ends among them connect
 // them all.
-func settled(ctx context.Context, nodes []*assemblyNode) bool {
+func settled(ctx context.Context, nodes []*Node) bool {
 	for _, n := range nodes {
 		if upLinks(ctx, n) < measured.NeighborFloor {
 			return false
 		}
 	}
-	reached := map[*assemblyNode]bool{nodes[0]: true}
-	frontier := []*assemblyNode{nodes[0]}
+	reached := map[*Node]bool{nodes[0]: true}
+	frontier := []*Node{nodes[0]}
 	for len(frontier) > 0 {
 		x := frontier[0]
 		frontier = frontier[1:]
@@ -143,7 +143,7 @@ func settled(ctx context.Context, nodes []*assemblyNode) bool {
 
 // meshed reports whether every pair of the nodes holds an up link
 // established at both ends.
-func meshed(ctx context.Context, nodes []*assemblyNode) bool {
+func meshed(ctx context.Context, nodes []*Node) bool {
 	for i, x := range nodes {
 		for _, y := range nodes[i+1:] {
 			if !upTo(ctx, x, y) || !upTo(ctx, y, x) {
@@ -156,7 +156,7 @@ func meshed(ctx context.Context, nodes []*assemblyNode) bool {
 
 // crossLink names the first pair across the two sets that holds an up link
 // established at both ends; empty when none does.
-func crossLink(ctx context.Context, xs, ys []*assemblyNode) string {
+func crossLink(ctx context.Context, xs, ys []*Node) string {
 	for _, x := range xs {
 		for _, y := range ys {
 			if upTo(ctx, x, y) && upTo(ctx, y, x) {
@@ -169,7 +169,7 @@ func crossLink(ctx context.Context, xs, ys []*assemblyNode) string {
 
 // upTo reports whether the node holds an established link to the peer
 // whose verdict is up.
-func upTo(ctx context.Context, n, peer *assemblyNode) bool {
+func upTo(ctx context.Context, n, peer *Node) bool {
 	entries, err := n.app.Links().All(ctx)
 	if err != nil {
 		return false
@@ -184,7 +184,7 @@ func upTo(ctx context.Context, n, peer *assemblyNode) bool {
 }
 
 // upLinks counts the node's established links whose verdicts are up.
-func upLinks(ctx context.Context, n *assemblyNode) int {
+func upLinks(ctx context.Context, n *Node) int {
 	entries, err := n.app.Links().All(ctx)
 	if err != nil {
 		return 0
@@ -201,7 +201,7 @@ func upLinks(ctx context.Context, n *assemblyNode) int {
 // probedBy reports whether the prober's rendezvous probe ever landed on the
 // node's acceptor: the probe mints an entry aimed at the prober's host,
 // which proves the prober's directory holds the node.
-func probedBy(ctx context.Context, n, prober *assemblyNode) bool {
+func probedBy(ctx context.Context, n, prober *Node) bool {
 	entries, err := n.app.Links().All(ctx)
 	if err != nil {
 		return false

@@ -3,7 +3,6 @@ package testnetwork
 import (
 	"context"
 	"net/netip"
-	"sync/atomic"
 	"testing"
 
 	"github.com/scionproto/scion/pkg/addr"
@@ -35,8 +34,8 @@ func TestLineTopology(t *testing.T) {
 	// Beacons propagate A→B→C with signatures verified at each hop: a path
 	// database holds only verified segments, and B and C each keep the up
 	// segments they terminate.
-	Poll(t, "up segments at C", func() bool { return holdsUpSegments(ctx, c.assemblyNode) })
-	Poll(t, "up segments at B", func() bool { return holdsUpSegments(ctx, b.assemblyNode) })
+	Poll(t, "up segments at C", func() bool { return holdsUpSegments(ctx, c.Node) })
+	Poll(t, "up segments at B", func() bool { return holdsUpSegments(ctx, b.Node) })
 
 	// C enrolls through the reversed beacon over B: no direct A–C link
 	// exists, so the enrollment fetch rides the bootstrap route.
@@ -162,7 +161,7 @@ func TestRestartedNodeServesUpSegments(t *testing.T) {
 	b := nodes[nodeIA]
 	ctx := t.Context()
 
-	Poll(t, "B up segment", func() bool { return holdsUpSegments(ctx, b.assemblyNode) })
+	Poll(t, "B up segment", func() bool { return holdsUpSegments(ctx, b.Node) })
 
 	// B stops, every socket and store released when its Close returns, and
 	// boots again on the same state, host, and link set — the restart a
@@ -188,7 +187,7 @@ func TestRestartedNodeServesUpSegments(t *testing.T) {
 
 // holdsUpSegments reports whether the node's path database holds an up
 // segment.
-func holdsUpSegments(ctx context.Context, n *assemblyNode) bool {
+func holdsUpSegments(ctx context.Context, n *Node) bool {
 	segs, err := n.app.PathDB().Get(ctx,
 		pathdb.Query{Type: pathdb.SegmentTypeUp})
 	return err == nil && len(segs) > 0
@@ -204,7 +203,7 @@ func TestHostSlotPool(t *testing.T) {
 	// Live draws from the shared counter, each a host no earlier draw named.
 	drawn := make(map[netip.Addr]bool, 32)
 	for range 32 {
-		ip := hostSlot(t)
+		ip := HostSlot(t)
 		if reserved.Contains(ip) {
 			t.Errorf("the draw %s names a host inside the reserved %s", ip, reserved)
 		}
@@ -250,41 +249,3 @@ var (
 	nodeIA  = addr.MustIAFrom(20, 0xff0000000002)
 	lineCIA = addr.MustIAFrom(20, 0xff0000000003)
 )
-
-// poolSize is the pool's size: the 127.0.X.Y loopback space above the
-// reserved /24, X from 1, Y skipping the all-zero and all-one bytes that
-// read as network and broadcast.
-const poolSize = 255 * 254
-
-// hostDraws counts the pool's draws; the counter never resets and never
-// wraps, so a host is never reissued within a process. A node's sockets can
-// outlive its test — the failed-boot proof's endpoint socket, which
-// releases with the process rather than the failed setup, the standing
-// example — so a repeated run must draw fresh hosts rather than find its
-// fixed ports held for the wrong reason.
-var hostDraws atomic.Uint32
-
-// hostSlot draws the next loopback host of the pool the package's labs
-// share, so two labs overlap freely, a repeated run draws fresh hosts, and
-// no two draws name one host. The pool starts at 127.0.1.1, above
-// 127.0.0.0/24 — that /24 belongs to the other packages' fixed loopback
-// mounts, and go test runs the packages' processes in parallel — and a draw
-// past the pool's end refuses instead of wrapping.
-func hostSlot(t *testing.T) netip.Addr {
-	t.Helper()
-	ip, ok := poolHost(int(hostDraws.Add(1)))
-	if !ok {
-		t.Fatalf("the pool of %d loopback hosts is drawn dry", poolSize)
-	}
-	return ip
-}
-
-// poolHost returns the n-th draw's host of the pool, n counted from one,
-// and whether the pool holds it.
-func poolHost(n int) (netip.Addr, bool) {
-	if n > poolSize {
-		return netip.Addr{}, false
-	}
-	n--
-	return netip.AddrFrom4([4]byte{127, 0, byte(n/254 + 1), byte(n%254 + 1)}), true
-}

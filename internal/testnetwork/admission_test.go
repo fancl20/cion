@@ -40,7 +40,7 @@ func mintedAuthKey(t *testing.T, bot *operatorBot, node addr.IA) string {
 }
 
 // registryHosts reads the hosts the core's registry holds.
-func registryHosts(t *testing.T, core *assemblyNode) []wireguard.HostEntry {
+func registryHosts(t *testing.T, core *Node) []wireguard.HostEntry {
 	t.Helper()
 	directory, err := wireguardOf(core).Directory(t.Context())
 	if err != nil {
@@ -59,11 +59,11 @@ func TestCoordinationAuthKeyJoin(t *testing.T) {
 	wpki := packageWebPKI
 	place := placeCoordination(t)
 	bot := newOperatorBot(t)
-	a := coordCore(t, wpki, hostSlot(t), place, func(cfg *services.NodeConfig) {
+	a := coordCore(t, wpki, HostSlot(t), place, func(cfg *services.NodeConfig) {
 		cfg.EnrollAuth = "telegram=" + operatorChatToken
 		cfg.TelegramAPI = bot.url
 	})
-	b := coordLeaf(t, wpki, hostSlot(t), a, place, nil)
+	b := coordLeaf(t, wpki, HostSlot(t), a, place, nil)
 
 	// The leaf enrolls on the operator's approval and publishes its slice.
 	prompt := -1
@@ -105,7 +105,7 @@ func TestCoordinationTelegramRefusesBareHost(t *testing.T) {
 	wpki := packageWebPKI
 	place := placeCoordination(t)
 	bot := newOperatorBot(t)
-	a := coordCore(t, wpki, hostSlot(t), place, func(cfg *services.NodeConfig) {
+	a := coordCore(t, wpki, HostSlot(t), place, func(cfg *services.NodeConfig) {
 		cfg.EnrollAuth = "telegram=" + operatorChatToken
 		cfg.TelegramAPI = bot.url
 	})
@@ -132,12 +132,12 @@ func TestCoordinationCIDRGate(t *testing.T) {
 	t.Parallel()
 	wpki := packageWebPKI
 	place := placeCoordination(t)
-	a := coordCore(t, wpki, hostSlot(t), place, func(cfg *services.NodeConfig) {
+	a := coordCore(t, wpki, HostSlot(t), place, func(cfg *services.NodeConfig) {
 		// The harness's nodes and hosts dial from loopback, which the prefix
 		// covers.
 		cfg.EnrollAuth = "cidrs=127.0.0.0/8"
 	})
-	b := coordLeaf(t, wpki, hostSlot(t), a, place, nil)
+	b := coordLeaf(t, wpki, HostSlot(t), a, place, nil)
 	Poll(t, "the leaf to enroll from inside the prefix", func() bool {
 		return holdsChain(t.Context(), b)
 	})

@@ -1,9 +1,10 @@
-// Package testnetwork holds the integration labs: nodes booted through the
-// node's own assembly, services.BootApp, on the loopback hosts the labs
-// draw, beside the fixtures they share — the address draws and the polls;
-// the test WebPKI standing in for the core's certificate authority comes
-// from pkg/core/webpki/webpkitest. The labs import the node's assembly, so no
-// package under pkg can host them.
+// Package testnetwork holds the e2e labs: nodes booted through the node's
+// own assembly, services.BootApp, on the loopback hosts the labs draw,
+// beside the fixtures every lab package shares — the nodes' boots, the
+// bubbles, the address draws, and the polls; the test WebPKI standing in for
+// the core's certificate authority comes from pkg/core/webpki/webpkitest.
+// The labs import the node's assembly, so no package under pkg can host
+// them.
 package testnetwork
 
 import (
@@ -164,4 +165,42 @@ func pollUntil(budget time.Duration, cond func() bool) bool {
 		}
 		time.Sleep(virtualPollInterval)
 	}
+}
+
+// poolSize is the pool's size: the 127.0.X.Y loopback space above the
+// reserved /24, X from 1, Y skipping the all-zero and all-one bytes that
+// read as network and broadcast.
+const poolSize = 255 * 254
+
+// hostDraws counts the pool's draws; the counter never resets and never
+// wraps, so a host is never reissued within a process. A node's sockets can
+// outlive its test — the failed-boot proof's endpoint socket, which
+// releases with the process rather than the failed setup, the standing
+// example — so a repeated run must draw fresh hosts rather than find its
+// fixed ports held for the wrong reason.
+var hostDraws atomic.Uint32
+
+// HostSlot draws the next loopback host of the pool the package's labs
+// share, so two labs overlap freely, a repeated run draws fresh hosts, and
+// no two draws name one host. The pool starts at 127.0.1.1, above
+// 127.0.0.0/24 — that /24 belongs to the other packages' fixed loopback
+// mounts, and go test runs the packages' processes in parallel — and a draw
+// past the pool's end refuses instead of wrapping.
+func HostSlot(t *testing.T) netip.Addr {
+	t.Helper()
+	ip, ok := poolHost(int(hostDraws.Add(1)))
+	if !ok {
+		t.Fatalf("the pool of %d loopback hosts is drawn dry", poolSize)
+	}
+	return ip
+}
+
+// poolHost returns the n-th draw's host of the pool, n counted from one,
+// and whether the pool holds it.
+func poolHost(n int) (netip.Addr, bool) {
+	if n > poolSize {
+		return netip.Addr{}, false
+	}
+	n--
+	return netip.AddrFrom4([4]byte{127, 0, byte(n/254 + 1), byte(n%254 + 1)}), true
 }

@@ -11,58 +11,26 @@ import (
 	"github.com/scionproto/scion/pkg/addr"
 
 	"github.com/fancl20/cion/internal/services"
-	"github.com/fancl20/cion/internal/testnetwork/fabric"
 	"github.com/fancl20/cion/pkg/apps"
 	"github.com/fancl20/cion/pkg/apps/ping"
-	"github.com/fancl20/cion/pkg/core/liveness"
 	"github.com/fancl20/cion/pkg/core/trust"
 	"github.com/fancl20/cion/pkg/core/webpki/webpkitest"
 	"github.com/fancl20/cion/pkg/libs/scion"
-	"github.com/fancl20/cion/pkg/libs/scionrpc"
 	"github.com/fancl20/cion/pkg/libs/underlay"
 	"github.com/fancl20/cion/pkg/modules/links"
 	"github.com/fancl20/cion/pkg/modules/pathdb"
 	"github.com/fancl20/cion/pkg/modules/topology/impl/measured"
 )
 
-// fastPacing paces the assembly's loops for the integration tests. BFD keeps
-// the production interval: its detection time rides out the stalls of a
-// loaded runner, which at a lab interval take every link down, lose the
-// echoes in flight, and leave the selection to retire live links. The
-// selection windows are long enough that the three a retirement counts
-// outlast a BFD detection and the re-handshake after it, so a stall that
-// drops a session on one side does not retire the link on that side alone.
-var fastPacing = services.NodePacing{
-	Propagation:     Propagation,
-	Registration:    Registration,
-	Enrollment:      EnrollRetry,
-	Selection:       2 * time.Second,
-	CandidateWindow: 5 * time.Second,
-	Directory:       100 * time.Millisecond,
-	RendezvousRate:  10 * time.Millisecond,
-	LinkSetPoll:     100 * time.Millisecond,
-	BFD:             liveness.BFDTransmissionInterval,
-}
-
-// assemblyNode is a node booted through the run command's own assembly.
-type assemblyNode struct {
-	app      *services.App
-	stateDir string
-	host     netip.Addr
-	// internal is the internal link's UDP address as the run arguments
-	// carried it, where a lab submits raw packets as a local host.
-	internal string
-}
-
-// rendezvousOf returns the node's advertised rendezvous address: the
-// control address's host on the fixed rendezvous port.
-func (n *assemblyNode) rendezvousOf() string {
+// Rendezvous returns the node's advertised rendezvous address: the control
+// address's host on the fixed rendezvous port.
+func (n *Node) Rendezvous() string {
 	return netip.AddrPortFrom(n.host, measured.RendezvousPort).String()
 }
 
 // stop stops the node, its loops returned and its resources released when
 // stop returns, and fails the test on the node's stop result.
-func (n *assemblyNode) stop(t *testing.T) {
+func (n *Node) stop(t *testing.T) {
 	t.Helper()
 	if err := n.app.Close(); err != nil {
 		t.Fatalf("stopping %v: %v", n.app.IA(), err)
@@ -71,7 +39,7 @@ func (n *assemblyNode) stop(t *testing.T) {
 
 // conn binds a SCION conn on the node's control host at an ephemeral port,
 // sending through the node's internal link, and closes it with the test.
-func (n *assemblyNode) conn(t *testing.T) *scion.Conn {
+func (n *Node) conn(t *testing.T) *scion.Conn {
 	t.Helper()
 	conn, err := n.app.Conn(0)
 	if err != nil {
@@ -83,7 +51,7 @@ func (n *assemblyNode) conn(t *testing.T) *scion.Conn {
 
 // forwardingKey reads the forwarding key the node's boot wrote to its
 // state: the key its data plane verifies its own hop fields with.
-func (n *assemblyNode) forwardingKey(t *testing.T) []byte {
+func (n *Node) forwardingKey(t *testing.T) []byte {
 	t.Helper()
 	key, err := trust.LoadOrCreateForwardingKey(n.stateDir)
 	if err != nil {
@@ -95,88 +63,20 @@ func (n *assemblyNode) forwardingKey(t *testing.T) []byte {
 // bootAssembly boots a full node assembly — the run command's own wiring —
 // and serves it underneath the test, stopping it at cleanup, on the kernel
 // the process shares.
-func bootAssembly(t *testing.T, mutate func(*services.NodeConfig)) *assemblyNode {
+func bootAssembly(t *testing.T, mutate func(*services.NodeConfig)) *Node {
 	t.Helper()
 	return bootOn(t, underlay.Kernel, mutate)
-}
-
-// bootOn boots a full node assembly binding every underlay socket through
-// the source, the kernel's or a fabric's, and serves it underneath the
-// test.
-func bootOn(
-	t *testing.T, sockets underlay.Sockets, mutate func(*services.NodeConfig),
-) *assemblyNode {
-
-	t.Helper()
-	cfg := services.NodeConfig{
-		Domain: webpkitest.Domain,
-		Pacing: fastPacing,
-	}
-	if mutate != nil {
-		mutate(&cfg)
-	}
-	if cfg.State == "" {
-		cfg.State = t.TempDir()
-	}
-	app, err := services.BootApp(t.Context(), cfg, sockets)
-	if err != nil {
-		t.Fatal(err)
-	}
-	n := &assemblyNode{app: app, stateDir: cfg.State, internal: cfg.Internal}
-	t.Cleanup(func() {
-		if err := app.Close(); err != nil {
-			t.Errorf("stopping %v: %v", app.IA(), err)
-		}
-	})
-	// The control address's host is the address the lab's helpers name a
-	// peer by, the bare-host form included — its port derived the same way
-	// the resolution derives it.
-	ap, err := underlay.ResolveAddrPortDefault(cfg.Control, scionrpc.EndpointPort)
-	if err != nil {
-		t.Fatal(err)
-	}
-	n.host = ap.Addr()
-	return n
-}
-
-// bootOnFabric boots a full node assembly on the fabric's node for the
-// host — the same wiring as bootAssembly, every underlay socket bound on
-// the node's stack and every port drawn there, no kernel port held or
-// probed. A founding core's domain names its host on the fabric, so the
-// founder publishes the host its peers reach and stands in the directory,
-// as a production founder does.
-func bootOnFabric(
-	t *testing.T, f *fabric.Fabric, host netip.Addr,
-	mutate func(*services.NodeConfig),
-) *assemblyNode {
-
-	t.Helper()
-	node := f.Node(host)
-	return bootOn(t, node.Sockets(), func(cfg *services.NodeConfig) {
-		if cfg.Internal == "" {
-			cfg.Internal = netip.AddrPortFrom(host, node.DrawPort()).String()
-		}
-		if cfg.Control == "" {
-			cfg.Control = netip.AddrPortFrom(host, node.DrawPort()).String()
-		}
-		if mutate != nil {
-			mutate(cfg)
-		}
-		if cfg.Core && len(cfg.Neighbors) == 0 {
-			f.Name(cfg.Domain, host)
-		}
-	})
 }
 
 // pingFrom pings the destination once through the node's own assembly,
 // reporting success. The responder runs beside every node's control
 // endpoint, as the daemon serves it.
-func pingFrom(ctx context.Context, n *assemblyNode, dst addr.IA, host netip.Addr) bool {
+func pingFrom(ctx context.Context, n *Node, dst addr.IA, host netip.Addr) bool {
 	return pingOver(ctx, n, n.app.Provider(), dst, host)
 }
 
 // pingOver is pingFrom resolving the path through the given provider.
-func pingOver(ctx context.Context, n *assemblyNode, provider *scion.PathProvider,
+func pingOver(ctx context.Context, n *Node, provider *scion.PathProvider,
 	dst addr.IA, host netip.Addr) bool {
 
 	conn, err := n.app.Conn(0)
@@ -198,7 +98,7 @@ func pingOver(ctx context.Context, n *assemblyNode, provider *scion.PathProvider
 
 // entryOf returns the node's link entry of a neighbor: its live one, the
 // store holding at most one, else a retired one.
-func entryOf(ctx context.Context, n *assemblyNode, ia addr.IA) *links.Link {
+func entryOf(ctx context.Context, n *Node, ia addr.IA) *links.Link {
 	entries, err := n.app.Links().All(ctx)
 	if err != nil {
 		return nil
@@ -221,7 +121,7 @@ func entryOf(ctx context.Context, n *assemblyNode, ia addr.IA) *links.Link {
 // drops a departed link's session and reports an interface it holds no
 // session for as up, so a link that retires before a poll reads its verdict
 // reads as up from then on.
-func markedDown(ctx context.Context, n *assemblyNode, ifID uint16) bool {
+func markedDown(ctx context.Context, n *Node, ifID uint16) bool {
 	if !n.app.Monitor().Up(ifID) {
 		return true
 	}
@@ -239,7 +139,7 @@ func markedDown(ctx context.Context, n *assemblyNode, ifID uint16) bool {
 
 // linkPortsInBand checks that every entry of the node holds its local
 // address in the link band, where no bind of port 0 lands.
-func linkPortsInBand(t *testing.T, n *assemblyNode) {
+func linkPortsInBand(t *testing.T, n *Node) {
 	t.Helper()
 	entries, err := n.app.Links().All(t.Context())
 	if err != nil {
@@ -257,7 +157,7 @@ func linkPortsInBand(t *testing.T, n *assemblyNode) {
 // establishedTo reports whether the node holds an established entry of the
 // neighbor: re-establishment past a retirement mints a second entry beside
 // the retired first, so the live one is what the polls want.
-func establishedTo(ctx context.Context, n *assemblyNode, ia addr.IA) bool {
+func establishedTo(ctx context.Context, n *Node, ia addr.IA) bool {
 	entries, err := n.app.Links().All(ctx)
 	if err != nil {
 		return false
@@ -275,7 +175,7 @@ func establishedTo(ctx context.Context, n *assemblyNode, ia addr.IA) bool {
 // joined to B — on the given loopback hosts, each node's run arguments
 // taking the mutation last when one is set.
 func bootRendezvousLine(t *testing.T, wpki *webpkitest.CA, ipA, ipB, ipC netip.Addr,
-	mutate func(*services.NodeConfig)) (a, b, c *assemblyNode) {
+	mutate func(*services.NodeConfig)) (a, b, c *Node) {
 
 	t.Helper()
 	last := func(cfg *services.NodeConfig) {
@@ -309,7 +209,7 @@ func bootRendezvousLine(t *testing.T, wpki *webpkitest.CA, ipA, ipB, ipC netip.A
 		cfg.State = t.TempDir()
 		cfg.Internal = PinnedUDPAddrOn(t, ipC)
 		cfg.Control = FreeUDPAddrOn(t, ipC)
-		cfg.Neighbors = []string{b.rendezvousOf()}
+		cfg.Neighbors = []string{b.Rendezvous()}
 		cfg.RootCAs = wpki.Pool
 		last(cfg)
 	})
@@ -326,7 +226,7 @@ func bootRendezvousLine(t *testing.T, wpki *webpkitest.CA, ipA, ipB, ipC netip.A
 func TestJoinByRendezvous(t *testing.T) {
 	t.Parallel()
 	wpki := webpkitest.New(t)
-	ipA, ipB, ipC := hostSlot(t), hostSlot(t), hostSlot(t)
+	ipA, ipB, ipC := HostSlot(t), HostSlot(t), HostSlot(t)
 	a, b, c := bootRendezvousLine(t, wpki, ipA, ipB, ipC, nil)
 	ctx := t.Context()
 
@@ -361,7 +261,7 @@ func TestJoinByRendezvous(t *testing.T) {
 		return e != nil && e.State == links.StateEstablished
 	})
 	// Every link the joins and the promotion allocated lies in the band.
-	for _, n := range []*assemblyNode{a, b, c} {
+	for _, n := range []*Node{a, b, c} {
 		linkPortsInBand(t, n)
 	}
 
@@ -436,7 +336,7 @@ func TestJoinByRendezvous(t *testing.T) {
 // enrolls, and the core's published host is the literal its sockets bind.
 func TestJoinByAddressIdentity(t *testing.T) {
 	t.Parallel()
-	ipA, ipB := hostSlot(t), hostSlot(t)
+	ipA, ipB := HostSlot(t), HostSlot(t)
 	wpki := webpkitest.NewFor(t, ipA)
 	identity := ipA.String()
 	a := bootAssembly(t, func(cfg *services.NodeConfig) {
@@ -453,7 +353,7 @@ func TestJoinByAddressIdentity(t *testing.T) {
 		cfg.State = t.TempDir()
 		cfg.Internal = PinnedUDPAddrOn(t, ipB)
 		cfg.Control = FreeUDPAddrOn(t, ipB)
-		cfg.Neighbors = []string{a.rendezvousOf()}
+		cfg.Neighbors = []string{a.Rendezvous()}
 		cfg.RootCAs = wpki.Pool
 	})
 	ctx := t.Context()
@@ -482,7 +382,7 @@ func TestJoinByAddressIdentity(t *testing.T) {
 func TestLineCutHeals(t *testing.T) {
 	t.Parallel()
 	wpki := webpkitest.New(t)
-	ipA, ipB, ipC := hostSlot(t), hostSlot(t), hostSlot(t)
+	ipA, ipB, ipC := HostSlot(t), HostSlot(t), HostSlot(t)
 	a, b, c := bootRendezvousLine(t, wpki, ipA, ipB, ipC, nil)
 	ctx := t.Context()
 
@@ -549,7 +449,7 @@ func TestLineCutHeals(t *testing.T) {
 func TestBootstrapWithoutAnswer(t *testing.T) {
 	t.Parallel()
 	wpki := webpkitest.New(t)
-	ipA, ipD := hostSlot(t), hostSlot(t)
+	ipA, ipD := HostSlot(t), HostSlot(t)
 	dead := FreeUDPAddrOn(t, ipA) // reserved, then released: nothing answers
 	state := t.TempDir()
 
@@ -588,7 +488,7 @@ func TestBootstrapWithoutAnswer(t *testing.T) {
 		cfg.State = state
 		cfg.Internal = PinnedUDPAddrOn(t, ipD)
 		cfg.Control = FreeUDPAddrOn(t, ipD)
-		cfg.Neighbors = []string{a.rendezvousOf()}
+		cfg.Neighbors = []string{a.Rendezvous()}
 		cfg.RootCAs = wpki.Pool
 	})
 	Poll(t, "the retried join to land", func() bool {
@@ -609,7 +509,7 @@ func TestBootstrapWithoutAnswer(t *testing.T) {
 func TestHeldHostPortRefusesBoot(t *testing.T) {
 	t.Parallel()
 	wpki := webpkitest.New(t)
-	ip := hostSlot(t)
+	ip := HostSlot(t)
 	held, err := net.ListenUDP("udp",
 		net.UDPAddrFromAddrPort(netip.AddrPortFrom(ip, apps.DefaultHostPort)))
 	if err != nil {
@@ -652,7 +552,7 @@ func TestHeldHostPortRefusesBoot(t *testing.T) {
 func TestHeldStateRefusesBoot(t *testing.T) {
 	t.Parallel()
 	wpki := webpkitest.New(t)
-	ip := hostSlot(t)
+	ip := HostSlot(t)
 	running := bootAssembly(t, func(cfg *services.NodeConfig) {
 		cfg.Core = true
 		cfg.Applications = []string{}
@@ -689,13 +589,13 @@ func TestHeldStateRefusesBoot(t *testing.T) {
 func TestCoreRestartsInPlace(t *testing.T) {
 	t.Parallel()
 	wpki := webpkitest.New(t)
-	ipA, ipB := hostSlot(t), hostSlot(t)
+	ipA, ipB := HostSlot(t), HostSlot(t)
 	state := t.TempDir()
 	internal, control := PinnedUDPAddrOn(t, ipA), FreeUDPAddrOn(t, ipA)
 	// The shared host port is drawn from the pinned band, for a WireGuard
 	// interface on the test host may hold the default.
 	hostPort := netip.MustParseAddrPort(PinnedUDPAddrOn(t, ipA)).Port()
-	boot := func() *assemblyNode {
+	boot := func() *Node {
 		return bootAssembly(t, func(cfg *services.NodeConfig) {
 			cfg.Core = true
 			cfg.Applications = []string{"wireguard", "voting"}
@@ -716,7 +616,7 @@ func TestCoreRestartsInPlace(t *testing.T) {
 	b := bootAssembly(t, func(cfg *services.NodeConfig) {
 		cfg.Internal = PinnedUDPAddrOn(t, ipB)
 		cfg.Control = FreeUDPAddrOn(t, ipB)
-		cfg.Neighbors = []string{a.rendezvousOf()}
+		cfg.Neighbors = []string{a.Rendezvous()}
 		cfg.RootCAs = wpki.Pool
 	})
 	Poll(t, "the joiner to enroll against the last boot", func() bool {
@@ -732,7 +632,7 @@ func TestCoreRestartsInPlace(t *testing.T) {
 func TestDeliberateCore(t *testing.T) {
 	t.Parallel()
 	wpki := webpkitest.New(t)
-	ipA, ipB := hostSlot(t), hostSlot(t)
+	ipA, ipB := HostSlot(t), HostSlot(t)
 
 	a := bootAssembly(t, func(cfg *services.NodeConfig) {
 		cfg.Core = true
@@ -748,7 +648,7 @@ func TestDeliberateCore(t *testing.T) {
 		cfg.State = t.TempDir()
 		cfg.Internal = PinnedUDPAddrOn(t, ipB)
 		cfg.Control = FreeUDPAddrOn(t, ipB)
-		cfg.Neighbors = []string{a.rendezvousOf()}
+		cfg.Neighbors = []string{a.Rendezvous()}
 		cfg.RootCAs = wpki.Pool
 	})
 

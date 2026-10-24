@@ -275,7 +275,7 @@ func persistCertFile(t *testing.T, state, name string, cert *x509.Certificate) {
 func TestCoresRotateByTRCUpdate(t *testing.T) {
 	t.Parallel()
 	wpki := webpkitest.New(t)
-	ipA, ipB, ipC, ipD := hostSlot(t), hostSlot(t), hostSlot(t), hostSlot(t)
+	ipA, ipB, ipC, ipD := HostSlot(t), HostSlot(t), HostSlot(t), HostSlot(t)
 
 	founderIA, err := trust.GenerateIA()
 	if err != nil {
@@ -312,7 +312,7 @@ func TestCoresRotateByTRCUpdate(t *testing.T) {
 		cfg.State = authState
 		cfg.Internal = PinnedUDPAddrOn(t, ipB)
 		cfg.Control = FreeUDPAddrOn(t, ipB)
-		cfg.Neighbors = []string{a.rendezvousOf()}
+		cfg.Neighbors = []string{a.Rendezvous()}
 		cfg.RootCAs = wpki.Pool
 		cfg.Pacing.EnrollmentInspect = EnrollRetry
 	})
@@ -321,7 +321,7 @@ func TestCoresRotateByTRCUpdate(t *testing.T) {
 		cfg.State = t.TempDir()
 		cfg.Internal = PinnedUDPAddrOn(t, ipC)
 		cfg.Control = FreeUDPAddrOn(t, ipC)
-		cfg.Neighbors = []string{a.rendezvousOf()}
+		cfg.Neighbors = []string{a.Rendezvous()}
 		cfg.RootCAs = wpki.Pool
 		cfg.Pacing.EnrollmentInspect = EnrollRetry
 	})
@@ -419,7 +419,7 @@ func TestCoresRotateByTRCUpdate(t *testing.T) {
 	pollDiscovered(t, c, founderIA.ISD(), base)
 	for _, n := range []struct {
 		name string
-		node *assemblyNode
+		node *Node
 	}{{"founder", a}, {"third node", c}} {
 		Poll(t, "the "+n.name+"'s chain to leave the replaced root", func() bool {
 			return anchoredInNewest(t, n.node, base)
@@ -432,7 +432,7 @@ func TestCoresRotateByTRCUpdate(t *testing.T) {
 		cfg.State = t.TempDir()
 		cfg.Internal = PinnedUDPAddrOn(t, ipD)
 		cfg.Control = FreeUDPAddrOn(t, ipD)
-		cfg.Neighbors = []string{a.rendezvousOf()}
+		cfg.Neighbors = []string{a.Rendezvous()}
 		cfg.RootCAs = wpki.Pool
 	})
 	Poll(t, "the post-pin node enrolled", func() bool {
@@ -471,9 +471,9 @@ func TestCoresRotateByTRCUpdate(t *testing.T) {
 func TestFounderBootPromotesStagedRoll(t *testing.T) {
 	t.Parallel()
 	wpki := webpkitest.New(t)
-	ipA, ipB := hostSlot(t), hostSlot(t)
+	ipA, ipB := HostSlot(t), HostSlot(t)
 	state := t.TempDir()
-	boot := func() *assemblyNode {
+	boot := func() *Node {
 		return bootAssembly(t, func(cfg *services.NodeConfig) {
 			cfg.Core = true
 			cfg.State = state
@@ -532,7 +532,7 @@ func TestFounderBootPromotesStagedRoll(t *testing.T) {
 		cfg.State = t.TempDir()
 		cfg.Internal = PinnedUDPAddrOn(t, ipB)
 		cfg.Control = FreeUDPAddrOn(t, ipB)
-		cfg.Neighbors = []string{a.rendezvousOf()}
+		cfg.Neighbors = []string{a.Rendezvous()}
 		cfg.RootCAs = wpki.Pool
 	})
 	Poll(t, "the joiner to enroll", func() bool {
@@ -549,7 +549,7 @@ func TestFounderBootPromotesStagedRoll(t *testing.T) {
 // serial, failing the test when it pins none.
 func pinnedRung(
 	t *testing.T,
-	n *assemblyNode,
+	n *Node,
 	isd addr.ISD,
 	serial scrypto.Version,
 ) cppki.SignedTRC {
@@ -582,7 +582,7 @@ func updateType(t *testing.T, successor, pred cppki.SignedTRC) cppki.UpdateType 
 // not carry.
 func pollRolled(
 	t *testing.T,
-	n *assemblyNode,
+	n *Node,
 	ia addr.IA,
 	pin cppki.SignedTRC,
 ) cppki.SignedTRC {
@@ -611,7 +611,7 @@ func pollRolled(
 // the discovery the founder's signed messages carry.
 func pollDiscovered(
 	t *testing.T,
-	n *assemblyNode,
+	n *Node,
 	isd addr.ISD,
 	pin cppki.SignedTRC,
 ) cppki.SignedTRC {
@@ -632,7 +632,7 @@ func pollDiscovered(
 }
 
 // ownChain returns the node's own chain valid now.
-func ownChain(t *testing.T, n *assemblyNode) []*x509.Certificate {
+func ownChain(t *testing.T, n *Node) []*x509.Certificate {
 	t.Helper()
 	var chain []*x509.Certificate
 	Poll(t, "the node's own chain", func() bool {
@@ -654,7 +654,7 @@ func ownChain(t *testing.T, n *assemblyNode) []*x509.Certificate {
 
 // chainUnder returns the node's own chain that verifies against the TRC's
 // roots, polling until the node holds one.
-func chainUnder(t *testing.T, n *assemblyNode, trc cppki.SignedTRC) []*x509.Certificate {
+func chainUnder(t *testing.T, n *Node, trc cppki.SignedTRC) []*x509.Certificate {
 	t.Helper()
 	var chain []*x509.Certificate
 	Poll(t, "the node's chain under the TRC's roots", func() bool {
@@ -679,7 +679,7 @@ func chainUnder(t *testing.T, n *assemblyNode, trc cppki.SignedTRC) []*x509.Cert
 
 // anchoredInNewest reports whether the node's newest chain verifies against
 // its newest pinned TRC alone, once that TRC is a successor of the base.
-func anchoredInNewest(t *testing.T, n *assemblyNode, base cppki.SignedTRC) bool {
+func anchoredInNewest(t *testing.T, n *Node, base cppki.SignedTRC) bool {
 	t.Helper()
 	ctx := t.Context()
 	newest, err := n.app.TrustDB().SignedTRC(ctx, cppki.TRCID{

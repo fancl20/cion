@@ -17,7 +17,7 @@ import (
 // staticNode is a node of the static lab: the run command's own assembly
 // under the file provider, with its link-set file's path kept for edits.
 type staticNode struct {
-	*assemblyNode
+	*Node
 	linkSet string
 }
 
@@ -57,7 +57,7 @@ func bootStaticNode(t *testing.T, wpki *webpkitest.CA, ip netip.Addr, core bool,
 
 	t.Helper()
 	n := &staticNode{linkSet: linkSet}
-	n.assemblyNode = bootAssembly(t, func(cfg *services.NodeConfig) {
+	n.Node = bootAssembly(t, func(cfg *services.NodeConfig) {
 		cfg.Core = core
 		cfg.LinkSet = linkSet
 		cfg.State = state
@@ -136,7 +136,7 @@ func bootTopology(t *testing.T, wpki *webpkitest.CA, topo staticTopology) map[ad
 	hosts := make(map[addr.IA]netip.Addr, len(topo.nodes))
 	states := make(map[addr.IA]string, len(topo.nodes))
 	for _, ia := range topo.nodes {
-		hosts[ia] = hostSlot(t)
+		hosts[ia] = HostSlot(t)
 		states[ia] = t.TempDir()
 		persistIAFile(t, states[ia], ia)
 	}
@@ -182,7 +182,7 @@ func bootTopology(t *testing.T, wpki *webpkitest.CA, topo staticTopology) map[ad
 func TestStaticLabByLinkSet(t *testing.T) {
 	t.Parallel()
 	wpki := webpkitest.New(t)
-	a, b, c := bootStaticLine(t, wpki, hostSlot(t), hostSlot(t), hostSlot(t))
+	a, b, c := bootStaticLine(t, wpki, HostSlot(t), HostSlot(t), HostSlot(t))
 
 	// The identity completed from the files: one ISD, each AS its own draw.
 	for _, n := range []*staticNode{b, c} {
@@ -195,19 +195,19 @@ func TestStaticLabByLinkSet(t *testing.T) {
 	// The links stand: both sides of each hold an established entry, the
 	// core's on the interface its file named.
 	Poll(t, "A's link to B", func() bool {
-		e := entryOf(ctx, a.assemblyNode, b.app.IA())
+		e := entryOf(ctx, a.Node, b.app.IA())
 		return e != nil && e.State == links.StateEstablished && e.IfID == 1
 	})
 	Poll(t, "B's link to A", func() bool {
-		e := entryOf(ctx, b.assemblyNode, a.app.IA())
+		e := entryOf(ctx, b.Node, a.app.IA())
 		return e != nil && e.State == links.StateEstablished
 	})
 	Poll(t, "B's link to C", func() bool {
-		e := entryOf(ctx, b.assemblyNode, c.app.IA())
+		e := entryOf(ctx, b.Node, c.app.IA())
 		return e != nil && e.State == links.StateEstablished
 	})
 	Poll(t, "C's link to B", func() bool {
-		e := entryOf(ctx, c.assemblyNode, b.app.IA())
+		e := entryOf(ctx, c.Node, b.app.IA())
 		return e != nil && e.State == links.StateEstablished
 	})
 
@@ -215,22 +215,22 @@ func TestStaticLabByLinkSet(t *testing.T) {
 	// core, C enrolls through B, and the core's echo to C rides the
 	// composed two-hop path — the responder in every node's assembly
 	// answering on its reversed arrival path.
-	Poll(t, "B enrolled", func() bool { return pingFrom(ctx, b.assemblyNode, a.app.IA(), a.host) })
-	Poll(t, "C enrolled", func() bool { return pingFrom(ctx, c.assemblyNode, a.app.IA(), a.host) })
-	Poll(t, "the core reaches C", func() bool { return pingFrom(ctx, a.assemblyNode, c.app.IA(), c.host) })
+	Poll(t, "B enrolled", func() bool { return pingFrom(ctx, b.Node, a.app.IA(), a.host) })
+	Poll(t, "C enrolled", func() bool { return pingFrom(ctx, c.Node, a.app.IA(), a.host) })
+	Poll(t, "the core reaches C", func() bool { return pingFrom(ctx, a.Node, c.app.IA(), c.host) })
 
 	// Removing C's entry from B's file retires the link — a generation swap
 	// the surviving traffic rides through. The A–B entry keeps the
 	// addresses the standing link holds.
-	ab := entryOf(ctx, b.assemblyNode, a.app.IA())
+	ab := entryOf(ctx, b.Node, a.app.IA())
 	writeStaticSet(t, b.linkSet, staticLink{
 		IA: a.app.IA().String(), Local: ab.Local.String(), Remote: ab.Remote.String()})
 	Poll(t, "B retired the link to C", func() bool {
-		e := entryOf(ctx, b.assemblyNode, c.app.IA())
+		e := entryOf(ctx, b.Node, c.app.IA())
 		return e != nil && e.State == links.StateRetired
 	})
 	Poll(t, "A and B still answer each other", func() bool {
-		return pingFrom(ctx, a.assemblyNode, b.app.IA(), b.host)
+		return pingFrom(ctx, a.Node, b.app.IA(), b.host)
 	})
 }
 
@@ -242,7 +242,7 @@ func TestStaticLabByLinkSet(t *testing.T) {
 func TestStaticEnrollmentByAuthorizer(t *testing.T) {
 	t.Parallel()
 	wpki := webpkitest.New(t)
-	ipA, ipB := hostSlot(t), hostSlot(t)
+	ipA, ipB := HostSlot(t), HostSlot(t)
 	abA, abB := PinnedUDPAddrOn(t, ipA), PinnedUDPAddrOn(t, ipB)
 
 	// A prefix list that admits nothing on the lab's loopback addressing:
@@ -260,20 +260,20 @@ func TestStaticEnrollmentByAuthorizer(t *testing.T) {
 		staticLink{IA: b.app.IA().String(), Local: abA, Remote: abB, Interface: &ifID})
 
 	Poll(t, "the link stands by the operator's vouch", func() bool {
-		e := entryOf(t.Context(), b.assemblyNode, a.app.IA())
+		e := entryOf(t.Context(), b.Node, a.app.IA())
 		return e != nil && e.State == links.StateEstablished
 	})
 	Poll(t, "the core's vouched link stands", func() bool {
-		e := entryOf(t.Context(), a.assemblyNode, b.app.IA())
+		e := entryOf(t.Context(), a.Node, b.app.IA())
 		return e != nil && e.State == links.StateEstablished
 	})
 	// The authorizer bounds enrollment: no chain ever names the joiner, on
 	// either side, however long the joiner's retries run.
 	time.Sleep(30 * fastPacing.Enrollment)
-	if holdsChain(t.Context(), b.assemblyNode) {
+	if holdsChain(t.Context(), b.Node) {
 		t.Error("a joiner outside the prefix list enrolled over the vouched link")
 	}
-	if !holdsNoChainFor(t.Context(), a.assemblyNode, b.assemblyNode) {
+	if !holdsNoChainFor(t.Context(), a.Node, b.Node) {
 		t.Error("the core issued a chain naming a joiner outside the prefix list")
 	}
 }

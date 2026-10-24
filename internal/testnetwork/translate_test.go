@@ -23,18 +23,18 @@ const translateBudget = 5 * time.Minute
 // host. The joiner's neighbor is the gateway — the one address a node
 // behind a translation can dial.
 func bootTranslatedLine(t *testing.T, f *fabric.Fabric, wpki *webpkitest.CA) (
-	b *fabric.Boundary, a, j *assemblyNode, gw netip.Addr,
+	b *fabric.Boundary, a, j *Node, gw netip.Addr,
 ) {
 
 	t.Helper()
-	ipA, gw, ipJ := hostSlot(t), hostSlot(t), hostSlot(t)
+	ipA, gw, ipJ := HostSlot(t), HostSlot(t), HostSlot(t)
 	b = f.Translate(gw, ipA, measured.RendezvousPort, ipJ)
-	a = bootInBubble(t, f, ipA, func(cfg *services.NodeConfig) {
+	a = BootInBubble(t, f, ipA, func(cfg *services.NodeConfig) {
 		cfg.Core = true
 		cfg.CertFile = wpki.CertFile
 		cfg.KeyFile = wpki.KeyFile
 	})
-	j = bootInBubble(t, f, ipJ, func(cfg *services.NodeConfig) {
+	j = BootInBubble(t, f, ipJ, func(cfg *services.NodeConfig) {
 		cfg.Neighbors = []string{gw.String()}
 		cfg.RootCAs = wpki.Pool
 	})
@@ -53,7 +53,7 @@ func TestTranslatedJoinerRecordsTheObservation(t *testing.T) {
 	if !solo(t) {
 		return
 	}
-	inBubble(t, func(t *testing.T, f *fabric.Fabric, wpki *webpkitest.CA) {
+	InBubble(t, func(t *testing.T, f *fabric.Fabric, wpki *webpkitest.CA) {
 		_, a, j, gw := bootTranslatedLine(t, f, wpki)
 		ctx := t.Context()
 
@@ -83,7 +83,7 @@ func TestTranslatedLinkRidesTheMapping(t *testing.T) {
 	if !solo(t) {
 		return
 	}
-	inBubble(t, func(t *testing.T, f *fabric.Fabric, wpki *webpkitest.CA) {
+	InBubble(t, func(t *testing.T, f *fabric.Fabric, wpki *webpkitest.CA) {
 		b, a, j, _ := bootTranslatedLine(t, f, wpki)
 		ctx := t.Context()
 		PollVirtual(t, translateBudget, "the translated joiner's link to A", func() bool {
@@ -139,7 +139,7 @@ func TestTranslatedRestartDrawsAFreshMapping(t *testing.T) {
 	if !solo(t) {
 		return
 	}
-	inBubble(t, func(t *testing.T, f *fabric.Fabric, wpki *webpkitest.CA) {
+	InBubble(t, func(t *testing.T, f *fabric.Fabric, wpki *webpkitest.CA) {
 		b, a, j, gw := bootTranslatedLine(t, f, wpki)
 		jHost, jState := j.host, j.stateDir
 		ctx := t.Context()
@@ -167,7 +167,7 @@ func TestTranslatedRestartDrawsAFreshMapping(t *testing.T) {
 		// The restart: the same state directory and host, the node's stack
 		// rebound — its first dial drawing a fresh mapping, the founder's
 		// fresh entry recording it.
-		j2 := bootInBubble(t, f, jHost, func(cfg *services.NodeConfig) {
+		j2 := BootInBubble(t, f, jHost, func(cfg *services.NodeConfig) {
 			cfg.State = jState
 			cfg.Neighbors = []string{gw.String()}
 			cfg.RootCAs = wpki.Pool
@@ -191,7 +191,7 @@ func TestTranslatedReturnReAimsTheStandingEntry(t *testing.T) {
 	if !solo(t) {
 		return
 	}
-	inBubble(t, func(t *testing.T, f *fabric.Fabric, wpki *webpkitest.CA) {
+	InBubble(t, func(t *testing.T, f *fabric.Fabric, wpki *webpkitest.CA) {
 		b, a, j, gw := bootTranslatedLine(t, f, wpki)
 		jHost, jState := j.host, j.stateDir
 		ctx := t.Context()
@@ -213,7 +213,7 @@ func TestTranslatedReturnReAimsTheStandingEntry(t *testing.T) {
 		// addresses.
 		j.stop(t)
 		b.Rebind()
-		j2 := bootInBubble(t, f, jHost, func(cfg *services.NodeConfig) {
+		j2 := BootInBubble(t, f, jHost, func(cfg *services.NodeConfig) {
 			cfg.State = jState
 			cfg.Neighbors = []string{gw.String()}
 			cfg.RootCAs = wpki.Pool

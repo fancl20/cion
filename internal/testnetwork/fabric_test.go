@@ -23,15 +23,15 @@ const joinBudget = 3 * time.Minute
 // runs inside a synctest bubble at the daemon's own pacing, and shares its
 // process with whatever else the package runs, bubbles included.
 func TestFabricJoin(t *testing.T) {
-	inBubble(t, func(t *testing.T, f *fabric.Fabric, wpki *webpkitest.CA) {
-		ipA, ipB := hostSlot(t), hostSlot(t)
-		a := bootInBubble(t, f, ipA, func(cfg *services.NodeConfig) {
+	InBubble(t, func(t *testing.T, f *fabric.Fabric, wpki *webpkitest.CA) {
+		ipA, ipB := HostSlot(t), HostSlot(t)
+		a := BootInBubble(t, f, ipA, func(cfg *services.NodeConfig) {
 			cfg.Core = true
 			cfg.CertFile = wpki.CertFile
 			cfg.KeyFile = wpki.KeyFile
 		})
-		b := bootInBubble(t, f, ipB, func(cfg *services.NodeConfig) {
-			cfg.Neighbors = []string{a.rendezvousOf()}
+		b := BootInBubble(t, f, ipB, func(cfg *services.NodeConfig) {
+			cfg.Neighbors = []string{a.Rendezvous()}
 			cfg.RootCAs = wpki.Pool
 		})
 		ctx := t.Context()

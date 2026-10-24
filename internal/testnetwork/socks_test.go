@@ -29,7 +29,7 @@ func socksPort(ip netip.Addr) netip.AddrPort {
 
 // servingAddresses maps each node's ISD-AS to its serving address — the
 // slice's first, the address the allocator never issues.
-func servingAddresses(t *testing.T, a *assemblyNode) map[addr.IA]netip.Addr {
+func servingAddresses(t *testing.T, a *Node) map[addr.IA]netip.Addr {
 	t.Helper()
 	directory, err := wireguardOf(a).Directory(t.Context())
 	if err != nil {
@@ -113,8 +113,8 @@ func TestEgressSocksService(t *testing.T) {
 	// every node offering the service by default.
 	wpki := packageWebPKI
 	place := placeCoordination(t)
-	a := coordCore(t, wpki, hostSlot(t), place, nil)
-	b := coordLeaf(t, wpki, hostSlot(t), a, place, nil)
+	a := coordCore(t, wpki, HostSlot(t), place, nil)
+	b := coordLeaf(t, wpki, HostSlot(t), a, place, nil)
 	t.Cleanup(func() {
 		t.Logf("node A counters: %v", wireguardOf(a).Counters())
 		t.Logf("node B counters: %v", wireguardOf(b).Counters())
@@ -244,8 +244,8 @@ func TestWithheldExitOffer(t *testing.T) {
 	// hosts with no SOCKS offer, on the suite's own loopback hosts.
 	wpki := packageWebPKI
 	place := placeCoordination(t)
-	a := coordCore(t, wpki, hostSlot(t), place, nil)
-	b := coordLeaf(t, wpki, hostSlot(t), a, place, func(cfg *services.NodeConfig) {
+	a := coordCore(t, wpki, HostSlot(t), place, nil)
+	b := coordLeaf(t, wpki, HostSlot(t), a, place, func(cfg *services.NodeConfig) {
 		cfg.Applications = []string{"wireguard"}
 	})
 	if got := b.app.Application("socks"); got != nil {
@@ -310,7 +310,7 @@ func TestWithheldExitOffer(t *testing.T) {
 }
 
 // otherIA returns the one node of the pair that is not the given one.
-func otherIA(t *testing.T, a *assemblyNode, ia addr.IA) addr.IA {
+func otherIA(t *testing.T, a *Node, ia addr.IA) addr.IA {
 	t.Helper()
 	if a.app.IA().Equal(ia) {
 		serving := servingAddresses(t, a)
@@ -324,7 +324,7 @@ func otherIA(t *testing.T, a *assemblyNode, ia addr.IA) addr.IA {
 }
 
 // nodeOf returns the assembly node of the pair holding the ISD-AS.
-func nodeOf(t *testing.T, a, b *assemblyNode, ia addr.IA) *assemblyNode {
+func nodeOf(t *testing.T, a, b *Node, ia addr.IA) *Node {
 	t.Helper()
 	if a.app.IA().Equal(ia) {
 		return a

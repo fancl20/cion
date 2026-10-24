@@ -25,7 +25,7 @@ import (
 func TestPathLayerServesTwoCores(t *testing.T) {
 	t.Parallel()
 	wpki := webpkitest.New(t)
-	ipA, ipB := hostSlot(t), hostSlot(t)
+	ipA, ipB := HostSlot(t), HostSlot(t)
 
 	// The founding core.
 	a := bootAssembly(t, func(cfg *services.NodeConfig) {
@@ -44,7 +44,7 @@ func TestPathLayerServesTwoCores(t *testing.T) {
 		cfg.State = t.TempDir()
 		cfg.Internal = PinnedUDPAddrOn(t, ipB)
 		cfg.Control = FreeUDPAddrOn(t, ipB)
-		cfg.Neighbors = []string{a.rendezvousOf()}
+		cfg.Neighbors = []string{a.Rendezvous()}
 		cfg.RootCAs = wpki.Pool
 	})
 	ctx := t.Context()
@@ -52,7 +52,7 @@ func TestPathLayerServesTwoCores(t *testing.T) {
 	// The join completes before any child starts: the successor TRC names
 	// both cores, so the origin checks pass from the first beacon.
 	successor := cppki.TRCID{ISD: a.app.IA().ISD(), Base: 1, Serial: 2}
-	pinned := func(n *assemblyNode) bool {
+	pinned := func(n *Node) bool {
 		trc, err := n.app.TrustDB().SignedTRC(ctx, successor)
 		return err == nil && !trc.IsZero()
 	}
@@ -109,7 +109,7 @@ func TestPathLayerServesTwoCores(t *testing.T) {
 	// of each origin proves both cores answered — and compose paths to
 	// either child.
 	children := []struct {
-		node *assemblyNode
+		node *Node
 		name string
 	}{{c, "the founder's child"}, {d, "the authoritative's child"}}
 	for _, child := range children {
@@ -135,14 +135,14 @@ func TestPathLayerServesTwoCores(t *testing.T) {
 
 // nodeUnder boots a plain node standing under the core alone, its only
 // neighbor the core's rendezvous.
-func nodeUnder(t *testing.T, wpki *webpkitest.CA, core *assemblyNode) *assemblyNode {
+func nodeUnder(t *testing.T, wpki *webpkitest.CA, core *Node) *Node {
 	t.Helper()
-	ip := hostSlot(t)
+	ip := HostSlot(t)
 	return bootAssembly(t, func(cfg *services.NodeConfig) {
 		cfg.State = t.TempDir()
 		cfg.Internal = PinnedUDPAddrOn(t, ip)
 		cfg.Control = FreeUDPAddrOn(t, ip)
-		cfg.Neighbors = []string{core.rendezvousOf()}
+		cfg.Neighbors = []string{core.Rendezvous()}
 		cfg.RootCAs = wpki.Pool
 	})
 }
@@ -150,7 +150,7 @@ func nodeUnder(t *testing.T, wpki *webpkitest.CA, core *assemblyNode) *assemblyN
 // holdsSegmentFrom reports whether the node's path database holds a segment
 // of the type originating at the given core.
 func holdsSegmentFrom(
-	t *testing.T, n *assemblyNode, typ pathdb.SegmentType, core addr.IA) bool {
+	t *testing.T, n *Node, typ pathdb.SegmentType, core addr.IA) bool {
 
 	t.Helper()
 	segs, err := n.app.PathDB().Get(t.Context(), pathdb.Query{Type: typ})
@@ -168,7 +168,7 @@ func holdsSegmentFrom(
 // holdsSharedIngressUps reports whether the node's path database holds up
 // segments of both origins whose terminating entries record one shared
 // ingress interface — both origins' beacons arrived over one link.
-func holdsSharedIngressUps(t *testing.T, n *assemblyNode, one, other addr.IA) bool {
+func holdsSharedIngressUps(t *testing.T, n *Node, one, other addr.IA) bool {
 	t.Helper()
 	segs, err := n.app.PathDB().Get(t.Context(), pathdb.Query{Type: pathdb.SegmentTypeUp})
 	if err != nil {
@@ -199,7 +199,7 @@ func holdsSharedIngressUps(t *testing.T, n *assemblyNode, one, other addr.IA) bo
 
 // holdsDownSegmentsOf reports whether the node's path database holds down
 // segments reaching the destination.
-func holdsDownSegmentsOf(t *testing.T, n *assemblyNode, dst addr.IA) bool {
+func holdsDownSegmentsOf(t *testing.T, n *Node, dst addr.IA) bool {
 	t.Helper()
 	segs, err := n.app.PathDB().Get(t.Context(),
 		pathdb.Query{Type: pathdb.SegmentTypeDown, DstIA: dst})

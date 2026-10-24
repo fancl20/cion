@@ -35,7 +35,7 @@ const votingAuth = "cidrs=127.0.0.0/8"
 func TestCoreJoinsBySensitiveUpdate(t *testing.T) {
 	t.Parallel()
 	wpki := webpkitest.New(t)
-	ipA, ipB, ipC, ipD := hostSlot(t), hostSlot(t), hostSlot(t), hostSlot(t)
+	ipA, ipB, ipC, ipD := HostSlot(t), HostSlot(t), HostSlot(t), HostSlot(t)
 
 	// The founding core.
 	a := bootAssembly(t, func(cfg *services.NodeConfig) {
@@ -54,7 +54,7 @@ func TestCoreJoinsBySensitiveUpdate(t *testing.T) {
 		cfg.State = t.TempDir()
 		cfg.Internal = PinnedUDPAddrOn(t, ipB)
 		cfg.Control = FreeUDPAddrOn(t, ipB)
-		cfg.Neighbors = []string{a.rendezvousOf()}
+		cfg.Neighbors = []string{a.Rendezvous()}
 		cfg.RootCAs = wpki.Pool
 	})
 	// A third node joining the founder, to watch the successor spread.
@@ -62,7 +62,7 @@ func TestCoreJoinsBySensitiveUpdate(t *testing.T) {
 		cfg.State = t.TempDir()
 		cfg.Internal = PinnedUDPAddrOn(t, ipC)
 		cfg.Control = FreeUDPAddrOn(t, ipC)
-		cfg.Neighbors = []string{a.rendezvousOf()}
+		cfg.Neighbors = []string{a.Rendezvous()}
 		cfg.RootCAs = wpki.Pool
 	})
 	// A node neighboring the joining core alone, whose enrollments must
@@ -71,7 +71,7 @@ func TestCoreJoinsBySensitiveUpdate(t *testing.T) {
 		cfg.State = t.TempDir()
 		cfg.Internal = PinnedUDPAddrOn(t, ipD)
 		cfg.Control = FreeUDPAddrOn(t, ipD)
-		cfg.Neighbors = []string{b.rendezvousOf()}
+		cfg.Neighbors = []string{b.Rendezvous()}
 		cfg.RootCAs = wpki.Pool
 	})
 	ctx := t.Context()
@@ -157,7 +157,7 @@ func TestCoreJoinsBySensitiveUpdate(t *testing.T) {
 func TestCoreJoinsThroughAnAuthoritative(t *testing.T) {
 	t.Parallel()
 	wpki := webpkitest.New(t)
-	ipA, ipB, ipE := hostSlot(t), hostSlot(t), hostSlot(t)
+	ipA, ipB, ipE := HostSlot(t), HostSlot(t), HostSlot(t)
 
 	// The founding core, and the authoritative onboarded through it.
 	a := bootAssembly(t, func(cfg *services.NodeConfig) {
@@ -174,13 +174,13 @@ func TestCoreJoinsThroughAnAuthoritative(t *testing.T) {
 		cfg.State = t.TempDir()
 		cfg.Internal = PinnedUDPAddrOn(t, ipB)
 		cfg.Control = FreeUDPAddrOn(t, ipB)
-		cfg.Neighbors = []string{a.rendezvousOf()}
+		cfg.Neighbors = []string{a.Rendezvous()}
 		cfg.RootCAs = wpki.Pool
 	})
 	ctx := t.Context()
 	// onboarded reports whether the node's newest pinned TRC names it a
 	// core.
-	onboarded := func(n *assemblyNode) bool {
+	onboarded := func(n *Node) bool {
 		trc, err := n.app.TrustDB().SignedTRC(ctx, cppki.TRCID{
 			ISD:    n.app.IA().ISD(),
 			Base:   scrypto.LatestVer,
@@ -199,7 +199,7 @@ func TestCoreJoinsThroughAnAuthoritative(t *testing.T) {
 		cfg.State = t.TempDir()
 		cfg.Internal = PinnedUDPAddrOn(t, ipE)
 		cfg.Control = FreeUDPAddrOn(t, ipE)
-		cfg.Neighbors = []string{b.rendezvousOf()}
+		cfg.Neighbors = []string{b.Rendezvous()}
 		cfg.RootCAs = wpki.Pool
 	})
 	stopped := make(chan error, 1)
@@ -216,7 +216,7 @@ func TestCoreJoinsThroughAnAuthoritative(t *testing.T) {
 
 // holdsAssemblyChain reports whether the assembly node holds a chain valid
 // now for the IA.
-func holdsAssemblyChain(t *testing.T, n *assemblyNode, ia addr.IA) bool {
+func holdsAssemblyChain(t *testing.T, n *Node, ia addr.IA) bool {
 	t.Helper()
 	now := time.Now()
 	chains, err := n.app.TrustDB().Chains(t.Context(), trustdb.ChainQuery{
@@ -239,7 +239,7 @@ func holdsAssemblyChain(t *testing.T, n *assemblyNode, ia addr.IA) bool {
 func TestJoinerStopsWithoutVotingApp(t *testing.T) {
 	t.Parallel()
 	wpki := webpkitest.New(t)
-	ipA, ipB, ipD, ipE := hostSlot(t), hostSlot(t), hostSlot(t), hostSlot(t)
+	ipA, ipB, ipD, ipE := HostSlot(t), HostSlot(t), HostSlot(t), HostSlot(t)
 
 	// The deliberate core: no application loads, the voting application
 	// among them.
@@ -259,7 +259,7 @@ func TestJoinerStopsWithoutVotingApp(t *testing.T) {
 			State:     t.TempDir(),
 			Internal:  PinnedUDPAddrOn(t, ip),
 			Control:   FreeUDPAddrOn(t, ip),
-			Neighbors: []string{a.rendezvousOf()},
+			Neighbors: []string{a.Rendezvous()},
 			RootCAs:   wpki.Pool,
 			Pacing:    fastPacing,
 		}
@@ -284,7 +284,7 @@ func TestJoinerStopsWithoutVotingApp(t *testing.T) {
 		cfg.State = t.TempDir()
 		cfg.Internal = PinnedUDPAddrOn(t, ipD)
 		cfg.Control = FreeUDPAddrOn(t, ipD)
-		cfg.Neighbors = []string{a.rendezvousOf()}
+		cfg.Neighbors = []string{a.Rendezvous()}
 		cfg.RootCAs = wpki.Pool
 	})
 
@@ -322,7 +322,7 @@ func TestJoinerStopsWithoutVotingApp(t *testing.T) {
 func TestJoiningCoreMeshesWithTheFounder(t *testing.T) {
 	t.Parallel()
 	wpki := webpkitest.New(t)
-	ipA, ipB := hostSlot(t), hostSlot(t)
+	ipA, ipB := HostSlot(t), HostSlot(t)
 	// The shared host ports are drawn from the pinned band, for a WireGuard
 	// interface on the test host may hold the default. The two need not
 	// match: the mesh rides SCION, and each host dials its own node.
@@ -347,7 +347,7 @@ func TestJoiningCoreMeshesWithTheFounder(t *testing.T) {
 		cfg.State = t.TempDir()
 		cfg.Internal = PinnedUDPAddrOn(t, ipB)
 		cfg.Control = FreeUDPAddrOn(t, ipB)
-		cfg.Neighbors = []string{a.rendezvousOf()}
+		cfg.Neighbors = []string{a.Rendezvous()}
 		cfg.RootCAs = wpki.Pool
 	})
 

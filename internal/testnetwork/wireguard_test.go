@@ -94,14 +94,14 @@ func hasHostPeer(a *wireguard.App, host wireguard.HostEntry) bool {
 }
 
 // nodeHostPort returns the node's shared host-facing underlay endpoint.
-func nodeHostPort(n *assemblyNode) netip.AddrPort {
+func nodeHostPort(n *Node) netip.AddrPort {
 	return netip.AddrPortFrom(n.host, wireguardOf(n).HostPort())
 }
 
 // registerHost records one host's registry entry in the core's store — the
 // record the coordination service's gate writes, handed here by the tests that
 // stand in for the service.
-func registerHost(t *testing.T, core *assemblyNode, host wireguard.HostEntry) {
+func registerHost(t *testing.T, core *Node, host wireguard.HostEntry) {
 	t.Helper()
 	if err := wireguardOf(core).Registry().PublishHost(t.Context(), host); err != nil {
 		t.Fatal(err)
@@ -114,7 +114,7 @@ func registerHost(t *testing.T, core *assemblyNode, host wireguard.HostEntry) {
 // on the test host may hold the default — and meshed once B's publication
 // lands. B's first publication precedes its chain, so the mesh waits out
 // one publication retry.
-func startWireguardNodes(t *testing.T) (a, b *assemblyNode) {
+func startWireguardNodes(t *testing.T) (a, b *Node) {
 	t.Helper()
 	nodes := bootTopology(t, webpkitest.New(t), staticTopology{
 		core:  wireguardA,
@@ -127,7 +127,7 @@ func startWireguardNodes(t *testing.T) (a, b *assemblyNode) {
 				netip.MustParseAddrPort(PinnedUDPAddrOn(t, host)).Port()
 		},
 	})
-	a, b = nodes[wireguardA].assemblyNode, nodes[wireguardB].assemblyNode
+	a, b = nodes[wireguardA].Node, nodes[wireguardB].Node
 	PollFor(t, TestTimeout+wireguard.PublishRetry, "A's mesh peer", func() bool {
 		return hasMeshPeer(wireguardOf(a), wireguardB)
 	})
@@ -137,7 +137,7 @@ func startWireguardNodes(t *testing.T) (a, b *assemblyNode) {
 
 // assignedSlice waits for the node's directory entry to carry its assigned
 // slice and returns it: the harness places its nodes by publication.
-func assignedSlice(t *testing.T, n *assemblyNode) netip.Prefix {
+func assignedSlice(t *testing.T, n *Node) netip.Prefix {
 	t.Helper()
 	Poll(t, "the node's assigned slice", func() bool {
 		return sliceOf(t.Context(), n).IsValid()
@@ -147,7 +147,7 @@ func assignedSlice(t *testing.T, n *assemblyNode) netip.Prefix {
 
 // sliceOf returns the slice the node's directory entry carries, invalid
 // while none does.
-func sliceOf(ctx context.Context, n *assemblyNode) netip.Prefix {
+func sliceOf(ctx context.Context, n *Node) netip.Prefix {
 	directory, err := wireguardOf(n).Directory(ctx)
 	if err != nil {
 		return netip.Prefix{}

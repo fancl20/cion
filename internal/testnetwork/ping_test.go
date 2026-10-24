@@ -396,7 +396,7 @@ func warmUp(t *testing.T, p, r *staticNode, seg *pathdb.Segment) {
 	t.Helper()
 	provider := &scion.PathProvider{IA: p.app.IA(), DB: &staticPathDB{seg: seg}}
 	Poll(t, "R answers P's echo over the crafted segment", func() bool {
-		return pingOver(t.Context(), p.assemblyNode, provider, r.app.IA(), r.host)
+		return pingOver(t.Context(), p.Node, provider, r.app.IA(), r.host)
 	})
 }
 
@@ -509,7 +509,7 @@ func TestPingLossSummary(t *testing.T) {
 		Conn:     p.conn(t),
 		Paths:    &scion.PathProvider{IA: iaP, DB: &staticPathDB{seg: seg}},
 		Dst:      iaR,
-		DstHost:  hostSlot(t),
+		DstHost:  HostSlot(t),
 		Count:    2,
 		Interval: 100 * time.Millisecond,
 		Wait:     200 * time.Millisecond,

@@ -41,12 +41,12 @@ func TestFabricatingNeighbor(t *testing.T) {
 
 	// The honest line stands: B enrolled, C terminates verified up segments
 	// to the core, and the core holds the down segments to C.
-	Poll(t, "B enrolled", func() bool { return holdsChain(ctx, b.assemblyNode) })
+	Poll(t, "B enrolled", func() bool { return holdsChain(ctx, b.Node) })
 	Poll(t, "C's up segments bound-verify", func() bool {
-		return boundVerifies(ctx, c.assemblyNode, pathdb.SegmentTypeUp)
+		return boundVerifies(ctx, c.Node, pathdb.SegmentTypeUp)
 	})
 	Poll(t, "A's down segments bound-verify", func() bool {
-		return boundVerifies(ctx, a.assemblyNode, pathdb.SegmentTypeDown)
+		return boundVerifies(ctx, a.Node, pathdb.SegmentTypeDown)
 	})
 
 	// The fabrication: an entry claiming the core's name, signed by B's own
@@ -89,10 +89,10 @@ func TestFabricatingNeighbor(t *testing.T) {
 	// or register what it stored — and every segment every store holds
 	// still verifies bound.
 	time.Sleep(3 * Registration)
-	if !boundVerifies(ctx, c.assemblyNode, pathdb.SegmentTypeUp) {
+	if !boundVerifies(ctx, c.Node, pathdb.SegmentTypeUp) {
 		t.Error("C's up segments hold an entry another identity signed")
 	}
-	if !boundVerifies(ctx, a.assemblyNode, pathdb.SegmentTypeDown) {
+	if !boundVerifies(ctx, a.Node, pathdb.SegmentTypeDown) {
 		t.Error("the core's down segments hold an entry another identity signed")
 	}
 
@@ -107,7 +107,7 @@ func TestFabricatingNeighbor(t *testing.T) {
 // boundVerifies reports whether the node's path database holds segments of
 // the type and every entry of every one of them verifies bound to the
 // identity it claims.
-func boundVerifies(ctx context.Context, n *assemblyNode, typ pathdb.SegmentType) bool {
+func boundVerifies(ctx context.Context, n *Node, typ pathdb.SegmentType) bool {
 	segs, err := n.app.PathDB().Get(ctx, pathdb.Query{Type: typ})
 	if err != nil || len(segs) == 0 {
 		return false

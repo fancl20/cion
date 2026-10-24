@@ -100,7 +100,7 @@ func (labPolicy) Authorize(_ context.Context, f enrollauth.AdmissionFacts) enrol
 // default shared port — and the coordination endpoint beside it, the labs'
 // policy admitting where the suite names no method.
 func coordCore(t *testing.T, wpki *webpkitest.CA, host netip.Addr,
-	place coordinationPlacement, mutate func(*services.NodeConfig)) *assemblyNode {
+	place coordinationPlacement, mutate func(*services.NodeConfig)) *Node {
 
 	t.Helper()
 	return bootAssembly(t, func(cfg *services.NodeConfig) {
@@ -129,15 +129,15 @@ func coordCore(t *testing.T, wpki *webpkitest.CA, host netip.Addr,
 // loopback host: it joins by rendezvous and runs the wireguard application
 // with its relay presence, its tailnet slice the directory's assignment and
 // its hosts dialed on the default shared port.
-func coordLeaf(t *testing.T, wpki *webpkitest.CA, host netip.Addr, core *assemblyNode,
-	place coordinationPlacement, mutate func(*services.NodeConfig)) *assemblyNode {
+func coordLeaf(t *testing.T, wpki *webpkitest.CA, host netip.Addr, core *Node,
+	place coordinationPlacement, mutate func(*services.NodeConfig)) *Node {
 
 	t.Helper()
 	return bootAssembly(t, func(cfg *services.NodeConfig) {
 		cfg.State = t.TempDir()
 		cfg.Internal = PinnedUDPAddrOn(t, host)
 		cfg.Control = FreeUDPAddrOn(t, host)
-		cfg.Neighbors = []string{core.rendezvousOf()}
+		cfg.Neighbors = []string{core.Rendezvous()}
 		cfg.RootCAs = wpki.Pool
 		cfg.AppArguments.Wireguard.HostPort = apps.DefaultHostPort
 		cfg.Coordination = &services.CoordinationOptions{
@@ -151,7 +151,7 @@ func coordLeaf(t *testing.T, wpki *webpkitest.CA, host netip.Addr, core *assembl
 
 // wireguardOf returns the node's booted WireGuard application, where the
 // labs watch host peers — the same assertion the borrowing entries make.
-func wireguardOf(n *assemblyNode) *wireguard.App {
+func wireguardOf(n *Node) *wireguard.App {
 	return n.app.Application("wireguard").(*wireguard.App)
 }
 
@@ -234,7 +234,7 @@ func warmSession(t *testing.T, srv *tsnet.Server, far netip.Addr) {
 }
 
 // ownerOf returns the node whose slice holds the address.
-func ownerOf(t *testing.T, a *assemblyNode, ip netip.Addr) addr.IA {
+func ownerOf(t *testing.T, a *Node, ip netip.Addr) addr.IA {
 	t.Helper()
 	ctx := t.Context()
 	directory, err := wireguardOf(a).Directory(ctx)
@@ -253,7 +253,7 @@ func ownerOf(t *testing.T, a *assemblyNode, ip netip.Addr) addr.IA {
 // holdsHostEndpoint reports whether the core's registry holds the node's
 // entry with its host endpoint: until it does, a registration naming the
 // node is refused.
-func holdsHostEndpoint(t *testing.T, core *assemblyNode, node addr.IA) bool {
+func holdsHostEndpoint(t *testing.T, core *Node, node addr.IA) bool {
 	directory, err := wireguardOf(core).Directory(t.Context())
 	if err != nil {
 		return false
@@ -351,8 +351,8 @@ func TestCoordinationJoin(t *testing.T) {
 	// clients' root store trusts.
 	wpki := packageWebPKI
 	place := placeCoordination(t)
-	a := coordCore(t, wpki, hostSlot(t), place, nil)
-	b := coordLeaf(t, wpki, hostSlot(t), a, place, nil)
+	a := coordCore(t, wpki, HostSlot(t), place, nil)
+	b := coordLeaf(t, wpki, HostSlot(t), a, place, nil)
 	// The nodes' counters, printed at the test's end: the overlay's own
 	// tooling, where the operating system's cannot see.
 	t.Cleanup(func() {
@@ -467,7 +467,7 @@ func TestCoordinationByAddressIdentity(t *testing.T) {
 		cfg.CertFile = wpki.AddrCertFile
 		cfg.KeyFile = wpki.AddrKeyFile
 	})
-	b := coordLeaf(t, wpki, hostSlot(t), a, place, func(cfg *services.NodeConfig) {
+	b := coordLeaf(t, wpki, HostSlot(t), a, place, func(cfg *services.NodeConfig) {
 		cfg.Domain = webpkitest.Address
 	})
 

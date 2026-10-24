@@ -46,7 +46,7 @@ func bfdPacing(cfg *services.NodeConfig) {
 func TestBFDLivenessEpisode(t *testing.T) {
 	t.Parallel()
 	wpki := webpkitest.New(t)
-	ipA, ipB, ipC := hostSlot(t), hostSlot(t), hostSlot(t)
+	ipA, ipB, ipC := HostSlot(t), HostSlot(t), HostSlot(t)
 	a, b, c := bootRendezvousLine(t, wpki, ipA, ipB, ipC, bfdPacing)
 	ctx := t.Context()
 
@@ -141,24 +141,24 @@ func TestBFDLivenessEpisode(t *testing.T) {
 func TestBFDStaticLabEpisode(t *testing.T) {
 	t.Parallel()
 	wpki := webpkitest.New(t)
-	ipB := hostSlot(t)
-	a, b, c := bootStaticLine(t, wpki, hostSlot(t), ipB, hostSlot(t))
+	ipB := HostSlot(t)
+	a, b, c := bootStaticLine(t, wpki, HostSlot(t), ipB, HostSlot(t))
 	// The interface the core's file named its link to B.
 	ifID := uint16(1)
 
 	ctx := t.Context()
 	Poll(t, "the static line to stand", func() bool {
-		return establishedOf(ctx, a.assemblyNode, b.app.IA()) &&
-			establishedOf(ctx, b.assemblyNode, a.app.IA()) &&
-			establishedOf(ctx, c.assemblyNode, b.app.IA())
+		return establishedOf(ctx, a.Node, b.app.IA()) &&
+			establishedOf(ctx, b.Node, a.app.IA()) &&
+			establishedOf(ctx, c.Node, b.app.IA())
 	})
 	// The path through B is kept for the echo across the dead link, which
 	// no composition offers once A's verdict on it is down.
 	var throughB *spath.Decoded
 	Poll(t, "A reaches C through B", func() bool {
-		throughB = pathVia(ctx, t, a.assemblyNode, c.app.IA(), ifID)
+		throughB = pathVia(ctx, t, a.Node, c.app.IA(), ifID)
 		return throughB != nil &&
-			echoOver(t, a.assemblyNode, c.app.IA(), c.host, throughB, time.Second)
+			echoOver(t, a.Node, c.app.IA(), c.host, throughB, time.Second)
 	})
 
 	// The blackhole: B dies, and A's monitor marks the file provider's link
@@ -168,7 +168,7 @@ func TestBFDStaticLabEpisode(t *testing.T) {
 		return !a.app.Monitor().Up(ifID)
 	})
 	// The dead route answers the source with the signal; A's cache holds it.
-	echoAcrossDownLink(t, a.assemblyNode, c.app.IA(), c.host, ifID, throughB)
+	echoAcrossDownLink(t, a.Node, c.app.IA(), c.host, ifID, throughB)
 
 	// Lift the blackhole: B restarted from its link-set returns the link up.
 	b2 := bootStaticNode(t, wpki, ipB, false, b.stateDir, b.linkSet, nil)
@@ -177,13 +177,13 @@ func TestBFDStaticLabEpisode(t *testing.T) {
 		return a.app.Monitor().Up(ifID)
 	})
 	Poll(t, "A to reach C through B again", func() bool {
-		return pingFrom(ctx, a.assemblyNode, c.app.IA(), c.host)
+		return pingFrom(ctx, a.Node, c.app.IA(), c.host)
 	})
 }
 
 // establishedOf reports whether the node's entry of the neighbor is
 // established.
-func establishedOf(ctx context.Context, n *assemblyNode, ia addr.IA) bool {
+func establishedOf(ctx context.Context, n *Node, ia addr.IA) bool {
 	e := entryOf(ctx, n, ia)
 	return e != nil && e.State == links.StateEstablished
 }
@@ -194,7 +194,7 @@ func establishedOf(ctx context.Context, n *assemblyNode, ia addr.IA) bool {
 // over — until the node's shared cache holds the egress-down branch's
 // type-5 signal, which the receive path records while each echo goes
 // unanswered.
-func echoAcrossDownLink(t *testing.T, n *assemblyNode, dst addr.IA,
+func echoAcrossDownLink(t *testing.T, n *Node, dst addr.IA,
 	host netip.Addr, ifID uint16, path *spath.Decoded) {
 
 	t.Helper()
@@ -206,7 +206,7 @@ func echoAcrossDownLink(t *testing.T, n *assemblyNode, dst addr.IA,
 
 // pathVia returns a composed path toward the destination that leaves
 // through the node's interface; nil while none is composed.
-func pathVia(ctx context.Context, t *testing.T, n *assemblyNode, dst addr.IA,
+func pathVia(ctx context.Context, t *testing.T, n *Node, dst addr.IA,
 	ifID uint16) *spath.Decoded {
 
 	t.Helper()
@@ -228,7 +228,7 @@ func pathVia(ctx context.Context, t *testing.T, n *assemblyNode, dst addr.IA,
 // path leaving through the node's interface and reports whether the reply
 // arrived within the wait; while no such path is composed it reports false
 // at once.
-func echoVia(ctx context.Context, t *testing.T, n *assemblyNode, dst addr.IA,
+func echoVia(ctx context.Context, t *testing.T, n *Node, dst addr.IA,
 	host netip.Addr, ifID uint16, wait time.Duration) bool {
 
 	t.Helper()
@@ -240,7 +240,7 @@ func echoVia(ctx context.Context, t *testing.T, n *assemblyNode, dst addr.IA,
 // reads the socket until the reply arrives or the wait elapses, reporting
 // whether the reply arrived. The receive path records an interface-down
 // signal in the node's shared cache as it reads.
-func echoOver(t *testing.T, n *assemblyNode, dst addr.IA, host netip.Addr,
+func echoOver(t *testing.T, n *Node, dst addr.IA, host netip.Addr,
 	path *spath.Decoded, wait time.Duration) bool {
 
 	t.Helper()
