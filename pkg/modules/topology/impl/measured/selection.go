@@ -872,13 +872,15 @@ func (s *selection) count(neighbors map[addr.IA]*links.Link, ts []tier) {
 // guard: a down link carries no route and is no redundancy. Then at most
 // one up link retires as useless — none in a window whose eviction took an
 // up link, for each departure changes the routes every other exclusion was
-// measured against — and only while up links exceed the floor: of the up
-// links this node dialed whose useless count reached DemoteWindows and
-// whose window decides them useless, the one whose exclusion moves its
-// tier's price least, ties to the slower direct sample. A link a peer
-// dialed is the peer's to judge, so the two ends' tiers never disagree over
-// one link: at this end only its verdict or the cap's eviction retires it.
-// The useless test is measured each window and decides only when a route
+// measured against — and only while the up links this node dialed exceed
+// the floor: of those whose useless count reached DemoteWindows and whose
+// window decides them useless, the one whose exclusion moves its tier's
+// price least, ties to the slower direct sample. A link a peer dialed is
+// the peer's to judge, so the two ends' tiers never disagree over one link:
+// at this end only its verdict or the cap's eviction retires it, and it
+// never counts toward the floor this retirement guards, so a link a node
+// accepted cannot free it to shed a link it dialed for its own floor. The
+// useless test is measured each window and decides only when a route
 // avoiding the link answered, so a cut-critical link never retires as
 // useless; it and promotion's priced cases read the same price with
 // hysteresis between the thresholds — one test serving both directions,
@@ -890,20 +892,22 @@ func (s *selection) prune(
 	ts []tier,
 ) {
 
-	up := 0
+	dialedUp := 0
 	for _, l := range entries {
 		if l.State != links.StateEstablished {
 			continue
 		}
 		if s.linkUp(l.IfID) {
-			up++
+			if dialed(l) {
+				dialedUp++
+			}
 			continue
 		}
 		if s.streak(l.NeighborIA).down >= DemoteWindows {
 			s.retire(ctx, l, "its verdict stayed down")
 		}
 	}
-	if s.upLeft || up <= NeighborFloor {
+	if s.upLeft || dialedUp <= NeighborFloor {
 		return
 	}
 	var worst *links.Link

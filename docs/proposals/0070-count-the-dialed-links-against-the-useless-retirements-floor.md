@@ -97,3 +97,10 @@ converge no worse than today.
     settles in every run.
 
 ## Implementation history
+
+*   Landed as proposed: the useless loop's guard in
+    [selection.go](/pkg/modules/topology/impl/measured/selection.go), and
+    the regions lab runs unskipped
+    ([regions_test.go](/internal/testnetwork/behavior/regions_test.go)). The
+    lab settled in 45 of 45 runs, within 3 to 8 minutes of virtual time and
+    with 1 to 4 useless retirements each; the stranded lab passed 10 of 10.

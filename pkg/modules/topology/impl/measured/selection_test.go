@@ -513,6 +513,32 @@ func TestSelectionAcceptedLinkStands(t *testing.T) {
 	}
 }
 
+// TestSelectionOwnFloor checks the useless retirement's floor: it counts the
+// up links the node dialed, so a link it accepted never frees it to shed one
+// it dialed — a useless dialed link stands while the dialed links sit at the
+// floor, and retires once a third dialed link lifts them above it.
+func TestSelectionOwnFloor(t *testing.T) {
+	f := newSelFixture(t, selPeer, selA, selB) // up links above the floor
+	f.accept(t, selB)
+	f.carried(selA, 18*time.Millisecond, 20*time.Millisecond, f.via(t, selPeer, 0, selPeer, selA))
+	for range 2 * DemoteWindows {
+		f.pass(t)
+	}
+	if f.state(t, selA) != links.StateEstablished {
+		t.Fatal("a useless dialed link retired with the dialed links at the floor")
+	}
+
+	if err := f.store.Insert(context.Background(), neighborLink(selC, links.StateEstablished)); err != nil {
+		t.Fatal(err)
+	}
+	f.directory = append(f.directory, entryOf(selC))
+	f.samples[selC] = sm(50*time.Millisecond, 60*time.Millisecond)
+	f.pass(t)
+	if f.state(t, selA) != links.StateRetired {
+		t.Error("a useless dialed link stood with the dialed links above the floor")
+	}
+}
+
 // TestSelectionSecondRouteKept checks the route count's half of the useless
 // test: a link bought as its tier's second route never decides useless
 // while it is one of the tier's two routes, though its exclusion leaves the
