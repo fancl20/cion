@@ -1,7 +1,6 @@
 package behavior
 
 import (
-	"net/netip"
 	"testing"
 	"time"
 
@@ -55,29 +54,20 @@ func TestRegionsSettle(t *testing.T) {
 // spanning tree.
 func bootRegions(t *testing.T, fab *fabric.Fabric, wpki *webpkitest.CA) *network {
 	t.Helper()
-	size := len(regionsOneWay)
-	n := &network{nodes: make([]*testnetwork.Node, size), oneWay: make([][]time.Duration, size)}
-	hosts := make([]netip.Addr, size)
-	for i := range hosts {
-		hosts[i] = testnetwork.HostSlot(t)
-	}
-	for i := range hosts {
-		n.oneWay[i] = make([]time.Duration, size)
-		for j := range hosts {
-			n.oneWay[i][j] = time.Duration(regionsOneWay[i][j]) * time.Microsecond
-			if j > i {
-				fab.Delay(hosts[i], hosts[j], n.oneWay[i][j])
-			}
+	n := newNetwork(t, fab, len(regionsOneWay))
+	for i := range n.hosts {
+		for j := i + 1; j < len(n.hosts); j++ {
+			n.setDelay(i, j, time.Duration(regionsOneWay[i][j])*time.Microsecond)
 		}
 	}
-	n.nodes[0] = testnetwork.BootInBubble(t, fab, hosts[0], func(cfg *services.NodeConfig) {
+	n.nodes[0] = testnetwork.BootInBubble(t, fab, n.hosts[0], func(cfg *services.NodeConfig) {
 		cfg.Core = true
 		cfg.CertFile = wpki.CertFile
 		cfg.KeyFile = wpki.KeyFile
 	})
 	for _, i := range regionsOrder {
 		parent := n.nodes[regionsParent[i]]
-		n.nodes[i] = testnetwork.BootInBubble(t, fab, hosts[i], func(cfg *services.NodeConfig) {
+		n.nodes[i] = testnetwork.BootInBubble(t, fab, n.hosts[i], func(cfg *services.NodeConfig) {
 			cfg.Neighbors = []string{rendezvous(parent)}
 			cfg.RootCAs = wpki.Pool
 		})

@@ -13,6 +13,7 @@ import (
 	"github.com/scionproto/scion/pkg/addr"
 
 	"github.com/fancl20/cion/internal/testnetwork"
+	"github.com/fancl20/cion/internal/testnetwork/fabric"
 	"github.com/fancl20/cion/pkg/modules/links"
 	"github.com/fancl20/cion/pkg/modules/topology/impl/measured"
 )
@@ -32,18 +33,64 @@ const (
 )
 
 // network is a lab's booted network: its nodes, the founding core first,
-// the one-way delay the fabric holds between each pair, and the pairs the
-// lab cut.
+// on the fabric's hosts, the one-way delay the fabric holds between each
+// pair, and the pairs cut.
 type network struct {
+	fab    *fabric.Fabric
+	hosts  []netip.Addr
 	nodes  []*testnetwork.Node
 	oneWay [][]time.Duration
+	taps   map[[2]int]func()
 	cut    map[[2]int]bool
 }
 
+// newNetwork draws hosts for a network of the given size on the fabric.
+func newNetwork(t *testing.T, fab *fabric.Fabric, size int) *network {
+	t.Helper()
+	n := &network{
+		fab:    fab,
+		hosts:  make([]netip.Addr, size),
+		nodes:  make([]*testnetwork.Node, size),
+		oneWay: make([][]time.Duration, size),
+		taps:   map[[2]int]func(){},
+		cut:    map[[2]int]bool{},
+	}
+	for i := range size {
+		n.hosts[i] = testnetwork.HostSlot(t)
+		n.oneWay[i] = make([]time.Duration, size)
+	}
+	return n
+}
+
+// pair names an unordered pair of the network's nodes.
+func pair(i, j int) [2]int {
+	return [2]int{min(i, j), max(i, j)}
+}
+
+// setDelay draws the pair's one-way delay on the fabric, lifting the delay
+// drawn for the pair before.
+func (n *network) setDelay(i, j int, oneWay time.Duration) {
+	if lift := n.taps[pair(i, j)]; lift != nil {
+		lift()
+	}
+	n.taps[pair(i, j)] = n.fab.Delay(n.hosts[i], n.hosts[j], oneWay)
+	n.oneWay[i][j], n.oneWay[j][i] = oneWay, oneWay
+}
+
+// cutPair cuts the pair on the fabric; the returned lift restores it.
+func (n *network) cutPair(i, j int) func() {
+	lift := n.fab.Cut(n.hosts[i], n.hosts[j])
+	n.cut[pair(i, j)] = true
+	return func() {
+		lift()
+		delete(n.cut, pair(i, j))
+	}
+}
+
 // delay returns the one-way delay the fabric holds between two of the
-// network's nodes; false for a pair the lab cut.
+// network's nodes; false for a cut pair.
 func (n *network) delay(i, j int) (time.Duration, bool) {
-	if n.cut[[2]int{min(i, j), max(i, j)}] {
+	if n.cut[pair(i, j)] {
 		return 0, false
 	}
 	return n.oneWay[i][j], true

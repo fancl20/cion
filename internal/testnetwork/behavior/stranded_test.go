@@ -49,30 +49,21 @@ func TestStrandedTierHeals(t *testing.T) {
 // founder first, with the pairs the lab cut.
 func healStranded(t *testing.T, fab *fabric.Fabric, wpki *webpkitest.CA) *network {
 	t.Helper()
-	ipA, ipF, ipG := testnetwork.HostSlot(t), testnetwork.HostSlot(t), testnetwork.HostSlot(t)
-	ipC, ipD, ipE := testnetwork.HostSlot(t), testnetwork.HostSlot(t), testnetwork.HostSlot(t)
-	hosts := []netip.Addr{ipA, ipF, ipG, ipC, ipD, ipE}
-	n := &network{oneWay: make([][]time.Duration, len(hosts)), cut: map[[2]int]bool{}}
-	for i := range hosts {
-		n.oneWay[i] = make([]time.Duration, len(hosts))
-	}
-	delay := func(i, j int, oneWay time.Duration) {
-		fab.Delay(hosts[i], hosts[j], oneWay)
-		n.oneWay[i][j], n.oneWay[j][i] = oneWay, oneWay
-	}
+	n := newNetwork(t, fab, 6)
+	ipA, ipF, ipG, ipC, ipD, ipE := n.hosts[0], n.hosts[1], n.hosts[2], n.hosts[3], n.hosts[4], n.hosts[5]
 	for _, side := range [][]int{{0, 1, 2}, {3, 4, 5}} {
 		for i := range side {
 			for _, other := range side[i+1:] {
-				delay(side[i], other, 1*time.Millisecond)
+				n.setDelay(side[i], other, 1*time.Millisecond)
 			}
 		}
 	}
 	var blackholes []func()
 	for _, far := range []int{3, 4, 5} {
-		delay(0, far, 15*time.Millisecond)
+		n.setDelay(0, far, 15*time.Millisecond)
 		for _, near := range []int{1, 2} {
-			delay(near, far, 40*time.Millisecond)
-			blackholes = append(blackholes, fab.Blackhole(hosts[near], hosts[far]))
+			n.setDelay(near, far, 40*time.Millisecond)
+			blackholes = append(blackholes, fab.Blackhole(n.hosts[near], n.hosts[far]))
 		}
 	}
 	blackholes = append(blackholes, fab.Blackhole(ipA, ipE))
@@ -122,16 +113,14 @@ func healStranded(t *testing.T, fab *fabric.Fabric, wpki *webpkitest.CA) *networ
 	})
 
 	cut := map[[2]*testnetwork.Node]bool{}
-	for i, y := range far {
-		fab.Cut(ipA, y.Host())
-		n.cut[[2]int{0, 3 + i}] = true
+	for i := range far {
+		n.cutPair(0, 3+i)
 	}
 	for i, x := range near[1:] {
 		for j, y := range far {
 			if upTo(ctx, x, y) || upTo(ctx, y, x) {
-				fab.Cut(x.Host(), y.Host())
+				n.cutPair(1+i, 3+j)
 				cut[[2]*testnetwork.Node{x, y}] = true
-				n.cut[[2]int{1 + i, 3 + j}] = true
 			}
 		}
 	}

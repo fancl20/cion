@@ -2,6 +2,7 @@ package behavior
 
 import (
 	"cmp"
+	"context"
 	"fmt"
 	"hash"
 	"math"
@@ -27,22 +28,17 @@ const penalty = 5 * time.Millisecond
 // unreachable is the cost between nodes no sequence of edges joins.
 const unreachable = time.Duration(math.MaxInt64 / 4)
 
-// assessment grades a network's chosen paths at one penalty against the
-// shortest paths every pair's delay allows.
+// lookupBudget bounds each path lookup a read makes: a lookup whose fetch
+// from the core cannot complete would otherwise hold the read, and the
+// bubble's clock, for the fetch's own timeouts. It leaves a fresh fetch
+// across the slowest lab's delays several round trips.
+const lookupBudget = 2 * time.Second
+
+// assessment grades a settled network's paths at one penalty: the grading
+// beside the segment records the chosen paths join and the links a single
+// cut would need.
 type assessment struct {
-	// penalty is the cost each transit node adds to a path.
-	penalty time.Duration
-	// pairs counts the ordered pairs; reached, those whose chosen path
-	// crosses only links up at both ends to its destination.
-	pairs, reached int
-	// ratio and excess grade each reached pair's chosen path against the
-	// global reference: its cost over the reference's, and the
-	// milliseconds above it.
-	ratio, excess summary
-	// topology is the formed links' shortest over the reference, for every
-	// pair the formed links join; choice is the chosen path over the formed
-	// links' shortest, for every reached pair.
-	topology, choice summary
+	grading
 	// upChosen and downChosen count the stored up and down segment records
 	// some pair's chosen path joins, of upStored and downStored.
 	upChosen, upStored, downChosen, downStored int
@@ -52,10 +48,38 @@ type assessment struct {
 }
 
 func (a assessment) String() string {
+	return fmt.Sprintf("%v; up segments chosen %d of %d, down %d of %d; single cuts %v",
+		a.grading, a.upChosen, a.upStored, a.downChosen, a.downStored, a.cuts)
+}
+
+// grading grades one read of a network's paths at one penalty against the
+// shortest paths every pair's delay allows.
+type grading struct {
+	// penalty is the cost each transit node adds to a path.
+	penalty time.Duration
+	// pairs counts the ordered pairs; reached, those whose chosen path
+	// crosses only formed links to its destination.
+	pairs, reached int
+	// ratio and excess grade each reached pair's chosen path against the
+	// global reference: its cost over the reference's, and the
+	// milliseconds above it.
+	ratio, excess summary
+	// topology is the formed links' shortest over the reference, for every
+	// pair the formed links join; choice is the chosen path over the formed
+	// links' shortest, for every reached pair.
+	topology, choice summary
+	// bestReached counts the pairs with a candidate crossing only formed
+	// links, and best grades the cheapest such candidate against the
+	// reference; surfaced reports that every pair's cheapest candidate costs
+	// the formed links' shortest. All three need the candidates read.
+	bestReached int
+	best        summary
+	surfaced    bool
+}
+
+func (g grading) String() string {
 	return fmt.Sprintf("reached %d of %d pairs; cost over the reference %v; excess ms %v; "+
-		"topology %v; choice %v; up segments chosen %d of %d, down %d of %d; single cuts %v",
-		a.reached, a.pairs, a.ratio, a.excess, a.topology, a.choice,
-		a.upChosen, a.upStored, a.downChosen, a.downStored, a.cuts)
+		"topology %v; choice %v", g.reached, g.pairs, g.ratio, g.excess, g.topology, g.choice)
 }
 
 // summary is a distribution's mean, 95th percentile, and maximum.
@@ -82,80 +106,141 @@ func summarize(xs []float64) summary {
 	}
 }
 
-// assess grades the network's chosen paths at each penalty: every ordered
-// pair's choice, walked over the links up at both ends and costed against
-// the penalized shortest paths over every pair's delay and over the formed
-// links, beside the segment records the choices join and the formed links
-// a single cut would need. The founding core is the network's first node.
+// assess grades the settled network's paths at each penalty, beside the
+// segment records the chosen paths join and the formed links a single cut
+// would need. The founding core is the network's first node.
 func assess(t *testing.T, n *network, penalties ...time.Duration) []assessment {
 	t.Helper()
-	f := formedLinks(t, n.nodes)
-	size := len(n.nodes)
-	type walked struct {
-		src, dst int
-		hops     []int
-		reached  bool
+	r := readPaths(t, n, false)
+	upChosen, upStored := countChosen(t, n.nodes[1:], pathdb.SegmentTypeUp, r.routes)
+	downChosen, downStored := countChosen(t, n.nodes[:1], pathdb.SegmentTypeDown, r.routes)
+	cuts := singleCuts(len(n.nodes), r.formed.edges)
+	var out []assessment
+	for _, p := range penalties {
+		out = append(out, assessment{
+			grading:  r.grade(n, p),
+			upChosen: upChosen, upStored: upStored, downChosen: downChosen, downStored: downStored,
+			cuts: cuts,
+		})
 	}
-	var walks []walked
-	chosen := map[string]bool{}
+	return out
+}
+
+// paths is one read of a network's paths.
+type paths struct {
+	formed formed
+	// set names the formed links as linkSet does.
+	set string
+	// chosen holds each reached ordered pair's chosen path as the nodes it
+	// crosses, and routes the routes the chosen paths join.
+	chosen map[[2]int][]int
+	routes map[string]bool
+	// live holds each ordered pair's candidates that cross only formed
+	// links, as the nodes they cross, when candidates were read.
+	live       map[[2]int][][]int
+	candidates bool
+}
+
+// readPaths reads every ordered pair's chosen path, walked over the formed
+// links, and with candidates set every candidate the pair's segments
+// compose. A lookup that outlasts lookupBudget finds no segment it would
+// have fetched.
+func readPaths(t *testing.T, n *network, candidates bool) paths {
+	t.Helper()
+	lookup := func() (context.Context, context.CancelFunc) {
+		return context.WithTimeout(t.Context(), lookupBudget)
+	}
+	r := paths{
+		formed:     formedLinks(t, n),
+		set:        linkSet(t.Context(), n.nodes),
+		chosen:     map[[2]int][]int{},
+		routes:     map[string]bool{},
+		live:       map[[2]int][][]int{},
+		candidates: candidates,
+	}
+	for s := range n.nodes {
+		for d := range n.nodes {
+			if s == d {
+				continue
+			}
+			provider, dst := n.nodes[s].App().Provider(), n.nodes[d].App().IA()
+			ctx, cancel := lookup()
+			c, err := provider.Choose(ctx, dst)
+			cancel()
+			if err == nil {
+				for _, seg := range c.Segments {
+					r.routes[routeKey(seg)] = true
+				}
+				if hops, ok := r.formed.walk(s, d, c.Path); ok {
+					r.chosen[[2]int{s, d}] = hops
+				}
+			}
+			if !candidates {
+				continue
+			}
+			ctx, cancel = lookup()
+			cands, err := provider.Enumerate(ctx, dst)
+			cancel()
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, c := range cands {
+				if hops, ok := r.formed.walk(s, d, c.Path); ok {
+					r.live[[2]int{s, d}] = append(r.live[[2]int{s, d}], hops)
+				}
+			}
+		}
+	}
+	return r
+}
+
+// grade grades the read at the penalty against the penalized shortest
+// paths over every pair's delay and over the formed links.
+func (r paths) grade(n *network, p time.Duration) grading {
+	size := len(n.nodes)
+	reference := penalizedShortest(size, n.delay, p)
+	shortest := penalizedShortest(size, r.formed.delay(n), p)
+	g := grading{penalty: p, surfaced: r.candidates}
+	var ratio, excess, topology, choice, best []float64
 	for s := range size {
 		for d := range size {
 			if s == d {
 				continue
 			}
-			w := walked{src: s, dst: d}
-			c, err := n.nodes[s].App().Provider().Choose(t.Context(), n.nodes[d].App().IA())
-			if err == nil {
-				for _, seg := range c.Segments {
-					chosen[routeKey(seg)] = true
-				}
-				w.hops, w.reached = f.walk(s, d, c.Path)
-			}
-			walks = append(walks, w)
-		}
-	}
-	upChosen, upStored := countChosen(t, n.nodes[1:], pathdb.SegmentTypeUp, chosen)
-	downChosen, downStored := countChosen(t, n.nodes[:1], pathdb.SegmentTypeDown, chosen)
-	cuts := singleCuts(size, f.edges)
-	formedDelay := func(i, j int) (time.Duration, bool) {
-		if !f.edges[[2]int{min(i, j), max(i, j)}] {
-			return 0, false
-		}
-		return n.delay(i, j)
-	}
-
-	var out []assessment
-	for _, p := range penalties {
-		reference := penalizedShortest(size, n.delay, p)
-		shortest := penalizedShortest(size, formedDelay, p)
-		a := assessment{
-			penalty: p, pairs: len(walks),
-			upChosen: upChosen, upStored: upStored, downChosen: downChosen, downStored: downStored,
-			cuts: cuts,
-		}
-		var ratio, excess, topology, choice []float64
-		for _, w := range walks {
-			ref, best := reference[w.src][w.dst], shortest[w.src][w.dst]
+			g.pairs++
+			ref, short := reference[s][d], shortest[s][d]
 			if ref == unreachable {
 				continue
 			}
-			if best != unreachable {
-				topology = append(topology, float64(best)/float64(ref))
+			if short != unreachable {
+				topology = append(topology, float64(short)/float64(ref))
 			}
-			if !w.reached {
+			if hops, ok := r.chosen[[2]int{s, d}]; ok {
+				g.reached++
+				cost := pathCost(hops, n.delay, p)
+				ratio = append(ratio, float64(cost)/float64(ref))
+				excess = append(excess, float64(cost-ref)/float64(time.Millisecond))
+				choice = append(choice, float64(cost)/float64(short))
+			}
+			if !r.candidates {
 				continue
 			}
-			a.reached++
-			cost := pathCost(w.hops, n.delay, p)
-			ratio = append(ratio, float64(cost)/float64(ref))
-			excess = append(excess, float64(cost-ref)/float64(time.Millisecond))
-			choice = append(choice, float64(cost)/float64(best))
+			cheapest := unreachable
+			for _, hops := range r.live[[2]int{s, d}] {
+				cheapest = min(cheapest, pathCost(hops, n.delay, p))
+			}
+			if cheapest != unreachable {
+				g.bestReached++
+				best = append(best, float64(cheapest)/float64(ref))
+			}
+			if short != unreachable && cheapest != short {
+				g.surfaced = false
+			}
 		}
-		a.ratio, a.excess = summarize(ratio), summarize(excess)
-		a.topology, a.choice = summarize(topology), summarize(choice)
-		out = append(out, a)
 	}
-	return out
+	g.ratio, g.excess = summarize(ratio), summarize(excess)
+	g.topology, g.choice, g.best = summarize(topology), summarize(choice), summarize(best)
+	return g
 }
 
 // countChosen counts the nodes' stored segment records of the type, and
@@ -197,35 +282,46 @@ type formed struct {
 	edges map[[2]int]bool
 }
 
-// formedLinks reads the nodes' formed links.
-func formedLinks(t *testing.T, nodes []*testnetwork.Node) formed {
+// formedLinks reads the network's formed links: a link the fabric cuts
+// counts as down whatever its ends still believe.
+func formedLinks(t *testing.T, n *network) formed {
 	t.Helper()
-	index := make(map[addr.IA]int, len(nodes))
-	for i, node := range nodes {
+	index := make(map[addr.IA]int, len(n.nodes))
+	for i, node := range n.nodes {
 		index[node.App().IA()] = i
 	}
 	f := formed{up: map[iface]int{}, edges: map[[2]int]bool{}}
 	directed := map[[2]int]bool{}
-	for i, node := range nodes {
+	for i, node := range n.nodes {
 		entries, err := node.App().Links().All(t.Context())
 		if err != nil {
 			t.Fatal(err)
 		}
 		for _, l := range entries {
 			j, ok := index[l.NeighborIA]
-			if !ok || l.State != links.StateEstablished || !node.App().Monitor().Up(l.IfID) {
+			if !ok || l.State != links.StateEstablished || !node.App().Monitor().Up(l.IfID) || n.cut[pair(i, j)] {
 				continue
 			}
 			f.up[iface{i, l.IfID}] = j
 			directed[[2]int{i, j}] = true
 		}
 	}
-	for pair := range directed {
-		if directed[[2]int{pair[1], pair[0]}] {
-			f.edges[[2]int{min(pair[0], pair[1]), max(pair[0], pair[1])}] = true
+	for ends := range directed {
+		if directed[[2]int{ends[1], ends[0]}] {
+			f.edges[pair(ends[0], ends[1])] = true
 		}
 	}
 	return f
+}
+
+// delay returns the network's delays over the formed links alone.
+func (f formed) delay(n *network) func(i, j int) (time.Duration, bool) {
+	return func(i, j int) (time.Duration, bool) {
+		if !f.edges[pair(i, j)] {
+			return 0, false
+		}
+		return n.delay(i, j)
+	}
 }
 
 // walk follows a data-plane path from src hop field by hop field, returning

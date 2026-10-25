@@ -250,3 +250,27 @@ demand.
     refused every beacon the healed link carried: verifying a near-side
     signer fetches the signer's chain from the core, over those dead
     routes.
+*   The change scenarios landed — a cut and its restoration, a delay
+    raised, and a delay lowered, on both networks
+    ([scenario_test.go](/internal/testnetwork/behavior/scenario_test.go)).
+    The network keeps the fabric's taps, so a scenario cuts a pair and
+    redraws a delay, and a read counts a link the fabric cuts as down
+    whatever its ends still believe
+    ([lab_test.go](/internal/testnetwork/behavior/lab_test.go),
+    [assess_test.go](/internal/testnetwork/behavior/assess_test.go)).
+    Recovery counts as many pairs reaching as before the change, since a
+    stale segment can hold a pair unreached before any change, and a delay
+    change counts as detected at the first link-set change, since a choice
+    ranked by freshness moves among equal routes unprompted. A read bounds
+    each lookup to two seconds and liveness is watched beside the reads:
+    lookups the stranded network's far side could not complete otherwise
+    held the reads past the cut link's retirement, after which its verdict
+    reads up again. Across ten runs, the cut of the regions network's
+    busiest link was caught in three seconds every time; right after it,
+    55 to 64 of 72 pairs reached over their chosen paths, while every pair
+    held a live candidate. The reached count came back within half an hour
+    in six runs, and the chosen paths then averaged 1.18 to 2.18 times the
+    reference, the worst between 2.5 and 26 times. Neither the tripled
+    delay nor the lowered one changed a regions link in any run, the
+    lowered pair never linked, while the stranded network linked its
+    lowered pair in every run.
