@@ -57,22 +57,34 @@ type PathProvider struct {
 // from inside a dial — resolving a route must not spawn RPCs over the very
 // transport being dialed.
 func (p *PathProvider) LocalPath(dst addr.IA) (*spath.Decoded, error) {
+	c, err := p.local(dst)
+	if err != nil {
+		return nil, err
+	}
+	return c.Path, nil
+}
+
+// local resolves LocalPath's candidate. The bootstrap route is no
+// composition: its candidate carries its path and hop count alone and joins
+// no segment.
+func (p *PathProvider) local(dst addr.IA) (*Candidate, error) {
 	if dst.Equal(p.IA) {
 		return nil, serrors.New("destination is the local ISD-AS", "isd_as", dst)
 	}
+	live := p.liveInterfaces()
 	// A destination an up segment already contains is on a route from here —
 	// a core at the segment's origin, an on-path AS mid-segment — and the
 	// freshest containing segment's truncated reversed path is the route to
 	// it.
-	if up, m := p.containingUp(dst); up != nil {
-		return up.PCB.ReversePathTo(m)
+	if up, m := p.containingUp(dst, live); up != nil {
+		return p.compose(up, m, nil, -1, live)
 	}
 	// Before any up segment is verified — a fresh node that has not even
 	// pinned the TRC — the bootstrap beacon's reversed route serves the
 	// core; beacons originate only at cores.
 	if p.Bootstrap != nil {
-		if bs := p.Bootstrap(dst); bs != nil && !retired(p.liveInterfaces(), egress(bs)) {
-			return bs, nil
+		if bs := p.Bootstrap(dst); bs != nil && !retired(live, egress(bs)) {
+			return &Candidate{Path: bs, Hops: len(bs.HopFields)}, nil
 		}
 	}
 	return nil, serrors.New("no path to destination", "isd_as", dst)
@@ -87,18 +99,28 @@ func egress(p *spath.Decoded) uint16 {
 	return p.HopFields[0].ConsIngress
 }
 
-// Path returns a data-plane path from the local AS to dst. What LocalPath
-// resolves from local state comes from it; anything else is the first clean
+// Path returns a data-plane path from the local AS to dst: the path of the
+// candidate Choose takes.
+func (p *PathProvider) Path(ctx context.Context, dst addr.IA) (*spath.Decoded, error) {
+	c, err := p.Choose(ctx, dst)
+	if err != nil {
+		return nil, err
+	}
+	return c.Path, nil
+}
+
+// Choose returns the candidate Path takes to dst. What LocalPath resolves
+// from local state comes from it; anything else is the first clean
 // candidate Enumerate composes, ordered by the carried rank — fewest joined
 // hops, ties to the fresher pair, then to the one with fewer entries. A
 // candidate crossing a signaled interface stays the last resort: the first
 // of them in emission order, never the best-ranked one.
-func (p *PathProvider) Path(ctx context.Context, dst addr.IA) (*spath.Decoded, error) {
+func (p *PathProvider) Choose(ctx context.Context, dst addr.IA) (*Candidate, error) {
 	if dst.Equal(p.IA) {
 		return nil, serrors.New("destination is the local ISD-AS", "isd_as", dst)
 	}
-	if path, err := p.LocalPath(dst); err == nil {
-		return path, nil
+	if c, err := p.local(dst); err == nil {
+		return c, nil
 	}
 	candidates, err := p.Enumerate(ctx, dst)
 	if err != nil {
@@ -118,10 +140,10 @@ func (p *PathProvider) Path(ctx context.Context, dst addr.IA) (*spath.Decoded, e
 		}
 	}
 	if best != nil {
-		return best.Path, nil
+		return best, nil
 	}
 	if crossing != nil {
-		return crossing.Path, nil
+		return crossing, nil
 	}
 	return nil, serrors.New("no path to destination", "isd_as", dst)
 }
@@ -149,6 +171,10 @@ type Candidate struct {
 	// summed, the path's one-way estimate; nil when any traversed edge is
 	// declared by neither end: an undeclared edge is unknown, not free.
 	Latency *time.Duration
+	// Segments are the stored segments the path joins, in travel order: the
+	// up segment before the down segment of a meeting, the one segment of a
+	// containing branch or a down-only meeting.
+	Segments []*pathdb.Segment
 }
 
 // Before reports whether c outranks o: fewest joined hops first, then the
@@ -320,6 +346,7 @@ func (p *PathProvider) compose(
 		Fresh:    fresh,
 		Entries:  entries,
 		Crossing: crossing,
+		Segments: pieces,
 	}
 	if known {
 		c.Latency = &latency
@@ -423,8 +450,7 @@ func (p *PathProvider) upSegments() []*pathdb.Segment {
 // mid-segment — the freshest one that crosses no signaled interface, the
 // freshest crossing one kept when nothing else exists. A segment the node
 // terminated on an interface the live snapshot lacks serves neither.
-func (p *PathProvider) containingUp(ia addr.IA) (*pathdb.Segment, int) {
-	live := p.liveInterfaces()
+func (p *PathProvider) containingUp(ia addr.IA, live map[uint16]addr.IA) (*pathdb.Segment, int) {
 	var best, clean *pathdb.Segment
 	bestAt, cleanAt := -1, -1
 	for _, seg := range p.upSegments() {

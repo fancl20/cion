@@ -225,3 +225,8 @@ demand.
     distributions.
 
 ## Implementation history
+
+*   The path layer landed first: `Candidate`'s `Segments` and
+    `PathProvider.Choose` in [provider.go](/pkg/libs/scion/provider.go).
+    `LocalPath` resolves through the same candidate, its containing branch
+    composed as `Enumerate` composes one.

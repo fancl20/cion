@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/go-cmp/cmp"
 	"github.com/scionproto/scion/pkg/addr"
 	"github.com/scionproto/scion/pkg/private/util"
 	cryptopb "github.com/scionproto/scion/pkg/proto/crypto"
@@ -1285,4 +1286,82 @@ func TestProviderLastResortFirstCrossing(t *testing.T) {
 	}
 	checkHops(t, path, up.Entries[1], up.Entries[0],
 		downLong.Entries[0], downLong.Entries[1], downLong.Entries[2])
+}
+
+// TestProviderChoose checks the choice Path makes as Choose returns it: on
+// every branch — the containing up segment, the bootstrap route, a meeting,
+// a down-only meeting, and the crossing last resort — Choose's candidate
+// carries Path's path and names the segments it joins, the bootstrap route
+// none.
+func TestProviderChoose(t *testing.T) {
+	now := time.Now()
+	up := linePCB(t, now, iaCore, iaMid, iaLeaf)
+	upShort := linePCB(t, now, iaCore, iaLeaf)
+	down := linePCB(t, now, iaCore, iaMid, iaDest)
+	downShort := linePCB(t, now, iaCore, iaDest)
+	beacon := linePCB(t, now, iaCore, iaLeaf)
+	provider := func(local addr.IA, ups []*segment.PCB, downs []*segment.PCB) *PathProvider {
+		db := &fakePathDB{}
+		for _, pcb := range ups {
+			seg := &pathdb.Segment{Type: pathdb.SegmentTypeUp, PCB: pcb}
+			if _, err := db.Insert(context.Background(), seg); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return &PathProvider{
+			IA: local,
+			DB: db,
+			Lookup: func(context.Context, addr.IA) []*pathdb.Segment {
+				var segs []*pathdb.Segment
+				for _, pcb := range downs {
+					segs = append(segs, &pathdb.Segment{Type: pathdb.SegmentTypeDown, PCB: pcb})
+				}
+				return segs
+			},
+		}
+	}
+	bootstrapped := provider(iaLeaf, nil, nil)
+	bootstrapped.Bootstrap = func(core addr.IA) *spath.Decoded {
+		if !core.Equal(iaCore) {
+			return nil
+		}
+		return beacon.ReversePath()
+	}
+	crossing := provider(iaLeaf, []*segment.PCB{upShort}, []*segment.PCB{down, downShort})
+	crossing.InterfaceDown = NewInterfaceDownCache()
+	crossing.InterfaceDown.Record(InterfaceDownSignal{IA: iaCore, IfID: testIfID})
+
+	for _, tc := range []struct {
+		name string
+		p    *PathProvider
+		dst  addr.IA
+		want []*segment.PCB
+	}{
+		{"containing branch", provider(iaLeaf, []*segment.PCB{up}, nil), iaMid, []*segment.PCB{up}},
+		{"bootstrap route", bootstrapped, iaCore, nil},
+		{"meeting", provider(iaLeaf, []*segment.PCB{up}, []*segment.PCB{down}), iaDest, []*segment.PCB{up, down}},
+		{"down-only meeting", provider(iaMid, nil, []*segment.PCB{down}), iaDest, []*segment.PCB{down}},
+		{"crossing last resort", crossing, iaDest, []*segment.PCB{upShort, down}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c, err := tc.p.Choose(context.Background(), tc.dst)
+			if err != nil {
+				t.Fatal(err)
+			}
+			path, err := tc.p.Path(context.Background(), tc.dst)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if diff := cmp.Diff(path, c.Path); diff != "" {
+				t.Errorf("Choose's path differs from Path's (-Path +Choose):\n%s", diff)
+			}
+			var got []*segment.PCB
+			for _, seg := range c.Segments {
+				got = append(got, seg.PCB)
+			}
+			if !slices.Equal(got, tc.want) {
+				t.Errorf("Choose joins %d segments %v, want %d %v", len(got), got, len(tc.want), tc.want)
+			}
+		})
+	}
 }
