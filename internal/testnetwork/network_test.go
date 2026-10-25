@@ -82,7 +82,7 @@ func TestLineTopology(t *testing.T) {
 		t.Fatalf("no up segments at C: %v", err)
 	}
 	for i := range ups[0].PCB.Entries {
-		if _, err := c.app.Engine().VerifyBound(ctx, ups[0].PCB.Entries[i].IA,
+		if _, err := c.app.Engine().VerifyBound(ctx, ups[0].PCB.Entries[i].IA, nil,
 			ups[0].PCB.Entries[i].Signed, ups[0].PCB.AssociatedData(i)...); err != nil {
 			t.Fatalf("up segment entry %d does not verify: %v", i, err)
 		}

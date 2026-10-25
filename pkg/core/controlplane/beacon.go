@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"hash"
 	"log/slog"
+	"net"
 	"slices"
 	"sort"
 	"sync"
@@ -291,10 +292,13 @@ func (b *Beaconer) goSend(t sendTarget, rpcs func()) {
 // HandleBeacon applies the reception checks of Section 2.3.1 to the received
 // PCB and stores it as a candidate. A node that has not pinned the TRC
 // cannot verify beacons; it records the freshest one as its bootstrap route
-// for the enrollment fetch instead. A pinned node refreshes the slots it
-// holds with each verified one, so their routes name the interfaces the
-// link's two ends use now, and opens none: the cores BootstrapCore
-// alternates over stay the ones the node heard before its pin.
+// for the enrollment fetch instead. A pinned node verifies with material its
+// sender holds — the neighbor at the arrival interface, which verified the
+// same entries before it propagated them — whatever routes the node holds to
+// the core. It refreshes the slots it holds with each verified beacon, so
+// their routes name the interfaces the link's two ends use now, and opens
+// none: the cores BootstrapCore alternates over stay the ones the node heard
+// before its pin.
 func (b *Beaconer) HandleBeacon(
 	ctx context.Context,
 	pcb *segment.PCB,
@@ -312,7 +316,8 @@ func (b *Beaconer) HandleBeacon(
 		b.recordBootstrap(ingress, pcb, true)
 		return nil
 	}
-	if err := b.verifySignatures(ctx, pcb); err != nil {
+	sender := &scion.Addr{IA: pcb.LastIA(), Service: addr.SvcCS}
+	if err := b.verifySignatures(ctx, pcb, sender); err != nil {
 		return err
 	}
 	b.store.Insert(ingress, pcb)
@@ -334,7 +339,7 @@ func (b *Beaconer) HandleRegistration(
 	if err := b.checkRegistered(pcb); err != nil {
 		return err
 	}
-	if err := b.verifySignatures(ctx, pcb); err != nil {
+	if err := b.verifySignatures(ctx, pcb, nil); err != nil {
 		return err
 	}
 	seg, err := pathdb.NewSegment(pathdb.SegmentTypeDown, pb)
@@ -525,12 +530,13 @@ func checkTimeWindow(pcb *segment.PCB, now time.Time) error {
 // verifySignatures verifies every AS entry's signature against the
 // TRC-anchored chain the entry references, bound to the identity the entry
 // claims: the signer's key must name the entry's own ISD-AS, so an enrolled AS
-// cannot sign entries in another's name. Missing chains are fetched through
-// the provider (Section 2.3.1, check 1).
-func (b *Beaconer) verifySignatures(ctx context.Context, pcb *segment.PCB) error {
+// cannot sign entries in another's name. Missing TRCs and chains are asked of
+// server, the sending AS's control service (Section 2.3.1, check 1); a nil
+// server asks the provider's own source.
+func (b *Beaconer) verifySignatures(ctx context.Context, pcb *segment.PCB, server net.Addr) error {
 	for i := range pcb.Entries {
 		entry := pcb.Entries[i]
-		if _, err := b.engine.VerifyBound(ctx, entry.IA, entry.Signed,
+		if _, err := b.engine.VerifyBound(ctx, entry.IA, server, entry.Signed,
 			pcb.AssociatedData(i)...); err != nil {
 			return serrors.Wrap("verifying AS entry signature", err,
 				"index", i, "isd_as", entry.IA)

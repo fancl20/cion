@@ -2,16 +2,22 @@ package controlplane
 
 import (
 	"context"
+	"crypto/x509"
+	"net"
 	"net/http"
 	"sync"
 
 	"connectrpc.com/connect"
 	"github.com/quic-go/quic-go"
 	"github.com/scionproto/scion/pkg/addr"
+	"github.com/scionproto/scion/pkg/private/serrors"
 	cppb "github.com/scionproto/scion/pkg/proto/control_plane"
+	"github.com/scionproto/scion/pkg/scrypto/cppki"
 
+	"github.com/fancl20/cion/pkg/core/trust"
 	"github.com/fancl20/cion/pkg/libs/scion"
 	"github.com/fancl20/cion/pkg/libs/scionrpc"
+	"github.com/fancl20/cion/pkg/modules/trustdb"
 )
 
 // PeerClient is the SCION-native channel's RPC client: ConnectRPC over HTTP/3
@@ -26,8 +32,8 @@ type PeerClient struct {
 	qclt *quic.Transport
 	// beaconHCLT pools connections for beacon sends; verifiedHCLT for the
 	// mutually verified RPCs; oneHopHCLT for the mutually verified RPCs that
-	// dial one-hop paths alone — the confirm's channel. All ride the same
-	// QUIC transport.
+	// dial one-hop paths alone — the confirm's channel, and the trust fetches
+	// from a beacon's sender. All ride the same QUIC transport.
 	beaconHCLT   *http.Client
 	verifiedHCLT *http.Client
 	oneHopHCLT   *http.Client
@@ -35,6 +41,7 @@ type PeerClient struct {
 	mtx         sync.Mutex
 	beaconClt   map[string]*Client
 	verifiedClt map[string]*Client
+	oneHopClt   map[string]*Client
 }
 
 // NewPeerClient creates the client for the SCION-native channel.
@@ -43,6 +50,7 @@ func NewPeerClient(cfg scionrpc.PeerClientConfig) *PeerClient {
 		qclt:        &quic.Transport{Conn: cfg.Conn},
 		beaconClt:   make(map[string]*Client),
 		verifiedClt: make(map[string]*Client),
+		oneHopClt:   make(map[string]*Client),
 	}
 	// Beacons ride the client-authenticated channel; registrations and
 	// lookups the mutually verified one. Both ride the same QUIC transport,
@@ -113,6 +121,55 @@ func (c *PeerClient) Segments(
 // client's transport and connection pool.
 func (c *PeerClient) VerifiedClient() *http.Client {
 	return c.verifiedHCLT
+}
+
+// Fetcher returns the trust fetcher that asks server — a neighbor's control
+// service, named by its ISD-AS as a service destination — for TRCs and
+// chains over the one-hop channel (Section 2.4): the source a received
+// beacon's missing material comes from, reached over the link the beacon
+// arrived on whatever routes the node holds beyond it.
+func (c *PeerClient) Fetcher(server net.Addr) trust.Fetcher {
+	return peerFetcher{client: c, server: server}
+}
+
+// peerFetcher asks one neighbor's control service for trust material.
+type peerFetcher struct {
+	client *PeerClient
+	server net.Addr
+}
+
+func (f peerFetcher) TRC(ctx context.Context, id cppki.TRCID) (cppki.SignedTRC, error) {
+	clt, err := f.trustClient()
+	if err != nil {
+		return cppki.SignedTRC{}, err
+	}
+	resp, err := clt.TRC(ctx, connect.NewRequest(trust.TRCRequest(id)))
+	if err != nil {
+		return cppki.SignedTRC{}, err
+	}
+	return cppki.DecodeSignedTRC(resp.Msg.Trc)
+}
+
+func (f peerFetcher) Chains(ctx context.Context, q trustdb.ChainQuery) ([][]*x509.Certificate, error) {
+	clt, err := f.trustClient()
+	if err != nil {
+		return nil, err
+	}
+	resp, err := clt.Chains(ctx, connect.NewRequest(trust.ChainsRequest(q)))
+	if err != nil {
+		return nil, err
+	}
+	return trust.ParseChains(resp.Msg)
+}
+
+// trustClient returns the one-hop channel's client of the server, which the
+// beaconer names by its SCION address.
+func (f peerFetcher) trustClient() (*Client, error) {
+	peer, ok := f.server.(*scion.Addr)
+	if !ok {
+		return nil, serrors.New("trust server is not a SCION address", "server", f.server)
+	}
+	return f.client.client(peer, f.client.oneHopHCLT, f.client.oneHopClt), nil
 }
 
 // OneHopClient returns the HTTP client of the mutually verified channel's

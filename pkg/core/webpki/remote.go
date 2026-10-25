@@ -24,7 +24,6 @@ import (
 	cppb "github.com/scionproto/scion/pkg/proto/control_plane"
 	"github.com/scionproto/scion/pkg/proto/control_plane/v1/control_planeconnect"
 	"github.com/scionproto/scion/pkg/scrypto/cppki"
-	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/fancl20/cion/pkg/core/trust"
 	"github.com/fancl20/cion/pkg/libs/scion"
@@ -214,11 +213,7 @@ func (c *CoreClient) Close() error {
 
 // TRC fetches the signed TRC with the given ID.
 func (c *CoreClient) TRC(ctx context.Context, id cppki.TRCID) (cppki.SignedTRC, error) {
-	resp, err := c.clt.TRC(ctx, connect.NewRequest(&cppb.TRCRequest{
-		Isd:    uint32(id.ISD),
-		Base:   uint64(id.Base),
-		Serial: uint64(id.Serial),
-	}))
+	resp, err := c.clt.TRC(ctx, connect.NewRequest(trust.TRCRequest(id)))
 	if err != nil {
 		return cppki.SignedTRC{}, err
 	}
@@ -231,33 +226,11 @@ func (c *CoreClient) Chains(
 	q trustdb.ChainQuery,
 ) ([][]*x509.Certificate, error) {
 
-	req := &cppb.ChainsRequest{
-		IsdAs:        uint64(q.IA),
-		SubjectKeyId: q.SubjectKeyID,
-	}
-	if !q.Validity.NotBefore.IsZero() {
-		req.AtLeastValidSince = timestamppb.New(q.Validity.NotBefore)
-	}
-	if !q.Validity.NotAfter.IsZero() {
-		req.AtLeastValidUntil = timestamppb.New(q.Validity.NotAfter)
-	}
-	resp, err := c.clt.Chains(ctx, connect.NewRequest(req))
+	resp, err := c.clt.Chains(ctx, connect.NewRequest(trust.ChainsRequest(q)))
 	if err != nil {
 		return nil, err
 	}
-	var out [][]*x509.Certificate
-	for _, chain := range resp.Msg.Chains {
-		asCert, err := x509.ParseCertificate(chain.AsCert)
-		if err != nil {
-			return nil, fmt.Errorf("parsing AS certificate: %w", err)
-		}
-		caCert, err := x509.ParseCertificate(chain.CaCert)
-		if err != nil {
-			return nil, fmt.Errorf("parsing CA certificate: %w", err)
-		}
-		out = append(out, []*x509.Certificate{asCert, caCert})
-	}
-	return out, nil
+	return trust.ParseChains(resp.Msg)
 }
 
 // RenewChain requests a chain for the CSR. The CMS wrapper is signed by the

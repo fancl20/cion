@@ -6,6 +6,7 @@ import (
 	"crypto"
 	"crypto/x509"
 	"errors"
+	"net"
 	"testing"
 
 	"github.com/scionproto/scion/pkg/addr"
@@ -160,6 +161,112 @@ func TestGetChainsVerifiesStoredChains(t *testing.T) {
 	if chains, err := provider.GetChains(ctx, q); err != nil || !isAnchored(chains) {
 		t.Errorf("cached chains = %d (%v), want the anchored chain from the DB",
 			len(chains), err)
+	}
+}
+
+// TestNetworkProviderAsksTheServer checks the Server option: with a server
+// named, a miss goes first to the fetcher Peer returns for that server — the
+// TRC and the chain alike, each verified and cached — and the Remote is not
+// asked; a chain the server returns that no pinned TRC anchors is refused,
+// never cached; a server that cannot answer leaves the miss to the Remote;
+// without a server, the Remote answers.
+func TestNetworkProviderAsksTheServer(t *testing.T) {
+	ctx := context.Background()
+	remote := newFakeRemote(t)
+	sender := &fakeRemote{trc: remote.trc, issuer: remote.issuer}
+	db := newTestDB(t)
+	server := &net.UDPAddr{IP: net.IPv4(192, 0, 2, 1), Port: 30252}
+	var asked []net.Addr
+	provider := &NetworkProvider{DB: db, Remote: remote, Peer: func(s net.Addr) Fetcher {
+		asked = append(asked, s)
+		return sender
+	}}
+
+	if _, err := provider.GetSignedTRC(ctx, remote.trc.TRC.ID, Server(server)); err != nil {
+		t.Fatal(err)
+	}
+	if sender.trcFetches != 1 || remote.trcFetches != 0 {
+		t.Fatalf("TRC fetches: %d from the server, %d from the remote; want 1 and 0",
+			sender.trcFetches, remote.trcFetches)
+	}
+
+	issue := func(ia addr.IA, issuer *Issuer) []*x509.Certificate {
+		t.Helper()
+		csr, err := CreateCSR(ia, newTestASKey(t))
+		if err != nil {
+			t.Fatal(err)
+		}
+		chain, err := issuer.IssueChain(csr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return chain
+	}
+	anchored := issue(nodeIA, remote.issuer)
+	sender.chains = [][]*x509.Certificate{anchored}
+	q := trustdb.ChainQuery{IA: nodeIA}
+	chains, err := provider.GetChains(ctx, q, Server(server))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(chains) != 1 || !bytes.Equal(chains[0][0].Raw, anchored[0].Raw) {
+		t.Fatalf("chains = %d, want the server's anchored chain", len(chains))
+	}
+	if sender.chainFetches != 1 || remote.chainFetches != 0 {
+		t.Fatalf("chain fetches: %d from the server, %d from the remote; want 1 and 0",
+			sender.chainFetches, remote.chainFetches)
+	}
+	if stored, err := db.Chains(ctx, q); err != nil || len(stored) != 1 {
+		t.Fatalf("stored chains = %d (%v), want the fetched chain cached", len(stored), err)
+	}
+
+	// Issued under another genesis, so no pinned TRC anchors it.
+	other := newGenesisFixture(t)
+	otherIssuer, err := NewIssuer(coreIA, other.keys, other.trc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	foreignIA := addr.MustIAFrom(20, 0xff0000000003)
+	sender.chains = [][]*x509.Certificate{issue(foreignIA, otherIssuer)}
+	foreign := trustdb.ChainQuery{IA: foreignIA}
+	if chains, err := provider.GetChains(ctx, foreign, Server(server)); err != nil || len(chains) != 0 {
+		t.Fatalf("chains = %d (%v), want the unanchored chain refused", len(chains), err)
+	}
+	if stored, err := db.Chains(ctx, foreign); err != nil || len(stored) != 0 {
+		t.Fatalf("stored chains = %d (%v), want the unanchored chain left out", len(stored), err)
+	}
+	for _, s := range asked {
+		if s != net.Addr(server) {
+			t.Errorf("Peer asked for %v, want the named server %v", s, server)
+		}
+	}
+
+	// A server that cannot answer — a node not yet enrolled, refused by the
+	// sender's channel — leaves the miss to the Remote.
+	sender.failFollowing = true
+	fallbackIA := addr.MustIAFrom(20, 0xff0000000005)
+	remote.chains = [][]*x509.Certificate{issue(fallbackIA, remote.issuer)}
+	if chains, err := provider.GetChains(ctx, trustdb.ChainQuery{IA: fallbackIA},
+		Server(server)); err != nil || len(chains) != 1 {
+
+		t.Fatalf("chains = %d (%v), want the remote's chain once the server failed",
+			len(chains), err)
+	}
+	if sender.chainFetches != 3 || remote.chainFetches != 1 {
+		t.Fatalf("chain fetches: %d from the server, %d from the remote; want 3 and 1",
+			sender.chainFetches, remote.chainFetches)
+	}
+
+	remoteIA := addr.MustIAFrom(20, 0xff0000000004)
+	remote.chains = [][]*x509.Certificate{issue(remoteIA, remote.issuer)}
+	if chains, err := provider.GetChains(ctx, trustdb.ChainQuery{IA: remoteIA}); err != nil ||
+		len(chains) != 1 {
+
+		t.Fatalf("chains = %d (%v), want the remote's chain without a server", len(chains), err)
+	}
+	if sender.chainFetches != 3 || remote.chainFetches != 2 {
+		t.Errorf("chain fetches: %d from the server, %d from the remote; want 3 and 2",
+			sender.chainFetches, remote.chainFetches)
 	}
 }
 

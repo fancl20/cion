@@ -370,12 +370,13 @@ func (n *node) promoteStaged(ctx context.Context) (cppki.SignedTRC, error) {
 // buildMessenger builds the trust engine and the peer client every node
 // beacons and fetches segments through.
 func (n *node) buildMessenger() error {
-	// The provider behind the engine is DB-first: every role but the
-	// founder falls back to the core's endpoint through its core client
-	// over the SCION-native transport; the founder's role leaves none, its
-	// DB holding every chain it issued.
-	n.engine = trust.NewEngine(n.ident.ia, n.asKey,
-		&trust.NetworkProvider{DB: n.trustDB, Remote: n.remote})
+	// The provider behind the engine is DB-first: a received beacon's
+	// missing material comes from its sender through the peer client; the
+	// rest, and what a sender cannot serve, comes from the core's endpoint
+	// through the core client over the SCION-native transport, on every role
+	// but the founder, whose DB holds every chain it issued.
+	provider := &trust.NetworkProvider{DB: n.trustDB, Remote: n.remote}
+	n.engine = trust.NewEngine(n.ident.ia, n.asKey, provider)
 
 	peerConn, err := n.scionConn(0)
 	if err != nil {
@@ -398,6 +399,10 @@ func (n *node) buildMessenger() error {
 	})
 	n.group.Own("peer client", peerClt.Close)
 	n.peerClt = peerClt
+	// The client's credentials come from the engine, so the provider learns
+	// the senders' fetcher once the client exists, before any beacon
+	// arrives.
+	provider.Peer = peerClt.Fetcher
 	return nil
 }
 

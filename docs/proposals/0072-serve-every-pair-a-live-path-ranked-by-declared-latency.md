@@ -196,3 +196,16 @@ bootstrap route.
     paths cost what the best paths over its formed links cost.
 
 ## Implementation history
+
+*   Trust from the sender landed: the beacon handler names the neighbor at
+    the arrival interface ([beacon.go](/pkg/core/controlplane/beacon.go)),
+    the provider asks it before the core client
+    ([network.go](/pkg/core/trust/network.go)), and the peer client asks over
+    its one-hop channel ([peerclient.go](/pkg/core/controlplane/peerclient.go))
+    with the request forms it shares with the core client
+    ([material.go](/pkg/core/trust/material.go)). Across five runs, the
+    stranded network reached 28 to 30 of its 30 pairs once settled, where it
+    had reached 12 in every run. Right after its cut, 18 to 20 pairs reached
+    over their chosen paths, against 10, and 26 to 28 once the link set had
+    held for five minutes, against 12. Every pair held a live candidate right
+    after the cut, so the pairs left chose paths over the cut links.

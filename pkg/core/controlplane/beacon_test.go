@@ -5,8 +5,10 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/x509"
 	"errors"
 	"hash"
+	"net"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -220,6 +222,82 @@ func TestHandleBeaconAccepts(t *testing.T) {
 	}
 	if got := f.store.Len(); got != 1 {
 		t.Errorf("store length = %d, want 1", got)
+	}
+}
+
+// dbFetcher serves trust material from a trust database, the way a
+// neighbor's trust service answers from its own.
+type dbFetcher struct{ db trustdb.DB }
+
+func (s dbFetcher) TRC(ctx context.Context, id cppki.TRCID) (cppki.SignedTRC, error) {
+	return s.db.SignedTRC(ctx, id)
+}
+
+func (s dbFetcher) Chains(ctx context.Context, q trustdb.ChainQuery) ([][]*x509.Certificate, error) {
+	return s.db.Chains(ctx, q)
+}
+
+// TestHandleBeaconAsksTheSender checks where a beacon's missing trust material
+// comes from: B holds the TRC and none of the signers' chains, so without a
+// sender to ask it refuses the core's beacon; with one, it verifies the
+// beacon with the chain its sender serves — the neighbor at the arrival
+// interface, named by its ISD-AS as the control service — and keeps the
+// chain.
+func TestHandleBeaconAsksTheSender(t *testing.T) {
+	f := newBeaconFixture(t)
+	ctx := context.Background()
+	trc, err := f.db.SignedTRC(ctx, cppki.TRCID{ISD: coreIATest.ISD(), Base: 1, Serial: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	beaconerOf := func(provider *trust.NetworkProvider) *Beaconer {
+		t.Helper()
+		if _, err := provider.DB.InsertTRC(ctx, trc); err != nil {
+			t.Fatal(err)
+		}
+		b, err := NewBeaconer(BeaconerConfig{
+			IA:     nodeIATest,
+			Engine: trust.NewEngine(nodeIATest, f.engines[nodeIATest].Key, provider),
+			MACKey: []byte(testMACKey),
+			Store:  NewBeaconStore(),
+			DB:     f.pathDB,
+			Links: func() map[uint16]addr.IA {
+				return map[uint16]addr.IA{1: coreIATest}
+			},
+			Sender: &fakeSender{},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return b
+	}
+
+	alone := beaconerOf(&trust.NetworkProvider{DB: openTrustDB(t, t.TempDir())})
+	if err := alone.HandleBeacon(ctx, lineBeacon(t, f, time.Now()), 1); err == nil {
+		t.Fatal("a node without the signer's chain and no one to ask accepted the beacon")
+	}
+
+	db := openTrustDB(t, t.TempDir())
+	var asked []net.Addr
+	asking := beaconerOf(&trust.NetworkProvider{DB: db, Peer: func(server net.Addr) trust.Fetcher {
+		asked = append(asked, server)
+		return dbFetcher{db: f.db}
+	}})
+	if err := asking.HandleBeacon(ctx, lineBeacon(t, f, time.Now()), 1); err != nil {
+		t.Fatalf("handle beacon: %v", err)
+	}
+	if len(asked) == 0 {
+		t.Fatal("the beaconer asked no sender for the missing chain")
+	}
+	for _, server := range asked {
+		peer, ok := server.(*scion.Addr)
+		if !ok || !peer.IA.Equal(coreIATest) || peer.Service != addr.SvcCS || peer.Path != nil {
+			t.Errorf("asked %v, want the sender's control service %s,svc:%04x on the one-hop path",
+				server, coreIATest, uint16(addr.SvcCS))
+		}
+	}
+	if chains, err := db.Chains(ctx, trustdb.ChainQuery{IA: coreIATest}); err != nil || len(chains) == 0 {
+		t.Errorf("stored chains of the sender = %d (%v), want the fetched chain kept", len(chains), err)
 	}
 }
 

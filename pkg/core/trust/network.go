@@ -5,8 +5,10 @@ import (
 	"crypto"
 	"crypto/rand"
 	"crypto/x509"
+	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"time"
 
 	"github.com/scionproto/scion/pkg/addr"
@@ -16,13 +18,19 @@ import (
 	"github.com/fancl20/cion/pkg/modules/trustdb"
 )
 
-// Remote resolves trust material over the network, typically from the core's
-// control endpoint.
-type Remote interface {
+// Fetcher resolves trust material over the network from one source: the
+// core's control endpoint, or the control service of a message's sender.
+type Fetcher interface {
 	// TRC fetches the signed TRC with the given ID.
 	TRC(ctx context.Context, id cppki.TRCID) (cppki.SignedTRC, error)
 	// Chains fetches the chains matching the query.
 	Chains(ctx context.Context, q trustdb.ChainQuery) ([][]*x509.Certificate, error)
+}
+
+// Remote resolves trust material over the network, typically from the core's
+// control endpoint, and renews the node's chain there.
+type Remote interface {
+	Fetcher
 	// RenewChain requests a certificate chain for the CSR, proving possession
 	// of the subject key with the given signer. It returns the chain carried
 	// by the verified renewal response.
@@ -31,7 +39,7 @@ type Remote interface {
 }
 
 // NetworkProvider is a DB-first trust.Provider: lookups go to the local
-// database and fall back to a Remote on a miss, caching the result. The
+// database and fall back on a miss to the network, caching the result. The
 // founding core runs without a Remote — its DB holds every chain it issued —
 // and a nil Remote resolves to "not found", never a panic.
 type NetworkProvider struct {
@@ -40,6 +48,14 @@ type NetworkProvider struct {
 	// Remote resolves missing trust material over the network. Nil means the
 	// provider is local-only.
 	Remote Remote
+	// Peer returns the fetcher that asks the server a Server option names:
+	// the sender of the message under verification, which holds the material
+	// that verifies it (control plane draft, Section 1.6). The provider asks
+	// the sender first and the Remote when the sender yields nothing: a node
+	// not yet enrolled cannot reach a sender's control service, whose channel
+	// admits enrolled peers alone, while the core's bootstrap channel serves
+	// it. Nil leaves the option unread.
+	Peer func(server net.Addr) Fetcher
 }
 
 var _ Provider = (*NetworkProvider)(nil)
@@ -58,7 +74,7 @@ func (p *NetworkProvider) LocalChains(
 }
 
 // GetSignedTRC returns the TRC with the given ID, fetching and validating it
-// from the Remote if it is not in the DB. A base TRC is verified with its
+// from the network if it is not in the DB. A base TRC is verified with its
 // own voting certificates; an update is verified against its pinned
 // predecessor — fetched first when it is missing, so a node holding only the
 // base can chain its way to any successor. The numbers-less ID asks the
@@ -69,13 +85,13 @@ func (p *NetworkProvider) GetSignedTRC(
 	opts ...Option,
 ) (cppki.SignedTRC, error) {
 
-	return fetchTRC(ctx, p.DB, p.Remote, id)
+	return fetchTRC(ctx, p.DB, p.fetcher(opts), id)
 }
 
 // GetChains returns the chains matching the query that verify against the
 // anchor pool — the newest pinned TRC's roots, the predecessor's beside them
 // while the newest is within its grace period: the database's when any of
-// them verifies, else the Remote's, which are cached. A stored chain whose
+// them verifies, else the network's, which are cached. A stored chain whose
 // root no pooled TRC carries is passed over.
 func (p *NetworkProvider) GetChains(
 	ctx context.Context,
@@ -83,26 +99,27 @@ func (p *NetworkProvider) GetChains(
 	opts ...Option,
 ) ([][]*x509.Certificate, error) {
 
+	fetcher := p.fetcher(opts)
 	stored, err := p.DB.Chains(ctx, q)
 	if err != nil {
 		return nil, err
 	}
-	if len(stored) == 0 && p.Remote == nil {
+	if len(stored) == 0 && fetcher == nil {
 		return nil, nil
 	}
-	pool, err := anchorPool(ctx, p.DB, p.Remote, q.IA.ISD())
+	pool, err := anchorPool(ctx, p.DB, fetcher, q.IA.ISD())
 	if err != nil {
 		return nil, serrors.Wrap("fetching TRCs to verify chains", err)
 	}
 	if verified, _ := verifiedChains(stored, pool); len(verified) != 0 {
 		return verified, nil
 	}
-	if p.Remote == nil {
+	if fetcher == nil {
 		return nil, nil
 	}
-	fetched, err := p.Remote.Chains(ctx, q)
+	fetched, err := fetcher.Chains(ctx, q)
 	if err != nil {
-		return nil, serrors.Wrap("fetching chains from remote", err)
+		return nil, serrors.Wrap("fetching chains", err)
 	}
 	verified, failures := verifiedChains(fetched, pool)
 	for _, err := range failures {
@@ -114,6 +131,62 @@ func (p *NetworkProvider) GetChains(
 		}
 	}
 	return verified, nil
+}
+
+// fetcher returns where the options send a fetch: the Peer fetcher of the
+// server a Server option names, then the Remote; nil when neither applies.
+func (p *NetworkProvider) fetcher(opts []Option) Fetcher {
+	var o options
+	for _, opt := range opts {
+		opt(&o)
+	}
+	var sources inOrder
+	if o.server != nil && p.Peer != nil {
+		sources = append(sources, p.Peer(o.server))
+	}
+	if p.Remote != nil {
+		sources = append(sources, p.Remote)
+	}
+	switch len(sources) {
+	case 0:
+		return nil
+	case 1:
+		return sources[0]
+	default:
+		return sources
+	}
+}
+
+// inOrder asks its fetchers in turn and keeps the first answer: a TRC
+// fetched without error, chains fetched without error and not empty. Its
+// error joins the errors of every fetcher asked.
+type inOrder []Fetcher
+
+func (fs inOrder) TRC(ctx context.Context, id cppki.TRCID) (cppki.SignedTRC, error) {
+	var errs []error
+	for _, f := range fs {
+		trc, err := f.TRC(ctx, id)
+		if err == nil {
+			return trc, nil
+		}
+		errs = append(errs, err)
+	}
+	return cppki.SignedTRC{}, errors.Join(errs...)
+}
+
+func (fs inOrder) Chains(ctx context.Context, q trustdb.ChainQuery) ([][]*x509.Certificate, error) {
+	var errs []error
+	for _, f := range fs {
+		chains, err := f.Chains(ctx, q)
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		if len(chains) != 0 {
+			return chains, nil
+		}
+	}
+	return nil, errors.Join(errs...)
 }
 
 // verifiedChains returns the chains that verify against the pool, beside
@@ -194,20 +267,20 @@ func RenewChain(
 
 // anchorPool resolves the active TRCs that anchor chain verification, as
 // activePool reads them: the ISD's newest and, inside its grace period, its
-// predecessor, each from the DB or the Remote.
+// predecessor, each from the DB or the fetcher.
 func anchorPool(
 	ctx context.Context,
 	db trustdb.DB,
-	remote Remote,
+	fetcher Fetcher,
 	isd addr.ISD,
 ) ([]*cppki.TRC, error) {
 
-	newest, err := fetchTRC(ctx, db, remote, NewestTRCID(isd))
+	newest, err := fetchTRC(ctx, db, fetcher, NewestTRCID(isd))
 	if err != nil {
 		return nil, err
 	}
 	return activePool(newest, func(id cppki.TRCID) (cppki.SignedTRC, error) {
-		return fetchTRC(ctx, db, remote, id)
+		return fetchTRC(ctx, db, fetcher, id)
 	})
 }
 
@@ -238,12 +311,12 @@ func activePool(
 }
 
 // fetchTRC returns the TRC with the given ID — the newest of the ISD when the
-// ID is numbers-less — from the DB or the Remote, verifying what it fetches
-// and caching it in the DB; with a nil Remote, a DB miss is the zero TRC.
+// ID is numbers-less — from the DB or the fetcher, verifying what it fetches
+// and caching it in the DB; with a nil fetcher, a DB miss is the zero TRC.
 func fetchTRC(
 	ctx context.Context,
 	db trustdb.DB,
-	remote Remote,
+	fetcher Fetcher,
 	id cppki.TRCID,
 ) (cppki.SignedTRC, error) {
 
@@ -252,34 +325,34 @@ func fetchTRC(
 	} else if !trc.IsZero() {
 		return trc, nil
 	}
-	if remote == nil {
+	if fetcher == nil {
 		return cppki.SignedTRC{}, nil
 	}
 	if id.Base.IsLatest() {
-		return pullNewestTRC(ctx, db, remote, id.ISD)
+		return pullNewestTRC(ctx, db, fetcher, id.ISD)
 	}
-	trc, err := remote.TRC(ctx, id)
+	trc, err := fetcher.TRC(ctx, id)
 	if err != nil {
-		return cppki.SignedTRC{}, serrors.Wrap("fetching TRC from remote", err, "id", id)
+		return cppki.SignedTRC{}, serrors.Wrap("fetching TRC", err, "id", id)
 	}
 	if trc.TRC.ID != id {
 		return cppki.SignedTRC{}, serrors.New("fetched TRC has unexpected ID",
 			"expected", id, "actual", trc.TRC.ID)
 	}
-	return verifyAndPinTRC(ctx, db, remote, trc)
+	return verifyAndPinTRC(ctx, db, fetcher, trc)
 }
 
-// pullNewestTRC asks the Remote for the ISD's newest TRC — the drafts'
+// pullNewestTRC asks the fetcher for the ISD's newest TRC — the drafts'
 // numbers-less request — whatever the DB holds, and pins it once it
 // verifies, fetching the predecessors it stands on.
 func pullNewestTRC(
 	ctx context.Context,
 	db trustdb.DB,
-	remote Remote,
+	fetcher Fetcher,
 	isd addr.ISD,
 ) (cppki.SignedTRC, error) {
 
-	trc, err := remote.TRC(ctx, NewestTRCID(isd))
+	trc, err := fetcher.TRC(ctx, NewestTRCID(isd))
 	if err != nil {
 		return cppki.SignedTRC{}, serrors.Wrap("fetching the newest TRC", err, "isd", isd)
 	}
@@ -287,7 +360,7 @@ func pullNewestTRC(
 		return cppki.SignedTRC{}, serrors.New("fetched TRC is for another ISD",
 			"expected", isd, "actual", trc.TRC.ID.ISD)
 	}
-	return verifyAndPinTRC(ctx, db, remote, trc)
+	return verifyAndPinTRC(ctx, db, fetcher, trc)
 }
 
 // verifyAndPinTRC verifies the TRC — a base TRC with its own voting
@@ -297,7 +370,7 @@ func pullNewestTRC(
 func verifyAndPinTRC(
 	ctx context.Context,
 	db trustdb.DB,
-	remote Remote,
+	fetcher Fetcher,
 	trc cppki.SignedTRC,
 ) (cppki.SignedTRC, error) {
 
@@ -306,7 +379,7 @@ func verifyAndPinTRC(
 			return cppki.SignedTRC{}, serrors.Wrap("verifying fetched TRC", err, "id", trc.TRC.ID)
 		}
 	} else {
-		pred, err := fetchTRC(ctx, db, remote, predecessorID(trc.TRC.ID))
+		pred, err := fetchTRC(ctx, db, fetcher, predecessorID(trc.TRC.ID))
 		if err != nil {
 			return cppki.SignedTRC{}, err
 		}

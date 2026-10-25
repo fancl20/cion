@@ -204,14 +204,14 @@ func TestEngineVerifyBound(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := f.engine.VerifyBound(ctx, iaNode, signedMsg); err == nil {
+	if _, err := f.engine.VerifyBound(ctx, iaNode, nil, signedMsg); err == nil {
 		t.Error("bound verification accepted another IA's signature")
 	} else if msg := err.Error(); !strings.Contains(msg, iaNode.String()) ||
 		!strings.Contains(msg, iaCore.String()) {
 
 		t.Errorf("error = %q, want both the bound and the signing identity", msg)
 	}
-	if _, err := f.engine.VerifyBound(ctx, iaCore, signedMsg); err != nil {
+	if _, err := f.engine.VerifyBound(ctx, iaCore, nil, signedMsg); err != nil {
 		t.Errorf("bound verification rejected the signer's own IA: %v", err)
 	}
 }

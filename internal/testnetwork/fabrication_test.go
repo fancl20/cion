@@ -114,7 +114,7 @@ func boundVerifies(ctx context.Context, n *Node, typ pathdb.SegmentType) bool {
 	}
 	for _, seg := range segs {
 		for i := range seg.PCB.Entries {
-			if _, err := n.app.Engine().VerifyBound(ctx, seg.PCB.Entries[i].IA,
+			if _, err := n.app.Engine().VerifyBound(ctx, seg.PCB.Entries[i].IA, nil,
 				seg.PCB.Entries[i].Signed, seg.PCB.AssociatedData(i)...); err != nil {
 				return false
 			}

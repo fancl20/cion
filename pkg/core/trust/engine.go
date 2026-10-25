@@ -5,6 +5,7 @@ import (
 	"crypto"
 	"crypto/x509"
 	"fmt"
+	"net"
 	"time"
 
 	"github.com/scionproto/scion/pkg/addr"
@@ -131,15 +132,19 @@ func (e *Engine) Verify(
 // signature whose verification key names another ISD-AS fails with the
 // mismatch named. The signed bytes of a beacon's AS entry claim the entry's
 // own ISD-AS; this form reads the claim back to the signer and refuses the
-// difference.
+// difference. Missing material is asked of server — the message's sender,
+// which holds what verifies it — and, with a nil server, of the provider's
+// own source.
 func (e *Engine) VerifyBound(
 	ctx context.Context,
 	ia addr.IA,
+	server net.Addr,
 	signedMsg *cryptopb.SignedMessage,
 	associatedData ...[]byte,
 ) (*signed.Message, error) {
 
-	v := Verifier{Engine: e.Provider, chains: e.chains, notifies: e.notifies, BoundIA: ia}
+	v := Verifier{Engine: e.Provider, chains: e.chains, notifies: e.notifies,
+		BoundIA: ia, BoundServer: server}
 	return v.Verify(ctx, signedMsg, associatedData...)
 }
 
