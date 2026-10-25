@@ -95,6 +95,10 @@ func TestPickRoute(t *testing.T) {
 		c.Crossing = true
 		return c
 	}
+	stale := func(c scion.Candidate) scion.Candidate {
+		c.Stale = true
+		return c
+	}
 	incumbent100 := declared(mint(1, 4, 6, fresh), 100*time.Millisecond)
 	cases := []pickCase{
 		{
@@ -432,6 +436,34 @@ func TestPickRoute(t *testing.T) {
 		{
 			name:    "a window that composes nothing picks nothing",
 			windows: []pickWindow{{}},
+		},
+		{
+			name: "a fresh candidate outranks a stale one whatever its sum",
+			windows: []pickWindow{{
+				candidates: []scion.Candidate{
+					stale(declared(mint(1, 2, 4, fresh), 10*time.Millisecond)),
+					declared(mint(2, 5, 6, fresh), 30*time.Millisecond),
+				},
+				wantPick: 2,
+			}},
+		},
+		{
+			name: "an incumbent gone stale yields to a fresh challenger at once",
+			windows: []pickWindow{
+				{
+					candidates: []scion.Candidate{incumbent100},
+					wantPick:   1,
+				},
+				{
+					// Inside the ratio: a fresh incumbent would hold.
+					candidates: []scion.Candidate{
+						stale(incumbent100),
+						declared(mint(2, 5, 6, fresh), 90*time.Millisecond),
+					},
+					wantPick:   2,
+					wantSwitch: true,
+				},
+			},
 		},
 	}
 	for _, tc := range cases {

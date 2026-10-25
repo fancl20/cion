@@ -50,16 +50,17 @@ type routeChoice struct {
 // resort Path honors — and the pick considers the clean pool, falling back to
 // the crossing one only when nothing clean composes. A pool keeps one
 // candidate per route, the freshest composition Before ranks first, so the
-// route the pick lands is its freshest instance. Within the pool a declared
-// sum outranks an undeclared one and a smaller declared sum a larger, ties
-// and undeclared pairs falling to the path layer's rank. An incumbent the
-// pool no longer holds — its route gone, or demoted to the crossing pool
-// while clean candidates stand — is a failure, and the pool's best replaces
-// it at once. A surviving incumbent switches reluctantly: the challenger must
-// beat its declared sum by SwitchRatio, and a window where a different
-// candidate leads, where the leader falls back inside the ratio, or where
-// the incumbent's declaration lapses or returns resets the count. The
-// declaration gaps govern where no ratio applies: an incumbent without a
+// route the pick lands is its freshest instance. Within the pool the path
+// layer's rank orders the routes: a fresh route before a stale one, a
+// declared sum before an undeclared one, a smaller declared sum before a
+// larger one. An incumbent the pool no longer holds — its route gone, or
+// demoted to the crossing pool while clean candidates stand — is a failure,
+// and the pool's best replaces it at once; so is an incumbent gone stale
+// while a fresh route leads. A surviving incumbent switches reluctantly: the
+// challenger must beat its declared sum by SwitchRatio, and a window where a
+// different candidate leads, where the leader falls back inside the ratio,
+// or where the incumbent's declaration lapses or returns resets the count.
+// The declaration gaps govern where no ratio applies: an incumbent without a
 // declared sum yields to a declared challenger through the streak alone, and
 // neither declaring is today's case — the default rank picks, immediately.
 // It answers the pick — nil when nothing composes — the next choice, and
@@ -83,7 +84,7 @@ func pickRoute(candidates []scion.Candidate, choice routeChoice) (pick *scion.Ca
 	pool = freshestPerRoute(pool)
 	best := pool[0]
 	for _, c := range pool[1:] {
-		if outranks(c, best) {
+		if c.Outranks(best) {
 			best = c
 		}
 	}
@@ -108,14 +109,18 @@ func pickRoute(candidates []scion.Candidate, choice routeChoice) (pick *scion.Ca
 		return matched, routeChoice{incumbent: matched.Links}, false
 	}
 	switch {
+	case matched.Stale && !best.Stale:
+		// The incumbent's route stopped refreshing while a fresh one leads:
+		// the failure semantics again.
+		return best, routeChoice{incumbent: best.Links}, true
 	case matched.Latency == nil && best.Latency == nil:
 		// Neither side declares: the default rank picks, immediately — the
 		// hops-first order a non-declaring network has always had.
 		return best, routeChoice{incumbent: best.Links}, true
 	case matched.Latency != nil && *best.Latency >= ratioOf(*matched.Latency, SwitchRatio):
 		// The leader fell back inside the ratio: the streak resets. Ahead
-		// of a declared incumbent only a declared candidate can lead, for
-		// the rank puts declared sums first.
+		// of a declared incumbent only a declared candidate as fresh can
+		// lead, for the rank puts freshness, then declared sums, first.
 		return matched, routeChoice{incumbent: matched.Links}, false
 	}
 	declared := matched.Latency != nil
@@ -152,23 +157,6 @@ func freshestPerRoute(pool []*scion.Candidate) []*scion.Candidate {
 		}
 	}
 	return out
-}
-
-// outranks reports whether c outranks o by the pick's rank: a declared sum
-// outranks an undeclared one — unknown is not free — a smaller declared sum a
-// larger, and ties and undeclared pairs the path layer's own rank, so the
-// order a non-declaring network sees is the order it sees today.
-func outranks(c, o *scion.Candidate) bool {
-	if c.Latency != nil && o.Latency == nil {
-		return true
-	}
-	if c.Latency == nil && o.Latency != nil {
-		return false
-	}
-	if c.Latency != nil && *c.Latency != *o.Latency {
-		return *c.Latency < *o.Latency
-	}
-	return c.Before(o)
 }
 
 // ratioOf scales a duration by one of the pick's ratios.

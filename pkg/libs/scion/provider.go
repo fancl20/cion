@@ -25,7 +25,8 @@ type PathProvider struct {
 	// Lookup resolves down segments for a destination, fetched with
 	// expiry-aware caching — the narrowed piece of the control plane's
 	// lookup service, so that linking the library does not link the
-	// control plane.
+	// control plane. Nil looks up nothing: composition reads the local up
+	// segments alone.
 	Lookup func(ctx context.Context, dst addr.IA) []*pathdb.Segment
 	// Bootstrap yields the reversed data-plane path of the freshest unverified
 	// beacon originating at a core: the enrollment route of a node that has not
@@ -74,10 +75,10 @@ func (p *PathProvider) local(dst addr.IA) (*Candidate, error) {
 	live := p.liveInterfaces()
 	// A destination an up segment already contains is on a route from here —
 	// a core at the segment's origin, an on-path AS mid-segment — and the
-	// freshest containing segment's truncated reversed path is the route to
-	// it.
-	if up, m := p.containingUp(dst, live); up != nil {
-		return p.compose(up, m, nil, -1, live)
+	// containing segment whose truncated reversal ranks first is the route
+	// to it.
+	if c, err := p.containing(dst, live); err != nil || c != nil {
+		return c, err
 	}
 	// Before any up segment is verified — a fresh node that has not even
 	// pinned the TRC — the bootstrap beacon's reversed route serves the
@@ -109,18 +110,14 @@ func (p *PathProvider) Path(ctx context.Context, dst addr.IA) (*spath.Decoded, e
 	return c.Path, nil
 }
 
-// Choose returns the candidate Path takes to dst. What LocalPath resolves
-// from local state comes from it; anything else is the first clean
-// candidate Enumerate composes, ordered by the carried rank — fewest joined
-// hops, ties to the fresher pair, then to the one with fewer entries. A
-// candidate crossing a signaled interface stays the last resort: the first
-// of them in emission order, never the best-ranked one.
+// Choose returns the candidate Path takes to dst: the first clean candidate
+// Enumerate composes, ordered by Outranks — the containing branches among
+// them, ranked with the rest — else the first crossing one in emission
+// order, never the best-ranked one, else what LocalPath resolves: the
+// bootstrap route before any up segment is verified.
 func (p *PathProvider) Choose(ctx context.Context, dst addr.IA) (*Candidate, error) {
 	if dst.Equal(p.IA) {
 		return nil, serrors.New("destination is the local ISD-AS", "isd_as", dst)
-	}
-	if c, err := p.local(dst); err == nil {
-		return c, nil
 	}
 	candidates, err := p.Enumerate(ctx, dst)
 	if err != nil {
@@ -135,7 +132,7 @@ func (p *PathProvider) Choose(ctx context.Context, dst addr.IA) (*Candidate, err
 			}
 			continue
 		}
-		if best == nil || c.Before(best) {
+		if best == nil || c.Outranks(best) {
 			best = c
 		}
 	}
@@ -145,8 +142,15 @@ func (p *PathProvider) Choose(ctx context.Context, dst addr.IA) (*Candidate, err
 	if crossing != nil {
 		return crossing, nil
 	}
-	return nil, serrors.New("no path to destination", "isd_as", dst)
+	return p.local(dst)
 }
+
+// StaleAfter is the age past which a candidate's staler piece reads stale.
+// Registration refreshes the routes beaconing selects every minute, and a
+// fetched down segment is cached for at most a minute, so a selected route's
+// pieces stay a few minutes fresh; a route ages past five once the beacons
+// stopped refreshing it, because it died or because beaconing selects others.
+const StaleAfter = 5 * time.Minute
 
 // Candidate is one composed path beside the facts composition holds on its
 // way to ranking it.
@@ -162,6 +166,9 @@ type Candidate struct {
 	// Fresh is the staler piece's creation timestamp: a join is only as
 	// fresh as the piece that expires first.
 	Fresh time.Time
+	// Stale reports whether Fresh lies more than StaleAfter in the past at
+	// composition.
+	Stale bool
 	// Entries is the joined pieces' total segment entries.
 	Entries int
 	// Crossing reports whether the traversed stretch crosses a signaled
@@ -177,10 +184,28 @@ type Candidate struct {
 	Segments []*pathdb.Segment
 }
 
-// Before reports whether c outranks o: fewest joined hops first, then the
-// fresher candidate by the staler piece's creation timestamp, then the one
-// with fewer entries — the order Path returns and a consumer sorting the
-// candidates reproduces.
+// Outranks reports whether c outranks o by the rank Choose picks with: a
+// fresh candidate before a stale one, a declared sum before an undeclared
+// one — unknown is not free — a smaller declared sum before a larger one,
+// and every tie to Before.
+func (c *Candidate) Outranks(o *Candidate) bool {
+	if c.Stale != o.Stale {
+		return !c.Stale
+	}
+	if (c.Latency == nil) != (o.Latency == nil) {
+		return c.Latency != nil
+	}
+	if c.Latency != nil && *c.Latency != *o.Latency {
+		return *c.Latency < *o.Latency
+	}
+	return c.Before(o)
+}
+
+// Before reports whether c outranks o by composition's own order: fewest
+// joined hops first, then the fresher candidate by the staler piece's
+// creation timestamp, then the one with fewer entries — the order Outranks
+// falls back on, and the one a consumer keeping one candidate per route
+// picks its freshest instance by.
 func (c *Candidate) Before(o *Candidate) bool {
 	if c.Hops != o.Hops {
 		return c.Hops < o.Hops
@@ -211,7 +236,10 @@ func (p *PathProvider) Enumerate(ctx context.Context, dst addr.IA) ([]Candidate,
 		return nil, serrors.New("destination is the local ISD-AS", "isd_as", dst)
 	}
 	live := p.liveInterfaces()
-	downs := p.Lookup(ctx, dst)
+	var downs []*pathdb.Segment
+	if p.Lookup != nil {
+		downs = p.Lookup(ctx, dst)
+	}
 	ups := p.upSegments()
 	var out []Candidate
 	emit := func(up *pathdb.Segment, mUp int, down *pathdb.Segment, mDown int) error {
@@ -344,6 +372,7 @@ func (p *PathProvider) compose(
 		Links:    links,
 		Hops:     len(path.HopFields),
 		Fresh:    fresh,
+		Stale:    time.Since(fresh) > StaleAfter,
 		Entries:  entries,
 		Crossing: crossing,
 		Segments: pieces,
@@ -428,12 +457,6 @@ func (p *PathProvider) crossesFrom(seg *pathdb.Segment, from int) bool {
 	return false
 }
 
-// crosses reports whether the segment's entries traverse a signaled
-// interface.
-func (p *PathProvider) crosses(seg *pathdb.Segment) bool {
-	return p.crossesFrom(seg, 0)
-}
-
 // upSegments returns every stored up segment. Each is a candidate meeting —
 // not only the freshest per origin core — because a staler segment through a
 // deeper parent can meet a down segment the freshest one cannot.
@@ -445,35 +468,37 @@ func (p *PathProvider) upSegments() []*pathdb.Segment {
 	return segs
 }
 
-// containingUp returns the freshest up segment whose entries contain the
-// given ISD-AS and that entry's index — a core at the origin, an on-path AS
-// mid-segment — the freshest one that crosses no signaled interface, the
-// freshest crossing one kept when nothing else exists. A segment the node
-// terminated on an interface the live snapshot lacks serves neither.
-func (p *PathProvider) containingUp(ia addr.IA, live map[uint16]addr.IA) (*pathdb.Segment, int) {
-	var best, clean *pathdb.Segment
-	bestAt, cleanAt := -1, -1
+// containing composes the truncated reversal of every up segment whose
+// entries contain the given ISD-AS — a core at the origin, an on-path AS
+// mid-segment — and returns the one Outranks puts first among those crossing
+// no signaled interface, the first-ranked crossing one when nothing else
+// composes; nil when no up segment contains it. A segment the node
+// terminated on an interface the live snapshot lacks composes nothing.
+func (p *PathProvider) containing(ia addr.IA, live map[uint16]addr.IA) (*Candidate, error) {
+	var clean, crossing *Candidate
 	for _, seg := range p.upSegments() {
 		at := seg.PCB.IndexOfIA(ia)
 		if at < 0 {
 			continue
 		}
-		// The node's own entry terminates the segment, its ingress the
-		// interface the beacon arrived on.
-		if retired(live, seg.PCB.Entries[len(seg.PCB.Entries)-1].Hop.ConsIngress) {
-			continue
+		c, err := p.compose(seg, at, nil, -1, live)
+		if err != nil {
+			return nil, err
 		}
-		if freshest(best, seg) == seg {
-			best, bestAt = seg, at
-		}
-		if !p.crosses(seg) && freshest(clean, seg) == seg {
-			clean, cleanAt = seg, at
+		switch {
+		case c == nil:
+		case c.Crossing:
+			if crossing == nil || c.Outranks(crossing) {
+				crossing = c
+			}
+		case clean == nil || c.Outranks(clean):
+			clean = c
 		}
 	}
 	if clean != nil {
-		return clean, cleanAt
+		return clean, nil
 	}
-	return best, bestAt
+	return crossing, nil
 }
 
 // liveInterfaces snapshots the node's live interfaces; nil filters nothing.
@@ -492,24 +517,4 @@ func retired(live map[uint16]addr.IA, ifID uint16) bool {
 	}
 	_, ok := live[ifID]
 	return !ok
-}
-
-// freshest picks the freshest of two segments — nil keeps the other — by
-// the latest creation timestamp; equally fresh segments resolve to the one
-// with the fewest entries — a tie names the same origination period, and
-// the shorter route through it serves better than an arbitrary one.
-func freshest(a, b *pathdb.Segment) *pathdb.Segment {
-	switch {
-	case a == nil:
-		return b
-	case b == nil:
-		return a
-	case b.PCB.Timestamp().After(a.PCB.Timestamp()):
-		return b
-	case b.PCB.Timestamp().Equal(a.PCB.Timestamp()) &&
-		len(b.PCB.Entries) < len(a.PCB.Entries):
-		return b
-	default:
-		return a
-	}
 }

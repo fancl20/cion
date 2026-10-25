@@ -347,12 +347,13 @@ func TestProviderCorePath(t *testing.T) {
 	checkHops(t, path, down.Entries...)
 }
 
-// TestProviderPrefersFewestHops checks the selection order: a staler up
-// segment through a deeper parent wins on hops — the reason every candidate
-// enters the computation, not the freshest per core.
+// TestProviderPrefersFewestHops checks the order behind the declared sums: of
+// fresh candidates declaring none, a staler up segment through a deeper parent
+// wins on hops — the reason every candidate enters the computation, not the
+// freshest per core.
 func TestProviderPrefersFewestHops(t *testing.T) {
 	fresh := linePCB(t, time.Now(), iaCore, iaLeaf)
-	stale := linePCB(t, time.Now().Add(-10*time.Minute), iaCore, iaMid, iaLeaf)
+	stale := linePCB(t, time.Now().Add(-2*time.Minute), iaCore, iaMid, iaLeaf)
 	down := linePCB(t, time.Now(), iaCore, iaMid, iaDest)
 	db := &fakePathDB{}
 	for _, up := range []*segment.PCB{fresh, stale} {
@@ -498,8 +499,8 @@ func TestProviderFilterCountsTraversedHopsOnly(t *testing.T) {
 // TestProviderBootstrapRoute checks the enrollment fallback: before any up
 // segment is verified, the reversed unverified beacon — the node's own hop
 // already extended — serves the core route in both resolution variants,
-// with no fetch, and a verified up segment takes over the moment one
-// exists.
+// LocalPath's with no fetch, and a verified up segment takes over the moment
+// one exists.
 func TestProviderBootstrapRoute(t *testing.T) {
 	beacon := linePCB(t, time.Now(), iaCore, iaLeaf)
 	route := beacon.ReversePath()
@@ -540,9 +541,11 @@ func TestProviderBootstrapRoute(t *testing.T) {
 		if path.InfoFields[0].ConsDir {
 			t.Errorf("%s is forward, want the reversed beacon", resolve.name)
 		}
-	}
-	if fetched {
-		t.Error("the bootstrap route fetched down segments, want local state only")
+		// Path asks the lookup first, which answers nothing for a core;
+		// LocalPath never asks.
+		if resolve.name == "LocalPath" && fetched {
+			t.Error("LocalPath over the bootstrap route fetched down segments, want local state only")
+		}
 	}
 
 	// A verified up segment takes over the moment one exists: the route
@@ -696,6 +699,9 @@ func TestEnumerateFacts(t *testing.T) {
 	if !c.Fresh.Equal(down.Timestamp()) {
 		t.Errorf("candidate freshness = %v, want the staler down piece's %v",
 			c.Fresh, down.Timestamp())
+	}
+	if !c.Stale {
+		t.Errorf("candidate over an hour-old piece reads fresh, want stale past %v", StaleAfter)
 	}
 	if c.Entries != 5 {
 		t.Errorf("candidate entries = %d, want the pair's 5", c.Entries)
@@ -1363,5 +1369,193 @@ func TestProviderChoose(t *testing.T) {
 				t.Errorf("Choose joins %d segments %v, want %d %v", len(got), got, len(tc.want), tc.want)
 			}
 		})
+	}
+}
+
+// rankFixture holds three up segments from the leaf to the core — direct at
+// 40ms, through the middle at 5ms a link, and direct declaring nothing — and
+// a down segment from the core to the destination at 5ms.
+type rankFixture struct {
+	upDirect, upMid, upUndeclared, down *segment.PCB
+}
+
+func newRankFixture(t *testing.T, midAge time.Duration) rankFixture {
+	t.Helper()
+	now := time.Now()
+	ms := time.Millisecond
+	return rankFixture{
+		upDirect: signedLine(t, now,
+			linkHop{ia: iaCore, eg: 11, latency: 40 * ms},
+			linkHop{ia: iaLeaf, in: 12}),
+		upMid: signedLine(t, now.Add(-midAge),
+			linkHop{ia: iaCore, eg: 21, latency: 5 * ms},
+			linkHop{ia: iaMid, in: 22, eg: 23, latency: 5 * ms},
+			linkHop{ia: iaLeaf, in: 24}),
+		upUndeclared: signedLine(t, now,
+			linkHop{ia: iaCore, eg: 41},
+			linkHop{ia: iaLeaf, in: 42}),
+		down: signedLine(t, now,
+			linkHop{ia: iaCore, eg: 31, latency: 5 * ms},
+			linkHop{ia: iaDest, in: 32}),
+	}
+}
+
+// provider returns the leaf's provider over the given up segments, the down
+// segment answering the destination's lookups.
+func (f rankFixture) provider(t *testing.T, ups ...*segment.PCB) *PathProvider {
+	t.Helper()
+	db := &fakePathDB{}
+	for _, up := range ups {
+		if _, err := db.Insert(context.Background(), &pathdb.Segment{
+			Type: pathdb.SegmentTypeUp,
+			PCB:  up,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return &PathProvider{
+		IA: iaLeaf,
+		DB: db,
+		Lookup: func(_ context.Context, dst addr.IA) []*pathdb.Segment {
+			if !dst.Equal(iaDest) {
+				return nil
+			}
+			return []*pathdb.Segment{{Type: pathdb.SegmentTypeDown, PCB: f.down}}
+		},
+	}
+}
+
+// TestProviderRanksFreshThenFast checks the rank Choose picks with: of fresh
+// candidates, the lowest declared sum wins over fewer hops, and an undeclared
+// sum ranks after every declared one; a candidate whose staler piece is
+// older than StaleAfter ranks after every fresh one whatever its sum, and
+// serves when nothing fresh composes.
+func TestProviderRanksFreshThenFast(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		midAge time.Duration
+		ups    func(f rankFixture) []*segment.PCB
+		want   func(f rankFixture) *segment.PCB
+	}{{
+		name:   "the lowest declared sum over fewer hops",
+		midAge: time.Minute,
+		ups:    func(f rankFixture) []*segment.PCB { return []*segment.PCB{f.upDirect, f.upMid} },
+		want:   func(f rankFixture) *segment.PCB { return f.upMid },
+	}, {
+		name:   "a declared sum over an undeclared one",
+		midAge: time.Minute,
+		ups:    func(f rankFixture) []*segment.PCB { return []*segment.PCB{f.upUndeclared, f.upDirect} },
+		want:   func(f rankFixture) *segment.PCB { return f.upDirect },
+	}, {
+		name:   "a fresh candidate over a stale one",
+		midAge: StaleAfter + time.Minute,
+		ups:    func(f rankFixture) []*segment.PCB { return []*segment.PCB{f.upDirect, f.upMid} },
+		want:   func(f rankFixture) *segment.PCB { return f.upDirect },
+	}, {
+		name:   "a stale candidate when nothing fresh composes",
+		midAge: StaleAfter + time.Minute,
+		ups:    func(f rankFixture) []*segment.PCB { return []*segment.PCB{f.upMid} },
+		want:   func(f rankFixture) *segment.PCB { return f.upMid },
+	}} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newRankFixture(t, tc.midAge)
+			c, err := f.provider(t, tc.ups(f)...).Choose(context.Background(), iaDest)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(c.Segments) != 2 || c.Segments[0].PCB != tc.want(f) || c.Segments[1].PCB != f.down {
+				t.Errorf("Choose joins %v, want the up segment %v with the down segment",
+					c.Segments, tc.want(f))
+			}
+		})
+	}
+}
+
+// TestProviderContainingBranchRanks checks the containing branch by the same
+// rank: of the up segments containing the core, the route LocalPath
+// resolves is the one declaring the lower sum while both are fresh, and the
+// fresh one once the faster has gone stale.
+func TestProviderContainingBranchRanks(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		midAge time.Duration
+		want   func(f rankFixture) *segment.PCB
+	}{
+		{"the lower declared sum", time.Minute, func(f rankFixture) *segment.PCB { return f.upMid }},
+		{"the fresh segment", StaleAfter + time.Minute, func(f rankFixture) *segment.PCB { return f.upDirect }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newRankFixture(t, tc.midAge)
+			p := f.provider(t, f.upDirect, f.upMid)
+			c, err := p.Choose(context.Background(), iaCore)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(c.Segments) != 1 || c.Segments[0].PCB != tc.want(f) {
+				t.Fatalf("containing branch joins %v, want the up segment %v", c.Segments, tc.want(f))
+			}
+			path, err := p.LocalPath(iaCore)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if diff := cmp.Diff(c.Path, path); diff != "" {
+				t.Errorf("LocalPath differs from Choose's containing branch (-Choose +LocalPath):\n%s", diff)
+			}
+		})
+	}
+}
+
+// TestProviderChooseRanksContainingBranchesWithTheRest checks that a
+// containing branch competes with every other candidate: a destination only a
+// stale up segment contains takes the fresh meeting that serves it, while
+// LocalPath, which composes from local state alone, still resolves the
+// containing branch.
+func TestProviderChooseRanksContainingBranchesWithTheRest(t *testing.T) {
+	now := time.Now()
+	ms := time.Millisecond
+	// The stale up segment crosses the destination on its way to the leaf.
+	staleUp := signedLine(t, now.Add(-StaleAfter-time.Minute),
+		linkHop{ia: iaCore, eg: 11, latency: ms},
+		linkHop{ia: iaDest, in: 12, eg: 13, latency: ms},
+		linkHop{ia: iaLeaf, in: 14})
+	freshUp := signedLine(t, now,
+		linkHop{ia: iaCore, eg: 21, latency: 20 * ms},
+		linkHop{ia: iaLeaf, in: 22})
+	down := signedLine(t, now,
+		linkHop{ia: iaCore, eg: 31, latency: 20 * ms},
+		linkHop{ia: iaDest, in: 32})
+	db := &fakePathDB{}
+	for _, up := range []*segment.PCB{staleUp, freshUp} {
+		if _, err := db.Insert(context.Background(), &pathdb.Segment{
+			Type: pathdb.SegmentTypeUp,
+			PCB:  up,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	p := &PathProvider{
+		IA: iaLeaf,
+		DB: db,
+		Lookup: func(_ context.Context, dst addr.IA) []*pathdb.Segment {
+			if !dst.Equal(iaDest) {
+				return nil
+			}
+			return []*pathdb.Segment{{Type: pathdb.SegmentTypeDown, PCB: down}}
+		},
+	}
+
+	c, err := p.Choose(context.Background(), iaDest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(c.Segments) != 2 || c.Segments[0].PCB != freshUp || c.Segments[1].PCB != down {
+		t.Errorf("Choose joins %v, want the fresh meeting over the stale containing branch", c.Segments)
+	}
+	local, err := p.local(iaDest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(local.Segments) != 1 || local.Segments[0].PCB != staleUp {
+		t.Errorf("LocalPath resolves %v, want the containing branch", local.Segments)
 	}
 }

@@ -209,3 +209,18 @@ bootstrap route.
     over their chosen paths, against 10, and 26 to 28 once the link set had
     held for five minutes, against 12. Every pair held a live candidate right
     after the cut, so the pairs left chose paths over the cut links.
+*   The rank landed in the path layer ([provider.go](/pkg/libs/scion/provider.go)),
+    and the WireGuard pick ranks with it
+    ([route.go](/pkg/apps/wireguard/route.go)). Taking the containing
+    branches first, as `Choose` did, held two regions pairs on stale branches
+    through gone links while fresh meetings at 13 and 22ms served them. The
+    lookup became optional because `Choose` now enumerates before it falls
+    back, and the e2e labs' ping providers carry none. Across five runs, the
+    regions network reached all 72 pairs once settled, where it had reached
+    71 in most runs; its worst chosen path stood 2.0 to 2.1 times the
+    reference, against 2.5 to 26, and every chosen path cost what the formed
+    links' best path cost. After its cut, all 72 pairs reached again in every
+    run, 261 to 320 seconds on, where 62 to 72 had and six runs of ten
+    recovered; the worst path once settled stood 2.0 to 4.1 times the
+    reference, against 2.5 to 26. The stranded network reached all 30 pairs
+    in every run, once settled and after its cut.
