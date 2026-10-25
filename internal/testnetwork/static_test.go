@@ -4,13 +4,17 @@ import (
 	"encoding/json/v2"
 	"net/netip"
 	"os"
+	"slices"
 	"testing"
 	"time"
 
 	"github.com/scionproto/scion/pkg/addr"
+	spath "github.com/scionproto/scion/pkg/slayers/path/scion"
 
 	"github.com/fancl20/cion/internal/services"
 	"github.com/fancl20/cion/pkg/core/webpki/webpkitest"
+	"github.com/fancl20/cion/pkg/libs/scion"
+	"github.com/fancl20/cion/pkg/libs/segment"
 	"github.com/fancl20/cion/pkg/modules/links"
 )
 
@@ -231,6 +235,68 @@ func TestStaticLabByLinkSet(t *testing.T) {
 	})
 	Poll(t, "A and B still answer each other", func() bool {
 		return pingFrom(ctx, a.Node, b.app.IA(), b.host)
+	})
+}
+
+// TestRetiredLinkAnswersInterfaceDown is the retired link's proof on the
+// static lab: the core A reaches D over two branches — B, and C then E —
+// and its chosen path crosses B's link to D, the branch of fewer hops.
+// Removing D's entry from B's file retires the link while the segments
+// through it stay fresh for minutes: B's data plane answers an echo over
+// them with the interface-down signal, A's cache holds B's interface, and A
+// reaches D over C and E at once.
+func TestRetiredLinkAnswersInterfaceDown(t *testing.T) {
+	t.Parallel()
+	iaD := addr.MustIAFrom(20, 0xff0000000091)
+	iaE := addr.MustIAFrom(20, 0xff0000000092)
+	// B's interface toward D, pinned so the lab names the signaled pair.
+	const bd = uint16(7)
+	nodes := bootTopology(t, webpkitest.New(t), staticTopology{
+		core:  coreIA,
+		nodes: []addr.IA{coreIA, nodeIA, lineCIA, iaD, iaE},
+		links: [][2]addr.IA{
+			{coreIA, nodeIA}, {nodeIA, iaD},
+			{coreIA, lineCIA}, {lineCIA, iaE}, {iaE, iaD},
+		},
+		pins: map[[2]addr.IA]uint16{{nodeIA, iaD}: bd},
+	})
+	a, b, d := nodes[coreIA], nodes[nodeIA], nodes[iaD]
+	ctx := t.Context()
+	viaB := segment.LinkID{IA: nodeIA, IfID: bd}
+
+	// A reaches D through B, and holds a fresh path around it.
+	var throughB *spath.Decoded
+	PollFor(t, RestartTimeout, "A to reach D through B", func() bool {
+		c, err := a.app.Provider().Choose(ctx, iaD)
+		if err != nil || !slices.Contains(c.Links, viaB) {
+			return false
+		}
+		throughB = c.Path
+		return pingFrom(ctx, a.Node, iaD, d.host)
+	})
+	Poll(t, "A to compose a fresh path around B", func() bool {
+		candidates, err := a.app.Provider().Enumerate(ctx, iaD)
+		return err == nil && slices.ContainsFunc(candidates, func(c scion.Candidate) bool {
+			return !c.Stale && !slices.Contains(c.Links, viaB)
+		})
+	})
+
+	// Removing D's entry from B's file retires the link. The A–B entry
+	// keeps the addresses the standing link holds.
+	ab := entryOf(ctx, b.Node, coreIA)
+	writeStaticSet(t, b.linkSet, staticLink{
+		IA: coreIA.String(), Local: ab.Local.String(), Remote: ab.Remote.String()})
+	Poll(t, "B retired the link to D", func() bool {
+		e := entryOf(ctx, b.Node, iaD)
+		return e != nil && e.State == links.StateRetired
+	})
+
+	// B's data plane answers an echo over the path through the retired link
+	// with the signal, and A, its cache holding the signal, reaches D over C
+	// and E while the path through B still ranks first.
+	echoAcrossDownLink(t, a.Node, iaD, d.host, viaB, throughB)
+	Poll(t, "A to reach D around the retired link", func() bool {
+		return pingFrom(ctx, a.Node, iaD, d.host)
 	})
 }
 

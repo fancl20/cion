@@ -115,3 +115,14 @@ stale.
     and cut benchmarks of both networks are compared before and after.
 
 ## Implementation history
+
+*   Landed as proposed: `validateEgressID` answers an egress the generation
+    lacks as a down one ([processor.go](/pkg/core/dataplane/processor.go)),
+    and the static lab proves the retired link's signal end to end
+    ([static_test.go](/internal/testnetwork/static_test.go)). Across five
+    runs, the settled and cut benchmarks of both networks, which send no
+    traffic, held their ranges from before the change, save one regions cut
+    run: its links settled seven seconds after the cut, and its scenario
+    ended five minutes later, before three pairs' segments through the cut
+    link read stale — a race the scenario's end runs against the staleness
+    window with or without the change.

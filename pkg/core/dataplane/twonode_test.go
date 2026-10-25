@@ -120,16 +120,22 @@ func startTwoNodes(t *testing.T) (a, b *node) {
 // key; the second hop's MAC is chained over the SegID updated by the first.
 func directPath(t *testing.T, key []byte, segID uint16) *scion.Decoded {
 	t.Helper()
+	return pathOver(t, key, segID, 1)
+}
+
+// pathOver is directPath across the given interface ID at both ends.
+func pathOver(t *testing.T, key []byte, segID, ifID uint16) *scion.Decoded {
+	t.Helper()
 	now := util.TimeToSecs(time.Now())
 	info := path.InfoField{SegID: segID, ConsDir: true, Timestamp: now}
 
-	egressHop := path.HopField{ConsIngress: 0, ConsEgress: 1, ExpTime: 63}
+	egressHop := path.HopField{ConsIngress: 0, ConsEgress: ifID, ExpTime: 63}
 	egressHop.Mac = benchMAC(t, key, info, egressHop)
 
 	// The ingress router sees the SegID after the egress router's update.
 	infoAfter := info
 	infoAfter.UpdateSegID(egressHop.Mac)
-	ingressHop := path.HopField{ConsIngress: 1, ConsEgress: 0, ExpTime: 63}
+	ingressHop := path.HopField{ConsIngress: ifID, ConsEgress: 0, ExpTime: 63}
 	ingressHop.Mac = benchMAC(t, key, infoAfter, ingressHop)
 
 	p := &scion.Decoded{

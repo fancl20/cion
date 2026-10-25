@@ -106,7 +106,8 @@ func TestBFDLivenessEpisode(t *testing.T) {
 	// An echo from A toward B's far side — C — over the path through the
 	// dead link: the egress-down branch answers with the type-5 signal, and
 	// A's conn records the signaled interface in the shared cache.
-	echoAcrossDownLink(t, a, c.app.IA(), c.host, abIfID, throughB)
+	echoAcrossDownLink(t, a, c.app.IA(), c.host,
+		segment.LinkID{IA: a.app.IA(), IfID: abIfID}, throughB)
 
 	// Lift the blackhole: B restarted on the same state serves its persisted
 	// link, and A's verdict returns up on the next answered arrival — the
@@ -168,7 +169,8 @@ func TestBFDStaticLabEpisode(t *testing.T) {
 		return !a.app.Monitor().Up(ifID)
 	})
 	// The dead route answers the source with the signal; A's cache holds it.
-	echoAcrossDownLink(t, a.Node, c.app.IA(), c.host, ifID, throughB)
+	echoAcrossDownLink(t, a.Node, c.app.IA(), c.host,
+		segment.LinkID{IA: a.app.IA(), IfID: ifID}, throughB)
 
 	// Lift the blackhole: B restarted from its link-set returns the link up.
 	b2 := bootStaticNode(t, wpki, ipB, false, b.stateDir, b.linkSet, nil)
@@ -189,18 +191,18 @@ func establishedOf(ctx context.Context, n *Node, ia addr.IA) bool {
 }
 
 // echoAcrossDownLink sends echoes toward the destination over a path
-// through the node's down interface — captured while the link was up, for
-// the provider composes no path through an interface the node cannot send
-// over — until the node's shared cache holds the egress-down branch's
-// type-5 signal, which the receive path records while each echo goes
-// unanswered.
+// through a down or retired interface — one of the node's own captured
+// while its link was up, for the provider composes no path through an
+// interface the node cannot send over — until the node's shared cache holds
+// the type-5 signal naming that interface, which the receive path records
+// while each echo goes unanswered.
 func echoAcrossDownLink(t *testing.T, n *Node, dst addr.IA,
-	host netip.Addr, ifID uint16, path *spath.Decoded) {
+	host netip.Addr, down segment.LinkID, path *spath.Decoded) {
 
 	t.Helper()
 	Poll(t, "the interface-down signal to land in the cache", func() bool {
 		echoOver(t, n, dst, host, path, 100*time.Millisecond)
-		return n.app.InterfaceDown().Holds(n.app.IA(), ifID)
+		return n.app.InterfaceDown().Holds(down.IA, down.IfID)
 	})
 }
 

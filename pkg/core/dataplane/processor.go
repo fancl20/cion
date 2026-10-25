@@ -538,11 +538,23 @@ func (p *scionPacketProcessor) validateEgressID() disposition {
 	egressID := p.pkt.egress
 	egressLink := p.d.interfaces[egressID]
 
-	// egress interface must be a known interface
+	// An egress the generation does not serve, named by a hop field whose
+	// MAC verified, is a link this AS held and has since retired: the packet
+	// is dropped and its source told the interface is down, as a down
+	// link's source is (Section 6.2), under the same per-interface cap.
+	if egressLink == nil {
+		if !p.d.scmpCap.allow(egressID, time.Now()) {
+			return p.errorDiscard("error", errSCMPNotifyCapExceeded)
+		}
+		p.pkt.slowPathRequest = slowPathRequest{
+			spType: slowPathType(slayers.SCMPTypeExternalInterfaceDown),
+		}
+		return pSlowPath
+	}
 	// egress is never the internal interface (already checked)
 	// packet coming from internal interface, must go to an external interface
 	// Note that, for now, ingress == 0 is also true for sibling interfaces. That might change.
-	if egressLink == nil || (p.ingressFromLink == 0 && egressLink.Scope() == Sibling) {
+	if p.ingressFromLink == 0 && egressLink.Scope() == Sibling {
 		errCode := slayers.SCMPCodeUnknownHopFieldEgress
 		if !p.infoField.ConsDir {
 			errCode = slayers.SCMPCodeUnknownHopFieldIngress

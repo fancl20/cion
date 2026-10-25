@@ -72,121 +72,142 @@ func startDownNode(t *testing.T) (n *node, key []byte) {
 	return &node{d: d, provider: provider, ia: ia, internal: internal}, key
 }
 
-// TestEgressDownAnswersInterfaceDown checks the slow path the down verdict
-// finally runs: a packet routed into the down link is dropped and answered
-// toward its source with SCMP External Interface Down carrying the local
-// ISD-AS, the egress interface, and the quoted packet.
+// egressCases are the two egresses a packet cannot leave through: the node's
+// down link, and an interface its generation does not serve — a link the AS
+// retired, which its verified hop field still names.
+var egressCases = []struct {
+	name   string
+	egress uint16
+}{
+	{"down link", 1},
+	{"retired link", 2},
+}
+
+// TestEgressDownAnswersInterfaceDown checks the slow path a packet routed
+// into a link that cannot carry it runs: into the down link or through a
+// retired one, it is dropped and answered toward its source with SCMP
+// External Interface Down carrying the local ISD-AS, the egress interface,
+// and the quoted packet.
 func TestEgressDownAnswersInterfaceDown(t *testing.T) {
-	a, key := startDownNode(t)
-	bia := addr.MustIAFrom(1, 0xff0000000002)
+	for _, tc := range egressCases {
+		t.Run(tc.name, func(t *testing.T) {
+			a, key := startDownNode(t)
+			bia := addr.MustIAFrom(1, 0xff0000000002)
 
-	app, err := net.ListenUDP("udp4", net.UDPAddrFromAddrPort(netip.AddrPortFrom(testHost, 0)))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = app.Close() }()
-	ident := uint16(app.LocalAddr().(*net.UDPAddr).Port)
+			app, err := net.ListenUDP("udp4", net.UDPAddrFromAddrPort(netip.AddrPortFrom(testHost, 0)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = app.Close() }()
+			ident := uint16(app.LocalAddr().(*net.UDPAddr).Port)
 
-	request := scmpPacket(t, a.ia, bia, directPath(t, key, 0x111),
-		slayers.SCMPTypeEchoRequest, ident)
-	if _, err := app.WriteToUDP(request, mustUDPAddr(t, a.internal)); err != nil {
-		t.Fatal(err)
-	}
+			request := scmpPacket(t, a.ia, bia, pathOver(t, key, 0x111, tc.egress),
+				slayers.SCMPTypeEchoRequest, ident)
+			if _, err := app.WriteToUDP(request, mustUDPAddr(t, a.internal)); err != nil {
+				t.Fatal(err)
+			}
 
-	buf := make([]byte, bufSize)
-	_ = app.SetReadDeadline(time.Now().Add(testTimeout))
-	n, err := app.Read(buf)
-	if err != nil {
-		t.Fatalf("no answer from the down egress: %v", err)
-	}
-	pkt := gopacket.NewPacket(buf[:n], slayers.LayerTypeSCION, gopacket.NoCopy)
-	scnL := pkt.Layer(slayers.LayerTypeSCION)
-	if scnL == nil {
-		t.Fatal("no SCION layer in the answer")
-	}
-	scn := scnL.(*slayers.SCION)
-	if scn.SrcIA != a.ia || scn.DstIA != a.ia {
-		t.Fatalf("answer src/dst IA = %v/%v, want the local %v both",
-			scn.SrcIA, scn.DstIA, a.ia)
-	}
-	ifDown := pkt.Layer(slayers.LayerTypeSCMPExternalInterfaceDown)
-	if ifDown == nil {
-		t.Fatalf("SCMP layer = %v, want External Interface Down",
-			pkt.Layer(slayers.LayerTypeSCMP))
-	}
-	msg := ifDown.(*slayers.SCMPExternalInterfaceDown)
-	if msg.IA != a.ia {
-		t.Errorf("signaled ISD-AS = %v, want the local %v", msg.IA, a.ia)
-	}
-	if msg.IfID != 1 {
-		t.Errorf("signaled interface = %d, want the egress 1", msg.IfID)
-	}
-	// The quote names the offending packet: its destination is the far AS.
-	quote := gopacket.NewPacket(msg.LayerPayload(), slayers.LayerTypeSCION,
-		gopacket.NoCopy)
-	quoted := quote.Layer(slayers.LayerTypeSCION)
-	if quoted == nil {
-		t.Fatal("the notification carries no quoted packet")
-	}
-	if got := quoted.(*slayers.SCION).DstIA; got != bia {
-		t.Errorf("quoted destination = %v, want %v", got, bia)
+			buf := make([]byte, bufSize)
+			_ = app.SetReadDeadline(time.Now().Add(testTimeout))
+			n, err := app.Read(buf)
+			if err != nil {
+				t.Fatalf("no answer from the egress: %v", err)
+			}
+			pkt := gopacket.NewPacket(buf[:n], slayers.LayerTypeSCION, gopacket.NoCopy)
+			scnL := pkt.Layer(slayers.LayerTypeSCION)
+			if scnL == nil {
+				t.Fatal("no SCION layer in the answer")
+			}
+			scn := scnL.(*slayers.SCION)
+			if scn.SrcIA != a.ia || scn.DstIA != a.ia {
+				t.Fatalf("answer src/dst IA = %v/%v, want the local %v both",
+					scn.SrcIA, scn.DstIA, a.ia)
+			}
+			ifDown := pkt.Layer(slayers.LayerTypeSCMPExternalInterfaceDown)
+			if ifDown == nil {
+				t.Fatalf("SCMP layer = %v, want External Interface Down",
+					pkt.Layer(slayers.LayerTypeSCMP))
+			}
+			msg := ifDown.(*slayers.SCMPExternalInterfaceDown)
+			if msg.IA != a.ia {
+				t.Errorf("signaled ISD-AS = %v, want the local %v", msg.IA, a.ia)
+			}
+			if msg.IfID != uint64(tc.egress) {
+				t.Errorf("signaled interface = %d, want the egress %d", msg.IfID, tc.egress)
+			}
+			// The quote names the offending packet: its destination is the far AS.
+			quote := gopacket.NewPacket(msg.LayerPayload(), slayers.LayerTypeSCION,
+				gopacket.NoCopy)
+			quoted := quote.Layer(slayers.LayerTypeSCION)
+			if quoted == nil {
+				t.Fatal("the notification carries no quoted packet")
+			}
+			if got := quoted.(*slayers.SCION).DstIA; got != bia {
+				t.Errorf("quoted destination = %v, want %v", got, bia)
+			}
+		})
 	}
 }
 
 // TestEgressDownNotificationCap checks the per-interface rate cap: a burst
-// of packets into the down link earns no more than the cap's notifications
-// per second — exceeded ones dropped with the packet.
+// of packets into the down link or through a retired one earns no more than
+// the cap's notifications per second — exceeded ones dropped with the
+// packet.
 func TestEgressDownNotificationCap(t *testing.T) {
-	reader := newTestReader(t)
-	a, key := startDownNode(t)
-	bia := addr.MustIAFrom(1, 0xff0000000002)
+	for _, tc := range egressCases {
+		t.Run(tc.name, func(t *testing.T) {
+			reader := newTestReader(t)
+			a, key := startDownNode(t)
+			bia := addr.MustIAFrom(1, 0xff0000000002)
 
-	app, err := net.ListenUDP("udp4", net.UDPAddrFromAddrPort(netip.AddrPortFrom(testHost, 0)))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = app.Close() }()
-	ident := uint16(app.LocalAddr().(*net.UDPAddr).Port)
+			app, err := net.ListenUDP("udp4", net.UDPAddrFromAddrPort(netip.AddrPortFrom(testHost, 0)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = app.Close() }()
+			ident := uint16(app.LocalAddr().(*net.UDPAddr).Port)
 
-	// The burst starts at a second boundary the episode chooses, so it
-	// cannot straddle the cap's one-second window.
-	time.Sleep(time.Until(time.Now().Truncate(time.Second).Add(time.Second)))
-	burst := 5 * notifyCapPerSecond
-	tmpl := scmpPacket(t, a.ia, bia, directPath(t, key, 0x111),
-		slayers.SCMPTypeEchoRequest, ident)
-	sc := ClassOfSize(len(tmpl)).String()
-	for range burst {
-		if _, err := app.WriteToUDP(tmpl, mustUDPAddr(t, a.internal)); err != nil {
-			t.Fatal(err)
-		}
-	}
+			// The burst starts at a second boundary the episode chooses, so it
+			// cannot straddle the cap's one-second window.
+			time.Sleep(time.Until(time.Now().Truncate(time.Second).Add(time.Second)))
+			burst := 5 * notifyCapPerSecond
+			tmpl := scmpPacket(t, a.ia, bia, pathOver(t, key, 0x111, tc.egress),
+				slayers.SCMPTypeEchoRequest, ident)
+			sc := ClassOfSize(len(tmpl)).String()
+			for range burst {
+				if _, err := app.WriteToUDP(tmpl, mustUDPAddr(t, a.internal)); err != nil {
+					t.Fatal(err)
+				}
+			}
 
-	// Every packet of the burst is read and processed — counted — before
-	// the answers are collected, so the read runs to completion instead of
-	// guessing at the quiet after the burst.
-	settleSums(t, reader, map[metricKey]int64{
-		{"dataplane.input_packets_total", "0", sc, ""}: int64(burst),
-		{"dataplane.processed_packets", "0", sc, ""}:   int64(burst),
-	})
+			// Every packet of the burst is read and processed — counted — before
+			// the answers are collected, so the read runs to completion instead of
+			// guessing at the quiet after the burst.
+			settleSums(t, reader, map[metricKey]int64{
+				{"dataplane.input_packets_total", "0", sc, ""}: int64(burst),
+				{"dataplane.processed_packets", "0", sc, ""}:   int64(burst),
+			})
 
-	notifications := 0
-	buf := make([]byte, bufSize)
-	for {
-		_ = app.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
-		n, err := app.Read(buf)
-		if err != nil {
-			break // everything the burst answered has arrived
-		}
-		pkt := gopacket.NewPacket(buf[:n], slayers.LayerTypeSCION, gopacket.NoCopy)
-		if pkt.Layer(slayers.LayerTypeSCMPExternalInterfaceDown) != nil {
-			notifications++
-		}
-	}
-	if notifications == 0 {
-		t.Fatal("the burst earned no notification at all")
-	}
-	if notifications > notifyCapPerSecond {
-		t.Fatalf("notifications = %d, exceeding the per-interface cap %d",
-			notifications, notifyCapPerSecond)
+			notifications := 0
+			buf := make([]byte, bufSize)
+			for {
+				_ = app.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
+				n, err := app.Read(buf)
+				if err != nil {
+					break // everything the burst answered has arrived
+				}
+				pkt := gopacket.NewPacket(buf[:n], slayers.LayerTypeSCION, gopacket.NoCopy)
+				if pkt.Layer(slayers.LayerTypeSCMPExternalInterfaceDown) != nil {
+					notifications++
+				}
+			}
+			if notifications == 0 {
+				t.Fatal("the burst earned no notification at all")
+			}
+			if notifications > notifyCapPerSecond {
+				t.Fatalf("notifications = %d, exceeding the per-interface cap %d",
+					notifications, notifyCapPerSecond)
+			}
+		})
 	}
 }
