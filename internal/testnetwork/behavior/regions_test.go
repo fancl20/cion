@@ -3,7 +3,6 @@ package behavior
 import (
 	"net/netip"
 	"testing"
-	"testing/synctest"
 	"time"
 
 	"github.com/fancl20/cion/internal/services"
@@ -35,66 +34,53 @@ var (
 	regionsOrder  = []int{3, 6, 2, 8, 5, 1, 4, 7}
 )
 
-const (
-	// regionsBudget bounds the regions lab's run in virtual time.
-	regionsBudget = time.Hour
-	// regionsQuiet is how long the link set must hold unchanged to count
-	// as settled: twenty selection windows at the daemon's pacing.
-	regionsQuiet = 10 * time.Minute
-	// regionsSample spaces the lab's reads of the link set.
-	regionsSample = 10 * time.Second
-)
+// regionsBudget bounds the regions lab's run in virtual time.
+const regionsBudget = time.Hour
 
 // TestRegionsSettle is the selection loop's convergence proof at the
 // daemon's own pacing: nine nodes over three regions, joined outward from
 // the founder along a spanning tree, settle — the link set holds unchanged
-// for regionsQuiet with every node at or above its floor and the links
+// for settleQuiet with every node at or above its floor and the links
 // connecting them all — within regionsBudget of virtual time. Under the
 // labs' two-second windows the same network settles even with both ends of
 // a link judging it, so only the daemon's own pacing holds the settling.
 func TestRegionsSettle(t *testing.T) {
 	testnetwork.InBubble(t, func(t *testing.T, fab *fabric.Fabric, wpki *webpkitest.CA) {
-		var hosts [9]netip.Addr
-		for i := range hosts {
-			hosts[i] = testnetwork.HostSlot(t)
-		}
-		for i := range hosts {
-			for j := i + 1; j < len(hosts); j++ {
-				fab.Delay(hosts[i], hosts[j], time.Duration(regionsOneWay[i][j])*time.Microsecond)
-			}
-		}
-		var nodes [9]*testnetwork.Node
-		nodes[0] = testnetwork.BootInBubble(t, fab, hosts[0], func(cfg *services.NodeConfig) {
-			cfg.Core = true
-			cfg.CertFile = wpki.CertFile
-			cfg.KeyFile = wpki.KeyFile
-		})
-		for _, i := range regionsOrder {
-			parent := nodes[regionsParent[i]]
-			nodes[i] = testnetwork.BootInBubble(t, fab, hosts[i], func(cfg *services.NodeConfig) {
-				cfg.Neighbors = []string{rendezvous(parent)}
-				cfg.RootCAs = wpki.Pool
-			})
-		}
-		ctx := t.Context()
-
-		start := time.Now()
-		var last string
-		changed, changes := start, 0
-		for {
-			synctest.Wait()
-			if now := linkSet(ctx, nodes[:]); now != last {
-				last, changed = now, time.Now()
-				changes++
-			}
-			if time.Since(changed) >= regionsQuiet && settled(ctx, nodes[:]) {
-				return
-			}
-			if time.Since(start) >= regionsBudget {
-				t.Fatalf("the link set changed %d times in %v and never held for %v; last: %s",
-					changes, regionsBudget, regionsQuiet, last)
-			}
-			time.Sleep(regionsSample)
-		}
+		awaitSettled(t, bootRegions(t, fab, wpki).nodes, settleQuiet, regionsBudget)
 	})
+}
+
+// bootRegions boots the regions lab's network: nine nodes over
+// regionsOneWay's delays, joined outward from the founder along the
+// spanning tree.
+func bootRegions(t *testing.T, fab *fabric.Fabric, wpki *webpkitest.CA) *network {
+	t.Helper()
+	size := len(regionsOneWay)
+	n := &network{nodes: make([]*testnetwork.Node, size), oneWay: make([][]time.Duration, size)}
+	hosts := make([]netip.Addr, size)
+	for i := range hosts {
+		hosts[i] = testnetwork.HostSlot(t)
+	}
+	for i := range hosts {
+		n.oneWay[i] = make([]time.Duration, size)
+		for j := range hosts {
+			n.oneWay[i][j] = time.Duration(regionsOneWay[i][j]) * time.Microsecond
+			if j > i {
+				fab.Delay(hosts[i], hosts[j], n.oneWay[i][j])
+			}
+		}
+	}
+	n.nodes[0] = testnetwork.BootInBubble(t, fab, hosts[0], func(cfg *services.NodeConfig) {
+		cfg.Core = true
+		cfg.CertFile = wpki.CertFile
+		cfg.KeyFile = wpki.KeyFile
+	})
+	for _, i := range regionsOrder {
+		parent := n.nodes[regionsParent[i]]
+		n.nodes[i] = testnetwork.BootInBubble(t, fab, hosts[i], func(cfg *services.NodeConfig) {
+			cfg.Neighbors = []string{rendezvous(parent)}
+			cfg.RootCAs = wpki.Pool
+		})
+	}
+	return n
 }

@@ -6,4 +6,12 @@
 // virtual minutes to hours repeats code the e2e labs of
 // internal/testnetwork already run under the detector, at several times the
 // wall time.
+//
+// Beside the labs, benchmarks grade the same networks by the paths they
+// serve: every pair's chosen path against the shortest paths the fabric's
+// delays allow, the segment records no chosen path joins, and the links a
+// single cut would need. They are skipped unless CION_BENCH is set, and
+// each prints benchmark result lines on standard output for benchstat:
+//
+//	CION_BENCH=1 go test -run Bench -count=10 -v ./internal/testnetwork/behavior/
 package behavior

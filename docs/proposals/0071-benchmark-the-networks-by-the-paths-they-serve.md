@@ -230,3 +230,23 @@ demand.
     `PathProvider.Choose` in [provider.go](/pkg/libs/scion/provider.go).
     `LocalPath` resolves through the same candidate, its containing branch
     composed as `Enumerate` composes one.
+*   The assessment landed with its tests on synthetic networks, beside the
+    two settled benchmarks
+    ([assess_test.go](/internal/testnetwork/behavior/assess_test.go),
+    [bench_test.go](/internal/testnetwork/behavior/bench_test.go)). The
+    regions and stranded labs boot through the builders the benchmarks
+    share and settle through one wait
+    ([lab_test.go](/internal/testnetwork/behavior/lab_test.go),
+    [regions_test.go](/internal/testnetwork/behavior/regions_test.go),
+    [stranded_test.go](/internal/testnetwork/behavior/stranded_test.go)).
+    Across ten runs at the 5ms penalty, the regions network reached 71 of
+    its 72 pairs in eight runs, all 72 in one, and 68 in one. Its chosen
+    paths averaged 1.20 to 1.95 times the reference, the median run 1.23,
+    and the worst path of a run stood between 2.5 and 26 times. Of 100 to
+    118 up segment records, 35 to 42 were chosen; of 100 to 117 down
+    records, 15 to 20. No single cut split it. The stranded network reached
+    only the 12 pairs within its sides, in every run. Every route its far
+    side held to the core crossed a link the lab cut, and the far side
+    refused every beacon the healed link carried: verifying a near-side
+    signer fetches the signer's chain from the core, over those dead
+    routes.

@@ -6,6 +6,9 @@ import (
 	"net/netip"
 	"slices"
 	"strings"
+	"testing"
+	"testing/synctest"
+	"time"
 
 	"github.com/scionproto/scion/pkg/addr"
 
@@ -18,6 +21,67 @@ import (
 // the fixed rendezvous port.
 func rendezvous(n *testnetwork.Node) string {
 	return netip.AddrPortFrom(n.Host(), measured.RendezvousPort).String()
+}
+
+const (
+	// settleQuiet is how long a link set must hold unchanged to count as
+	// settled: twenty selection windows at the daemon's pacing.
+	settleQuiet = 10 * time.Minute
+	// settleSample spaces the reads of a settling link set.
+	settleSample = 10 * time.Second
+)
+
+// network is a lab's booted network: its nodes, the founding core first,
+// the one-way delay the fabric holds between each pair, and the pairs the
+// lab cut.
+type network struct {
+	nodes  []*testnetwork.Node
+	oneWay [][]time.Duration
+	cut    map[[2]int]bool
+}
+
+// delay returns the one-way delay the fabric holds between two of the
+// network's nodes; false for a pair the lab cut.
+func (n *network) delay(i, j int) (time.Duration, bool) {
+	if n.cut[[2]int{min(i, j), max(i, j)}] {
+		return 0, false
+	}
+	return n.oneWay[i][j], true
+}
+
+// settling is how a link set settled: the changes it went through and how
+// long after the first read the last one came.
+type settling struct {
+	changes int
+	at      time.Duration
+}
+
+// awaitSettled reads the nodes' link set every settleSample until it holds
+// unchanged for quiet with the nodes settled, and fails the test once
+// budget passes first.
+func awaitSettled(t *testing.T, nodes []*testnetwork.Node, quiet, budget time.Duration) settling {
+	t.Helper()
+	ctx := t.Context()
+	start := time.Now()
+	var s settling
+	var last string
+	changed := start
+	for {
+		synctest.Wait()
+		if now := linkSet(ctx, nodes); now != last {
+			last, changed = now, time.Now()
+			s.changes++
+		}
+		if time.Since(changed) >= quiet && settled(ctx, nodes) {
+			s.at = changed.Sub(start)
+			return s
+		}
+		if time.Since(start) >= budget {
+			t.Fatalf("the link set changed %d times in %v and never held for %v; last: %s",
+				s.changes, budget, quiet, last)
+		}
+		time.Sleep(settleSample)
+	}
 }
 
 // settled reports whether every one of the nodes holds at least the floor

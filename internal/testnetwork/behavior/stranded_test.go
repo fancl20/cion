@@ -40,84 +40,105 @@ import (
 // the daemon's own pacing.
 func TestStrandedTierHeals(t *testing.T) {
 	testnetwork.InBubble(t, func(t *testing.T, fab *fabric.Fabric, wpki *webpkitest.CA) {
-		ipA, ipF, ipG := testnetwork.HostSlot(t), testnetwork.HostSlot(t), testnetwork.HostSlot(t)
-		ipC, ipD, ipE := testnetwork.HostSlot(t), testnetwork.HostSlot(t), testnetwork.HostSlot(t)
-		for _, side := range [][]netip.Addr{{ipA, ipF, ipG}, {ipC, ipD, ipE}} {
-			for i := range side {
-				for _, other := range side[i+1:] {
-					fab.Delay(side[i], other, 1*time.Millisecond)
-				}
-			}
-		}
-		var blackholes []func()
-		for _, far := range []netip.Addr{ipC, ipD, ipE} {
-			fab.Delay(ipA, far, 15*time.Millisecond)
-			for _, near := range []netip.Addr{ipF, ipG} {
-				fab.Delay(near, far, 40*time.Millisecond)
-				blackholes = append(blackholes, fab.Blackhole(near, far))
-			}
-		}
-		blackholes = append(blackholes, fab.Blackhole(ipA, ipE))
-
-		a := testnetwork.BootInBubble(t, fab, ipA, func(cfg *services.NodeConfig) {
-			cfg.Core = true
-			cfg.CertFile = wpki.CertFile
-			cfg.KeyFile = wpki.KeyFile
-		})
-		join := func(ip netip.Addr, neighbors ...*testnetwork.Node) *testnetwork.Node {
-			return testnetwork.BootInBubble(t, fab, ip, func(cfg *services.NodeConfig) {
-				for _, n := range neighbors {
-					cfg.Neighbors = append(cfg.Neighbors, rendezvous(n))
-				}
-				cfg.RootCAs = wpki.Pool
-			})
-		}
-		f := join(ipF, a)
-		g := join(ipG, a, f)
-		c := join(ipC, a)
-		d := join(ipD, a, c)
-		e := join(ipE, c, d)
-		near, far := []*testnetwork.Node{a, f, g}, []*testnetwork.Node{c, d, e}
-		ctx := t.Context()
-
-		testnetwork.PollVirtual(t, strandedBudget, "each side to settle and the bridges to stand", func() bool {
-			return settled(ctx, near) && settled(ctx, far) &&
-				meshed(ctx, []*testnetwork.Node{a, c}) && meshed(ctx, []*testnetwork.Node{a, d})
-		})
-
-		// The blackholes lift while A links the sides: every node of each
-		// side probes the other's — the founder among them, standing in the
-		// directory — landing an entry on its acceptor.
-		for _, lift := range blackholes {
-			lift()
-		}
-		testnetwork.PollVirtual(t, strandedBudget, "the sides' probes to land", func() bool {
-			for _, x := range near {
-				for _, y := range far {
-					if !probedBy(ctx, x, y) || !probedBy(ctx, y, x) {
-						return false
-					}
-				}
-			}
-			return true
-		})
-
-		cut := map[[2]*testnetwork.Node]bool{}
-		for _, y := range far {
-			fab.Cut(ipA, y.Host())
-		}
-		for _, x := range near[1:] {
-			for _, y := range far {
-				if upTo(ctx, x, y) || upTo(ctx, y, x) {
-					fab.Cut(x.Host(), y.Host())
-					cut[[2]*testnetwork.Node{x, y}] = true
-				}
-			}
-		}
-		testnetwork.PollVirtual(t, strandedBudget, "the stranded clause to link the sides", func() bool {
-			return crossLink(ctx, near[1:], far, cut) != "" && settled(ctx, near) && settled(ctx, far)
-		})
+		healStranded(t, fab, wpki)
 	})
+}
+
+// healStranded runs the stranded lab on a fresh network and returns it once
+// the stranded clause has linked the sides again: A, F, G, C, D, and E, the
+// founder first, with the pairs the lab cut.
+func healStranded(t *testing.T, fab *fabric.Fabric, wpki *webpkitest.CA) *network {
+	t.Helper()
+	ipA, ipF, ipG := testnetwork.HostSlot(t), testnetwork.HostSlot(t), testnetwork.HostSlot(t)
+	ipC, ipD, ipE := testnetwork.HostSlot(t), testnetwork.HostSlot(t), testnetwork.HostSlot(t)
+	hosts := []netip.Addr{ipA, ipF, ipG, ipC, ipD, ipE}
+	n := &network{oneWay: make([][]time.Duration, len(hosts)), cut: map[[2]int]bool{}}
+	for i := range hosts {
+		n.oneWay[i] = make([]time.Duration, len(hosts))
+	}
+	delay := func(i, j int, oneWay time.Duration) {
+		fab.Delay(hosts[i], hosts[j], oneWay)
+		n.oneWay[i][j], n.oneWay[j][i] = oneWay, oneWay
+	}
+	for _, side := range [][]int{{0, 1, 2}, {3, 4, 5}} {
+		for i := range side {
+			for _, other := range side[i+1:] {
+				delay(side[i], other, 1*time.Millisecond)
+			}
+		}
+	}
+	var blackholes []func()
+	for _, far := range []int{3, 4, 5} {
+		delay(0, far, 15*time.Millisecond)
+		for _, near := range []int{1, 2} {
+			delay(near, far, 40*time.Millisecond)
+			blackholes = append(blackholes, fab.Blackhole(hosts[near], hosts[far]))
+		}
+	}
+	blackholes = append(blackholes, fab.Blackhole(ipA, ipE))
+
+	a := testnetwork.BootInBubble(t, fab, ipA, func(cfg *services.NodeConfig) {
+		cfg.Core = true
+		cfg.CertFile = wpki.CertFile
+		cfg.KeyFile = wpki.KeyFile
+	})
+	join := func(ip netip.Addr, neighbors ...*testnetwork.Node) *testnetwork.Node {
+		return testnetwork.BootInBubble(t, fab, ip, func(cfg *services.NodeConfig) {
+			for _, neighbor := range neighbors {
+				cfg.Neighbors = append(cfg.Neighbors, rendezvous(neighbor))
+			}
+			cfg.RootCAs = wpki.Pool
+		})
+	}
+	f := join(ipF, a)
+	g := join(ipG, a, f)
+	c := join(ipC, a)
+	d := join(ipD, a, c)
+	e := join(ipE, c, d)
+	n.nodes = []*testnetwork.Node{a, f, g, c, d, e}
+	near, far := []*testnetwork.Node{a, f, g}, []*testnetwork.Node{c, d, e}
+	ctx := t.Context()
+
+	testnetwork.PollVirtual(t, strandedBudget, "each side to settle and the bridges to stand", func() bool {
+		return settled(ctx, near) && settled(ctx, far) &&
+			meshed(ctx, []*testnetwork.Node{a, c}) && meshed(ctx, []*testnetwork.Node{a, d})
+	})
+
+	// The blackholes lift while A links the sides: every node of each
+	// side probes the other's — the founder among them, standing in the
+	// directory — landing an entry on its acceptor.
+	for _, lift := range blackholes {
+		lift()
+	}
+	testnetwork.PollVirtual(t, strandedBudget, "the sides' probes to land", func() bool {
+		for _, x := range near {
+			for _, y := range far {
+				if !probedBy(ctx, x, y) || !probedBy(ctx, y, x) {
+					return false
+				}
+			}
+		}
+		return true
+	})
+
+	cut := map[[2]*testnetwork.Node]bool{}
+	for i, y := range far {
+		fab.Cut(ipA, y.Host())
+		n.cut[[2]int{0, 3 + i}] = true
+	}
+	for i, x := range near[1:] {
+		for j, y := range far {
+			if upTo(ctx, x, y) || upTo(ctx, y, x) {
+				fab.Cut(x.Host(), y.Host())
+				cut[[2]*testnetwork.Node{x, y}] = true
+				n.cut[[2]int{1 + i, 3 + j}] = true
+			}
+		}
+	}
+	testnetwork.PollVirtual(t, strandedBudget, "the stranded clause to link the sides", func() bool {
+		return crossLink(ctx, near[1:], far, cut) != "" && settled(ctx, near) && settled(ctx, far)
+	})
+	return n
 }
 
 // strandedBudget bounds each of the stranded lab's waits in virtual time:
