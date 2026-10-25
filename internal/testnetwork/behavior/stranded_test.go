@@ -35,12 +35,18 @@ import (
 // its side, a sibling answering faster than anything across, so only the
 // stranded clause can link the sides again, over a pair the cut spared:
 // whatever prices the other side — a stale route's declarations near 34ms,
-// or nothing — an 80ms round trip neither beats nor seconds it. The lab
-// draws its bands as taps on the fabric and runs inside a synctest bubble at
-// the daemon's own pacing.
+// or nothing — an 80ms round trip neither beats nor seconds it. Once the
+// sides are linked again and the network settles, every ordered pair reaches
+// over its chosen path within reachBudget: the far side verifies what the
+// new link carries with material its sender holds, and the segments the
+// links gone since killed age behind the fresh ones. The lab draws its bands
+// as taps on the fabric and runs inside a synctest bubble at the daemon's
+// own pacing.
 func TestStrandedTierHeals(t *testing.T) {
 	testnetwork.InBubble(t, func(t *testing.T, fab *fabric.Fabric, wpki *webpkitest.CA) {
-		healStranded(t, fab, wpki)
+		n := healStranded(t, fab, wpki)
+		awaitSettled(t, n.nodes, settleQuiet, strandedBudget)
+		awaitReach(t, n, reachBudget)
 	})
 }
 

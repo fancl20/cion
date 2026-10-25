@@ -224,3 +224,15 @@ bootstrap route.
     recovered; the worst path once settled stood 2.0 to 4.1 times the
     reference, against 2.5 to 26. The stranded network reached all 30 pairs
     in every run, once settled and after its cut.
+*   The labs assert reachability
+    ([lab_test.go](/internal/testnetwork/behavior/lab_test.go)): once the
+    regions network settles
+    ([regions_test.go](/internal/testnetwork/behavior/regions_test.go)), and
+    once the stranded network's link set holds for `settleQuiet` after the
+    heal ([stranded_test.go](/internal/testnetwork/behavior/stranded_test.go)),
+    each waits up to twice the staleness window for every ordered pair to
+    reach over its chosen path, and ADR-0025 is accepted. The heal's own
+    wait, which ends once the sides are linked again, did not suffice: in one
+    run of four, a link retired some five minutes into the reachability wait,
+    and two pairs still chose segments through it, fresh, when the wait ran
+    out. With the link set held first, both labs passed in six runs of six.

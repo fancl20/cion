@@ -14,6 +14,7 @@ import (
 
 	"github.com/fancl20/cion/internal/testnetwork"
 	"github.com/fancl20/cion/internal/testnetwork/fabric"
+	"github.com/fancl20/cion/pkg/libs/scion"
 	"github.com/fancl20/cion/pkg/modules/links"
 	"github.com/fancl20/cion/pkg/modules/topology/impl/measured"
 )
@@ -126,6 +127,40 @@ func awaitSettled(t *testing.T, nodes []*testnetwork.Node, quiet, budget time.Du
 		if time.Since(start) >= budget {
 			t.Fatalf("the link set changed %d times in %v and never held for %v; last: %s",
 				s.changes, budget, quiet, last)
+		}
+		time.Sleep(settleSample)
+	}
+}
+
+// reachBudget bounds the wait for every pair to reach over its chosen path:
+// twice the staleness window, past which a segment through a link gone
+// elsewhere ranks behind every fresh candidate.
+const reachBudget = 2 * scion.StaleAfter
+
+// awaitReach reads every ordered pair's chosen path each settleSample until
+// every one crosses only links up at both ends — the assessment's
+// reachability — and fails the test, naming the pairs left, once budget
+// passes first.
+func awaitReach(t *testing.T, n *network, budget time.Duration) {
+	t.Helper()
+	start := time.Now()
+	for {
+		synctest.Wait()
+		r := readPaths(t, n, false)
+		var unreached []string
+		for s := range n.nodes {
+			for d := range n.nodes {
+				if _, ok := r.chosen[[2]int{s, d}]; s != d && !ok {
+					unreached = append(unreached, fmt.Sprintf("%d->%d", s, d))
+				}
+			}
+		}
+		if len(unreached) == 0 {
+			return
+		}
+		if time.Since(start) >= budget {
+			t.Fatalf("%d pairs reached over no chosen path within %v: %s",
+				len(unreached), budget, strings.Join(unreached, " "))
 		}
 		time.Sleep(settleSample)
 	}

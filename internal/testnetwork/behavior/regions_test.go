@@ -40,12 +40,15 @@ const regionsBudget = time.Hour
 // daemon's own pacing: nine nodes over three regions, joined outward from
 // the founder along a spanning tree, settle — the link set holds unchanged
 // for settleQuiet with every node at or above its floor and the links
-// connecting them all — within regionsBudget of virtual time. Under the
-// labs' two-second windows the same network settles even with both ends of
-// a link judging it, so only the daemon's own pacing holds the settling.
+// connecting them all — within regionsBudget of virtual time, and every
+// ordered pair then reaches over its chosen path within reachBudget. Under
+// the labs' two-second windows the same network settles even with both ends
+// of a link judging it, so only the daemon's own pacing holds the settling.
 func TestRegionsSettle(t *testing.T) {
 	testnetwork.InBubble(t, func(t *testing.T, fab *fabric.Fabric, wpki *webpkitest.CA) {
-		awaitSettled(t, bootRegions(t, fab, wpki).nodes, settleQuiet, regionsBudget)
+		n := bootRegions(t, fab, wpki)
+		awaitSettled(t, n.nodes, settleQuiet, regionsBudget)
+		awaitReach(t, n, reachBudget)
 	})
 }
 

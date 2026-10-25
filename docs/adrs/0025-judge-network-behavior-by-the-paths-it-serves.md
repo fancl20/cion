@@ -1,6 +1,6 @@
 # Judge Network Behavior by the Paths It Serves
 
-*   Status: proposed
+*   Status: accepted
 *   Date: 2026-10-25
 
 [TOC]
