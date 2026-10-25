@@ -11,9 +11,9 @@
 // serve: every pair's chosen path against the shortest paths the fabric's
 // delays allow, the segment records no chosen path joins, and the links a
 // single cut would need, once settled and through the network's answer to
-// a link cut and restored or a delay raised or lowered. They are skipped
-// unless CION_BENCH is set, and each prints benchmark result lines on
-// standard output for benchstat:
+// a link cut and restored, a delay raised or lowered, and a link's loss
+// swept up and back down. They are skipped unless CION_BENCH is set, and
+// each prints benchmark result lines on standard output for benchstat:
 //
 //	CION_BENCH=1 go test -run Bench -count=10 -v ./internal/testnetwork/behavior/
 package behavior

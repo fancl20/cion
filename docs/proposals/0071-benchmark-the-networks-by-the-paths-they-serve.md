@@ -274,3 +274,14 @@ demand.
     delay nor the lowered one changed a regions link in any run, the
     lowered pair never linked, while the stranded network linked its
     lowered pair in every run.
+*   The loss sweep landed on both networks
+    ([sweep_test.go](/internal/testnetwork/behavior/sweep_test.go)),
+    measured across five runs rather than ten: the batch stopped after
+    four, beside the run that probed it. Up to 10 percent loss the busiest
+    link stood without a flap. The regions network dropped it at 50
+    percent in four runs and at 20 percent in one, and took it back on the
+    way down in one run of five; at 20 percent the link flapped 17 to 32
+    times in a level and settled in one run, and at 50 percent it flapped
+    up to 133 times. The stranded network dropped its link at 50 or 100
+    percent and took it back at 20 percent in every run, three or four of
+    its fifteen levels never settling.
