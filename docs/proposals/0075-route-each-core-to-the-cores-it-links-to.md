@@ -82,3 +82,9 @@ to the cores that joined after its pin.
     benchmarks do not move.
 
 ## Implementation history
+
+*   Landed as proposed: a core opens a slot for every verified beacon
+    ([beacon.go](/pkg/core/controlplane/beacon.go)), and the two-core lab
+    echoes each core from the other
+    ([corepath_test.go](/internal/testnetwork/corepath_test.go)). Without
+    the change, the lab times out on the founder's echo.

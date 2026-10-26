@@ -296,9 +296,10 @@ func (b *Beaconer) goSend(t sendTarget, rpcs func()) {
 // sender holds — the neighbor at the arrival interface, which verified the
 // same entries before it propagated them — whatever routes the node holds to
 // the core. It refreshes the slots it holds with each verified beacon, so
-// their routes name the interfaces the link's two ends use now, and opens
-// none: the cores BootstrapCore alternates over stay the ones the node heard
-// before its pin.
+// their routes name the interfaces the link's two ends use now. A core opens
+// a slot for every core it hears, whatever its pin: the slot is its only
+// route to a core it links to. A non-core opens none after its pin: the
+// cores BootstrapCore alternates over stay the ones it heard before.
 func (b *Beaconer) HandleBeacon(
 	ctx context.Context,
 	pcb *segment.PCB,
@@ -321,7 +322,7 @@ func (b *Beaconer) HandleBeacon(
 		return err
 	}
 	b.store.Insert(ingress, pcb)
-	b.recordBootstrap(ingress, pcb, false)
+	b.recordBootstrap(ingress, pcb, b.core)
 	return nil
 }
 

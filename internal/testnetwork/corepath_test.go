@@ -74,6 +74,16 @@ func TestPathLayerServesTwoCores(t *testing.T) {
 		return holdsSegmentFrom(t, b, pathdb.SegmentTypeCore, a.app.IA())
 	})
 
+	// Each core reaches the other over their link: the founder, pinned from
+	// its creation, as well as the authoritative, which heard the founder
+	// before its pin.
+	Poll(t, "the founder to reach the authoritative", func() bool {
+		return pingFrom(ctx, a, b.app.IA(), b.host)
+	})
+	Poll(t, "the authoritative to reach the founder", func() bool {
+		return pingFrom(ctx, b, a.app.IA(), a.host)
+	})
+
 	// The node under the authoritative enrolls — its retries riding the
 	// alternation of the bootstrap slot to the founder's fresher beacon, for
 	// the authoritative issues nothing — and pins the successor that names

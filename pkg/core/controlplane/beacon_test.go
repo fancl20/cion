@@ -867,6 +867,54 @@ func TestBootstrapRouteFollowsVerifiedBeacons(t *testing.T) {
 	}
 }
 
+// TestCoreOpensBootstrapSlots checks a core's slots: the founder, pinned
+// from its creation, opens one for the fellow core whose beacon it verifies,
+// and its bootstrap route leaves through the link to that core and enters
+// it on the beacon's egress.
+func TestCoreOpensBootstrapSlots(t *testing.T) {
+	f := newBeaconFixture(t)
+	ctx := context.Background()
+	// The founder A, its interface 3 linking the fellow core A2.
+	founder, err := NewBeaconer(BeaconerConfig{
+		IA:     coreIATest,
+		Engine: f.engines[coreIATest],
+		MACKey: []byte(testMACKey),
+		Store:  NewBeaconStore(),
+		DB:     f.pathDB,
+		Links: func() map[uint16]addr.IA {
+			return map[uint16]addr.IA{3: iaCore2Test}
+		},
+		Core: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A2's beacon [A2], leaving A2 on its interface 5.
+	pcb, err := segment.NewPCB(time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := pcb.AppendEntry(ctx, iaCore2Test, segment.EntryOptions{
+		Next:       coreIATest,
+		EgressIfID: 5,
+	}, macFactory(), f.engines[iaCore2Test]); err != nil {
+		t.Fatal(err)
+	}
+	if err := founder.HandleBeacon(ctx, pcb, 3); err != nil {
+		t.Fatal(err)
+	}
+	route := founder.BootstrapRoute(iaCore2Test)
+	if route == nil {
+		t.Fatal("the founder holds no route to the fellow core it verified")
+	}
+	if got := route.HopFields[0].ConsIngress; got != 3 {
+		t.Errorf("the route leaves the founder on %d, want its link to the fellow core 3", got)
+	}
+	if got := route.HopFields[len(route.HopFields)-1].ConsEgress; got != 5 {
+		t.Errorf("the route enters the fellow core on %d, want the beacon's egress 5", got)
+	}
+}
+
 // TestPropagateOnce checks the propagation rule: every external
 // interface except the one the beacon arrived on, and except interfaces
 // whose neighbor the TRC names as a core.
