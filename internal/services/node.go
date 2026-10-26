@@ -57,6 +57,9 @@ type node struct {
 	// the measured provider's directory copy holds them; nil under the file
 	// provider, which runs no directory.
 	nodeReach func() map[addr.IA]apps.Reach
+	// directory returns the measured provider's directory copy; nil under
+	// the file provider.
+	directory func() []measured.DirectoryEntry
 	// wildcardHost resolves the host the node's conns name for themselves
 	// under a wildcard bind: the local address routing toward the published
 	// host, which the node's own router delivers to.
@@ -235,8 +238,9 @@ func (n *node) selectProvider() error {
 	}
 	n.topology = provider
 	n.publishedHost = provider.PublishedHost
+	n.directory = provider.Directory
 	n.nodeReach = func() map[addr.IA]apps.Reach {
-		entries := provider.Directory()
+		entries := n.directory()
 		reach := make(map[addr.IA]apps.Reach, len(entries))
 		for _, e := range entries {
 			reach[e.IA] = apps.Reach{

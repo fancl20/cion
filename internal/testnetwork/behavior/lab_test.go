@@ -83,12 +83,31 @@ func (n *network) translate(t *testing.T, behaviors map[int]fabric.Behavior) map
 	return bounds
 }
 
+// site places the nodes behind one boundary of the behavior given, on a
+// gateway drawn for it: their packets to each other cross nothing, every
+// other node's go to the gateway, and theirs to every other node leave from
+// it. A lab places a site before it draws delays, for the taps follow the
+// addresses on the wire.
+func (n *network) site(t *testing.T, behavior fabric.Behavior, members ...int) *fabric.Boundary {
+	t.Helper()
+	inside := make([]netip.Addr, len(members))
+	for k, i := range members {
+		inside[k] = n.hosts[i]
+	}
+	b := n.fab.TranslateAs(behavior, testnetwork.HostSlot(t), inside...)
+	for _, i := range members {
+		n.wire[i] = b.Gateway()
+	}
+	return b
+}
+
 // drawPair draws a tap for each direction the pair's packets take: from
 // each node's host — the fabric shapes a packet before any boundary
-// translates it — to the other's address on the wire; one tap covers both
-// directions of two untranslated nodes.
+// translates it — to the other's address on the wire. One tap covers both
+// directions of a pair whose packets go host to host: two untranslated
+// nodes, or two behind one boundary.
 func (n *network) drawPair(i, j int, draw func(a, b netip.Addr) func()) func() {
-	if n.wire[i] == n.hosts[i] && n.wire[j] == n.hosts[j] {
+	if n.wire[i] == n.wire[j] || n.wire[i] == n.hosts[i] && n.wire[j] == n.hosts[j] {
 		return draw(n.hosts[i], n.hosts[j])
 	}
 	there, back := draw(n.hosts[i], n.wire[j]), draw(n.hosts[j], n.wire[i])
@@ -146,6 +165,16 @@ type settling struct {
 // budget passes first.
 func awaitSettled(t *testing.T, nodes []*testnetwork.Node, quiet, budget time.Duration) settling {
 	t.Helper()
+	return awaitSettledEach(t, nodes, quiet, budget, func() {})
+}
+
+// awaitSettledEach is awaitSettled calling each at every read, once the
+// bubble has parked.
+func awaitSettledEach(
+	t *testing.T, nodes []*testnetwork.Node, quiet, budget time.Duration, each func(),
+) settling {
+
+	t.Helper()
 	ctx := t.Context()
 	start := time.Now()
 	var s settling
@@ -153,6 +182,7 @@ func awaitSettled(t *testing.T, nodes []*testnetwork.Node, quiet, budget time.Du
 	changed := start
 	for {
 		synctest.Wait()
+		each()
 		if now := linkSet(ctx, nodes); now != last {
 			last, changed = now, time.Now()
 			s.changes++

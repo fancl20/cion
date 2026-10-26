@@ -113,3 +113,10 @@ keep their taps: a pair behind two boundaries draws them as before.
 *   **The benchmarks:** each runs and reports, five runs each.
 
 ## Implementation history
+
+*   Landed as proposed: the site and its taps
+    ([lab_test.go](/internal/testnetwork/behavior/lab_test.go)), the site
+    network with its lab and benchmarks
+    ([site_test.go](/internal/testnetwork/behavior/site_test.go)), and the
+    directory's read ([app.go](/internal/services/app.go)). The Summary's
+    figures are the benchmarks' five runs each.
