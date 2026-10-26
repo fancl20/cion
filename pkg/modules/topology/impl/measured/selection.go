@@ -125,6 +125,11 @@ type SelectionConfig struct {
 	LinkHost netip.Addr
 	// Link establishes a link in-band.
 	Link LinkRequester
+	// Observed returns a serving link's last observed underlay source by
+	// interface ID — where the peer's packets, the confirm's reply among
+	// them, come from; nil observes nothing, and a confirm records the
+	// reply's claim.
+	Observed func(ifID uint16) netip.AddrPort
 	// Learn records the external host a rendezvous reply's observed source
 	// names for the node, latest observation winning; nil discards it.
 	Learn func(netip.Addr)
@@ -1066,11 +1071,11 @@ func (s *selection) confirm(
 	}
 }
 
-// landConfirm records the reply's side: the acceptor's link address under
-// the claim rule — the reply leaves the acceptor's endpoint, whose arrival
-// the dialer cannot observe, so the claimed address is the record and the
-// peer's own confirm corrects it — beside the established state, the
-// requester's answer to the possession the acceptor just recorded.
+// landConfirm records the reply's side: the address the entry's own link
+// observes the acceptor at — the reply rode that link, the authenticated
+// channel proving who sent it — else the acceptor's claimed link address
+// under the claim rule, beside the established state, the requester's
+// answer to the possession the acceptor just recorded.
 func (s *selection) landConfirm(
 	ctx context.Context,
 	ia addr.IA,
@@ -1085,7 +1090,8 @@ func (s *selection) landConfirm(
 		slog.Error("The link reply carries a malformed address", "err", err)
 		return false
 	}
-	entry.Remote = recordedLinkAddr(remote, netip.AddrPortFrom(published, remote.Port()))
+	entry.Remote = observedOr(s.cfg.Observed, entry.IfID,
+		recordedLinkAddr(remote, netip.AddrPortFrom(published, remote.Port())))
 	entry.RemoteIfID = uint16(reply.IfId)
 	entry.State = links.StateEstablished
 	if err := s.cfg.Store.Update(ctx, entry); err != nil {

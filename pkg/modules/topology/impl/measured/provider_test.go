@@ -3,10 +3,14 @@ package measured
 import (
 	"context"
 	"errors"
+	"maps"
 	"net"
 	"net/netip"
 	"slices"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/scionproto/scion/pkg/addr"
@@ -683,14 +687,21 @@ func TestStrandedRedialFreshAddress(t *testing.T) {
 	})
 }
 
-// fakeLinkServiceClient answers every link request with the reply it holds.
+// fakeLinkServiceClient answers every link request with the reply it holds,
+// or fails it with err, counting the requests.
 type fakeLinkServiceClient struct {
-	reply *nodev1.LinkReply
+	reply    *nodev1.LinkReply
+	err      error
+	requests atomic.Int32
 }
 
 func (c *fakeLinkServiceClient) Request(
 	context.Context, *nodev1.LinkRequest,
 ) (*nodev1.LinkReply, error) {
+	c.requests.Add(1)
+	if c.err != nil {
+		return nil, c.err
+	}
 	return c.reply, nil
 }
 
@@ -825,4 +836,173 @@ func TestReachUnderTheWildcardBind(t *testing.T) {
 				tc.learned, got.RendezvousAddr, got.Reach, want)
 		}
 	}
+}
+
+// linkClientOf returns a link client whose request over each entry's own
+// interface the entry's fake answers.
+func linkClientOf(fakes map[*links.Link]*fakeLinkServiceClient) *linkClient {
+	clts := make(map[string]nodev1connect.LinkServiceClient, len(fakes))
+	for l, fake := range fakes {
+		clts[scionrpc.PeerAuthority(&scion.Addr{
+			IA: l.NeighborIA, Service: addr.SvcCS, IfID: l.IfID,
+		})] = fake
+	}
+	return &linkClient{clts: clts}
+}
+
+// entryByIfID returns the store's entry on the interface.
+func entryByIfID(t *testing.T, store links.DB, ifID uint16) *links.Link {
+	t.Helper()
+	entries, err := store.All(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, l := range entries {
+		if l.IfID == ifID {
+			return l
+		}
+	}
+	t.Fatalf("no entry on interface %d", ifID)
+	return nil
+}
+
+// TestConfirmRecordsTheObservation checks the record a node's own confirm
+// lands: the address the entry's link observes the peer at, which a
+// translated peer's claim — the socket it bound inside its translator —
+// cannot name, and the claim rule's record only while the link observed
+// nothing.
+func TestConfirmRecordsTheObservation(t *testing.T) {
+	claim := netip.MustParseAddrPort("10.0.0.5:31005")
+	mapped := netip.MustParseAddrPort("203.0.113.9:26001")
+	for _, tc := range []struct {
+		name           string
+		observed, want netip.AddrPort
+	}{
+		{name: "an observing link", observed: mapped, want: mapped},
+		{name: "a link observing nothing", want: claim},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := memory.New()
+			z := &Provider{}
+			z.Wire(topology.Environment{
+				Store:    store,
+				Observed: func(uint16) netip.AddrPort { return tc.observed },
+			})
+			l := &links.Link{
+				NeighborIA: linkIA,
+				Local:      netip.MustParseAddrPort("127.0.0.1:40001"),
+				Remote:     netip.MustParseAddrPort("203.0.113.9:26000"),
+				State:      links.StateEstablished,
+			}
+			if err := store.Insert(context.Background(), l); err != nil {
+				t.Fatal(err)
+			}
+			z.linker = linkClientOf(map[*links.Link]*fakeLinkServiceClient{
+				l: {reply: &nodev1.LinkReply{LocalAddr: claim.String(), IfId: 7}},
+			})
+			if !z.confirmEntry(context.Background(), l) {
+				t.Fatal("the confirm did not land")
+			}
+			if got := entryByIfID(t, store, l.IfID).Remote; got != tc.want {
+				t.Errorf("recorded remote = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestFollowKeepsTheLocatorOnTheFlow checks the follow loop: an established
+// entry its link observes elsewhere sends a confirm and records the
+// observation the answer leaves; one whose confirm fails sends one per
+// FollowRetry; a candidate takes the observation once its BFD session
+// answers there, and not before; an entry observed at its locator sends
+// nothing.
+func TestFollowKeepsTheLocatorOnTheFlow(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		store := memory.New()
+		var mtx sync.Mutex
+		observed := map[uint16]netip.AddrPort{}
+		verdicts := map[uint16]bool{}
+		z := &Provider{}
+		z.Wire(topology.Environment{
+			Store: store,
+			Observed: func(ifID uint16) netip.AddrPort {
+				mtx.Lock()
+				defer mtx.Unlock()
+				return observed[ifID]
+			},
+			Verdicts: func() map[uint16]bool {
+				mtx.Lock()
+				defer mtx.Unlock()
+				return maps.Clone(verdicts)
+			},
+		})
+		entry := func(ia addr.IA, port uint16, state links.State) *links.Link {
+			l := &links.Link{
+				NeighborIA: ia,
+				Local:      netip.AddrPortFrom(netip.MustParseAddr("127.0.0.1"), port),
+				Remote:     netip.AddrPortFrom(netip.MustParseAddr("203.0.113.9"), port),
+				State:      state,
+			}
+			if err := store.Insert(context.Background(), l); err != nil {
+				t.Fatal(err)
+			}
+			return l
+		}
+		moved := entry(linkIA, 40001, links.StateEstablished)
+		failing := entry(linkIA2, 40002, links.StateEstablished)
+		candidate := entry(addr.MustIAFrom(20, 0xfd0000000034), 40003, links.StateCandidate)
+		steady := entry(addr.MustIAFrom(20, 0xfd0000000035), 40004, links.StateEstablished)
+		flow := func(port uint16) netip.AddrPort {
+			return netip.AddrPortFrom(netip.MustParseAddr("198.51.100.7"), port)
+		}
+		mtx.Lock()
+		observed[moved.IfID] = flow(1)
+		observed[failing.IfID] = flow(2)
+		observed[candidate.IfID] = flow(3)
+		observed[steady.IfID] = steady.Remote
+		verdicts[candidate.IfID] = false
+		mtx.Unlock()
+		fakes := map[*links.Link]*fakeLinkServiceClient{
+			moved:   {reply: &nodev1.LinkReply{LocalAddr: "10.0.0.5:31001", IfId: 7}},
+			failing: {err: errors.New("no answer")},
+			steady:  {reply: &nodev1.LinkReply{LocalAddr: "10.0.0.5:31004", IfId: 8}},
+		}
+		z.linker = linkClientOf(fakes)
+
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		go z.runFollow(ctx)
+		time.Sleep(3 * FollowInterval)
+		synctest.Wait()
+		if got := entryByIfID(t, store, moved.IfID).Remote; got != flow(1) {
+			t.Errorf("the moved entry's remote = %v, want the observation %v", got, flow(1))
+		}
+		if n := fakes[moved].requests.Load(); n != 1 {
+			t.Errorf("the moved entry sent %d confirms, want 1", n)
+		}
+		if n := fakes[failing].requests.Load(); n != 1 {
+			t.Errorf("the failing entry sent %d confirms within FollowRetry, want 1", n)
+		}
+		if got := entryByIfID(t, store, candidate.IfID).Remote; got != candidate.Remote {
+			t.Errorf("the candidate followed an observation its session never answered: %v", got)
+		}
+		if n := fakes[steady].requests.Load(); n != 0 {
+			t.Errorf("the steady entry sent %d confirms, want none", n)
+		}
+
+		// The session answers at the observation, and the candidate takes
+		// it; past FollowRetry, the failing entry tries once more.
+		mtx.Lock()
+		verdicts[candidate.IfID] = true
+		mtx.Unlock()
+		time.Sleep(FollowRetry)
+		synctest.Wait()
+		if got := entryByIfID(t, store, candidate.IfID).Remote; got != flow(3) {
+			t.Errorf("the candidate's remote = %v, want the answered observation %v", got, flow(3))
+		}
+		if n := fakes[failing].requests.Load(); n != 2 {
+			t.Errorf("the failing entry sent %d confirms past FollowRetry, want 2", n)
+		}
+		cancel()
+	})
 }

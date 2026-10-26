@@ -275,6 +275,39 @@ func TestTranslatedNetworkReaches(t *testing.T) {
 	})
 }
 
+// TestTranslatedNetworkRecovers checks that each link's locator follows the
+// link's own flow: a node behind a symmetric translator joins, and every
+// ordered pair answers a ping; again once a translator drops node 3's
+// mappings; and again once node 2, the parent of 4 and 6, restarts on its
+// state.
+func TestTranslatedNetworkRecovers(t *testing.T) {
+	testnetwork.InBubble(t, func(t *testing.T, fab *fabric.Fabric, wpki *webpkitest.CA) {
+		behaviors := maps.Clone(coneTranslators)
+		behaviors[6] = fabric.Symmetric
+		n, bounds := bootTranslated(t, fab, wpki, behaviors)
+		awaitPinned(t, n, allNodes(n)...)
+		awaitSettled(t, n.nodes, settleQuiet, translatedBudget)
+		awaitPings(t, n, allNodes(n), reachBudget)
+
+		bounds[3].Rebind()
+		awaitPings(t, n, allNodes(n), translatedWatch)
+
+		restart(t, fab, wpki, n, 2)
+		awaitPings(t, n, allNodes(n), translatedWatch)
+	})
+}
+
+// restart stops the node and boots it again on its state at once.
+func restart(t *testing.T, fab *fabric.Fabric, wpki *webpkitest.CA, n *network, i int) {
+	t.Helper()
+	host, state := n.nodes[i].Host(), n.nodes[i].StateDir()
+	n.nodes[i].Stop(t)
+	n.nodes[i] = testnetwork.BootInBubble(t, fab, host, func(cfg *services.NodeConfig) {
+		cfg.State = state
+		cfg.RootCAs = wpki.Pool
+	})
+}
+
 // TestBenchTranslatedSettled benchmarks the translated network once it
 // settles behind full-cone and port-restricted translators.
 func TestBenchTranslatedSettled(t *testing.T) {
@@ -429,4 +462,44 @@ func flag(ok bool) float64 {
 		return 1
 	}
 	return 0
+}
+
+// TestBenchTranslatedPeerRestart benchmarks a public node's restart under
+// its translated neighbors: node 2, the parent of 4 and 6, stops and boots
+// again on its state at once, and the pings between it and every other
+// node are read each settleSample until every one answers or
+// translatedWatch passes.
+func TestBenchTranslatedPeerRestart(t *testing.T) {
+	requireBench(t)
+	testnetwork.InBubble(t, func(t *testing.T, fab *fabric.Fabric, wpki *webpkitest.CA) {
+		n, _ := bootTranslated(t, fab, wpki, coneTranslators)
+		awaitPinned(t, n, allNodes(n)...)
+		awaitSettled(t, n.nodes, settleQuiet, translatedBudget)
+		awaitPings(t, n, allNodes(n), reachBudget)
+		const restarted = 2
+		restart(t, fab, wpki, n, restarted)
+		peers := len(n.nodes) - 1
+		start := time.Now()
+		recovery, recovered := translatedWatch, false
+		var to, from int
+		for {
+			synctest.Wait()
+			to, from = pingsWith(t, n, restarted, allNodes(n))
+			if to == peers && from == peers {
+				recovery, recovered = time.Since(start), true
+				break
+			}
+			if time.Since(start) >= translatedWatch {
+				break
+			}
+			time.Sleep(settleSample)
+		}
+		reportValues(t, "TranslatedPeerRestart",
+			benchValue{recovery.Seconds(), "recover-s"},
+			benchValue{flag(recovered), "recovered"},
+			benchValue{float64(to), "pinged-to"},
+			benchValue{float64(from), "pinged-from"},
+			benchValue{float64(peers), "peers"},
+		)
+	})
 }

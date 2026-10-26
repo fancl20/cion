@@ -607,17 +607,18 @@ func (u *udpConnection) drain(queue <-chan *Packet, pool PacketPool) {
 // kernel's connected-socket filter is replaced by two software tiers:
 // arrivals are processed on the discriminator's echo — the BFD session's
 // return-routability and blind-guess barrier, no weaker than the address
-// match the connected socket bought — and only the authenticated confirm
-// moves the locator; bare arrival never does, though every arrival records
-// the source the link last observed, the record the confirm's agreement
-// rule reads and the address the link's own conversation answers: the
-// node's one-hop sends — replies and the confirm's dial alike, the only
-// one-hop traffic an external link carries, for the router forwards no
-// one-hop packet but the local AS's own — and the BFD session's stream pay
-// the observation back while it stands apart from the locator, so a peer
+// match the connected socket bought — and only the provider's record moves
+// the locator: an authenticated confirm, in either direction, or for an
+// unproven candidate the source its BFD session answers. Bare arrival never
+// does, though every arrival records the source the link last observed, the
+// record the confirms read and the address the link's own conversation
+// answers: the node's one-hop sends — replies and the confirm's dial alike,
+// the only one-hop traffic an external link carries, for the router forwards
+// no one-hop packet but the local AS's own — and the BFD session's stream
+// pay the observation back while it stands apart from the locator, so a peer
 // that moved keeps reaching the link whose entry still names its former
-// address. Transit carries the locator: the authenticated record alone
-// steers the traffic that forwards through the node.
+// address. Transit carries the locator: the provider's record alone steers
+// the traffic that forwards through the node.
 type externalLink struct {
 	procQs     []chan *Packet
 	name       string // For logs

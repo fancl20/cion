@@ -118,3 +118,11 @@ its peers of this release follow its flow and record its observation.
     five runs each.
 
 ## Implementation history
+
+*   Landed as proposed: the answered request's record and the follow loop
+    ([provider.go](/pkg/modules/topology/impl/measured/provider.go),
+    [selection.go](/pkg/modules/topology/impl/measured/selection.go)), the
+    external link's account ([udpip.go](/pkg/core/dataplane/udpip.go)), and
+    the recovery lab and restart benchmark
+    ([translated_test.go](/internal/testnetwork/behavior/translated_test.go)).
+    The Summary's figures are the benchmarks' five runs each.

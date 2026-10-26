@@ -36,6 +36,16 @@ import (
 // candidate window retires them.
 const joinDialInterval = 5 * time.Second
 
+// The follow loop's cadence: each link's locator is compared with the
+// source the link observes its peer at.
+const (
+	// FollowInterval paces the comparison.
+	FollowInterval = time.Second
+	// FollowRetry is the least pause between two confirms one entry's
+	// mismatch sends.
+	FollowRetry = 5 * time.Second
+)
+
 // Config configures the measured provider with the pieces the node's
 // identity completion and run arguments own; Wire delivers the rest, the
 // products of the node's phases, before Seed, Mounts, and Run.
@@ -492,6 +502,7 @@ func (z *Provider) Run(ctx context.Context) {
 		RunSelection(ctx, z.selectionConfig())
 	})
 	loops.Go(ctx, &wg, "confirm pass", z.runConfirmPass)
+	loops.Go(ctx, &wg, "follow", z.runFollow)
 	wg.Wait()
 }
 
@@ -534,6 +545,7 @@ func (z *Provider) selectionConfig() SelectionConfig {
 		LinkHost:    z.cfg.ControlHost,
 		Sockets:     z.cfg.Sockets,
 		Link:        z.linker,
+		Observed:    z.env.Observed,
 		Learn:       z.learn,
 		Stranded:    &z.stranded,
 		Interval:    z.cfg.Pacing.Selection,
@@ -700,11 +712,64 @@ func (z *Provider) runConfirmPass(ctx context.Context) {
 	}
 }
 
+// runFollow keeps each live entry's locator on its link's own flow, the
+// source the link observes the peer at. An established entry observed
+// elsewhere sends a confirm, at most one per FollowRetry, whose answer — the
+// authenticated reply, arriving over that link — records the observation. A
+// candidate, which no chain confirms yet, takes the observation once its BFD
+// session answers there: the return-routability the rendezvous exchange
+// already holds candidates to.
+func (z *Provider) runFollow(ctx context.Context) {
+	tried := make(map[uint16]time.Time)
+	for loops.Sleep(ctx, FollowInterval) {
+		entries, err := z.env.Store.All(ctx)
+		if err != nil {
+			slog.Error("Reading the link store", "err", err)
+			continue
+		}
+		var verdicts map[uint16]bool
+		if z.env.Verdicts != nil {
+			verdicts = z.env.Verdicts()
+		}
+		for _, l := range entries {
+			if !l.Live() || l.NeighborIA.IsZero() || !l.Remote.IsValid() {
+				continue
+			}
+			observed := observedOr(z.env.Observed, l.IfID, netip.AddrPort{})
+			if !observed.IsValid() || observed == l.Remote {
+				continue
+			}
+			switch l.State {
+			case links.StateEstablished:
+				if time.Since(tried[l.IfID]) < FollowRetry {
+					continue
+				}
+				tried[l.IfID] = time.Now()
+				slog.Info("Following a link's flow", "neighbor", l.NeighborIA,
+					"remote", l.Remote, "observed", observed, "interface", l.IfID)
+				z.confirmEntry(ctx, l)
+			case links.StateCandidate:
+				if !verdicts[l.IfID] {
+					continue
+				}
+				l.Remote = observed
+				if err := z.env.Store.Update(ctx, l); err != nil {
+					slog.Error("Following a candidate's flow", "neighbor", l.NeighborIA, "err", err)
+					continue
+				}
+				slog.Info("A candidate followed its link's flow", "neighbor", l.NeighborIA,
+					"remote", l.Remote, "interface", l.IfID)
+			}
+		}
+	}
+}
+
 // confirmEntry sends one held entry's link request over the link's one-hop
 // path — the peer's control service addressed by it, the dial naming the
 // entry's own interface so the link's verdict gates nothing — and lands the
-// reply's side: the peer's recorded addresses, the claim rule's record, and
-// the established state a candidate was waiting on.
+// reply's side: the address the link observes the peer at, else the peer's
+// recorded addresses under the claim rule, and the established state a
+// candidate was waiting on.
 func (z *Provider) confirmEntry(ctx context.Context, l *links.Link) bool {
 	rpcCtx, cancel := context.WithTimeout(ctx, EstablishTimeout)
 	defer cancel()
@@ -721,7 +786,7 @@ func (z *Provider) confirmEntry(ctx context.Context, l *links.Link) bool {
 	}
 	// The reply refreshes only what changed: an answered confirm of an
 	// established entry whose side already matches writes nothing.
-	if recorded := recordedLinkAddr(remote, claimFallback(l)); recorded != l.Remote ||
+	if recorded := observedOr(z.env.Observed, l.IfID, recordedLinkAddr(remote, claimFallback(l))); recorded != l.Remote ||
 		uint16(reply.IfId) != l.RemoteIfID || l.State != links.StateEstablished {
 
 		l.Remote = recorded
@@ -745,6 +810,19 @@ func claimFallback(l *links.Link) netip.AddrPort {
 		return l.Rendezvous
 	}
 	return l.Remote
+}
+
+// observedOr returns the address the interface's link last observed its
+// peer at, else the fallback: the observation is the peer's socket as its
+// packets cross every translator between, where a claim names only the
+// socket the peer bound.
+func observedOr(observed func(uint16) netip.AddrPort, ifID uint16, fallback netip.AddrPort) netip.AddrPort {
+	if observed != nil {
+		if ap := observed(ifID); ap.IsValid() {
+			return ap
+		}
+	}
+	return fallback
 }
 
 // revivable reports whether a stranded node re-dials a retired entry. A
