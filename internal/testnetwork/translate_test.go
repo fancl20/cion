@@ -113,7 +113,7 @@ func TestTranslatedLinkRidesTheMapping(t *testing.T) {
 		// mapping — nothing crossing any more — expires after the
 		// retirement.
 		ifID := entryOf(ctx, a, j.app.IA()).IfID
-		j.stop(t)
+		j.Stop(t)
 		PollVirtual(t, translateBudget, "A to mark the translated link down", func() bool {
 			return markedDown(ctx, a, ifID)
 		})
@@ -155,7 +155,7 @@ func TestTranslatedRestartDrawsAFreshMapping(t *testing.T) {
 		// The joiner stops, and the outage runs its course: the founder's
 		// BFD runs out its detection, the sweep retires the entry, and the
 		// mapping — nothing crossing any more — expires with it.
-		j.stop(t)
+		j.Stop(t)
 		PollVirtual(t, translateBudget, "the founder's entry for the joiner to retire", func() bool {
 			e := entryOf(ctx, a, j.app.IA())
 			return e == nil || !e.Live()
@@ -211,7 +211,7 @@ func TestTranslatedReturnReAimsTheStandingEntry(t *testing.T) {
 		// founder's own BFD stream would keep refreshing it past the node's
 		// stop, and the returning node's sockets rebind the same inside
 		// addresses.
-		j.stop(t)
+		j.Stop(t)
 		b.Rebind()
 		j2 := BootInBubble(t, f, jHost, func(cfg *services.NodeConfig) {
 			cfg.State = jState

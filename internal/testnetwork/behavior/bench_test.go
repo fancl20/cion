@@ -32,13 +32,34 @@ func report(t *testing.T, name string, s settling, as []assessment) {
 	}
 }
 
+// benchValue is one value-unit pair of a benchmark result line.
+type benchValue struct {
+	value float64
+	unit  string
+}
+
+// fields renders value-unit pairs as a benchmark result's fields.
+func fields(values []benchValue) string {
+	out := make([]string, 0, len(values))
+	for _, v := range values {
+		out = append(out, fmt.Sprintf("%g %s", v.value, v.unit))
+	}
+	return strings.Join(out, " ")
+}
+
+// reportValues logs a scenario's values and prints them as a benchmark
+// result line on the test's standard output, where benchstat reads it.
+func reportValues(t *testing.T, name string, values ...benchValue) {
+	t.Helper()
+	line := fields(values)
+	t.Logf("%s: %s", name, line)
+	fmt.Printf("Benchmark%s 1 %s\n", name, line)
+}
+
 // metrics renders an assessment and the settling before it as a benchmark
 // result's value-unit pairs.
 func metrics(a assessment, s settling) string {
-	values := []struct {
-		value float64
-		unit  string
-	}{
+	values := []benchValue{
 		{float64(a.reached), "reached"},
 		{float64(a.pairs), "pairs"},
 		{a.ratio.mean, "ratio-mean"},
@@ -59,11 +80,7 @@ func metrics(a assessment, s settling) string {
 		{float64(s.changes), "changes"},
 		{s.at.Minutes(), "settle-min"},
 	}
-	fields := make([]string, 0, len(values))
-	for _, v := range values {
-		fields = append(fields, fmt.Sprintf("%g %s", v.value, v.unit))
-	}
-	return strings.Join(fields, " ")
+	return fields(values)
 }
 
 // TestBenchRegionsSettled benchmarks the regions network once it settles.

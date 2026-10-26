@@ -12,11 +12,10 @@ import (
 	"gvisor.dev/gvisor/pkg/tcpip/header"
 )
 
-// The mapping band: the ports the boundary's per-socket mappings draw,
-// below the kernel's ephemeral range and beside — not inside — the labs'
-// pinned band and the node's link band, so a mapping's port is always a
-// port no node claims and a changed mapping always spells a different
-// address.
+// The mapping band: the ports the boundary's mappings draw, below the
+// kernel's ephemeral range and beside — not inside — the labs' pinned band
+// and the node's link band, so a mapping's port is always a port no node
+// claims and a changed mapping always spells a different address.
 const (
 	mappingPortBase = 26000
 	mappingPortSpan = 500
@@ -28,48 +27,100 @@ const (
 // node's mapping does not.
 const MappingIdle = 2 * time.Second
 
+// Behavior is a translator's mapping and filtering behavior, as RFC 4787
+// names them.
+type Behavior struct {
+	// EndpointDependentMapping draws a mapping per destination address and
+	// port of an inside socket, where an endpoint-independent translator
+	// keeps one mapping per socket for every destination.
+	EndpointDependentMapping bool
+	// AddressPortFiltering admits an outside packet to a mapping only from
+	// an address and port the mapping's inside socket sent to, where
+	// endpoint-independent filtering admits any outside source.
+	AddressPortFiltering bool
+}
+
+// The behaviors the labs draw.
+var (
+	// FullCone maps and filters independently of the endpoint: any outside
+	// source reaches an inside socket's one mapping.
+	FullCone = Behavior{}
+	// PortRestricted keeps one mapping per inside socket and admits only
+	// the endpoints the socket sent to.
+	PortRestricted = Behavior{AddressPortFiltering: true}
+	// Symmetric draws a mapping per destination and admits only that
+	// destination.
+	Symmetric = Behavior{EndpointDependentMapping: true, AddressPortFiltering: true}
+)
+
 // Boundary is the translation between the inside hosts and the outside:
 // the gateway address it owns — the address the translated nodes' packets
-// leave from, never their own — and the upstream host beyond it. Packets
-// from inside to outside are rewritten to leave from the gateway under a
-// port drawn from the mapping band, one mapping per inside socket under the
-// endpoint-independent policy the translator held; the first-contact dials
-// to the gateway's forwarded port are carried to the upstream's; packets
-// from outside to a drawn port are reverse-translated to the mapping's
-// inside socket; every other packet to the gateway is dropped, the silence
-// a real translation gives. The rewrite renews the IP and UDP checksums;
-// the reverse-translated delivery back to the inside socket is the proof it
-// renewed them right.
+// leave from, never their own — and, when it forwards a first-contact port,
+// the upstream host beyond it. Packets from inside to outside are rewritten
+// to leave from the gateway under a port drawn from the mapping band, as the
+// boundary's behavior maps them; the first-contact dials to the gateway's
+// forwarded port are carried to the upstream's; packets from outside to a
+// drawn port the behavior admits are reverse-translated to the mapping's
+// inside socket; every other packet to the gateway or to an inside host is
+// dropped, the silence a real translation gives. The rewrite renews the IP
+// and UDP checksums; the reverse-translated delivery back to the inside
+// socket is the proof it renewed them right.
 type Boundary struct {
 	f        *Fabric
+	behavior Behavior
 	gateway  netip.Addr
 	upstream netip.Addr
 	// firstContact is the gateway port forwarded to the upstream's own —
 	// the rendezvous port of the exchange the translated node dials
-	// through.
+	// through. Zero forwards none.
 	firstContact uint16
 	inside       map[netip.Addr]bool
 
 	mtx      sync.Mutex
 	mappings map[uint16]*mapping // by the gateway port drawn
-	bySock   map[netip.AddrPort]uint16
+	byFlow   map[flow]uint16
 	draws    int
 }
 
-// mapping is one inside socket's translation: the gateway port its packets
-// leave from and the far side's return traffic dials.
+// flow keys a mapping: the inside socket and, under endpoint-dependent
+// mapping, the destination it sent to.
+type flow struct {
+	sock, dst netip.AddrPort
+}
+
+// mapping is one translation: the inside socket whose packets leave from
+// the gateway port, the destinations they went to — the endpoints
+// address-and-port filtering admits — and when a packet last crossed it.
 type mapping struct {
-	sock netip.AddrPort
+	key  flow
+	sent map[netip.AddrPort]bool
 	used time.Time
 }
 
-// Translate draws a boundary on the fabric: the gateway address it owns —
-// a host no node may hold, for the boundary answers it — the upstream host
-// the first-contact port forwards to at the same port, and the inside
-// hosts whose packets it carries. Every host beyond the inside set and the
-// gateway is outside.
+// Translate draws a full-cone boundary on the fabric: the gateway address
+// it owns — a host no node may hold, for the boundary answers it — the
+// upstream host the first-contact port forwards to at the same port, and
+// the inside hosts whose packets it carries. Every host beyond the inside
+// set and the gateway is outside.
 func (f *Fabric) Translate(
 	gateway, upstream netip.Addr, firstContact uint16, inside ...netip.Addr,
+) *Boundary {
+
+	f.t.Helper()
+	return f.translateAs(FullCone, gateway, upstream, firstContact, inside)
+}
+
+// TranslateAs draws a boundary of the given behavior on the fabric: the
+// gateway address it owns and the inside hosts whose packets it carries.
+// It forwards no first-contact port: an inside node dials its peers'
+// published addresses, as it would through a real translator.
+func (f *Fabric) TranslateAs(behavior Behavior, gateway netip.Addr, inside ...netip.Addr) *Boundary {
+	f.t.Helper()
+	return f.translateAs(behavior, gateway, netip.Addr{}, 0, inside)
+}
+
+func (f *Fabric) translateAs(
+	behavior Behavior, gateway, upstream netip.Addr, firstContact uint16, inside []netip.Addr,
 ) *Boundary {
 
 	f.t.Helper()
@@ -88,12 +139,13 @@ func (f *Fabric) Translate(
 	}
 	b := &Boundary{
 		f:            f,
+		behavior:     behavior,
 		gateway:      gateway,
 		upstream:     upstream,
 		firstContact: firstContact,
 		inside:       make(map[netip.Addr]bool, len(inside)),
 		mappings:     make(map[uint16]*mapping),
-		bySock:       make(map[netip.AddrPort]uint16),
+		byFlow:       make(map[flow]uint16),
 	}
 	for _, host := range inside {
 		b.inside[host] = true
@@ -102,66 +154,78 @@ func (f *Fabric) Translate(
 	return b
 }
 
-// rewrite applies the boundary's rules to one packet: the rewritten packet
-// and whether the boundary claimed it — nil packet for one it dropped.
-func (b *Boundary) rewrite(pkt []byte) ([]byte, bool) {
+// Gateway returns the address the boundary's crossings leave from.
+func (b *Boundary) Gateway() netip.Addr { return b.gateway }
+
+// egress applies the boundary's rules to a packet leaving one of its inside
+// hosts: the rewritten packet and whether the boundary claimed it — nil
+// packet for one it dropped. A packet between two inside hosts crosses
+// nothing and is not claimed.
+func (b *Boundary) egress(pkt []byte) ([]byte, bool) {
 	ip := header.IPv4(pkt)
 	src := toNetip(ip.SourceAddress())
 	dst := toNetip(ip.DestinationAddress())
+	if !b.inside[src] || b.inside[dst] {
+		return nil, false
+	}
 	isUDP := ip.TransportProtocol() == header.UDPProtocolNumber &&
 		len(pkt) >= int(ip.HeaderLength())+header.UDPMinimumSize
-	if b.inside[src] {
-		switch {
-		case b.inside[dst]:
-			// Inside to inside: nothing crosses the boundary.
-			return nil, false
-		case dst == b.gateway && isUDP &&
-			udpOf(pkt).DestinationPort() == b.firstContact:
-			// The first-contact leg: a dial to the gateway's rendezvous
-			// port is carried to the upstream's, its source mapped like any
-			// crossing.
-			udp := header.UDP(pkt[ip.HeaderLength():])
-			port := b.mappingFor(netip.AddrPortFrom(src, udp.SourcePort()))
-			return rewriteDatagram(pkt, b.gateway, port, b.upstream,
-				b.firstContact), true
-		case dst == b.gateway:
-			// The gateway answers nothing else: the silence a real
-			// translation gives.
-			return nil, true
-		default:
-			if !isUDP {
-				return nil, false
-			}
-			// Inside to outside: the source becomes the gateway under the
-			// inside socket's mapping.
-			udp := header.UDP(pkt[ip.HeaderLength():])
-			port := b.mappingFor(netip.AddrPortFrom(src, udp.SourcePort()))
-			return rewriteDatagram(pkt, b.gateway, port, dst,
-				udp.DestinationPort()), true
-		}
+	switch {
+	case dst == b.gateway && isUDP && b.firstContact != 0 &&
+		udpOf(pkt).DestinationPort() == b.firstContact:
+		// The first-contact leg: a dial to the gateway's rendezvous port is
+		// carried to the upstream's, its source mapped like any crossing.
+		udp := udpOf(pkt)
+		to := netip.AddrPortFrom(b.upstream, b.firstContact)
+		port := b.mappingFor(netip.AddrPortFrom(src, udp.SourcePort()), to)
+		return rewriteDatagram(pkt, b.gateway, port, b.upstream, b.firstContact), true
+	case dst == b.gateway:
+		// The gateway answers nothing else: the silence a real translation
+		// gives.
+		return nil, true
+	case !isUDP:
+		return nil, false
+	default:
+		// Inside to outside: the source becomes the gateway under the
+		// mapping the behavior draws for the socket and destination.
+		udp := udpOf(pkt)
+		to := netip.AddrPortFrom(dst, udp.DestinationPort())
+		port := b.mappingFor(netip.AddrPortFrom(src, udp.SourcePort()), to)
+		return rewriteDatagram(pkt, b.gateway, port, dst, udp.DestinationPort()), true
 	}
-	if dst == b.gateway {
-		if !isUDP {
-			return nil, true
-		}
-		// Outside to a drawn port: reverse-translated to the inside socket
-		// the mapping records, its source untouched.
-		udp := header.UDP(pkt[ip.HeaderLength():])
-		m := b.reverseLookup(udp.DestinationPort())
-		if m == nil {
-			return nil, true
-		}
-		return rewriteDatagram(pkt, src, udp.SourcePort(),
-			m.sock.Addr(), m.sock.Port()), true
+}
+
+// ingress applies the boundary's rules to a packet arriving from outside:
+// one addressed to the gateway is reverse-translated to the inside socket
+// of the mapping its port spells, when the behavior admits its source, and
+// dropped otherwise; one addressed to an inside host directly is dropped,
+// for every crossing is named for the gateway. A packet from an inside host
+// is not the boundary's to admit.
+func (b *Boundary) ingress(pkt []byte) ([]byte, bool) {
+	ip := header.IPv4(pkt)
+	src := toNetip(ip.SourceAddress())
+	dst := toNetip(ip.DestinationAddress())
+	if b.inside[src] {
+		return nil, false
 	}
 	if b.inside[dst] {
-		// Outside to an inside host: the inside is unreachable from the
-		// outside — the silence a real translation gives, for every
-		// crossing is named for the gateway. The neighbors' traffic rides
-		// the links, whose locators the observations spell.
+		// The neighbors' traffic rides the links, whose locators the
+		// observations spell.
 		return nil, true
 	}
-	return nil, false
+	if dst != b.gateway {
+		return nil, false
+	}
+	if ip.TransportProtocol() != header.UDPProtocolNumber ||
+		len(pkt) < int(ip.HeaderLength())+header.UDPMinimumSize {
+		return nil, true
+	}
+	udp := udpOf(pkt)
+	m := b.admit(udp.DestinationPort(), netip.AddrPortFrom(src, udp.SourcePort()))
+	if m == nil {
+		return nil, true
+	}
+	return rewriteDatagram(pkt, src, udp.SourcePort(), m.key.sock.Addr(), m.key.sock.Port()), true
 }
 
 // udpOf reads the packet's UDP header, for a packet already known UDP.
@@ -169,39 +233,52 @@ func udpOf(pkt []byte) header.UDP {
 	return header.UDP(pkt[header.IPv4(pkt).HeaderLength():])
 }
 
-// mappingFor returns the inside socket's mapping's gateway port, drawing
-// one where none stands: every destination, the one port — the mapping an
-// endpoint-independent translation gives a socket. Each crossing refreshes
-// the mapping's idle window on the fabric's clock.
-func (b *Boundary) mappingFor(sock netip.AddrPort) uint16 {
+// mappingFor returns the gateway port of the mapping the behavior keys the
+// socket's packet to the destination by, drawing one where none stands:
+// one per socket under endpoint-independent mapping, one per socket and
+// destination under endpoint-dependent mapping. The crossing records the
+// destination for the filtering and refreshes the mapping's idle window on
+// the fabric's clock.
+func (b *Boundary) mappingFor(sock, dst netip.AddrPort) uint16 {
 	now := b.f.clock.Now()
+	key := flow{sock: sock}
+	if b.behavior.EndpointDependentMapping {
+		key.dst = dst
+	}
 	b.mtx.Lock()
 	defer b.mtx.Unlock()
 	b.retireIdleLocked(now)
-	if port, ok := b.bySock[sock]; ok {
-		b.mappings[port].used = now
+	if port, ok := b.byFlow[key]; ok {
+		m := b.mappings[port]
+		m.used = now
+		m.sent[dst] = true
 		return port
 	}
 	for {
 		b.draws++
 		port := uint16(mappingPortBase + b.draws%mappingPortSpan)
 		if _, ok := b.mappings[port]; !ok {
-			b.bySock[sock] = port
-			b.mappings[port] = &mapping{sock: sock, used: now}
+			b.byFlow[key] = port
+			b.mappings[port] = &mapping{
+				key:  key,
+				sent: map[netip.AddrPort]bool{dst: true},
+				used: now,
+			}
 			return port
 		}
 	}
 }
 
-// reverseLookup returns the mapping a drawn gateway port spells, refreshed
-// by the packet that reached it, or nil where none stands.
-func (b *Boundary) reverseLookup(port uint16) *mapping {
+// admit returns the mapping a drawn gateway port spells when the behavior
+// admits the source to it, refreshed by the packet that reached it, or nil
+// where none stands or the filtering refuses the source.
+func (b *Boundary) admit(port uint16, src netip.AddrPort) *mapping {
 	now := b.f.clock.Now()
 	b.mtx.Lock()
 	defer b.mtx.Unlock()
 	b.retireIdleLocked(now)
 	m, ok := b.mappings[port]
-	if !ok {
+	if !ok || b.behavior.AddressPortFiltering && !m.sent[src] {
 		return nil
 	}
 	m.used = now
@@ -216,7 +293,7 @@ func (b *Boundary) retireIdleLocked(now time.Time) {
 			continue
 		}
 		delete(b.mappings, port)
-		delete(b.bySock, m.sock)
+		delete(b.byFlow, m.key)
 	}
 }
 
@@ -226,11 +303,12 @@ func (b *Boundary) Rebind() {
 	b.mtx.Lock()
 	defer b.mtx.Unlock()
 	clear(b.mappings)
-	clear(b.bySock)
+	clear(b.byFlow)
 }
 
-// Mappings returns the inside sockets whose mappings stand, in draw order —
-// the idle window retiring the ones past it.
+// Mappings returns the inside sockets of the mappings that stand, in draw
+// order — the idle window retiring the ones past it. A socket appears once
+// per mapping it holds.
 func (b *Boundary) Mappings() []netip.AddrPort {
 	b.mtx.Lock()
 	defer b.mtx.Unlock()
@@ -242,7 +320,7 @@ func (b *Boundary) Mappings() []netip.AddrPort {
 	slices.Sort(ports)
 	socks := make([]netip.AddrPort, len(ports))
 	for i, port := range ports {
-		socks[i] = b.mappings[port].sock
+		socks[i] = b.mappings[port].key.sock
 	}
 	return socks
 }

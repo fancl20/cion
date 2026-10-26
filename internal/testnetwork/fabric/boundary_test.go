@@ -4,6 +4,8 @@ import (
 	"net"
 	"net/netip"
 	"testing"
+	"testing/synctest"
+	"time"
 
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/checksum"
@@ -164,5 +166,129 @@ func tcpipAddr(ip netip.Addr) tcpip.Address {
 }
 
 // TestMappingExpiresAndRedraws checks the mapping's life on the fabric's
-// clock: past the idle window the mapping retires, and the socket's next
-// crossing draws a fresh one, never the same port twice.
+// clock: past the idle window the mapping retires, a reply to it falls, and
+// the socket's next crossing draws a fresh one, never the same port twice.
+func TestMappingExpiresAndRedraws(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		f := New(t, UDPOnly())
+		inside, upstream := f.Node(insideAddr), f.Node(upstreamAddr)
+		b := f.TranslateAs(FullCone, gatewayAddr, insideAddr)
+		ci, _ := listen(t, inside)
+		cu, ua := listen(t, upstream)
+
+		send(t, ci, ua, "the first crossing")
+		_, first := recv(t, cu, testWait)
+		time.Sleep(MappingIdle)
+		if socks := b.Mappings(); len(socks) != 0 {
+			t.Fatalf("the mappings %v outlived the idle window", socks)
+		}
+		send(t, cu, first, "the late reply")
+		if got, _ := recv(t, ci, dropWait); got != "" {
+			t.Fatalf("a reply to a retired mapping reached the inside socket as %q", got)
+		}
+		send(t, ci, ua, "the next crossing")
+		if _, next := recv(t, cu, testWait); next == first || !mappingPort(next.Port()) {
+			t.Errorf("the next crossing left from %v, want a fresh drawn port after %v", next, first)
+		}
+	})
+}
+
+// dropWait is how long the proofs on virtual time read for a datagram that
+// should fall: well inside the mapping's idle window, so the read itself
+// retires nothing.
+const dropWait = MappingIdle / 4
+
+// The second translated host the chained proofs draw, and its gateway.
+var (
+	peerAddr    = netip.MustParseAddr("127.0.1.15")
+	peerGateway = netip.MustParseAddr("127.0.1.16")
+)
+
+// TestBoundaryBehaviors checks the translators' behaviors: an inside socket
+// leaves through one gateway port for every destination under
+// endpoint-independent mapping and through a port per destination under
+// endpoint-dependent mapping; a reply from a destination the socket sent to
+// returns under every behavior; an outside socket it never sent to gets in
+// only under endpoint-independent filtering.
+func TestBoundaryBehaviors(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		behavior Behavior
+		onePort  bool
+		open     bool
+	}{
+		{"full cone", FullCone, true, true},
+		{"port-restricted", PortRestricted, true, false},
+		{"symmetric", Symmetric, false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				f := New(t, UDPOnly())
+				inside, upstream, stranger := f.Node(insideAddr), f.Node(upstreamAddr), f.Node(strangerAddr)
+				f.TranslateAs(tc.behavior, gatewayAddr, insideAddr)
+				ci, _ := listen(t, inside)
+				cu, ua := listen(t, upstream)
+				cs, sa := listen(t, stranger)
+				unsolicited, _ := listen(t, stranger)
+
+				send(t, ci, ua, "to the upstream")
+				_, viaUpstream := recv(t, cu, testWait)
+				send(t, ci, sa, "to the stranger")
+				_, viaStranger := recv(t, cs, testWait)
+				if viaUpstream.Addr() != gatewayAddr || viaStranger.Addr() != gatewayAddr {
+					t.Fatalf("the crossings left from %v and %v, want the gateway %v",
+						viaUpstream, viaStranger, gatewayAddr)
+				}
+				if onePort := viaUpstream == viaStranger; onePort != tc.onePort {
+					t.Errorf("the socket left through %v and %v: one port %v, want %v",
+						viaUpstream, viaStranger, onePort, tc.onePort)
+				}
+				send(t, cu, viaUpstream, "the reply")
+				if got, from := recv(t, ci, testWait); got != "the reply" || from != ua {
+					t.Errorf("the inside socket received %q from %v, want the reply from %v", got, from, ua)
+				}
+				send(t, unsolicited, viaUpstream, "the unsolicited datagram")
+				if got, _ := recv(t, ci, dropWait); (got != "") != tc.open {
+					t.Errorf("an unsolicited datagram got in: %v, want %v", got != "", tc.open)
+				}
+			})
+		})
+	}
+}
+
+// TestBoundariesChain checks a crossing between two translated hosts: the
+// datagram leaves through its source's gateway and enters through its
+// destination's, as through two translators — the exchange hole punching
+// rides. Behind port-restricted translators, a side's first datagram toward
+// the other's mapping falls until the other has sent toward its own, and
+// then both directions pass.
+func TestBoundariesChain(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		f := New(t, UDPOnly())
+		a, b, server := f.Node(insideAddr), f.Node(peerAddr), f.Node(upstreamAddr)
+		f.TranslateAs(PortRestricted, gatewayAddr, insideAddr)
+		f.TranslateAs(PortRestricted, peerGateway, peerAddr)
+		ca, _ := listen(t, a)
+		cb, _ := listen(t, b)
+		cs, sa := listen(t, server)
+
+		// Each side's mapping, as the third party observes it.
+		send(t, ca, sa, "from a")
+		_, mapA := recv(t, cs, testWait)
+		send(t, cb, sa, "from b")
+		_, mapB := recv(t, cs, testWait)
+
+		send(t, ca, mapB, "a's first")
+		if got, _ := recv(t, cb, dropWait); got != "" {
+			t.Fatalf("a's first datagram passed b's translator as %q before b sent toward a", got)
+		}
+		send(t, cb, mapA, "b's")
+		if got, from := recv(t, ca, testWait); got != "b's" || from != mapB {
+			t.Fatalf("a received %q from %v, want b's datagram from b's mapping %v", got, from, mapB)
+		}
+		send(t, ca, mapB, "a's second")
+		if got, from := recv(t, cb, testWait); got != "a's second" || from != mapA {
+			t.Fatalf("b received %q from %v, want a's datagram from a's mapping %v", got, from, mapA)
+		}
+	})
+}

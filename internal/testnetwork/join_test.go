@@ -28,15 +28,6 @@ func (n *Node) Rendezvous() string {
 	return netip.AddrPortFrom(n.host, measured.RendezvousPort).String()
 }
 
-// stop stops the node, its loops returned and its resources released when
-// stop returns, and fails the test on the node's stop result.
-func (n *Node) stop(t *testing.T) {
-	t.Helper()
-	if err := n.app.Close(); err != nil {
-		t.Fatalf("stopping %v: %v", n.app.IA(), err)
-	}
-}
-
 // conn binds a SCION conn on the node's control host at an ephemeral port,
 // sending through the node's internal link, and closes it with the test.
 func (n *Node) conn(t *testing.T) *scion.Conn {
@@ -295,7 +286,7 @@ func TestJoinByRendezvous(t *testing.T) {
 
 	// Killing B leaves C connected through A.
 	cbIfID := entryOf(ctx, c, b.app.IA()).IfID
-	b.stop(t)
+	b.Stop(t)
 	// C marks its link to B down — the condition the wait wants, not a
 	// fixed multiple of the transmission interval — so the composed route
 	// crosses no link the monitor distrusts or the node no longer serves.
@@ -414,7 +405,7 @@ func TestLineCutHeals(t *testing.T) {
 
 	// Killing B strands C: every route from C to A crossed the dead link.
 	cbIfID := entryOf(ctx, c, b.app.IA()).IfID
-	b.stop(t)
+	b.Stop(t)
 	Poll(t, "C to mark the C–B link down", func() bool {
 		return markedDown(ctx, c, cbIfID)
 	})
@@ -609,7 +600,7 @@ func TestCoreRestartsInPlace(t *testing.T) {
 	}
 	a := boot()
 	for range 3 {
-		a.stop(t)
+		a.Stop(t)
 		a = boot()
 	}
 

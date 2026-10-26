@@ -3,6 +3,7 @@ package behavior
 import (
 	"context"
 	"fmt"
+	"maps"
 	"net/netip"
 	"slices"
 	"strings"
@@ -34,11 +35,14 @@ const (
 )
 
 // network is a lab's booted network: its nodes, the founding core first,
-// on the fabric's hosts, the one-way delay the fabric holds between each
-// pair, and the pairs cut.
+// on the fabric's hosts — some behind translators, where a lab draws them —
+// the one-way delay the fabric holds between each pair, and the pairs cut.
 type network struct {
-	fab    *fabric.Fabric
-	hosts  []netip.Addr
+	fab   *fabric.Fabric
+	hosts []netip.Addr
+	// wire holds each node's address on the wire, where its peers' packets
+	// go: its host, or the gateway of the boundary it sits behind.
+	wire   []netip.Addr
 	nodes  []*testnetwork.Node
 	oneWay [][]time.Duration
 	taps   map[[2]int]func()
@@ -51,6 +55,7 @@ func newNetwork(t *testing.T, fab *fabric.Fabric, size int) *network {
 	n := &network{
 		fab:    fab,
 		hosts:  make([]netip.Addr, size),
+		wire:   make([]netip.Addr, size),
 		nodes:  make([]*testnetwork.Node, size),
 		oneWay: make([][]time.Duration, size),
 		taps:   map[[2]int]func(){},
@@ -58,9 +63,39 @@ func newNetwork(t *testing.T, fab *fabric.Fabric, size int) *network {
 	}
 	for i := range size {
 		n.hosts[i] = testnetwork.HostSlot(t)
+		n.wire[i] = n.hosts[i]
 		n.oneWay[i] = make([]time.Duration, size)
 	}
 	return n
+}
+
+// translate places the nodes behind a boundary each, of the behavior
+// given, on a gateway drawn for it: their peers' packets go to the
+// gateway, and theirs leave from it. A lab translates before it draws
+// delays, for the taps follow the addresses on the wire.
+func (n *network) translate(t *testing.T, behaviors map[int]fabric.Behavior) map[int]*fabric.Boundary {
+	t.Helper()
+	bounds := make(map[int]*fabric.Boundary, len(behaviors))
+	for _, i := range slices.Sorted(maps.Keys(behaviors)) {
+		bounds[i] = n.fab.TranslateAs(behaviors[i], testnetwork.HostSlot(t), n.hosts[i])
+		n.wire[i] = bounds[i].Gateway()
+	}
+	return bounds
+}
+
+// drawPair draws a tap for each direction the pair's packets take: from
+// each node's host — the fabric shapes a packet before any boundary
+// translates it — to the other's address on the wire; one tap covers both
+// directions of two untranslated nodes.
+func (n *network) drawPair(i, j int, draw func(a, b netip.Addr) func()) func() {
+	if n.wire[i] == n.hosts[i] && n.wire[j] == n.hosts[j] {
+		return draw(n.hosts[i], n.hosts[j])
+	}
+	there, back := draw(n.hosts[i], n.wire[j]), draw(n.hosts[j], n.wire[i])
+	return func() {
+		there()
+		back()
+	}
 }
 
 // pair names an unordered pair of the network's nodes.
@@ -74,13 +109,15 @@ func (n *network) setDelay(i, j int, oneWay time.Duration) {
 	if lift := n.taps[pair(i, j)]; lift != nil {
 		lift()
 	}
-	n.taps[pair(i, j)] = n.fab.Delay(n.hosts[i], n.hosts[j], oneWay)
+	n.taps[pair(i, j)] = n.drawPair(i, j, func(a, b netip.Addr) func() {
+		return n.fab.Delay(a, b, oneWay)
+	})
 	n.oneWay[i][j], n.oneWay[j][i] = oneWay, oneWay
 }
 
 // cutPair cuts the pair on the fabric; the returned lift restores it.
 func (n *network) cutPair(i, j int) func() {
-	lift := n.fab.Cut(n.hosts[i], n.hosts[j])
+	lift := n.drawPair(i, j, n.fab.Cut)
 	n.cut[pair(i, j)] = true
 	return func() {
 		lift()

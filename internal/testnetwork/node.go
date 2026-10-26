@@ -50,6 +50,19 @@ func (n *Node) App() *services.App { return n.app }
 // node by.
 func (n *Node) Host() netip.Addr { return n.host }
 
+// StateDir returns the node's state directory: a node booted on it again
+// returns with the identity, chain, and links it held.
+func (n *Node) StateDir() string { return n.stateDir }
+
+// Stop stops the node, its loops returned and its resources released when
+// Stop returns, and fails the test on the node's stop result.
+func (n *Node) Stop(t *testing.T) {
+	t.Helper()
+	if err := n.app.Close(); err != nil {
+		t.Fatalf("stopping %v: %v", n.app.IA(), err)
+	}
+}
+
 // bootOn boots a full node assembly binding every underlay socket through
 // the source, the kernel's or a fabric's, and serves it underneath the
 // test.

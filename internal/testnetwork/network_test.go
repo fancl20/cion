@@ -167,7 +167,7 @@ func TestRestartedNodeServesUpSegments(t *testing.T) {
 	// boots again on the same state, host, and link set — the restart a
 	// process supervisor performs — serving the up segments before the next
 	// beaconing period.
-	b.stop(t)
+	b.Stop(t)
 	b = bootStaticNode(t, wpki, b.host, false, b.stateDir, b.linkSet, nil)
 	segs, err := b.app.PathDB().Get(ctx, pathdb.Query{Type: pathdb.SegmentTypeUp})
 	if err != nil {

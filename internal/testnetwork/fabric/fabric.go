@@ -364,23 +364,29 @@ func (f *Fabric) carry(pkt []byte) {
 	f.translate(pkt)
 }
 
-// translate passes the packet through the drawn boundaries — the first that
-// claims it rewrites it, and a boundary drops what it holds no mapping for
-// — then delivers it to the destination its address finally names.
+// translate passes the packet out of the boundary holding its source, then
+// into the boundary owning its destination — a packet between two
+// translated hosts crosses both, as it would two translators — and a
+// boundary drops what it holds no admitted mapping for. It then delivers
+// the packet to the destination its address finally names.
 func (f *Fabric) translate(pkt []byte) {
 	f.mtx.Lock()
 	bounds := slices.Clone(f.bounds)
 	f.mtx.Unlock()
-	for _, b := range bounds {
-		rewritten, ok := b.rewrite(pkt)
-		if !ok {
-			continue
+	for _, leg := range []func(*Boundary, []byte) ([]byte, bool){
+		(*Boundary).egress, (*Boundary).ingress,
+	} {
+		for _, b := range bounds {
+			rewritten, ok := leg(b, pkt)
+			if !ok {
+				continue
+			}
+			if rewritten == nil {
+				return
+			}
+			pkt = rewritten
+			break
 		}
-		if rewritten == nil {
-			return
-		}
-		pkt = rewritten
-		break
 	}
 	f.deliver(toNetip(header.IPv4(pkt).DestinationAddress()), pkt)
 }

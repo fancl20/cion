@@ -131,3 +131,20 @@ first-contact forward.
 *   **The benchmarks:** each runs and reports, five runs each.
 
 ## Implementation history
+
+*   Landed as proposed: the translator behaviors and chained crossings
+    ([boundary.go](/internal/testnetwork/fabric/boundary.go),
+    [fabric.go](/internal/testnetwork/fabric/fabric.go)), a node a lab stops
+    and restarts on its state ([node.go](/internal/testnetwork/node.go)),
+    and the translated network with its lab and benchmarks
+    ([translated_test.go](/internal/testnetwork/behavior/translated_test.go),
+    [lab_test.go](/internal/testnetwork/behavior/lab_test.go)). The fabric's
+    test of a mapping's expiry, documented without a body, landed beside the
+    behaviors' tests ([boundary_test.go](/internal/testnetwork/fabric/boundary_test.go)).
+    Across five runs: the settled network reached all 42 pairs, its worst
+    pair 22.5 times the reference under the 5ms penalty and 20 times
+    without; the rebound node reached no peer and no peer reached it for the
+    ten minutes read, its three links established; the node behind a
+    symmetric translator never pinned the TRC or linked; every survivor of
+    the founder's loss reached every other within 17 to 115 seconds, and the
+    restarted node returned within 222 to 296 seconds.

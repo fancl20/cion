@@ -83,7 +83,7 @@ func TestBFDLivenessEpisode(t *testing.T) {
 	}
 
 	// The blackhole: kill B.
-	b.stop(t)
+	b.Stop(t)
 
 	// A marks the link down within the window while its BFD keeps leaving
 	// on the link's own socket — the stream survives its own verdict.
@@ -164,7 +164,7 @@ func TestBFDStaticLabEpisode(t *testing.T) {
 
 	// The blackhole: B dies, and A's monitor marks the file provider's link
 	// down exactly as the measured provider's.
-	b.stop(t)
+	b.Stop(t)
 	Poll(t, "A to mark the static link down", func() bool {
 		return !a.app.Monitor().Up(ifID)
 	})
