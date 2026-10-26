@@ -68,18 +68,22 @@ func chainFor(t *testing.T, ia addr.IA, skid byte, notAfter time.Time) []*x509.C
 
 // TestPortalRecordsNodes checks the console's view of the nodes: one per
 // ISD-AS holding a chain, its newest chain's key and expiry; the roles from
-// the founder's ISD-AS and the TRC's cores; and the directory's slice,
-// endpoint, and issued count beside each.
+// the founder's ISD-AS and the TRC's cores; the tag each node's directory
+// report earns — NAT when translated and unanswered, Degraded when
+// unanswered alone, none for a translated node peers dial or a node without
+// a report; and the directory's slice, endpoint, and issued count beside
+// each.
 func TestPortalRecordsNodes(t *testing.T) {
 	ctx := t.Context()
 	founder, core := addr.MustParseIA("1-ff00:0:1"), addr.MustParseIA("1-ff00:0:2")
-	node := addr.MustParseIA("1-ff00:0:3")
+	node, cloud := addr.MustParseIA("1-ff00:0:3"), addr.MustParseIA("1-ff00:0:4")
 	now := time.Now().UTC().Truncate(time.Second)
 	chains := [][]*x509.Certificate{
 		chainFor(t, founder, 0x01, now.Add(72*time.Hour)),
 		chainFor(t, core, 0x02, now.Add(60*time.Hour)),
 		chainFor(t, node, 0x03, now.Add(24*time.Hour)),
 		chainFor(t, node, 0x03, now.Add(48*time.Hour)),
+		chainFor(t, cloud, 0x04, now.Add(36*time.Hour)),
 	}
 	registry := &dbtest.MemStore{}
 	registry.Seed(wireguard.Entry{
@@ -97,9 +101,16 @@ func TestPortalRecordsNodes(t *testing.T) {
 		}
 	}
 	r := &portalRecords{
-		chains:   func(context.Context) ([][]*x509.Certificate, error) { return chains, nil },
-		cores:    func(addr.ISD) ([]addr.IA, error) { return []addr.IA{founder, core}, nil },
-		founder:  founder,
+		chains:  func(context.Context) ([][]*x509.Certificate, error) { return chains, nil },
+		cores:   func(addr.ISD) ([]addr.IA, error) { return []addr.IA{founder, core}, nil },
+		founder: founder,
+		reach: func() map[addr.IA]Reach {
+			return map[addr.IA]Reach{
+				core:  {Translated: true, RendezvousUnanswered: true},
+				node:  {RendezvousUnanswered: true},
+				cloud: {Translated: true},
+			}
+		},
 		registry: registry,
 	}
 	nodes, err := r.Nodes(ctx)
@@ -116,8 +127,15 @@ func TestPortalRecordsNodes(t *testing.T) {
 			Endpoint: netip.MustParseAddrPort("198.51.100.10:41641"),
 			Issued:   2,
 		},
-		{IA: core, Key: "0202", Expires: now.Add(60 * time.Hour), Role: portal.RoleCore},
-		{IA: node, Key: "0303", Expires: now.Add(48 * time.Hour), Role: portal.RoleNormal},
+		{
+			IA: core, Key: "0202", Expires: now.Add(60 * time.Hour),
+			Role: portal.RoleCore, Reach: portal.ReachNAT,
+		},
+		{
+			IA: node, Key: "0303", Expires: now.Add(48 * time.Hour),
+			Role: portal.RoleNormal, Reach: portal.ReachDegraded,
+		},
+		{IA: cloud, Key: "0404", Expires: now.Add(36 * time.Hour), Role: portal.RoleNormal},
 	}
 	if diff := cmp.Diff(want, nodes,
 		cmpopts.EquateComparable(netip.Prefix{}, netip.AddrPort{})); diff != "" {

@@ -5,7 +5,8 @@ package node.v1;
 option go_package = "github.com/fancl20/cion/proto/node/v1;nodev1";
 
 // Entry is one node's publication: everything the selection loop needs to
-// probe the node as a candidate neighbor.
+// probe the node as a candidate neighbor, and the node's report of how its
+// peers reach it.
 message Entry {
   // isd_as is the publisher's ISD-AS. The directory records the ISD-AS the
   // authenticated publisher's certificate names, never the claimed one.
@@ -17,6 +18,12 @@ message Entry {
   // rendezvous acceptor listens on for first contact, the fixed rendezvous
   // port on the published host.
   string rendezvous_addr = 3;
+  // translated reports that the published host is not an address of the
+  // publisher's own: a translator stands between it and its peers.
+  bool translated = 4;
+  // rendezvous_unanswered reports that the acceptor of the publisher's
+  // latest link request got no answer at the published rendezvous address.
+  bool rendezvous_unanswered = 5;
 }
 
 message PublishRequest {

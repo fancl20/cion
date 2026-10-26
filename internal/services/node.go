@@ -53,6 +53,10 @@ type node struct {
 	// provider's the control host a concrete bind names, for it learns
 	// nothing. The zero address publishes nothing.
 	publishedHost func(context.Context) netip.Addr
+	// nodeReach returns each node's report of how its peers reach it, as
+	// the measured provider's directory copy holds them; nil under the file
+	// provider, which runs no directory.
+	nodeReach func() map[addr.IA]apps.Reach
 	// wildcardHost resolves the host the node's conns name for themselves
 	// under a wildcard bind: the local address routing toward the published
 	// host, which the node's own router delivers to.
@@ -231,6 +235,17 @@ func (n *node) selectProvider() error {
 	}
 	n.topology = provider
 	n.publishedHost = provider.PublishedHost
+	n.nodeReach = func() map[addr.IA]apps.Reach {
+		entries := provider.Directory()
+		reach := make(map[addr.IA]apps.Reach, len(entries))
+		for _, e := range entries {
+			reach[e.IA] = apps.Reach{
+				Translated:           e.Reach.Translated,
+				RendezvousUnanswered: e.Reach.RendezvousUnanswered,
+			}
+		}
+		return reach
+	}
 	return nil
 }
 

@@ -3,11 +3,15 @@ package measured
 import (
 	"context"
 	"errors"
+	"net"
 	"net/netip"
 	"os"
 	"path/filepath"
+	"syscall"
 	"testing"
 	"time"
+
+	"github.com/fancl20/cion/pkg/libs/underlay"
 )
 
 // TestExternalHostPersistsAcrossRestart checks the learned external host's
@@ -159,5 +163,26 @@ func TestDomainHostResolvesPublishedAddress(t *testing.T) {
 	}
 	if got := wrongFamily.resolve(ctx); got.IsValid() {
 		t.Errorf("wrong-family host = %v, want the zero address", got)
+	}
+}
+
+// TestHoldsTheNodesOwnHost checks the published host's check: a host a
+// socket binds is the node's own; one the kernel refuses with EADDRNOTAVAIL
+// is not — documentation space no interface holds stands for a
+// translator's — and any other refusal is an error.
+func TestHoldsTheNodesOwnHost(t *testing.T) {
+	if own, err := holds(underlay.Kernel, netip.MustParseAddr("127.0.0.1")); err != nil || !own {
+		t.Errorf("holds(127.0.0.1) = %v, %v, want held", own, err)
+	}
+	if own, err := holds(underlay.Kernel, netip.MustParseAddr("192.0.2.1")); err != nil || own {
+		t.Errorf("holds(192.0.2.1) = %v, %v, want not held", own, err)
+	}
+	refusing := underlay.Sockets{
+		ListenUDP: func(*net.UDPAddr, netip.AddrPort) (underlay.UDPConn, error) {
+			return nil, os.NewSyscallError("bind", syscall.EMFILE)
+		},
+	}
+	if _, err := holds(refusing, netip.MustParseAddr("127.0.0.1")); !errors.Is(err, syscall.EMFILE) {
+		t.Errorf("holds under another refusal = %v, want the refusal", err)
 	}
 }

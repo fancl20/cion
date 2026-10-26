@@ -303,6 +303,9 @@ table.plain th:last-child, table.plain td:last-child { padding-right: 0; }
 .badge-muted { background: var(--chip); color: var(--muted); }
 .badge-muted-outline { box-shadow: inset 0 0 0 1px var(--muted-line); color: var(--muted); }
 
+/* A node's tags hold one line: the column widens to fit them. */
+.tags { display: flex; gap: 4px; }
+
 /* Buttons */
 
 .btn {

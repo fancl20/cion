@@ -43,14 +43,15 @@ func (n *node) setupApplications() error {
 // published-host resolver, the domain and the HTTPS server's origin, the
 // trust engine and path provider, the issued chains, the sending conn and
 // the interface-down cache, the service-socket registration, the admission
-// authorizer, the core route the joiner's directory fetch rides, the relay
-// derivation's inputs with the harness's placement among them, the
-// directory pacing, the control plane's TRC decision the voting
-// application hands its submissions to, the control-endpoint mounting
-// behind the peer-identity middleware, and the HTTPS server's mounting.
-// The environment's core flag marks the founding tier alone: a joining
-// core runs the applications a local node runs, its WireGuard application
-// publishing to and fetching from the founder's directory.
+// authorizer, the core route the joiner's directory fetch rides, the node
+// directory's reports of how peers reach each node, the relay derivation's
+// inputs with the harness's placement among them, the directory pacing, the
+// control plane's TRC decision the voting application hands its submissions
+// to, the control-endpoint mounting behind the peer-identity middleware, and
+// the HTTPS server's mounting. The environment's core flag marks the
+// founding tier alone: a joining core runs the applications a local node
+// runs, its WireGuard application publishing to and fetching from the
+// founder's directory.
 func (n *node) appEnvironment() *apps.Environment {
 	env := &apps.Environment{
 		Arguments:       n.cfg.AppArguments,
@@ -71,6 +72,7 @@ func (n *node) appEnvironment() *apps.Environment {
 		Authorizer:      n.cfg.enrollAuth,
 		TRCDecision:     n.trcDecision,
 		CoreRoute:       n.coreRoute,
+		NodeReach:       n.nodeReach,
 		DirectoryPacing: n.cfg.Pacing.Directory,
 		MountControlEndpoint: func(pattern string, handler http.Handler) {
 			n.services.Mounts = append(n.services.Mounts, scionrpc.Mount{

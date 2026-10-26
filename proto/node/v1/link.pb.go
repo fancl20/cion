@@ -78,16 +78,21 @@ func (x *LinkRequest) GetIfId() uint32 {
 	return 0
 }
 
-// LinkReply carries the acceptor's side of the link: the address and
-// interface ID the requester sends to.
+// LinkReply carries the acceptor's side of the link — the address and
+// interface ID the requester sends to — beside whether the requester's
+// published rendezvous address answered the acceptor's echo.
 type LinkReply struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// local_addr is the acceptor's link local underlay address, "host:port".
 	LocalAddr string `protobuf:"bytes,1,opt,name=local_addr,json=localAddr,proto3" json:"local_addr,omitempty"`
 	// if_id is the acceptor's interface ID of the link.
-	IfId          uint32 `protobuf:"varint,2,opt,name=if_id,json=ifId,proto3" json:"if_id,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	IfId uint32 `protobuf:"varint,2,opt,name=if_id,json=ifId,proto3" json:"if_id,omitempty"`
+	// rendezvous_answered reports whether the requester's published
+	// rendezvous address answered the acceptor's echo; unset when the
+	// acceptor's directory names no address for the requester.
+	RendezvousAnswered *bool `protobuf:"varint,3,opt,name=rendezvous_answered,json=rendezvousAnswered,proto3,oneof" json:"rendezvous_answered,omitempty"`
+	unknownFields      protoimpl.UnknownFields
+	sizeCache          protoimpl.SizeCache
 }
 
 func (x *LinkReply) Reset() {
@@ -134,6 +139,13 @@ func (x *LinkReply) GetIfId() uint32 {
 	return 0
 }
 
+func (x *LinkReply) GetRendezvousAnswered() bool {
+	if x != nil && x.RendezvousAnswered != nil {
+		return *x.RendezvousAnswered
+	}
+	return false
+}
+
 var File_proto_node_v1_link_proto protoreflect.FileDescriptor
 
 const file_proto_node_v1_link_proto_rawDesc = "" +
@@ -142,11 +154,13 @@ const file_proto_node_v1_link_proto_rawDesc = "" +
 	"\vLinkRequest\x12\x1d\n" +
 	"\n" +
 	"local_addr\x18\x01 \x01(\tR\tlocalAddr\x12\x13\n" +
-	"\x05if_id\x18\x02 \x01(\rR\x04ifId\"?\n" +
+	"\x05if_id\x18\x02 \x01(\rR\x04ifId\"\x8d\x01\n" +
 	"\tLinkReply\x12\x1d\n" +
 	"\n" +
 	"local_addr\x18\x01 \x01(\tR\tlocalAddr\x12\x13\n" +
-	"\x05if_id\x18\x02 \x01(\rR\x04ifId2B\n" +
+	"\x05if_id\x18\x02 \x01(\rR\x04ifId\x124\n" +
+	"\x13rendezvous_answered\x18\x03 \x01(\bH\x00R\x12rendezvousAnswered\x88\x01\x01B\x16\n" +
+	"\x14_rendezvous_answered2B\n" +
 	"\vLinkService\x123\n" +
 	"\aRequest\x12\x14.node.v1.LinkRequest\x1a\x12.node.v1.LinkReplyB.Z,github.com/fancl20/cion/proto/node/v1;nodev1b\x06proto3"
 
@@ -182,6 +196,7 @@ func file_proto_node_v1_link_proto_init() {
 	if File_proto_node_v1_link_proto != nil {
 		return
 	}
+	file_proto_node_v1_link_proto_msgTypes[1].OneofWrappers = []any{}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{

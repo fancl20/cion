@@ -36,12 +36,14 @@ var portalEntry = Entry{
 // newPortal adapts the environment into the console's configuration: the
 // selected method's operator surface — the pairing has already made any
 // other method a refused selection — and the records over the issued
-// chains and whichever of the registry's owners loaded before it.
+// chains, the node directory's reports, and whichever of the registry's
+// owners loaded before it.
 func newPortal(env *Environment, loaded []Loaded) (Application, error) {
 	records := &portalRecords{
 		chains:  env.IssuedChains,
 		cores:   env.Engine.CoreASes,
 		founder: env.IA,
+		reach:   env.NodeReach,
 	}
 	if wg, ok := AppOf(loaded, "wireguard").(*wireguard.App); ok {
 		records.registry = wg.Registry()
@@ -60,12 +62,15 @@ func newPortal(env *Environment, loaded []Loaded) (Application, error) {
 }
 
 // portalRecords is the console's view of the founder's records: the chains
-// it issued, the TRC's cores, the directory, and the coordination
-// application's registry and presence.
+// it issued, the TRC's cores, the node directory's reports, the WireGuard
+// directory, and the coordination application's registry and presence.
 type portalRecords struct {
 	chains  func(context.Context) ([][]*x509.Certificate, error)
 	cores   func(addr.ISD) ([]addr.IA, error)
 	founder addr.IA
+	// reach returns the node directory's reports by ISD-AS; nil where the
+	// measured provider did not load.
+	reach func() map[addr.IA]Reach
 	// registry is the WireGuard application's directory; nil where it did
 	// not load.
 	registry wireguard.Registry
@@ -76,7 +81,8 @@ type portalRecords struct {
 var _ portal.Records = (*portalRecords)(nil)
 
 // Nodes lists every node holding a chain valid now, the newest chain per
-// ISD-AS, beside the node's directory entry where the registry holds one.
+// ISD-AS, beside the tag the node directory's report earns it and the
+// node's WireGuard directory entry where the registry holds one.
 func (r *portalRecords) Nodes(ctx context.Context) ([]portal.Node, error) {
 	chains, err := r.chains(ctx)
 	if err != nil {
@@ -102,6 +108,10 @@ func (r *portalRecords) Nodes(ctx context.Context) ([]portal.Node, error) {
 			return nil, fmt.Errorf("reading the directory: %w", err)
 		}
 	}
+	var reach map[addr.IA]Reach
+	if r.reach != nil {
+		reach = r.reach()
+	}
 	nodes := make([]portal.Node, 0, len(newest))
 	for ia, chain := range newest {
 		node := portal.Node{
@@ -109,6 +119,7 @@ func (r *portalRecords) Nodes(ctx context.Context) ([]portal.Node, error) {
 			Key:     hex.EncodeToString(chain[0].SubjectKeyId),
 			Expires: chain[0].NotAfter,
 			Role:    portal.RoleNormal,
+			Reach:   reachTag(reach[ia]),
 		}
 		switch {
 		case ia.Equal(r.founder):
@@ -132,6 +143,20 @@ func (r *portalRecords) Nodes(ctx context.Context) ([]portal.Node, error) {
 		return cmp.Compare(uint64(a.IA), uint64(b.IA))
 	})
 	return nodes, nil
+}
+
+// reachTag tags a node's report: NAT when peers cannot dial it behind a
+// translator, Degraded when they cannot dial it otherwise, and nothing
+// while they can or nothing was observed.
+func reachTag(r Reach) portal.Reach {
+	switch {
+	case !r.RendezvousUnanswered:
+		return ""
+	case r.Translated:
+		return portal.ReachNAT
+	default:
+		return portal.ReachDegraded
+	}
 }
 
 // Hosts lists the registry's hosts, sorted by address, each beside the host

@@ -12,11 +12,13 @@ import (
 	"github.com/scionproto/scion/pkg/addr"
 
 	"github.com/fancl20/cion/pkg/libs/scion"
+	"github.com/fancl20/cion/pkg/libs/scionrpc"
 	"github.com/fancl20/cion/pkg/libs/underlay"
 	"github.com/fancl20/cion/pkg/modules/links"
 	"github.com/fancl20/cion/pkg/modules/links/impl/memory"
 	"github.com/fancl20/cion/pkg/modules/topology"
 	"github.com/fancl20/cion/pkg/modules/topology/impl/providertest"
+	nodev1 "github.com/fancl20/cion/proto/node/v1"
 	nodev1connect "github.com/fancl20/cion/proto/node/v1/nodev1connect"
 )
 
@@ -679,4 +681,148 @@ func TestStrandedRedialFreshAddress(t *testing.T) {
 			t.Errorf("the acceptor's entry = %+v, want it aimed at %v", accepted, retired.Local)
 		}
 	})
+}
+
+// fakeLinkServiceClient answers every link request with the reply it holds.
+type fakeLinkServiceClient struct {
+	reply *nodev1.LinkReply
+}
+
+func (c *fakeLinkServiceClient) Request(
+	context.Context, *nodev1.LinkRequest,
+) (*nodev1.LinkReply, error) {
+	return c.reply, nil
+}
+
+// TestProviderReportsReach checks the published report: the link client
+// keeps the latest reply's report of the acceptor's echo — a reply without
+// one keeps the last — and the report names the published host translated
+// when it is not one of the node's own.
+func TestProviderReportsReach(t *testing.T) {
+	z := &Provider{}
+	peer := &scion.Addr{IA: linkIA, Service: addr.SvcCS}
+	const ifID = 3
+	fake := &fakeLinkServiceClient{}
+	c := &linkClient{
+		answered: z.recordAnswer,
+		clts: map[string]nodev1connect.LinkServiceClient{
+			scionrpc.PeerAuthority(&scion.Addr{IA: peer.IA, Service: peer.Service, IfID: ifID}): fake,
+		},
+	}
+	own := netip.MustParseAddr("127.0.0.1")
+	steps := []struct {
+		answered *bool
+		want     Reach
+	}{
+		{want: Reach{}},
+		{answered: new(false), want: Reach{RendezvousUnanswered: true}},
+		{want: Reach{RendezvousUnanswered: true}},
+		{answered: new(true), want: Reach{}},
+	}
+	for i, step := range steps {
+		fake.reply = &nodev1.LinkReply{
+			LocalAddr: "127.0.0.1:4242", IfId: 7, RendezvousAnswered: step.answered,
+		}
+		if _, err := c.Link(t.Context(), peer, netip.MustParseAddrPort("127.0.0.1:4243"), ifID); err != nil {
+			t.Fatal(err)
+		}
+		got, err := z.reach(own)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != step.want {
+			t.Errorf("after reply %d: report = %+v, want %+v", i, got, step.want)
+		}
+	}
+
+	// Documentation space no interface holds stands for a translator's
+	// host.
+	got, err := z.reach(netip.MustParseAddr("192.0.2.1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.Translated {
+		t.Errorf("the report at a host the node does not hold = %+v, want translated", got)
+	}
+}
+
+// TestEchoPublishedReportsTheAnswer checks the acceptor's echo: a peer whose
+// published rendezvous address answers is answered, one whose address is
+// silent is not, and a peer the directory copy lacks is not echoed. No
+// answer teaches the node its own external host.
+func TestEchoPublishedReportsTheAnswer(t *testing.T) {
+	acceptor := newRendezvousFixture(t, nil)
+	silent := addr.MustIAFrom(20, 0xfd0000000052)
+	z := &Provider{
+		cfg: Config{ControlHost: netip.MustParseAddr("127.0.0.1")},
+		directory: &NodeDirectory{local: []DirectoryEntry{
+			{IA: linkIA, RendezvousAddr: acceptor.addr},
+			{IA: silent, RendezvousAddr: netip.MustParseAddrPort("127.0.0.1:1")},
+		}},
+	}
+	cases := []struct {
+		name         string
+		peer         addr.IA
+		answered, ok bool
+	}{
+		{name: "an answering address", peer: linkIA, answered: true, ok: true},
+		{name: "a silent address", peer: silent, ok: true},
+		{name: "no entry", peer: linkIA2},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			answered, ok := z.echoPublished(t.Context(), tc.peer)
+			if answered != tc.answered || ok != tc.ok {
+				t.Errorf("echoPublished(%v) = %v, %v, want %v, %v",
+					tc.peer, answered, ok, tc.answered, tc.ok)
+			}
+		})
+	}
+	if got := z.external.host(); got.IsValid() {
+		t.Errorf("the echoes taught the node the external host %v, want none", got)
+	}
+}
+
+// TestReachUnderTheWildcardBind checks the report under the default bind,
+// on the kernel's sockets: a wildcard-bound node publishes nothing until it
+// learns a host, then checks the learned host its entry publishes — never
+// the wildcard — so the loopback, which the machine holds, reports
+// untranslated, and documentation space no interface holds, translated.
+func TestReachUnderTheWildcardBind(t *testing.T) {
+	z, err := New(Config{ControlHost: netip.MustParseAddr("0.0.0.0")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := NewDirectoryStore()
+	d := NewNodeDirectory(NodeDirectoryConfig{
+		IA:    directoryIA,
+		Host:  z.publishedHost,
+		Reach: z.reach,
+		Store: store,
+	})
+	ctx := context.Background()
+	if err := d.publish(ctx); err == nil {
+		t.Fatal("the unlearned wildcard published an entry")
+	}
+	for _, tc := range []struct {
+		learned    netip.Addr
+		translated bool
+	}{
+		{learned: netip.MustParseAddr("127.0.0.1")},
+		{learned: netip.MustParseAddr("192.0.2.1"), translated: true},
+	} {
+		z.learn(tc.learned)
+		if err := d.publish(ctx); err != nil {
+			t.Fatal(err)
+		}
+		entries := store.List(time.Now())
+		if len(entries) != 1 {
+			t.Fatalf("entries = %v, want the one", entries)
+		}
+		want := Reach{Translated: tc.translated}
+		if got := entries[0]; got.RendezvousAddr.Addr() != tc.learned || got.Reach != want {
+			t.Errorf("learning %v published %v with %+v, want the learned host with %+v",
+				tc.learned, got.RendezvousAddr, got.Reach, want)
+		}
+	}
 }

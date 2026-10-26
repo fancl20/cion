@@ -105,6 +105,11 @@ type Provider struct {
 	// holds is worth more than an empty or expired directory snapshot.
 	stranded atomic.Bool
 
+	// unanswered records the latest link reply's report that the node's
+	// published rendezvous address did not answer the acceptor's echo;
+	// false before any reply reports.
+	unanswered atomic.Bool
+
 	// mtx guards the one-time assembly of the serving machinery.
 	mtx sync.Mutex
 	// rendezvous, links, linker, directoryStore, directory, and the two
@@ -181,6 +186,49 @@ func (z *Provider) publishedHost(ctx context.Context) netip.Addr {
 // zero address publishing nothing.
 func (z *Provider) PublishedHost(ctx context.Context) netip.Addr {
 	return z.publishedHost(ctx)
+}
+
+// reach reports how the node's peers reach it at the published host:
+// translated when the host is not one of the node's own, and the latest
+// link reply's report of the acceptor's echo.
+func (z *Provider) reach(host netip.Addr) (Reach, error) {
+	held, err := holds(z.cfg.Sockets, host)
+	if err != nil {
+		return Reach{}, err
+	}
+	return Reach{Translated: !held, RendezvousUnanswered: z.unanswered.Load()}, nil
+}
+
+// recordAnswer keeps a link reply's report of the acceptor's echo at the
+// node's published rendezvous address, the latest report winning.
+func (z *Provider) recordAnswer(answered bool) {
+	z.unanswered.Store(!answered)
+}
+
+// echoPublished echoes the peer's published rendezvous address as the
+// selection loop's probe does — from an ephemeral port on the control host,
+// claiming the zero ISD-AS and the control address — and reports whether it
+// answered; ok is false when the directory copy holds no entry for the
+// peer. The echo checks the peer alone: its answer teaches the node nothing
+// of its own external host.
+func (z *Provider) echoPublished(ctx context.Context, peer addr.IA) (answered, ok bool) {
+	for _, e := range z.directory.Entries() {
+		if !e.IA.Equal(peer) {
+			continue
+		}
+		_, _, _, err := RendezvousEcho(ctx, z.cfg.Sockets,
+			netip.AddrPortFrom(z.cfg.ControlHost, 0), e.RendezvousAddr, addr.IA(0),
+			netip.AddrPortFrom(z.cfg.ControlHost, scionrpc.EndpointPort))
+		return err == nil, true
+	}
+	return false, false
+}
+
+// Directory returns the node's directory copy once Mounts assembled it:
+// the entries the selection loop draws its candidates from, nil until the
+// first fetch lands.
+func (z *Provider) Directory() []DirectoryEntry {
+	return z.directory.Entries()
 }
 
 // bootstrapped is what a first-start joiner's rendezvous taught it: the
@@ -360,11 +408,13 @@ func (z *Provider) assemble() error {
 		MinInterval: z.cfg.Pacing.RendezvousRate,
 		Sockets:     z.cfg.Sockets,
 		Observed:    z.env.Observed,
+		Echo:        z.echoPublished,
 	}
-	z.linker = &linkClient{peer: z.env.Peer}
+	z.linker = &linkClient{peer: z.env.Peer, answered: z.recordAnswer}
 	directoryCfg := NodeDirectoryConfig{
 		IA:              z.env.IA,
 		Host:            z.publishedHost,
+		Reach:           z.reach,
 		Engine:          z.env.Engine,
 		Paths:           z.env.Paths,
 		PublishInterval: z.cfg.Pacing.Directory,
@@ -736,6 +786,9 @@ func localHeld(entries []*links.Link, l *links.Link) bool {
 // socket and not a transit's address.
 type linkClient struct {
 	peer topology.PeerChannel
+	// answered receives each reply's report of the acceptor's echo at the
+	// node's published rendezvous address; nil discards the reports.
+	answered func(bool)
 
 	mtx  sync.Mutex
 	clts map[string]nodev1connect.LinkServiceClient
@@ -744,7 +797,8 @@ type linkClient struct {
 var _ LinkRequester = (*linkClient)(nil)
 
 // Link asks the peer to admit the link, offering the requester's link
-// address and interface ID, and answers the peer's side of it.
+// address and interface ID, and answers the peer's side of it; a reply that
+// reports the acceptor's echo hands the report to answered.
 func (c *linkClient) Link(
 	ctx context.Context,
 	peer *scion.Addr,
@@ -775,6 +829,9 @@ func (c *linkClient) Link(
 	})
 	if err != nil {
 		return nil, err
+	}
+	if reply.RendezvousAnswered != nil && c.answered != nil {
+		c.answered(*reply.RendezvousAnswered)
 	}
 	return reply, nil
 }

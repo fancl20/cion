@@ -1,6 +1,7 @@
 package testnetwork
 
 import (
+	"context"
 	"net"
 	"net/netip"
 	"testing"
@@ -20,17 +21,27 @@ import (
 // default spells, its port derived — binds every socket on every interface
 // of the family. The rendezvous acceptor answers a wildcard-bound dial
 // through the loopback and records the wildcard claim's port on the observed
-// host, and the founder's HTTPS serves the coordination surfaces at the
-// port. The lab owns a network namespace of its own, for a wildcard bind
-// holds the fixed ports against every node of the process — the same host
-// cannot serve two of them, which is why the observed-address link between
-// two wildcard assemblies stays proven at the measured package's exchange.
+// host, the founder's HTTPS serves the coordination surfaces at the port,
+// and the founder's entry reports its published host — its domain's
+// address, the loopback the namespace holds — as its own: the check binds
+// the published host, never the wildcard. The lab owns a network namespace
+// of its own, for a wildcard bind holds the fixed ports against every node
+// of the process — the same host cannot serve two of them, which is why the
+// observed-address link between two wildcard assemblies stays proven at the
+// measured package's exchange.
 func TestWildcardControlBoots(t *testing.T) {
 	if !ownNetns(t) {
 		return
 	}
 	wpki := webpkitest.New(t)
-	n := bootAssembly(t, func(cfg *services.NodeConfig) {
+	// The founder's domain resolves to the loopback, so its entry publishes.
+	loopback := netip.MustParseAddr("127.0.0.1")
+	resolver := underlay.Sockets{
+		LookupNetIP: func(context.Context, string, string) ([]netip.Addr, error) {
+			return []netip.Addr{loopback}, nil
+		},
+	}
+	n := bootOn(t, resolver, func(cfg *services.NodeConfig) {
 		cfg.Core = true
 		cfg.Domain = webpkitest.Domain
 		cfg.State = t.TempDir()
@@ -84,4 +95,14 @@ func TestWildcardControlBoots(t *testing.T) {
 		}
 		return false
 	})
+
+	// The founder's entry publishes the loopback the namespace holds, and
+	// its report names it untranslated, nothing unanswered.
+	Poll(t, "the founder's entry to publish", func() bool {
+		_, ok := n.app.NodeReach()[n.app.IA()]
+		return ok
+	})
+	if got := n.app.NodeReach()[n.app.IA()]; got != (apps.Reach{}) {
+		t.Errorf("the founder's report = %+v, want its published host its own", got)
+	}
 }

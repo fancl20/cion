@@ -9,6 +9,7 @@ import (
 	"testing/synctest"
 	"time"
 
+	"github.com/google/go-cmp/cmp"
 	"github.com/quic-go/quic-go/http3"
 	"github.com/scionproto/scion/pkg/addr"
 
@@ -413,4 +414,56 @@ func TestLinkServiceConfirmInstallsObservation(t *testing.T) {
 				entry.Remote, observed)
 		}
 	})
+}
+
+// TestLinkServiceReportsTheEcho checks the reply's report of the echo at the
+// requester's published rendezvous address: an answered echo reports true, a
+// silent one false, and a requester the directory names no address for — or
+// a service that echoes nothing — leaves the report unset. The echo is asked
+// of the authenticated requester.
+func TestLinkServiceReportsTheEcho(t *testing.T) {
+	cases := []struct {
+		name string
+		echo func(ctx context.Context, peer addr.IA) (answered, ok bool)
+		want *bool
+	}{
+		{
+			name: "an answered echo",
+			echo: func(context.Context, addr.IA) (bool, bool) { return true, true },
+			want: new(true),
+		},
+		{
+			name: "a silent echo",
+			echo: func(context.Context, addr.IA) (bool, bool) { return false, true },
+			want: new(false),
+		},
+		{
+			name: "no published address",
+			echo: func(context.Context, addr.IA) (bool, bool) { return false, false },
+		},
+		{name: "no echo"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var asked []addr.IA
+			svc := newLinkService(t, func(s *LinkService) {
+				if tc.echo != nil {
+					s.Echo = func(ctx context.Context, peer addr.IA) (bool, bool) {
+						asked = append(asked, peer)
+						return tc.echo(ctx, peer)
+					}
+				}
+			})
+			reply, err := linkRequest(context.Background(), svc, linkIA, "127.0.0.1:4242", 9)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if diff := cmp.Diff(tc.want, reply.RendezvousAnswered); diff != "" {
+				t.Errorf("the reply's report mismatch (-want +got):\n%s", diff)
+			}
+			if tc.echo != nil && !slices.Equal(asked, []addr.IA{linkIA}) {
+				t.Errorf("echoes asked of %v, want the requester %v alone", asked, linkIA)
+			}
+		})
+	}
 }

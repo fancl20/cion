@@ -256,7 +256,9 @@ func (n *Node) Sockets() underlay.Sockets {
 // listenUDP binds an unconnected UDP socket on the node's stack at the
 // concrete address given — per-family ports and immediate release are the
 // stack's own facts, so the remote hint names nothing to select. The stack
-// draws the port where the address names none.
+// draws the port where the address names none. The bind names no NIC, so
+// the stack checks the address against the one its NIC holds: an IPv4 bind
+// naming the NIC skips that check, and would bind a host the node lacks.
 func (n *Node) listenUDP(
 	listen *net.UDPAddr, _ netip.AddrPort,
 ) (underlay.UDPConn, error) {
@@ -271,7 +273,7 @@ func (n *Node) listenUDP(
 		return nil, fmt.Errorf("creating the UDP endpoint: %v", tcpErr)
 	}
 	if tcpErr := ep.Bind(tcpip.FullAddress{
-		NIC: 1, Addr: tcpip.AddrFrom4(ap.Addr().As4()), Port: ap.Port(),
+		Addr: tcpip.AddrFrom4(ap.Addr().As4()), Port: ap.Port(),
 	}); tcpErr != nil {
 		ep.Close()
 		return nil, bindError(tcpErr)
@@ -315,11 +317,16 @@ func listenAddr(listen *net.UDPAddr) (netip.AddrPort, error) {
 	return netip.AddrPortFrom(ip.Unmap(), uint16(listen.Port)), nil
 }
 
-// bindError carries a bind refusal in the errno shape the band allocation's
-// probe reads, the held port its own.
+// bindError carries a bind refusal in the errno shape the kernel gives: a
+// held port as EADDRINUSE, which the band allocation's probe reads, and a
+// host the stack does not hold as EADDRNOTAVAIL, which the published host's
+// check reads.
 func bindError(err tcpip.Error) error {
-	if _, ok := err.(*tcpip.ErrPortInUse); ok {
+	switch err.(type) {
+	case *tcpip.ErrPortInUse:
 		return os.NewSyscallError("bind", syscall.EADDRINUSE)
+	case *tcpip.ErrBadLocalAddress:
+		return os.NewSyscallError("bind", syscall.EADDRNOTAVAIL)
 	}
 	return fmt.Errorf("binding on the stack: %v", err)
 }

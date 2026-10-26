@@ -4,14 +4,17 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/netip"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/fancl20/cion/pkg/libs/statefile"
+	"github.com/fancl20/cion/pkg/libs/underlay"
 )
 
 // ExternalHostFile holds the learned external host in the state directory's
@@ -86,6 +89,21 @@ func (h *externalHost) host() netip.Addr {
 	h.mtx.Lock()
 	defer h.mtx.Unlock()
 	return h.current
+}
+
+// holds reports whether the host is one of the node's own addresses: one a
+// socket of the source binds. A bind refused with EADDRNOTAVAIL names a host
+// the node does not hold, a translator's; any other refusal is the error.
+func holds(sockets underlay.Sockets, host netip.Addr) (bool, error) {
+	conn, err := sockets.NewUDP(net.UDPAddrFromAddrPort(netip.AddrPortFrom(host, 0)), netip.AddrPort{})
+	if errors.Is(err, syscall.EADDRNOTAVAIL) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("binding the published host %s: %w", host, err)
+	}
+	_ = conn.Close()
+	return true, nil
 }
 
 // domainHost resolves the founding core's own identity to the address its

@@ -213,6 +213,7 @@ type nodeView struct {
 	Key      string    `json:"key"`
 	Expires  time.Time `json:"expires"`
 	Role     Role      `json:"role"`
+	Reach    Reach     `json:"reach,omitempty"`
 	Overlay  string    `json:"overlay,omitempty"`
 	Endpoint string    `json:"endpoint,omitempty"`
 	Issued   int       `json:"issued"`
@@ -234,6 +235,7 @@ func (a *App) handleNodes(w http.ResponseWriter, r *http.Request) {
 			Key:      n.Key,
 			Expires:  n.Expires,
 			Role:     n.Role,
+			Reach:    n.Reach,
 			Issued:   n.Issued,
 			Capacity: capacityOf(n.Overlay),
 		}

@@ -150,5 +150,15 @@ func (a *App) Application(name string) apps.Application {
 	return apps.AppOf(a.node.apps, name)
 }
 
+// NodeReach returns each node's report of how its peers reach it, as the
+// measured provider's directory copy holds them — the reports the portal
+// tags. A node under the file provider runs no directory and has none.
+func (a *App) NodeReach() map[addr.IA]apps.Reach {
+	if a.node.nodeReach == nil {
+		return nil
+	}
+	return a.node.nodeReach()
+}
+
 // Close stops the node and returns what Wait returns.
 func (a *App) Close() error { return a.node.group.Stop() }

@@ -25,6 +25,18 @@ const (
 	RoleNormal Role = "normal"
 )
 
+// Reach is the observed tag of a node peers cannot dial; the zero value
+// tags nothing.
+type Reach string
+
+const (
+	// ReachNAT tags a node behind a translator that peers cannot dial.
+	ReachNAT Reach = "nat"
+	// ReachDegraded tags a node peers cannot dial with no translator in
+	// front of it: a firewall or a network fault.
+	ReachDegraded Reach = "degraded"
+)
+
 // Node is one node holding a chain valid now, as the founder's records hold
 // it.
 type Node struct {
@@ -37,6 +49,9 @@ type Node struct {
 	Expires time.Time
 	// Role is the node's place in the trust fabric.
 	Role Role
+	// Reach is the node's observed tag, the zero value while peers can dial
+	// it or nothing was observed.
+	Reach Reach
 	// Overlay and Endpoint are the node's tailnet slice and host-facing
 	// endpoint, zero while the directory holds no entry of the node.
 	Overlay  netip.Prefix

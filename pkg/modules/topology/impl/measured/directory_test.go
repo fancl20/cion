@@ -2,6 +2,7 @@ package measured
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
@@ -13,6 +14,7 @@ import (
 
 	"connectrpc.com/connect/v2"
 	"connectrpc.com/connect/v2/connecthttp"
+	"github.com/google/go-cmp/cmp"
 	"github.com/scionproto/scion/pkg/addr"
 
 	"github.com/fancl20/cion/pkg/libs/peeria"
@@ -275,5 +277,78 @@ func TestDirectoryPublishResolvesHost(t *testing.T) {
 	_, wantRendezvous = published(host)
 	if got := store.List(time.Now())[0].RendezvousAddr; got != wantRendezvous {
 		t.Errorf("published rendezvous after learning = %v, want %v", got, wantRendezvous)
+	}
+}
+
+// TestDirectoryCarriesTheReach checks the report rides the directory: a
+// publisher's report lists as published, and an entry without one — an
+// earlier publisher's — lists the zero report.
+func TestDirectoryCarriesTheReach(t *testing.T) {
+	svc := &DirectoryService{Store: NewDirectoryStore()}
+	reported := directoryEntryPB("192.0.2.7:30042", "192.0.2.7:30043")
+	reported.Translated = true
+	reported.RendezvousUnanswered = true
+	if err := directoryPublish(context.Background(), svc, directoryIA, reported); err != nil {
+		t.Fatal(err)
+	}
+	earlier := addr.MustIAFrom(20, 0xfd0000000042)
+	if err := directoryPublish(context.Background(), svc, earlier,
+		directoryEntryPB("192.0.2.8:30042", "192.0.2.8:30043")); err != nil {
+		t.Fatal(err)
+	}
+	entries, err := directoryList(context.Background(), svc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := make(map[addr.IA]Reach, len(entries))
+	for _, e := range entries {
+		got[e.IA] = e.Reach
+	}
+	want := map[addr.IA]Reach{
+		directoryIA: {Translated: true, RendezvousUnanswered: true},
+		earlier:     {},
+	}
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("the listed reports mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// TestDirectoryPublishReportsReach checks the publication's report: each
+// cadence asks it at the host it resolved and the entry carries it, while a
+// report that fails fails the publication, which records nothing.
+func TestDirectoryPublishReportsReach(t *testing.T) {
+	store := NewDirectoryStore()
+	host := netip.MustParseAddr("203.0.113.7")
+	report := Reach{Translated: true, RendezvousUnanswered: true}
+	var asked []netip.Addr
+	var failure error
+	d := NewNodeDirectory(NodeDirectoryConfig{
+		IA:   directoryIA,
+		Host: func(context.Context) netip.Addr { return host },
+		Reach: func(h netip.Addr) (Reach, error) {
+			asked = append(asked, h)
+			return report, failure
+		},
+		Store: store,
+	})
+	ctx := context.Background()
+
+	failure = errors.New("binding the published host failed")
+	if err := d.publish(ctx); err == nil {
+		t.Fatal("a publication whose report failed succeeded")
+	}
+	if entries := store.List(time.Now()); len(entries) != 0 {
+		t.Fatalf("a failed report recorded %v, want nothing", entries)
+	}
+
+	failure = nil
+	if err := d.publish(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if entries := store.List(time.Now()); len(entries) != 1 || entries[0].Reach != report {
+		t.Fatalf("entries = %v, want the one carrying %+v", entries, report)
+	}
+	if want := []netip.Addr{host, host}; !slices.Equal(asked, want) {
+		t.Errorf("reports asked at %v, want %v", asked, want)
 	}
 }

@@ -159,3 +159,15 @@ The fabric's stacks refuse a bind on a host they do not hold with
     neither.
 
 ## Implementation history
+
+*   Landed as proposed: the acceptor's echo and the requester's answer
+    ([linkservice.go](/pkg/modules/topology/impl/measured/linkservice.go),
+    [provider.go](/pkg/modules/topology/impl/measured/provider.go)), the
+    published facts
+    ([directory.go](/pkg/modules/topology/impl/measured/directory.go),
+    [external.go](/pkg/modules/topology/impl/measured/external.go)), and the
+    tags ([portal.go](/pkg/apps/portal.go),
+    [portal.js](/pkg/apps/portal/portal.js)). The fabric's stacks bound any
+    IPv4 host a bind named beside their NIC, for the stack then checks the
+    interface alone, as Linux does; their binds now name no NIC, so the
+    stack checks the host ([fabric.go](/internal/testnetwork/fabric/fabric.go)).

@@ -28,8 +28,9 @@ const LinkMinInterval = time.Second
 // paths already reach asks over the control endpoint's authenticated
 // channel, the peer's chain identifying it. The acceptor applies its
 // admission policy, allocates its own interface ID and link address, records
-// the entry as established, and replies with them. The request is the
-// confirm: possession establishes, and a request the entry's own link
+// the entry as established, and replies with them and with whether the
+// requester's published rendezvous address answered its echo. The request
+// is the confirm: possession establishes, and a request the entry's own link
 // observed re-aims the entry's locator at the observation. Served by the
 // measured provider, mounted behind the peer middleware.
 type LinkService struct {
@@ -50,6 +51,10 @@ type LinkService struct {
 	// come from, the record the request's agreement rule reads. Nil serves
 	// none and no locator moves.
 	Observed func(ifID uint16) netip.AddrPort
+	// Echo echoes the peer's published rendezvous address and reports
+	// whether it answered; ok is false when the directory names no address
+	// for the peer. Nil echoes nothing, and the reply reports nothing.
+	Echo func(ctx context.Context, peer addr.IA) (answered, ok bool)
 
 	limiterOnce sync.Once
 	limiter     *ratelimit.Keyed[addr.IA]
@@ -78,7 +83,7 @@ var _ nodev1connect.LinkServiceHandler = (*LinkService)(nil)
 // request establishes — a candidate it lands on establishes, a live entry's
 // identity and the peer's interface ID refresh — and a request whose
 // arrival the entry's own link observed takes that observation as the
-// entry's locator.
+// entry's locator. The reply carries the echo's outcome too.
 func (s *LinkService) Request(
 	ctx context.Context,
 	req *nodev1.LinkRequest,
@@ -119,20 +124,28 @@ func (s *LinkService) Request(
 	// either race looks again: it refreshes the winner's entry, or records
 	// its own on a fresh address.
 	s.mtx.Lock()
-	defer s.mtx.Unlock()
 	entry, err := s.record(ctx, peer, linkAddr, uint16(req.IfId), arrival)
 	if errors.Is(err, links.ErrDuplicateNeighbor) || errors.Is(err, links.ErrDuplicateLocal) {
 		entry, err = s.record(ctx, peer, linkAddr, uint16(req.IfId), arrival)
 	}
+	s.mtx.Unlock()
 	if err != nil {
 		return nil, err
 	}
 	slog.Info("Link established", "neighbor", peer, "local", entry.Local,
 		"remote", entry.Remote, "interface", entry.IfID)
-	return &nodev1.LinkReply{
+	reply := &nodev1.LinkReply{
 		LocalAddr: entry.Local.String(),
 		IfId:      uint32(entry.IfID),
-	}, nil
+	}
+	// The echo runs outside the lock: an unanswered one spends the
+	// exchange's every attempt, which no other request waits on.
+	if s.Echo != nil {
+		if answered, ok := s.Echo(ctx, peer); ok {
+			reply.RendezvousAnswered = &answered
+		}
+	}
+	return reply, nil
 }
 
 // record lands the peer's entry as established: a peer the table lacks is

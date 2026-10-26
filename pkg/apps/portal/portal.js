@@ -29,6 +29,11 @@ const ROLES = {
   core: ["Core", "blue-outline"],
   normal: ["Normal", "muted-outline"],
 };
+// The observed tags of the nodes peers cannot dial.
+const REACH = {
+  nat: ["NAT", "violet"],
+  degraded: ["Degraded", "amber"],
+};
 const KEY_STATES = { spent: "Spent", revoked: "Revoked", expired: "Expired" };
 // The endpoints answering without a session, whose 401 signs nobody out.
 const PUBLIC_API = /^\/admin\/api\/(session|setup\/|login\/)/;
@@ -516,15 +521,21 @@ function decide(button, ask, verdict) {
 function renderNodes(list) {
   renderAsks(list?.asks ?? []);
   const query = $("#nodes-filter").value;
-  const nodes = (list?.nodes ?? []).filter(node => matches(query, [node.ia, node.key, node.overlay, node.endpoint]));
+  const nodes = (list?.nodes ?? []).filter(node =>
+    matches(query, [node.ia, node.key, node.overlay, node.endpoint, ...tags(node).map(([label]) => label)]));
   fillTable($("#nodes-rows"), nodes.map(nodeRow), emptyText(list, query, "No node holds a chain from this core yet."));
 }
 
-// One node: its ISD-AS and role, key, overlay, endpoint, issued addresses,
+// A node's tags: its role, then the observed tag when peers cannot dial it.
+function tags(node) {
+  return [ROLES[node.role], REACH[node.reach]].filter(Boolean);
+}
+
+// One node: its ISD-AS and tags, key, overlay, endpoint, issued addresses,
 // and certificate.
 function nodeRow(node) {
   return h("tr", null,
-    h("td", null, h("div", { class: "id" }, node.ia), h("div", { class: "below" }, badge(...ROLES[node.role]))),
+    h("td", null, h("div", { class: "id" }, node.ia), h("div", { class: "below tags" }, tags(node).map(tag => badge(...tag)))),
     h("td", null, shortKey(node.key)),
     h("td", null, node.overlay ? mono(node.overlay) : dash()),
     h("td", null, node.endpoint ? mono(node.endpoint) : dash()),

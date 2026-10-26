@@ -121,10 +121,11 @@ func (c *console) doWith(method, path string, body any,
 }
 
 // TestRecordsAPI checks the console's views of the records: the nodes beside
-// the method's node and vote asks, the slice's capacity counted; the hosts,
-// each beside its node's host endpoint and no asks beside them, none
-// available without the coordination application; and a release reaching
-// the records, a malformed key refused before it.
+// the method's node and vote asks, each with its observed tag and the
+// slice's capacity counted; the hosts, each beside its node's host endpoint
+// and no asks beside them, none available without the coordination
+// application; and a release reaching the records, a malformed key refused
+// before it.
 func TestRecordsAPI(t *testing.T) {
 	f, c, _ := signedIn(t)
 	f.records.nodes = []Node{{
@@ -132,6 +133,7 @@ func TestRecordsAPI(t *testing.T) {
 		Key:      "aa01",
 		Expires:  time.Date(2030, 1, 2, 3, 4, 5, 0, time.UTC),
 		Role:     RoleFounder,
+		Reach:    ReachNAT,
 		Overlay:  netip.MustParsePrefix("100.64.0.0/24"),
 		Endpoint: netip.MustParseAddrPort("198.51.100.10:41641"),
 		Issued:   2,
@@ -168,6 +170,7 @@ func TestRecordsAPI(t *testing.T) {
 		Key:      "aa01",
 		Expires:  time.Date(2030, 1, 2, 3, 4, 5, 0, time.UTC),
 		Role:     RoleFounder,
+		Reach:    ReachNAT,
 		Overlay:  "100.64.0.0/24",
 		Endpoint: "198.51.100.10:41641",
 		Issued:   2,

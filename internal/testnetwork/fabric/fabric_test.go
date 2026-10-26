@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net"
 	"net/netip"
+	"syscall"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -248,5 +249,20 @@ func TestDrawPortStaysBelowTheEphemeralRange(t *testing.T) {
 			t.Fatalf("binding drawn port %d: %v", port, err)
 		}
 		_ = c.Close()
+	}
+}
+
+// TestBindRefusesAHostTheStackLacks checks a bind's refusals carry the
+// kernel's errnos: a host the stack does not hold — a translator's gateway
+// among them — refuses with EADDRNOTAVAIL, and a held port with EADDRINUSE.
+func TestBindRefusesAHostTheStackLacks(t *testing.T) {
+	n := New(t).Node(insideAddr)
+	_, err := n.Sockets().NewUDP(&net.UDPAddr{IP: upstreamAddr.AsSlice()}, netip.AddrPort{})
+	if !errors.Is(err, syscall.EADDRNOTAVAIL) {
+		t.Errorf("a bind on a host the stack lacks = %v, want EADDRNOTAVAIL", err)
+	}
+	_, held := listen(t, n)
+	if _, err := n.Sockets().NewUDP(net.UDPAddrFromAddrPort(held), netip.AddrPort{}); !errors.Is(err, syscall.EADDRINUSE) {
+		t.Errorf("a bind on a held port = %v, want EADDRINUSE", err)
 	}
 }

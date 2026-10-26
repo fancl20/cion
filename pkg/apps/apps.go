@@ -116,6 +116,10 @@ type Environment struct {
 	// publish and fetch ride on every other node; the founding core needs
 	// none, serving the directory itself.
 	CoreRoute func() *scion.Addr
+	// NodeReach returns each node's report of how its peers reach it, by
+	// ISD-AS, as the node directory's local copy holds them; nil where the
+	// measured provider does not load.
+	NodeReach func() map[addr.IA]Reach
 	// Relay carries the relay derivation's inputs: the production form
 	// derives from the domain, and the harness's placement — its loopback
 	// address and pinned certificate — stands in for the domain and the
@@ -131,6 +135,17 @@ type Environment struct {
 type Paths interface {
 	Enumerate(ctx context.Context, dst addr.IA) ([]scion.Candidate, error)
 	LocalPath(dst addr.IA) (*spath.Decoded, error)
+}
+
+// Reach is a node's report of how its peers reach it, as its directory
+// entry publishes it. The zero value reports nothing observed.
+type Reach struct {
+	// Translated reports that the node's published host is not an address
+	// of its own: a translator stands between it and its peers.
+	Translated bool
+	// RendezvousUnanswered reports that the acceptor of the node's latest
+	// link request got no answer at its published rendezvous address.
+	RendezvousUnanswered bool
 }
 
 // RelayPlacement is the harness's stand-in for the production relay

@@ -14,19 +14,25 @@ message LinkRequest {
   uint32 if_id = 2;
 }
 
-// LinkReply carries the acceptor's side of the link: the address and
-// interface ID the requester sends to.
+// LinkReply carries the acceptor's side of the link — the address and
+// interface ID the requester sends to — beside whether the requester's
+// published rendezvous address answered the acceptor's echo.
 message LinkReply {
   // local_addr is the acceptor's link local underlay address, "host:port".
   string local_addr = 1;
   // if_id is the acceptor's interface ID of the link.
   uint32 if_id = 2;
+  // rendezvous_answered reports whether the requester's published
+  // rendezvous address answered the acceptor's echo; unset when the
+  // acceptor's directory names no address for the requester.
+  optional bool rendezvous_answered = 3;
 }
 
 // LinkService establishes links bilaterally between nodes that composed
 // paths already reach. The acceptor applies its admission policy — the
 // allowlist, the link-count cap, and the rate cap — records the link on its
-// side, and answers with its own addresses.
+// side, echoes the requester's published rendezvous address, and answers
+// with its own addresses and the echo's outcome.
 service LinkService {
   // Request admits the caller's link and answers the acceptor's side of it.
   rpc Request(LinkRequest) returns (LinkReply);

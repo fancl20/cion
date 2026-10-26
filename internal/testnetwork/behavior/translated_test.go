@@ -8,12 +8,14 @@ import (
 	"testing/synctest"
 	"time"
 
+	"github.com/google/go-cmp/cmp"
 	"github.com/scionproto/scion/pkg/scrypto"
 	"github.com/scionproto/scion/pkg/scrypto/cppki"
 
 	"github.com/fancl20/cion/internal/services"
 	"github.com/fancl20/cion/internal/testnetwork"
 	"github.com/fancl20/cion/internal/testnetwork/fabric"
+	"github.com/fancl20/cion/pkg/apps"
 	"github.com/fancl20/cion/pkg/apps/ping"
 	"github.com/fancl20/cion/pkg/core/webpki/webpkitest"
 	"github.com/fancl20/cion/pkg/modules/links"
@@ -222,11 +224,43 @@ func allNodes(n *network) []int {
 	return which
 }
 
+// reports maps each node's index to the reach the founder's directory copy
+// reports of it.
+func reports(n *network) map[int]apps.Reach {
+	reach := n.nodes[0].App().NodeReach()
+	got := make(map[int]apps.Reach, len(n.nodes))
+	for i, node := range n.nodes {
+		got[i] = reach[node.App().IA()]
+	}
+	return got
+}
+
+// awaitReports fails the test, naming what differs, unless the founder's
+// directory copy reports each node's reach as want holds it within budget.
+func awaitReports(t *testing.T, n *network, want map[int]apps.Reach, budget time.Duration) {
+	t.Helper()
+	start := time.Now()
+	for {
+		synctest.Wait()
+		diff := cmp.Diff(want, reports(n))
+		if diff == "" {
+			return
+		}
+		if time.Since(start) >= budget {
+			t.Fatalf("the founder's directory reports mismatch after %v (-want +got):\n%s",
+				budget, diff)
+		}
+		time.Sleep(settleSample)
+	}
+}
+
 // TestTranslatedNetworkReaches checks what the translated network serves
 // behind full-cone and port-restricted translators: it settles, and every
 // ordered pair reaches over its chosen path and answers a ping — the
 // translated nodes' links to the public nodes carrying their traffic both
 // ways, and every pair of translated nodes reaching through a public node.
+// The founder's directory reports each translated node translated and its
+// published rendezvous address unanswered, and each public node neither.
 func TestTranslatedNetworkReaches(t *testing.T) {
 	testnetwork.InBubble(t, func(t *testing.T, fab *fabric.Fabric, wpki *webpkitest.CA) {
 		n, _ := bootTranslated(t, fab, wpki, coneTranslators)
@@ -234,6 +268,10 @@ func TestTranslatedNetworkReaches(t *testing.T) {
 		awaitSettled(t, n.nodes, settleQuiet, translatedBudget)
 		awaitReach(t, n, reachBudget)
 		awaitPings(t, n, allNodes(n), reachBudget)
+		nat := apps.Reach{Translated: true, RendezvousUnanswered: true}
+		awaitReports(t, n, map[int]apps.Reach{
+			0: {}, 1: {}, 2: {}, 3: nat, 4: nat, 5: nat, 6: nat,
+		}, reachBudget)
 	})
 }
 

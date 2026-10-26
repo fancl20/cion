@@ -1,6 +1,6 @@
 # Tag the Nodes Peers Cannot Dial
 
-*   Status: proposed
+*   Status: accepted
 *   Date: 2026-10-26
 
 [TOC]

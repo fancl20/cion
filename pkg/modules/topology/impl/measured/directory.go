@@ -42,8 +42,9 @@ const (
 )
 
 // DirectoryEntry is one node's publication: everything the selection loop
-// needs to probe the node as a candidate. The ISD-AS comes from the
-// authenticated publisher's certificate chain, never from the claim.
+// needs to probe the node as a candidate, and the node's report of how its
+// peers reach it. The ISD-AS comes from the authenticated publisher's
+// certificate chain, never from the claim.
 type DirectoryEntry struct {
 	// IA is the publisher's ISD-AS.
 	IA addr.IA
@@ -54,8 +55,21 @@ type DirectoryEntry struct {
 	// acceptor listens on for first contact, the fixed rendezvous port on
 	// the published host.
 	RendezvousAddr netip.AddrPort
+	// Reach is the publisher's report of how its peers reach it.
+	Reach Reach
 	// Published is the publish time the core recorded.
 	Published time.Time
+}
+
+// Reach is a node's report of how its peers reach it. The zero value
+// reports nothing observed.
+type Reach struct {
+	// Translated reports that the node's published host is not an address
+	// of its own: a translator stands between it and its peers.
+	Translated bool
+	// RendezvousUnanswered reports that the acceptor of the node's latest
+	// link request got no answer at its published rendezvous address.
+	RendezvousUnanswered bool
 }
 
 // DirectoryStore is the core's in-memory directory. Entries expire without
@@ -162,14 +176,20 @@ func entryFromPB(pb *nodev1.Entry) (DirectoryEntry, error) {
 		IA:             addr.IA(pb.IsdAs),
 		ControlAddr:    control,
 		RendezvousAddr: rendezvous,
+		Reach: Reach{
+			Translated:           pb.Translated,
+			RendezvousUnanswered: pb.RendezvousUnanswered,
+		},
 	}, nil
 }
 
 func (e DirectoryEntry) pb() *nodev1.Entry {
 	return &nodev1.Entry{
-		IsdAs:          uint64(e.IA),
-		ControlAddr:    e.ControlAddr.String(),
-		RendezvousAddr: e.RendezvousAddr.String(),
+		IsdAs:                uint64(e.IA),
+		ControlAddr:          e.ControlAddr.String(),
+		RendezvousAddr:       e.RendezvousAddr.String(),
+		Translated:           e.Reach.Translated,
+		RendezvousUnanswered: e.Reach.RendezvousUnanswered,
 	}
 }
 
@@ -322,6 +342,10 @@ type NodeDirectoryConfig struct {
 	// resolution. Every socket keeps binding the control host whatever this
 	// returns, and an invalid host publishes nothing.
 	Host func(context.Context) netip.Addr
+	// Reach reports, at each publication, how the node's peers reach it at
+	// the published host; an error fails the publication. Nil reports
+	// nothing observed.
+	Reach func(host netip.Addr) (Reach, error)
 	// Engine provides the node's AS chain as the client certificate; a node
 	// without a chain cannot publish.
 	Engine *trust.Engine
@@ -407,10 +431,11 @@ func (d *NodeDirectory) runPublish(ctx context.Context) {
 
 // publish sends the node's entry once the node's chain exists: an un-enrolled
 // node has no certificate to authenticate the channel with. The entry is
-// built, not baked: its host resolves at each publication, so a host learned
-// or a domain's address changed mid-run publishes on the next cadence. A
-// host that resolves to none — the founding core's name before its first
-// answer — publishes nothing, the retry re-asking.
+// built, not baked: its host and its report resolve at each publication, so
+// a host learned, a domain's address changed, or a link's echo answered
+// mid-run publishes on the next cadence. A host that resolves to none — the
+// founding core's name before its first answer — publishes nothing, the
+// retry re-asking.
 func (d *NodeDirectory) publish(ctx context.Context) error {
 	if d.cfg.Engine != nil {
 		chain, err := d.cfg.Engine.Chain(ctx)
@@ -425,10 +450,18 @@ func (d *NodeDirectory) publish(ctx context.Context) error {
 	if !host.IsValid() {
 		return errors.New("the entry's host did not resolve")
 	}
+	var reach Reach
+	if d.cfg.Reach != nil {
+		var err error
+		if reach, err = d.cfg.Reach(host); err != nil {
+			return fmt.Errorf("reporting the entry's reach: %w", err)
+		}
+	}
 	return d.client.Publish(ctx, DirectoryEntry{
 		IA:             d.cfg.IA,
 		ControlAddr:    netip.AddrPortFrom(host, scionrpc.EndpointPort),
 		RendezvousAddr: netip.AddrPortFrom(host, RendezvousPort),
+		Reach:          reach,
 	})
 }
 
