@@ -5,6 +5,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/go-cmp/cmp"
+	"github.com/google/go-cmp/cmp/cmpopts"
 	"github.com/scionproto/scion/pkg/addr"
 
 	"github.com/fancl20/cion/pkg/libs/scion"
@@ -168,9 +170,10 @@ func TestCheapest(t *testing.T) {
 // the link nowhere, the freshest of them echoed; the price is the cheapest
 // survivor — the echoed one by its new echo, unanswered pricing nothing, a
 // surviving carrier by its baseline echo, any other by its declaration;
-// the route count reads the tier's other up links beside the survivors; a
-// link every route crosses leaves no survivor, no echo, and no price; and a
-// down link takes no measurement.
+// each member's price is the same over its own survivors, each route charged
+// the transit penalty per AS it crosses; the route count reads the tier's
+// other up links beside the survivors; a link every route crosses leaves no
+// survivor, no echo, and no price; and a down link takes no measurement.
 func TestMeasureExcluded(t *testing.T) {
 	verdicts := map[uint16]bool{1: true, 2: true, 4: false, 5: true}
 	neighbors := map[addr.IA]*links.Link{
@@ -215,24 +218,36 @@ func TestMeasureExcluded(t *testing.T) {
 	}
 	fast, slow := &ts[0], &ts[1]
 
+	opts := []cmp.Option{cmp.AllowUnexported(excludedSample{}), cmpopts.EquateEmpty()}
 	// Excluding A's link: B's carrier is the freshest survivor, priced by
 	// its new 26ms echo, and A's surviving carrier by its 22ms baseline —
-	// the price. B's link and the declared third route keep two routes.
-	want := excludedSample{echo: 26 * time.Millisecond, price: 22 * time.Millisecond, routes: 2}
-	if got := fast.excluded[selA]; got != want {
-		t.Errorf("A's excluded measurement = %+v, want %+v", got, want)
+	// the price. B's link and the declared third route keep two routes. A's
+	// own price rides B's link, one transit: 22ms and 10ms more.
+	want := excludedSample{
+		echo:   26 * time.Millisecond,
+		price:  22 * time.Millisecond,
+		routes: 2,
+		prices: map[addr.IA]time.Duration{selA: 32 * time.Millisecond, selB: 26 * time.Millisecond},
+	}
+	if diff := cmp.Diff(want, fast.excluded[selA], opts...); diff != "" {
+		t.Errorf("A's excluded measurement (-want +got):\n%s", diff)
 	}
 	// Excluding B's link: A's own route is the freshest survivor and goes
-	// unanswered, pricing nothing; the declared route prices at 60ms.
-	want = excludedSample{price: 60 * time.Millisecond, routes: 2}
-	if got := fast.excluded[selB]; got != want {
-		t.Errorf("B's excluded measurement = %+v, want %+v", got, want)
+	// unanswered, pricing nothing; the declared route prices at 60ms, and
+	// B at 70ms with its one transit.
+	want = excludedSample{
+		price:  60 * time.Millisecond,
+		routes: 2,
+		prices: map[addr.IA]time.Duration{selB: 70 * time.Millisecond},
+	}
+	if diff := cmp.Diff(want, fast.excluded[selB], opts...); diff != "" {
+		t.Errorf("B's excluded measurement (-want +got):\n%s", diff)
 	}
 	if _, ok := fast.excluded[selD]; ok {
 		t.Error("the down link took an excluded measurement")
 	}
 	// E's link is crossed by every route into its tier.
-	if got := slow.excluded[selE]; got != (excludedSample{}) {
-		t.Errorf("E's excluded measurement = %+v, want none", got)
+	if diff := cmp.Diff(excludedSample{}, slow.excluded[selE], opts...); diff != "" {
+		t.Errorf("E's excluded measurement (-want +got):\n%s", diff)
 	}
 }

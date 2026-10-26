@@ -160,3 +160,26 @@ converges, each end applying its own rule to the links it dialed.
     runs each.
 
 ## Implementation history
+
+*   Landed as proposed: member prices, promotion by a candidate's own price,
+    and the useless test's members
+    ([tiers.go](/pkg/modules/topology/impl/measured/tiers.go)), with the
+    transit penalty and the margin floor
+    ([selection.go](/pkg/modules/topology/impl/measured/selection.go)). A
+    member cut off decides a link useful whether a route prices it or not,
+    where the measured copy passed over members no route priced. Across five
+    runs, the regions network settled on 20 or 21 links, its worst pair 1.23
+    to 1.24 times the reference under the 5ms penalty, against 1.97 to 2.13;
+    graded offline, its worst pair after any single cut stood 1.31 to 1.54
+    times, against 2.53 to 4.83. It stored 151 to 197 up segment records,
+    against 92 to 109. The stranded network never left a 7-times pair.
+*   Cuts recover more slowly. Right after the regions cut, 50 to 60 of 72
+    pairs reached, against 56 to 63. Every pair reached again before the
+    scenario ended in two of the five runs, at 345 and 615 seconds, and in
+    four of five further cut runs, at 263 to 679 seconds; before the change,
+    in every run, at 261 to 320 seconds. In the further run that ended short,
+    read pair by pair, the two pairs left held no fresh candidate five
+    minutes after the cut, so the rank fell back to declared latencies and
+    chose paths over gone links: the cut one, and one retired before it. The
+    recovery time's upper bound is left to a follow-up: how long a pair can
+    hold no fresh candidate after a cut, and what delays its fresh segments.

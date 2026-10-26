@@ -35,6 +35,10 @@ type tier struct {
 	// by its baseline echo, any other clean candidate by its declared sum.
 	// Zero when nothing prices the tier, and no priced rule fires on it.
 	price time.Duration
+	// prices is each member's own price: the cheapest clean route into the
+	// member, priced as memberPrice prices routes. A member no route prices
+	// is absent.
+	prices map[addr.IA]time.Duration
 	// routes is the independent routes into the tier, saturated at two.
 	routes int
 	// stranded reports that no up link and no answered composed route reach
@@ -66,6 +70,13 @@ type excludedSample struct {
 	// routes is the tier's route count without the link: its other up links
 	// beside the survivors, saturated at two.
 	routes int
+	// prices is each member's price over its survivors, transits charged:
+	// the freshest by the echo above, a surviving carrier by its baseline
+	// echo, any other by its declared sum. A member no survivor prices is
+	// absent.
+	prices map[addr.IA]time.Duration
+	// cutOff holds the members a clean route reaches and no survivor does.
+	cutOff map[addr.IA]bool
 }
 
 // deriveTiers classes the window's samples by direct round trip: walked
@@ -141,6 +152,13 @@ func (s *selection) windowTiers(
 			}
 		}
 		t.price = cheapest(echoes, routes, probed)
+		t.prices = make(map[addr.IA]time.Duration, len(t.members))
+		for _, m := range t.members {
+			sm := samples[m.ia]
+			if p := memberPrice(sm.carrier, sm.m.path, clean[m.ia], probed); p > 0 {
+				t.prices[m.ia] = p
+			}
+		}
 		t.routes = routeCount(t.upLinks, routes)
 		t.stranded = len(t.upLinks) == 0 && t.baseline == 0
 		t.excluded = make(map[addr.IA]excludedSample, len(up))
@@ -200,15 +218,43 @@ func (s *selection) measureExcluded(
 		}
 	}
 	ex.price = cheapest(echoes, survivors, probed)
+	ex.prices = make(map[addr.IA]time.Duration, len(t.members))
+	ex.cutOff = make(map[addr.IA]bool)
+	for _, m := range t.members {
+		var own []*scion.Candidate
+		for _, c := range clean[m.ia] {
+			if slices.Contains(survivors, c) {
+				own = append(own, c)
+			}
+		}
+		if len(clean[m.ia]) > 0 && len(own) == 0 {
+			ex.cutOff[m.ia] = true
+			continue
+		}
+		price := memberPrice(nil, 0, own, probed)
+		if dst.Equal(m.ia) {
+			price = lower(price, memberPrice(freshest, ex.echo, nil, probed))
+		}
+		if c := samples[m.ia].carrier; c != nil && c != freshest && slices.Contains(own, c) {
+			price = lower(price, memberPrice(c, samples[m.ia].m.path, nil, probed))
+		}
+		if price > 0 {
+			ex.prices[m.ia] = price
+		}
+	}
 	return ex
 }
 
 // judge reads an up link's useless test off its tier this window. The
 // window decides when the tier is priced and the freshest route avoiding the
-// link answered its echo; it decides useless when the link's exclusion
-// leaves the tier's route count unchanged and its price no worse than the
-// demotion ratio above the tier's. A link no answered route avoids decides
-// nothing — the cut-critical link, which no useless retirement takes.
+// link answered its echo. It decides useless when the link's exclusion
+// leaves the tier's route count unchanged and its price within the demotion
+// ratio of the tier's, cuts no member off, and leaves every priced member a
+// survivor within the demotion ratio of its own price — the link's own
+// neighbor of its direct round trip, the sample promotion compares with the
+// same price. A member no survivor prices holds nothing against the link. A
+// link no answered route avoids decides nothing — the cut-critical link,
+// which no useless retirement takes.
 func judge(t *tier, ia addr.IA) (decided, useless bool) {
 	if t == nil || t.price == 0 {
 		return false, false
@@ -217,7 +263,19 @@ func judge(t *tier, ia addr.IA) (decided, useless bool) {
 	if !ok || ex.echo == 0 {
 		return false, false
 	}
-	return true, ex.routes == t.routes && ex.price <= ratioOf(t.price, DemotionRatio)
+	if ex.routes != t.routes || ex.price > ratioOf(t.price, DemotionRatio) {
+		return true, false
+	}
+	for _, m := range t.members {
+		price := t.prices[m.ia]
+		if m.ia.Equal(ia) {
+			price = m.direct
+		}
+		if ex.cutOff[m.ia] || price > 0 && ex.prices[m.ia] > ratioOf(price, DemotionRatio) {
+			return true, false
+		}
+	}
+	return true, true
 }
 
 // harm is how far a link's exclusion moves its tier's price.
@@ -242,15 +300,63 @@ func tierOf(ts []tier, ia addr.IA) *tier {
 	return nil
 }
 
-// qualifies reports whether a direct round trip earns a link into the tier
+// qualifies reports whether the member's direct round trip earns a link
 // under the priced admission cases: a second route for a single-route tier
-// within the demotion ratio of the price — redundancy purchased at a
-// bounded latency price — or a round trip beating the price by the
-// promotion ratio. An unpriced tier qualifies nothing.
-func (t *tier) qualifies(direct time.Duration) bool {
+// within the demotion ratio of the tier's price — redundancy purchased at a
+// bounded latency price — or a round trip beating the member's own price,
+// the tier's when no route prices the member, by the promotion ratio and by
+// at least the margin floor. An unpriced tier qualifies nothing.
+func (t *tier) qualifies(ia addr.IA, direct time.Duration) bool {
 	if t.price == 0 {
 		return false
 	}
-	return direct < ratioOf(t.price, PromotionRatio) ||
-		(t.routes == 1 && direct <= ratioOf(t.price, DemotionRatio))
+	price := t.prices[ia]
+	if price == 0 {
+		price = t.price
+	}
+	beats := direct < ratioOf(price, PromotionRatio) && price-direct >= MarginFloor
+	return beats || (t.routes == 1 && direct <= ratioOf(t.price, DemotionRatio))
+}
+
+// memberPrice prices one member's routes by the cheapest of them, each
+// charged TransitPenalty for every AS it crosses between its ends, each way:
+// the carrier by its echo — an unanswered one pricing nothing — and every
+// other route the window did not probe by its declared one-way sum, doubled
+// to meet the round trips it is judged against. A route whose sum is unknown
+// prices nothing. Zero when nothing prices the member.
+func memberPrice(
+	carrier *scion.Candidate,
+	echo time.Duration,
+	routes []*scion.Candidate,
+	probed map[*scion.Candidate]bool,
+) time.Duration {
+
+	var price time.Duration
+	if carrier != nil && echo > 0 {
+		price = echo + transitCost(carrier)
+	}
+	for _, c := range routes {
+		if !probed[c] && c.Latency != nil {
+			price = lower(price, 2**c.Latency+transitCost(c))
+		}
+	}
+	return price
+}
+
+// transitCost is what a route's transits add to its round trip: the
+// penalty for every AS of its link set beyond its two ends, each way.
+func transitCost(c *scion.Candidate) time.Duration {
+	ases := make(map[addr.IA]bool, len(c.Links))
+	for _, l := range c.Links {
+		ases[l.IA] = true
+	}
+	return 2 * TransitPenalty * time.Duration(max(0, len(ases)-2))
+}
+
+// lower returns the smaller of two prices, a zero pricing nothing.
+func lower(a, b time.Duration) time.Duration {
+	if a == 0 || b > 0 && b < a {
+		return b
+	}
+	return a
 }

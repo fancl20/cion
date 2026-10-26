@@ -1,6 +1,6 @@
 # Price Each Peer by Its Own Route
 
-*   Status: proposed
+*   Status: accepted
 *   Date: 2026-10-26
 
 [TOC]

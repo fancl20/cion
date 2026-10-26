@@ -27,9 +27,9 @@ import (
 // The selection loop's constants (no operator tuning). A node keeps at least
 // NeighborFloor up links no single failure can partition it from, caps the
 // count to bound beaconing fan-out, promotes a candidate whose direct link
-// earns its place against its tier's price, demotes a neighbor whose
-// exclusion serves its tier no worse, and damp both directions to sustained
-// evidence — every link change re-shapes segments network-wide.
+// earns its place against its own price, demotes a neighbor whose exclusion
+// serves its tier and every member no worse, and damp both directions to
+// sustained evidence — every link change re-shapes segments network-wide.
 const (
 	// SelectionInterval is the evaluation window.
 	SelectionInterval = 30 * time.Second
@@ -39,10 +39,18 @@ const (
 	NeighborFloor = 2
 	// MaxNeighbors caps the neighbor count.
 	MaxNeighbors = 8
-	// PromotionRatio: a direct link must beat its tier's price by it.
+	// PromotionRatio: a direct link must beat its peer's price by it.
 	PromotionRatio = 0.8
-	// DemotionRatio: a direct link may lose to its tier's price by it.
+	// DemotionRatio: a route may lose to the price it is judged against —
+	// the tier's, a member's, or the neighbor's direct round trip — by it.
 	DemotionRatio = 1.25
+	// MarginFloor is the least a direct round trip must beat its peer's
+	// price by to promote: a smaller gain is jitter on a fast link.
+	MarginFloor = 2 * time.Millisecond
+	// TransitPenalty is what each AS a route crosses between its ends adds
+	// to the route's one-way price: the forwarding a transit costs, and one
+	// more failure on the way.
+	TransitPenalty = 5 * time.Millisecond
 	// TierGap is the multiple of a tier's median direct round trip at which
 	// a peer opens the next tier.
 	TierGap = 2.0
@@ -667,10 +675,11 @@ func (s *selection) echoRTT(ctx context.Context, dst *scion.Addr) time.Duration 
 // no answered composed route reach the tier, and the establishment rides
 // the rendezvous exchange that reaches where no path does. A single-route
 // tier admits a second member within the demotion ratio of the price, and a
-// tier whose price a candidate beats by the promotion ratio admits it — the
-// priced cases sustained, the sustained winner the fastest direct sample
-// among qualifiers. At the cap every case requires an eviction that
-// qualifies under retirement, the floor and stranded cases included.
+// candidate whose direct round trip beats its own price by the promotion
+// ratio and the margin floor is admitted — the priced cases sustained, the
+// sustained winner the fastest direct sample among qualifiers. At the cap
+// every case requires an eviction that qualifies under retirement, the
+// floor and stranded cases included.
 func (s *selection) promote(
 	ctx context.Context,
 	entries []*links.Link,
@@ -738,7 +747,7 @@ func (s *selection) promote(
 			!s.qualifies(e.IA, samples, ts) {
 			continue
 		}
-		s.admit(ctx, entries, neighbors, ts, samples, e, "its direct link beats its tier's price")
+		s.admit(ctx, entries, neighbors, ts, samples, e, "its direct link beats its own price")
 		return
 	}
 }
@@ -753,7 +762,7 @@ func (s *selection) qualifies(ia addr.IA, samples map[addr.IA]sample, ts []tier)
 		return false
 	}
 	t := tierOf(ts, ia)
-	return t != nil && t.qualifies(sm.m.direct)
+	return t != nil && t.qualifies(ia, sm.m.direct)
 }
 
 // admit lands a promotion, evicting at the cap first: the victim is the

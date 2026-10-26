@@ -325,10 +325,10 @@ func TestSelectionStrandedPromotion(t *testing.T) {
 }
 
 // TestSelectionPricedPromotion checks the beaten-baseline case: a candidate
-// whose direct round trip beats its tier's price by the promotion ratio is
-// promoted on the second consecutive good window, never on the first, and a
-// candidate that beats no price never is — however cheap the declarations
-// its unreachable self would price.
+// no route prices, whose direct round trip beats its tier's price by the
+// promotion ratio, is promoted on the second consecutive good window, never
+// on the first, and a candidate that beats no price never is — however cheap
+// the declarations its unreachable self would price.
 func TestSelectionPricedPromotion(t *testing.T) {
 	f := newSelFixture(t, selPeer, selA)                        // at the floor
 	f.candidate(selB, 8*time.Millisecond, 20*time.Millisecond)  // beats 0.8 of the 20ms price
@@ -354,6 +354,33 @@ func TestSelectionPricedPromotion(t *testing.T) {
 	}
 	if f.hasEntry(t, selD) {
 		t.Error("an unreachable candidate was promoted")
+	}
+}
+
+// TestSelectionOwnPricePromotion checks promotion by a candidate's own
+// price: a candidate whose one route detours through two transits promotes
+// though a neighbor prices the tier below the candidate's round trip, while
+// a faster candidate no route prices beats the tier's price by the promotion
+// ratio but by less than the margin floor, and does not.
+func TestSelectionOwnPricePromotion(t *testing.T) {
+	f := newSelFixture(t, selPeer, selA) // at the floor
+	// A's baseline over its own link prices the tier at 8ms.
+	f.carried(selA, 10*time.Millisecond, 8*time.Millisecond, f.via(t, selA, 0, selA))
+	// B's one route crosses A and X, declaring 12ms one way: 44ms with its
+	// transits, which B's 16ms beats.
+	f.candidate(selB, 16*time.Millisecond, 0,
+		route(0, 12*time.Millisecond, local(f.ifID(t, selA)), link(selA), link(selX), link(selB)))
+	// C's 6.3ms is within the ratio of the tier's 8ms, short of the floor.
+	f.candidate(selC, 6300*time.Microsecond, 0)
+
+	f.pass(t)
+	f.pass(t)
+	if len(f.established) != 1 || !f.established[0].Equal(selB) {
+		t.Fatalf("promoted %v, want the candidate its own route detours %v", f.established, selB)
+	}
+	f.pass(t)
+	if f.hasEntry(t, selC) {
+		t.Error("a candidate within the margin floor of its price was promoted")
 	}
 }
 
@@ -435,16 +462,17 @@ func TestSelectionOneEstablishment(t *testing.T) {
 }
 
 // TestSelectionUselessRetirement checks the useless rule: an up link whose
-// exclusion leaves its tier's route count unchanged and its price within
-// the demotion ratio retires on the third consecutive window decided
-// useless — the survivor measured each window — and never at the floor of
-// up links.
+// exclusion leaves its tier's route count unchanged, its price within the
+// demotion ratio, and every member a route within the ratio of its own price
+// retires on the third consecutive window decided useless — the survivor
+// measured each window — and never at the floor of up links.
 func TestSelectionUselessRetirement(t *testing.T) {
 	f := newSelFixture(t, selPeer, selA, selB) // above the floor of two
-	// A's baseline rides Peer's link: excluding A's link leaves the tier two
-	// up links and the route through Peer answering at the price — useless —
-	// and A's own round trip earns nothing.
-	f.carried(selA, 18*time.Millisecond, 20*time.Millisecond, f.via(t, selPeer, 0, selPeer, selA))
+	// A's baseline rides Peer's link at 12ms: excluding A's link leaves the
+	// tier two up links, the route through Peer answering at the price, and
+	// A a route within the demotion ratio of its 18ms round trip, its one
+	// transit charged — useless — and A's own round trip earns nothing.
+	f.carried(selA, 18*time.Millisecond, 12*time.Millisecond, f.via(t, selPeer, 0, selPeer, selA))
 
 	f.pass(t)
 	f.pass(t)
@@ -456,12 +484,12 @@ func TestSelectionUselessRetirement(t *testing.T) {
 		t.Fatal("a durably useless neighbor was not retired")
 	}
 
-	// At the floor, the same useless evidence retires nothing: Peer's
-	// baseline rides B's link, and a route through a third interface keeps
-	// the tier's two routes without Peer's link.
-	f.carried(selPeer, 10*time.Millisecond, 20*time.Millisecond,
-		f.via(t, selB, 0, selB, selPeer),
-		route(-time.Minute, 0, local(9), link(selX), link(selPeer)))
+	// At the floor, the same useless evidence retires nothing: B's baseline
+	// rides Peer's link as A's did, and a route through a third interface
+	// keeps the tier's two routes without B's link.
+	f.carried(selB, 18*time.Millisecond, 12*time.Millisecond,
+		f.via(t, selPeer, 0, selPeer, selB),
+		route(-time.Minute, 0, local(9), link(selX), link(selB)))
 	for range 5 {
 		f.pass(t)
 	}
@@ -478,7 +506,7 @@ func TestSelectionUselessRetirement(t *testing.T) {
 func TestSelectionAcceptedLinkStands(t *testing.T) {
 	f := newSelFixture(t, selPeer, selA, selB) // above the floor of two
 	f.accept(t, selA)
-	f.carried(selA, 18*time.Millisecond, 20*time.Millisecond, f.via(t, selPeer, 0, selPeer, selA))
+	f.carried(selA, 18*time.Millisecond, 12*time.Millisecond, f.via(t, selPeer, 0, selPeer, selA))
 	for range 2 * DemoteWindows {
 		f.pass(t)
 	}
@@ -495,14 +523,8 @@ func TestSelectionAcceptedLinkStands(t *testing.T) {
 
 	// At the cap, B — useless, the least harm, and a peer's dial — is the
 	// victim that admits D, as in TestSelectionCapEviction.
-	neighbors := []addr.IA{selPeer, selA, selB, selC}
-	f = newSelFixture(t, neighbors...)
-	f.sel.cfg.MaxLinks = len(neighbors)
+	f = capFixture(t)
 	f.accept(t, selB)
-	f.carried(selA, 10*time.Millisecond, 20*time.Millisecond, f.via(t, selPeer, 0, selPeer, selA))
-	f.carried(selB, 12*time.Millisecond, 20*time.Millisecond, f.via(t, selPeer, 0, selPeer, selB))
-	f.carried(selC, 10*time.Millisecond, 16*time.Millisecond, f.via(t, selA, 0, selA, selC))
-	f.candidate(selD, 8*time.Millisecond, 20*time.Millisecond)
 	f.pass(t)
 	f.pass(t)
 	if len(f.established) != 1 || !f.established[0].Equal(selD) {
@@ -520,7 +542,7 @@ func TestSelectionAcceptedLinkStands(t *testing.T) {
 func TestSelectionOwnFloor(t *testing.T) {
 	f := newSelFixture(t, selPeer, selA, selB) // up links above the floor
 	f.accept(t, selB)
-	f.carried(selA, 18*time.Millisecond, 20*time.Millisecond, f.via(t, selPeer, 0, selPeer, selA))
+	f.carried(selA, 18*time.Millisecond, 12*time.Millisecond, f.via(t, selPeer, 0, selPeer, selA))
 	for range 2 * DemoteWindows {
 		f.pass(t)
 	}
@@ -546,14 +568,44 @@ func TestSelectionOwnFloor(t *testing.T) {
 func TestSelectionSecondRouteKept(t *testing.T) {
 	f := newSelFixture(t, selPeer, selA, selB, selC)
 	// A slow tier of B and C, both reached over B's link alone besides C's
-	// own: excluding C's link leaves B's route at the price, and one route.
+	// own: excluding C's link leaves B's route at the price, C's within the
+	// ratio of its round trip with its transit charged, and one route.
 	f.carried(selB, 50*time.Millisecond, 60*time.Millisecond, f.via(t, selB, 0, selB))
-	f.carried(selC, 55*time.Millisecond, 60*time.Millisecond, f.via(t, selB, 0, selB, selC))
+	f.carried(selC, 60*time.Millisecond, 60*time.Millisecond, f.via(t, selB, 0, selB, selC))
 	for range 5 {
 		f.pass(t)
 	}
 	if f.state(t, selC) != links.StateEstablished {
 		t.Error("the tier's second route retired as useless")
+	}
+}
+
+// TestSelectionLinkKeptForItsRoutes checks the useless test's members: a
+// link stays while its neighbor keeps no route within the demotion ratio of
+// its round trip, transits charged, and while another member's route needs
+// it — though its exclusion leaves the tier's price and route count as they
+// were.
+func TestSelectionLinkKeptForItsRoutes(t *testing.T) {
+	f := newSelFixture(t, selPeer, selA, selB) // above the floor of two
+	// B's baseline rides Peer's link at 10ms and prices the tier: 20ms with
+	// its transit, past the ratio of B's 10ms round trip.
+	f.carried(selB, 10*time.Millisecond, 10*time.Millisecond, f.via(t, selPeer, 0, selPeer, selB))
+	// C's cheap route rides A's link and prices C at 22ms; its other route
+	// detours through Peer and X at 60ms.
+	f.candidate(selC, 19*time.Millisecond, 0,
+		route(-time.Minute, 6*time.Millisecond,
+			local(f.ifID(t, selA)), link(selA), link(selC)),
+		route(-time.Minute, 20*time.Millisecond,
+			local(f.ifID(t, selPeer)), link(selPeer), link(selX), link(selC)))
+
+	for range 2 * DemoteWindows {
+		f.pass(t)
+	}
+	if f.state(t, selA) != links.StateEstablished {
+		t.Error("a link retired while a member's route needs it")
+	}
+	if f.state(t, selB) != links.StateEstablished {
+		t.Error("a link retired while its neighbor's other route is past the ratio")
 	}
 }
 
@@ -565,7 +617,7 @@ func TestSelectionRetirementCounts(t *testing.T) {
 	// A down window between useless ones holds the useless count: the link
 	// retires on the third useless window, not on the down one.
 	f := newSelFixture(t, selPeer, selA, selB)
-	f.carried(selA, 18*time.Millisecond, 20*time.Millisecond, f.via(t, selPeer, 0, selPeer, selA))
+	f.carried(selA, 18*time.Millisecond, 12*time.Millisecond, f.via(t, selPeer, 0, selPeer, selA))
 	f.pass(t)
 	f.pass(t)
 	f.down[selA] = true
@@ -604,7 +656,7 @@ func TestSelectionRetirementCounts(t *testing.T) {
 	// retires A.
 	f = newSelFixture(t, selPeer, selA)
 	carrier := f.via(t, selPeer, 0, selPeer, selA)
-	f.carried(selA, 18*time.Millisecond, 20*time.Millisecond, carrier,
+	f.carried(selA, 18*time.Millisecond, 12*time.Millisecond, carrier,
 		route(-time.Minute, 0, local(9), link(selX), link(selA)))
 	for range DemoteWindows + 1 {
 		f.pass(t)
@@ -623,7 +675,7 @@ func TestSelectionRetirementCounts(t *testing.T) {
 	if f.state(t, selA) != links.StateEstablished {
 		t.Fatal("a count at the threshold retired the link in an undecided window")
 	}
-	f.echoes[routeKey(&carrier)] = 20 * time.Millisecond
+	f.echoes[routeKey(&carrier)] = 12 * time.Millisecond
 	f.pass(t)
 	if f.state(t, selA) != links.StateRetired {
 		t.Fatal("a window decided useless past the threshold did not retire the link")
@@ -689,10 +741,12 @@ func TestSelectionFloorCountsUpLinks(t *testing.T) {
 // the routes the others' exclusions were measured against.
 func TestSelectionOneUpLinkPerWindow(t *testing.T) {
 	f := newSelFixture(t, selPeer, selA, selB, selC, selD)
-	// A, B, and C ride Peer's link: every exclusion but Peer's leaves the
-	// tier two up links and an answered route at the price.
+	// A, B, and C ride Peer's link at 12ms, within the demotion ratio of
+	// their 18ms round trips with the transit charged: every exclusion but
+	// Peer's leaves the tier two up links and an answered route at the
+	// price.
 	for _, ia := range []addr.IA{selA, selB, selC} {
-		f.carried(ia, 18*time.Millisecond, 20*time.Millisecond, f.via(t, selPeer, 0, selPeer, ia))
+		f.carried(ia, 18*time.Millisecond, 12*time.Millisecond, f.via(t, selPeer, 0, selPeer, ia))
 	}
 	retired := func() int {
 		n := 0
@@ -726,12 +780,12 @@ func TestSelectionEvictionBlocksPrune(t *testing.T) {
 	f.sel.cfg.MaxLinks = len(neighbors)
 	// A and B ride Peer's link, useless from the first window; B is the
 	// slower direct sample.
-	f.carried(selA, 18*time.Millisecond, 20*time.Millisecond, f.via(t, selPeer, 0, selPeer, selA))
-	f.carried(selB, 19*time.Millisecond, 20*time.Millisecond, f.via(t, selPeer, 0, selPeer, selB))
+	f.carried(selA, 18*time.Millisecond, 12*time.Millisecond, f.via(t, selPeer, 0, selPeer, selA))
+	f.carried(selB, 19*time.Millisecond, 12*time.Millisecond, f.via(t, selPeer, 0, selPeer, selB))
 	f.pass(t)
-	// D beats the price, sustained from the second window: the third
-	// window evicts at the cap while A's useless count reaches the
-	// threshold.
+	// D, which no route prices, beats the tier's price, sustained from the
+	// second window: the third window evicts at the cap while A's useless
+	// count reaches the threshold.
 	f.candidate(selD, 8*time.Millisecond, 20*time.Millisecond)
 	f.pass(t)
 	f.pass(t)
@@ -760,7 +814,7 @@ func TestSelectionCutCritical(t *testing.T) {
 	// B is the slow tier's only link, and every route into the tier rides it.
 	f.carried(selB, 50*time.Millisecond, 60*time.Millisecond, f.via(t, selB, 0, selB))
 	// A is useless in the fast tier, its baseline riding Peer's link.
-	f.carried(selA, 18*time.Millisecond, 20*time.Millisecond, f.via(t, selPeer, 0, selPeer, selA))
+	f.carried(selA, 18*time.Millisecond, 12*time.Millisecond, f.via(t, selPeer, 0, selPeer, selA))
 
 	for range 5 {
 		f.pass(t)
@@ -781,6 +835,31 @@ func TestSelectionCutCritical(t *testing.T) {
 	}
 }
 
+// capFixture builds the cap's fixture: Peer, A, B, and C at a cap of four in
+// one tier, and the candidate D, whose one route through Peer prices it at
+// 50ms. C's baseline rides A's link and sets the tier's price at 16ms:
+// excluding A's link raises it to 18ms, a harm of 2ms, and C keeps its
+// declared route through Peer. Excluding B's or C's link moves the price by
+// nothing, and B is the slower direct sample. Without any one of the three,
+// every member keeps a route within the demotion ratio of its own price,
+// transits charged; without Peer's, A, B, and D keep none.
+func capFixture(t *testing.T) *selFixture {
+	t.Helper()
+	neighbors := []addr.IA{selPeer, selA, selB, selC}
+	f := newSelFixture(t, neighbors...)
+	f.sel.cfg.MaxLinks = len(neighbors)
+	viaPeer := func(oneWay time.Duration, ia addr.IA) scion.Candidate {
+		return route(-time.Minute, oneWay, local(f.ifID(t, selPeer)), link(selPeer), link(ia))
+	}
+	f.samples[selPeer] = sm(30*time.Millisecond, 0)
+	f.carried(selA, 30*time.Millisecond, 18*time.Millisecond, f.via(t, selPeer, 0, selPeer, selA))
+	f.carried(selB, 36*time.Millisecond, 18*time.Millisecond, f.via(t, selPeer, 0, selPeer, selB))
+	f.carried(selC, 30*time.Millisecond, 16*time.Millisecond,
+		f.via(t, selA, 0, selA, selC), viaPeer(10*time.Millisecond, selC))
+	f.candidate(selD, 24*time.Millisecond, 0, viaPeer(20*time.Millisecond, selD))
+	return f
+}
+
 // TestSelectionCapEviction checks the cap: at it, an admission evicts the
 // retirement-qualified neighbor whose exclusion moves its tier's price
 // least, ties to the slower direct sample; none qualifying means no
@@ -788,17 +867,7 @@ func TestSelectionCutCritical(t *testing.T) {
 // never evicted and the promotion waits; and a down link whose count
 // reached DemoteWindows goes at no harm.
 func TestSelectionCapEviction(t *testing.T) {
-	neighbors := []addr.IA{selPeer, selA, selB, selC}
-	f := newSelFixture(t, neighbors...)
-	f.sel.cfg.MaxLinks = len(neighbors)
-	// C's baseline rides A's link and sets the price at 16ms: excluding A's
-	// link raises it to 20ms, a harm of 4ms. Excluding B's or C's moves it
-	// by nothing, and B is the slower direct sample.
-	f.carried(selA, 10*time.Millisecond, 20*time.Millisecond, f.via(t, selPeer, 0, selPeer, selA))
-	f.carried(selB, 12*time.Millisecond, 20*time.Millisecond, f.via(t, selPeer, 0, selPeer, selB))
-	f.carried(selC, 10*time.Millisecond, 16*time.Millisecond, f.via(t, selA, 0, selA, selC))
-	f.candidate(selD, 8*time.Millisecond, 20*time.Millisecond)
-
+	f := capFixture(t)
 	f.pass(t) // streak 1
 	f.pass(t) // streak 2: evicts B and admits D
 	if len(f.established) != 1 || !f.established[0].Equal(selD) {
@@ -814,6 +883,7 @@ func TestSelectionCapEviction(t *testing.T) {
 	}
 
 	// None qualifying means no promotion: the cap stands.
+	neighbors := []addr.IA{selPeer, selA, selB, selC}
 	f = newSelFixture(t, neighbors...)
 	f.sel.cfg.MaxLinks = len(neighbors)
 	f.candidate(selD, 8*time.Millisecond, 20*time.Millisecond)
@@ -866,11 +936,13 @@ func TestSelectionEquilibrium(t *testing.T) {
 	f := newSelFixture(t, r1, r2, z)
 	f.sel.cfg.MaxLinks = 3
 	// R1 and R2 reach each other over their own links, and both by the
-	// round route through the bridge. R2 is the slower direct sample, so
-	// the tie between the two regional evictions is decided.
+	// round route through the bridge. R2's route through R1 stays within
+	// the demotion ratio of its round trip, its transit charged, while R3's
+	// one route rides R1's link: R2's is the regional link an eviction may
+	// take.
 	f.carried(r1, 10*time.Millisecond, 20*time.Millisecond,
 		f.via(t, r2, 0, r2, r1), f.via(t, z, -time.Minute, z, selX, r1))
-	f.carried(r2, 11*time.Millisecond, 20*time.Millisecond,
+	f.carried(r2, 18*time.Millisecond, 12*time.Millisecond,
 		f.via(t, r1, 0, r1, r2), f.via(t, z, -time.Minute, z, selX, r2))
 	f.carried(z, 100*time.Millisecond, 200*time.Millisecond, f.via(t, z, 0, z))
 	viaR1 := f.via(t, r1, 0, r1, r3)
