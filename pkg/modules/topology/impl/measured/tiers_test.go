@@ -162,6 +162,45 @@ func TestWindowTierFacts(t *testing.T) {
 	}
 }
 
+// TestExcludedCutsOffTheLinksOwnNeighbor checks the excluded measurement of
+// a link whose neighbor no composed route reaches — a fellow core, which
+// only their link routes a core to: without the link the neighbor is cut
+// off, and the window decides the link useful however well the survivors
+// serve the rest of its tier.
+func TestExcludedCutsOffTheLinksOwnNeighbor(t *testing.T) {
+	ms := time.Millisecond
+	verdicts := map[uint16]bool{3: true, 5: true}
+	neighbors := map[addr.IA]*links.Link{
+		selA: {NeighborIA: selA, IfID: 3, State: links.StateEstablished},
+		selB: {NeighborIA: selB, IfID: 5, State: links.StateEstablished},
+	}
+	s := &selection{
+		cfg: SelectionConfig{
+			IA:       selIA,
+			Verdicts: func() map[uint16]bool { return verdicts },
+		},
+		pathEchoFn: func(addr.IA, *scion.Candidate) time.Duration { return 20 * ms },
+	}
+	// A answers its direct echo, and no route composes into it. B's carrier
+	// rides B's own link, and a second route reaches B around it.
+	b := sm(10*ms, 20*ms,
+		route(0, 0, local(5), link(selB)),
+		route(0, 12*ms, link(selX), link(selB)),
+	)
+	b.carrier = &b.candidates[0]
+	ts := s.windowTiers(t.Context(), neighbors, map[addr.IA]sample{selA: sm(10*ms, 0), selB: b})
+	if len(ts) != 1 {
+		t.Fatalf("tiers = %d, want one", len(ts))
+	}
+	if !ts[0].excluded[selA].cutOff[selA] {
+		t.Error("excluding A's link left A uncut, though no survivor reaches it")
+	}
+	if decided, useless := judge(&ts[0], selA); !decided || useless {
+		t.Errorf("judge = (%v, %v), want (true, false): the link is A's only route",
+			decided, useless)
+	}
+}
+
 // TestMemberPrice checks a member's price: the carrier by its echo, an
 // unanswered one pricing nothing; every other route the window did not probe
 // by its declared sum doubled, an undeclared one pricing nothing; each route

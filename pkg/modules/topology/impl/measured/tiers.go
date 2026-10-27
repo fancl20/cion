@@ -75,7 +75,9 @@ type excludedSample struct {
 	// echo, any other by its declared sum. A member no survivor prices is
 	// absent.
 	prices map[addr.IA]time.Duration
-	// cutOff holds the members a clean route reaches and no survivor does.
+	// cutOff holds the members no survivor reaches that a clean route or
+	// the link reaches: the link's own neighbor, which the link reaches
+	// whatever composes, is cut off unless a survivor reaches it.
 	cutOff map[addr.IA]bool
 }
 
@@ -163,7 +165,7 @@ func (s *selection) windowTiers(
 		t.stranded = len(t.upLinks) == 0 && t.baseline == 0
 		t.excluded = make(map[addr.IA]excludedSample, len(up))
 		for ia, link := range up {
-			t.excluded[ia] = s.measureExcluded(ctx, t, clean, samples, link)
+			t.excluded[ia] = s.measureExcluded(ctx, t, clean, samples, ia, link)
 		}
 	}
 	return ts
@@ -182,6 +184,7 @@ func (s *selection) measureExcluded(
 	t *tier,
 	clean map[addr.IA][]*scion.Candidate,
 	samples map[addr.IA]sample,
+	neighbor addr.IA,
 	link segment.LinkID,
 ) excludedSample {
 
@@ -227,7 +230,7 @@ func (s *selection) measureExcluded(
 				own = append(own, c)
 			}
 		}
-		if len(clean[m.ia]) > 0 && len(own) == 0 {
+		if len(own) == 0 && (len(clean[m.ia]) > 0 || m.ia.Equal(neighbor)) {
 			ex.cutOff[m.ia] = true
 			continue
 		}
