@@ -40,8 +40,9 @@ type LinkService struct {
 	MaxLinks int
 	// LinkHost is the host link addresses are allocated on.
 	LinkHost netip.Addr
-	// MinInterval is the least pause between admissions of one peer; zero
-	// uses the default.
+	// MinInterval is the least pause between admissions of one peer's
+	// requests of one kind — link requests, probe punches, and link
+	// punches; zero uses each kind's default.
 	MinInterval time.Duration
 	// Sockets is the socket source the allocated addresses probe through;
 	// the zero value is the kernel's.
@@ -55,9 +56,19 @@ type LinkService struct {
 	// whether it answered; ok is false when the directory names no address
 	// for the peer. Nil echoes nothing, and the reply reports nothing.
 	Echo func(ctx context.Context, peer addr.IA) (answered, ok bool)
+	// Reflector returns the rendezvous address of a node outside the
+	// node's NAT, whose acceptor answers the binding requests a punch
+	// learns its socket's reflexive address by, and fails when none
+	// answers. Nil punches nothing.
+	Reflector func(ctx context.Context) (netip.AddrPort, error)
+	// Punching reports whether the node's own link punch toward the peer is
+	// in flight; nil reports none.
+	Punching func(peer addr.IA) bool
 
 	limiterOnce sync.Once
 	limiter     *ratelimit.Keyed[addr.IA]
+	punchOnce   sync.Once
+	punches     *ratelimit.Keyed[punchKey]
 	// mtx serializes the handlers' lookup-and-mutate runs over the store.
 	mtx sync.Mutex
 }

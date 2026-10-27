@@ -68,8 +68,8 @@ type Config struct {
 	// the rendezvous port and the probe claims among them.
 	ControlHost netip.Addr
 	// NewConn binds a SCION connection on an ephemeral port: the socket the
-	// directory's publish and fetch ride on non-core nodes and the selection
-	// probe's socket.
+	// directory's publish and fetch ride on non-core nodes, the selection
+	// probe's socket, and the punch requests' socket.
 	NewConn func() (*scion.Conn, error)
 	// CoreRoute resolves the core's endpoint, which the directory's client
 	// rides on non-core nodes.
@@ -122,16 +122,18 @@ type Provider struct {
 
 	// mtx guards the one-time assembly of the serving machinery.
 	mtx sync.Mutex
-	// rendezvous, links, linker, directoryStore, directory, and the two
-	// conns drawn through NewConn are the assembled machinery, built by
-	// Mounts before Run.
+	// rendezvous, links, linker, puncher, directoryStore, directory, and
+	// the three conns drawn through NewConn are the assembled machinery,
+	// built by Mounts before Run.
 	rendezvous     *Rendezvous
 	links          *LinkService
 	linker         *linkClient
+	puncher        *puncher
 	directoryStore *DirectoryStore
 	directory      *NodeDirectory
 	directoryConn  *scion.Conn
 	probeConn      *scion.Conn
+	punchConn      *scion.Conn
 	assembled      bool
 }
 
@@ -411,6 +413,21 @@ func (z *Provider) assemble() error {
 		return err
 	}
 	z.rendezvous = rendezvous
+	// The punch requests ride a conn of their own: the QUIC transport over
+	// it reads every datagram the conn receives.
+	punchConn, err := z.cfg.NewConn()
+	if err != nil {
+		return err
+	}
+	z.punchConn = punchConn
+	z.puncher = &puncher{
+		conn:      punchConn,
+		engine:    z.env.Engine,
+		paths:     z.env.Paths,
+		reflector: z.reflector,
+		sockets:   z.cfg.Sockets,
+		host:      z.cfg.ControlHost,
+	}
 	z.links = &LinkService{
 		Store:       z.env.Store,
 		MaxLinks:    MaxNeighbors,
@@ -419,6 +436,8 @@ func (z *Provider) assemble() error {
 		Sockets:     z.cfg.Sockets,
 		Observed:    z.env.Observed,
 		Echo:        z.echoPublished,
+		Reflector:   z.reflector,
+		Punching:    z.puncher.punching,
 	}
 	z.linker = &linkClient{peer: z.env.Peer, answered: z.recordAnswer}
 	directoryCfg := NodeDirectoryConfig{
@@ -506,15 +525,45 @@ func (z *Provider) Run(ctx context.Context) {
 	wg.Wait()
 }
 
+// errNoReflector reports that no established neighbor reports itself
+// dialable.
+var errNoReflector = errors.New("no established neighbor reports itself dialable")
+
+// reflector returns the published rendezvous address of a neighbor whose
+// own report says it answers: a node outside the node's NAT, whose acceptor
+// echoes a socket's reflexive address.
+func (z *Provider) reflector(ctx context.Context) (netip.AddrPort, error) {
+	entries, err := z.env.Store.All(ctx)
+	if err != nil {
+		return netip.AddrPort{}, fmt.Errorf("reading the link store: %w", err)
+	}
+	neighbors := make(map[addr.IA]bool, len(entries))
+	for _, l := range entries {
+		if l.State == links.StateEstablished {
+			neighbors[l.NeighborIA] = true
+		}
+	}
+	for _, e := range z.directory.Entries() {
+		if neighbors[e.IA] && !e.Reach.RendezvousUnanswered {
+			return e.RendezvousAddr, nil
+		}
+	}
+	return netip.AddrPort{}, errNoReflector
+}
+
 // Close releases what Mounts bound, once Run has returned: the directory's
-// transport, the two conns drawn through NewConn beneath it, and the
-// acceptor's socket. A provider never assembled releases nothing.
+// and the punches' transports, the three conns drawn through NewConn
+// beneath them, and the acceptor's socket. A provider never assembled
+// releases nothing.
 func (z *Provider) Close() error {
 	var errs []error
 	if z.directory != nil {
 		errs = append(errs, z.directory.Close())
 	}
-	for _, conn := range []*scion.Conn{z.directoryConn, z.probeConn} {
+	if z.puncher != nil {
+		errs = append(errs, z.puncher.Close())
+	}
+	for _, conn := range []*scion.Conn{z.directoryConn, z.probeConn, z.punchConn} {
 		if conn != nil {
 			errs = append(errs, conn.Close())
 		}
@@ -546,6 +595,7 @@ func (z *Provider) selectionConfig() SelectionConfig {
 		Sockets:     z.cfg.Sockets,
 		Link:        z.linker,
 		Observed:    z.env.Observed,
+		Punch:       z.puncher,
 		Learn:       z.learn,
 		Stranded:    &z.stranded,
 		Interval:    z.cfg.Pacing.Selection,

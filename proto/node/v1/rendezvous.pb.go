@@ -32,8 +32,16 @@ type RendezvousRequest struct {
 	Nonce []byte `protobuf:"bytes,1,opt,name=nonce,proto3" json:"nonce,omitempty"`
 	// isd_as is the dialer's ISD-AS; zero for a claim that names none.
 	IsdAs uint64 `protobuf:"varint,2,opt,name=isd_as,json=isdAs,proto3" json:"isd_as,omitempty"`
-	// link_addr is the link address the dialer claims, "host:port".
-	LinkAddr      string `protobuf:"bytes,3,opt,name=link_addr,json=linkAddr,proto3" json:"link_addr,omitempty"`
+	// link_addr is the link address the dialer claims, "host:port"; empty in
+	// a binding request.
+	LinkAddr string `protobuf:"bytes,3,opt,name=link_addr,json=linkAddr,proto3" json:"link_addr,omitempty"`
+	// binding marks a binding request: it claims no link address and names
+	// no ISD-AS, and the acceptor answers it with the requester's reflexive
+	// address alone, recording nothing.
+	Binding bool `protobuf:"varint,4,opt,name=binding,proto3" json:"binding,omitempty"`
+	// padding fills a binding request past the longest binding reply, so the
+	// reply it buys is never larger than itself.
+	Padding       []byte `protobuf:"bytes,5,opt,name=padding,proto3" json:"padding,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -89,13 +97,29 @@ func (x *RendezvousRequest) GetLinkAddr() string {
 	return ""
 }
 
+func (x *RendezvousRequest) GetBinding() bool {
+	if x != nil {
+		return x.Binding
+	}
+	return false
+}
+
+func (x *RendezvousRequest) GetPadding() []byte {
+	if x != nil {
+		return x.Padding
+	}
+	return nil
+}
+
 // RendezvousReply answers a request: the nonce, the acceptor's side of the
-// link, and the requester's reflexive address.
+// link, and the requester's reflexive address. A binding reply carries the
+// nonce, the acceptor's ISD-AS, and the reflexive address alone.
 type RendezvousReply struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// nonce is the request's.
 	Nonce []byte `protobuf:"bytes,1,opt,name=nonce,proto3" json:"nonce,omitempty"`
-	// link_addr is the acceptor's link address, "host:port".
+	// link_addr is the acceptor's link address, "host:port"; empty in a
+	// binding reply.
 	LinkAddr string `protobuf:"bytes,2,opt,name=link_addr,json=linkAddr,proto3" json:"link_addr,omitempty"`
 	// if_id is the acceptor's interface ID of the link.
 	IfId uint32 `protobuf:"varint,3,opt,name=if_id,json=ifId,proto3" json:"if_id,omitempty"`
@@ -177,11 +201,13 @@ var File_proto_node_v1_rendezvous_proto protoreflect.FileDescriptor
 
 const file_proto_node_v1_rendezvous_proto_rawDesc = "" +
 	"\n" +
-	"\x1eproto/node/v1/rendezvous.proto\x12\anode.v1\"]\n" +
+	"\x1eproto/node/v1/rendezvous.proto\x12\anode.v1\"\x91\x01\n" +
 	"\x11RendezvousRequest\x12\x14\n" +
 	"\x05nonce\x18\x01 \x01(\fR\x05nonce\x12\x15\n" +
 	"\x06isd_as\x18\x02 \x01(\x04R\x05isdAs\x12\x1b\n" +
-	"\tlink_addr\x18\x03 \x01(\tR\blinkAddr\"\x97\x01\n" +
+	"\tlink_addr\x18\x03 \x01(\tR\blinkAddr\x12\x18\n" +
+	"\abinding\x18\x04 \x01(\bR\abinding\x12\x18\n" +
+	"\apadding\x18\x05 \x01(\fR\apadding\"\x97\x01\n" +
 	"\x0fRendezvousReply\x12\x14\n" +
 	"\x05nonce\x18\x01 \x01(\fR\x05nonce\x12\x1b\n" +
 	"\tlink_addr\x18\x02 \x01(\tR\blinkAddr\x12\x13\n" +

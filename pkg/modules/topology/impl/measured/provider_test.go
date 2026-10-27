@@ -211,8 +211,9 @@ func TestProviderRunReturnsAndCloseReleases(t *testing.T) {
 	if _, err := z.Mounts(); err != nil {
 		t.Fatal(err)
 	}
-	if len(drawn) != 2 {
-		t.Fatalf("NewConn drew %d conns, want the directory's and the probe's", len(drawn))
+	if len(drawn) != 3 {
+		t.Fatalf("NewConn drew %d conns, want the punches', the directory's, and the probe's",
+			len(drawn))
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -729,6 +730,18 @@ func (c *fakeLinkServiceClient) Request(
 		return nil, c.err
 	}
 	return c.reply, nil
+}
+
+func (c *fakeLinkServiceClient) Punch(
+	context.Context, *nodev1.PunchRequest,
+) (*nodev1.PunchReply, error) {
+	return nil, errors.New("the fake punches nothing")
+}
+
+func (c *fakeLinkServiceClient) PunchProbe(
+	context.Context, *nodev1.PunchProbeRequest,
+) (nodev1connect.LinkServicePunchProbeClientStream, error) {
+	return nodev1connect.LinkServicePunchProbeClientStream{}, errors.New("the fake probes nothing")
 }
 
 // TestProviderReportsReach checks the published report: the link client

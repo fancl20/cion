@@ -501,6 +501,116 @@ func TestRendezvousWireFormat(t *testing.T) {
 	}
 }
 
+// TestRendezvousBindingWireFormat checks the binding request and its
+// reply: the request round-trips claiming no link address, padded past the
+// longest binding reply, which round-trips naming no link address; a
+// binding request that claims a link address is refused.
+func TestRendezvousBindingWireFormat(t *testing.T) {
+	req := RendezvousRequest{Nonce: [16]byte{1, 2, 3}, Binding: true}
+	raw := marshaled(t, req)
+	if got, err := ParseRendezvousRequest(raw); err != nil || got != req {
+		t.Errorf("binding request round trip = %+v (%v), want %+v", got, err, req)
+	}
+	longest := RendezvousReply{
+		Nonce:     req.Nonce,
+		IA:        addr.MustIAFrom(65535, 0xffffffffffff),
+		Reflexive: netip.MustParseAddrPort("[ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff]:65535"),
+	}
+	reply := marshaled(t, longest)
+	if len(raw) < len(reply) {
+		t.Errorf("a binding request of %d bytes buys a reply of %d", len(raw), len(reply))
+	}
+	if got, err := ParseRendezvousReply(reply); err != nil || got != longest {
+		t.Errorf("binding reply round trip = %+v (%v), want %+v", got, err, longest)
+	}
+	claiming := marshaledProto(t, &nodev1.RendezvousRequest{
+		Nonce: req.Nonce[:], Binding: true, LinkAddr: "192.0.2.7:4242",
+	})
+	if _, err := ParseRendezvousRequest(claiming); err == nil {
+		t.Error("a binding request claiming a link address parsed")
+	}
+}
+
+// TestRendezvousBindingRecordsNothing checks the acceptor's answer to a
+// binding request: each socket of one host learns its own reflexive
+// address and the acceptor records nothing; a second request from one
+// source within the interval is refused, and so are a request naming an
+// ISD-AS and one shorter than its reply.
+func TestRendezvousBindingRecordsNothing(t *testing.T) {
+	f := newRendezvousFixture(t, func(cfg *RendezvousConfig) {
+		cfg.IA = rendezvousIA
+		cfg.MinInterval = time.Hour
+	})
+	for range 2 {
+		conn, err := underlay.Kernel.NewUDP(
+			net.UDPAddrFromAddrPort(netip.MustParseAddrPort("127.0.0.1:0")), netip.AddrPort{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		bound := conn.LocalAddr().AddrPort()
+		got, err := reflexiveAddr(context.Background(), conn, f.addr)
+		_ = conn.Close()
+		if err != nil {
+			t.Fatalf("a fresh socket's reflexive address: %v", err)
+		}
+		if want := netip.AddrPortFrom(bound.Addr().Unmap(), bound.Port()); got != want {
+			t.Errorf("the reflexive address = %v, want the socket's own %v", got, want)
+		}
+	}
+	if entries, err := f.store.All(context.Background()); err != nil || len(entries) != 0 {
+		t.Errorf("the binding requests recorded %v (%v), want nothing", entries, err)
+	}
+
+	src := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 4242}
+	raw := marshaled(t, RendezvousRequest{Binding: true})
+	if _, err := f.handle(context.Background(), raw, src); err != nil {
+		t.Fatalf("a binding request was refused: %v", err)
+	}
+	if _, err := f.handle(context.Background(), raw, src); err == nil {
+		t.Error("a second binding request from one source within the interval was answered")
+	}
+	other := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 4243}
+	named := marshaled(t, RendezvousRequest{IA: rendezvousIA, Binding: true})
+	if _, err := f.handle(context.Background(), named, other); err == nil {
+		t.Error("a binding request naming an ISD-AS was answered")
+	}
+	unpadded := marshaledProto(t, &nodev1.RendezvousRequest{Nonce: make([]byte, 16), Binding: true})
+	if _, err := f.handle(context.Background(), unpadded, other); err == nil {
+		t.Error("a binding request shorter than its reply was answered")
+	}
+}
+
+// TestRendezvousEchoNeedsTheLinkAddress checks the dialer's reading of an
+// answer: a reply that names no link address — a binding reply to a
+// claim — is refused, for the dial records the acceptor's side.
+func TestRendezvousEchoNeedsTheLinkAddress(t *testing.T) {
+	acceptor := udpSocket(t)
+	go func() {
+		buf := make([]byte, 192)
+		n, src, err := acceptor.ReadFromUDP(buf)
+		if err != nil {
+			return
+		}
+		req, err := ParseRendezvousRequest(buf[:n])
+		if err != nil {
+			return
+		}
+		reply := RendezvousReply{Nonce: req.Nonce, IA: rendezvousIA, Reflexive: observedAddr(src)}
+		raw, err := reply.Marshal()
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		_, _ = acceptor.WriteToUDP(raw, src)
+	}()
+	_, _, _, err := RendezvousEcho(context.Background(), underlay.Kernel,
+		netip.MustParseAddrPort("127.0.0.1:0"), boundAddr(acceptor), rendezvousIA,
+		netip.MustParseAddrPort("127.0.0.1:4242"))
+	if err == nil {
+		t.Error("a reply naming no link address was taken")
+	}
+}
+
 // TestRendezvousEchoEndsWithItsContext checks the rendezvous echo's wait: a
 // dial no acceptor answers, its context ending once the first request is
 // out, returns the context's error well inside the attempt's

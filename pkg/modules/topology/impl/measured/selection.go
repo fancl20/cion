@@ -130,6 +130,9 @@ type SelectionConfig struct {
 	// them, come from; nil observes nothing, and a confirm records the
 	// reply's claim.
 	Observed func(ifID uint16) netip.AddrPort
+	// Punch reaches the candidates whose published rendezvous address
+	// answers nothing, by probe and by establishment; nil reaches none.
+	Punch Puncher
 	// Learn records the external host a rendezvous reply's observed source
 	// names for the node, latest observation winning; nil discards it.
 	Learn func(netip.Addr)
@@ -529,30 +532,40 @@ func (s *selection) establish(ctx context.Context, e DirectoryEntry, why string)
 	return s.establishLink(ctx, e, why)
 }
 
-// probe measures one peer by the directory's own distinction: an
-// established neighbor's direct side by SCMP echo over the one-hop path —
-// the conn resolving the egress interface from the link table as every
-// one-hop write does, the responder in the peer's core answering on the
-// reversed arrival path — and a candidate's (a demoted neighbor included)
-// by the rendezvous echo that reaches where no path and no interface exist.
-// A neighbor whose link the conn cannot send over — its verdict down —
-// fails its writes at once, and the zero sample is what it would
-// measure. The baseline is the same SCMP echo instrument over the
-// freshest clean composed route of the enumeration the probe keeps beside
-// the sample, the route recorded as the sample's carrier: one destination,
-// two routes, the same median-of-runs discipline, and no clean route leaves
-// the baseline unmeasured for the window rather than measured over a route
-// the network would not serve. The rendezvous echo claims the zero ISD-AS —
-// a probe mints no entry a candidate sweep could mistake for a peer —
-// deduplicated by the control address it claims. Both SCMP echoes address
-// the host the peer's own resolution names.
+// probe measures one peer by the directory's own distinction: an established
+// neighbor's direct side by SCMP echo over the one-hop path — the conn
+// resolving the egress interface from the link table as every one-hop write
+// does, the responder in the peer's core answering on the reversed arrival
+// path — a candidate's (a demoted neighbor included) by the rendezvous echo
+// that reaches where no path and no interface exist, and a candidate whose
+// published rendezvous address answers nothing by the punch that opens both
+// NATs between. A neighbor whose link the conn cannot send over — its verdict
+// down — fails its writes at once, and the zero sample is what it would
+// measure. The baseline is the same SCMP echo instrument over the freshest
+// clean composed route of the enumeration the probe keeps beside the sample,
+// the route recorded as the sample's carrier: one destination, two routes,
+// the same median-of-runs discipline, and no clean route leaves the baseline
+// unmeasured for the window rather than measured over a route the network
+// would not serve. The rendezvous echo claims the zero ISD-AS — a probe mints
+// no entry a candidate sweep could mistake for a peer — deduplicated by the
+// control address it claims. Both SCMP echoes address the host the peer's own
+// resolution names.
 func (s *selection) probe(ctx context.Context, e DirectoryEntry, l *links.Link) sample {
 	var m measurement
-	if l != nil {
+	switch {
+	case l != nil:
 		m.direct = s.peerEcho(ctx, e.IA, nil)
-	} else if _, _, rtt, err := s.echo(ctx, netip.AddrPortFrom(s.cfg.ControlAddr.Addr(), 0),
-		e.RendezvousAddr, addr.IA(0), s.cfg.ControlAddr); err == nil {
-		m.direct = rtt
+	case s.punched(e):
+		if rtt, err := s.cfg.Punch.Probe(ctx, e.IA); err == nil {
+			m.direct = rtt
+		} else {
+			slog.Debug("The punch probe did not answer", "peer", e.IA, "err", err)
+		}
+	default:
+		if _, _, rtt, err := s.echo(ctx, netip.AddrPortFrom(s.cfg.ControlAddr.Addr(), 0),
+			e.RendezvousAddr, addr.IA(0), s.cfg.ControlAddr); err == nil {
+			m.direct = rtt
+		}
 	}
 	probeCtx, cancel := context.WithTimeout(ctx, ProbeWait*ProbeRuns+time.Second)
 	defer cancel()
@@ -980,14 +993,15 @@ func (s *selection) retire(ctx context.Context, l *links.Link, why string) bool 
 	return true
 }
 
-// establishLink lands a promoted candidate: the rendezvous exchange seeds
-// and names — the plaintext exchange beneath every path and every identity,
-// the state it leaves the candidate the confirm waits on — and the
-// authenticated link request over the seeded entry's one-hop path
-// establishes both sides, the peer's entry when the request lands and this
-// one when the reply answers. An entry already holding its remote — seeded
-// by an earlier window or the joiner's own dial — skips the exchange: the
-// seed taught both sides already.
+// establishLink lands a promoted candidate: the rendezvous exchange seeds and
+// names — the plaintext exchange beneath every path and every identity, the
+// state it leaves the candidate the confirm waits on — or, for a candidate
+// whose published rendezvous address answers nothing, the punch opens both
+// NATs and seeds both sides; the authenticated link request over the seeded
+// entry's one-hop path then establishes both sides, the peer's entry when the
+// request lands and this one when the reply answers. An entry already holding
+// its remote — seeded by an earlier window or the joiner's own dial — skips
+// the exchange: the seed taught both sides already.
 func (s *selection) establishLink(ctx context.Context, e DirectoryEntry, why string) bool {
 	entry, err := s.ownEntry(ctx, e)
 	if err != nil {
@@ -995,11 +1009,18 @@ func (s *selection) establishLink(ctx context.Context, e DirectoryEntry, why str
 			"neighbor", e.IA, "err", err)
 		return false
 	}
-	if !entry.Remote.IsValid() && !s.establishByRendezvous(ctx, e, entry) {
-		return false
+	punched := s.punched(e)
+	if !entry.Remote.IsValid() {
+		seed := s.establishByRendezvous
+		if punched {
+			seed = s.establishByPunch
+		}
+		if !seed(ctx, e, entry) {
+			return false
+		}
 	}
 	s.streak(e.IA).promote = 0
-	slog.Info("Link seeded by rendezvous", "neighbor", e.IA, "why", why,
+	slog.Info("Link seeded", "neighbor", e.IA, "why", why, "punched", punched,
 		"interface", entry.IfID, "local", entry.Local, "remote", entry.Remote)
 	s.confirm(ctx, e, entry, why)
 	return true
@@ -1035,6 +1056,31 @@ func (s *selection) establishByRendezvous(
 		return false
 	}
 	return true
+}
+
+// establishByPunch seeds a promotion through the punch: the dial leaves from
+// the entry's own link address, released before the entry records the peer's
+// reflexive address, so the mapping each NAT opened is the one the link
+// keeps. The entry stays the candidate the confirm waits on.
+func (s *selection) establishByPunch(ctx context.Context, e DirectoryEntry, entry *links.Link) bool {
+	theirs, ifID, err := s.cfg.Punch.Establish(ctx, e.IA, entry)
+	if err != nil {
+		slog.Warn("The punch establishment failed", "neighbor", e.IA, "err", err)
+		return false
+	}
+	entry.Remote = theirs
+	entry.RemoteIfID = ifID
+	if err := s.cfg.Store.Update(ctx, entry); err != nil {
+		slog.Error("Recording the punch establishment", "neighbor", e.IA, "err", err)
+		return false
+	}
+	return true
+}
+
+// punched reports whether the loop reaches the candidate by punch: its own
+// report says its published rendezvous address answers nothing.
+func (s *selection) punched(e DirectoryEntry) bool {
+	return s.cfg.Punch != nil && e.Reach.RendezvousUnanswered
 }
 
 // confirm sends the entry's link request over the one-hop path of the link

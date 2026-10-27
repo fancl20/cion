@@ -28,12 +28,63 @@ message LinkReply {
   optional bool rendezvous_answered = 3;
 }
 
+// PunchRequest asks the peer to open its NAT toward the requester for the
+// link the requester establishes: the peer binds the link's socket, learns
+// its reflexive address, sends toward the requester's, and answers with its
+// own. The requester then sends toward the peer's, and the packets cross
+// both NATs.
+message PunchRequest {
+  // reflexive_addr is the requester's link socket as a node outside its
+  // NAT observes it, "host:port".
+  string reflexive_addr = 1;
+  // nonce marks the punch's packets, 16 bytes.
+  bytes nonce = 2;
+  // if_id is the requester's interface ID of the link.
+  uint32 if_id = 3;
+}
+
+// PunchReply carries the peer's side of the link's punch.
+message PunchReply {
+  // reflexive_addr is the peer's link socket as a node outside its NAT
+  // observes it, "host:port".
+  string reflexive_addr = 1;
+  // if_id is the peer's interface ID of the link.
+  uint32 if_id = 2;
+}
+
+// PunchProbeRequest asks the peer to answer a probe through both NATs: the
+// peer binds an ephemeral socket, learns its reflexive address, and answers
+// with it, then the socket sends toward the requester's and echoes the
+// requester's probes for as long as the stream stays open.
+message PunchProbeRequest {
+  // reflexive_addr is the requester's probe socket as a node outside its
+  // NAT observes it, "host:port".
+  string reflexive_addr = 1;
+  // nonce marks the probe's packets, 16 bytes.
+  bytes nonce = 2;
+}
+
+// PunchProbeReply carries the peer's probe socket.
+message PunchProbeReply {
+  // reflexive_addr is the peer's probe socket as a node outside its NAT
+  // observes it, "host:port".
+  string reflexive_addr = 1;
+}
+
 // LinkService establishes links bilaterally between nodes that composed
 // paths already reach. The acceptor applies its admission policy — the
 // allowlist, the link-count cap, and the rate cap — records the link on its
 // side, echoes the requester's published rendezvous address, and answers
-// with its own addresses and the echo's outcome.
+// with its own addresses and the echo's outcome. A punch opens both sides'
+// NATs first, for a link neither side's published address admits.
 service LinkService {
   // Request admits the caller's link and answers the acceptor's side of it.
   rpc Request(LinkRequest) returns (LinkReply);
+  // Punch opens the acceptor's NAT toward the caller for the link the
+  // caller establishes, and answers the acceptor's side.
+  rpc Punch(PunchRequest) returns (PunchReply);
+  // PunchProbe opens the acceptor's NAT toward the caller's probe socket
+  // and answers with the acceptor's own, which echoes the caller's probes
+  // while the stream stays open.
+  rpc PunchProbe(PunchProbeRequest) returns (stream PunchProbeReply);
 }

@@ -58,20 +58,32 @@ const (
 // RendezvousRequest is the joiner's first contact: a nonce, its ISD-AS, and
 // the link address it will receive on. The nonce is random per dial; the
 // reply echoing it proves it reached the acceptor and came back — a spoofed
-// source never receives its reply.
+// source never receives its reply. A binding request claims no link
+// address and names no ISD-AS: the acceptor answers it with the
+// requester's reflexive address alone and records nothing.
 type RendezvousRequest struct {
 	Nonce    [16]byte
 	IA       addr.IA
 	LinkAddr netip.AddrPort
+	Binding  bool
 }
+
+// bindingPadding is the padding a binding request carries: past the longest
+// binding reply — the nonce, the ISD-AS, and an IPv6 reflexive address at its
+// longest, 78 bytes — so the reply a request buys is never larger than
+// itself.
+const bindingPadding = 64
 
 // Marshal writes the request's datagram.
 func (r RendezvousRequest) Marshal() ([]byte, error) {
-	return proto.Marshal(&nodev1.RendezvousRequest{
-		Nonce:    r.Nonce[:],
-		IsdAs:    uint64(r.IA),
-		LinkAddr: r.LinkAddr.String(),
-	})
+	pb := &nodev1.RendezvousRequest{Nonce: r.Nonce[:], IsdAs: uint64(r.IA)}
+	if r.Binding {
+		pb.Binding = true
+		pb.Padding = make([]byte, bindingPadding)
+	} else {
+		pb.LinkAddr = r.LinkAddr.String()
+	}
+	return proto.Marshal(pb)
 }
 
 // ParseRendezvousRequest reads a request's datagram.
@@ -80,9 +92,15 @@ func ParseRendezvousRequest(b []byte) (RendezvousRequest, error) {
 	if err := proto.Unmarshal(b, &pb); err != nil {
 		return RendezvousRequest{}, fmt.Errorf("reading rendezvous request: %w", err)
 	}
-	req := RendezvousRequest{IA: addr.IA(pb.IsdAs)}
+	req := RendezvousRequest{IA: addr.IA(pb.IsdAs), Binding: pb.Binding}
 	if err := readNonce(&req.Nonce, pb.Nonce); err != nil {
 		return RendezvousRequest{}, err
+	}
+	if req.Binding {
+		if pb.LinkAddr != "" {
+			return RendezvousRequest{}, errors.New("a binding request claims a link address")
+		}
+		return req, nil
 	}
 	linkAddr, err := netip.ParseAddrPort(pb.LinkAddr)
 	if err != nil {
@@ -96,7 +114,7 @@ func ParseRendezvousRequest(b []byte) (RendezvousRequest, error) {
 // interface ID, and ISD-AS — its ISD is the network's, what a joiner's
 // identity completes with — beside the requester's reflexive address, the
 // one fact a NAT cannot hide: the dialer keeps its host as its learned
-// external host.
+// external host. A binding reply names no link address and no interface.
 type RendezvousReply struct {
 	Nonce    [16]byte
 	LinkAddr netip.AddrPort
@@ -111,10 +129,12 @@ type RendezvousReply struct {
 // Marshal writes the reply's datagram.
 func (r RendezvousReply) Marshal() ([]byte, error) {
 	pb := &nodev1.RendezvousReply{
-		Nonce:    r.Nonce[:],
-		LinkAddr: r.LinkAddr.String(),
-		IfId:     uint32(r.IfID),
-		IsdAs:    uint64(r.IA),
+		Nonce: r.Nonce[:],
+		IfId:  uint32(r.IfID),
+		IsdAs: uint64(r.IA),
+	}
+	if r.LinkAddr.IsValid() {
+		pb.LinkAddr = r.LinkAddr.String()
 	}
 	if r.Reflexive.IsValid() {
 		pb.ReflexiveAddr = r.Reflexive.String()
@@ -135,11 +155,13 @@ func ParseRendezvousReply(b []byte) (RendezvousReply, error) {
 	if err := readNonce(&reply.Nonce, pb.Nonce); err != nil {
 		return RendezvousReply{}, err
 	}
-	linkAddr, err := netip.ParseAddrPort(pb.LinkAddr)
-	if err != nil {
-		return RendezvousReply{}, fmt.Errorf("parsing rendezvous link address: %w", err)
+	if pb.LinkAddr != "" {
+		linkAddr, err := netip.ParseAddrPort(pb.LinkAddr)
+		if err != nil {
+			return RendezvousReply{}, fmt.Errorf("parsing rendezvous link address: %w", err)
+		}
+		reply.LinkAddr = linkAddr
 	}
-	reply.LinkAddr = linkAddr
 	if pb.ReflexiveAddr != "" {
 		reflexive, err := netip.ParseAddrPort(pb.ReflexiveAddr)
 		if err != nil {
@@ -160,12 +182,12 @@ func readNonce(dst *[16]byte, nonce []byte) error {
 }
 
 // Rendezvous is the acceptor every node runs on its advertised rendezvous
-// address: one unconnected UDP socket answering first-contact requests. The
-// entries it creates start as candidates — a peer that produces no verified
-// beacon or enrollment within the candidate window retires. Identity adoption
-// is the exchange's own act: the acceptor names its entry from the request's
-// ISD-AS and the joiner names its own from the reply, so every establishment
-// names both sides before the link serves.
+// address: one unconnected UDP socket answering first-contact requests and
+// binding requests. The entries it creates start as candidates — a peer that
+// produces no verified beacon or enrollment within the candidate window
+// retires. Identity adoption is the exchange's own act: the acceptor names
+// its entry from the request's ISD-AS and the joiner names its own from the
+// reply, so every establishment names both sides before the link serves.
 type Rendezvous struct {
 	conn underlay.UDPConn
 	cfg  RendezvousConfig
@@ -175,9 +197,11 @@ type Rendezvous struct {
 
 	// byAddr rate-caps unnamed claims by the address claimed, byIA named
 	// ones by the ISD-AS: a node's dials share one key however many
-	// ephemeral sockets they use.
-	byAddr *ratelimit.Keyed[netip.AddrPort]
-	byIA   *ratelimit.Keyed[addr.IA]
+	// ephemeral sockets they use. bySource rate-caps binding requests by
+	// the source observed: each socket its own key.
+	byAddr   *ratelimit.Keyed[netip.AddrPort]
+	byIA     *ratelimit.Keyed[addr.IA]
+	bySource *ratelimit.Keyed[netip.AddrPort]
 }
 
 // RendezvousConfig configures a Rendezvous acceptor.
@@ -216,10 +240,11 @@ func NewRendezvous(cfg RendezvousConfig) (*Rendezvous, error) {
 		interval = RendezvousMinInterval
 	}
 	return &Rendezvous{
-		conn:   conn,
-		cfg:    cfg,
-		byAddr: ratelimit.NewKeyed[netip.AddrPort](interval),
-		byIA:   ratelimit.NewKeyed[addr.IA](interval),
+		conn:     conn,
+		cfg:      cfg,
+		byAddr:   ratelimit.NewKeyed[netip.AddrPort](interval),
+		byIA:     ratelimit.NewKeyed[addr.IA](interval),
+		bySource: ratelimit.NewKeyed[netip.AddrPort](interval),
 	}, nil
 }
 
@@ -294,12 +319,16 @@ func observedAddr(src *net.UDPAddr) netip.AddrPort {
 // port both: the observation names the dialing socket's mapping, whatever
 // the middle made of it. An unnamed one — a probe's ephemeral dial, a
 // bootstrap's pre-identity claim — keeps the claim rule, so the probes of
-// one node answer one entry instead of minting one per ephemeral port. The
-// store calls run under ctx, the loop's.
+// one node answer one entry instead of minting one per ephemeral port. A
+// binding request claims nothing and records nothing. The store calls run
+// under ctx, the loop's.
 func (r *Rendezvous) handle(ctx context.Context, raw []byte, src *net.UDPAddr) ([]byte, error) {
 	req, err := ParseRendezvousRequest(raw)
 	if err != nil {
 		return nil, err
+	}
+	if req.Binding {
+		return r.answerBinding(req, len(raw), src)
 	}
 	if req.IA.IsZero() {
 		req.LinkAddr = recordedLinkAddr(req.LinkAddr, observedAddr(src))
@@ -344,6 +373,28 @@ func (r *Rendezvous) handle(ctx context.Context, raw []byte, src *net.UDPAddr) (
 		Reflexive: observedAddr(src),
 	}
 	return reply.Marshal()
+}
+
+// answerBinding answers a binding request with the requester's reflexive
+// address, recording nothing. A request naming an ISD-AS is refused, and so
+// is one shorter than its reply: the acceptor amplifies nothing.
+func (r *Rendezvous) answerBinding(req RendezvousRequest, size int, src *net.UDPAddr) ([]byte, error) {
+	if !req.IA.IsZero() {
+		return nil, fmt.Errorf("a binding request names the ISD-AS %s", req.IA)
+	}
+	observed := observedAddr(src)
+	reply, err := RendezvousReply{Nonce: req.Nonce, IA: r.cfg.IA, Reflexive: observed}.Marshal()
+	if err != nil {
+		return nil, err
+	}
+	if len(reply) > size {
+		return nil, fmt.Errorf("a binding request of %d bytes is shorter than its reply's %d",
+			size, len(reply))
+	}
+	if !r.bySource.Admit(observed) {
+		return nil, fmt.Errorf("source %s exceeds the admission rate", observed)
+	}
+	return reply, nil
 }
 
 // admit returns the claim's entry: the one the table holds for it, an
@@ -486,14 +537,45 @@ func RendezvousEcho(
 			fmt.Errorf("binding the rendezvous client: %w", err)
 	}
 	defer func() { _ = conn.Close() }()
+	reply, observed, rtt, err := echoOn(ctx, conn, target, RendezvousRequest{IA: ia, LinkAddr: linkAddr})
+	if err != nil {
+		return RendezvousReply{}, netip.AddrPort{}, 0, err
+	}
+	if !reply.LinkAddr.IsValid() {
+		return RendezvousReply{}, netip.AddrPort{}, 0,
+			fmt.Errorf("the acceptor %s names no link address", target)
+	}
+	if bind.Port() != 0 {
+		// The link's flow speaks before the acceptor's link can: a NAT keeps
+		// the dial's port for the flow toward the acceptor's link socket
+		// only while no packet of that socket has reached the mapping
+		// first, and the acceptor's link sends to the recorded mapping from
+		// the moment its entry lands. The acceptor's data plane drops the
+		// empty datagram as malformed; a lost one costs only the race it
+		// would have won.
+		_, _ = conn.WriteToUDP(nil, udpAddr(recordedLinkAddr(reply.LinkAddr, observed)))
+	}
+	return reply, observed, rtt, nil
+}
+
+// echoOn sends one request run from a socket the caller holds — the request
+// given, under a fresh nonce — and returns the reply with the round trip
+// and the address the reply arrived from. The context's end moves the read
+// deadline to the past, ending a wait in flight; each attempt reads the
+// context after setting its own deadline, so no attempt overrides the move
+// unseen.
+func echoOn(
+	ctx context.Context,
+	conn underlay.UDPConn,
+	target netip.AddrPort,
+	req RendezvousRequest,
+) (RendezvousReply, netip.AddrPort, time.Duration, error) {
+
 	stop := context.AfterFunc(ctx, func() { _ = conn.SetReadDeadline(time.Now()) })
 	defer stop()
-	var req RendezvousRequest
 	if _, err := rand.Read(req.Nonce[:]); err != nil {
 		return RendezvousReply{}, netip.AddrPort{}, 0, err
 	}
-	req.IA = ia
-	req.LinkAddr = linkAddr
 	raw, err := req.Marshal()
 	if err != nil {
 		return RendezvousReply{}, netip.AddrPort{}, 0, err
@@ -522,19 +604,7 @@ func RendezvousEcho(
 			if err != nil || reply.Nonce != req.Nonce {
 				continue
 			}
-			rtt, observed := time.Since(sent), observedAddr(src)
-			if bind.Port() != 0 {
-				// The link's flow speaks before the acceptor's link can: a
-				// NAT keeps the dial's port for the flow toward the
-				// acceptor's link socket only while no packet of that socket
-				// has reached the mapping first, and the acceptor's link
-				// sends to the recorded mapping from the moment its entry
-				// lands. The acceptor's data plane drops the empty datagram
-				// as malformed; a lost one costs only the race it would have
-				// won.
-				_, _ = conn.WriteToUDP(nil, udpAddr(recordedLinkAddr(reply.LinkAddr, observed)))
-			}
-			return reply, observed, rtt, nil
+			return reply, observedAddr(src), time.Since(sent), nil
 		}
 	}
 	return RendezvousReply{}, netip.AddrPort{}, 0,

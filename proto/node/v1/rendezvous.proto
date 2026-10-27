@@ -14,16 +14,26 @@ message RendezvousRequest {
   bytes nonce = 1;
   // isd_as is the dialer's ISD-AS; zero for a claim that names none.
   uint64 isd_as = 2;
-  // link_addr is the link address the dialer claims, "host:port".
+  // link_addr is the link address the dialer claims, "host:port"; empty in
+  // a binding request.
   string link_addr = 3;
+  // binding marks a binding request: it claims no link address and names
+  // no ISD-AS, and the acceptor answers it with the requester's reflexive
+  // address alone, recording nothing.
+  bool binding = 4;
+  // padding fills a binding request past the longest binding reply, so the
+  // reply it buys is never larger than itself.
+  bytes padding = 5;
 }
 
 // RendezvousReply answers a request: the nonce, the acceptor's side of the
-// link, and the requester's reflexive address.
+// link, and the requester's reflexive address. A binding reply carries the
+// nonce, the acceptor's ISD-AS, and the reflexive address alone.
 message RendezvousReply {
   // nonce is the request's.
   bytes nonce = 1;
-  // link_addr is the acceptor's link address, "host:port".
+  // link_addr is the acceptor's link address, "host:port"; empty in a
+  // binding reply.
   string link_addr = 2;
   // if_id is the acceptor's interface ID of the link.
   uint32 if_id = 3;

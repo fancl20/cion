@@ -146,6 +146,237 @@ func (x *LinkReply) GetRendezvousAnswered() bool {
 	return false
 }
 
+// PunchRequest asks the peer to open its NAT toward the requester for the
+// link the requester establishes: the peer binds the link's socket, learns
+// its reflexive address, sends toward the requester's, and answers with its
+// own. The requester then sends toward the peer's, and the packets cross
+// both NATs.
+type PunchRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// reflexive_addr is the requester's link socket as a node outside its
+	// NAT observes it, "host:port".
+	ReflexiveAddr string `protobuf:"bytes,1,opt,name=reflexive_addr,json=reflexiveAddr,proto3" json:"reflexive_addr,omitempty"`
+	// nonce marks the punch's packets, 16 bytes.
+	Nonce []byte `protobuf:"bytes,2,opt,name=nonce,proto3" json:"nonce,omitempty"`
+	// if_id is the requester's interface ID of the link.
+	IfId          uint32 `protobuf:"varint,3,opt,name=if_id,json=ifId,proto3" json:"if_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *PunchRequest) Reset() {
+	*x = PunchRequest{}
+	mi := &file_proto_node_v1_link_proto_msgTypes[2]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PunchRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PunchRequest) ProtoMessage() {}
+
+func (x *PunchRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_node_v1_link_proto_msgTypes[2]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PunchRequest.ProtoReflect.Descriptor instead.
+func (*PunchRequest) Descriptor() ([]byte, []int) {
+	return file_proto_node_v1_link_proto_rawDescGZIP(), []int{2}
+}
+
+func (x *PunchRequest) GetReflexiveAddr() string {
+	if x != nil {
+		return x.ReflexiveAddr
+	}
+	return ""
+}
+
+func (x *PunchRequest) GetNonce() []byte {
+	if x != nil {
+		return x.Nonce
+	}
+	return nil
+}
+
+func (x *PunchRequest) GetIfId() uint32 {
+	if x != nil {
+		return x.IfId
+	}
+	return 0
+}
+
+// PunchReply carries the peer's side of the link's punch.
+type PunchReply struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// reflexive_addr is the peer's link socket as a node outside its NAT
+	// observes it, "host:port".
+	ReflexiveAddr string `protobuf:"bytes,1,opt,name=reflexive_addr,json=reflexiveAddr,proto3" json:"reflexive_addr,omitempty"`
+	// if_id is the peer's interface ID of the link.
+	IfId          uint32 `protobuf:"varint,2,opt,name=if_id,json=ifId,proto3" json:"if_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *PunchReply) Reset() {
+	*x = PunchReply{}
+	mi := &file_proto_node_v1_link_proto_msgTypes[3]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PunchReply) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PunchReply) ProtoMessage() {}
+
+func (x *PunchReply) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_node_v1_link_proto_msgTypes[3]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PunchReply.ProtoReflect.Descriptor instead.
+func (*PunchReply) Descriptor() ([]byte, []int) {
+	return file_proto_node_v1_link_proto_rawDescGZIP(), []int{3}
+}
+
+func (x *PunchReply) GetReflexiveAddr() string {
+	if x != nil {
+		return x.ReflexiveAddr
+	}
+	return ""
+}
+
+func (x *PunchReply) GetIfId() uint32 {
+	if x != nil {
+		return x.IfId
+	}
+	return 0
+}
+
+// PunchProbeRequest asks the peer to answer a probe through both NATs: the
+// peer binds an ephemeral socket, learns its reflexive address, and answers
+// with it, then the socket sends toward the requester's and echoes the
+// requester's probes for as long as the stream stays open.
+type PunchProbeRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// reflexive_addr is the requester's probe socket as a node outside its
+	// NAT observes it, "host:port".
+	ReflexiveAddr string `protobuf:"bytes,1,opt,name=reflexive_addr,json=reflexiveAddr,proto3" json:"reflexive_addr,omitempty"`
+	// nonce marks the probe's packets, 16 bytes.
+	Nonce         []byte `protobuf:"bytes,2,opt,name=nonce,proto3" json:"nonce,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *PunchProbeRequest) Reset() {
+	*x = PunchProbeRequest{}
+	mi := &file_proto_node_v1_link_proto_msgTypes[4]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PunchProbeRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PunchProbeRequest) ProtoMessage() {}
+
+func (x *PunchProbeRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_node_v1_link_proto_msgTypes[4]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PunchProbeRequest.ProtoReflect.Descriptor instead.
+func (*PunchProbeRequest) Descriptor() ([]byte, []int) {
+	return file_proto_node_v1_link_proto_rawDescGZIP(), []int{4}
+}
+
+func (x *PunchProbeRequest) GetReflexiveAddr() string {
+	if x != nil {
+		return x.ReflexiveAddr
+	}
+	return ""
+}
+
+func (x *PunchProbeRequest) GetNonce() []byte {
+	if x != nil {
+		return x.Nonce
+	}
+	return nil
+}
+
+// PunchProbeReply carries the peer's probe socket.
+type PunchProbeReply struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// reflexive_addr is the peer's probe socket as a node outside its NAT
+	// observes it, "host:port".
+	ReflexiveAddr string `protobuf:"bytes,1,opt,name=reflexive_addr,json=reflexiveAddr,proto3" json:"reflexive_addr,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *PunchProbeReply) Reset() {
+	*x = PunchProbeReply{}
+	mi := &file_proto_node_v1_link_proto_msgTypes[5]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PunchProbeReply) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PunchProbeReply) ProtoMessage() {}
+
+func (x *PunchProbeReply) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_node_v1_link_proto_msgTypes[5]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PunchProbeReply.ProtoReflect.Descriptor instead.
+func (*PunchProbeReply) Descriptor() ([]byte, []int) {
+	return file_proto_node_v1_link_proto_rawDescGZIP(), []int{5}
+}
+
+func (x *PunchProbeReply) GetReflexiveAddr() string {
+	if x != nil {
+		return x.ReflexiveAddr
+	}
+	return ""
+}
+
 var File_proto_node_v1_link_proto protoreflect.FileDescriptor
 
 const file_proto_node_v1_link_proto_rawDesc = "" +
@@ -160,9 +391,25 @@ const file_proto_node_v1_link_proto_rawDesc = "" +
 	"local_addr\x18\x01 \x01(\tR\tlocalAddr\x12\x13\n" +
 	"\x05if_id\x18\x02 \x01(\rR\x04ifId\x124\n" +
 	"\x13rendezvous_answered\x18\x03 \x01(\bH\x00R\x12rendezvousAnswered\x88\x01\x01B\x16\n" +
-	"\x14_rendezvous_answered2B\n" +
+	"\x14_rendezvous_answered\"`\n" +
+	"\fPunchRequest\x12%\n" +
+	"\x0ereflexive_addr\x18\x01 \x01(\tR\rreflexiveAddr\x12\x14\n" +
+	"\x05nonce\x18\x02 \x01(\fR\x05nonce\x12\x13\n" +
+	"\x05if_id\x18\x03 \x01(\rR\x04ifId\"H\n" +
+	"\n" +
+	"PunchReply\x12%\n" +
+	"\x0ereflexive_addr\x18\x01 \x01(\tR\rreflexiveAddr\x12\x13\n" +
+	"\x05if_id\x18\x02 \x01(\rR\x04ifId\"P\n" +
+	"\x11PunchProbeRequest\x12%\n" +
+	"\x0ereflexive_addr\x18\x01 \x01(\tR\rreflexiveAddr\x12\x14\n" +
+	"\x05nonce\x18\x02 \x01(\fR\x05nonce\"8\n" +
+	"\x0fPunchProbeReply\x12%\n" +
+	"\x0ereflexive_addr\x18\x01 \x01(\tR\rreflexiveAddr2\xbd\x01\n" +
 	"\vLinkService\x123\n" +
-	"\aRequest\x12\x14.node.v1.LinkRequest\x1a\x12.node.v1.LinkReplyB.Z,github.com/fancl20/cion/proto/node/v1;nodev1b\x06proto3"
+	"\aRequest\x12\x14.node.v1.LinkRequest\x1a\x12.node.v1.LinkReply\x123\n" +
+	"\x05Punch\x12\x15.node.v1.PunchRequest\x1a\x13.node.v1.PunchReply\x12D\n" +
+	"\n" +
+	"PunchProbe\x12\x1a.node.v1.PunchProbeRequest\x1a\x18.node.v1.PunchProbeReply0\x01B.Z,github.com/fancl20/cion/proto/node/v1;nodev1b\x06proto3"
 
 var (
 	file_proto_node_v1_link_proto_rawDescOnce sync.Once
@@ -176,16 +423,24 @@ func file_proto_node_v1_link_proto_rawDescGZIP() []byte {
 	return file_proto_node_v1_link_proto_rawDescData
 }
 
-var file_proto_node_v1_link_proto_msgTypes = make([]protoimpl.MessageInfo, 2)
+var file_proto_node_v1_link_proto_msgTypes = make([]protoimpl.MessageInfo, 6)
 var file_proto_node_v1_link_proto_goTypes = []any{
-	(*LinkRequest)(nil), // 0: node.v1.LinkRequest
-	(*LinkReply)(nil),   // 1: node.v1.LinkReply
+	(*LinkRequest)(nil),       // 0: node.v1.LinkRequest
+	(*LinkReply)(nil),         // 1: node.v1.LinkReply
+	(*PunchRequest)(nil),      // 2: node.v1.PunchRequest
+	(*PunchReply)(nil),        // 3: node.v1.PunchReply
+	(*PunchProbeRequest)(nil), // 4: node.v1.PunchProbeRequest
+	(*PunchProbeReply)(nil),   // 5: node.v1.PunchProbeReply
 }
 var file_proto_node_v1_link_proto_depIdxs = []int32{
 	0, // 0: node.v1.LinkService.Request:input_type -> node.v1.LinkRequest
-	1, // 1: node.v1.LinkService.Request:output_type -> node.v1.LinkReply
-	1, // [1:2] is the sub-list for method output_type
-	0, // [0:1] is the sub-list for method input_type
+	2, // 1: node.v1.LinkService.Punch:input_type -> node.v1.PunchRequest
+	4, // 2: node.v1.LinkService.PunchProbe:input_type -> node.v1.PunchProbeRequest
+	1, // 3: node.v1.LinkService.Request:output_type -> node.v1.LinkReply
+	3, // 4: node.v1.LinkService.Punch:output_type -> node.v1.PunchReply
+	5, // 5: node.v1.LinkService.PunchProbe:output_type -> node.v1.PunchProbeReply
+	3, // [3:6] is the sub-list for method output_type
+	0, // [0:3] is the sub-list for method input_type
 	0, // [0:0] is the sub-list for extension type_name
 	0, // [0:0] is the sub-list for extension extendee
 	0, // [0:0] is the sub-list for field type_name
@@ -203,7 +458,7 @@ func file_proto_node_v1_link_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_proto_node_v1_link_proto_rawDesc), len(file_proto_node_v1_link_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   2,
+			NumMessages:   6,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

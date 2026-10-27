@@ -183,3 +183,15 @@ and interface. The confirm then establishes it as any other.
     benchmarks recover as before, and the rebinding benchmark recovers.
 
 ## Implementation history
+
+*   Landed as proposed: the punches and the binding request
+    ([link.proto](/proto/node/v1/link.proto),
+    [rendezvous.go](/pkg/modules/topology/impl/measured/rendezvous.go)), the
+    handler and the puncher
+    ([punch.go](/pkg/modules/topology/impl/measured/punch.go),
+    [provider.go](/pkg/modules/topology/impl/measured/provider.go)), the
+    selection's instrument
+    ([selection.go](/pkg/modules/topology/impl/measured/selection.go)), and
+    the NAT lab's links
+    ([nat_test.go](/internal/testnetwork/behavior/nat_test.go)). The
+    Summary's figures are the benchmarks' five runs each.

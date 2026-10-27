@@ -254,15 +254,41 @@ func awaitReports(t *testing.T, n *network, want map[int]apps.Reach, budget time
 	}
 }
 
-// TestNATNetworkReaches checks what the NAT network serves
-// behind full-cone and port-restricted NATs: it settles, and every
-// ordered pair reaches over its chosen path and answers a ping — the
-// links of the nodes behind NATs to the public nodes carrying their
-// traffic both ways, and every pair of nodes behind NATs reaching through a
-// public node.
-// The founder's directory reports each node behind a NAT as behind one with
-// its published rendezvous address unanswered, and each public node as
-// neither.
+// awaitNATLinks fails the test, naming the pairs left, unless every pair of
+// the nodes behind NATs holds an established link at both ends within
+// budget.
+func awaitNATLinks(t *testing.T, n *network, budget time.Duration) {
+	t.Helper()
+	start := time.Now()
+	for {
+		synctest.Wait()
+		var unlinked []string
+		for i := 3; i < len(n.nodes); i++ {
+			for j := i + 1; j < len(n.nodes); j++ {
+				if !holdsLinkTo(t, n.nodes[i], n.nodes[j]) || !holdsLinkTo(t, n.nodes[j], n.nodes[i]) {
+					unlinked = append(unlinked, fmt.Sprintf("%d-%d", i, j))
+				}
+			}
+		}
+		if len(unlinked) == 0 {
+			return
+		}
+		if time.Since(start) >= budget {
+			t.Fatalf("%d pairs of nodes behind NATs hold no link within %v: %s",
+				len(unlinked), budget, strings.Join(unlinked, " "))
+		}
+		time.Sleep(settleSample)
+	}
+}
+
+// TestNATNetworkReaches checks what the NAT network serves behind
+// full-cone and port-restricted NATs: it settles, and every ordered pair
+// reaches over its chosen path and answers a ping — the links of the nodes
+// behind NATs to the public nodes carrying their traffic both ways, and
+// every pair of nodes behind NATs holding a link punched through both
+// NATs. The founder's directory reports each node behind a NAT as behind
+// one with its published rendezvous address unanswered, and each public
+// node as neither.
 func TestNATNetworkReaches(t *testing.T) {
 	testnetwork.InBubble(t, func(t *testing.T, fab *fabric.Fabric, wpki *webpkitest.CA) {
 		n, _ := bootNAT(t, fab, wpki, coneNATs)
@@ -270,6 +296,7 @@ func TestNATNetworkReaches(t *testing.T) {
 		awaitSettled(t, n.nodes, settleQuiet, natBudget)
 		awaitReach(t, n, reachBudget)
 		awaitPings(t, n, allNodes(n), reachBudget)
+		awaitNATLinks(t, n, reachBudget)
 		nat := apps.Reach{BehindNAT: true, RendezvousUnanswered: true}
 		awaitReports(t, n, map[int]apps.Reach{
 			0: {}, 1: {}, 2: {}, 3: nat, 4: nat, 5: nat, 6: nat,
