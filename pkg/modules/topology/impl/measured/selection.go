@@ -450,10 +450,17 @@ func liveNeighbor(entries []*links.Link, ia addr.IA) bool {
 // linkUp reports the interface's verdict; a loop without the monitor's
 // verdicts treats every link as up.
 func (s *selection) linkUp(ifID uint16) bool {
-	if s.cfg.Verdicts == nil {
+	return verdictUp(s.cfg.Verdicts, ifID)
+}
+
+// verdictUp reports an interface's verdict from the monitor's verdicts: an
+// interface with none is up, as the monitor counts it, and a nil source
+// reports every link up.
+func verdictUp(verdicts func() map[uint16]bool, ifID uint16) bool {
+	if verdicts == nil {
 		return true
 	}
-	up, ok := s.cfg.Verdicts()[ifID]
+	up, ok := verdicts()[ifID]
 	return !ok || up
 }
 

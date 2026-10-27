@@ -451,17 +451,7 @@ func TestStrandedRedial(t *testing.T) {
 // acceptor's per-ISD-AS rate limit.
 func strandedDialer(t *testing.T, ia addr.IA, entries ...*links.Link) (*Provider, *memory.DB) {
 	t.Helper()
-	z, err := New(Config{ControlHost: netip.MustParseAddr("127.0.0.1")})
-	if err != nil {
-		t.Fatal(err)
-	}
-	store := memory.New()
-	z.Wire(topology.Environment{IA: ia, Store: store})
-	for _, l := range entries {
-		if err := store.Insert(context.Background(), l); err != nil {
-			t.Fatal(err)
-		}
-	}
+	z, store := wiredProvider(t, ia, entries...)
 	z.stranded.Store(true)
 	return z, store
 }
@@ -481,7 +471,7 @@ func TestStrandedRevivalConfirms(t *testing.T) {
 	}
 	fake := &fakeLinkServiceClient{reply: &nodev1.LinkReply{LocalAddr: "127.0.0.1:4242", IfId: 9}}
 	z.linker = linkClientOf(map[*links.Link]*fakeLinkServiceClient{revived[0]: fake})
-	z.confirmRevived(context.Background(), revived[0])
+	z.confirmLanded(context.Background(), revived[0])
 	entry := entryByIfID(t, store, retired.IfID)
 	if entry.State != links.StateEstablished || entry.RemoteIfID != 9 ||
 		entry.Remote != netip.MustParseAddrPort("127.0.0.1:4242") {
@@ -1044,4 +1034,166 @@ func TestFollowKeepsTheLocatorOnTheFlow(t *testing.T) {
 		}
 		cancel()
 	})
+}
+
+// TestRepunchDue checks which punched links the re-punch loop takes: an
+// established link to a peer that reports itself undialable, down for
+// RepunchGrace, again after RepunchRetry and twice that, RepunchAttempts in
+// all, and only at the end with the lower ISD-AS; a link whose verdict comes
+// back is forgotten, its next down period counted afresh.
+func TestRepunchDue(t *testing.T) {
+	punched := liveLink(linkIA, 40041)
+	punched.IfID = 4
+	entries := []*links.Link{punched}
+	down := map[uint16]bool{4: false}
+	undialable := map[addr.IA]bool{linkIA: true}
+	t0 := time.Unix(1000, 0)
+	st := repunchState{}
+	second := RepunchGrace + RepunchRetry
+	third := second + 2*RepunchRetry
+	steps := []struct {
+		after    time.Duration
+		verdicts map[uint16]bool
+		want     int
+	}{
+		{0, down, 0},
+		{RepunchGrace - time.Second, down, 0},
+		{RepunchGrace, down, 1},
+		{second - time.Second, down, 0},
+		{second, down, 1},
+		{third - time.Second, down, 0},
+		{third, down, 1},
+		{third + time.Hour, down, 0},
+		{third + time.Hour + time.Second, map[uint16]bool{4: true}, 0},
+		{third + time.Hour + 2*time.Second, down, 0},
+		{third + time.Hour + 2*time.Second + RepunchGrace, down, 1},
+	}
+	for _, step := range steps {
+		if got := st.due(rendezvousIA, entries, step.verdicts, undialable, t0.Add(step.after)); len(got) != step.want {
+			t.Errorf("at %v: %d links due, want %d", step.after, len(got), step.want)
+		}
+	}
+
+	never := []struct {
+		name       string
+		mine       addr.IA
+		entry      func() *links.Link
+		verdicts   map[uint16]bool
+		undialable map[addr.IA]bool
+	}{
+		{"the end with the higher ISD-AS", linkIA2, func() *links.Link { return punched }, down, undialable},
+		{"a dialable peer", rendezvousIA, func() *links.Link { return punched }, down, nil},
+		{"no verdict", rendezvousIA, func() *links.Link { return punched }, nil, undialable},
+		{"a candidate", rendezvousIA, func() *links.Link {
+			l := *punched
+			l.State = links.StateCandidate
+			return &l
+		}, down, undialable},
+		{"an entry naming no locator", rendezvousIA, func() *links.Link {
+			l := *punched
+			l.Remote = netip.AddrPort{}
+			return &l
+		}, down, undialable},
+	}
+	for _, tt := range never {
+		st := repunchState{}
+		for _, after := range []time.Duration{0, RepunchGrace, RepunchGrace + RepunchRetry} {
+			if got := st.due(tt.mine, []*links.Link{tt.entry()}, tt.verdicts, tt.undialable,
+				t0.Add(after)); len(got) != 0 {
+				t.Errorf("%s: due at %v", tt.name, after)
+			}
+		}
+	}
+}
+
+// TestRepunchMovesTheLink checks a re-punch: the entry keeps its interface
+// ID, moves to a fresh link address aimed at the peer's reflexive address,
+// and its link request lands; a failed punch leaves the entry as it was.
+func TestRepunchMovesTheLink(t *testing.T) {
+	standing := liveLink(linkIA, 40051)
+	z, store := wiredProvider(t, rendezvousIA, standing)
+	theirs := netip.MustParseAddrPort("127.0.0.1:26001")
+	fake := &fakeLinkServiceClient{reply: &nodev1.LinkReply{LocalAddr: theirs.String(), IfId: 8}}
+	z.linker = linkClientOf(map[*links.Link]*fakeLinkServiceClient{standing: fake})
+
+	z.repunch(context.Background(), &stubPuncher{}, standing)
+	if entry := entryByIfID(t, store, standing.IfID); entry.Local != standing.Local ||
+		entry.Remote != standing.Remote {
+		t.Errorf("a failed re-punch left %+v, want the entry unchanged", entry)
+	}
+
+	punch := &stubPuncher{reflexive: theirs, ifID: 8}
+	z.repunch(context.Background(), punch, standing)
+	entry := entryByIfID(t, store, standing.IfID)
+	if entry.Local == standing.Local || entry.Remote != theirs || entry.RemoteIfID != 8 ||
+		entry.State != links.StateEstablished {
+		t.Errorf("the re-punched entry = %+v, want interface %d established on a fresh address "+
+			"aimed at %v, interface 8", entry, standing.IfID, theirs)
+	}
+	if want := []addr.IA{linkIA}; !slices.Equal(punch.established, want) {
+		t.Errorf("the re-punch punched %v, want %v", punch.established, want)
+	}
+	if got := fake.requests.Load(); got != 1 {
+		t.Errorf("the re-punch sent %d link requests, want one", got)
+	}
+}
+
+// TestPickReflector checks the reflector's choice: a neighbor whose own
+// report says its address answers and whose established link is up, never
+// one whose link is down, nor a candidate, nor a node that reports itself
+// undialable.
+func TestPickReflector(t *testing.T) {
+	entry := func(ia addr.IA, ifID uint16, state links.State) *links.Link {
+		l := liveLink(ia, 40060+ifID)
+		l.IfID, l.State = ifID, state
+		return l
+	}
+	dialable := func(ia addr.IA, rendezvous string) DirectoryEntry {
+		return DirectoryEntry{IA: ia, RendezvousAddr: netip.MustParseAddrPort(rendezvous)}
+	}
+	directory := []DirectoryEntry{
+		dialable(linkIA, "192.0.2.1:30043"),
+		dialable(linkIA2, "192.0.2.2:30043"),
+		{IA: rendezvousIA, RendezvousAddr: netip.MustParseAddrPort("192.0.2.3:30043"),
+			Reach: Reach{BehindNAT: true, RendezvousUnanswered: true}},
+	}
+	tests := []struct {
+		name     string
+		entries  []*links.Link
+		verdicts map[uint16]bool
+		want     string
+	}{
+		{"the first one up", []*links.Link{entry(linkIA, 1, links.StateEstablished),
+			entry(linkIA2, 2, links.StateEstablished)}, nil, "192.0.2.1:30043"},
+		{"past a down one", []*links.Link{entry(linkIA, 1, links.StateEstablished),
+			entry(linkIA2, 2, links.StateEstablished)}, map[uint16]bool{1: false}, "192.0.2.2:30043"},
+		{"past a candidate", []*links.Link{entry(linkIA, 1, links.StateCandidate),
+			entry(linkIA2, 2, links.StateEstablished)}, nil, "192.0.2.2:30043"},
+		{"none dialable", []*links.Link{entry(rendezvousIA, 3, links.StateEstablished)}, nil, ""},
+		{"none up", []*links.Link{entry(linkIA, 1, links.StateEstablished)},
+			map[uint16]bool{1: false}, ""},
+	}
+	for _, tt := range tests {
+		got, ok := pickReflector(tt.entries, tt.verdicts, directory)
+		if want := tt.want != ""; ok != want || want && got != netip.MustParseAddrPort(tt.want) {
+			t.Errorf("%s: picked %v (%t), want %q", tt.name, got, ok, tt.want)
+		}
+	}
+}
+
+// wiredProvider returns a provider over a store holding the given entries.
+func wiredProvider(t *testing.T, ia addr.IA, entries ...*links.Link) (*Provider, *memory.DB) {
+	t.Helper()
+	z, err := New(Config{ControlHost: netip.MustParseAddr("127.0.0.1")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := memory.New()
+	z.Wire(topology.Environment{IA: ia, Store: store})
+	for _, l := range entries {
+		if err := store.Insert(context.Background(), l); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return z, store
 }

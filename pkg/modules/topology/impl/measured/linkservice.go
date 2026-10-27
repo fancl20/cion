@@ -64,6 +64,10 @@ type LinkService struct {
 	// Punching reports whether the node's own link punch toward the peer is
 	// in flight; nil reports none.
 	Punching func(peer addr.IA) bool
+	// Verdicts returns the health monitor's link verdicts by interface ID:
+	// a link's punch takes over a caller's standing entry only while its
+	// verdict is down. Nil reports every link up.
+	Verdicts func() map[uint16]bool
 
 	limiterOnce sync.Once
 	limiter     *ratelimit.Keyed[addr.IA]

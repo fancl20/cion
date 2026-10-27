@@ -183,22 +183,56 @@ func TestPunchLinkRecordsTheCallersReflexiveAddress(t *testing.T) {
 		t.Errorf("the reply = %s/%d, want the entry's %v/%d",
 			reply.ReflexiveAddr, reply.IfId, entry.Local, entry.IfID)
 	}
-	// The opens left before the reply: the deadline bounds a read the queue
-	// answers at once.
-	if err := caller.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+	awaitOpen(t, caller, nonce, entry.Local)
+}
+
+// awaitOpen fails the test unless the socket holds the nonce's open from the
+// given address. The opens left before the punch's reply: the deadline only
+// bounds a read the queue answers at once.
+func awaitOpen(t *testing.T, conn underlay.UDPConn, nonce [16]byte, from netip.AddrPort) {
+	t.Helper()
+	if err := conn.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
 		t.Fatal(err)
 	}
 	buf := make([]byte, 64)
-	n, src, err := caller.ReadFromUDP(buf)
+	n, src, err := conn.ReadFromUDP(buf)
 	if err != nil {
-		t.Fatalf("the caller's socket has no open: %v", err)
+		t.Fatalf("the socket has no open: %v", err)
 	}
 	p, ok := parsePunchPacket(buf[:n])
-	if from := netip.AddrPortFrom(src.AddrPort().Addr().Unmap(), src.AddrPort().Port()); !ok ||
-		p != (punchPacket{nonce: nonce, kind: punchOpen}) || from != entry.Local {
-		t.Errorf("the caller's socket has %+v from %v, want the nonce's open from %v",
-			p, from, entry.Local)
+	if got := netip.AddrPortFrom(src.AddrPort().Addr().Unmap(), src.AddrPort().Port()); !ok ||
+		p != (punchPacket{nonce: nonce, kind: punchOpen}) || got != from {
+		t.Errorf("the socket has %+v from %v, want the nonce's open from %v", p, got, from)
 	}
+}
+
+// TestPunchLinkMovesADownEntry checks a link's punch toward a caller whose
+// standing entry is down — a NAT on the way remapped — naming the interface
+// the entry pairs with: the entry moves to a fresh link address with its
+// interface ID kept, aimed at the caller's reflexive address, and the
+// caller's socket has the opens from the fresh address.
+func TestPunchLinkMovesADownEntry(t *testing.T) {
+	standing := liveLink(linkIA, 40001)
+	standing.RemoteIfID = 6
+	svc := punchService(t, func(s *LinkService) {
+		if err := s.Store.Insert(context.Background(), standing); err != nil {
+			t.Fatal(err)
+		}
+		s.Verdicts = func() map[uint16]bool { return map[uint16]bool{standing.IfID: false} }
+	})
+	caller := udpSocket(t)
+	nonce := [16]byte{4}
+	if _, err := linkPunch(svc, linkIA, boundAddr(caller), nonce, 6); err != nil {
+		t.Fatal(err)
+	}
+	entry := linkEntry(t, svc, linkIA)
+	if entry.IfID != standing.IfID || entry.Local == standing.Local ||
+		entry.Remote != boundAddr(caller) || entry.RemoteIfID != 6 ||
+		entry.State != links.StateEstablished {
+		t.Errorf("the moved entry = %+v, want interface %d established on a fresh address "+
+			"aimed at %v, interface 6", entry, standing.IfID, boundAddr(caller))
+	}
+	awaitOpen(t, caller, nonce, entry.Local)
 }
 
 // TestPunchLinkAdoptsTheUnfinishedEntry checks a link's punch toward a
@@ -298,11 +332,24 @@ func TestPunchRefusals(t *testing.T) {
 		req:  valid,
 		want: connect.CodeUnavailable,
 	}, {
-		name: "a standing link",
+		name: "a standing link that is up",
 		mutate: func(s *LinkService) {
 			if err := s.Store.Insert(context.Background(), liveLink(linkIA, 40001)); err != nil {
 				t.Fatal(err)
 			}
+		},
+		peer: linkIA,
+		req:  valid,
+		want: connect.CodeAlreadyExists,
+	}, {
+		name: "a down standing link paired with another interface",
+		mutate: func(s *LinkService) {
+			standing := liveLink(linkIA, 40001)
+			standing.RemoteIfID = 9
+			if err := s.Store.Insert(context.Background(), standing); err != nil {
+				t.Fatal(err)
+			}
+			s.Verdicts = func() map[uint16]bool { return map[uint16]bool{standing.IfID: false} }
 		},
 		peer: linkIA,
 		req:  valid,

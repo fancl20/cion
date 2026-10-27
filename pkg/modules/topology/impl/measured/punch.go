@@ -286,9 +286,10 @@ func (s *LinkService) punchProbe(
 }
 
 // Punch opens the node's NAT toward the authenticated caller for the link
-// it establishes: the caller's entry — a candidate the punch records, or
-// the one an unfinished punch left — binds its link address, sends toward
-// the caller's reflexive address, and records it as the entry's locator.
+// it establishes or punches again: the caller's entry — a candidate the
+// punch records, the one an unfinished punch left, or a down one it moves to
+// a fresh link address — binds its link address, sends toward the caller's
+// reflexive address, and records it as the entry's locator.
 func (s *LinkService) Punch(ctx context.Context, req *nodev1.PunchRequest) (*nodev1.PunchReply, error) {
 	call, err := s.admitPunch(ctx, true, req.ReflexiveAddr, req.Nonce)
 	if err != nil {
@@ -331,31 +332,43 @@ func (s *LinkService) Punch(ctx context.Context, req *nodev1.PunchRequest) (*nod
 }
 
 // punchEntry returns the caller's entry a link's punch binds: the live one
-// an unfinished punch left, which names no locator yet, or a candidate it
-// records under the cap on a fresh link address. A caller the table holds a
-// serving entry for is refused: that link stands.
+// an unfinished punch left, which names no locator yet; a standing one whose
+// verdict is down and whose peer interface is the one the request names —
+// the same link punched again — moved to a fresh link address, for the
+// link's own socket stays bound until the punched locator lands, with its
+// interface ID kept, so the routes through the link carry again once it
+// does; or a candidate it records under the cap on a fresh link address. A
+// caller whose standing entry is up, or pairs with another of its
+// interfaces, is refused: that link stands until its own verdict retires it.
 func (s *LinkService) punchEntry(ctx context.Context, peer addr.IA, remoteIfID uint16) (*links.Link, error) {
 	entry, err := s.Store.ByNeighbor(ctx, peer)
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInternal, "reading the neighbor table").WithCause(err)
 	}
-	if entry != nil {
-		if entry.Remote.IsValid() {
-			return nil, connect.Errorf(connect.CodeAlreadyExists, "a link to %s stands", peer)
-		}
+	if entry != nil && !entry.Remote.IsValid() {
 		entry.RemoteIfID = remoteIfID
 		return entry, nil
+	}
+	if entry != nil && (entry.RemoteIfID != remoteIfID || verdictUp(s.Verdicts, entry.IfID)) {
+		return nil, connect.Errorf(connect.CodeAlreadyExists, "a link to %s stands", peer)
 	}
 	entries, err := s.Store.All(ctx)
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInternal, "reading the link store").WithCause(err)
 	}
-	if live := liveLinks(entries); live >= s.MaxLinks {
-		return nil, connect.Errorf(connect.CodeResourceExhausted, "link cap reached (%d)", live)
+	if entry == nil {
+		if live := liveLinks(entries); live >= s.MaxLinks {
+			return nil, connect.Errorf(connect.CodeResourceExhausted, "link cap reached (%d)", live)
+		}
 	}
 	local, err := AllocateLinkAddr(s.Sockets, s.LinkHost, entries)
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInternal, "allocating the link address").WithCause(err)
+	}
+	if entry != nil {
+		entry.Local = local
+		entry.RemoteIfID = remoteIfID
+		return entry, nil
 	}
 	entry = &links.Link{
 		NeighborIA: peer,

@@ -167,3 +167,11 @@ the old entry stands until its own verdict retires it. `LinkService` gains
     takes. The other benchmarks hold.
 
 ## Implementation history
+
+*   Landed as proposed: the re-punch loop and the reflector
+    ([provider.go](/pkg/modules/topology/impl/measured/provider.go)), the
+    handler's down entry
+    ([punch.go](/pkg/modules/topology/impl/measured/punch.go)), and the
+    recovery lab
+    ([nat_test.go](/internal/testnetwork/behavior/nat_test.go)). The
+    Summary's figures are the benchmarks' five runs each.

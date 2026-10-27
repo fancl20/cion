@@ -45,6 +45,9 @@ const (
 	// natCores is the count of cores the network's TRC names once
 	// the authoritative core joined.
 	natCores = 2
+	// natRepunch bounds, in virtual time, a remapped node's punched link's
+	// fall and its return.
+	natRepunch = 30 * time.Second
 )
 
 // natOneWay is the one-way delay between two of the NAT
@@ -255,16 +258,16 @@ func awaitReports(t *testing.T, n *network, want map[int]apps.Reach, budget time
 }
 
 // awaitNATLinks fails the test, naming the pairs left, unless every pair of
-// the nodes behind NATs holds an established link at both ends within
+// the given nodes behind NATs holds an established link at both ends within
 // budget.
-func awaitNATLinks(t *testing.T, n *network, budget time.Duration) {
+func awaitNATLinks(t *testing.T, n *network, which []int, budget time.Duration) {
 	t.Helper()
 	start := time.Now()
 	for {
 		synctest.Wait()
 		var unlinked []string
-		for i := 3; i < len(n.nodes); i++ {
-			for j := i + 1; j < len(n.nodes); j++ {
+		for a, i := range which {
+			for _, j := range which[a+1:] {
 				if !holdsLinkTo(t, n.nodes[i], n.nodes[j]) || !holdsLinkTo(t, n.nodes[j], n.nodes[i]) {
 					unlinked = append(unlinked, fmt.Sprintf("%d-%d", i, j))
 				}
@@ -296,7 +299,7 @@ func TestNATNetworkReaches(t *testing.T) {
 		awaitSettled(t, n.nodes, settleQuiet, natBudget)
 		awaitReach(t, n, reachBudget)
 		awaitPings(t, n, allNodes(n), reachBudget)
-		awaitNATLinks(t, n, reachBudget)
+		awaitNATLinks(t, n, []int{3, 4, 5, 6}, reachBudget)
 		nat := apps.Reach{BehindNAT: true, RendezvousUnanswered: true}
 		awaitReports(t, n, map[int]apps.Reach{
 			0: {}, 1: {}, 2: {}, 3: nat, 4: nat, 5: nat, 6: nat,
@@ -305,10 +308,12 @@ func TestNATNetworkReaches(t *testing.T) {
 }
 
 // TestNATNetworkRecovers checks that each link's locator follows the
-// link's own flow: a node behind a symmetric NAT joins, and every
-// ordered pair answers a ping; again once a NAT drops node 3's
-// mappings; and again once node 2, the parent of 4 and 6, restarts on its
-// state.
+// link's own flow, and that a punched link a remap took down is punched
+// again: a node behind a symmetric NAT joins, and every ordered pair
+// answers a ping; again once a NAT drops node 3's mappings — its link to
+// node 5, behind a port-restricted NAT, going down and, with its link to
+// node 4, standing again within natRepunch on the interfaces it had; and
+// again once node 2, the parent of 4 and 6, restarts on its state.
 func TestNATNetworkRecovers(t *testing.T) {
 	testnetwork.InBubble(t, func(t *testing.T, fab *fabric.Fabric, wpki *webpkitest.CA) {
 		behaviors := maps.Clone(coneNATs)
@@ -317,13 +322,61 @@ func TestNATNetworkRecovers(t *testing.T) {
 		awaitPinned(t, n, allNodes(n)...)
 		awaitSettled(t, n.nodes, settleQuiet, natBudget)
 		awaitPings(t, n, allNodes(n), reachBudget)
+		awaitNATLinks(t, n, []int{3, 4, 5}, reachBudget)
 
-		nats[3].Rebind()
+		const rebound = 3
+		ends := linkEnds(t, n, rebound, 4, 5)
+		nats[rebound].Rebind()
+		testnetwork.PollVirtual(t, natRepunch, "node 3's link to node 5 to go down", func() bool {
+			return !n.nodes[rebound].App().Monitor().Up(ends[5][0])
+		})
+		testnetwork.PollVirtual(t, natRepunch, "node 3's links to nodes 4 and 5 to stand again",
+			func() bool { return linksStand(t, n, rebound, ends) })
 		awaitPings(t, n, allNodes(n), natWatch)
 
 		restart(t, fab, wpki, n, 2)
 		awaitPings(t, n, allNodes(n), natWatch)
 	})
+}
+
+// linkTo returns the node's live entry for the neighbor, nil when it holds
+// none.
+func linkTo(t *testing.T, node, neighbor *testnetwork.Node) *links.Link {
+	t.Helper()
+	l, err := node.App().Links().ByNeighbor(t.Context(), neighbor.App().IA())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return l
+}
+
+// linkEnds returns the interface IDs of the node's links to the peers, by
+// peer: the node's own, then the peer's.
+func linkEnds(t *testing.T, n *network, node int, peers ...int) map[int][2]uint16 {
+	t.Helper()
+	ends := make(map[int][2]uint16, len(peers))
+	for _, p := range peers {
+		ends[p] = [2]uint16{
+			linkTo(t, n.nodes[node], n.nodes[p]).IfID,
+			linkTo(t, n.nodes[p], n.nodes[node]).IfID,
+		}
+	}
+	return ends
+}
+
+// linksStand reports whether each of the node's links to the peers is
+// established and up at both ends, on the interfaces given.
+func linksStand(t *testing.T, n *network, node int, ends map[int][2]uint16) bool {
+	t.Helper()
+	for p, ifIDs := range ends {
+		mine, theirs := linkTo(t, n.nodes[node], n.nodes[p]), linkTo(t, n.nodes[p], n.nodes[node])
+		if mine == nil || theirs == nil || mine.IfID != ifIDs[0] || theirs.IfID != ifIDs[1] ||
+			mine.State != links.StateEstablished || theirs.State != links.StateEstablished ||
+			!n.nodes[node].App().Monitor().Up(mine.IfID) || !n.nodes[p].App().Monitor().Up(theirs.IfID) {
+			return false
+		}
+	}
+	return true
 }
 
 // restart stops the node and boots it again on its state at once.

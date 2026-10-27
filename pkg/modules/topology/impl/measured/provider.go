@@ -46,6 +46,21 @@ const (
 	FollowRetry = 5 * time.Second
 )
 
+// The re-punch loop's cadence, on the follow loop's FollowInterval: a punched
+// link whose verdict stays down is punched again in place.
+const (
+	// RepunchGrace is how long a punched link's verdict stays down before it
+	// is punched again: one BFD detection time past the verdict, so an
+	// outage the link rides out moves nothing.
+	RepunchGrace = 3 * time.Second
+	// RepunchRetry is the pause after a link's first failed re-punch; each
+	// later pause doubles it.
+	RepunchRetry = 5 * time.Second
+	// RepunchAttempts bounds the re-punches of one down period: a peer that
+	// stays unreachable leaves the link to the selection's retirement.
+	RepunchAttempts = 3
+)
+
 // Config configures the measured provider with the pieces the node's
 // identity completion and run arguments own; Wire delivers the rest, the
 // products of the node's phases, before Seed, Mounts, and Run.
@@ -438,6 +453,7 @@ func (z *Provider) assemble() error {
 		Echo:        z.echoPublished,
 		Reflector:   z.reflector,
 		Punching:    z.puncher.punching,
+		Verdicts:    z.env.Verdicts,
 	}
 	z.linker = &linkClient{peer: z.env.Peer, answered: z.recordAnswer}
 	directoryCfg := NodeDirectoryConfig{
@@ -509,9 +525,10 @@ func (z *Provider) Mounts() ([]scionrpc.Mount, error) {
 
 // Run owns the measured provider's loops until the context is canceled — the
 // rendezvous acceptor, the joiner's dials, the node directory's publish and
-// fetch, the selection sweep, and the confirm pass over the entries the node
-// holds — and returns once every one has returned. Mounts assembled what the
-// loops serve.
+// fetch, the selection sweep, the confirm pass over the entries the node
+// holds, and the loops keeping each link on its peer's current mapping, by
+// following its flow or punching it again — and returns once every one has
+// returned. Mounts assembled what the loops serve.
 func (z *Provider) Run(ctx context.Context) {
 	var wg sync.WaitGroup
 	loops.Go(ctx, &wg, "rendezvous", z.rendezvous.Run)
@@ -522,33 +539,52 @@ func (z *Provider) Run(ctx context.Context) {
 	})
 	loops.Go(ctx, &wg, "confirm pass", z.runConfirmPass)
 	loops.Go(ctx, &wg, "follow", z.runFollow)
+	loops.Go(ctx, &wg, "re-punch", z.runRepunch)
 	wg.Wait()
 }
 
-// errNoReflector reports that no established neighbor reports itself
+// errNoReflector reports that no neighbor whose link is up reports itself
 // dialable.
-var errNoReflector = errors.New("no established neighbor reports itself dialable")
+var errNoReflector = errors.New("no neighbor whose link is up reports itself dialable")
 
 // reflector returns the published rendezvous address of a neighbor whose
-// own report says it answers: a node outside the node's NAT, whose acceptor
-// echoes a socket's reflexive address.
+// link is up and whose own report says it answers: a node outside the
+// node's NAT, whose acceptor echoes a socket's reflexive address.
 func (z *Provider) reflector(ctx context.Context) (netip.AddrPort, error) {
 	entries, err := z.env.Store.All(ctx)
 	if err != nil {
 		return netip.AddrPort{}, fmt.Errorf("reading the link store: %w", err)
 	}
-	neighbors := make(map[addr.IA]bool, len(entries))
-	for _, l := range entries {
-		if l.State == links.StateEstablished {
-			neighbors[l.NeighborIA] = true
-		}
+	var verdicts map[uint16]bool
+	if z.env.Verdicts != nil {
+		verdicts = z.env.Verdicts()
 	}
-	for _, e := range z.directory.Entries() {
-		if neighbors[e.IA] && !e.Reach.RendezvousUnanswered {
-			return e.RendezvousAddr, nil
-		}
+	if ap, ok := pickReflector(entries, verdicts, z.directory.Entries()); ok {
+		return ap, nil
 	}
 	return netip.AddrPort{}, errNoReflector
+}
+
+// pickReflector returns the published rendezvous address of the first
+// directory entry whose node reports its address answering and holds an
+// established link to this node whose verdict is up; an interface with no
+// verdict is up.
+func pickReflector(
+	entries []*links.Link, verdicts map[uint16]bool, directory []DirectoryEntry,
+) (netip.AddrPort, bool) {
+
+	up := make(map[addr.IA]bool, len(entries))
+	for _, l := range entries {
+		if v, ok := verdicts[l.IfID]; l.State == links.StateEstablished && (!ok || v) {
+			up[l.NeighborIA] = true
+		}
+	}
+	for _, e := range directory {
+		if up[e.IA] && !e.Reach.RendezvousUnanswered {
+			return e.RendezvousAddr, true
+		}
+	}
+	return netip.AddrPort{}, false
 }
 
 // Close releases what Mounts bound, once Run has returned: the directory's
@@ -610,7 +646,7 @@ func (z *Provider) selectionConfig() SelectionConfig {
 func (z *Provider) runJoinDials(ctx context.Context) {
 	for {
 		for _, l := range z.dialJoins(ctx) {
-			z.confirmRevived(ctx, l)
+			z.confirmLanded(ctx, l)
 		}
 		if !loops.Sleep(ctx, joinDialInterval) {
 			return
@@ -720,16 +756,17 @@ func (z *Provider) dialJoins(ctx context.Context) []*links.Link {
 	return revived
 }
 
-// confirmRevived sends a revived entry's link request once the generation
-// serves the entry, retrying inside EstablishTimeout as an establishment's
-// confirm does: the acceptor's candidate waits on it, and the confirm pass
-// may have ended before the revival.
-func (z *Provider) confirmRevived(ctx context.Context, l *links.Link) {
+// confirmLanded sends the link request of an entry whose locator just
+// landed — a revived one, a punched-again one — once the generation serves
+// the entry, retrying inside EstablishTimeout as an establishment's confirm
+// does: the acceptor's side waits on it, and the confirm pass may have ended
+// before the locator landed.
+func (z *Provider) confirmLanded(ctx context.Context, l *links.Link) {
 	ctx, cancel := context.WithTimeout(ctx, EstablishTimeout)
 	defer cancel()
 	for !z.confirmEntry(ctx, l) {
 		if !loops.Sleep(ctx, ConfirmRetryPause) {
-			slog.Warn("The revived entry's link request did not answer",
+			slog.Warn("The landed entry's link request did not answer",
 				"neighbor", l.NeighborIA, "interface", l.IfID)
 			return
 		}
@@ -874,6 +911,138 @@ func (z *Provider) confirmEntry(ctx context.Context, l *links.Link) bool {
 	slog.Info("Confirmed a held entry", "neighbor", l.NeighborIA,
 		"local", l.Local, "remote", l.Remote, "interface", l.IfID)
 	return true
+}
+
+// runRepunch keeps punched links on their peers' current mappings. A NAT
+// that remaps one end of a punched link leaves it down for good while the
+// far end's NAT filters by address: that NAT drops what the new mapping
+// sends, so no flow arrives for the follow loop to follow. The loop punches
+// such a link again once its verdict has stayed down for RepunchGrace, up to
+// RepunchAttempts times per down period. A node whose own published
+// rendezvous address answers holds no punched link: its peers' flows reach
+// it, and the follow loop keeps its links.
+func (z *Provider) runRepunch(ctx context.Context) {
+	st := repunchState{}
+	for loops.Sleep(ctx, FollowInterval) {
+		if !z.unanswered.Load() {
+			continue
+		}
+		entries, err := z.env.Store.All(ctx)
+		if err != nil {
+			slog.Error("Reading the link store", "err", err)
+			continue
+		}
+		var verdicts map[uint16]bool
+		if z.env.Verdicts != nil {
+			verdicts = z.env.Verdicts()
+		}
+		undialable := make(map[addr.IA]bool)
+		for _, e := range z.directory.Entries() {
+			if e.Reach.RendezvousUnanswered {
+				undialable[e.IA] = true
+			}
+		}
+		for _, l := range st.due(z.env.IA, entries, verdicts, undialable, time.Now()) {
+			z.repunch(ctx, z.puncher, l)
+		}
+	}
+}
+
+// repunchState is the re-punch loop's memory of the punched links whose
+// verdict is down, by interface ID.
+type repunchState struct {
+	links map[uint16]repunchLink
+}
+
+// repunchLink is one down punched link's memory: since when its verdict has
+// been down, and how many re-punches the down period took, the last when.
+type repunchLink struct {
+	downSince time.Time
+	attempts  int
+	last      time.Time
+}
+
+// due returns the punched links the node punches again at now and advances
+// the memory. A punched link is an established, serving entry whose peer
+// reports its published rendezvous address unanswered. Of its two ends, the
+// one with the lower ISD-AS punches it again and the other's handler takes
+// its own down entry, so the two never punch toward each other at once. A
+// link is due once its verdict has stayed down for RepunchGrace, then again
+// after RepunchRetry, the pause doubling with each attempt, until the down
+// period has taken RepunchAttempts. A link whose verdict came back is
+// forgotten.
+func (st *repunchState) due(
+	mine addr.IA, entries []*links.Link, verdicts map[uint16]bool, undialable map[addr.IA]bool,
+	now time.Time,
+) []*links.Link {
+
+	next := make(map[uint16]repunchLink, len(st.links))
+	var due []*links.Link
+	for _, l := range entries {
+		if up, ok := verdicts[l.IfID]; !ok || up || l.State != links.StateEstablished ||
+			!l.Serving() || !undialable[l.NeighborIA] || mine >= l.NeighborIA {
+			continue
+		}
+		r, ok := st.links[l.IfID]
+		if !ok {
+			r.downSince = now
+		}
+		if r.attempts < RepunchAttempts && now.Sub(r.downSince) >= RepunchGrace &&
+			(r.attempts == 0 || now.Sub(r.last) >= RepunchRetry<<(r.attempts-1)) {
+			r.attempts++
+			r.last = now
+			due = append(due, l)
+		}
+		next[l.IfID] = r
+	}
+	st.links = next
+	return due
+}
+
+// repunch punches a down link again and records both ends' current
+// reflexive addresses on its entry. The punch leaves from a fresh link
+// address — the link's own socket stays bound until the entry lands — and
+// the entry keeps its interface ID, so the routes through the link carry
+// again once the confirm lands. A failed punch changes nothing: the link
+// stays down for the next attempt or the selection's retirement.
+func (z *Provider) repunch(ctx context.Context, punch Puncher, l *links.Link) {
+	entries, err := z.env.Store.All(ctx)
+	if err != nil {
+		slog.Error("Reading the link store", "err", err)
+		return
+	}
+	local, err := AllocateLinkAddr(z.cfg.Sockets, z.cfg.ControlHost, entries)
+	if err != nil {
+		slog.Error("Allocating a link address", "neighbor", l.NeighborIA, "err", err)
+		return
+	}
+	fresh := *l
+	fresh.Local = local
+	punchCtx, cancel := context.WithTimeout(ctx, EstablishTimeout)
+	defer cancel()
+	theirs, ifID, err := punch.Establish(punchCtx, l.NeighborIA, &fresh)
+	if err != nil {
+		slog.Warn("The re-punch failed", "neighbor", l.NeighborIA, "interface", l.IfID, "err", err)
+		return
+	}
+	// The punch took seconds: an entry another loop moved or retired
+	// meanwhile keeps that change, and the punch's openings lapse.
+	current, err := z.env.Store.ByNeighbor(ctx, l.NeighborIA)
+	if err != nil || current == nil || current.IfID != l.IfID || current.Local != l.Local ||
+		current.Remote != l.Remote || current.State != l.State {
+		slog.Info("The re-punched entry moved meanwhile", "neighbor", l.NeighborIA,
+			"interface", l.IfID)
+		return
+	}
+	fresh.Remote = theirs
+	fresh.RemoteIfID = ifID
+	if err := z.env.Store.Update(ctx, &fresh); err != nil {
+		slog.Error("Recording the re-punch", "neighbor", l.NeighborIA, "err", err)
+		return
+	}
+	slog.Info("Punched a link again", "neighbor", l.NeighborIA, "interface", l.IfID,
+		"local", fresh.Local, "remote", fresh.Remote)
+	z.confirmLanded(ctx, &fresh)
 }
 
 // claimFallback returns the address a wildcard reply's record falls back
