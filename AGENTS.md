@@ -34,9 +34,9 @@ go in `internal/testnetwork`.
 
 Review changes to ensure they conform to all style requirements. For code
 changes, run tests with `go test -race -count=2 ./...` and
-`go test -count=2 ./internal/testnetwork/behavior/` first, then `golangci-lint`,
-then `git ls-files '*.go' ':!:proto/' | xargs -r goimports -w -local
-github.com/fancl20/cion`, `go fmt`, `go fix`, and `go vet`. Run test
+`go test -count=2 -timeout 20m ./internal/testnetwork/behavior/` first, then
+`golangci-lint`, then `git ls-files '*.go' ':!:proto/' | xargs -r goimports -w
+-local github.com/fancl20/cion`, `go fmt`, `go fix`, and `go vet`. Run test
 commands one at a time; overlapping runs fail the labs.
 
 Pause and wait for human review before committing changes to the codebase.
