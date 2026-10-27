@@ -31,19 +31,29 @@ import (
 	nodev1connect "github.com/fancl20/cion/proto/node/v1/nodev1connect"
 )
 
-// joinDialInterval paces the joiner's rendezvous dials: entries whose
-// rendezvous has not answered yet are re-dialed until it does or the
-// candidate window retires them.
-const joinDialInterval = 5 * time.Second
+// The joiner's rendezvous dials: entries whose rendezvous has not answered
+// yet are re-dialed until it does or the candidate window retires them, a
+// pass each joinDialInterval, each entry's re-dials backing off from it up
+// to joinDialRetryMax.
+const (
+	joinDialInterval = 5 * time.Second
+	joinDialRetryMax = 30 * time.Second
+)
+
+// confirmPassWindows caps the wait between an unanswered entry's confirms in
+// the confirm pass, in selection windows.
+const confirmPassWindows = 4
 
 // The follow loop's cadence: each link's locator is compared with the
 // source the link observes its peer at.
 const (
 	// FollowInterval paces the comparison.
 	FollowInterval = time.Second
-	// FollowRetry is the least pause between two confirms one entry's
-	// mismatch sends.
+	// FollowRetry is the first pause after a confirm one entry's mismatch
+	// sends; later pauses double up to FollowRetryMax.
 	FollowRetry = 5 * time.Second
+	// FollowRetryMax caps the pause between one entry's confirms.
+	FollowRetryMax = time.Minute
 )
 
 // The re-punch loop's cadence, on the follow loop's FollowInterval: a punched
@@ -53,8 +63,8 @@ const (
 	// is punched again: one BFD detection time past the verdict, so an
 	// outage the link rides out moves nothing.
 	RepunchGrace = 3 * time.Second
-	// RepunchRetry is the pause after a link's first failed re-punch; each
-	// later pause doubles it.
+	// RepunchRetry is the first wait after a link's failed re-punch; later
+	// waits double it.
 	RepunchRetry = 5 * time.Second
 	// RepunchAttempts bounds the re-punches of one down period: a peer that
 	// stays unreachable leaves the link to the selection's retirement.
@@ -130,6 +140,10 @@ type Provider struct {
 	// holds is worth more than an empty or expired directory snapshot.
 	stranded atomic.Bool
 
+	// joinDials paces each entry's rendezvous dials; the join dials loop
+	// owns it.
+	joinDials loops.Attempts[uint16]
+
 	// unanswered records the latest link reply's report that the node's
 	// published rendezvous address did not answer the acceptor's echo;
 	// false before any reply reports.
@@ -166,6 +180,9 @@ func New(cfg Config) (*Provider, error) {
 			current: host,
 		},
 		domain: newDomainHost(cfg.Domain, cfg.ControlHost, cfg.Sockets.Lookup),
+		joinDials: loops.Attempts[uint16]{
+			Backoff: loops.Backoff{Base: joinDialInterval, Max: joinDialRetryMax},
+		},
 	}, nil
 }
 
@@ -673,7 +690,8 @@ func (z *Provider) runJoinDials(ctx context.Context) {
 // address no generation serves. A revival the store refuses — its neighbor
 // or its address recorded live meanwhile — waits for the next pass. Each
 // check reads the table as the pass's earlier revivals left it. An
-// unanswered re-dial costs a UDP round trip and changes nothing.
+// unanswered dial costs a UDP round trip and changes nothing, the entry's
+// next waiting on its backoff.
 func (z *Provider) dialJoins(ctx context.Context) []*links.Link {
 	entries, err := z.env.Store.All(ctx)
 	if err != nil {
@@ -682,6 +700,9 @@ func (z *Provider) dialJoins(ctx context.Context) []*links.Link {
 	}
 	var revived []*links.Link
 	stranded := z.stranded.Load()
+	now := time.Now()
+	dialed := make(map[uint16]bool)
+	defer z.joinDials.Retain(func(ifID uint16) bool { return dialed[ifID] })
 	for _, l := range entries {
 		target := rendezvousTarget(l)
 		if !target.IsValid() {
@@ -693,6 +714,10 @@ func (z *Provider) dialJoins(ctx context.Context) []*links.Link {
 				continue // retargeted already: waiting on the peer's evidence
 			}
 		} else if !stranded || !revivable(entries, l) {
+			continue
+		}
+		dialed[l.IfID] = true
+		if !z.joinDials.Due(l.IfID, now) {
 			continue
 		}
 		local := l.Local
@@ -710,8 +735,10 @@ func (z *Provider) dialJoins(ctx context.Context) []*links.Link {
 		reply, observed, _, err := RendezvousEcho(ctx, z.cfg.Sockets, local, target, z.env.IA, local)
 		if err != nil {
 			slog.Debug("Rendezvous dial", "rendezvous", target, "err", err)
+			z.joinDials.Tried(l.IfID, now)
 			continue
 		}
+		z.joinDials.Forget(l.IfID)
 		z.learn(reply.Reflexive.Addr())
 		if revival && liveNeighbor(entries, reply.IA) {
 			slog.Debug("Rendezvous revival answered by a live neighbor",
@@ -777,14 +804,18 @@ func (z *Provider) confirmLanded(ctx context.Context, l *links.Link) {
 // start and a first start's identity completion confirm every entry over its
 // one-hop path, the dial the establishment already makes, and each answered
 // request leaves a confirm behind it — the far side polls nothing. Entries
-// the pass cannot yet reach retry on the selection's cadence until they
-// answer or retire, and the pass ends once every held entry has answered.
-// The exchange's replies retarget the returning node's own entries on the
-// way, as the join dials already do, and the enrollment is never re-run.
+// the pass cannot yet reach retry until they answer or retire, each backing
+// off from the selection's cadence up to confirmPassWindows of it, and the
+// pass ends once every held entry has answered. The exchange's replies
+// retarget the returning node's own entries on the way, as the join dials
+// already do, and the enrollment is never re-run.
 func (z *Provider) runConfirmPass(ctx context.Context) {
 	interval := z.cfg.Pacing.Selection
 	if interval == 0 {
 		interval = SelectionInterval
+	}
+	retries := loops.Attempts[uint16]{
+		Backoff: loops.Backoff{Base: interval, Max: confirmPassWindows * interval},
 	}
 	// started marks the pass's first run, when every held entry is confirmed;
 	// pending holds the interfaces whose confirm is still to land.
@@ -795,17 +826,22 @@ func (z *Provider) runConfirmPass(ctx context.Context) {
 		if err != nil {
 			slog.Error("Reading the link store", "err", err)
 		} else {
+			now := time.Now()
 			for _, l := range entries {
 				if !l.Live() || !l.Remote.IsValid() || l.NeighborIA.IsZero() {
 					delete(pending, l.IfID)
+					retries.Forget(l.IfID)
 					continue
 				}
-				if !started || pending[l.IfID] {
-					if z.confirmEntry(ctx, l) {
-						delete(pending, l.IfID)
-					} else {
-						pending[l.IfID] = true
-					}
+				if started && !pending[l.IfID] || !retries.Due(l.IfID, now) {
+					continue
+				}
+				if z.confirmEntry(ctx, l) {
+					delete(pending, l.IfID)
+					retries.Forget(l.IfID)
+				} else {
+					pending[l.IfID] = true
+					retries.Tried(l.IfID, now)
 				}
 			}
 			started = true
@@ -824,14 +860,16 @@ func (z *Provider) runConfirmPass(ctx context.Context) {
 }
 
 // runFollow keeps each live entry's locator on its link's own flow, the
-// source the link observes the peer at. An established entry observed
-// elsewhere sends a confirm, at most one per FollowRetry, whose answer — the
-// authenticated reply, arriving over that link — records the observation. A
-// candidate, which no chain confirms yet, takes the observation once its BFD
-// session answers there: the return-routability the rendezvous exchange
-// already holds candidates to.
+// source the link observes its peer at. An established entry observed
+// elsewhere sends a confirm, its retries backing off from FollowRetry up to
+// FollowRetryMax, whose answer — the authenticated reply, arriving over that
+// link — records the observation. A candidate, which no chain confirms yet,
+// takes the observation once its BFD session answers there: the
+// return-routability the rendezvous exchange already holds candidates to.
 func (z *Provider) runFollow(ctx context.Context) {
-	tried := make(map[uint16]time.Time)
+	confirms := loops.Attempts[uint16]{
+		Backoff: loops.Backoff{Base: FollowRetry, Max: FollowRetryMax},
+	}
 	for loops.Sleep(ctx, FollowInterval) {
 		entries, err := z.env.Store.All(ctx)
 		if err != nil {
@@ -842,6 +880,7 @@ func (z *Provider) runFollow(ctx context.Context) {
 		if z.env.Verdicts != nil {
 			verdicts = z.env.Verdicts()
 		}
+		mismatched := make(map[uint16]bool)
 		for _, l := range entries {
 			if !l.Live() || l.NeighborIA.IsZero() || !l.Remote.IsValid() {
 				continue
@@ -852,10 +891,12 @@ func (z *Provider) runFollow(ctx context.Context) {
 			}
 			switch l.State {
 			case links.StateEstablished:
-				if time.Since(tried[l.IfID]) < FollowRetry {
+				mismatched[l.IfID] = true
+				now := time.Now()
+				if !confirms.Due(l.IfID, now) {
 					continue
 				}
-				tried[l.IfID] = time.Now()
+				confirms.Tried(l.IfID, now)
 				slog.Info("Following a link's flow", "neighbor", l.NeighborIA,
 					"remote", l.Remote, "observed", observed, "interface", l.IfID)
 				z.confirmEntry(ctx, l)
@@ -872,6 +913,7 @@ func (z *Provider) runFollow(ctx context.Context) {
 					"remote", l.Remote, "interface", l.IfID)
 			}
 		}
+		confirms.Retain(func(ifID uint16) bool { return mismatched[ifID] })
 	}
 }
 
@@ -922,7 +964,7 @@ func (z *Provider) confirmEntry(ctx context.Context, l *links.Link) bool {
 // rendezvous address answers holds no punched link: its peers' flows reach
 // it, and the follow loop keeps its links.
 func (z *Provider) runRepunch(ctx context.Context) {
-	st := repunchState{}
+	st := newRepunchState()
 	for loops.Sleep(ctx, FollowInterval) {
 		if !z.unanswered.Load() {
 			continue
@@ -949,17 +991,19 @@ func (z *Provider) runRepunch(ctx context.Context) {
 }
 
 // repunchState is the re-punch loop's memory of the punched links whose
-// verdict is down, by interface ID.
+// verdict is down, by interface ID: since when each has been down, and its
+// re-punches' backoff.
 type repunchState struct {
-	links map[uint16]repunchLink
+	downSince map[uint16]time.Time
+	attempts  loops.Attempts[uint16]
 }
 
-// repunchLink is one down punched link's memory: since when its verdict has
-// been down, and how many re-punches the down period took, the last when.
-type repunchLink struct {
-	downSince time.Time
-	attempts  int
-	last      time.Time
+// newRepunchState returns the memory of a loop that has seen no down link.
+func newRepunchState() *repunchState {
+	return &repunchState{attempts: loops.Attempts[uint16]{
+		Backoff: loops.Backoff{Base: RepunchRetry},
+		Limit:   RepunchAttempts,
+	}}
 }
 
 // due returns the punched links the node punches again at now and advances
@@ -968,34 +1012,36 @@ type repunchLink struct {
 // one with the lower ISD-AS punches it again and the other's handler takes
 // its own down entry, so the two never punch toward each other at once. A
 // link is due once its verdict has stayed down for RepunchGrace, then again
-// after RepunchRetry, the pause doubling with each attempt, until the down
-// period has taken RepunchAttempts. A link whose verdict came back is
-// forgotten.
+// on the backoff from RepunchRetry, until the down period has taken
+// RepunchAttempts. A link whose verdict came back is forgotten.
 func (st *repunchState) due(
 	mine addr.IA, entries []*links.Link, verdicts map[uint16]bool, undialable map[addr.IA]bool,
 	now time.Time,
 ) []*links.Link {
 
-	next := make(map[uint16]repunchLink, len(st.links))
+	down := make(map[uint16]time.Time, len(st.downSince))
 	var due []*links.Link
 	for _, l := range entries {
 		if up, ok := verdicts[l.IfID]; !ok || up || l.State != links.StateEstablished ||
 			!l.Serving() || !undialable[l.NeighborIA] || mine >= l.NeighborIA {
 			continue
 		}
-		r, ok := st.links[l.IfID]
+		since, ok := st.downSince[l.IfID]
 		if !ok {
-			r.downSince = now
+			since = now
 		}
-		if r.attempts < RepunchAttempts && now.Sub(r.downSince) >= RepunchGrace &&
-			(r.attempts == 0 || now.Sub(r.last) >= RepunchRetry<<(r.attempts-1)) {
-			r.attempts++
-			r.last = now
-			due = append(due, l)
+		down[l.IfID] = since
+		if now.Sub(since) < RepunchGrace || !st.attempts.Due(l.IfID, now) {
+			continue
 		}
-		next[l.IfID] = r
+		st.attempts.Tried(l.IfID, now)
+		due = append(due, l)
 	}
-	st.links = next
+	st.downSince = down
+	st.attempts.Retain(func(ifID uint16) bool {
+		_, ok := down[ifID]
+		return ok
+	})
 	return due
 }
 

@@ -46,8 +46,11 @@ const (
 	// pollTimeout is the long-poll wait one getUpdates call asks the API to
 	// hold.
 	pollTimeout = 25 * time.Second
-	// pollRetry paces a failed poll.
+	// pollRetry is the first wait after a failed poll; later waits double up
+	// to pollRetryMax.
 	pollRetry = time.Second
+	// pollRetryMax caps the wait after a failed poll.
+	pollRetryMax = 30 * time.Second
 )
 
 // authKeyPrefix marks a minted auth key among the credentials a
@@ -279,17 +282,12 @@ func (d *decision) note() string {
 // window has passed and answering the buttons pressed and the messages sent.
 func (t *Authorizer) Run(ctx context.Context) {
 	t.offerCommands(ctx)
+	backoff := loops.Backoff{Base: pollRetry, Max: pollRetryMax}
 	var offset int64
-	for ctx.Err() == nil {
-		updates, err := t.getUpdates(ctx, offset)
-		if err != nil {
-			if ctx.Err() == nil {
-				slog.Warn("Polling the Bot API", "err", err)
-				if !loops.Sleep(ctx, pollRetry) {
-					return
-				}
-			}
-			continue
+	for {
+		updates, ok := t.poll(ctx, backoff, offset)
+		if !ok {
+			return
 		}
 		t.sweep()
 		for _, u := range updates {
@@ -298,6 +296,21 @@ func (t *Authorizer) Run(ctx context.Context) {
 			t.converse(ctx, u.Message)
 		}
 	}
+}
+
+// poll returns the updates past offset, a failed long poll tried again on
+// the backoff; false once ctx ends.
+func (t *Authorizer) poll(ctx context.Context, backoff loops.Backoff, offset int64) ([]tgUpdate, bool) {
+	for range backoff.Tries(ctx) {
+		updates, err := t.getUpdates(ctx, offset)
+		if err == nil {
+			return updates, true
+		}
+		if ctx.Err() == nil {
+			slog.Warn("Polling the Bot API", "err", err)
+		}
+	}
+	return nil, false
 }
 
 // sweep drops the decisions whose window has passed: a stranger's persistent

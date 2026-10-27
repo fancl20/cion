@@ -33,9 +33,10 @@ const (
 	NodePublishInterval = time.Minute
 	// NodeFetchInterval is the directory re-fetch cadence.
 	NodeFetchInterval = 30 * time.Second
-	// NodePublishRetry is how long publication waits before retrying — a
-	// chain the enrollment loop has not produced yet, or a core that has not
-	// answered.
+	// NodePublishRetry is how long publication waits while the node's own
+	// state is not ready — a chain the enrollment loop has not produced yet,
+	// a host not resolved — and the first wait after a core refused it, the
+	// later ones doubling up to NodePublishInterval.
 	NodePublishRetry = 5 * time.Second
 	// NodeDirectoryTTL is how long the core serves an entry without refresh.
 	NodeDirectoryTTL = 5 * time.Minute
@@ -407,27 +408,34 @@ func (d *NodeDirectory) Run(ctx context.Context) {
 }
 
 // runPublish waits for enrollment to produce the node's chain, publishes the
-// node's entry, and re-publishes on the cadence. Failures retry, never stop,
-// the loop.
+// node's entry, and re-publishes on the cadence. A publication waiting on the
+// node's own state polls at the retry; one the core refused backs off from
+// it up to the cadence. Failures never stop the loop.
 func (d *NodeDirectory) runPublish(ctx context.Context) {
 	interval := intervalOr(d.cfg.PublishInterval, NodePublishInterval)
 	retry := intervalOr(d.cfg.PublishRetry, NodePublishRetry)
+	backoff := loops.Backoff{Base: retry, Max: interval}
 	for {
-		if ctx.Err() != nil {
-			return
-		}
-		if err := d.publish(ctx); err != nil {
-			slog.Debug("Node directory publication", "err", err)
-			if !loops.Sleep(ctx, retry) {
-				return
+		wait := interval
+		for range backoff.Tries(ctx) {
+			err := d.publish(ctx)
+			if err == nil {
+				break
 			}
-			continue
+			slog.Debug("Node directory publication", "err", err)
+			if errors.Is(err, errNotReady) {
+				wait = retry
+				break
+			}
 		}
-		if !loops.Sleep(ctx, interval) {
+		if !loops.Sleep(ctx, wait) {
 			return
 		}
 	}
 }
+
+// errNotReady marks a publication waiting on the node's own state.
+var errNotReady = errors.New("the node's entry is not ready")
 
 // publish sends the node's entry once the node's chain exists: an un-enrolled
 // node has no certificate to authenticate the channel with. The entry is
@@ -443,12 +451,12 @@ func (d *NodeDirectory) publish(ctx context.Context) error {
 			return err
 		}
 		if len(chain) == 0 {
-			return errors.New("no certificate chain yet; enrollment has not produced one")
+			return fmt.Errorf("%w: no certificate chain yet; enrollment has not produced one", errNotReady)
 		}
 	}
 	host := d.cfg.Host(ctx)
 	if !host.IsValid() {
-		return errors.New("the entry's host did not resolve")
+		return fmt.Errorf("%w: the entry's host did not resolve", errNotReady)
 	}
 	var reach Reach
 	if d.cfg.Reach != nil {

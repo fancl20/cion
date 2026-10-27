@@ -6,7 +6,7 @@
 // their loops here. A goroutine started per peer, connection, or flow ends
 // with what it serves, so it joins the wait group through the group's own Go.
 // Sleep is the pause between any loop's passes, cut short when the loop's
-// context ends.
+// context ends, and Backoff spaces every retry of a failed operation.
 package loops
 
 import (

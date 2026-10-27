@@ -154,3 +154,12 @@ wait.
     and stranded cut benchmarks hold.
 
 ## Implementation history
+
+*   Landed as proposed: the schedule and the per-key attempts
+    ([backoff.go](/pkg/libs/loops/backoff.go)), the publishes
+    ([directory.go](/pkg/modules/topology/impl/measured/directory.go),
+    [directory.go](/pkg/apps/wireguard/directory.go)), the Telegram poll
+    ([telegram.go](/pkg/modules/enrollauth/impl/telegram/telegram.go)), and
+    the topology loops
+    ([provider.go](/pkg/modules/topology/impl/measured/provider.go)). The
+    Summary's figures are the benchmarks' five runs each.

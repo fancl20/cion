@@ -25,10 +25,13 @@ const (
 	PublishInterval = time.Hour
 	// RefreshInterval is the directory re-fetch cadence.
 	RefreshInterval = 30 * time.Second
-	// PublishRetry is how long publication waits before retrying — a chain
-	// the enrollment loop has not produced yet, or a core that has not
-	// answered.
+	// PublishRetry is how long publication waits while the node's own state
+	// is not ready — a chain the enrollment loop has not produced yet, a host
+	// not resolved — and the first wait after a core refused it, the later
+	// ones doubling up to PublishRetryMax.
 	PublishRetry = 10 * time.Second
+	// PublishRetryMax caps the wait after a refused publication.
+	PublishRetryMax = 5 * time.Minute
 )
 
 // Entry is one node's publication: everything another node needs to establish
@@ -190,7 +193,9 @@ func (c storeDirectoryClient) List(ctx context.Context) (Directory, error) {
 
 // runPublish owns the application's publication cadence: it waits for
 // enrollment to produce the node's chain, publishes the node's entry, and
-// re-publishes on the constant. Failures retry, never stop, the loop.
+// re-publishes on the constant. A publication waiting on the node's own
+// state polls at the retry; one the core refused backs off from it up to
+// PublishRetryMax. Failures never stop the loop.
 func (a *App) runPublish(ctx context.Context) {
 	interval := a.cfg.PublishInterval
 	if interval == 0 {
@@ -200,22 +205,28 @@ func (a *App) runPublish(ctx context.Context) {
 	if retry == 0 {
 		retry = PublishRetry
 	}
+	backoff := loops.Backoff{Base: retry, Max: max(retry, PublishRetryMax)}
 	for {
-		if ctx.Err() != nil {
-			return
-		}
-		if err := a.publish(ctx); err != nil {
-			slog.Warn("WireGuard publication", "err", err)
-			if !loops.Sleep(ctx, retry) {
-				return
+		wait := interval
+		for range backoff.Tries(ctx) {
+			err := a.publish(ctx)
+			if err == nil {
+				break
 			}
-			continue
+			slog.Warn("WireGuard publication", "err", err)
+			if errors.Is(err, errNotReady) {
+				wait = retry
+				break
+			}
 		}
-		if !loops.Sleep(ctx, interval) {
+		if !loops.Sleep(ctx, wait) {
 			return
 		}
 	}
 }
+
+// errNotReady marks a publication waiting on the node's own state.
+var errNotReady = errors.New("the node's entry is not ready")
 
 // publish sends the node's entry once the node's chain exists: an
 // un-enrolled node has no certificate to authenticate the channel with. The
@@ -229,7 +240,7 @@ func (a *App) publish(ctx context.Context) error {
 		return err
 	}
 	if len(chain) == 0 {
-		return fmt.Errorf("no certificate chain yet; enrollment has not produced one")
+		return fmt.Errorf("%w: no certificate chain yet; enrollment has not produced one", errNotReady)
 	}
 	entry, err := a.selfEntry(ctx)
 	if err != nil {
@@ -260,7 +271,7 @@ func (a *App) selfEntry(ctx context.Context) (Entry, error) {
 		host = a.cfg.ListenHost
 	}
 	if !host.IsValid() || host.IsUnspecified() {
-		return Entry{}, errors.New("the entry's host did not resolve")
+		return Entry{}, fmt.Errorf("%w: the entry's host did not resolve", errNotReady)
 	}
 	return Entry{
 		IA:           a.cfg.IA,

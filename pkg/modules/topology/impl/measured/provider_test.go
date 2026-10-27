@@ -1038,9 +1038,10 @@ func TestFollowKeepsTheLocatorOnTheFlow(t *testing.T) {
 
 // TestRepunchDue checks which punched links the re-punch loop takes: an
 // established link to a peer that reports itself undialable, down for
-// RepunchGrace, again after RepunchRetry and twice that, RepunchAttempts in
-// all, and only at the end with the lower ISD-AS; a link whose verdict comes
-// back is forgotten, its next down period counted afresh.
+// RepunchGrace, again on the backoff from RepunchRetry — each wait within
+// its band — RepunchAttempts in all, and only at the end with the lower
+// ISD-AS; a link whose verdict comes back is forgotten, its next down period
+// counted afresh.
 func TestRepunchDue(t *testing.T) {
 	punched := liveLink(linkIA, 40041)
 	punched.IfID = 4
@@ -1048,29 +1049,33 @@ func TestRepunchDue(t *testing.T) {
 	down := map[uint16]bool{4: false}
 	undialable := map[addr.IA]bool{linkIA: true}
 	t0 := time.Unix(1000, 0)
-	st := repunchState{}
-	second := RepunchGrace + RepunchRetry
-	third := second + 2*RepunchRetry
+	st := newRepunchState()
+	// Each retry is taken at its wait's upper bound, the earliest step past
+	// the band's lower one.
+	first := t0.Add(RepunchGrace)
+	second := first.Add(RepunchRetry)
+	third := second.Add(2 * RepunchRetry)
+	later := third.Add(time.Hour)
 	steps := []struct {
-		after    time.Duration
+		at       time.Time
 		verdicts map[uint16]bool
 		want     int
 	}{
-		{0, down, 0},
-		{RepunchGrace - time.Second, down, 0},
-		{RepunchGrace, down, 1},
-		{second - time.Second, down, 0},
+		{t0, down, 0},
+		{first.Add(-time.Second), down, 0},
+		{first, down, 1},
+		{first.Add(RepunchRetry/2 - time.Millisecond), down, 0},
 		{second, down, 1},
-		{third - time.Second, down, 0},
+		{second.Add(RepunchRetry - time.Millisecond), down, 0},
 		{third, down, 1},
-		{third + time.Hour, down, 0},
-		{third + time.Hour + time.Second, map[uint16]bool{4: true}, 0},
-		{third + time.Hour + 2*time.Second, down, 0},
-		{third + time.Hour + 2*time.Second + RepunchGrace, down, 1},
+		{later, down, 0},
+		{later.Add(time.Second), map[uint16]bool{4: true}, 0},
+		{later.Add(2 * time.Second), down, 0},
+		{later.Add(2*time.Second + RepunchGrace), down, 1},
 	}
 	for _, step := range steps {
-		if got := st.due(rendezvousIA, entries, step.verdicts, undialable, t0.Add(step.after)); len(got) != step.want {
-			t.Errorf("at %v: %d links due, want %d", step.after, len(got), step.want)
+		if got := st.due(rendezvousIA, entries, step.verdicts, undialable, step.at); len(got) != step.want {
+			t.Errorf("at %v: %d links due, want %d", step.at.Sub(t0), len(got), step.want)
 		}
 	}
 
@@ -1096,7 +1101,7 @@ func TestRepunchDue(t *testing.T) {
 		}, down, undialable},
 	}
 	for _, tt := range never {
-		st := repunchState{}
+		st := newRepunchState()
 		for _, after := range []time.Duration{0, RepunchGrace, RepunchGrace + RepunchRetry} {
 			if got := st.due(tt.mine, []*links.Link{tt.entry()}, tt.verdicts, tt.undialable,
 				t0.Add(after)); len(got) != 0 {
