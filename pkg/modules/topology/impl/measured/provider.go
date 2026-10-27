@@ -555,42 +555,46 @@ func (z *Provider) selectionConfig() SelectionConfig {
 
 // runJoinDials dials the rendezvous of every entry still aimed at one: the
 // reply retargets the entry to the acceptor's link address under the claim
-// rule, and the first generation serves it.
+// rule, and the first generation serves it. Each entry a pass revives sends
+// its link request.
 func (z *Provider) runJoinDials(ctx context.Context) {
 	for {
-		z.dialJoins(ctx)
+		for _, l := range z.dialJoins(ctx) {
+			z.confirmRevived(ctx, l)
+		}
 		if !loops.Sleep(ctx, joinDialInterval) {
 			return
 		}
 	}
 }
 
-// dialJoins runs one pass of the joiner's dials. The reply names the
-// joiner's own entry — the acceptor's ISD-AS — beside retargeting it, so
-// both sides of the establishment are named before the link serves. A
-// stranded node — the selection loop's window found it below the floor with
-// no reachable candidate from the directory — dials what it knows: each
-// retired entry revivable admits re-dials its peer's rendezvous socket too,
-// and an answered re-dial revives the entry as a candidate, the state flip
-// and the recorded sides, for the sweep to settle by the peer's evidence,
-// exactly as it settles a joiner's. A revival records the rendezvous socket
-// it dialed, for the revived link is this node's dial whoever dialed the
-// entry before. It keeps the entry's local address unless a live entry now
-// holds it — a later allocation drew the retired entry's port — and then
-// claims a fresh one, the address the revived entry serves. An answer naming a neighbor the table holds live
-// revives nothing, and the store refuses to name a live entry after it:
-// that entry retires, for its re-dials would retarget the peer's unproven
-// entry for this node to an address no generation serves. A revival the
-// store refuses — its neighbor or its address recorded live meanwhile —
-// waits for the next pass. Each check reads the table as the pass's earlier
-// revivals left it. An unanswered re-dial costs a UDP round trip and
-// changes nothing.
-func (z *Provider) dialJoins(ctx context.Context) {
+// dialJoins runs one pass of the joiner's dials and returns the entries it
+// revived. The reply names the joiner's own entry — the acceptor's ISD-AS —
+// beside retargeting it, so both sides of the establishment are named
+// before the link serves. A stranded node — the selection loop's window
+// found it below the floor with no reachable candidate from the directory —
+// dials what it knows: each retired entry revivable admits re-dials its
+// peer's rendezvous socket too, and an answered re-dial revives the entry as
+// a candidate, the state flip and the recorded sides, whose own link request
+// the caller sends, the confirm a promotion sends too. A revival records the
+// rendezvous socket it dialed, for the revived link is this node's dial
+// whoever dialed the entry before. It keeps the entry's local address unless
+// a live entry now holds it — a later allocation drew the retired entry's
+// port — and then claims a fresh one, the address the revived entry serves.
+// An answer naming a neighbor the table holds live revives nothing, and the
+// store refuses to name a live entry after it: that entry retires, for its
+// re-dials would retarget the peer's unproven entry for this node to an
+// address no generation serves. A revival the store refuses — its neighbor
+// or its address recorded live meanwhile — waits for the next pass. Each
+// check reads the table as the pass's earlier revivals left it. An
+// unanswered re-dial costs a UDP round trip and changes nothing.
+func (z *Provider) dialJoins(ctx context.Context) []*links.Link {
 	entries, err := z.env.Store.All(ctx)
 	if err != nil {
 		slog.Error("Reading the link store", "err", err)
-		return
+		return nil
 	}
+	var revived []*links.Link
 	stranded := z.stranded.Load()
 	for _, l := range entries {
 		target := rendezvousTarget(l)
@@ -659,6 +663,26 @@ func (z *Provider) dialJoins(ctx context.Context) {
 		slog.Info("Joined a neighbor by rendezvous",
 			"neighbor", l.NeighborIA, "local", l.Local, "remote", l.Remote,
 			"interface", l.IfID)
+		if revival {
+			revived = append(revived, l)
+		}
+	}
+	return revived
+}
+
+// confirmRevived sends a revived entry's link request once the generation
+// serves the entry, retrying inside EstablishTimeout as an establishment's
+// confirm does: the acceptor's candidate waits on it, and the confirm pass
+// may have ended before the revival.
+func (z *Provider) confirmRevived(ctx context.Context, l *links.Link) {
+	ctx, cancel := context.WithTimeout(ctx, EstablishTimeout)
+	defer cancel()
+	for !z.confirmEntry(ctx, l) {
+		if !loops.Sleep(ctx, ConfirmRetryPause) {
+			slog.Warn("The revived entry's link request did not answer",
+				"neighbor", l.NeighborIA, "interface", l.IfID)
+			return
+		}
 	}
 }
 

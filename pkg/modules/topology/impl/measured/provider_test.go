@@ -465,6 +465,32 @@ func strandedDialer(t *testing.T, ia addr.IA, entries ...*links.Link) (*Provider
 	return z, store
 }
 
+// TestStrandedRevivalConfirms checks the revival's confirm: a stranded pass
+// returns the entry it revived, and the revived entry's link request
+// establishes it on the reply's side, whatever the confirm pass did before.
+func TestStrandedRevivalConfirms(t *testing.T) {
+	f := newRendezvousFixture(t, func(cfg *RendezvousConfig) {
+		cfg.IA = rendezvousIA
+	})
+	retired := retiredLink(rendezvousIA, f.addr, 40021)
+	z, store := strandedDialer(t, zeroconfDraw, retired)
+	revived := z.dialJoins(context.Background())
+	if len(revived) != 1 || revived[0].IfID != retired.IfID {
+		t.Fatalf("the pass revived %v, want the retired entry", revived)
+	}
+	fake := &fakeLinkServiceClient{reply: &nodev1.LinkReply{LocalAddr: "127.0.0.1:4242", IfId: 9}}
+	z.linker = linkClientOf(map[*links.Link]*fakeLinkServiceClient{revived[0]: fake})
+	z.confirmRevived(context.Background(), revived[0])
+	entry := entryByIfID(t, store, retired.IfID)
+	if entry.State != links.StateEstablished || entry.RemoteIfID != 9 ||
+		entry.Remote != netip.MustParseAddrPort("127.0.0.1:4242") {
+		t.Errorf("the revived entry = %+v, want established on the reply's side", entry)
+	}
+	if got := fake.requests.Load(); got != 1 {
+		t.Errorf("the revival sent %d link requests, want one", got)
+	}
+}
+
 // liveLink returns an established entry of the neighbor, retargeted
 // already so that no dial pass touches it.
 func liveLink(ia addr.IA, port uint16) *links.Link {
