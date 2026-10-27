@@ -99,18 +99,18 @@ func ParseRendezvousRequest(b []byte) (RendezvousRequest, error) {
 
 // RendezvousReply echoes the nonce and carries the acceptor's link address,
 // interface ID, and ISD-AS — its ISD is the network's, what a joiner's
-// identity completes with — beside the request's observed source address,
-// the one fact address translation cannot hide: the dialer keeps its host
-// as its learned external host.
+// identity completes with — beside the requester's reflexive address, the
+// one fact a NAT cannot hide: the dialer keeps its host as its learned
+// external host.
 type RendezvousReply struct {
 	Nonce    [16]byte
 	LinkAddr netip.AddrPort
 	IfID     uint16
 	IA       addr.IA
-	// Observed is the source address the acceptor observed the request
-	// arrive from — the address it already replies to. Zero when the reply
-	// does not echo one.
-	Observed netip.AddrPort
+	// Reflexive is the requester's reflexive address: the source the
+	// acceptor observed the request arrive from, the address it already
+	// replies to. Zero when the reply does not echo one.
+	Reflexive netip.AddrPort
 }
 
 func (r RendezvousReply) Marshal() []byte {
@@ -122,12 +122,12 @@ func (r RendezvousReply) Marshal() []byte {
 	buf = append(buf, a...)
 	buf = binary.BigEndian.AppendUint16(buf, r.IfID)
 	buf = binary.BigEndian.AppendUint64(buf, uint64(r.IA))
-	if !r.Observed.IsValid() {
+	if !r.Reflexive.IsValid() {
 		// An absent echo: the appended field is the reply's last, so the
 		// form without it is the reply a predecessor writes.
 		return buf
 	}
-	o := r.Observed.String()
+	o := r.Reflexive.String()
 	buf = binary.BigEndian.AppendUint16(buf, uint16(len(o)))
 	return append(buf, o...)
 }
@@ -151,19 +151,20 @@ func ParseRendezvousReply(b []byte) (RendezvousReply, error) {
 		return RendezvousReply{}, fmt.Errorf("parsing rendezvous link address: %w", err)
 	}
 	reply.LinkAddr = linkAddr
-	// The observed source is appended after the form every version shares:
-	// a reply that carries no such field is one that does not echo it.
+	// The reflexive address is appended after the form every version
+	// shares: a reply that carries no such field is one that does not echo
+	// it.
 	if len(rd.b) > 0 {
 		n := int(rd.uint16())
 		o := rd.bytes(n)
 		if rd.err != nil {
 			return RendezvousReply{}, fmt.Errorf("reading rendezvous reply: %w", rd.err)
 		}
-		observed, err := netip.ParseAddrPort(string(o))
+		reflexive, err := netip.ParseAddrPort(string(o))
 		if err != nil {
-			return RendezvousReply{}, fmt.Errorf("parsing rendezvous observed source: %w", err)
+			return RendezvousReply{}, fmt.Errorf("parsing rendezvous reflexive address: %w", err)
 		}
-		reply.Observed = observed
+		reply.Reflexive = reflexive
 	}
 	return reply, nil
 }
@@ -391,11 +392,11 @@ func (r *Rendezvous) handle(ctx context.Context, raw []byte, src *net.UDPAddr) (
 		return nil, err
 	}
 	reply := RendezvousReply{
-		Nonce:    req.Nonce,
-		LinkAddr: entry.Local,
-		IfID:     entry.IfID,
-		IA:       r.cfg.IA,
-		Observed: observedAddr(src),
+		Nonce:     req.Nonce,
+		LinkAddr:  entry.Local,
+		IfID:      entry.IfID,
+		IA:        r.cfg.IA,
+		Reflexive: observedAddr(src),
 	}
 	return reply.Marshal(), nil
 }
@@ -519,7 +520,7 @@ func rendezvousSilenceHint(target netip.AddrPort) string {
 // allocation performs — while a probe that records nothing binds port 0 and
 // dials ephemeral. An answered exchange of the former sends one empty
 // datagram from the held socket to the acceptor's link address — the
-// answer's, under the claim rule — before the release, so a translator maps
+// answer's, under the claim rule — before the release, so a NAT maps
 // the link's own flow before the acceptor's link can claim it. The requester
 // claims the given address; a probe claims its control address, a promotion
 // its link address. The context's end moves the read deadline to the past,
@@ -576,7 +577,7 @@ func RendezvousEcho(
 			rtt, observed := time.Since(sent), observedAddr(src)
 			if bind.Port() != 0 {
 				// The link's flow speaks before the acceptor's link can: a
-				// translator keeps the dial's port for the flow toward the
+				// NAT keeps the dial's port for the flow toward the
 				// acceptor's link socket only while no packet of that socket
 				// has reached the mapping first, and the acceptor's link
 				// sends to the recorded mapping from the moment its entry

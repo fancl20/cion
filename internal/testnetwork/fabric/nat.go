@@ -12,7 +12,7 @@ import (
 	"gvisor.dev/gvisor/pkg/tcpip/header"
 )
 
-// The mapping band: the ports the boundary's mappings draw, below the
+// The mapping band: the ports the NAT's mappings draw, below the
 // kernel's ephemeral range and beside — not inside — the labs' pinned band
 // and the node's link band, so a mapping's port is always a port no node
 // claims and a changed mapping always spells a different address.
@@ -21,23 +21,23 @@ const (
 	mappingPortSpan = 500
 )
 
-// MappingIdle is how long a mapping lives past its last packet, either
+// MappingTimeout is how long a mapping lives past its last packet, either
 // direction: the idle timeout a link's BFD stream — one packet per
 // interval, both directions — rides out by construction, and a silenced
 // node's mapping does not.
-const MappingIdle = 2 * time.Second
+const MappingTimeout = 2 * time.Second
 
-// Behavior is a translator's mapping and filtering behavior, as RFC 4787
-// names them.
+// Behavior is a NAT's mapping and filtering behavior, as RFC 4787 names
+// them.
 type Behavior struct {
-	// EndpointDependentMapping draws a mapping per destination address and
-	// port of an inside socket, where an endpoint-independent translator
-	// keeps one mapping per socket for every destination.
-	EndpointDependentMapping bool
-	// AddressPortFiltering admits an outside packet to a mapping only from
-	// an address and port the mapping's inside socket sent to, where
-	// endpoint-independent filtering admits any outside source.
-	AddressPortFiltering bool
+	// AddressPortDependentMapping draws a mapping per destination address
+	// and port of an inside socket, where endpoint-independent mapping keeps
+	// one mapping per socket for every destination.
+	AddressPortDependentMapping bool
+	// AddressPortDependentFiltering admits an outside packet to a mapping
+	// only from an address and port the mapping's inside socket sent to,
+	// where endpoint-independent filtering admits any outside source.
+	AddressPortDependentFiltering bool
 }
 
 // The behaviors the labs draw.
@@ -47,31 +47,31 @@ var (
 	FullCone = Behavior{}
 	// PortRestricted keeps one mapping per inside socket and admits only
 	// the endpoints the socket sent to.
-	PortRestricted = Behavior{AddressPortFiltering: true}
+	PortRestricted = Behavior{AddressPortDependentFiltering: true}
 	// Symmetric draws a mapping per destination and admits only that
 	// destination.
-	Symmetric = Behavior{EndpointDependentMapping: true, AddressPortFiltering: true}
+	Symmetric = Behavior{AddressPortDependentMapping: true, AddressPortDependentFiltering: true}
 )
 
-// Boundary is the translation between the inside hosts and the outside:
-// the gateway address it owns — the address the translated nodes' packets
-// leave from, never their own — and, when it forwards a first-contact port,
-// the upstream host beyond it. Packets from inside to outside are rewritten
-// to leave from the gateway under a port drawn from the mapping band, as the
-// boundary's behavior maps them; the first-contact dials to the gateway's
-// forwarded port are carried to the upstream's; packets from outside to a
-// drawn port the behavior admits are reverse-translated to the mapping's
-// inside socket; every other packet to the gateway or to an inside host is
-// dropped, the silence a real translation gives. The rewrite renews the IP
-// and UDP checksums; the reverse-translated delivery back to the inside
-// socket is the proof it renewed them right.
-type Boundary struct {
+// NAT translates between the inside hosts and the outside: the gateway
+// address it owns — the address its inside nodes' packets leave from, never
+// their own — and, when it forwards a first-contact port, the upstream host
+// beyond it. Packets from inside to outside are rewritten to leave from the
+// gateway under a port drawn from the mapping band, as the NAT's behavior
+// maps them; the first-contact dials to the gateway's forwarded port are
+// carried to the upstream's; packets from outside to a drawn port the
+// behavior admits are reverse-translated to the mapping's inside socket;
+// every other packet to the gateway or to an inside host is dropped, the
+// silence a real NAT gives. The rewrite renews the IP and UDP checksums; the
+// reverse-translated delivery back to the inside socket is the proof it
+// renewed them right.
+type NAT struct {
 	f        *Fabric
 	behavior Behavior
 	gateway  netip.Addr
 	upstream netip.Addr
 	// firstContact is the gateway port forwarded to the upstream's own —
-	// the rendezvous port of the exchange the translated node dials
+	// the rendezvous port of the exchange the node behind a NAT dials
 	// through. Zero forwards none.
 	firstContact uint16
 	inside       map[netip.Addr]bool
@@ -97,35 +97,35 @@ type mapping struct {
 	used time.Time
 }
 
-// Translate draws a full-cone boundary on the fabric: the gateway address
-// it owns — a host no node may hold, for the boundary answers it — the
+// ForwardingNAT draws a full-cone NAT on the fabric: the gateway address
+// it owns — a host no node may hold, for the NAT answers it — the
 // upstream host the first-contact port forwards to at the same port, and
 // the inside hosts whose packets it carries. Every host beyond the inside
 // set and the gateway is outside.
-func (f *Fabric) Translate(
+func (f *Fabric) ForwardingNAT(
 	gateway, upstream netip.Addr, firstContact uint16, inside ...netip.Addr,
-) *Boundary {
+) *NAT {
 
 	f.t.Helper()
-	return f.translateAs(FullCone, gateway, upstream, firstContact, inside)
+	return f.newNAT(FullCone, gateway, upstream, firstContact, inside)
 }
 
-// TranslateAs draws a boundary of the given behavior on the fabric: the
+// NAT draws a NAT of the given behavior on the fabric: the
 // gateway address it owns and the inside hosts whose packets it carries.
 // It forwards no first-contact port: an inside node dials its peers'
-// published addresses, as it would through a real translator.
-func (f *Fabric) TranslateAs(behavior Behavior, gateway netip.Addr, inside ...netip.Addr) *Boundary {
+// published addresses, as it would through a real NAT.
+func (f *Fabric) NAT(behavior Behavior, gateway netip.Addr, inside ...netip.Addr) *NAT {
 	f.t.Helper()
-	return f.translateAs(behavior, gateway, netip.Addr{}, 0, inside)
+	return f.newNAT(behavior, gateway, netip.Addr{}, 0, inside)
 }
 
-func (f *Fabric) translateAs(
+func (f *Fabric) newNAT(
 	behavior Behavior, gateway, upstream netip.Addr, firstContact uint16, inside []netip.Addr,
-) *Boundary {
+) *NAT {
 
 	f.t.Helper()
 	if len(inside) == 0 {
-		f.t.Fatalf("a boundary carries at least one inside host")
+		f.t.Fatalf("a NAT carries at least one inside host")
 	}
 	f.mtx.Lock()
 	defer f.mtx.Unlock()
@@ -134,10 +134,10 @@ func (f *Fabric) translateAs(
 	}
 	for _, host := range inside {
 		if host == gateway || host == upstream {
-			f.t.Fatalf("the boundary's inside host %v is its own gateway or upstream", host)
+			f.t.Fatalf("the NAT's inside host %v is its own gateway or upstream", host)
 		}
 	}
-	b := &Boundary{
+	b := &NAT{
 		f:            f,
 		behavior:     behavior,
 		gateway:      gateway,
@@ -150,18 +150,18 @@ func (f *Fabric) translateAs(
 	for _, host := range inside {
 		b.inside[host] = true
 	}
-	f.bounds = append(f.bounds, b)
+	f.nats = append(f.nats, b)
 	return b
 }
 
-// Gateway returns the address the boundary's crossings leave from.
-func (b *Boundary) Gateway() netip.Addr { return b.gateway }
+// Gateway returns the address the NAT's crossings leave from.
+func (b *NAT) Gateway() netip.Addr { return b.gateway }
 
-// egress applies the boundary's rules to a packet leaving one of its inside
-// hosts: the rewritten packet and whether the boundary claimed it — nil
+// egress applies the NAT's rules to a packet leaving one of its inside
+// hosts: the rewritten packet and whether the NAT claimed it — nil
 // packet for one it dropped. A packet between two inside hosts crosses
 // nothing and is not claimed.
-func (b *Boundary) egress(pkt []byte) ([]byte, bool) {
+func (b *NAT) egress(pkt []byte) ([]byte, bool) {
 	ip := header.IPv4(pkt)
 	src := toNetip(ip.SourceAddress())
 	dst := toNetip(ip.DestinationAddress())
@@ -180,7 +180,7 @@ func (b *Boundary) egress(pkt []byte) ([]byte, bool) {
 		port := b.mappingFor(netip.AddrPortFrom(src, udp.SourcePort()), to)
 		return rewriteDatagram(pkt, b.gateway, port, b.upstream, b.firstContact), true
 	case dst == b.gateway:
-		// The gateway answers nothing else: the silence a real translation
+		// The gateway answers nothing else: the silence a real NAT
 		// gives.
 		return nil, true
 	case !isUDP:
@@ -195,13 +195,13 @@ func (b *Boundary) egress(pkt []byte) ([]byte, bool) {
 	}
 }
 
-// ingress applies the boundary's rules to a packet arriving from outside:
+// ingress applies the NAT's rules to a packet arriving from outside:
 // one addressed to the gateway is reverse-translated to the inside socket
 // of the mapping its port spells, when the behavior admits its source, and
 // dropped otherwise; one addressed to an inside host directly is dropped,
 // for every crossing is named for the gateway. A packet from an inside host
-// is not the boundary's to admit.
-func (b *Boundary) ingress(pkt []byte) ([]byte, bool) {
+// is not the NAT's to admit.
+func (b *NAT) ingress(pkt []byte) ([]byte, bool) {
 	ip := header.IPv4(pkt)
 	src := toNetip(ip.SourceAddress())
 	dst := toNetip(ip.DestinationAddress())
@@ -239,10 +239,10 @@ func udpOf(pkt []byte) header.UDP {
 // destination under endpoint-dependent mapping. The crossing records the
 // destination for the filtering and refreshes the mapping's idle window on
 // the fabric's clock.
-func (b *Boundary) mappingFor(sock, dst netip.AddrPort) uint16 {
+func (b *NAT) mappingFor(sock, dst netip.AddrPort) uint16 {
 	now := b.f.clock.Now()
 	key := flow{sock: sock}
-	if b.behavior.EndpointDependentMapping {
+	if b.behavior.AddressPortDependentMapping {
 		key.dst = dst
 	}
 	b.mtx.Lock()
@@ -272,13 +272,13 @@ func (b *Boundary) mappingFor(sock, dst netip.AddrPort) uint16 {
 // admit returns the mapping a drawn gateway port spells when the behavior
 // admits the source to it, refreshed by the packet that reached it, or nil
 // where none stands or the filtering refuses the source.
-func (b *Boundary) admit(port uint16, src netip.AddrPort) *mapping {
+func (b *NAT) admit(port uint16, src netip.AddrPort) *mapping {
 	now := b.f.clock.Now()
 	b.mtx.Lock()
 	defer b.mtx.Unlock()
 	b.retireIdleLocked(now)
 	m, ok := b.mappings[port]
-	if !ok || b.behavior.AddressPortFiltering && !m.sent[src] {
+	if !ok || b.behavior.AddressPortDependentFiltering && !m.sent[src] {
 		return nil
 	}
 	m.used = now
@@ -287,9 +287,9 @@ func (b *Boundary) admit(port uint16, src netip.AddrPort) *mapping {
 
 // retireIdleLocked drops the mappings whose idle window elapsed; they
 // return as fresh draws, never the same port twice.
-func (b *Boundary) retireIdleLocked(now time.Time) {
+func (b *NAT) retireIdleLocked(now time.Time) {
 	for port, m := range b.mappings {
-		if now.Sub(m.used) < MappingIdle {
+		if now.Sub(m.used) < MappingTimeout {
 			continue
 		}
 		delete(b.mappings, port)
@@ -299,7 +299,7 @@ func (b *Boundary) retireIdleLocked(now time.Time) {
 
 // Rebind retires every mapping at once: the next inside packet draws a
 // fresh one, the changed mapping a restart's proof needs.
-func (b *Boundary) Rebind() {
+func (b *NAT) Rebind() {
 	b.mtx.Lock()
 	defer b.mtx.Unlock()
 	clear(b.mappings)
@@ -309,7 +309,7 @@ func (b *Boundary) Rebind() {
 // Mappings returns the inside sockets of the mappings that stand, in draw
 // order — the idle window retiring the ones past it. A socket appears once
 // per mapping it holds.
-func (b *Boundary) Mappings() []netip.AddrPort {
+func (b *NAT) Mappings() []netip.AddrPort {
 	b.mtx.Lock()
 	defer b.mtx.Unlock()
 	b.retireIdleLocked(b.f.clock.Now())
@@ -325,7 +325,7 @@ func (b *Boundary) Mappings() []netip.AddrPort {
 	return socks
 }
 
-// MappingPort reports whether an address's port lies in the boundary's
+// MappingPort reports whether an address's port lies in the NAT's
 // drawn mapping band.
 func MappingPort(ap netip.AddrPort) bool {
 	return ap.Port() >= mappingPortBase && ap.Port() < mappingPortBase+mappingPortSpan

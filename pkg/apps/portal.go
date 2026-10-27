@@ -146,13 +146,13 @@ func (r *portalRecords) Nodes(ctx context.Context) ([]portal.Node, error) {
 }
 
 // reachTag tags a node's report: NAT when peers cannot dial it behind a
-// translator, Degraded when they cannot dial it otherwise, and nothing
+// NAT, Degraded when they cannot dial it otherwise, and nothing
 // while they can or nothing was observed.
 func reachTag(r Reach) portal.Reach {
 	switch {
 	case !r.RendezvousUnanswered:
 		return ""
-	case r.Translated:
+	case r.BehindNAT:
 		return portal.ReachNAT
 	default:
 		return portal.ReachDegraded

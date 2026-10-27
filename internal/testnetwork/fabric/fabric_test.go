@@ -253,7 +253,7 @@ func TestDrawPortStaysBelowTheEphemeralRange(t *testing.T) {
 }
 
 // TestBindRefusesAHostTheStackLacks checks a bind's refusals carry the
-// kernel's errnos: a host the stack does not hold — a translator's gateway
+// kernel's errnos: a host the stack does not hold — a NAT's gateway
 // among them — refuses with EADDRNOTAVAIL, and a held port with EADDRINUSE.
 func TestBindRefusesAHostTheStackLacks(t *testing.T) {
 	n := New(t).Node(insideAddr)

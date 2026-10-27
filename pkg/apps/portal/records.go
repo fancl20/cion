@@ -30,9 +30,9 @@ const (
 type Reach string
 
 const (
-	// ReachNAT tags a node behind a translator that peers cannot dial.
+	// ReachNAT tags a node behind a NAT that peers cannot dial.
 	ReachNAT Reach = "nat"
-	// ReachDegraded tags a node peers cannot dial with no translator in
+	// ReachDegraded tags a node peers cannot dial with no NAT in
 	// front of it: a firewall or a network fault.
 	ReachDegraded Reach = "degraded"
 )

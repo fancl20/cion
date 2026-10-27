@@ -48,9 +48,8 @@ const (
 // exchange's claim — all of it in the clear, handed to the plugin, nothing
 // else decided on. The source is bound by the completed handshake at every
 // boundary, yet it remains the joiner's own claim otherwise: a node behind
-// translation presents its private address, a host behind it the
-// translated public one, so a private-range entry is what admits such
-// joiners.
+// a NAT presents its private address, a host behind it the NAT's external
+// one, so a private-range entry is what admits such joiners.
 type AdmissionFacts struct {
 	// Boundary is the boundary asking.
 	Boundary Boundary

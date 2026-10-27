@@ -244,7 +244,7 @@ func (n *node) selectProvider() error {
 		reach := make(map[addr.IA]apps.Reach, len(entries))
 		for _, e := range entries {
 			reach[e.IA] = apps.Reach{
-				Translated:           e.Reach.Translated,
+				BehindNAT:            e.Reach.BehindNAT,
 				RendezvousUnanswered: e.Reach.RendezvousUnanswered,
 			}
 		}

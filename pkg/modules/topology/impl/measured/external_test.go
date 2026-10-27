@@ -169,7 +169,7 @@ func TestDomainHostResolvesPublishedAddress(t *testing.T) {
 // TestHoldsTheNodesOwnHost checks the published host's check: a host a
 // socket binds is the node's own; one the kernel refuses with EADDRNOTAVAIL
 // is not — documentation space no interface holds stands for a
-// translator's — and any other refusal is an error.
+// NAT's — and any other refusal is an error.
 func TestHoldsTheNodesOwnHost(t *testing.T) {
 	if own, err := holds(underlay.Kernel, netip.MustParseAddr("127.0.0.1")); err != nil || !own {
 		t.Errorf("holds(127.0.0.1) = %v, %v, want held", own, err)

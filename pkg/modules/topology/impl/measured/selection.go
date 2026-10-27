@@ -387,7 +387,7 @@ func (s *selection) echo(
 ) (RendezvousReply, netip.AddrPort, time.Duration, error) {
 	reply, observed, rtt, err := RendezvousEcho(ctx, s.cfg.Sockets, bind, target, ia, linkAddr)
 	if err == nil && s.cfg.Learn != nil {
-		s.cfg.Learn(reply.Observed.Addr())
+		s.cfg.Learn(reply.Reflexive.Addr())
 	}
 	return reply, observed, rtt, err
 }
@@ -476,8 +476,8 @@ const (
 	scopeNone
 )
 
-// cgnat is the shared address range RFC 6598 allocates — carrier-side
-// translation, reachable from inside whatever deployment claimed it.
+// cgnat is the shared address range RFC 6598 allocates — carrier-grade
+// NAT, reachable from inside whatever deployment claimed it.
 var cgnat = netip.MustParsePrefix("100.64.0.0/10")
 
 // scopeOf classifies an address by its reachability scope.
@@ -604,7 +604,7 @@ func (s *selection) peerEcho(ctx context.Context, ia addr.IA, path *spath.Decode
 // service resolution of its control service over the path the echo is about
 // to ride, answered with the host its router delivers to — memoized for the
 // window. The directory's published host is the peer as the network sees
-// it, which behind a translation no socket of the peer's holds. A route the
+// it, which behind a NAT no socket of the peer's holds. A route the
 // resolution goes unanswered over memoizes nothing, so the window's next
 // route asks again.
 func (s *selection) peerHost(ctx context.Context, ia addr.IA, path *spath.Decoded) (netip.Addr, bool) {

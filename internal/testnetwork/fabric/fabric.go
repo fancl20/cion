@@ -2,7 +2,7 @@
 // netstack per node — the SOCKS application's own recipe — connected by a
 // forwarder the harness owns, so a lab's nodes hold no kernel port at all
 // and the network's behaviors are taps the lab draws: delay, loss,
-// blackhole, cut, and the translation boundary. The hosts the labs draw
+// blackhole, cut, and the NAT. The hosts the labs draw
 // from the loopback pool become plain names, each stack routing its own, so
 // two fabrics may draw the same host and two labs may overlap freely; the
 // host names a lab draws resolve through every node's socket source, and no
@@ -48,7 +48,7 @@ const queueDepth = 512
 const drawnPortBase = 10000
 
 // Fabric is the userspace network a lab draws: the stacks it booted, the
-// taps it drew between them, the boundaries it placed, the host names it
+// taps it drew between them, the NATs it placed, the host names it
 // drew, and the one clock they all read. It stops with the test.
 type Fabric struct {
 	t      *testing.T
@@ -58,13 +58,13 @@ type Fabric struct {
 	wg     sync.WaitGroup
 
 	// mtx guards the drawn network: the stacks by host, the taps, the
-	// boundaries, and the names. A packet's walk from one stack to another
+	// NATs, and the names. A packet's walk from one stack to another
 	// reads it twice — once for the taps, once for the destination — so no
 	// tap draw or node boot waits on a packet in flight.
 	mtx    sync.Mutex
 	hosts  map[netip.Addr]*Node
 	taps   []*tap
-	bounds []*Boundary
+	nats   []*NAT
 	names  map[string]netip.Addr
 	closed bool
 
@@ -351,7 +351,7 @@ func (f *Fabric) forward(n *Node) {
 }
 
 // carry moves one wire packet the forwarder drained: the taps shape its
-// pair, the boundaries translate it, and the destination's stack receives
+// pair, the NATs translate it, and the destination's stack receives
 // it. A packet held by a delay tap re-enters here on the fabric's clock.
 func (f *Fabric) carry(pkt []byte) {
 	if len(pkt) < header.IPv4MinimumSize || pkt[0]>>4 != 4 {
@@ -365,25 +365,25 @@ func (f *Fabric) carry(pkt []byte) {
 	}
 	if delay > 0 {
 		held := pkt
-		f.clock.AfterFunc(delay, func() { f.translate(held) })
+		f.clock.AfterFunc(delay, func() { f.crossNATs(held) })
 		return
 	}
-	f.translate(pkt)
+	f.crossNATs(pkt)
 }
 
-// translate passes the packet out of the boundary holding its source, then
-// into the boundary owning its destination — a packet between two
-// translated hosts crosses both, as it would two translators — and a
-// boundary drops what it holds no admitted mapping for. It then delivers
+// crossNATs passes the packet out of the NAT holding its source, then
+// into the NAT owning its destination — a packet between two
+// hosts behind NATs crosses both, as it would two NATs — and a
+// NAT drops what it holds no admitted mapping for. It then delivers
 // the packet to the destination its address finally names.
-func (f *Fabric) translate(pkt []byte) {
+func (f *Fabric) crossNATs(pkt []byte) {
 	f.mtx.Lock()
-	bounds := slices.Clone(f.bounds)
+	nats := slices.Clone(f.nats)
 	f.mtx.Unlock()
-	for _, leg := range []func(*Boundary, []byte) ([]byte, bool){
-		(*Boundary).egress, (*Boundary).ingress,
+	for _, leg := range []func(*NAT, []byte) ([]byte, bool){
+		(*NAT).egress, (*NAT).ingress,
 	} {
-		for _, b := range bounds {
+		for _, b := range nats {
 			rewritten, ok := leg(b, pkt)
 			if !ok {
 				continue
@@ -412,7 +412,7 @@ func (f *Fabric) deliver(dst netip.Addr, pkt []byte) {
 }
 
 // toNetip reads a header address as the plain IPv4 address the taps and the
-// boundaries key by.
+// NATs key by.
 func toNetip(addr tcpip.Address) netip.Addr {
 	ip, _ := netip.AddrFromSlice(addr.AsSlice())
 	return ip.Unmap()

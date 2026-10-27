@@ -14,7 +14,7 @@ import (
 
 // TestWildcardHostRoutesTowardThePublishedHost checks the host the wildcard
 // conns name: the routing table's answer toward the published host — the
-// inside address a translation hides, not the published host itself —
+// inside address a NAT hides, not the published host itself —
 // memoized while the published host stands and the answer is young, routed
 // anew when the published host moves or the answer ages past its bound. A
 // failed route resolves nothing, and an unpublished host resolves nothing

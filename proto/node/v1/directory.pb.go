@@ -36,9 +36,9 @@ type Entry struct {
 	// rendezvous acceptor listens on for first contact, the fixed rendezvous
 	// port on the published host.
 	RendezvousAddr string `protobuf:"bytes,3,opt,name=rendezvous_addr,json=rendezvousAddr,proto3" json:"rendezvous_addr,omitempty"`
-	// translated reports that the published host is not an address of the
-	// publisher's own: a translator stands between it and its peers.
-	Translated bool `protobuf:"varint,4,opt,name=translated,proto3" json:"translated,omitempty"`
+	// behind_nat reports that the published host is not an address of the
+	// publisher's own: a NAT stands between it and its peers.
+	BehindNat bool `protobuf:"varint,4,opt,name=behind_nat,json=behindNat,proto3" json:"behind_nat,omitempty"`
 	// rendezvous_unanswered reports that the acceptor of the publisher's
 	// latest link request got no answer at the published rendezvous address.
 	RendezvousUnanswered bool `protobuf:"varint,5,opt,name=rendezvous_unanswered,json=rendezvousUnanswered,proto3" json:"rendezvous_unanswered,omitempty"`
@@ -97,9 +97,9 @@ func (x *Entry) GetRendezvousAddr() string {
 	return ""
 }
 
-func (x *Entry) GetTranslated() bool {
+func (x *Entry) GetBehindNat() bool {
 	if x != nil {
-		return x.Translated
+		return x.BehindNat
 	}
 	return false
 }
@@ -278,14 +278,13 @@ var File_proto_node_v1_directory_proto protoreflect.FileDescriptor
 
 const file_proto_node_v1_directory_proto_rawDesc = "" +
 	"\n" +
-	"\x1dproto/node/v1/directory.proto\x12\anode.v1\"\xbf\x01\n" +
+	"\x1dproto/node/v1/directory.proto\x12\anode.v1\"\xbe\x01\n" +
 	"\x05Entry\x12\x15\n" +
 	"\x06isd_as\x18\x01 \x01(\x04R\x05isdAs\x12!\n" +
 	"\fcontrol_addr\x18\x02 \x01(\tR\vcontrolAddr\x12'\n" +
-	"\x0frendezvous_addr\x18\x03 \x01(\tR\x0erendezvousAddr\x12\x1e\n" +
+	"\x0frendezvous_addr\x18\x03 \x01(\tR\x0erendezvousAddr\x12\x1d\n" +
 	"\n" +
-	"translated\x18\x04 \x01(\bR\n" +
-	"translated\x123\n" +
+	"behind_nat\x18\x04 \x01(\bR\tbehindNat\x123\n" +
 	"\x15rendezvous_unanswered\x18\x05 \x01(\bR\x14rendezvousUnanswered\"6\n" +
 	"\x0ePublishRequest\x12$\n" +
 	"\x05entry\x18\x01 \x01(\v2\x0e.node.v1.EntryR\x05entry\"\x11\n" +

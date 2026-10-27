@@ -1412,7 +1412,7 @@ var probeHost = netip.MustParseAddr("127.0.0.132")
 // TestProbeEchoesTheHostThePeerResolves checks the host a neighbor's echoes
 // address: the one the peer's own resolution names, never the directory's
 // published host. The peer publishes a host none of its sockets hold — a
-// translator's public side — while its control service answers the drafts'
+// NAT's public side — while its control service answers the drafts'
 // resolution with the host it binds and its responder answers the echoes
 // there: the direct sample measures, and the window keeps the resolved host
 // for the echoes after it.
@@ -1481,9 +1481,9 @@ func TestProbeEchoesTheHostThePeerResolves(t *testing.T) {
 			Lookup: func(context.Context, addr.IA) []*pathdb.Segment { return nil },
 		},
 	}}
-	translated := netip.MustParseAddr("192.0.2.1")
+	external := netip.MustParseAddr("192.0.2.1")
 	sm := s.probe(t.Context(),
-		DirectoryEntry{IA: selPeer, ControlAddr: netip.AddrPortFrom(translated, 30042)},
+		DirectoryEntry{IA: selPeer, ControlAddr: netip.AddrPortFrom(external, 30042)},
 		&links.Link{NeighborIA: selPeer, IfID: dataplanetest.IfID, State: links.StateEstablished})
 	if sm.m.direct <= 0 {
 		t.Errorf("direct sample = %v, want the round trip to the resolved host", sm.m.direct)

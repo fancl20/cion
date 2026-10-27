@@ -86,7 +86,7 @@ Untrusted:
     address-based policy lends that vote to every enrolled core inside its
     prefixes.
 *   Admission policy decides on addressing, not identity: a location is
-    self-claimed and weakened by translation. A fabricated location still
+    self-claimed and weakened by NATs. A fabricated location still
     completes no enrollment, but address-based admission is a policy about
     networks, not about nodes.
 *   A node cannot be more restrictive than its core's admission policy; the

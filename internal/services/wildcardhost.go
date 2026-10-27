@@ -12,7 +12,7 @@ import (
 
 // wildcardHostTTL bounds how long a resolved host stands before the routing
 // table is asked again, so a lease that renumbers the interface behind an
-// unchanged translation renames the conns within it.
+// unchanged NAT renames the conns within it.
 const wildcardHostTTL = 30 * time.Second
 
 // wildcardHost resolves the host the node's wildcard-bound conns name for
@@ -20,7 +20,7 @@ const wildcardHostTTL = 30 * time.Second
 // host, the one the local router delivers their replies to: the local
 // address the routing table sends from toward the published host. That is
 // the published host itself where an interface carries it, and the
-// interface's inside address behind a translation, whose public side no
+// interface's inside address behind a NAT, whose public side no
 // local socket receives on — the host a concrete bind of that interface
 // names. The zero address while nothing is published or no route reaches
 // it, and the conns send nothing until a host lands.

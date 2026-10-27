@@ -733,8 +733,8 @@ func (c *fakeLinkServiceClient) Request(
 
 // TestProviderReportsReach checks the published report: the link client
 // keeps the latest reply's report of the acceptor's echo — a reply without
-// one keeps the last — and the report names the published host translated
-// when it is not one of the node's own.
+// one keeps the last — and the report names the published host behind a
+// NAT when it is not one of the node's own.
 func TestProviderReportsReach(t *testing.T) {
 	z := &Provider{}
 	peer := &scion.Addr{IA: linkIA, Service: addr.SvcCS}
@@ -772,14 +772,14 @@ func TestProviderReportsReach(t *testing.T) {
 		}
 	}
 
-	// Documentation space no interface holds stands for a translator's
+	// Documentation space no interface holds stands for a NAT's
 	// host.
 	got, err := z.reach(netip.MustParseAddr("192.0.2.1"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !got.Translated {
-		t.Errorf("the report at a host the node does not hold = %+v, want translated", got)
+	if !got.BehindNAT {
+		t.Errorf("the report at a host the node does not hold = %+v, want behind a NAT", got)
 	}
 }
 
@@ -823,8 +823,8 @@ func TestEchoPublishedReportsTheAnswer(t *testing.T) {
 // TestReachUnderTheWildcardBind checks the report under the default bind,
 // on the kernel's sockets: a wildcard-bound node publishes nothing until it
 // learns a host, then checks the learned host its entry publishes — never
-// the wildcard — so the loopback, which the machine holds, reports
-// untranslated, and documentation space no interface holds, translated.
+// the wildcard — so the loopback, which the machine holds, reports no NAT,
+// and documentation space no interface holds, behind a NAT.
 func TestReachUnderTheWildcardBind(t *testing.T) {
 	z, err := New(Config{ControlHost: netip.MustParseAddr("0.0.0.0")})
 	if err != nil {
@@ -842,11 +842,11 @@ func TestReachUnderTheWildcardBind(t *testing.T) {
 		t.Fatal("the unlearned wildcard published an entry")
 	}
 	for _, tc := range []struct {
-		learned    netip.Addr
-		translated bool
+		learned   netip.Addr
+		behindNAT bool
 	}{
 		{learned: netip.MustParseAddr("127.0.0.1")},
-		{learned: netip.MustParseAddr("192.0.2.1"), translated: true},
+		{learned: netip.MustParseAddr("192.0.2.1"), behindNAT: true},
 	} {
 		z.learn(tc.learned)
 		if err := d.publish(ctx); err != nil {
@@ -856,7 +856,7 @@ func TestReachUnderTheWildcardBind(t *testing.T) {
 		if len(entries) != 1 {
 			t.Fatalf("entries = %v, want the one", entries)
 		}
-		want := Reach{Translated: tc.translated}
+		want := Reach{BehindNAT: tc.behindNAT}
 		if got := entries[0]; got.RendezvousAddr.Addr() != tc.learned || got.Reach != want {
 			t.Errorf("learning %v published %v with %+v, want the learned host with %+v",
 				tc.learned, got.RendezvousAddr, got.Reach, want)
@@ -893,8 +893,8 @@ func entryByIfID(t *testing.T, store links.DB, ifID uint16) *links.Link {
 }
 
 // TestConfirmRecordsTheObservation checks the record a node's own confirm
-// lands: the address the entry's link observes the peer at, which a
-// translated peer's claim — the socket it bound inside its translator —
+// lands: the address the entry's link observes the peer at, which the
+// claim of a peer behind a NAT — the socket it bound inside its NAT —
 // cannot name, and the claim rule's record only while the link observed
 // nothing.
 func TestConfirmRecordsTheObservation(t *testing.T) {

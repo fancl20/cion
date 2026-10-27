@@ -22,8 +22,8 @@ const routeProbePort = 9
 
 // RouteSource returns the local address the kernel's routing table sends
 // from toward dst: dst itself where one of the host's interfaces carries it,
-// else the address of the interface the route leaves through — behind an
-// address translation, the inside address and never the translated one. A
+// else the address of the interface the route leaves through — behind a
+// NAT, the inside address and never the external one. A
 // connected UDP socket asks the table; no datagram leaves.
 func RouteSource(dst netip.Addr) (netip.Addr, error) {
 	c, err := net.DialUDP("udp", nil, net.UDPAddrFromAddrPort(netip.AddrPortFrom(dst, routeProbePort)))

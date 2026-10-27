@@ -93,7 +93,7 @@ func (h *externalHost) host() netip.Addr {
 
 // holds reports whether the host is one of the node's own addresses: one a
 // socket of the source binds. A bind refused with EADDRNOTAVAIL names a host
-// the node does not hold, a translator's; any other refusal is the error.
+// the node does not hold, a NAT's; any other refusal is the error.
 func holds(sockets underlay.Sockets, host netip.Addr) (bool, error) {
 	conn, err := sockets.NewUDP(net.UDPAddrFromAddrPort(netip.AddrPortFrom(host, 0)), netip.AddrPort{})
 	if errors.Is(err, syscall.EADDRNOTAVAIL) {

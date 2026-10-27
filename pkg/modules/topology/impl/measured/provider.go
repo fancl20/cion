@@ -199,14 +199,14 @@ func (z *Provider) PublishedHost(ctx context.Context) netip.Addr {
 }
 
 // reach reports how the node's peers reach it at the published host:
-// translated when the host is not one of the node's own, and the latest
+// behind a NAT when the host is not one of the node's own, and the latest
 // link reply's report of the acceptor's echo.
 func (z *Provider) reach(host netip.Addr) (Reach, error) {
 	held, err := holds(z.cfg.Sockets, host)
 	if err != nil {
 		return Reach{}, err
 	}
-	return Reach{Translated: !held, RendezvousUnanswered: z.unanswered.Load()}, nil
+	return Reach{BehindNAT: !held, RendezvousUnanswered: z.unanswered.Load()}, nil
 }
 
 // recordAnswer keeps a link reply's report of the acceptor's echo at the
@@ -305,7 +305,7 @@ func (z *Provider) CompleteIdentity(ctx context.Context, ia addr.IA) (addr.IA, e
 		if err != nil {
 			return ia, fmt.Errorf("naming the bootstrap neighbor's entry: %w", err)
 		}
-		z.learn(reply.Observed.Addr())
+		z.learn(reply.Reflexive.Addr())
 		z.bootstrap = &bootstrapped{
 			target: target,
 			reply:  reply,
@@ -626,7 +626,7 @@ func (z *Provider) dialJoins(ctx context.Context) []*links.Link {
 			slog.Debug("Rendezvous dial", "rendezvous", target, "err", err)
 			continue
 		}
-		z.learn(reply.Observed.Addr())
+		z.learn(reply.Reflexive.Addr())
 		if revival && liveNeighbor(entries, reply.IA) {
 			slog.Debug("Rendezvous revival answered by a live neighbor",
 				"rendezvous", target, "neighbor", reply.IA)
@@ -838,7 +838,7 @@ func claimFallback(l *links.Link) netip.AddrPort {
 
 // observedOr returns the address the interface's link last observed its
 // peer at, else the fallback: the observation is the peer's socket as its
-// packets cross every translator between, where a claim names only the
+// packets cross every NAT between, where a claim names only the
 // socket the peer bound.
 func observedOr(observed func(uint16) netip.AddrPort, ifID uint16, fallback netip.AddrPort) netip.AddrPort {
 	if observed != nil {

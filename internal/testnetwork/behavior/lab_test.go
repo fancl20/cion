@@ -35,13 +35,13 @@ const (
 )
 
 // network is a lab's booted network: its nodes, the founding core first,
-// on the fabric's hosts — some behind translators, where a lab draws them —
+// on the fabric's hosts — some behind NATs, where a lab draws them —
 // the one-way delay the fabric holds between each pair, and the pairs cut.
 type network struct {
 	fab   *fabric.Fabric
 	hosts []netip.Addr
 	// wire holds each node's address on the wire, where its peers' packets
-	// go: its host, or the gateway of the boundary it sits behind.
+	// go: its host, or the gateway of the NAT it sits behind.
 	wire   []netip.Addr
 	nodes  []*testnetwork.Node
 	oneWay [][]time.Duration
@@ -69,32 +69,32 @@ func newNetwork(t *testing.T, fab *fabric.Fabric, size int) *network {
 	return n
 }
 
-// translate places the nodes behind a boundary each, of the behavior
+// placeNATs places the nodes behind a NAT each, of the behavior
 // given, on a gateway drawn for it: their peers' packets go to the
-// gateway, and theirs leave from it. A lab translates before it draws
-// delays, for the taps follow the addresses on the wire.
-func (n *network) translate(t *testing.T, behaviors map[int]fabric.Behavior) map[int]*fabric.Boundary {
+// gateway, and theirs leave from it. A lab places its NATs before it
+// draws delays, for the taps follow the addresses on the wire.
+func (n *network) placeNATs(t *testing.T, behaviors map[int]fabric.Behavior) map[int]*fabric.NAT {
 	t.Helper()
-	bounds := make(map[int]*fabric.Boundary, len(behaviors))
+	nats := make(map[int]*fabric.NAT, len(behaviors))
 	for _, i := range slices.Sorted(maps.Keys(behaviors)) {
-		bounds[i] = n.fab.TranslateAs(behaviors[i], testnetwork.HostSlot(t), n.hosts[i])
-		n.wire[i] = bounds[i].Gateway()
+		nats[i] = n.fab.NAT(behaviors[i], testnetwork.HostSlot(t), n.hosts[i])
+		n.wire[i] = nats[i].Gateway()
 	}
-	return bounds
+	return nats
 }
 
-// site places the nodes behind one boundary of the behavior given, on a
+// site places the nodes behind one NAT of the behavior given, on a
 // gateway drawn for it: their packets to each other cross nothing, every
 // other node's go to the gateway, and theirs to every other node leave from
 // it. A lab places a site before it draws delays, for the taps follow the
 // addresses on the wire.
-func (n *network) site(t *testing.T, behavior fabric.Behavior, members ...int) *fabric.Boundary {
+func (n *network) site(t *testing.T, behavior fabric.Behavior, members ...int) *fabric.NAT {
 	t.Helper()
 	inside := make([]netip.Addr, len(members))
 	for k, i := range members {
 		inside[k] = n.hosts[i]
 	}
-	b := n.fab.TranslateAs(behavior, testnetwork.HostSlot(t), inside...)
+	b := n.fab.NAT(behavior, testnetwork.HostSlot(t), inside...)
 	for _, i := range members {
 		n.wire[i] = b.Gateway()
 	}
@@ -102,10 +102,10 @@ func (n *network) site(t *testing.T, behavior fabric.Behavior, members ...int) *
 }
 
 // drawPair draws a tap for each direction the pair's packets take: from
-// each node's host — the fabric shapes a packet before any boundary
+// each node's host — the fabric shapes a packet before any NAT
 // translates it — to the other's address on the wire. One tap covers both
-// directions of a pair whose packets go host to host: two untranslated
-// nodes, or two behind one boundary.
+// directions of a pair whose packets go host to host: two public
+// nodes, or two behind one NAT.
 func (n *network) drawPair(i, j int, draw func(a, b netip.Addr) func()) func() {
 	if n.wire[i] == n.wire[j] || n.wire[i] == n.hosts[i] && n.wire[j] == n.hosts[j] {
 		return draw(n.hosts[i], n.hosts[j])

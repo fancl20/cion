@@ -21,35 +21,35 @@ import (
 	"github.com/fancl20/cion/pkg/modules/links"
 )
 
-// The translated network: the founder 0, the authoritative core 1, and the
-// public node 2, 10ms apart, and the translated nodes 3 to 6, each behind a
-// translator of its own, 2ms apart and 20ms from every public node. Each
-// node joins through its parent alone; 5's parent is the founder.
+// The NAT network: the founder 0, the authoritative core 1, and the
+// public node 2, 10ms apart, and nodes 3 to 6, each behind a NAT of its
+// own, 2ms apart and 20ms from every public node. Each node joins through
+// its parent alone; 5's parent is the founder.
 var (
-	translatedParent = map[int]int{1: 0, 2: 0, 3: 1, 4: 2, 5: 0, 6: 2}
-	translatedOrder  = []int{1, 2, 3, 4, 5, 6}
-	// coneTranslators places the translated nodes behind the translators
-	// the network serves through today.
-	coneTranslators = map[int]fabric.Behavior{
+	natParent = map[int]int{1: 0, 2: 0, 3: 1, 4: 2, 5: 0, 6: 2}
+	natOrder  = []int{1, 2, 3, 4, 5, 6}
+	// coneNATs places nodes 3 to 6 behind the NATs the network serves
+	// through today.
+	coneNATs = map[int]fabric.Behavior{
 		3: fabric.FullCone, 4: fabric.FullCone, 5: fabric.PortRestricted, 6: fabric.PortRestricted,
 	}
 )
 
 const (
-	// translatedBudget bounds the translated network's join and settling
+	// natBudget bounds the NAT network's join and settling
 	// in virtual time.
-	translatedBudget = 30 * time.Minute
-	// translatedWatch is how long a benchmark reads the translated
+	natBudget = 30 * time.Minute
+	// natWatch is how long a benchmark reads the NAT
 	// network's answer to a change.
-	translatedWatch = 10 * time.Minute
-	// translatedCores is the count of cores the network's TRC names once
+	natWatch = 10 * time.Minute
+	// natCores is the count of cores the network's TRC names once
 	// the authoritative core joined.
-	translatedCores = 2
+	natCores = 2
 )
 
-// translatedOneWay is the one-way delay between two of the translated
+// natOneWay is the one-way delay between two of the NAT
 // network's nodes.
-func translatedOneWay(i, j int) time.Duration {
+func natOneWay(i, j int) time.Duration {
 	public := func(k int) bool { return k < 3 }
 	switch {
 	case public(i) && public(j):
@@ -61,18 +61,18 @@ func translatedOneWay(i, j int) time.Duration {
 	}
 }
 
-// bootTranslated boots the translated network, its translated nodes behind
-// translators of the behaviors given, and returns it with the translators.
-func bootTranslated(
+// bootNAT boots the NAT network, nodes 3 to 6 behind NATs of the
+// behaviors given, and returns it with the NATs.
+func bootNAT(
 	t *testing.T, fab *fabric.Fabric, wpki *webpkitest.CA, behaviors map[int]fabric.Behavior,
-) (*network, map[int]*fabric.Boundary) {
+) (*network, map[int]*fabric.NAT) {
 
 	t.Helper()
 	n := newNetwork(t, fab, 7)
-	bounds := n.translate(t, behaviors)
+	nats := n.placeNATs(t, behaviors)
 	for i := range n.hosts {
 		for j := i + 1; j < len(n.hosts); j++ {
-			n.setDelay(i, j, translatedOneWay(i, j))
+			n.setDelay(i, j, natOneWay(i, j))
 		}
 	}
 	n.nodes[0] = testnetwork.BootInBubble(t, fab, n.hosts[0], func(cfg *services.NodeConfig) {
@@ -82,15 +82,15 @@ func bootTranslated(
 		// The founder's vote admits the authoritative core.
 		cfg.EnrollAuth = "cidrs=127.0.0.0/8"
 	})
-	for _, i := range translatedOrder {
-		parent := n.nodes[translatedParent[i]]
+	for _, i := range natOrder {
+		parent := n.nodes[natParent[i]]
 		n.nodes[i] = testnetwork.BootInBubble(t, fab, n.hosts[i], func(cfg *services.NodeConfig) {
 			cfg.Neighbors = []string{rendezvous(parent)}
 			cfg.RootCAs = wpki.Pool
 			cfg.Core = i == 1
 		})
 	}
-	return n, bounds
+	return n, nats
 }
 
 // pinnedCores is the count of cores the node's newest pinned TRC names;
@@ -110,9 +110,9 @@ func pinnedCores(t *testing.T, node *testnetwork.Node) int {
 // cores.
 func awaitPinned(t *testing.T, n *network, which ...int) {
 	t.Helper()
-	testnetwork.PollVirtual(t, translatedBudget, "the nodes to pin the TRC naming both cores", func() bool {
+	testnetwork.PollVirtual(t, natBudget, "the nodes to pin the TRC naming both cores", func() bool {
 		for _, i := range which {
-			if pinnedCores(t, n.nodes[i]) != translatedCores {
+			if pinnedCores(t, n.nodes[i]) != natCores {
 				return false
 			}
 		}
@@ -254,46 +254,48 @@ func awaitReports(t *testing.T, n *network, want map[int]apps.Reach, budget time
 	}
 }
 
-// TestTranslatedNetworkReaches checks what the translated network serves
-// behind full-cone and port-restricted translators: it settles, and every
+// TestNATNetworkReaches checks what the NAT network serves
+// behind full-cone and port-restricted NATs: it settles, and every
 // ordered pair reaches over its chosen path and answers a ping — the
-// translated nodes' links to the public nodes carrying their traffic both
-// ways, and every pair of translated nodes reaching through a public node.
-// The founder's directory reports each translated node translated and its
-// published rendezvous address unanswered, and each public node neither.
-func TestTranslatedNetworkReaches(t *testing.T) {
+// links of the nodes behind NATs to the public nodes carrying their
+// traffic both ways, and every pair of nodes behind NATs reaching through a
+// public node.
+// The founder's directory reports each node behind a NAT as behind one with
+// its published rendezvous address unanswered, and each public node as
+// neither.
+func TestNATNetworkReaches(t *testing.T) {
 	testnetwork.InBubble(t, func(t *testing.T, fab *fabric.Fabric, wpki *webpkitest.CA) {
-		n, _ := bootTranslated(t, fab, wpki, coneTranslators)
+		n, _ := bootNAT(t, fab, wpki, coneNATs)
 		awaitPinned(t, n, allNodes(n)...)
-		awaitSettled(t, n.nodes, settleQuiet, translatedBudget)
+		awaitSettled(t, n.nodes, settleQuiet, natBudget)
 		awaitReach(t, n, reachBudget)
 		awaitPings(t, n, allNodes(n), reachBudget)
-		nat := apps.Reach{Translated: true, RendezvousUnanswered: true}
+		nat := apps.Reach{BehindNAT: true, RendezvousUnanswered: true}
 		awaitReports(t, n, map[int]apps.Reach{
 			0: {}, 1: {}, 2: {}, 3: nat, 4: nat, 5: nat, 6: nat,
 		}, reachBudget)
 	})
 }
 
-// TestTranslatedNetworkRecovers checks that each link's locator follows the
-// link's own flow: a node behind a symmetric translator joins, and every
-// ordered pair answers a ping; again once a translator drops node 3's
+// TestNATNetworkRecovers checks that each link's locator follows the
+// link's own flow: a node behind a symmetric NAT joins, and every
+// ordered pair answers a ping; again once a NAT drops node 3's
 // mappings; and again once node 2, the parent of 4 and 6, restarts on its
 // state.
-func TestTranslatedNetworkRecovers(t *testing.T) {
+func TestNATNetworkRecovers(t *testing.T) {
 	testnetwork.InBubble(t, func(t *testing.T, fab *fabric.Fabric, wpki *webpkitest.CA) {
-		behaviors := maps.Clone(coneTranslators)
+		behaviors := maps.Clone(coneNATs)
 		behaviors[6] = fabric.Symmetric
-		n, bounds := bootTranslated(t, fab, wpki, behaviors)
+		n, nats := bootNAT(t, fab, wpki, behaviors)
 		awaitPinned(t, n, allNodes(n)...)
-		awaitSettled(t, n.nodes, settleQuiet, translatedBudget)
+		awaitSettled(t, n.nodes, settleQuiet, natBudget)
 		awaitPings(t, n, allNodes(n), reachBudget)
 
-		bounds[3].Rebind()
-		awaitPings(t, n, allNodes(n), translatedWatch)
+		nats[3].Rebind()
+		awaitPings(t, n, allNodes(n), natWatch)
 
 		restart(t, fab, wpki, n, 2)
-		awaitPings(t, n, allNodes(n), translatedWatch)
+		awaitPings(t, n, allNodes(n), natWatch)
 	})
 }
 
@@ -308,35 +310,35 @@ func restart(t *testing.T, fab *fabric.Fabric, wpki *webpkitest.CA, n *network, 
 	})
 }
 
-// TestBenchTranslatedSettled benchmarks the translated network once it
-// settles behind full-cone and port-restricted translators.
-func TestBenchTranslatedSettled(t *testing.T) {
+// TestBenchNATSettled benchmarks the NAT network once it
+// settles behind full-cone and port-restricted NATs.
+func TestBenchNATSettled(t *testing.T) {
 	requireBench(t)
 	testnetwork.InBubble(t, func(t *testing.T, fab *fabric.Fabric, wpki *webpkitest.CA) {
-		n, _ := bootTranslated(t, fab, wpki, coneTranslators)
+		n, _ := bootNAT(t, fab, wpki, coneNATs)
 		awaitPinned(t, n, allNodes(n)...)
-		s := awaitSettled(t, n.nodes, settleQuiet, translatedBudget)
-		report(t, "TranslatedSettled", s, assess(t, n, penalty, 0))
+		s := awaitSettled(t, n.nodes, settleQuiet, natBudget)
+		report(t, "NATSettled", s, assess(t, n, penalty, 0))
 	})
 }
 
-// TestBenchTranslatedRebind benchmarks a translator dropping a settled
+// TestBenchNATRebind benchmarks a NAT dropping a settled
 // node's mappings: the pings to and from node 3 are read each settleSample
-// until every peer's answer returns or translatedWatch passes, beside the
+// until every peer's answer returns or natWatch passes, beside the
 // links node 3 still holds established.
-func TestBenchTranslatedRebind(t *testing.T) {
+func TestBenchNATRebind(t *testing.T) {
 	requireBench(t)
 	testnetwork.InBubble(t, func(t *testing.T, fab *fabric.Fabric, wpki *webpkitest.CA) {
-		n, bounds := bootTranslated(t, fab, wpki, coneTranslators)
+		n, nats := bootNAT(t, fab, wpki, coneNATs)
 		awaitPinned(t, n, allNodes(n)...)
-		awaitSettled(t, n.nodes, settleQuiet, translatedBudget)
+		awaitSettled(t, n.nodes, settleQuiet, natBudget)
 		awaitPings(t, n, allNodes(n), reachBudget)
 		const rebound = 3
 		peers := len(n.nodes) - 1
 
-		bounds[rebound].Rebind()
+		nats[rebound].Rebind()
 		start := time.Now()
-		recovery, recovered := translatedWatch, false
+		recovery, recovered := natWatch, false
 		var to, from int
 		for {
 			synctest.Wait()
@@ -345,12 +347,12 @@ func TestBenchTranslatedRebind(t *testing.T) {
 				recovery, recovered = time.Since(start), true
 				break
 			}
-			if time.Since(start) >= translatedWatch {
+			if time.Since(start) >= natWatch {
 				break
 			}
 			time.Sleep(settleSample)
 		}
-		reportValues(t, "TranslatedRebind",
+		reportValues(t, "NATRebind",
 			benchValue{recovery.Seconds(), "recover-s"},
 			benchValue{flag(recovered), "recovered"},
 			benchValue{float64(to), "pinged-to"},
@@ -361,66 +363,66 @@ func TestBenchTranslatedRebind(t *testing.T) {
 	})
 }
 
-// TestBenchTranslatedSymmetric benchmarks a node behind a symmetric
-// translator: whether it pins the TRC naming both cores and answers every
-// peer's ping within translatedWatch of the others' pins.
-func TestBenchTranslatedSymmetric(t *testing.T) {
+// TestBenchNATSymmetric benchmarks a node behind a symmetric
+// NAT: whether it pins the TRC naming both cores and answers every
+// peer's ping within natWatch of the others' pins.
+func TestBenchNATSymmetric(t *testing.T) {
 	requireBench(t)
 	testnetwork.InBubble(t, func(t *testing.T, fab *fabric.Fabric, wpki *webpkitest.CA) {
-		behaviors := maps.Clone(coneTranslators)
+		behaviors := maps.Clone(coneNATs)
 		const symmetric = 6
 		behaviors[symmetric] = fabric.Symmetric
-		n, _ := bootTranslated(t, fab, wpki, behaviors)
+		n, _ := bootNAT(t, fab, wpki, behaviors)
 		awaitPinned(t, n, 0, 1, 2, 3, 4, 5)
 		peers := len(n.nodes) - 1
 
 		start := time.Now()
-		join, joined := translatedWatch, false
+		join, joined := natWatch, false
 		for {
 			synctest.Wait()
-			if pinnedCores(t, n.nodes[symmetric]) == translatedCores {
+			if pinnedCores(t, n.nodes[symmetric]) == natCores {
 				if to, from := pingsWith(t, n, symmetric, allNodes(n)); to == peers && from == peers {
 					join, joined = time.Since(start), true
 					break
 				}
 			}
-			if time.Since(start) >= translatedWatch {
+			if time.Since(start) >= natWatch {
 				break
 			}
 			time.Sleep(settleSample)
 		}
-		reportValues(t, "TranslatedSymmetric",
+		reportValues(t, "NATSymmetric",
 			benchValue{join.Seconds(), "join-s"},
 			benchValue{flag(joined), "joined"},
-			benchValue{flag(pinnedCores(t, n.nodes[symmetric]) == translatedCores), "pinned"},
+			benchValue{flag(pinnedCores(t, n.nodes[symmetric]) == natCores), "pinned"},
 			benchValue{float64(establishedLinks(t, n.nodes[symmetric])), "links"},
 		)
 	})
 }
 
-// TestBenchTranslatedFounderDown benchmarks the translated network losing
+// TestBenchNATFounderDown benchmarks the NAT network losing
 // its founder: every pair the founder holds is cut, and the time until
 // every surviving pair answers its pings is read. Then node 5, whose parent
 // is the founder, stops; once its peers retired its links it boots again on
 // its state, and the time until every survivor's ping to it and its pings
 // to every survivor answer is read.
-func TestBenchTranslatedFounderDown(t *testing.T) {
+func TestBenchNATFounderDown(t *testing.T) {
 	requireBench(t)
 	testnetwork.InBubble(t, func(t *testing.T, fab *fabric.Fabric, wpki *webpkitest.CA) {
-		n, _ := bootTranslated(t, fab, wpki, coneTranslators)
+		n, _ := bootNAT(t, fab, wpki, coneNATs)
 		awaitPinned(t, n, allNodes(n)...)
-		awaitSettled(t, n.nodes, settleQuiet, translatedBudget)
+		awaitSettled(t, n.nodes, settleQuiet, natBudget)
 		awaitPings(t, n, allNodes(n), reachBudget)
 		survivors := allNodes(n)[1:]
 		for _, j := range survivors {
 			n.cutPair(0, j)
 		}
-		survive, silent := pingAll(t, n, survivors, translatedWatch)
+		survive, silent := pingAll(t, n, survivors, natWatch)
 
 		const restarted = 5
 		host, state := n.nodes[restarted].Host(), n.nodes[restarted].StateDir()
 		n.nodes[restarted].Stop(t)
-		testnetwork.PollVirtual(t, translatedWatch, "the peers to retire the stopped node's links", func() bool {
+		testnetwork.PollVirtual(t, natWatch, "the peers to retire the stopped node's links", func() bool {
 			for _, j := range survivors {
 				if j != restarted && holdsLinkTo(t, n.nodes[j], n.nodes[restarted]) {
 					return false
@@ -434,7 +436,7 @@ func TestBenchTranslatedFounderDown(t *testing.T) {
 			cfg.RootCAs = wpki.Pool
 		})
 		start := time.Now()
-		ret, returned := translatedWatch, false
+		ret, returned := natWatch, false
 		peers := len(survivors) - 1
 		for {
 			synctest.Wait()
@@ -442,12 +444,12 @@ func TestBenchTranslatedFounderDown(t *testing.T) {
 				ret, returned = time.Since(start), true
 				break
 			}
-			if time.Since(start) >= translatedWatch {
+			if time.Since(start) >= natWatch {
 				break
 			}
 			time.Sleep(settleSample)
 		}
-		reportValues(t, "TranslatedFounderDown",
+		reportValues(t, "NATFounderDown",
 			benchValue{survive.Seconds(), "survive-s"},
 			benchValue{flag(len(silent) == 0), "survived"},
 			benchValue{ret.Seconds(), "return-s"},
@@ -464,23 +466,23 @@ func flag(ok bool) float64 {
 	return 0
 }
 
-// TestBenchTranslatedPeerRestart benchmarks a public node's restart under
-// its translated neighbors: node 2, the parent of 4 and 6, stops and boots
+// TestBenchNATPeerRestart benchmarks a public node's restart under
+// its neighbors behind NATs: node 2, the parent of 4 and 6, stops and boots
 // again on its state at once, and the pings between it and every other
 // node are read each settleSample until every one answers or
-// translatedWatch passes.
-func TestBenchTranslatedPeerRestart(t *testing.T) {
+// natWatch passes.
+func TestBenchNATPeerRestart(t *testing.T) {
 	requireBench(t)
 	testnetwork.InBubble(t, func(t *testing.T, fab *fabric.Fabric, wpki *webpkitest.CA) {
-		n, _ := bootTranslated(t, fab, wpki, coneTranslators)
+		n, _ := bootNAT(t, fab, wpki, coneNATs)
 		awaitPinned(t, n, allNodes(n)...)
-		awaitSettled(t, n.nodes, settleQuiet, translatedBudget)
+		awaitSettled(t, n.nodes, settleQuiet, natBudget)
 		awaitPings(t, n, allNodes(n), reachBudget)
 		const restarted = 2
 		restart(t, fab, wpki, n, restarted)
 		peers := len(n.nodes) - 1
 		start := time.Now()
-		recovery, recovered := translatedWatch, false
+		recovery, recovered := natWatch, false
 		var to, from int
 		for {
 			synctest.Wait()
@@ -489,12 +491,12 @@ func TestBenchTranslatedPeerRestart(t *testing.T) {
 				recovery, recovered = time.Since(start), true
 				break
 			}
-			if time.Since(start) >= translatedWatch {
+			if time.Since(start) >= natWatch {
 				break
 			}
 			time.Sleep(settleSample)
 		}
-		reportValues(t, "TranslatedPeerRestart",
+		reportValues(t, "NATPeerRestart",
 			benchValue{recovery.Seconds(), "recover-s"},
 			benchValue{flag(recovered), "recovered"},
 			benchValue{float64(to), "pinged-to"},

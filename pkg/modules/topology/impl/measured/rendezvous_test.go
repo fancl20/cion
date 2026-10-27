@@ -106,8 +106,8 @@ func TestRendezvousRoundTrip(t *testing.T) {
 	}
 	// The reply echoes the request's observed source: the dialing socket's
 	// own address as the acceptor saw it, the host what it learns from.
-	if reply.Observed != local {
-		t.Errorf("observed source = %v, want the dial's bind %v", reply.Observed, local)
+	if reply.Reflexive != local {
+		t.Errorf("observed source = %v, want the dial's bind %v", reply.Reflexive, local)
 	}
 
 	// The dial held the address for the round trip alone: it binds again
@@ -449,19 +449,19 @@ func TestRendezvousWireFormat(t *testing.T) {
 	if gotReply != reply {
 		t.Fatalf("reply round trip = %+v, want %+v", gotReply, reply)
 	}
-	if gotReply.Observed.IsValid() {
+	if gotReply.Reflexive.IsValid() {
 		t.Error("a reply that echoes no source parsed one")
 	}
 
 	echoed := reply
-	echoed.Observed = netip.MustParseAddrPort("198.51.100.6:54321")
+	echoed.Reflexive = netip.MustParseAddrPort("198.51.100.6:54321")
 	gotEchoed, err := ParseRendezvousReply(echoed.Marshal())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if gotEchoed.Observed != echoed.Observed {
+	if gotEchoed.Reflexive != echoed.Reflexive {
 		t.Errorf("observed source round trip = %v, want %v",
-			gotEchoed.Observed, echoed.Observed)
+			gotEchoed.Reflexive, echoed.Reflexive)
 	}
 	// A reader tolerates what follows the field it knows: bytes appended
 	// after the observed source are a later version's, read past.
@@ -521,7 +521,7 @@ func TestRendezvousEchoEndsWithItsContext(t *testing.T) {
 // TestRendezvousEchoSpeaksForTheLink checks the answered dial of an exchange
 // that binds a link address: before the socket is released, one empty
 // datagram leaves it for the acceptor's link address — the answer's port on
-// the host the reply arrived from, the claim rule's record — so a translator
+// the host the reply arrived from, the claim rule's record — so a NAT
 // maps the link's own flow first. A probe's ephemeral dial sends none: the
 // first datagram the link socket reads after the probe returned is a
 // sentinel sent after it.
@@ -552,10 +552,10 @@ func TestRendezvousEchoSpeaksForTheLink(t *testing.T) {
 				continue
 			}
 			reply := RendezvousReply{
-				Nonce:    req.Nonce,
-				LinkAddr: netip.AddrPortFrom(netip.IPv4Unspecified(), linkPort),
-				IA:       rendezvousIA,
-				Observed: observedAddr(src),
+				Nonce:     req.Nonce,
+				LinkAddr:  netip.AddrPortFrom(netip.IPv4Unspecified(), linkPort),
+				IA:        rendezvousIA,
+				Reflexive: observedAddr(src),
 			}
 			_, _ = acceptor.WriteToUDP(reply.Marshal(), src)
 		}

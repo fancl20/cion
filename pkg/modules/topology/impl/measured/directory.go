@@ -64,9 +64,9 @@ type DirectoryEntry struct {
 // Reach is a node's report of how its peers reach it. The zero value
 // reports nothing observed.
 type Reach struct {
-	// Translated reports that the node's published host is not an address
-	// of its own: a translator stands between it and its peers.
-	Translated bool
+	// BehindNAT reports that the node's published host is not an address
+	// of its own: a NAT stands between it and its peers.
+	BehindNAT bool
 	// RendezvousUnanswered reports that the acceptor of the node's latest
 	// link request got no answer at its published rendezvous address.
 	RendezvousUnanswered bool
@@ -177,7 +177,7 @@ func entryFromPB(pb *nodev1.Entry) (DirectoryEntry, error) {
 		ControlAddr:    control,
 		RendezvousAddr: rendezvous,
 		Reach: Reach{
-			Translated:           pb.Translated,
+			BehindNAT:            pb.BehindNat,
 			RendezvousUnanswered: pb.RendezvousUnanswered,
 		},
 	}, nil
@@ -188,7 +188,7 @@ func (e DirectoryEntry) pb() *nodev1.Entry {
 		IsdAs:                uint64(e.IA),
 		ControlAddr:          e.ControlAddr.String(),
 		RendezvousAddr:       e.RendezvousAddr.String(),
-		Translated:           e.Reach.Translated,
+		BehindNat:            e.Reach.BehindNAT,
 		RendezvousUnanswered: e.Reach.RendezvousUnanswered,
 	}
 }

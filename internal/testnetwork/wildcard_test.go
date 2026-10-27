@@ -97,7 +97,7 @@ func TestWildcardControlBoots(t *testing.T) {
 	})
 
 	// The founder's entry publishes the loopback the namespace holds, and
-	// its report names it untranslated, nothing unanswered.
+	// its report names it neither behind a NAT nor unanswered.
 	Poll(t, "the founder's entry to publish", func() bool {
 		_, ok := n.app.NodeReach()[n.app.IA()]
 		return ok

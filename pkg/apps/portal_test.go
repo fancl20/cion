@@ -69,8 +69,8 @@ func chainFor(t *testing.T, ia addr.IA, skid byte, notAfter time.Time) []*x509.C
 // TestPortalRecordsNodes checks the console's view of the nodes: one per
 // ISD-AS holding a chain, its newest chain's key and expiry; the roles from
 // the founder's ISD-AS and the TRC's cores; the tag each node's directory
-// report earns — NAT when translated and unanswered, Degraded when
-// unanswered alone, none for a translated node peers dial or a node without
+// report earns — NAT when behind a NAT and unanswered, Degraded when
+// unanswered alone, none for a node behind a NAT peers dial or a node without
 // a report; and the directory's slice, endpoint, and issued count beside
 // each.
 func TestPortalRecordsNodes(t *testing.T) {
@@ -106,9 +106,9 @@ func TestPortalRecordsNodes(t *testing.T) {
 		founder: founder,
 		reach: func() map[addr.IA]Reach {
 			return map[addr.IA]Reach{
-				core:  {Translated: true, RendezvousUnanswered: true},
+				core:  {BehindNAT: true, RendezvousUnanswered: true},
 				node:  {RendezvousUnanswered: true},
-				cloud: {Translated: true},
+				cloud: {BehindNAT: true},
 			}
 		},
 		registry: registry,

@@ -18,9 +18,9 @@ message Entry {
   // rendezvous acceptor listens on for first contact, the fixed rendezvous
   // port on the published host.
   string rendezvous_addr = 3;
-  // translated reports that the published host is not an address of the
-  // publisher's own: a translator stands between it and its peers.
-  bool translated = 4;
+  // behind_nat reports that the published host is not an address of the
+  // publisher's own: a NAT stands between it and its peers.
+  bool behind_nat = 4;
   // rendezvous_unanswered reports that the acceptor of the publisher's
   // latest link request got no answer at the published rendezvous address.
   bool rendezvous_unanswered = 5;

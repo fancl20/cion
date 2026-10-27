@@ -14,7 +14,7 @@ import (
 // the listed prefixes and denies everything else — a request carrying no
 // address among them, for a gate that opens when its signal is missing is
 // no gate. The address is self-claimed but return-routable: a joiner behind
-// translation presents its private address, and a private-range entry is
+// a NAT presents its private address, and a private-range entry is
 // what admits such joiners; a fabricated address inside an allowed prefix
 // completes no exchange at all. It mints no keys, so it admits no host: a
 // host is admitted on a key alone, and the posture denies every

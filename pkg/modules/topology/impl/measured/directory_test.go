@@ -286,7 +286,7 @@ func TestDirectoryPublishResolvesHost(t *testing.T) {
 func TestDirectoryCarriesTheReach(t *testing.T) {
 	svc := &DirectoryService{Store: NewDirectoryStore()}
 	reported := directoryEntryPB("192.0.2.7:30042", "192.0.2.7:30043")
-	reported.Translated = true
+	reported.BehindNat = true
 	reported.RendezvousUnanswered = true
 	if err := directoryPublish(context.Background(), svc, directoryIA, reported); err != nil {
 		t.Fatal(err)
@@ -305,7 +305,7 @@ func TestDirectoryCarriesTheReach(t *testing.T) {
 		got[e.IA] = e.Reach
 	}
 	want := map[addr.IA]Reach{
-		directoryIA: {Translated: true, RendezvousUnanswered: true},
+		directoryIA: {BehindNAT: true, RendezvousUnanswered: true},
 		earlier:     {},
 	}
 	if diff := cmp.Diff(want, got); diff != "" {
@@ -319,7 +319,7 @@ func TestDirectoryCarriesTheReach(t *testing.T) {
 func TestDirectoryPublishReportsReach(t *testing.T) {
 	store := NewDirectoryStore()
 	host := netip.MustParseAddr("203.0.113.7")
-	report := Reach{Translated: true, RendezvousUnanswered: true}
+	report := Reach{BehindNAT: true, RendezvousUnanswered: true}
 	var asked []netip.Addr
 	var failure error
 	d := NewNodeDirectory(NodeDirectoryConfig{

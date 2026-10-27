@@ -18,7 +18,7 @@ import (
 
 // The site network: the founder 0, the authoritative core 1, and the public
 // node 2, 10ms apart, and the site's nodes 3 to 6 behind one port-restricted
-// translator, 2ms apart and 20ms from every public node. Each node joins
+// NAT, 2ms apart and 20ms from every public node. Each node joins
 // through its parent alone, in one of the site's two ways of joining.
 var (
 	siteOrder   = []int{1, 2, 3, 4, 5, 6}
@@ -40,19 +40,19 @@ var (
 const siteWatch = 10 * time.Minute
 
 // bootSite boots the site network, each node joining through its parent,
-// and returns it with the site's translator. The one-way delays are the
-// translated network's: a pair of public nodes, a pair of site nodes, and a
+// and returns it with the site's NAT. The one-way delays are the
+// NAT network's: a pair of public nodes, a pair of site nodes, and a
 // pair across.
 func bootSite(
 	t *testing.T, fab *fabric.Fabric, wpki *webpkitest.CA, parents map[int]int,
-) (*network, *fabric.Boundary) {
+) (*network, *fabric.NAT) {
 
 	t.Helper()
 	n := newNetwork(t, fab, 7)
 	site := n.site(t, fabric.PortRestricted, siteMembers...)
 	for i := range n.hosts {
 		for j := i + 1; j < len(n.hosts); j++ {
-			n.setDelay(i, j, translatedOneWay(i, j))
+			n.setDelay(i, j, natOneWay(i, j))
 		}
 	}
 	n.nodes[0] = testnetwork.BootInBubble(t, fab, n.hosts[0], func(cfg *services.NodeConfig) {
@@ -74,7 +74,7 @@ func bootSite(
 }
 
 // insideLinks counts the site's pairs holding an up link established at
-// both ends: links at their inside addresses, for the translator carries no
+// both ends: links at their inside addresses, for the NAT carries no
 // site node's packet back inside.
 func insideLinks(t *testing.T, n *network) int {
 	t.Helper()
@@ -100,7 +100,7 @@ func TestSiteNetworkReaches(t *testing.T) {
 			testnetwork.InBubble(t, func(t *testing.T, fab *fabric.Fabric, wpki *webpkitest.CA) {
 				n, _ := bootSite(t, fab, wpki, joins.parents)
 				awaitPinned(t, n, allNodes(n)...)
-				awaitSettled(t, n.nodes, settleQuiet, translatedBudget)
+				awaitSettled(t, n.nodes, settleQuiet, natBudget)
 				awaitReach(t, n, reachBudget)
 				awaitPings(t, n, allNodes(n), reachBudget)
 			})
@@ -118,7 +118,7 @@ func TestBenchSiteSettled(t *testing.T) {
 			testnetwork.InBubble(t, func(t *testing.T, fab *fabric.Fabric, wpki *webpkitest.CA) {
 				n, _ := bootSite(t, fab, wpki, joins.parents)
 				awaitPinned(t, n, allNodes(n)...)
-				s := awaitSettled(t, n.nodes, settleQuiet, translatedBudget)
+				s := awaitSettled(t, n.nodes, settleQuiet, natBudget)
 				report(t, "SiteSettled/joins="+joins.name, s, assess(t, n, penalty, 0))
 				reportLinks(t, "SiteLinks/joins="+joins.name, n)
 			})
@@ -208,13 +208,13 @@ func (r *siteReads) read() {
 }
 
 // tagOf names the tag a report earns on the portal: NAT when peers cannot
-// dial the node behind a translator, Degraded when they cannot dial it
+// dial the node behind a NAT, Degraded when they cannot dial it
 // otherwise, none while they can or nothing was observed.
 func tagOf(r measured.Reach) string {
 	switch {
 	case !r.RendezvousUnanswered:
 		return "none"
-	case r.Translated:
+	case r.BehindNAT:
 		return "nat"
 	default:
 		return "degraded"
@@ -233,7 +233,7 @@ func TestBenchSiteHosts(t *testing.T) {
 			testnetwork.InBubble(t, func(t *testing.T, fab *fabric.Fabric, wpki *webpkitest.CA) {
 				n, site := bootSite(t, fab, wpki, joins.parents)
 				reads := newSiteReads(n, site.Gateway())
-				awaitSettledEach(t, n.nodes, settleQuiet, translatedBudget, reads.read)
+				awaitSettledEach(t, n.nodes, settleQuiet, natBudget, reads.read)
 				reads.settled = true
 				watch := time.Now()
 				for time.Since(watch) < siteWatch {

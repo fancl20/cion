@@ -140,9 +140,9 @@ type Paths interface {
 // Reach is a node's report of how its peers reach it, as its directory
 // entry publishes it. The zero value reports nothing observed.
 type Reach struct {
-	// Translated reports that the node's published host is not an address
-	// of its own: a translator stands between it and its peers.
-	Translated bool
+	// BehindNAT reports that the node's published host is not an address
+	// of its own: a NAT stands between it and its peers.
+	BehindNAT bool
 	// RendezvousUnanswered reports that the acceptor of the node's latest
 	// link request got no answer at its published rendezvous address.
 	RendezvousUnanswered bool
