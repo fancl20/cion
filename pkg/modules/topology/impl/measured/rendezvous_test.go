@@ -11,11 +11,13 @@ import (
 	"time"
 
 	"github.com/scionproto/scion/pkg/addr"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/fancl20/cion/pkg/libs/scionrpc"
 	"github.com/fancl20/cion/pkg/libs/underlay"
 	"github.com/fancl20/cion/pkg/modules/links"
 	"github.com/fancl20/cion/pkg/modules/links/impl/memory"
+	nodev1 "github.com/fancl20/cion/proto/node/v1"
 )
 
 // rendezvousFixture is a rendezvous acceptor on a loopback address with a
@@ -215,7 +217,7 @@ func TestRendezvousLosesRecordRace(t *testing.T) {
 	}
 	store.armed.Store(true)
 	req := RendezvousRequest{IA: rendezvousIA, LinkAddr: recorded.Remote}
-	raw, err := f.handle(context.Background(), req.Marshal(), net.UDPAddrFromAddrPort(recorded.Remote))
+	raw, err := f.handle(context.Background(), marshaled(t, req), net.UDPAddrFromAddrPort(recorded.Remote))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -248,7 +250,7 @@ func TestRendezvousLosesPortRace(t *testing.T) {
 	store.armed.Store(true)
 	claim := netip.MustParseAddrPort("127.0.0.1:4242")
 	req := RendezvousRequest{IA: rendezvousIA, LinkAddr: claim}
-	raw, err := f.handle(context.Background(), req.Marshal(), net.UDPAddrFromAddrPort(claim))
+	raw, err := f.handle(context.Background(), marshaled(t, req), net.UDPAddrFromAddrPort(claim))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -277,7 +279,7 @@ func TestRendezvousRefusesTakenRemote(t *testing.T) {
 	fresh := addr.MustIAFrom(20, 0xfd0000000025)
 	for _, ia := range []addr.IA{fresh, strangerKeyIA} {
 		req := RendezvousRequest{IA: ia, LinkAddr: taken.Remote}
-		_, err := f.handle(context.Background(), req.Marshal(), net.UDPAddrFromAddrPort(taken.Remote))
+		_, err := f.handle(context.Background(), marshaled(t, req), net.UDPAddrFromAddrPort(taken.Remote))
 		if !errors.Is(err, links.ErrDuplicateRemote) {
 			t.Errorf("a claim of %s at a taken address returned %v, want ErrDuplicateRemote",
 				ia, err)
@@ -366,7 +368,7 @@ func TestRendezvousRateCap(t *testing.T) {
 	for i := range 5 {
 		req := RendezvousRequest{IA: rendezvousIA, LinkAddr: claim}
 		req.Nonce[0] = byte(i)
-		if _, err := conn.WriteToUDP(req.Marshal(), udpAddr(f.addr)); err != nil {
+		if _, err := conn.WriteToUDP(marshaled(t, req), udpAddr(f.addr)); err != nil {
 			t.Fatal(err)
 		}
 		if err := conn.SetReadDeadline(time.Now().Add(100 * time.Millisecond)); err != nil {
@@ -420,7 +422,33 @@ func TestRendezvousLinkCap(t *testing.T) {
 	}
 }
 
-// TestRendezvousWireFormat checks the request and reply wire forms.
+// marshaled returns the message's datagram, failing the test when it does
+// not marshal.
+func marshaled(t *testing.T, m interface{ Marshal() ([]byte, error) }) []byte {
+	t.Helper()
+	raw, err := m.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return raw
+}
+
+// marshaledProto returns the protobuf message's wire form, failing the test
+// when it does not marshal.
+func marshaledProto(t *testing.T, m proto.Message) []byte {
+	t.Helper()
+	raw, err := proto.Marshal(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return raw
+}
+
+// TestRendezvousWireFormat checks the request and reply datagrams: each
+// round-trips, a reply without a reflexive address included, and a field a
+// later release adds is skipped; a datagram of another format, a truncated
+// one, a nonce of another length, and an address that does not parse are
+// refused.
 func TestRendezvousWireFormat(t *testing.T) {
 	req := RendezvousRequest{
 		IA:       rendezvousIA,
@@ -429,55 +457,47 @@ func TestRendezvousWireFormat(t *testing.T) {
 	for i := range req.Nonce {
 		req.Nonce[i] = byte(i)
 	}
-	got, err := ParseRendezvousRequest(req.Marshal())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got != req {
-		t.Fatalf("request round trip = %+v, want %+v", got, req)
+	raw := marshaled(t, req)
+	if got, err := ParseRendezvousRequest(raw); err != nil || got != req {
+		t.Fatalf("request round trip = %+v (%v), want %+v", got, err, req)
 	}
 
 	reply := RendezvousReply{
 		LinkAddr: netip.MustParseAddrPort("192.0.2.8:4243"),
 		IfID:     7,
+		IA:       rendezvousIA,
 	}
 	copy(reply.Nonce[:], req.Nonce[:])
-	gotReply, err := ParseRendezvousReply(reply.Marshal())
-	if err != nil {
-		t.Fatal(err)
+	if got, err := ParseRendezvousReply(marshaled(t, reply)); err != nil || got != reply {
+		t.Fatalf("reply round trip = %+v (%v), want %+v", got, err, reply)
 	}
-	if gotReply != reply {
-		t.Fatalf("reply round trip = %+v, want %+v", gotReply, reply)
-	}
-	if gotReply.Reflexive.IsValid() {
-		t.Error("a reply that echoes no source parsed one")
-	}
-
 	echoed := reply
 	echoed.Reflexive = netip.MustParseAddrPort("198.51.100.6:54321")
-	gotEchoed, err := ParseRendezvousReply(echoed.Marshal())
-	if err != nil {
-		t.Fatal(err)
+	if got, err := ParseRendezvousReply(marshaled(t, echoed)); err != nil || got != echoed {
+		t.Errorf("echoing reply round trip = %+v (%v), want %+v", got, err, echoed)
 	}
-	if gotEchoed.Reflexive != echoed.Reflexive {
-		t.Errorf("observed source round trip = %v, want %v",
-			gotEchoed.Reflexive, echoed.Reflexive)
-	}
-	// A reader tolerates what follows the field it knows: bytes appended
-	// after the observed source are a later version's, read past.
-	if _, err := ParseRendezvousReply(append(echoed.Marshal(), 0, 0)); err != nil {
-		t.Errorf("a reply with trailing bytes parsed no: %v", err)
+	// Field 15 as a varint: a field a later release adds, skipped.
+	if got, err := ParseRendezvousReply(append(marshaled(t, echoed), 0x78, 0x01)); err != nil ||
+		got != echoed {
+		t.Errorf("a reply with an unknown field = %+v (%v), want %+v", got, err, echoed)
 	}
 
-	// Truncated and version-mangled forms are refused.
-	raw := req.Marshal()
-	if _, err := ParseRendezvousRequest(raw[:len(raw)-3]); err == nil {
-		t.Error("a truncated request parsed")
+	refused := map[string][]byte{
+		// The earlier hand-written form: a two-byte version, then the nonce.
+		"another format":      append([]byte{0, 1}, req.Nonce[:]...),
+		"a truncated request": raw[:len(raw)-3],
+		"an empty datagram":   nil,
+		"a short nonce": marshaledProto(t, &nodev1.RendezvousRequest{
+			Nonce: req.Nonce[:8], IsdAs: uint64(req.IA), LinkAddr: "192.0.2.7:4242",
+		}),
+		"an unparsable address": marshaledProto(t, &nodev1.RendezvousRequest{
+			Nonce: req.Nonce[:], IsdAs: uint64(req.IA), LinkAddr: "nowhere",
+		}),
 	}
-	bad := append([]byte{}, raw...)
-	bad[0] = 9
-	if _, err := ParseRendezvousRequest(bad); err == nil {
-		t.Error("an unsupported version parsed")
+	for name, b := range refused {
+		if _, err := ParseRendezvousRequest(b); err == nil {
+			t.Errorf("%s parsed", name)
+		}
 	}
 }
 
@@ -557,7 +577,12 @@ func TestRendezvousEchoSpeaksForTheLink(t *testing.T) {
 				IA:        rendezvousIA,
 				Reflexive: observedAddr(src),
 			}
-			_, _ = acceptor.WriteToUDP(reply.Marshal(), src)
+			raw, err := reply.Marshal()
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			_, _ = acceptor.WriteToUDP(raw, src)
 		}
 	}()
 	target := acceptor.LocalAddr().(*net.UDPAddr).AddrPort()

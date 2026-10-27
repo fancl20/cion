@@ -77,3 +77,7 @@ neither join through nor probe each other.
     the labs.
 
 ## Implementation history
+
+*   Landed as proposed: the two messages
+    ([rendezvous.proto](/proto/node/v1/rendezvous.proto)) and the codec over
+    them ([rendezvous.go](/pkg/modules/topology/impl/measured/rendezvous.go)).

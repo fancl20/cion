@@ -3,7 +3,6 @@ package measured
 import (
 	"context"
 	"crypto/rand"
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -13,11 +12,13 @@ import (
 	"time"
 
 	"github.com/scionproto/scion/pkg/addr"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/fancl20/cion/pkg/libs/ratelimit"
 	"github.com/fancl20/cion/pkg/libs/scionrpc"
 	"github.com/fancl20/cion/pkg/libs/underlay"
 	"github.com/fancl20/cion/pkg/modules/links"
+	nodev1 "github.com/fancl20/cion/proto/node/v1"
 )
 
 // RendezvousPort is the UDP port every node's rendezvous acceptor listens on
@@ -25,8 +26,6 @@ import (
 // step further down the underlay block's ladder, the port that binds
 // joiners only, and only before identity.
 const RendezvousPort = 30043
-
-const rendezvousVersion = 1
 
 // ParseRendezvousAddr parses a rendezvous address as the neighbor argument
 // spells it: "host:port" as spelled, a bare host naming the fixed rendezvous
@@ -66,30 +65,26 @@ type RendezvousRequest struct {
 	LinkAddr netip.AddrPort
 }
 
-func (r RendezvousRequest) Marshal() []byte {
-	a := r.LinkAddr.String()
-	buf := make([]byte, 0, 30+len(a))
-	buf = binary.BigEndian.AppendUint16(buf, rendezvousVersion)
-	buf = append(buf, r.Nonce[:]...)
-	buf = binary.BigEndian.AppendUint64(buf, uint64(r.IA))
-	buf = binary.BigEndian.AppendUint16(buf, uint16(len(a)))
-	return append(buf, a...)
+// Marshal writes the request's datagram.
+func (r RendezvousRequest) Marshal() ([]byte, error) {
+	return proto.Marshal(&nodev1.RendezvousRequest{
+		Nonce:    r.Nonce[:],
+		IsdAs:    uint64(r.IA),
+		LinkAddr: r.LinkAddr.String(),
+	})
 }
 
+// ParseRendezvousRequest reads a request's datagram.
 func ParseRendezvousRequest(b []byte) (RendezvousRequest, error) {
-	rd := &binReader{b: b}
-	if rd.uint16() != rendezvousVersion {
-		return RendezvousRequest{}, fmt.Errorf("unsupported rendezvous version")
+	var pb nodev1.RendezvousRequest
+	if err := proto.Unmarshal(b, &pb); err != nil {
+		return RendezvousRequest{}, fmt.Errorf("reading rendezvous request: %w", err)
 	}
-	var req RendezvousRequest
-	rd.read(&req.Nonce)
-	req.IA = addr.IA(rd.uint64())
-	n := int(rd.uint16())
-	a := rd.bytes(n)
-	if rd.err != nil {
-		return RendezvousRequest{}, fmt.Errorf("reading rendezvous request: %w", rd.err)
+	req := RendezvousRequest{IA: addr.IA(pb.IsdAs)}
+	if err := readNonce(&req.Nonce, pb.Nonce); err != nil {
+		return RendezvousRequest{}, err
 	}
-	linkAddr, err := netip.ParseAddrPort(string(a))
+	linkAddr, err := netip.ParseAddrPort(pb.LinkAddr)
 	if err != nil {
 		return RendezvousRequest{}, fmt.Errorf("parsing rendezvous link address: %w", err)
 	}
@@ -113,54 +108,40 @@ type RendezvousReply struct {
 	Reflexive netip.AddrPort
 }
 
-func (r RendezvousReply) Marshal() []byte {
-	a := r.LinkAddr.String()
-	buf := make([]byte, 0, 32+len(a))
-	buf = binary.BigEndian.AppendUint16(buf, rendezvousVersion)
-	buf = append(buf, r.Nonce[:]...)
-	buf = binary.BigEndian.AppendUint16(buf, uint16(len(a)))
-	buf = append(buf, a...)
-	buf = binary.BigEndian.AppendUint16(buf, r.IfID)
-	buf = binary.BigEndian.AppendUint64(buf, uint64(r.IA))
-	if !r.Reflexive.IsValid() {
-		// An absent echo: the appended field is the reply's last, so the
-		// form without it is the reply a predecessor writes.
-		return buf
+// Marshal writes the reply's datagram.
+func (r RendezvousReply) Marshal() ([]byte, error) {
+	pb := &nodev1.RendezvousReply{
+		Nonce:    r.Nonce[:],
+		LinkAddr: r.LinkAddr.String(),
+		IfId:     uint32(r.IfID),
+		IsdAs:    uint64(r.IA),
 	}
-	o := r.Reflexive.String()
-	buf = binary.BigEndian.AppendUint16(buf, uint16(len(o)))
-	return append(buf, o...)
+	if r.Reflexive.IsValid() {
+		pb.ReflexiveAddr = r.Reflexive.String()
+	}
+	return proto.Marshal(pb)
 }
 
+// ParseRendezvousReply reads a reply's datagram.
 func ParseRendezvousReply(b []byte) (RendezvousReply, error) {
-	rd := &binReader{b: b}
-	if rd.uint16() != rendezvousVersion {
-		return RendezvousReply{}, fmt.Errorf("unsupported rendezvous version")
+	var pb nodev1.RendezvousReply
+	if err := proto.Unmarshal(b, &pb); err != nil {
+		return RendezvousReply{}, fmt.Errorf("reading rendezvous reply: %w", err)
 	}
-	var reply RendezvousReply
-	rd.read(&reply.Nonce)
-	n := int(rd.uint16())
-	a := rd.bytes(n)
-	reply.IfID = rd.uint16()
-	reply.IA = addr.IA(rd.uint64())
-	if rd.err != nil {
-		return RendezvousReply{}, fmt.Errorf("reading rendezvous reply: %w", rd.err)
+	if pb.IfId > 0xffff {
+		return RendezvousReply{}, fmt.Errorf("rendezvous interface ID %d out of range", pb.IfId)
 	}
-	linkAddr, err := netip.ParseAddrPort(string(a))
+	reply := RendezvousReply{IfID: uint16(pb.IfId), IA: addr.IA(pb.IsdAs)}
+	if err := readNonce(&reply.Nonce, pb.Nonce); err != nil {
+		return RendezvousReply{}, err
+	}
+	linkAddr, err := netip.ParseAddrPort(pb.LinkAddr)
 	if err != nil {
 		return RendezvousReply{}, fmt.Errorf("parsing rendezvous link address: %w", err)
 	}
 	reply.LinkAddr = linkAddr
-	// The reflexive address is appended after the form every version
-	// shares: a reply that carries no such field is one that does not echo
-	// it.
-	if len(rd.b) > 0 {
-		n := int(rd.uint16())
-		o := rd.bytes(n)
-		if rd.err != nil {
-			return RendezvousReply{}, fmt.Errorf("reading rendezvous reply: %w", rd.err)
-		}
-		reflexive, err := netip.ParseAddrPort(string(o))
+	if pb.ReflexiveAddr != "" {
+		reflexive, err := netip.ParseAddrPort(pb.ReflexiveAddr)
 		if err != nil {
 			return RendezvousReply{}, fmt.Errorf("parsing rendezvous reflexive address: %w", err)
 		}
@@ -169,49 +150,13 @@ func ParseRendezvousReply(b []byte) (RendezvousReply, error) {
 	return reply, nil
 }
 
-// binReader is the rendezvous wire's cursor: every read consumes from the
-// front and records truncation, so one error check serves a whole parse.
-type binReader struct {
-	b   []byte
-	err error
-}
-
-func (r *binReader) uint16() uint16 {
-	if len(r.b) < 2 {
-		r.err = errors.New("truncated")
-		return 0
+// readNonce copies a message's nonce, refusing one of another length.
+func readNonce(dst *[16]byte, nonce []byte) error {
+	if len(nonce) != len(dst) {
+		return fmt.Errorf("rendezvous nonce of %d bytes, want %d", len(nonce), len(dst))
 	}
-	v := binary.BigEndian.Uint16(r.b)
-	r.b = r.b[2:]
-	return v
-}
-
-func (r *binReader) uint64() uint64 {
-	if len(r.b) < 8 {
-		r.err = errors.New("truncated")
-		return 0
-	}
-	v := binary.BigEndian.Uint64(r.b)
-	r.b = r.b[8:]
-	return v
-}
-
-func (r *binReader) bytes(n int) []byte {
-	if n < 0 || len(r.b) < n {
-		r.err = errors.New("truncated")
-		return nil
-	}
-	v := r.b[:n]
-	r.b = r.b[n:]
-	return v
-}
-
-// read consumes len(dst) bytes into dst.
-func (r *binReader) read(dst *[16]byte) {
-	b := r.bytes(len(dst))
-	if r.err == nil {
-		copy(dst[:], b)
-	}
+	copy(dst[:], nonce)
+	return nil
 }
 
 // Rendezvous is the acceptor every node runs on its advertised rendezvous
@@ -398,7 +343,7 @@ func (r *Rendezvous) handle(ctx context.Context, raw []byte, src *net.UDPAddr) (
 		IA:        r.cfg.IA,
 		Reflexive: observedAddr(src),
 	}
-	return reply.Marshal(), nil
+	return reply.Marshal()
 }
 
 // admit returns the claim's entry: the one the table holds for it, an
@@ -549,7 +494,10 @@ func RendezvousEcho(
 	}
 	req.IA = ia
 	req.LinkAddr = linkAddr
-	raw := req.Marshal()
+	raw, err := req.Marshal()
+	if err != nil {
+		return RendezvousReply{}, netip.AddrPort{}, 0, err
+	}
 
 	// The reply carries two addresses beside the fixed fields; the buffer
 	// holds the longest form an IPv6 reply takes.
