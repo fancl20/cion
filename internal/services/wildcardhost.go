@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/fancl20/cion/pkg/libs/bus"
 	"github.com/fancl20/cion/pkg/libs/underlay"
 )
 
@@ -25,7 +26,9 @@ const wildcardHostTTL = 30 * time.Second
 // names. The zero address while nothing is published or no route reaches
 // it, and the conns send nothing until a host lands.
 type wildcardHost struct {
-	published func(context.Context) netip.Addr
+	// self is the topic of the node's own state, whose host is the
+	// published host.
+	self *bus.Topic[bus.SelfState]
 	// route asks the routing table for the local address toward a
 	// destination; the field is the tests' seam.
 	route func(netip.Addr) (netip.Addr, error)
@@ -40,15 +43,15 @@ type wildcardHost struct {
 
 // newWildcardHost builds the resolution over the node's published host and
 // the kernel's routing table, the one a wildcard bind's sockets send by.
-func newWildcardHost(published func(context.Context) netip.Addr) *wildcardHost {
-	return &wildcardHost{published: published, route: underlay.RouteSource}
+func newWildcardHost(self *bus.Topic[bus.SelfState]) *wildcardHost {
+	return &wildcardHost{self: self, route: underlay.RouteSource}
 }
 
 // resolve returns the host: the memoized answer while the published host
 // stands and the answer is younger than wildcardHostTTL, else the routing
 // table's answer anew — every conn's every packet asks.
-func (w *wildcardHost) resolve(ctx context.Context) netip.Addr {
-	published := w.published(ctx)
+func (w *wildcardHost) resolve(context.Context) netip.Addr {
+	published := w.self.Latest().Host
 	if !published.IsValid() {
 		return netip.Addr{}
 	}

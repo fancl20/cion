@@ -16,7 +16,6 @@ import (
 	"context"
 	"crypto/x509"
 	"net/http"
-	"net/netip"
 	"time"
 
 	"github.com/scionproto/scion/pkg/addr"
@@ -64,11 +63,6 @@ type Environment struct {
 	// ControlHost is the control address, "host:port"; its host is the
 	// underlay host the host-facing port binds.
 	ControlHost string
-	// PublishedHost resolves the host the node's publications prefer: the
-	// learned external host when one is recorded, the founding core's
-	// identity. The zero address leaves the publication to whatever bind
-	// host it can name beside it.
-	PublishedHost func(ctx context.Context) netip.Addr
 	// Domain is the core's WebPKI identity — the founding core's own when
 	// Core is set, the network's core identity otherwise.
 	Domain string

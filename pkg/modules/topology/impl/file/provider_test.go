@@ -11,6 +11,7 @@ import (
 
 	"github.com/scionproto/scion/pkg/addr"
 
+	"github.com/fancl20/cion/pkg/libs/bus"
 	"github.com/fancl20/cion/pkg/modules/links"
 	"github.com/fancl20/cion/pkg/modules/links/impl/memory"
 	"github.com/fancl20/cion/pkg/modules/topology"
@@ -62,7 +63,7 @@ func newFileFixture(t *testing.T, entries ...Entry) *fileFixture {
 	}
 	f.Provider = New(Config{Path: f.path})
 	writeLinkSet(t, f.path, entries...)
-	f.Wire(topology.Environment{Store: links.Notifying(f.store, func() { f.writes++ })})
+	f.Wire(topology.Environment{Store: links.Notifying(f.store, func() { f.writes++ }), Bus: bus.New()})
 	return f
 }
 

@@ -23,13 +23,12 @@ import (
 // persists for a restart to republish.
 const ExternalHostFile = "external-host"
 
-// The domain resolution's memo windows: an answer holds for the publication
-// cadence, a failure for longer — a name the resolver cannot answer must not
-// burden the loop it resolves for.
+// The founding core's domain lookups: the next comes a publication cadence
+// after an answer and domainFailureTTL after a failure.
 const (
 	domainSuccessTTL = NodePublishInterval
 	domainFailureTTL = 30 * time.Second
-	// domainLookupTimeout bounds one resolution attempt.
+	// domainLookupTimeout bounds one lookup.
 	domainLookupTimeout = 2 * time.Second
 )
 
@@ -108,13 +107,10 @@ func holds(sockets underlay.Sockets, host netip.Addr) (bool, error) {
 
 // domainHost resolves the founding core's own identity to the address its
 // entry publishes: an address literal directly, a domain through the
-// resolver, the mapping a provider holds the core behind; a domain's
-// answer must share the bind host's family, the sockets binding it
-// receiving what the published address draws — unless the bind is the
-// wildcard, which names none, and the resolver's first answer publishes.
-// Only an answer the resolver vouched for publishes: a failed re-resolution
-// holds the last good one, and before any has landed the zero address,
-// which publishes nothing.
+// resolver, the mapping a provider holds the core behind; a domain's answer
+// must share the bind host's family, the sockets binding it receiving what
+// the published address draws — unless the bind is the wildcard, which names
+// none, and the resolver's first answer publishes.
 type domainHost struct {
 	domain string
 	// bind is the control host the node's sockets bind; its family alone
@@ -127,17 +123,10 @@ type domainHost struct {
 
 	// lookup resolves a name: the socket source's resolver.
 	lookup func(ctx context.Context, network, host string) ([]netip.Addr, error)
-
-	mtx sync.Mutex
-	// at and ok memoize the last attempt — its moment and its outcome —
-	// and host the last good answer, held through a failure.
-	at   time.Time
-	host netip.Addr
-	ok   bool
 }
 
 // newDomainHost builds the founder's host resolution, parsing the identity's
-// grammar once: an address needs no lookup and no memoization.
+// grammar once: an address needs no lookup.
 func newDomainHost(
 	domain string, bind netip.Addr,
 	lookup func(ctx context.Context, network, host string) ([]netip.Addr, error),
@@ -148,30 +137,6 @@ func newDomainHost(
 		d.literal = addr.Unmap()
 	}
 	return d
-}
-
-// resolve returns the identity's address: the literal itself when the
-// identity is one, else the domain's — the last good answer held through a
-// failed resolution, the zero address before any has landed.
-func (d *domainHost) resolve(ctx context.Context) netip.Addr {
-	if d.literal.IsValid() {
-		return d.literal
-	}
-	d.mtx.Lock()
-	defer d.mtx.Unlock()
-	ttl := domainFailureTTL
-	if d.ok {
-		ttl = domainSuccessTTL
-	}
-	if d.at.IsZero() || time.Since(d.at) >= ttl {
-		d.at = time.Now()
-		if host, ok := d.lookupAddr(ctx); ok {
-			d.host, d.ok = host, true
-		} else {
-			d.ok = false
-		}
-	}
-	return d.host
 }
 
 // lookupAddr resolves the domain, keeping the addresses of the bind host's

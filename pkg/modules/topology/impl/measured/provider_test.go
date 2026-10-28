@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/scionproto/scion/pkg/addr"
+	spath "github.com/scionproto/scion/pkg/slayers/path/scion"
 
 	"github.com/fancl20/cion/pkg/libs/bus"
 	"github.com/fancl20/cion/pkg/libs/scion"
@@ -279,110 +280,122 @@ func TestContract(t *testing.T) {
 	})
 }
 
-// TestPublishedHostFollowsLearning checks the host the node's own entry
-// publishes: a non-core's follows the learned external host — a restart
-// republishes the persisted one — the wildcard fallback publishing nothing
-// until one is learned, and the founding core resolving its own domain
-// through its socket source, of the family its control host binds — the
-// wildcard's first answer, which names no family to filter by — holding no
-// address the resolver did not vouch for.
-func TestPublishedHostFollowsLearning(t *testing.T) {
-	control := netip.MustParseAddr("10.0.0.7")
-	z, err := New(Config{ControlHost: control, StateDir: t.TempDir()})
-	if err != nil {
-		t.Fatal(err)
-	}
-	ctx := context.Background()
-	if got := z.publishedHost(ctx); got != control {
-		t.Errorf("unlearned host = %v, want the control host %v", got, control)
-	}
-	learned := netip.MustParseAddr("203.0.113.7")
-	z.learn(learned)
-	if got := z.publishedHost(ctx); got != learned {
-		t.Errorf("learned host = %v, want %v", got, learned)
-	}
+// wiredSelf wires the provider to a bus of its own and returns the bus's
+// topic of the node's own state.
+func wiredSelf(z *Provider) *bus.Topic[bus.SelfState] {
+	b := bus.New()
+	z.Wire(topology.Environment{Bus: b})
+	return b.Self()
+}
 
-	restarted, err := New(Config{ControlHost: control, StateDir: z.cfg.StateDir})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := restarted.publishedHost(ctx); got != learned {
-		t.Errorf("restarted host = %v, want the persisted %v", got, learned)
-	}
+// TestSelfFollowsLearning checks the host the node's own state carries: a
+// non-core's follows the learned external host — a restart publishes the
+// persisted one at wiring — the wildcard fallback naming none until one is
+// learned; the founding core's literal domain publishes at wiring, and a name
+// publishes the lookup's answer of the family the control host binds — the
+// wildcard's first answer, which names no family to filter by — nothing
+// before an answer lands, and the last answer held through a failed lookup.
+func TestSelfFollowsLearning(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		control := netip.MustParseAddr("10.0.0.7")
+		z, err := New(Config{ControlHost: control, StateDir: t.TempDir()})
+		if err != nil {
+			t.Fatal(err)
+		}
+		self := wiredSelf(z)
+		if got := self.Latest().Host; got != control {
+			t.Errorf("unlearned host = %v, want the control host %v", got, control)
+		}
+		learned := netip.MustParseAddr("203.0.113.7")
+		z.learn(learned)
+		if got := self.Latest().Host; got != learned {
+			t.Errorf("learned host = %v, want %v", got, learned)
+		}
 
-	// The wildcard fallback publishes nothing until a host is learned: the
-	// control host names none, exactly the founder's unresolved name.
-	wild, err := New(Config{
-		ControlHost: netip.MustParseAddr("0.0.0.0"),
-		StateDir:    t.TempDir(),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := wild.publishedHost(ctx); got.IsValid() {
-		t.Errorf("the unlearned wildcard host = %v, want the zero address", got)
-	}
-	wild.learn(learned)
-	if got := wild.publishedHost(ctx); got != learned {
-		t.Errorf("the learned wildcard host = %v, want %v", got, learned)
-	}
+		restarted, err := New(Config{ControlHost: control, StateDir: z.cfg.StateDir})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := wiredSelf(restarted).Latest().Host; got != learned {
+			t.Errorf("restarted host = %v, want the persisted %v", got, learned)
+		}
 
-	// The core's domain resolves through its socket source.
-	resolving := func(addrs ...netip.Addr) underlay.Sockets {
-		return underlay.Sockets{LookupNetIP: func(context.Context, string, string) ([]netip.Addr, error) {
-			return addrs, nil
-		}}
-	}
-	core, err := New(Config{
-		Core:        true,
-		Domain:      "core.example.org",
-		ControlHost: control,
-		StateDir:    t.TempDir(),
-		Sockets: resolving(
+		// The wildcard fallback names nothing until a host is learned.
+		wild, err := New(Config{ControlHost: netip.MustParseAddr("0.0.0.0"), StateDir: t.TempDir()})
+		if err != nil {
+			t.Fatal(err)
+		}
+		wildSelf := wiredSelf(wild)
+		if got := wildSelf.Latest().Host; got.IsValid() {
+			t.Errorf("the unlearned wildcard host = %v, want the zero address", got)
+		}
+		wild.learn(learned)
+		if got := wildSelf.Latest().Host; got != learned {
+			t.Errorf("the learned wildcard host = %v, want %v", got, learned)
+		}
+
+		// The core's literal domain is its host from the start.
+		literal := netip.MustParseAddr("192.0.2.30")
+		lit, err := New(Config{Core: true, Domain: literal.String(), ControlHost: control})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := wiredSelf(lit).Latest().Host; got != literal {
+			t.Errorf("the literal core's host = %v, want %v", got, literal)
+		}
+
+		// A name's host is the lookup loop's answer, held through a failure.
+		lookups := func(failing *atomic.Bool, addrs ...netip.Addr) underlay.Sockets {
+			return underlay.Sockets{LookupNetIP: func(context.Context, string, string) ([]netip.Addr, error) {
+				if failing.Load() {
+					return nil, errors.New("no such name")
+				}
+				return addrs, nil
+			}}
+		}
+		lookedUp := func(control netip.Addr, failing *atomic.Bool, addrs ...netip.Addr) *bus.Topic[bus.SelfState] {
+			core, err := New(Config{
+				Core: true, Domain: "core.example.org", ControlHost: control,
+				Sockets: lookups(failing, addrs...),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			coreSelf := wiredSelf(core)
+			if got := coreSelf.Latest().Host; got.IsValid() {
+				t.Errorf("the core's host before a lookup = %v, want the zero address", got)
+			}
+			go core.runDomain(t.Context())
+			synctest.Wait()
+			return coreSelf
+		}
+		failing := new(atomic.Bool)
+		coreSelf := lookedUp(control, failing,
 			netip.MustParseAddr("2001:db8::1"), // the wrong family
-			netip.MustParseAddr("192.0.2.20"),
-		),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := core.publishedHost(ctx); got != netip.MustParseAddr("192.0.2.20") {
-		t.Errorf("the core's host = %v, want its domain's 192.0.2.20", got)
-	}
+			netip.MustParseAddr("192.0.2.20"))
+		if got := coreSelf.Latest().Host; got != netip.MustParseAddr("192.0.2.20") {
+			t.Errorf("the core's host = %v, want its domain's 192.0.2.20", got)
+		}
+		failing.Store(true)
+		time.Sleep(domainSuccessTTL)
+		synctest.Wait()
+		if got := coreSelf.Latest().Host; got != netip.MustParseAddr("192.0.2.20") {
+			t.Errorf("the core's host after a failed lookup = %v, want the last answer held", got)
+		}
 
-	// A wildcard-bound core publishes the resolver's first answer.
-	first := netip.MustParseAddr("2001:db8::2")
-	wildCore, err := New(Config{
-		Core:        true,
-		Domain:      "core.example.org",
-		ControlHost: netip.MustParseAddr("0.0.0.0"),
-		StateDir:    t.TempDir(),
-		Sockets:     resolving(first, netip.MustParseAddr("192.0.2.21")),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := wildCore.publishedHost(ctx); got != first {
-		t.Errorf("the wildcard core's host = %v, want the resolver's first answer %v", got, first)
-	}
+		first := netip.MustParseAddr("2001:db8::2")
+		wildCore := lookedUp(netip.MustParseAddr("0.0.0.0"), new(atomic.Bool),
+			first, netip.MustParseAddr("192.0.2.21"))
+		if got := wildCore.Latest().Host; got != first {
+			t.Errorf("the wildcard core's host = %v, want the resolver's first answer %v", got, first)
+		}
 
-	// A name that has never answered publishes nothing: no address the
-	// resolver did not vouch for.
-	failing, err := New(Config{
-		Core:        true,
-		Domain:      "core.example.org",
-		ControlHost: control,
-		StateDir:    t.TempDir(),
-		Sockets: underlay.Sockets{LookupNetIP: func(context.Context, string, string) ([]netip.Addr, error) {
-			return nil, errors.New("no such name")
-		}},
+		never := new(atomic.Bool)
+		never.Store(true)
+		if got := lookedUp(control, never).Latest().Host; got.IsValid() {
+			t.Errorf("the core's unanswered host = %v, want the zero address", got)
+		}
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := failing.publishedHost(ctx); got.IsValid() {
-		t.Errorf("the core's unresolved host = %v, want the zero address", got)
-	}
 }
 
 // TestStrandedRedial checks the stranded dialer: an unstranded node's dial
@@ -733,12 +746,16 @@ func (c *fakeLinkServiceClient) PunchProbe(
 	return nodev1connect.LinkServicePunchProbeClientStream{}, errors.New("the fake probes nothing")
 }
 
-// TestProviderReportsReach checks the published report: the link client
-// keeps the latest reply's report of the acceptor's echo — a reply without
-// one keeps the last — and the report names the published host behind a
-// NAT when it is not one of the node's own.
+// TestProviderReportsReach checks the reported reach: the link client
+// publishes the latest reply's report of the acceptor's echo in the node's
+// own state — a reply without one keeps the last, and an unchanged report
+// publishes nothing — and a host the node does not hold stands behind a NAT.
 func TestProviderReportsReach(t *testing.T) {
-	z := &Provider{}
+	z := &Provider{cfg: Config{ControlHost: netip.MustParseAddr("127.0.0.1")}}
+	self := wiredSelf(z)
+	published := 0
+	sub := self.Subscribe(t.Context())
+	<-sub // the state at wiring
 	peer := &scion.Addr{IA: linkIA, Service: addr.SvcCS}
 	const ifID = 3
 	fake := &fakeLinkServiceClient{}
@@ -748,15 +765,16 @@ func TestProviderReportsReach(t *testing.T) {
 			scionrpc.PeerAuthority(&scion.Addr{IA: peer.IA, Service: peer.Service, IfID: ifID}): fake,
 		},
 	}
-	own := netip.MustParseAddr("127.0.0.1")
 	steps := []struct {
-		answered *bool
-		want     Reach
+		answered       *bool
+		wantUnanswered bool
+		wantPublished  int
 	}{
-		{want: Reach{}},
-		{answered: new(false), want: Reach{RendezvousUnanswered: true}},
-		{want: Reach{RendezvousUnanswered: true}},
-		{answered: new(true), want: Reach{}},
+		{},
+		{answered: new(false), wantUnanswered: true, wantPublished: 1},
+		{wantUnanswered: true, wantPublished: 1},
+		{answered: new(false), wantUnanswered: true, wantPublished: 1},
+		{answered: new(true), wantPublished: 2},
 	}
 	for i, step := range steps {
 		fake.reply = &nodev1.LinkReply{
@@ -765,23 +783,25 @@ func TestProviderReportsReach(t *testing.T) {
 		if _, err := c.Link(t.Context(), peer, netip.MustParseAddrPort("127.0.0.1:4243"), ifID); err != nil {
 			t.Fatal(err)
 		}
-		got, err := z.reach(own)
-		if err != nil {
-			t.Fatal(err)
+		select {
+		case <-sub:
+			published++
+		default:
 		}
-		if got != step.want {
-			t.Errorf("after reply %d: report = %+v, want %+v", i, got, step.want)
+		if got := self.Latest().RendezvousUnanswered; got != step.wantUnanswered {
+			t.Errorf("after reply %d: unanswered = %v, want %v", i, got, step.wantUnanswered)
+		}
+		if published != step.wantPublished {
+			t.Errorf("after reply %d: %d publishes, want %d", i, published, step.wantPublished)
 		}
 	}
 
-	// Documentation space no interface holds stands for a NAT's
-	// host.
-	got, err := z.reach(netip.MustParseAddr("192.0.2.1"))
-	if err != nil {
-		t.Fatal(err)
+	if behind, err := z.behindNAT(netip.MustParseAddr("127.0.0.1")); err != nil || behind {
+		t.Errorf("behindNAT(127.0.0.1) = %v, %v, want held", behind, err)
 	}
-	if !got.BehindNAT {
-		t.Errorf("the report at a host the node does not hold = %+v, want behind a NAT", got)
+	// Documentation space no interface holds stands for a NAT's host.
+	if behind, err := z.behindNAT(netip.MustParseAddr("192.0.2.1")); err != nil || !behind {
+		t.Errorf("behindNAT(192.0.2.1) = %v, %v, want behind a NAT", behind, err)
 	}
 }
 
@@ -834,10 +854,10 @@ func TestReachUnderTheWildcardBind(t *testing.T) {
 	}
 	store := NewDirectoryStore()
 	d := NewNodeDirectory(NodeDirectoryConfig{
-		IA:    directoryIA,
-		Host:  z.publishedHost,
-		Reach: z.reach,
-		Store: store,
+		IA:        directoryIA,
+		Self:      wiredSelf(z),
+		BehindNAT: z.behindNAT,
+		Store:     store,
 	})
 	ctx := context.Background()
 	if err := d.publish(ctx); err == nil {
@@ -953,7 +973,7 @@ func TestFollowKeepsTheLocatorOnTheFlow(t *testing.T) {
 		// The node's own rendezvous address goes unanswered, so each pass
 		// weighs re-punches too: no peer reports itself undialable, and
 		// none is due.
-		z.unanswered.Store(true)
+		z.recordAnswer(false)
 		entry := func(ia addr.IA, port uint16, state links.State) *links.Link {
 			l := &links.Link{
 				NeighborIA: ia,
@@ -1148,6 +1168,47 @@ func TestRepunchMovesTheLink(t *testing.T) {
 	if got := fake.requests.Load(); got != 1 {
 		t.Errorf("the re-punch sent %d link requests, want one", got)
 	}
+}
+
+// failingPunchPaths counts the routes a punch asks for, answering none.
+type failingPunchPaths struct{ calls atomic.Int32 }
+
+func (p *failingPunchPaths) Path(context.Context, addr.IA) (*spath.Decoded, error) {
+	p.calls.Add(1)
+	return nil, errors.New("no route")
+}
+
+// TestUpkeepRepunchesOnTheAnswersFlip checks the upkeep's wake on the
+// node's own state: a punched link that went down while the node's
+// rendezvous address counted as answered is punched again once a link reply
+// reports it unanswered, UpkeepGrace later, with no link state event
+// between.
+func TestUpkeepRepunchesOnTheAnswersFlip(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		standing := liveLink(linkIA, 40071)
+		z, _ := wiredProvider(t, rendezvousIA, standing)
+		z.directory = &NodeDirectory{local: []DirectoryEntry{
+			{IA: linkIA, Reach: Reach{RendezvousUnanswered: true}},
+		}}
+		paths := &failingPunchPaths{}
+		z.puncher = &puncher{paths: paths}
+		z.linkState.Publish(bus.NewLinkState(bus.Link{Entry: *standing, Down: true}))
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		go z.runUpkeep(ctx)
+		time.Sleep(2 * UpkeepGrace)
+		synctest.Wait()
+		if n := paths.calls.Load(); n != 0 {
+			t.Fatalf("punched %d times while the node's address answered, want none", n)
+		}
+
+		z.recordAnswer(false)
+		time.Sleep(UpkeepGrace + time.Millisecond)
+		synctest.Wait()
+		if n := paths.calls.Load(); n != 1 {
+			t.Errorf("punched %d times after the answer flipped, want 1", n)
+		}
+	})
 }
 
 // TestPickReflector checks the reflector's choice: a neighbor whose own

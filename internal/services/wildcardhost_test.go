@@ -1,7 +1,6 @@
 package services
 
 import (
-	"context"
 	"errors"
 	"net/netip"
 	"testing"
@@ -10,6 +9,8 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
+
+	"github.com/fancl20/cion/pkg/libs/bus"
 )
 
 // TestWildcardHostRoutesTowardThePublishedHost checks the host the wildcard
@@ -24,11 +25,12 @@ func TestWildcardHostRoutesTowardThePublishedHost(t *testing.T) {
 		first := netip.MustParseAddr("203.0.113.7")
 		moved := netip.MustParseAddr("198.51.100.9")
 		inside := netip.MustParseAddr("192.168.50.2")
-		published := first
+		self := new(bus.Topic[bus.SelfState])
+		self.Publish(bus.SelfState{Host: first})
 		var routed []netip.Addr
 		var refusal error
 		w := &wildcardHost{
-			published: func(context.Context) netip.Addr { return published },
+			self: self,
 			route: func(dst netip.Addr) (netip.Addr, error) {
 				routed = append(routed, dst)
 				if refusal != nil {
@@ -50,7 +52,7 @@ func TestWildcardHostRoutesTowardThePublishedHost(t *testing.T) {
 		check("the first resolution", inside, first)
 		check("a resolution inside the bound", inside, first)
 
-		published = moved
+		self.Publish(bus.SelfState{Host: moved})
 		check("a moved published host", inside, first, moved)
 
 		time.Sleep(wildcardHostTTL)
@@ -61,7 +63,7 @@ func TestWildcardHostRoutesTowardThePublishedHost(t *testing.T) {
 		check("a failed route", netip.Addr{}, first, moved, moved, moved)
 		check("a failed route inside the bound", netip.Addr{}, first, moved, moved, moved)
 
-		published = netip.Addr{}
+		self.Publish(bus.SelfState{})
 		check("an unpublished host", netip.Addr{}, first, moved, moved, moved)
 	})
 }

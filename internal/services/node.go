@@ -49,11 +49,6 @@ type node struct {
 	// completes a first start's identity, seeds the store, mounts its
 	// services on the endpoint, and runs its loops under start.
 	topology topology.Provider
-	// publishedHost resolves the host the node's publications carry — the
-	// measured provider's own, the learned host beside the bind; the file
-	// provider's the control host a concrete bind names, for it learns
-	// nothing. The zero address publishes nothing.
-	publishedHost func(context.Context) netip.Addr
 	// nodeReach returns each node's report of how its peers reach it, as
 	// the measured provider's directory copy holds them; nil under the file
 	// provider, which runs no directory.
@@ -196,15 +191,8 @@ func (n *node) selectProvider() error {
 			Core:          founding,
 			Path:          n.cfg.LinkSet,
 			WatchInterval: n.cfg.Pacing.LinkSetPoll,
+			ControlHost:   n.cfg.controlAddr.Addr(),
 		})
-		// The static provider learns nothing: its publication names the
-		// control host a concrete bind carries, nothing under the wildcard.
-		n.publishedHost = func(context.Context) netip.Addr {
-			if host := n.cfg.controlAddr.Addr(); !host.IsUnspecified() {
-				return host
-			}
-			return netip.Addr{}
-		}
 		return nil
 	}
 	cfg := measured.Config{
@@ -235,7 +223,6 @@ func (n *node) selectProvider() error {
 		return err
 	}
 	n.topology = provider
-	n.publishedHost = provider.PublishedHost
 	n.directory = provider.Directory
 	n.nodeReach = func() map[addr.IA]apps.Reach {
 		entries := n.directory()
@@ -283,7 +270,7 @@ func setupNode(
 	if err := n.selectProvider(); err != nil {
 		return nil, err
 	}
-	n.wildcardHost = newWildcardHost(n.publishedHost)
+	n.wildcardHost = newWildcardHost(n.bus.Self())
 	if created {
 		// The one moment before the phases: the provider completes the
 		// provisional ISD draw — the measured provider's from a bootstrap

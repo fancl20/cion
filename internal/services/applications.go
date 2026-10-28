@@ -39,19 +39,18 @@ func (n *node) setupApplications() error {
 }
 
 // appEnvironment builds the node's facts the entries' constructors adapt: the
-// identity and role, the state root, the control host beside its
-// published-host resolver, the domain and the HTTPS server's origin, the
-// trust engine and path provider, the issued chains, the sending conn, the
-// node's bus, the service-socket registration, the admission authorizer, the
-// core route the joiner's directory fetch rides, the node directory's reports
-// of how peers reach each node, the relay derivation's inputs with the
-// harness's placement among them, the directory pacing, the control plane's
-// TRC decision the voting application hands its submissions to, the
-// control-endpoint mounting behind the peer-identity middleware, and the
-// HTTPS server's mounting. The environment's core flag marks the founding
-// tier alone: a joining core runs the applications a local node runs, its
-// WireGuard application publishing to and fetching from the founder's
-// directory.
+// identity and role, the state root, the control host, the domain and the
+// HTTPS server's origin, the trust engine and path provider, the issued
+// chains, the sending conn, the node's bus, the service-socket registration,
+// the admission authorizer, the core route the joiner's directory fetch
+// rides, the node directory's reports of how peers reach each node, the relay
+// derivation's inputs with the harness's placement among them, the directory
+// pacing, the control plane's TRC decision the voting application hands its
+// submissions to, the control-endpoint mounting behind the peer-identity
+// middleware, and the HTTPS server's mounting. The environment's core flag
+// marks the founding tier alone: a joining core runs the applications a local
+// node runs, its WireGuard application publishing to and fetching from the
+// founder's directory.
 func (n *node) appEnvironment() *apps.Environment {
 	env := &apps.Environment{
 		Arguments:       n.cfg.AppArguments,
@@ -59,7 +58,6 @@ func (n *node) appEnvironment() *apps.Environment {
 		Core:            n.cfg.role == trust.ASTypeCore,
 		StateRoot:       n.cfg.State,
 		ControlHost:     n.cfg.controlAddr.String(),
-		PublishedHost:   n.publishedHost,
 		Domain:          n.cfg.Domain,
 		HTTPSOrigin:     n.cfg.httpsOrigin(),
 		Engine:          n.engine,

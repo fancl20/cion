@@ -9,7 +9,6 @@ import (
 	"path/filepath"
 	"syscall"
 	"testing"
-	"time"
 
 	"github.com/fancl20/cion/pkg/libs/underlay"
 )
@@ -65,104 +64,58 @@ func TestExternalHostPersistsAcrossRestart(t *testing.T) {
 	}
 }
 
-// TestDomainHostAnswersTheLiteral checks the founding core's published host
-// under an address identity: the literal is the answer itself — no lookup,
-// no memoization, and no family check, the identity being the address it
-// publishes.
-func TestDomainHostAnswersTheLiteral(t *testing.T) {
+// TestDomainHostParsesTheLiteral checks the founding core's identity under
+// an address: the literal is the host itself, parsed with no lookup, the
+// identity being the address it publishes; a name leaves no literal, its
+// host the lookup's.
+func TestDomainHostParsesTheLiteral(t *testing.T) {
 	lookups := 0
-	d := newDomainHost("2001:db8::1", netip.MustParseAddr("10.0.0.7"),
-		func(context.Context, string, string) ([]netip.Addr, error) {
-			lookups++
-			return nil, errors.New("no such name")
-		})
-	if got := d.resolve(context.Background()); got != netip.MustParseAddr("2001:db8::1") {
-		t.Errorf("resolved host = %v, want the literal", got)
+	lookup := func(context.Context, string, string) ([]netip.Addr, error) {
+		lookups++
+		return nil, errors.New("no such name")
+	}
+	d := newDomainHost("2001:db8::1", netip.MustParseAddr("10.0.0.7"), lookup)
+	if d.literal != netip.MustParseAddr("2001:db8::1") {
+		t.Errorf("literal = %v, want the identity's address", d.literal)
 	}
 	if lookups != 0 {
-		t.Errorf("resolutions = %d, want none for a value that cannot change", lookups)
+		t.Errorf("lookups = %d, want none for a value that cannot change", lookups)
 	}
-
-	// A domain identity still resolves through the lookup.
-	d = newDomainHost("core.example.org", netip.MustParseAddr("10.0.0.7"),
-		func(context.Context, string, string) ([]netip.Addr, error) {
-			lookups++
-			return []netip.Addr{netip.MustParseAddr("192.0.2.20")}, nil
-		})
-	if got := d.resolve(context.Background()); got != netip.MustParseAddr("192.0.2.20") {
-		t.Errorf("resolved host = %v, want the domain's address", got)
-	}
-	if lookups != 1 {
-		t.Errorf("resolutions = %d, want the domain's one", lookups)
+	if d := newDomainHost("core.example.org", netip.MustParseAddr("10.0.0.7"), lookup); d.literal.IsValid() {
+		t.Errorf("a name's literal = %v, want none", d.literal)
 	}
 }
 
-// TestDomainHostResolvesPublishedAddress checks the founding core's
-// published host: its domain's first address of the bind host's family —
-// a published address the node's sockets do not bind is a misconfiguration —
-// the answer memoized so the publication cadence outlives a name's
-// resolution, the last good one held through a failed re-resolution, and
-// the zero address before any answer has landed.
-func TestDomainHostResolvesPublishedAddress(t *testing.T) {
-	lookups := 0
-	d := domainHost{
-		domain: "core.example.org",
-		bind:   netip.MustParseAddr("10.0.0.7"),
-		lookup: func(context.Context, string, string) ([]netip.Addr, error) {
-			lookups++
-			return []netip.Addr{
-				netip.MustParseAddr("2001:db8::1"), // the wrong family
-				netip.MustParseAddr("192.0.2.20"),
-				netip.MustParseAddr("198.51.100.3"),
-			}, nil
-		},
+// TestDomainHostLooksUpPublishedAddress checks the founding core's lookup:
+// its domain's first address of the bind host's family — a published address
+// the node's sockets do not bind is a misconfiguration — and no answer from
+// a failed lookup or one whose addresses are all of the wrong family.
+func TestDomainHostLooksUpPublishedAddress(t *testing.T) {
+	lookingUp := func(addrs []netip.Addr, err error) domainHost {
+		return domainHost{
+			domain: "core.example.org",
+			bind:   netip.MustParseAddr("10.0.0.7"),
+			lookup: func(context.Context, string, string) ([]netip.Addr, error) {
+				return addrs, err
+			},
+		}
 	}
 	ctx := context.Background()
-	if got := d.resolve(ctx); got != netip.MustParseAddr("192.0.2.20") {
-		t.Errorf("resolved host = %v, want the family's first 192.0.2.20", got)
+	d := lookingUp([]netip.Addr{
+		netip.MustParseAddr("2001:db8::1"), // the wrong family
+		netip.MustParseAddr("192.0.2.20"),
+		netip.MustParseAddr("198.51.100.3"),
+	}, nil)
+	if got, ok := d.lookupAddr(ctx); !ok || got != netip.MustParseAddr("192.0.2.20") {
+		t.Errorf("looked up %v (%v), want the family's first 192.0.2.20", got, ok)
 	}
-	// The memo holds the answer for the window: the second publication
-	// resolves nothing.
-	if got := d.resolve(ctx); got != netip.MustParseAddr("192.0.2.20") {
-		t.Errorf("memoized host = %v, want the held one", got)
+	failing := lookingUp(nil, errors.New("no such name"))
+	if got, ok := failing.lookupAddr(ctx); ok {
+		t.Errorf("a failed lookup answered %v", got)
 	}
-	if lookups != 1 {
-		t.Errorf("resolutions = %d, want the memoized one", lookups)
-	}
-
-	// A failed re-resolution holds the last good answer: the memo aged past
-	// its window and the lookup failing, the held one still serves.
-	d.lookup = func(context.Context, string, string) ([]netip.Addr, error) {
-		return nil, errors.New("no such name")
-	}
-	d.at = time.Now().Add(-2 * domainSuccessTTL)
-	if got := d.resolve(ctx); got != netip.MustParseAddr("192.0.2.20") {
-		t.Errorf("held host = %v, want the last good one", got)
-	}
-
-	// A name no answer has ever landed for holds nothing: the zero
-	// address, which publishes nothing.
-	never := domainHost{
-		domain: "core.example.org",
-		bind:   netip.MustParseAddr("10.0.0.7"),
-		lookup: func(context.Context, string, string) ([]netip.Addr, error) {
-			return nil, errors.New("no such name")
-		},
-	}
-	if got := never.resolve(ctx); got.IsValid() {
-		t.Errorf("never-answered host = %v, want the zero address", got)
-	}
-
-	// A name whose answers are all of the wrong family holds nothing too.
-	wrongFamily := domainHost{
-		domain: "core.example.org",
-		bind:   netip.MustParseAddr("10.0.0.7"),
-		lookup: func(context.Context, string, string) ([]netip.Addr, error) {
-			return []netip.Addr{netip.MustParseAddr("2001:db8::1")}, nil
-		},
-	}
-	if got := wrongFamily.resolve(ctx); got.IsValid() {
-		t.Errorf("wrong-family host = %v, want the zero address", got)
+	wrongFamily := lookingUp([]netip.Addr{netip.MustParseAddr("2001:db8::1")}, nil)
+	if got, ok := wrongFamily.lookupAddr(ctx); ok {
+		t.Errorf("a lookup of the wrong family answered %v", got)
 	}
 }
 

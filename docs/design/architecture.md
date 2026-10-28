@@ -101,11 +101,15 @@ run no loops of their own and hold no policy.
     it owns as events, each carrying the full state, and the components
     that depend on it subscribe to its changes or read its last event
     ([ADR-0031](/docs/adrs/0031-publish-node-state-as-events-on-a-node-bus.md)).
-    Its topics are the link state — the neighbor table's live entries, each
-    with its link's verdict and the source the link observes its peer at —
-    the interface-down signals the node's conns receive, each held for ten
-    seconds, and the per-link one-way delay estimates the selection loop
-    measures, which the beacons declare.
+    Its topics are:
+    *   The link state: the neighbor table's live entries, each with its
+        link's verdict and the source the link observes its peer at.
+    *   The interface-down signals the node's conns receive, each held for
+        ten seconds.
+    *   The per-link one-way delay estimates the selection loop measures,
+        which the beacons declare.
+    *   The node's own state: the host its publications carry and whether
+        its published rendezvous address went unanswered.
 
 ### Modules
 

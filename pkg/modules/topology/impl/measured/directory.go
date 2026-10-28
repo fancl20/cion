@@ -17,6 +17,7 @@ import (
 	spath "github.com/scionproto/scion/pkg/slayers/path/scion"
 
 	"github.com/fancl20/cion/pkg/core/trust"
+	"github.com/fancl20/cion/pkg/libs/bus"
 	"github.com/fancl20/cion/pkg/libs/loops"
 	"github.com/fancl20/cion/pkg/libs/peeria"
 	"github.com/fancl20/cion/pkg/libs/scion"
@@ -337,16 +338,16 @@ type DirectoryPaths interface {
 type NodeDirectoryConfig struct {
 	// IA is the publisher's ISD-AS.
 	IA addr.IA
-	// Host resolves the published entry's host at each publication: the
-	// learned external host when one is recorded, else the control host —
-	// the founding core's its own domain's address, held through a failed
-	// resolution. Every socket keeps binding the control host whatever this
-	// returns, and an invalid host publishes nothing.
-	Host func(context.Context) netip.Addr
-	// Reach reports, at each publication, how the node's peers reach it at
-	// the published host; an error fails the publication. Nil reports
-	// nothing observed.
-	Reach func(host netip.Addr) (Reach, error)
+	// Self is the topic of the node's own state: the host the entry
+	// publishes — every socket keeps binding the control host whatever it
+	// names, and a zero host publishes nothing — and the rendezvous answer
+	// its report carries. The entry publishes at each event, beside the
+	// cadence.
+	Self *bus.Topic[bus.SelfState]
+	// BehindNAT reports, at each publication, whether a NAT stands between
+	// the node and its peers at the published host; an error fails the
+	// publication. Nil reports none.
+	BehindNAT func(host netip.Addr) (bool, error)
 	// Engine provides the node's AS chain as the client certificate; a node
 	// without a chain cannot publish.
 	Engine *trust.Engine
@@ -408,13 +409,24 @@ func (d *NodeDirectory) Run(ctx context.Context) {
 }
 
 // runPublish waits for enrollment to produce the node's chain, publishes the
-// node's entry, and re-publishes on the cadence. A publication waiting on the
-// node's own state polls at the retry; one the core refused backs off from
-// it up to the cadence. Failures never stop the loop.
+// node's entry, and re-publishes on the cadence and at each change of the
+// node's own state. A publication waiting on the node's own state polls at
+// the retry; one the core refused backs off from it up to the cadence.
+// Failures never stop the loop.
 func (d *NodeDirectory) runPublish(ctx context.Context) {
 	interval := intervalOr(d.cfg.PublishInterval, NodePublishInterval)
 	retry := intervalOr(d.cfg.PublishRetry, NodePublishRetry)
 	backoff := loops.Backoff{Base: retry, Max: interval}
+	var self <-chan bus.SelfState
+	if d.cfg.Self != nil {
+		self = d.cfg.Self.Subscribe(ctx)
+		// The subscription delivers the state as it stands, which the
+		// first publication reads anyway.
+		select {
+		case <-self:
+		default:
+		}
+	}
 	for {
 		wait := interval
 		for range backoff.Tries(ctx) {
@@ -428,7 +440,7 @@ func (d *NodeDirectory) runPublish(ctx context.Context) {
 				break
 			}
 		}
-		if !loops.Sleep(ctx, wait) {
+		if !loops.SleepOr(ctx, wait, self) {
 			return
 		}
 	}
@@ -439,11 +451,9 @@ var errNotReady = errors.New("the node's entry is not ready")
 
 // publish sends the node's entry once the node's chain exists: an un-enrolled
 // node has no certificate to authenticate the channel with. The entry is
-// built, not baked: its host and its report resolve at each publication, so
-// a host learned, a domain's address changed, or a link's echo answered
-// mid-run publishes on the next cadence. A host that resolves to none — the
-// founding core's name before its first answer — publishes nothing, the
-// retry re-asking.
+// built, not baked: its host and its report read the node's own state at
+// each publication. A zero host — the founding core's name before its first
+// answer — publishes nothing, the retry re-asking.
 func (d *NodeDirectory) publish(ctx context.Context) error {
 	if d.cfg.Engine != nil {
 		chain, err := d.cfg.Engine.Chain(ctx)
@@ -454,14 +464,15 @@ func (d *NodeDirectory) publish(ctx context.Context) error {
 			return fmt.Errorf("%w: no certificate chain yet; enrollment has not produced one", errNotReady)
 		}
 	}
-	host := d.cfg.Host(ctx)
+	self := d.cfg.Self.Latest()
+	host := self.Host
 	if !host.IsValid() {
 		return fmt.Errorf("%w: the entry's host did not resolve", errNotReady)
 	}
-	var reach Reach
-	if d.cfg.Reach != nil {
+	reach := Reach{RendezvousUnanswered: self.RendezvousUnanswered}
+	if d.cfg.BehindNAT != nil {
 		var err error
-		if reach, err = d.cfg.Reach(host); err != nil {
+		if reach.BehindNAT, err = d.cfg.BehindNAT(host); err != nil {
 			return fmt.Errorf("reporting the entry's reach: %w", err)
 		}
 	}

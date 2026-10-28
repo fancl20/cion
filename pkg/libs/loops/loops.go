@@ -6,7 +6,8 @@
 // their loops here. A goroutine started per peer, connection, or flow ends
 // with what it serves, so it joins the wait group through the group's own Go.
 // Sleep is the pause between any loop's passes, cut short when the loop's
-// context ends, and Backoff spaces every retry of a failed operation.
+// context ends, SleepOr the pause a delivery also cuts short, and Backoff
+// spaces every retry of a failed operation.
 package loops
 
 import (
@@ -46,5 +47,21 @@ func Sleep(ctx context.Context, d time.Duration) bool {
 		return false
 	case <-timer.C:
 		return ctx.Err() == nil
+	}
+}
+
+// SleepOr pauses for d or until wake delivers, and reports whether the loop
+// goes on: false once ctx has ended or wake has closed. A nil wake pauses as
+// Sleep does.
+func SleepOr[T any](ctx context.Context, d time.Duration, wake <-chan T) bool {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return ctx.Err() == nil
+	case _, ok := <-wake:
+		return ok && ctx.Err() == nil
 	}
 }

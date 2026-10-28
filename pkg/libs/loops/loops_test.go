@@ -186,3 +186,38 @@ func TestSleep(t *testing.T) {
 		}
 	})
 }
+
+// TestSleepOr checks the pause a delivery cuts short: it runs its course to
+// true, ends at once on a delivery with true, and reports false once its
+// context has ended or its channel has closed; a nil channel pauses as Sleep
+// does.
+func TestSleepOr(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		wake := make(chan int, 1)
+		start := time.Now()
+		if !SleepOr(t.Context(), time.Second, wake) || time.Since(start) != time.Second {
+			t.Errorf("an undisturbed pause = %v, want true after its second", time.Since(start))
+		}
+
+		start = time.Now()
+		wake <- 1
+		if !SleepOr(t.Context(), time.Second, wake) || time.Since(start) != 0 {
+			t.Errorf("a pause with a delivery waiting took %v, want true at once", time.Since(start))
+		}
+
+		start = time.Now()
+		if !SleepOr[int](t.Context(), time.Second, nil) || time.Since(start) != time.Second {
+			t.Errorf("a pause with no channel = %v, want true after its second", time.Since(start))
+		}
+
+		ctx, cancel := context.WithCancel(t.Context())
+		cancel()
+		if SleepOr(ctx, time.Second, wake) {
+			t.Error("a pause after its context ended reported true")
+		}
+		close(wake)
+		if SleepOr(t.Context(), time.Second, wake) {
+			t.Error("a pause on a closed channel reported true")
+		}
+	})
+}

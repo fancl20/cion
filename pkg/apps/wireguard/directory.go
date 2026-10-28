@@ -193,9 +193,10 @@ func (c storeDirectoryClient) List(ctx context.Context) (Directory, error) {
 
 // runPublish owns the application's publication cadence: it waits for
 // enrollment to produce the node's chain, publishes the node's entry, and
-// re-publishes on the constant. A publication waiting on the node's own
-// state polls at the retry; one the core refused backs off from it up to
-// PublishRetryMax. Failures never stop the loop.
+// re-publishes on the constant and at each change of the node's own state.
+// A publication waiting on the node's own state polls at the retry; one the
+// core refused backs off from it up to PublishRetryMax. Failures never stop
+// the loop.
 func (a *App) runPublish(ctx context.Context) {
 	interval := a.cfg.PublishInterval
 	if interval == 0 {
@@ -206,6 +207,13 @@ func (a *App) runPublish(ctx context.Context) {
 		retry = PublishRetry
 	}
 	backoff := loops.Backoff{Base: retry, Max: max(retry, PublishRetryMax)}
+	self := a.cfg.Self.Subscribe(ctx)
+	// The subscription delivers the state as it stands, which the first
+	// publication reads anyway.
+	select {
+	case <-self:
+	default:
+	}
 	for {
 		wait := interval
 		for range backoff.Tries(ctx) {
@@ -219,7 +227,7 @@ func (a *App) runPublish(ctx context.Context) {
 				break
 			}
 		}
-		if !loops.Sleep(ctx, wait) {
+		if !loops.SleepOr(ctx, wait, self) {
 			return
 		}
 	}
@@ -242,7 +250,7 @@ func (a *App) publish(ctx context.Context) error {
 	if len(chain) == 0 {
 		return fmt.Errorf("%w: no certificate chain yet; enrollment has not produced one", errNotReady)
 	}
-	entry, err := a.selfEntry(ctx)
+	entry, err := a.selfEntry()
 	if err != nil {
 		return err
 	}
@@ -262,11 +270,11 @@ func (a *App) publish(ctx context.Context) error {
 
 // selfEntry is the node's own publication: the claim without a slice — the
 // store assigns it — the endpoint naming the published host at the shared
-// port: the resolver's answer — the learned host, the founding core's
-// identity — else the bind host when it names one, resolved anew at each
-// publication so a host learned mid-run publishes on the next cadence.
-func (a *App) selfEntry(ctx context.Context) (Entry, error) {
-	host := a.cfg.PublishedHost(ctx)
+// port: the host of the node's own state — the learned host, the founding
+// core's identity — else the bind host when it names one, read anew at each
+// publication.
+func (a *App) selfEntry() (Entry, error) {
+	host := a.cfg.Self.Latest().Host
 	if !host.IsValid() || host.IsUnspecified() {
 		host = a.cfg.ListenHost
 	}

@@ -134,3 +134,35 @@ publication.
     improve.
 
 ## Implementation history
+
+*   Landed as proposed: the topic ([bus.go](/pkg/libs/bus/bus.go),
+    [self.go](/pkg/libs/bus/self.go)), `SleepOr`
+    ([loops.go](/pkg/libs/loops/loops.go)), the providers' publications
+    ([provider.go](/pkg/modules/topology/impl/measured/provider.go),
+    [provider.go](/pkg/modules/topology/impl/file/provider.go)), and the
+    readers ([directory.go](/pkg/modules/topology/impl/measured/directory.go),
+    [upkeep.go](/pkg/modules/topology/impl/measured/upkeep.go),
+    [directory.go](/pkg/apps/wireguard/directory.go),
+    [wildcardhost.go](/internal/services/wildcardhost.go)). The labs and
+    benchmarks ran once over this change and proposal 0090's, five runs
+    each against the node before them.
+    *   **NAT network:** it settled in 2m20s to 2m50s in four runs and
+        4m30s in one, against 2m50s to 3m30s, on paths as short. Its public
+        nodes, finding a node behind a NAT in the directory as soon as it
+        learns its host, punched toward it before it dialed out: 9 to 10
+        punches a run against 6 to 8. A rebind recovered in 16.5 to 16.7
+        seconds, a restarted peer in 13.0 to 13.2, a node behind a
+        symmetric NAT joined in 44 to 109, and the founder returned in 186
+        to 264.
+    *   **Regions and stranded networks:** they settled as before.
+    *   **Site network:** joined at the parents' inside addresses, it
+        linked 3 to 4 of its 6 pairs at their inside addresses, against 4
+        to 5, and the paths its links offer averaged 1.42 to 1.75 times the
+        reference, against 1.25 to 1.42; joined outside, it settled as
+        before. A site node's inside address, which a site peer's
+        rendezvous teaches it, now leaves the directory once a public peer
+        teaches it the gateway's, where the minute's cadence had kept it
+        listed for the other site nodes to dial. Those links depended on
+        when the publication ran; serving the inside addresses is the site
+        directory's
+        ([ADR-0028](/docs/adrs/0028-serve-each-site-a-directory-of-its-own.md)).

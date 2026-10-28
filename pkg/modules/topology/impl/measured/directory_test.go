@@ -17,6 +17,7 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"github.com/scionproto/scion/pkg/addr"
 
+	"github.com/fancl20/cion/pkg/libs/bus"
 	"github.com/fancl20/cion/pkg/libs/peeria"
 	"github.com/fancl20/cion/pkg/libs/scion"
 	"github.com/fancl20/cion/pkg/libs/scionrpc"
@@ -239,15 +240,17 @@ func TestDirectoryExpiry(t *testing.T) {
 }
 
 // TestDirectoryPublishResolvesHost checks the publication's host: the entry
-// is built at each cadence from the host the configuration resolves — the
+// is built at each publication from the host of the node's own state — the
 // learned external host when one is recorded, else the control host — the
 // endpoint and rendezvous ports fixed beside it.
 func TestDirectoryPublishResolvesHost(t *testing.T) {
 	store := NewDirectoryStore()
 	host := netip.MustParseAddr("127.0.0.1")
+	self := new(bus.Topic[bus.SelfState])
+	self.Publish(bus.SelfState{Host: host})
 	d := NewNodeDirectory(NodeDirectoryConfig{
 		IA:    directoryIA,
-		Host:  func(context.Context) netip.Addr { return host },
+		Self:  self,
 		Store: store,
 	})
 	ctx := context.Background()
@@ -268,9 +271,10 @@ func TestDirectoryPublishResolvesHost(t *testing.T) {
 			entries[0].ControlAddr, entries[0].RendezvousAddr, wantControl, wantRendezvous)
 	}
 
-	// The next cadence publishes the host it resolves then: a host learned
-	// mid-run follows without a restart.
+	// The next publication publishes the host the state holds then: a host
+	// learned mid-run follows without a restart.
 	host = netip.MustParseAddr("203.0.113.7")
+	self.Publish(bus.SelfState{Host: host})
 	if err := d.publish(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -278,6 +282,52 @@ func TestDirectoryPublishResolvesHost(t *testing.T) {
 	if got := store.List(time.Now())[0].RendezvousAddr; got != wantRendezvous {
 		t.Errorf("published rendezvous after learning = %v, want %v", got, wantRendezvous)
 	}
+}
+
+// TestDirectoryPublishesOnSelfEvents checks the publication's wake: the
+// entry publishes at once, again at once when the node's own state changes,
+// and again on the cadence with no change.
+func TestDirectoryPublishesOnSelfEvents(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		store := NewDirectoryStore()
+		first, learned := netip.MustParseAddr("127.0.0.1"), netip.MustParseAddr("203.0.113.7")
+		self := new(bus.Topic[bus.SelfState])
+		self.Publish(bus.SelfState{Host: first})
+		d := NewNodeDirectory(NodeDirectoryConfig{
+			IA:              directoryIA,
+			Self:            self,
+			Store:           store,
+			PublishInterval: time.Minute,
+		})
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		go d.runPublish(ctx)
+		published := func() (netip.Addr, time.Time) {
+			entries := store.List(time.Now())
+			if len(entries) != 1 {
+				t.Fatalf("entries = %v, want the one", entries)
+			}
+			return entries[0].RendezvousAddr.Addr(), entries[0].Published
+		}
+		synctest.Wait()
+		if host, _ := published(); host != first {
+			t.Errorf("the first publication's host = %v, want %v", host, first)
+		}
+
+		time.Sleep(time.Second)
+		self.Publish(bus.SelfState{Host: learned})
+		synctest.Wait()
+		host, at := published()
+		if host != learned || !at.Equal(time.Now()) {
+			t.Errorf("after the state changed: host %v published at %v, want %v at once", host, at, learned)
+		}
+
+		time.Sleep(time.Minute)
+		synctest.Wait()
+		if _, again := published(); !again.Equal(time.Now()) {
+			t.Errorf("the cadence's publication landed at %v, want %v", again, time.Now())
+		}
+	})
 }
 
 // TestDirectoryCarriesTheReach checks the report rides the directory: a
@@ -314,20 +364,23 @@ func TestDirectoryCarriesTheReach(t *testing.T) {
 }
 
 // TestDirectoryPublishReportsReach checks the publication's report: each
-// cadence asks it at the host it resolved and the entry carries it, while a
-// report that fails fails the publication, which records nothing.
+// publication asks whether a NAT stands at the state's host, and the entry
+// carries that beside the state's rendezvous answer, while an ask that fails
+// fails the publication, which records nothing.
 func TestDirectoryPublishReportsReach(t *testing.T) {
 	store := NewDirectoryStore()
 	host := netip.MustParseAddr("203.0.113.7")
 	report := Reach{BehindNAT: true, RendezvousUnanswered: true}
+	self := new(bus.Topic[bus.SelfState])
+	self.Publish(bus.SelfState{Host: host, RendezvousUnanswered: true})
 	var asked []netip.Addr
 	var failure error
 	d := NewNodeDirectory(NodeDirectoryConfig{
 		IA:   directoryIA,
-		Host: func(context.Context) netip.Addr { return host },
-		Reach: func(h netip.Addr) (Reach, error) {
+		Self: self,
+		BehindNAT: func(h netip.Addr) (bool, error) {
 			asked = append(asked, h)
-			return report, failure
+			return true, failure
 		},
 		Store: store,
 	})

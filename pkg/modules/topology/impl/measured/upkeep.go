@@ -38,8 +38,9 @@ const (
 
 // runUpkeep keeps each link on its peer's current mapping: it follows each
 // link's flow, and punches a punched link again once its verdict stays down.
-// It wakes on each link state event, when an entry's action ends, and when
-// the next retry or grace it waits on is due, never on a cadence of its own.
+// It wakes on each link state event and each event of the node's own state,
+// when an entry's action ends, and when the next retry or grace it waits on
+// is due, never on a cadence of its own.
 // Each entry's action runs off the loop, one at a time; the loop returns
 // once every action has.
 func (z *Provider) runUpkeep(ctx context.Context) {
@@ -52,6 +53,7 @@ func (z *Provider) runUpkeep(ctx context.Context) {
 	}
 	defer u.wg.Wait()
 	events := z.linkState.Subscribe(ctx)
+	selfEvents := z.self.Subscribe(ctx)
 	wake := time.NewTimer(0)
 	wake.Stop()
 	for {
@@ -63,6 +65,11 @@ func (z *Provider) runUpkeep(ctx context.Context) {
 				return
 			}
 			u.links = state
+		case self, ok := <-selfEvents:
+			if !ok {
+				return
+			}
+			u.self = self
 		case <-wake.C:
 		case ifID := <-u.done:
 			delete(u.busy, ifID)
@@ -78,8 +85,10 @@ func (z *Provider) runUpkeep(ctx context.Context) {
 // upkeep is the link upkeep's memory.
 type upkeep struct {
 	z *Provider
-	// links is the latest link state event.
+	// links and self are the latest events of the link state and the
+	// node's own state.
 	links bus.LinkState
+	self  bus.SelfState
 	// mismatched holds since when each established entry's link has
 	// observed its peer away from its locator; confirms paces their
 	// confirms; repunches remembers the punched links whose verdict is
@@ -177,7 +186,7 @@ func (u *upkeep) follow(ctx context.Context, entries []*links.Link, now time.Tim
 // published rendezvous address answers holds no punched link: its peers'
 // flows reach it, and following keeps its links.
 func (u *upkeep) repunch(ctx context.Context, entries []*links.Link, now time.Time) time.Time {
-	if !u.z.unanswered.Load() {
+	if !u.self.RendezvousUnanswered {
 		return time.Time{}
 	}
 	undialable := make(map[addr.IA]bool)

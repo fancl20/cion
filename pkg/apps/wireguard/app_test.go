@@ -198,17 +198,17 @@ func newTestWireguard(
 	linkState.Publish(bus.NewLinkState(bus.Link{
 		Entry: links.Link{IfID: 1, NeighborIA: addr.MustIAFrom(20, 2)},
 	}))
+	self := new(bus.Topic[bus.SelfState])
+	self.Publish(bus.SelfState{Host: testHost})
 	cfg := Config{
 		IA:         ia,
 		ListenHost: testHost,
 		ListenPort: freeHostPort(t),
-		PublishedHost: func(context.Context) netip.Addr {
-			return testHost
-		},
-		StateDir: t.TempDir(),
-		Paths:    provider,
-		Engine:   trust.NewEngine(ia, nil, &trust.NetworkProvider{DB: db}),
-		Store:    directory,
+		Self:       self,
+		StateDir:   t.TempDir(),
+		Paths:      provider,
+		Engine:     trust.NewEngine(ia, nil, &trust.NetworkProvider{DB: db}),
+		Store:      directory,
 		NewConn: func() (*scion.Conn, error) {
 			return scion.NewConn(scion.ConnConfig{
 				IA:           ia,
@@ -297,24 +297,21 @@ func TestWireguardPublishesOnceEnrolled(t *testing.T) {
 }
 
 // TestWireguardEntryFollowsPublishedHost checks the entry's host-facing
-// endpoint: it prefers the published host at each publication — the learned
-// host once one is recorded — falls back to the bind host a concrete bind
-// names when the resolver names none, and holds the publication under a
-// wildcard bind that names neither, the cadence retrying.
+// endpoint: it prefers the host of the node's own state at each publication
+// — the learned host once one is recorded — falls back to the bind host a
+// concrete bind names when the state names none, and holds the publication
+// under a wildcard bind that names neither, the cadence retrying.
 func TestWireguardEntryFollowsPublishedHost(t *testing.T) {
 	ia := addr.MustIAFrom(20, 0xff0000000213)
 	db := &flippableTrustDB{}
 	db.enroll([]*x509.Certificate{iaSubjectCert(t, ia)})
-	var resolved atomic.Value
-	store := func(host netip.Addr) { resolved.Store(host) }
+	self := new(bus.Topic[bus.SelfState])
+	store := func(host netip.Addr) { self.Publish(bus.SelfState{Host: host}) }
 	store(netip.Addr{}) // nothing learned, the founding core's name unresolved
-	resolve := func(context.Context) netip.Addr {
-		return resolved.Load().(netip.Addr)
-	}
 
-	// A concrete bind publishes itself while the resolver names none.
+	// A concrete bind publishes itself while the state names none.
 	a, directory := newTestWireguard(t, ia, db, func(c *Config) {
-		c.PublishedHost = resolve
+		c.Self = self
 	})
 	directory.answer = netip.MustParsePrefix("100.64.1.0/24")
 	if err := a.publish(context.Background()); err != nil {
@@ -348,7 +345,7 @@ func TestWireguardEntryFollowsPublishedHost(t *testing.T) {
 
 	// A wildcard bind naming neither holds the publication.
 	wild, wildDir := newTestWireguard(t, ia, db, func(c *Config) {
-		c.PublishedHost = resolve
+		c.Self = self
 		c.ListenHost = netip.MustParseAddr("0.0.0.0")
 	})
 	store(netip.Addr{})
@@ -359,6 +356,34 @@ func TestWireguardEntryFollowsPublishedHost(t *testing.T) {
 	case <-wildDir.published:
 		t.Fatal("published an entry with neither a resolved nor a bound host")
 	default:
+	}
+}
+
+// TestWireguardPublishesOnSelfEvents checks the publication's wake: a
+// change of the node's own state publishes the entry at once, the hour-long
+// cadence notwithstanding, with the state's new host.
+func TestWireguardPublishesOnSelfEvents(t *testing.T) {
+	ia := addr.MustIAFrom(20, 0xff0000000214)
+	db := &flippableTrustDB{}
+	db.enroll([]*x509.Certificate{iaSubjectCert(t, ia)})
+	a, directory := newTestWireguard(t, ia, db)
+	ctx := t.Context()
+	go a.runPublish(ctx)
+	select {
+	case <-directory.published:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the first publication never happened")
+	}
+
+	learned := netip.MustParseAddr("203.0.113.9")
+	a.cfg.Self.Publish(bus.SelfState{Host: learned})
+	select {
+	case entry := <-directory.published:
+		if want := netip.AddrPortFrom(learned, a.HostPort()); entry.HostEndpoint != want {
+			t.Errorf("the republished endpoint = %v, want %v", entry.HostEndpoint, want)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the state's change published nothing")
 	}
 }
 

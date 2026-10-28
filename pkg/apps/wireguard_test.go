@@ -1,7 +1,6 @@
 package apps
 
 import (
-	"context"
 	"net/netip"
 	"testing"
 
@@ -23,21 +22,18 @@ func wireguardEnvironment(t *testing.T, core bool) *Environment {
 		Core:        core,
 		StateRoot:   t.TempDir(),
 		ControlHost: "127.0.0.1:30042",
-		PublishedHost: func(context.Context) netip.Addr {
-			return netip.MustParseAddr("127.0.0.1")
-		},
-		Domain: "core.example.org",
-		Engine: trust.NewEngine(ia, nil, nil),
-		Paths:  &scion.PathProvider{},
-		Bus:    bus.New(),
+		Domain:      "core.example.org",
+		Engine:      trust.NewEngine(ia, nil, nil),
+		Paths:       &scion.PathProvider{},
+		Bus:         bus.New(),
 	}
 }
 
 // TestWireguardConfigFromEnvironment checks the configuration the entry
 // derives: the shared port its arguments name — no slice, the directory
-// assigning it — the published-host resolver beside the bind host, the
-// relay presence from the core's domain, the node's interface-down topic,
-// and the core's own store beside the joiner's core route.
+// assigning it — the node's own state beside the bind host, the relay
+// presence from the core's domain, the node's interface-down topic, and the
+// core's own store beside the joiner's core route.
 func TestWireguardConfigFromEnvironment(t *testing.T) {
 	env := wireguardEnvironment(t, true)
 	core, err := wireguardConfig(env)
@@ -54,8 +50,8 @@ func TestWireguardConfigFromEnvironment(t *testing.T) {
 	if cfg.ListenHost != netip.MustParseAddr("127.0.0.1") {
 		t.Errorf("listen host = %v, want the control host's", cfg.ListenHost)
 	}
-	if cfg.PublishedHost == nil {
-		t.Error("the entry derived no published-host resolver")
+	if cfg.Self != env.Bus.Self() {
+		t.Error("the entry did not hand the application the node's own state")
 	}
 	if cfg.DERP == nil || cfg.DERP.URL != "https://core.example.org/derp" {
 		t.Errorf("relay presence = %+v, want the core's domain", cfg.DERP)

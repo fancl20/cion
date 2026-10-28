@@ -14,6 +14,7 @@ import (
 
 	"github.com/scionproto/scion/pkg/addr"
 
+	"github.com/fancl20/cion/pkg/libs/bus"
 	"github.com/fancl20/cion/pkg/libs/loops"
 	"github.com/fancl20/cion/pkg/libs/scionrpc"
 	"github.com/fancl20/cion/pkg/modules/links"
@@ -34,6 +35,10 @@ type Config struct {
 	// WatchInterval overrides the modification-time poll; zero keeps the
 	// constant. The integration tests pace it.
 	WatchInterval time.Duration
+	// ControlHost is the control address's host, the host the node's
+	// publications carry: the provider learns none. The wildcard names none,
+	// and publishes nothing.
+	ControlHost netip.Addr
 }
 
 // Provider is the static topology provider: a link-set file the operator
@@ -182,10 +187,16 @@ func (f *Provider) CompleteIdentity(_ context.Context, ia addr.IA) (addr.IA, err
 	return completed, nil
 }
 
-// Wire stores the phases' products; the store is the one the
-// reconciliation lands in.
+// Wire stores the phases' products — the store is the one the
+// reconciliation lands in — and publishes the node's own state: the control
+// host when it names one.
 func (f *Provider) Wire(env topology.Environment) {
 	f.env = env
+	var host netip.Addr
+	if !f.cfg.ControlHost.IsUnspecified() {
+		host = f.cfg.ControlHost
+	}
+	env.Bus.Self().Publish(bus.SelfState{Host: host})
 }
 
 // Seed reconciles the link-set into the store before the first data plane

@@ -100,10 +100,15 @@ type Provider struct {
 	linkState *bus.Topic[bus.LinkState]
 
 	// external is the learned external host, persisted beside the identity
-	// so a restart republishes it; domain resolves the founding core's own
+	// so a restart republishes it; domain looks up the founding core's own
 	// published host from its identity.
 	external externalHost
 	domain   *domainHost
+	// self is the topic of the node's own state on the environment's bus;
+	// selfMtx serializes the provider's updates of it, each published only
+	// when it changes the state.
+	self    *bus.Topic[bus.SelfState]
+	selfMtx sync.Mutex
 
 	// bootstrap is the first start's completed rendezvous, the seed it
 	// taught both sides landing complete.
@@ -119,11 +124,6 @@ type Provider struct {
 	// joinDials paces each entry's rendezvous dials; the join dials loop
 	// owns it.
 	joinDials loops.Attempts[uint16]
-
-	// unanswered records the latest link reply's report that the node's
-	// published rendezvous address did not answer the acceptor's echo;
-	// false before any reply reports.
-	unanswered atomic.Bool
 
 	// mtx guards the one-time assembly of the serving machinery.
 	mtx sync.Mutex
@@ -173,23 +173,25 @@ func externalHostPath(stateDir string) string {
 
 // learn records the external host a rendezvous reply observed for the node,
 // logging a persistence failure — the loops that learn have no error to
-// return.
+// return — and publishes it once the provider is wired. The founding core
+// publishes its domain's address alone.
 func (z *Provider) learn(host netip.Addr) {
 	if err := z.external.observe(host); err != nil {
 		slog.Error("Persisting the learned external host", "err", err)
 	}
+	if z.self != nil && !z.cfg.Core {
+		z.updateSelf(func(s *bus.SelfState) { s.Host = z.knownHost() })
+	}
 }
 
-// publishedHost resolves the host the node's own entry publishes: the
-// learned external host when one is recorded, else the control host when it
-// names one — under the wildcard bind the zero address, which publishes
-// nothing until a host is learned. The founding core — which dials no
-// rendezvous — resolves its own identity, its last good answer held through
-// a failed resolution; before any has landed the zero address, which
-// publishes nothing.
-func (z *Provider) publishedHost(ctx context.Context) netip.Addr {
+// knownHost returns the host the node's publications carry as far as it is
+// known without a lookup: the founding core's domain when the domain is an
+// address, zero while a lookup answers for a name; a joiner's learned host,
+// else the control host when it names one — under the wildcard bind the zero
+// address, which publishes nothing until a host is learned.
+func (z *Provider) knownHost() netip.Addr {
 	if z.cfg.Core {
-		return z.domain.resolve(ctx)
+		return z.domain.literal
 	}
 	if host := z.external.host(); host.IsValid() {
 		return host
@@ -200,29 +202,47 @@ func (z *Provider) publishedHost(ctx context.Context) netip.Addr {
 	return z.cfg.ControlHost
 }
 
-// PublishedHost resolves the host the node's publications carry — the node
-// directory's entry and the applications' own — so every publication answers
-// with one host: the learned one, else the bind host when it names one, the
-// zero address publishing nothing.
-func (z *Provider) PublishedHost(ctx context.Context) netip.Addr {
-	return z.publishedHost(ctx)
-}
-
-// reach reports how the node's peers reach it at the published host:
-// behind a NAT when the host is not one of the node's own, and the latest
-// link reply's report of the acceptor's echo.
-func (z *Provider) reach(host netip.Addr) (Reach, error) {
-	held, err := holds(z.cfg.Sockets, host)
-	if err != nil {
-		return Reach{}, err
+// updateSelf applies f to the node's own state and publishes the result when
+// it changed.
+func (z *Provider) updateSelf(f func(*bus.SelfState)) {
+	z.selfMtx.Lock()
+	defer z.selfMtx.Unlock()
+	s := z.self.Latest()
+	next := s
+	f(&next)
+	if next != s {
+		z.self.Publish(next)
 	}
-	return Reach{BehindNAT: !held, RendezvousUnanswered: z.unanswered.Load()}, nil
 }
 
-// recordAnswer keeps a link reply's report of the acceptor's echo at the
+// runDomain keeps the founding core's published host on its domain's
+// address: it looks the domain up at once, again domainSuccessTTL after an
+// answer and domainFailureTTL after a failure, and publishes each answer. A
+// failed lookup holds the last answer.
+func (z *Provider) runDomain(ctx context.Context) {
+	for {
+		wait := domainFailureTTL
+		if host, ok := z.domain.lookupAddr(ctx); ok {
+			z.updateSelf(func(s *bus.SelfState) { s.Host = host })
+			wait = domainSuccessTTL
+		}
+		if !loops.Sleep(ctx, wait) {
+			return
+		}
+	}
+}
+
+// behindNAT reports whether a NAT stands between the node and its peers at
+// the published host: the host is not one of the node's own addresses.
+func (z *Provider) behindNAT(host netip.Addr) (bool, error) {
+	held, err := holds(z.cfg.Sockets, host)
+	return !held, err
+}
+
+// recordAnswer publishes a link reply's report of the acceptor's echo at the
 // node's published rendezvous address, the latest report winning.
 func (z *Provider) recordAnswer(answered bool) {
-	z.unanswered.Store(!answered)
+	z.updateSelf(func(s *bus.SelfState) { s.RendezvousUnanswered = !answered })
 }
 
 // echoPublished echoes the peer's published rendezvous address as the
@@ -328,10 +348,13 @@ func (z *Provider) CompleteIdentity(ctx context.Context, ia addr.IA) (addr.IA, e
 		"retry once one does")
 }
 
-// Wire stores the phases' products for the machinery's assembly.
+// Wire stores the phases' products for the machinery's assembly, and
+// publishes the node's own state as the provider starts with it.
 func (z *Provider) Wire(env topology.Environment) {
 	z.env = env
 	z.linkState = env.Bus.Links()
+	z.self = env.Bus.Self()
+	z.self.Publish(bus.SelfState{Host: z.knownHost()})
 }
 
 // Seed seeds the store with an entry per --topology.neighbor, aimed at
@@ -451,8 +474,8 @@ func (z *Provider) assemble() error {
 	z.linker = &linkClient{peer: z.env.Peer, answered: z.recordAnswer}
 	directoryCfg := NodeDirectoryConfig{
 		IA:              z.env.IA,
-		Host:            z.publishedHost,
-		Reach:           z.reach,
+		Self:            z.self,
+		BehindNAT:       z.behindNAT,
 		Engine:          z.env.Engine,
 		Paths:           z.env.Paths,
 		PublishInterval: z.cfg.Pacing.Directory,
@@ -519,9 +542,10 @@ func (z *Provider) Mounts() ([]scionrpc.Mount, error) {
 // Run owns the measured provider's loops until the context is canceled — the
 // rendezvous acceptor, the joiner's dials, the node directory's publish and
 // fetch, the selection sweep, the confirm pass over the entries the node
-// holds, and the link upkeep keeping each link on its peer's current
-// mapping, by following its flow or punching it again — and returns once
-// every one has returned. Mounts assembled what the loops serve.
+// holds, the link upkeep keeping each link on its peer's current mapping, by
+// following its flow or punching it again, and the founding core's lookup of
+// its domain when the domain is a name — and returns once every one has
+// returned. Mounts assembled what the loops serve.
 func (z *Provider) Run(ctx context.Context) {
 	var wg sync.WaitGroup
 	loops.Go(ctx, &wg, "rendezvous", z.rendezvous.Run)
@@ -532,6 +556,9 @@ func (z *Provider) Run(ctx context.Context) {
 	})
 	loops.Go(ctx, &wg, "confirm pass", z.runConfirmPass)
 	loops.Go(ctx, &wg, "link upkeep", z.runUpkeep)
+	if z.cfg.Core && z.cfg.Domain != "" && !z.domain.literal.IsValid() {
+		loops.Go(ctx, &wg, "domain lookup", z.runDomain)
+	}
 	wg.Wait()
 }
 

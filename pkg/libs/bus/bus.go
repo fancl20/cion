@@ -23,6 +23,7 @@ type Bus struct {
 	links     Topic[LinkState]
 	ifDown    Topic[InterfaceDownState]
 	latencies Topic[LinkLatencies]
+	self      Topic[SelfState]
 }
 
 // New returns a bus nothing has been published on.
@@ -49,6 +50,14 @@ func (b *Bus) InterfaceDown() *Topic[InterfaceDownState] {
 // selection publishes on it once per window; the beaconer reads it.
 func (b *Bus) Latencies() *Topic[LinkLatencies] {
 	return &b.latencies
+}
+
+// Self returns the topic of the node's own state. The topology provider
+// publishes on it whenever the host the node's publications carry or the
+// node's rendezvous answer changes; the node directory, the link upkeep, the
+// WireGuard application, and the wildcard-bound conns read it.
+func (b *Bus) Self() *Topic[SelfState] {
+	return &b.self
 }
 
 // Topic carries one kind of event and remembers the last one published. Its
