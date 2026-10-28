@@ -66,7 +66,7 @@ func boot(
 	if err != nil {
 		return nil, errors.Join(err, group.Stop())
 	}
-	gen, err := n.startGeneration(loops)
+	gen, err := n.startGeneration(loops, nil)
 	if err != nil {
 		return nil, errors.Join(err, group.Stop())
 	}

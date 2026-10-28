@@ -36,7 +36,7 @@ func (n *node) serveLinkState(ctx context.Context) error {
 }
 
 // publishLinkState publishes the link state the store's live entries, the
-// monitor's verdicts, and the serving generation's observations make up.
+// monitor's verdicts, and the serving links' observations make up.
 func (n *node) publishLinkState(ctx context.Context) error {
 	entries, err := n.linkStore.All(ctx)
 	if err != nil {

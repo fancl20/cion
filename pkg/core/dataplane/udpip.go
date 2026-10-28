@@ -212,11 +212,13 @@ func (u *UDPProvider) Stop() {
 // NewExternalLink returns an external link over the UDP/IP underlay: an
 // unconnected socket bound to the entry's local address and aimed at the
 // entry's recorded remote — the link's initial locator, live state the
-// serving generation re-aims in place. Two links may aim at one address;
-// the store's write-time rules are the duplicate check that stands.
+// serving generation re-aims in place. The link continues the interface's
+// observation record, nil starting one of its own. Two links may aim at one
+// address; the store's write-time rules are the duplicate check that stands.
 func (u *UDPProvider) NewExternalLink(
 	qSize int,
 	bfd Session,
+	observed *Observation,
 	local string,
 	remote string,
 	ifID uint16,
@@ -230,6 +232,9 @@ func (u *UDPProvider) NewExternalLink(
 	if err != nil {
 		return nil, fmt.Errorf("resolving local address: %w", err)
 	}
+	if observed == nil {
+		observed = new(Observation)
+	}
 
 	u.mu.Lock()
 	defer u.mu.Unlock()
@@ -239,12 +244,13 @@ func (u *UDPProvider) NewExternalLink(
 	if l := u.allLinks[ifID]; l != nil {
 		return nil, fmt.Errorf("%w: %d", errDuplicateInterface, ifID)
 	}
-	return u.newExternalLink(qSize, bfd, localAddr, remoteAddr, ifID, metrics)
+	return u.newExternalLink(qSize, bfd, observed, localAddr, remoteAddr, ifID, metrics)
 }
 
 func (u *UDPProvider) newExternalLink(
 	qSize int,
 	bfd Session,
+	observed *Observation,
 	localAddr *net.UDPAddr,
 	remoteAddr netip.AddrPort,
 	ifID uint16,
@@ -263,6 +269,7 @@ func (u *UDPProvider) newExternalLink(
 		raw:        c,
 		seed:       makeHashSeed(),
 		ifID:       ifID,
+		observed:   observed,
 		onObserved: u.onObserved,
 	}
 	el.locator.Store(udpAddrPointer(remoteAddr))
@@ -300,18 +307,21 @@ func (u *UDPProvider) Aim(ifID uint16, remote netip.AddrPort) {
 	}
 }
 
-// Observed returns the interface's external link's last observed underlay
-// source — the data plane's witness of where the peer's packets come from,
-// the record the authenticated link request's agreement rule reads and the
-// address its answers pay back — and the zero AddrPort when no external link
-// holds the interface or none of its arrivals recorded one.
-func (u *UDPProvider) Observed(ifID uint16) netip.AddrPort {
-	u.mu.Lock()
-	defer u.mu.Unlock()
-	if l, ok := u.allLinks[ifID].(*externalLink); ok {
-		if addr := l.observed.Load(); addr != nil {
-			return addr.AddrPort()
-		}
+// Observation is one interface's record of the underlay source its peer's
+// packets arrive from — the data plane's witness of where the peer is, the
+// record the authenticated link request's agreement rule reads and the
+// address the link's answers pay back. The links that serve one flow in
+// successive generations can continue one record, so it outlives the
+// generation that wrote it. The zero value has observed nothing.
+type Observation struct {
+	source atomic.Pointer[net.UDPAddr]
+}
+
+// Load returns the source of the interface's last arrival, the zero
+// AddrPort while none arrived.
+func (o *Observation) Load() netip.AddrPort {
+	if addr := o.source.Load(); addr != nil {
+		return addr.AddrPort()
 	}
 	return netip.AddrPort{}
 }
@@ -638,9 +648,10 @@ type externalLink struct {
 	// locator is the entry's current remote address: the destination transit
 	// carries, replaced in place by a re-aim.
 	locator atomic.Pointer[net.UDPAddr]
-	// observed is the source of the link's last arrival, the destination its
-	// answers carry — nil until one arrives.
-	observed atomic.Pointer[net.UDPAddr]
+	// observed is the interface's observation record: the source of the
+	// link's last arrival, or of a predecessor's on the same flow, and the
+	// destination its answers carry.
+	observed *Observation
 	// onObserved runs after each move of observed; nil runs nothing.
 	onObserved func()
 	seed       uint32
@@ -700,7 +711,7 @@ func (l *externalLink) egressAddr(p *Packet) *net.UDPAddr {
 // peer carries: its last observed source — the address the peer's latest
 // arrival proved answers — else the locator until an arrival names one.
 func (l *externalLink) answerAddr() *net.UDPAddr {
-	if addr := l.observed.Load(); addr != nil {
+	if addr := l.observed.source.Load(); addr != nil {
 		return addr
 	}
 	return l.locator.Load()
@@ -743,8 +754,8 @@ func (l *externalLink) receive(size int, srcAddr *net.UDPAddr, p *Packet) {
 	// connection follows the link's own addresses. Only a move replaces the
 	// record and reports it.
 	ap := netip.AddrPortFrom(srcAddr.AddrPort().Addr().Unmap(), srcAddr.AddrPort().Port())
-	if last := l.observed.Load(); last == nil || last.AddrPort() != ap {
-		l.observed.Store(net.UDPAddrFromAddrPort(ap))
+	if last := l.observed.source.Load(); last == nil || last.AddrPort() != ap {
+		l.observed.source.Store(net.UDPAddrFromAddrPort(ap))
 		if l.onObserved != nil {
 			l.onObserved()
 		}

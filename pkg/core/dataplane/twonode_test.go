@@ -69,7 +69,7 @@ func startTwoNodes(t *testing.T) (a, b *node) {
 			t.Fatal(err)
 		}
 		el, err := provider.NewExternalLink(
-			64, nil, extLocal, extRemote, 1, metrics.NewInterfaceMetrics(1, ia, 0),
+			64, nil, nil, extLocal, extRemote, 1, metrics.NewInterfaceMetrics(1, ia, 0),
 		)
 		if err != nil {
 			t.Fatal(err)

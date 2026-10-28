@@ -43,7 +43,7 @@ func startDownNode(t *testing.T) (n *node, key []byte) {
 	}
 	// The remote end is nothing at all: the link's own socket is connected
 	// to an address no one binds, and the verdict is down regardless.
-	el, err := provider.NewExternalLink(64, downSession{}, ext,
+	el, err := provider.NewExternalLink(64, downSession{}, nil, ext,
 		freeUDPAddr(t), 1, metrics.NewInterfaceMetrics(1, ia, 0))
 	if err != nil {
 		t.Fatal(err)

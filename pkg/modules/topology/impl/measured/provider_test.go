@@ -941,8 +941,7 @@ func TestConfirmRecordsTheObservation(t *testing.T) {
 // TestFollowKeepsTheLocatorOnTheFlow checks the upkeep's following: an
 // established entry its link observes elsewhere sends a confirm once the
 // observation held for UpkeepGrace, and records the observation the answer
-// leaves; one whose confirm fails retries on the backoff from FollowRetry,
-// generation swaps clearing its observation resetting none of it; a
+// leaves; one whose confirm fails retries on the backoff from FollowRetry; a
 // candidate takes the observation once its BFD session answers there, and
 // not before; an entry observed at its locator sends nothing.
 func TestFollowKeepsTheLocatorOnTheFlow(t *testing.T) {
@@ -975,21 +974,17 @@ func TestFollowKeepsTheLocatorOnTheFlow(t *testing.T) {
 			return netip.AddrPortFrom(netip.MustParseAddr("198.51.100.7"), port)
 		}
 		// publish lands the links' observations, the candidate's verdict as
-		// given and the failing entry's observation cleared on request; the
-		// moved entry's link is down, which follows the flow all the same.
-		publish := func(candidateUp, failingCleared bool) {
-			failingObserved := flow(2)
-			if failingCleared {
-				failingObserved = netip.AddrPort{}
-			}
+		// given; the moved entry's link is down, which follows the flow all
+		// the same.
+		publish := func(candidateUp bool) {
 			b.Links().Publish(bus.NewLinkState(
 				bus.Link{Entry: *moved, Down: true, Observed: flow(1)},
-				bus.Link{Entry: *failing, Observed: failingObserved},
+				bus.Link{Entry: *failing, Observed: flow(2)},
 				bus.Link{Entry: *candidate, Down: !candidateUp, Observed: flow(3)},
 				bus.Link{Entry: *steady, Observed: steady.Remote},
 			))
 		}
-		publish(false, false)
+		publish(false)
 		fakes := map[*links.Link]*fakeLinkServiceClient{
 			moved:   {reply: &nodev1.LinkReply{LocalAddr: "10.0.0.5:31001", IfId: 7}},
 			failing: {err: errors.New("no answer")},
@@ -1024,7 +1019,7 @@ func TestFollowKeepsTheLocatorOnTheFlow(t *testing.T) {
 
 		// The session answers at the observation, and the candidate takes
 		// it at once; past FollowRetry, the failing entry tries once more.
-		publish(true, false)
+		publish(true)
 		synctest.Wait()
 		if got := entryByIfID(t, store, candidate.IfID).Remote; got != flow(3) {
 			t.Errorf("the candidate's remote = %v, want the answered observation %v", got, flow(3))
@@ -1033,21 +1028,6 @@ func TestFollowKeepsTheLocatorOnTheFlow(t *testing.T) {
 		synctest.Wait()
 		if n := fakes[failing].requests.Load(); n != 2 {
 			t.Errorf("the failing entry sent %d confirms past FollowRetry, want 2", n)
-		}
-
-		// Generation swaps clear the failing entry's observation until its
-		// peer's next arrival, one past each grace; its confirms keep their
-		// backoff over them: two more at most within the next two retries'
-		// waits, where each swap would cost one were the mismatch forgotten.
-		for range 6 {
-			publish(true, true)
-			synctest.Wait()
-			publish(true, false)
-			time.Sleep(UpkeepGrace + 100*time.Millisecond)
-			synctest.Wait()
-		}
-		if n := fakes[failing].requests.Load(); n > 4 {
-			t.Errorf("the failing entry sent %d confirms over the swaps, want 4 at most", n)
 		}
 		cancel()
 	})

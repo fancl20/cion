@@ -86,7 +86,7 @@ func TestExternalLinkSendReceive(t *testing.T) {
 
 	provider := NewUDPProvider(64, 0, 0, underlay.Kernel, nil)
 	link, err := provider.NewExternalLink(
-		64, nil, "127.0.0.1:0", remoteAddr, 1, newTestMetrics(t, 1),
+		64, nil, nil, "127.0.0.1:0", remoteAddr, 1, newTestMetrics(t, 1),
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -298,8 +298,9 @@ func TestExternalLinkReaimAndObserved(t *testing.T) {
 
 	var moves atomic.Int32
 	provider := NewUDPProvider(64, 0, 0, underlay.Kernel, func() { moves.Add(1) })
+	observed := new(Observation)
 	link, err := provider.NewExternalLink(
-		64, nil, "127.0.0.1:0", aimed.LocalAddr().String(), 3, newTestMetrics(t, 3),
+		64, nil, observed, "127.0.0.1:0", aimed.LocalAddr().String(), 3, newTestMetrics(t, 3),
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -323,7 +324,7 @@ func TestExternalLinkReaimAndObserved(t *testing.T) {
 	if rpkt.Link.IfID() != 3 || !bytes.Equal(rpkt.RawPacket, in) {
 		t.Fatalf("arrival from the stranger dispatched as %d/%q", rpkt.Link.IfID(), rpkt.RawPacket)
 	}
-	if got := provider.Observed(3); got != stranger.LocalAddr().(*net.UDPAddr).AddrPort() {
+	if got := observed.Load(); got != stranger.LocalAddr().(*net.UDPAddr).AddrPort() {
 		t.Errorf("observed source = %v, want the stranger's %v", got, stranger.LocalAddr())
 	}
 	// A second arrival from the same source moves nothing and reports
@@ -418,10 +419,69 @@ func TestExternalLinkReaimAndObserved(t *testing.T) {
 	if n, err := moved.Read(got); err != nil || !bytes.Equal(got[:n], answer) {
 		t.Fatalf("the raw write did not follow the new locator's arrival: %v", err)
 	}
-	// The link's own recorded side is unchanged by any of it: the local
-	// address the serving generation bound still answers.
-	if got := provider.Observed(4); got.IsValid() {
-		t.Errorf("an interface no link holds observed %v", got)
+}
+
+// TestExternalLinkContinuesItsObservation checks an observation record's
+// continuation across providers, as across generations: a link built on the
+// local address and the record a stopped link filled answers at the
+// observed source before any arrival of its own, and an arrival from that
+// source moves nothing and reports nothing.
+func TestExternalLinkContinuesItsObservation(t *testing.T) {
+	aimed := newPeerSocket(t)
+	moved := newPeerSocket(t)
+	movedAddr := moved.LocalAddr().(*net.UDPAddr).AddrPort()
+	observed := new(Observation)
+	ctx := context.Background()
+	pool := newTestPool(256, 512)
+	procQs := []chan *Packet{make(chan *Packet, 4)}
+	in := scionLikeDatagram([]byte("from the moved peer"))
+
+	first := NewUDPProvider(64, 0, 0, underlay.Kernel, nil)
+	link, err := first.NewExternalLink(
+		64, nil, observed, "127.0.0.1:0", aimed.LocalAddr().String(), 3, newTestMetrics(t, 3),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	local := link.(*externalLink).raw.LocalAddr()
+	first.Start(ctx, pool, procQs)
+	if _, err := moved.WriteToUDP(in, local); err != nil {
+		t.Fatal(err)
+	}
+	recvFromQueues(t, procQs)
+	first.Stop()
+	if got := observed.Load(); got != movedAddr {
+		t.Fatalf("the first link observed %v, want the moved peer's %v", got, movedAddr)
+	}
+
+	var moves atomic.Int32
+	second := NewUDPProvider(64, 0, 0, underlay.Kernel, func() { moves.Add(1) })
+	link, err = second.NewExternalLink(
+		64, nil, observed, local.String(), aimed.LocalAddr().String(), 3, newTestMetrics(t, 3),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	el := link.(*externalLink)
+	second.Start(ctx, pool, procQs)
+	defer second.Stop()
+
+	// Before any arrival of its own, the link answers at the observation.
+	answer := onehopDatagram([]byte("the answer"))
+	if err := el.WriteRaw(answer); err != nil {
+		t.Fatal(err)
+	}
+	got := make([]byte, bufSize)
+	_ = moved.SetReadDeadline(time.Now().Add(testTimeout))
+	if n, err := moved.Read(got); err != nil || !bytes.Equal(got[:n], answer) {
+		t.Fatalf("the continued link's answer did not arrive at the observation: %v", err)
+	}
+	if _, err := moved.WriteToUDP(in, local); err != nil {
+		t.Fatal(err)
+	}
+	recvFromQueues(t, procQs)
+	if got := moves.Load(); got != 0 {
+		t.Errorf("observation moves reported = %d, want none", got)
 	}
 }
 
@@ -433,7 +493,7 @@ func TestExternalLinksShareLocator(t *testing.T) {
 	provider := NewUDPProvider(64, 0, 0, underlay.Kernel, nil)
 	for _, ifID := range []uint16{1, 2} {
 		if _, err := provider.NewExternalLink(
-			64, nil, "127.0.0.1:0", shared.LocalAddr().String(), ifID,
+			64, nil, nil, "127.0.0.1:0", shared.LocalAddr().String(), ifID,
 			newTestMetrics(t, ifID),
 		); err != nil {
 			t.Fatalf("the second link at one locator did not build: %v", err)

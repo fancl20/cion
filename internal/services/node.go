@@ -83,11 +83,13 @@ type node struct {
 	// Data plane generations, served by the data plane loop.
 	metrics *dataplane.Metrics
 
-	// backendsMtx guards the serving generation and the applications' service
-	// backends, which each new generation re-registers.
-	backendsMtx sync.Mutex
-	gen         *generation
-	backends    []backend
+	// backendsMtx guards the serving generation, the observation records its
+	// links continue, and the applications' service backends, which each new
+	// generation re-registers.
+	backendsMtx  sync.Mutex
+	gen          *generation
+	observations map[uint16]*dataplane.Observation
+	backends     []backend
 
 	// Control plane, assembled by setupControlPlane's phases.
 	trustDB      trustdb.DB
@@ -379,14 +381,15 @@ func (n *node) start(gen *generation) {
 }
 
 // observedSource returns a serving link's last observed underlay source,
-// the zero AddrPort while no generation serves the interface: the data
-// plane's own witness of where the peer's packets come from.
+// the zero AddrPort while its link observed none: the data plane's own
+// witness of where the peer's packets come from. The records outlive the
+// generations, so a swap's gap reads the last generation's.
 func (n *node) observedSource(ifID uint16) netip.AddrPort {
 	n.backendsMtx.Lock()
-	gen := n.gen
+	record := n.observations[ifID]
 	n.backendsMtx.Unlock()
-	if gen == nil {
+	if record == nil {
 		return netip.AddrPort{}
 	}
-	return gen.provider.Observed(ifID)
+	return record.Load()
 }

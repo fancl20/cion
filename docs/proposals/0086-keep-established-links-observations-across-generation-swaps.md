@@ -119,3 +119,13 @@ locator, and the link state publishes no cleared observation for it.
     follow moves a locator back from a peer's private address.
 
 ## Implementation history
+
+*   Landed as proposed: the observation record
+    ([udpip.go](/pkg/core/dataplane/udpip.go)), each generation's records
+    ([dataplane.go](/internal/services/dataplane.go)), and the upkeep
+    without the carry-over
+    ([upkeep.go](/pkg/modules/topology/impl/measured/upkeep.go)). Five runs
+    each: no follow moved a locator back from a peer's private address; a
+    restarted peer's links recovered in 13.0 to 13.2 seconds and a rebind in
+    16.5 to 16.9; the settled, symmetric, and founder-down benchmarks
+    measure as before.

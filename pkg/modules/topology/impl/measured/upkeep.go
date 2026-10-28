@@ -109,12 +109,10 @@ func (u *upkeep) pass(ctx context.Context, now time.Time) time.Time {
 // the link observes its peer at. An established entry observed elsewhere for
 // UpkeepGrace sends a confirm, its retries backing off from FollowRetry up to
 // FollowRetryMax, whose answer — the authenticated reply, arriving over that
-// link — records the observation. A generation swap clears a link's
-// observation until the peer's next arrival, and the entry's mismatch carries
-// over it. A candidate, which no chain confirms yet, takes the observation
-// once its BFD session answers there: the return-routability the rendezvous
-// exchange already holds candidates to. It returns when the next confirm
-// waits to be due.
+// link — records the observation. A candidate, which no chain confirms yet,
+// takes the observation once its BFD session answers there: the
+// return-routability the rendezvous exchange already holds candidates to. It
+// returns when the next confirm waits to be due.
 func (u *upkeep) follow(ctx context.Context, entries []*links.Link, now time.Time) time.Time {
 	var next time.Time
 	mismatched := make(map[uint16]time.Time, len(u.mismatched))
@@ -123,13 +121,7 @@ func (u *upkeep) follow(ctx context.Context, entries []*links.Link, now time.Tim
 			continue
 		}
 		observed := u.links.Observed(l.IfID)
-		if !observed.IsValid() {
-			if since, ok := u.mismatched[l.IfID]; ok {
-				mismatched[l.IfID] = since
-			}
-			continue
-		}
-		if observed == l.Remote {
+		if !observed.IsValid() || observed == l.Remote {
 			continue
 		}
 		switch l.State {

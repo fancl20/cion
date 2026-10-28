@@ -103,10 +103,12 @@ type UnderlayProvider interface {
 
 	// NewExternalLink returns a link that addresses a single remote AS at a unique underlay
 	// address. Outgoing packets do not need an underlay destination as metadata. Incoming
-	// packets have a defined ingress ifID.
+	// packets have a defined ingress ifID. The link continues the interface's observation
+	// record; nil starts one of the link's own.
 	NewExternalLink(
 		qSize int,
 		bfd Session,
+		observed *Observation,
 		local string,
 		remote string,
 		ifID uint16,

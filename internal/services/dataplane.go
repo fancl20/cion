@@ -65,6 +65,37 @@ type generation struct {
 	// entries is the serving set the generation was built from, the
 	// membership a store change is diffed against.
 	entries []*links.Link
+	// observations holds each serving interface's observation record, the
+	// one its link continues.
+	observations map[uint16]*dataplane.Observation
+}
+
+// carryObservations returns the observation records of a generation built
+// from the serving entries. An established entry the previous generation
+// served on the same local and remote addresses continues that generation's
+// record: its peer is proven, and no other entry holds its flow. Any other
+// entry starts a fresh record. A candidate's record ends with its
+// generation, for the acceptor may hold a second candidate on one prober's
+// flow, and an abandoned one would keep answering the flow at its last
+// observation. A nil previous generation carries nothing.
+func carryObservations(prev *generation, entries []*links.Link) map[uint16]*dataplane.Observation {
+	served := make(map[uint16]*links.Link)
+	if prev != nil {
+		for _, l := range prev.entries {
+			served[l.IfID] = l
+		}
+	}
+	records := make(map[uint16]*dataplane.Observation, len(entries))
+	for _, l := range entries {
+		if p, ok := served[l.IfID]; ok && l.State == links.StateEstablished &&
+			p.Local == l.Local && p.Remote == l.Remote {
+
+			records[l.IfID] = prev.observations[l.IfID]
+			continue
+		}
+		records[l.IfID] = new(dataplane.Observation)
+	}
+	return records
 }
 
 // reaim lands a locator change without a generational replacement: a store
@@ -117,14 +148,17 @@ func (n *node) setupMetrics() error {
 
 // startGeneration builds and serves one data plane from the link store's
 // serving entries: a provider, the internal link, one external link per
-// entry, every service backend registered on the new provider. It fails
-// only while the serving generation's addresses are still releasing; the
-// data plane loop's bounded retry covers that.
-func (n *node) startGeneration(ctx context.Context) (*generation, error) {
+// entry, every service backend registered on the new provider. Its links
+// continue the observation records carryObservations takes from prev, the
+// generation it replaces; a nil prev hands on none. It fails only while the
+// serving generation's addresses are still releasing; the data plane loop's
+// bounded retry covers that.
+func (n *node) startGeneration(ctx context.Context, prev *generation) (*generation, error) {
 	entries, err := n.servingLinks(ctx)
 	if err != nil {
 		return nil, err
 	}
+	observations := carryObservations(prev, entries)
 	provider := dataplane.NewUDPProvider(
 		n.opts.BatchSize, receiveBufferSize, sendBufferSize, n.sockets, n.nudgeLinkState)
 
@@ -140,10 +174,12 @@ func (n *node) startGeneration(ctx context.Context) (*generation, error) {
 		// Each serving link carries its BFD session — the monitor's, keyed by
 		// interface ID and surviving the swap — and the verdict through it: the link
 		// attaches its own raw writer, so the session's stream keeps leaving on the
-		// rebound address.
+		// rebound address. It continues its interface's observation record where
+		// the previous generation hands one on.
 		session := n.monitor.Session(l)
 		link, err := provider.NewExternalLink(
-			n.opts.QueueSize, session, l.Local.String(), l.Remote.String(), l.IfID,
+			n.opts.QueueSize, session, observations[l.IfID],
+			l.Local.String(), l.Remote.String(), l.IfID,
 			n.metrics.NewInterfaceMetrics(l.IfID, n.ident.ia, 0),
 		)
 		if err != nil {
@@ -180,7 +216,10 @@ func (n *node) startGeneration(ctx context.Context) (*generation, error) {
 	}
 	genCtx, cancel := context.WithCancel(ctx)
 	done := make(chan struct{})
-	g := &generation{provider: provider, dp: d, cancel: cancel, done: done, entries: entries}
+	g := &generation{
+		provider: provider, dp: d, cancel: cancel, done: done,
+		entries: entries, observations: observations,
+	}
 	go func() {
 		defer close(done)
 		if err := d.Serve(genCtx); err != nil {
@@ -218,7 +257,7 @@ func (n *node) serveGenerations(ctx context.Context, gen *generation) error {
 			n.setGeneration(nil)
 			var next *generation
 			for attempt := range bindAttempts {
-				next, err = n.startGeneration(ctx)
+				next, err = n.startGeneration(ctx, gen)
 				if err == nil {
 					break
 				}
@@ -319,12 +358,17 @@ func (n *node) unregisterSvc(svc addr.SVC, port uint16) error {
 	return nil
 }
 
-// setGeneration records the serving generation under the lock the service
-// registration callbacks read it by, and nudges the link state: the
-// generation's links observe their peers afresh.
+// setGeneration records the serving generation, with the observation
+// records its links continue, under the lock the service registration
+// callbacks and the link state read them by, and nudges the link state: the
+// links that started a fresh record observe afresh. A nil generation, a
+// swap's gap, keeps the last one's records.
 func (n *node) setGeneration(g *generation) {
 	n.backendsMtx.Lock()
 	n.gen = g
+	if g != nil {
+		n.observations = g.observations
+	}
 	n.backendsMtx.Unlock()
 	n.nudgeLinkState()
 }

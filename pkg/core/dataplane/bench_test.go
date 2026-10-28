@@ -139,14 +139,14 @@ func newBenchNode(tb testing.TB, rc RunConfig) *benchNode {
 		tb.Fatal(err)
 	}
 	if1, err := provider.NewExternalLink(
-		benchEgressQSize, &idleSession{}, freeUDPAddr(tb), srcEnd.LocalAddr().String(),
+		benchEgressQSize, &idleSession{}, nil, freeUDPAddr(tb), srcEnd.LocalAddr().String(),
 		1, metrics.NewInterfaceMetrics(1, benchLocal, benchSrcAS),
 	)
 	if err != nil {
 		tb.Fatal(err)
 	}
 	if2, err := provider.NewExternalLink(
-		benchEgressQSize, nil, freeUDPAddr(tb), dstEnd.LocalAddr().String(),
+		benchEgressQSize, nil, nil, freeUDPAddr(tb), dstEnd.LocalAddr().String(),
 		2, metrics.NewInterfaceMetrics(2, benchLocal, benchDstAS),
 	)
 	if err != nil {

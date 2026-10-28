@@ -78,7 +78,7 @@ func StartNode(t *testing.T, host netip.Addr, ia, neighbor addr.IA, extLocal, ex
 	if err != nil {
 		t.Fatal(err)
 	}
-	el, err := provider.NewExternalLink(64, nil, extLocal, extRemote, IfID,
+	el, err := provider.NewExternalLink(64, nil, nil, extLocal, extRemote, IfID,
 		metrics.NewInterfaceMetrics(IfID, ia, 0))
 	if err != nil {
 		t.Fatal(err)

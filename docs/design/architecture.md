@@ -60,8 +60,9 @@ policy chooses.
 
 *   **Data plane** — forwards SCION packets over the underlay by the path
     each packet carries. It is built with an immutable link set and serves
-    until retired; the only state that changes while serving is each link's
-    up or down verdict.
+    until retired. While it serves, a link's verdict, its locator, and the
+    source it observes its peer at change in place; the next generation
+    keeps that source for each established link that keeps its addresses.
 *   **Control endpoint** — speaks the control services to neighbor nodes
     over the SCION-native channel: beaconing, segment registration and
     lookup, trust material, and service resolution.
