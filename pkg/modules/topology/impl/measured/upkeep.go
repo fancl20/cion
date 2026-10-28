@@ -17,15 +17,17 @@ import (
 // link observes its peer at, and a punched link whose verdict stays down is
 // punched again in place.
 const (
+	// UpkeepGrace is how long a change to a link holds before the upkeep
+	// acts on it: one BFD detection time. A verdict down that long is no
+	// outage the link rides out, an observation away from the locator that
+	// long is no stray arrival, and the request that just landed the entry
+	// has passed the peer's admission rate by then.
+	UpkeepGrace = 3 * time.Second
 	// FollowRetry is the first pause after a confirm one entry's mismatch
 	// sends; later pauses double up to FollowRetryMax.
 	FollowRetry = 5 * time.Second
 	// FollowRetryMax caps the pause between one entry's confirms.
 	FollowRetryMax = time.Minute
-	// RepunchGrace is how long a punched link's verdict stays down before it
-	// is punched again: one BFD detection time past the verdict, so an
-	// outage the link rides out moves nothing.
-	RepunchGrace = 3 * time.Second
 	// RepunchRetry is the first wait after a link's failed re-punch; later
 	// waits double it.
 	RepunchRetry = 5 * time.Second
@@ -78,10 +80,13 @@ type upkeep struct {
 	z *Provider
 	// links is the latest link state event.
 	links bus.LinkState
-	// confirms paces each mismatched established entry's confirms, and
-	// repunches remembers the punched links whose verdict is down.
-	confirms  loops.Attempts[uint16]
-	repunches *repunchState
+	// mismatched holds since when each established entry's link has
+	// observed its peer away from its locator; confirms paces their
+	// confirms; repunches remembers the punched links whose verdict is
+	// down.
+	mismatched map[uint16]time.Time
+	confirms   loops.Attempts[uint16]
+	repunches  *repunchState
 	// busy holds the entries whose action runs; done receives each entry
 	// whose action ended.
 	busy map[uint16]bool
@@ -101,28 +106,44 @@ func (u *upkeep) pass(ctx context.Context, now time.Time) time.Time {
 }
 
 // follow keeps each live entry's locator on its link's own flow, the source
-// the link observes its peer at. An established entry observed elsewhere
-// sends a confirm, its retries backing off from FollowRetry up to
+// the link observes its peer at. An established entry observed elsewhere for
+// UpkeepGrace sends a confirm, its retries backing off from FollowRetry up to
 // FollowRetryMax, whose answer — the authenticated reply, arriving over that
-// link — records the observation. A candidate, which no chain confirms yet,
-// takes the observation once its BFD session answers there: the
-// return-routability the rendezvous exchange already holds candidates to.
-// It returns when the next confirm waits to be due.
+// link — records the observation. A generation swap clears a link's
+// observation until the peer's next arrival, and the entry's mismatch carries
+// over it. A candidate, which no chain confirms yet, takes the observation
+// once its BFD session answers there: the return-routability the rendezvous
+// exchange already holds candidates to. It returns when the next confirm
+// waits to be due.
 func (u *upkeep) follow(ctx context.Context, entries []*links.Link, now time.Time) time.Time {
 	var next time.Time
-	mismatched := make(map[uint16]bool)
+	mismatched := make(map[uint16]time.Time, len(u.mismatched))
 	for _, l := range entries {
 		if !l.Live() || l.NeighborIA.IsZero() || !l.Remote.IsValid() {
 			continue
 		}
 		observed := u.links.Observed(l.IfID)
-		if !observed.IsValid() || observed == l.Remote {
+		if !observed.IsValid() {
+			if since, ok := u.mismatched[l.IfID]; ok {
+				mismatched[l.IfID] = since
+			}
+			continue
+		}
+		if observed == l.Remote {
 			continue
 		}
 		switch l.State {
 		case links.StateEstablished:
-			mismatched[l.IfID] = true
+			since, ok := u.mismatched[l.IfID]
+			if !ok {
+				since = now
+			}
+			mismatched[l.IfID] = since
 			if u.busy[l.IfID] {
+				continue
+			}
+			if graced := since.Add(UpkeepGrace); now.Before(graced) {
+				next = earliest(next, graced)
 				continue
 			}
 			if !u.confirms.Due(l.IfID, now) {
@@ -148,7 +169,11 @@ func (u *upkeep) follow(ctx context.Context, entries []*links.Link, now time.Tim
 				"remote", l.Remote, "interface", l.IfID)
 		}
 	}
-	u.confirms.Retain(func(ifID uint16) bool { return mismatched[ifID] })
+	u.mismatched = mismatched
+	u.confirms.Retain(func(ifID uint16) bool {
+		_, ok := mismatched[ifID]
+		return ok
+	})
 	return next
 }
 
@@ -228,7 +253,7 @@ func newRepunchState() *repunchState {
 // address unanswered. Of its two ends, the one with the lower ISD-AS punches
 // it again and the other's handler takes its own down entry, so the two
 // never punch toward each other at once. A link is due once its verdict has
-// stayed down for RepunchGrace, then again on the backoff from RepunchRetry,
+// stayed down for UpkeepGrace, then again on the backoff from RepunchRetry,
 // until the down period has taken RepunchAttempts. A link whose verdict came
 // back, as linkUp reports it, is forgotten.
 func (st *repunchState) due(
@@ -247,7 +272,7 @@ func (st *repunchState) due(
 			since = now
 		}
 		down[l.IfID] = since
-		if graced := since.Add(RepunchGrace); now.Before(graced) {
+		if graced := since.Add(UpkeepGrace); now.Before(graced) {
 			next = earliest(next, graced)
 			continue
 		}

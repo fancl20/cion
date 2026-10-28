@@ -109,3 +109,12 @@ pass.
     `Attempts.Next` ([backoff.go](/pkg/libs/loops/backoff.go)). Each action
     works on its own copy of its entry, for the pass that started it reads
     on.
+*   Follow-up: an established entry's first confirm waits until its link
+    has observed the peer away from its locator for `UpkeepGrace`, which
+    replaces `RepunchGrace` at its three seconds as the grace both actions
+    wait. A generation swap clears an observation until the peer's next
+    arrival, and the entry's mismatch carries over it. Sent at once, a
+    confirm met the peer's admission rate behind the request that had
+    landed the entry, and each swap reset its backoff: a restarted peer's
+    links recovered in 13.0–17.2 s. With the grace, they recover in
+    13.0–13.2 s, and the rebind in 16.5–20.4 s.
