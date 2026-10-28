@@ -938,18 +938,22 @@ func TestConfirmRecordsTheObservation(t *testing.T) {
 	}
 }
 
-// TestFollowKeepsTheLocatorOnTheFlow checks the follow loop: an established
-// entry its link observes elsewhere sends a confirm and records the
-// observation the answer leaves; one whose confirm fails sends one per
-// FollowRetry; a candidate takes the observation once its BFD session
+// TestFollowKeepsTheLocatorOnTheFlow checks the upkeep's following: an
+// established entry its link observes elsewhere sends a confirm at once and
+// records the observation the answer leaves; one whose confirm fails sends
+// one per FollowRetry; a candidate takes the observation once its BFD session
 // answers there, and not before; an entry observed at its locator sends
 // nothing.
 func TestFollowKeepsTheLocatorOnTheFlow(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		store := memory.New()
 		b := bus.New()
-		z := &Provider{}
+		z := &Provider{directory: &NodeDirectory{}}
 		z.Wire(topology.Environment{Store: store, Bus: b})
+		// The node's own rendezvous address goes unanswered, so each pass
+		// weighs re-punches too: no peer reports itself undialable, and
+		// none is due.
+		z.unanswered.Store(true)
 		entry := func(ia addr.IA, port uint16, state links.State) *links.Link {
 			l := &links.Link{
 				NeighborIA: ia,
@@ -970,10 +974,11 @@ func TestFollowKeepsTheLocatorOnTheFlow(t *testing.T) {
 			return netip.AddrPortFrom(netip.MustParseAddr("198.51.100.7"), port)
 		}
 		// publish lands the links' observations, the candidate's verdict as
-		// given.
+		// given; the moved entry's link is down, which follows the flow all
+		// the same.
 		publish := func(candidateUp bool) {
 			b.Links().Publish(bus.NewLinkState(
-				bus.Link{Entry: *moved, Observed: flow(1)},
+				bus.Link{Entry: *moved, Down: true, Observed: flow(1)},
 				bus.Link{Entry: *failing, Observed: flow(2)},
 				bus.Link{Entry: *candidate, Down: !candidateUp, Observed: flow(3)},
 				bus.Link{Entry: *steady, Observed: steady.Remote},
@@ -989,8 +994,7 @@ func TestFollowKeepsTheLocatorOnTheFlow(t *testing.T) {
 
 		ctx, cancel := context.WithCancel(t.Context())
 		defer cancel()
-		go z.runFollow(ctx)
-		time.Sleep(3 * FollowInterval)
+		go z.runUpkeep(ctx)
 		synctest.Wait()
 		if got := entryByIfID(t, store, moved.IfID).Remote; got != flow(1) {
 			t.Errorf("the moved entry's remote = %v, want the observation %v", got, flow(1))
@@ -1023,12 +1027,12 @@ func TestFollowKeepsTheLocatorOnTheFlow(t *testing.T) {
 	})
 }
 
-// TestRepunchDue checks which punched links the re-punch loop takes: an
-// established link to a peer that reports itself undialable, down for
-// RepunchGrace, again on the backoff from RepunchRetry — each wait within
-// its band — RepunchAttempts in all, and only at the end with the lower
-// ISD-AS; a link whose verdict comes back is forgotten, its next down period
-// counted afresh.
+// TestRepunchDue checks which punched links the upkeep punches again, and
+// when it wakes for the next: an established link to a peer that reports
+// itself undialable, down for RepunchGrace, again on the backoff from
+// RepunchRetry — each wait within its band — RepunchAttempts in all, and only
+// at the end with the lower ISD-AS; a link whose verdict comes back is
+// forgotten, its next down period counted afresh.
 func TestRepunchDue(t *testing.T) {
 	punched := liveLink(linkIA, 40041)
 	punched.IfID = 4
@@ -1043,26 +1047,36 @@ func TestRepunchDue(t *testing.T) {
 	second := first.Add(RepunchRetry)
 	third := second.Add(2 * RepunchRetry)
 	later := third.Add(time.Hour)
+	// next bands the wake a step returns: the zero band, none.
 	steps := []struct {
 		at       time.Time
 		verdicts map[uint16]bool
 		want     int
+		next     [2]time.Time
 	}{
-		{t0, down, 0},
-		{first.Add(-time.Second), down, 0},
-		{first, down, 1},
-		{first.Add(RepunchRetry/2 - time.Millisecond), down, 0},
-		{second, down, 1},
-		{second.Add(RepunchRetry - time.Millisecond), down, 0},
-		{third, down, 1},
-		{later, down, 0},
-		{later.Add(time.Second), map[uint16]bool{4: true}, 0},
-		{later.Add(2 * time.Second), down, 0},
-		{later.Add(2*time.Second + RepunchGrace), down, 1},
+		{t0, down, 0, [2]time.Time{first, first}},
+		{first.Add(-time.Second), down, 0, [2]time.Time{first, first}},
+		{first, down, 1, [2]time.Time{}},
+		{first.Add(RepunchRetry/2 - time.Millisecond), down, 0, [2]time.Time{first.Add(RepunchRetry / 2), second}},
+		{second, down, 1, [2]time.Time{}},
+		{second.Add(RepunchRetry - time.Millisecond), down, 0, [2]time.Time{second.Add(RepunchRetry), third}},
+		{third, down, 1, [2]time.Time{}},
+		{later, down, 0, [2]time.Time{}},
+		{later.Add(time.Second), map[uint16]bool{4: true}, 0, [2]time.Time{}},
+		{later.Add(2 * time.Second), down, 0, [2]time.Time{later.Add(2*time.Second + RepunchGrace), later.Add(2*time.Second + RepunchGrace)}},
+		{later.Add(2*time.Second + RepunchGrace), down, 1, [2]time.Time{}},
 	}
 	for _, step := range steps {
-		if got := st.due(rendezvousIA, entries, verdictState(step.verdicts).Up, undialable, step.at); len(got) != step.want {
-			t.Errorf("at %v: %d links due, want %d", step.at.Sub(t0), len(got), step.want)
+		due, next := st.due(rendezvousIA, entries, verdictState(step.verdicts).Up, undialable, step.at)
+		if len(due) != step.want {
+			t.Errorf("at %v: %d links due, want %d", step.at.Sub(t0), len(due), step.want)
+		}
+		if next.Before(step.next[0]) || next.After(step.next[1]) {
+			t.Errorf("at %v: next wake %v, want within [%v, %v]", step.at.Sub(t0), next.Sub(t0),
+				step.next[0].Sub(t0), step.next[1].Sub(t0))
+		}
+		for _, l := range due {
+			st.attempts.Tried(l.IfID, step.at)
 		}
 	}
 
@@ -1090,9 +1104,9 @@ func TestRepunchDue(t *testing.T) {
 	for _, tt := range never {
 		st := newRepunchState()
 		for _, after := range []time.Duration{0, RepunchGrace, RepunchGrace + RepunchRetry} {
-			if got := st.due(tt.mine, []*links.Link{tt.entry()}, verdictState(tt.verdicts).Up, tt.undialable,
-				t0.Add(after)); len(got) != 0 {
-				t.Errorf("%s: due at %v", tt.name, after)
+			if due, next := st.due(tt.mine, []*links.Link{tt.entry()}, verdictState(tt.verdicts).Up, tt.undialable,
+				t0.Add(after)); len(due) != 0 || !next.IsZero() {
+				t.Errorf("%s: due %d at %v, the next wake at %v", tt.name, len(due), after, next)
 			}
 		}
 	}

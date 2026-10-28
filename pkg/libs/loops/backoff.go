@@ -84,6 +84,19 @@ func (a *Attempts[K]) Due(k K, now time.Time) bool {
 	return (a.Limit == 0 || t.count < a.Limit) && !now.Before(t.next)
 }
 
+// Next returns when the key may try next — the zero time for a key never
+// tried, which may at once — and false once its tries reached Limit.
+func (a *Attempts[K]) Next(k K) (time.Time, bool) {
+	t, ok := a.tries[k]
+	if !ok {
+		return time.Time{}, true
+	}
+	if a.Limit > 0 && t.count >= a.Limit {
+		return time.Time{}, false
+	}
+	return t.next, true
+}
+
 // Tried records a try of the key at now: its next is due the schedule's
 // delay for its count later.
 func (a *Attempts[K]) Tried(k K, now time.Time) {

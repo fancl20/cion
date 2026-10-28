@@ -103,3 +103,9 @@ pass.
 *   **The benchmarks:** five runs each. The NAT benchmarks hold.
 
 ## Implementation history
+
+*   Landed as proposed: the link upkeep
+    ([upkeep.go](/pkg/modules/topology/impl/measured/upkeep.go)) and
+    `Attempts.Next` ([backoff.go](/pkg/libs/loops/backoff.go)). Each action
+    works on its own copy of its entry, for the pass that started it reads
+    on.

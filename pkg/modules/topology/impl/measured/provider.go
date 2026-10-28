@@ -45,33 +45,6 @@ const (
 // the confirm pass, in selection windows.
 const confirmPassWindows = 4
 
-// The follow loop's cadence: each link's locator is compared with the
-// source the link observes its peer at.
-const (
-	// FollowInterval paces the comparison.
-	FollowInterval = time.Second
-	// FollowRetry is the first pause after a confirm one entry's mismatch
-	// sends; later pauses double up to FollowRetryMax.
-	FollowRetry = 5 * time.Second
-	// FollowRetryMax caps the pause between one entry's confirms.
-	FollowRetryMax = time.Minute
-)
-
-// The re-punch loop's cadence, on the follow loop's FollowInterval: a punched
-// link whose verdict stays down is punched again in place.
-const (
-	// RepunchGrace is how long a punched link's verdict stays down before it
-	// is punched again: one BFD detection time past the verdict, so an
-	// outage the link rides out moves nothing.
-	RepunchGrace = 3 * time.Second
-	// RepunchRetry is the first wait after a link's failed re-punch; later
-	// waits double it.
-	RepunchRetry = 5 * time.Second
-	// RepunchAttempts bounds the re-punches of one down period: a peer that
-	// stays unreachable leaves the link to the selection's retirement.
-	RepunchAttempts = 3
-)
-
 // Config configures the measured provider with the pieces the node's
 // identity completion and run arguments own; Wire delivers the rest, the
 // products of the node's phases, before Seed, Mounts, and Run.
@@ -546,9 +519,9 @@ func (z *Provider) Mounts() ([]scionrpc.Mount, error) {
 // Run owns the measured provider's loops until the context is canceled — the
 // rendezvous acceptor, the joiner's dials, the node directory's publish and
 // fetch, the selection sweep, the confirm pass over the entries the node
-// holds, and the loops keeping each link on its peer's current mapping, by
-// following its flow or punching it again — and returns once every one has
-// returned. Mounts assembled what the loops serve.
+// holds, and the link upkeep keeping each link on its peer's current
+// mapping, by following its flow or punching it again — and returns once
+// every one has returned. Mounts assembled what the loops serve.
 func (z *Provider) Run(ctx context.Context) {
 	var wg sync.WaitGroup
 	loops.Go(ctx, &wg, "rendezvous", z.rendezvous.Run)
@@ -558,8 +531,7 @@ func (z *Provider) Run(ctx context.Context) {
 		RunSelection(ctx, z.selectionConfig())
 	})
 	loops.Go(ctx, &wg, "confirm pass", z.runConfirmPass)
-	loops.Go(ctx, &wg, "follow", z.runFollow)
-	loops.Go(ctx, &wg, "re-punch", z.runRepunch)
+	loops.Go(ctx, &wg, "link upkeep", z.runUpkeep)
 	wg.Wait()
 }
 
@@ -857,61 +829,6 @@ func (z *Provider) runConfirmPass(ctx context.Context) {
 	}
 }
 
-// runFollow keeps each live entry's locator on its link's own flow, the
-// source the link observes its peer at. An established entry observed
-// elsewhere sends a confirm, its retries backing off from FollowRetry up to
-// FollowRetryMax, whose answer — the authenticated reply, arriving over that
-// link — records the observation. A candidate, which no chain confirms yet,
-// takes the observation once its BFD session answers there: the
-// return-routability the rendezvous exchange already holds candidates to.
-func (z *Provider) runFollow(ctx context.Context) {
-	confirms := loops.Attempts[uint16]{
-		Backoff: loops.Backoff{Base: FollowRetry, Max: FollowRetryMax},
-	}
-	for loops.Sleep(ctx, FollowInterval) {
-		entries, err := z.env.Store.All(ctx)
-		if err != nil {
-			slog.Error("Reading the link store", "err", err)
-			continue
-		}
-		state := z.linkState.Latest()
-		mismatched := make(map[uint16]bool)
-		for _, l := range entries {
-			if !l.Live() || l.NeighborIA.IsZero() || !l.Remote.IsValid() {
-				continue
-			}
-			observed := state.Observed(l.IfID)
-			if !observed.IsValid() || observed == l.Remote {
-				continue
-			}
-			switch l.State {
-			case links.StateEstablished:
-				mismatched[l.IfID] = true
-				now := time.Now()
-				if !confirms.Due(l.IfID, now) {
-					continue
-				}
-				confirms.Tried(l.IfID, now)
-				slog.Info("Following a link's flow", "neighbor", l.NeighborIA,
-					"remote", l.Remote, "observed", observed, "interface", l.IfID)
-				z.confirmEntry(ctx, l)
-			case links.StateCandidate:
-				if !state.Up(l.IfID) {
-					continue
-				}
-				l.Remote = observed
-				if err := z.env.Store.Update(ctx, l); err != nil {
-					slog.Error("Following a candidate's flow", "neighbor", l.NeighborIA, "err", err)
-					continue
-				}
-				slog.Info("A candidate followed its link's flow", "neighbor", l.NeighborIA,
-					"remote", l.Remote, "interface", l.IfID)
-			}
-		}
-		confirms.Retain(func(ifID uint16) bool { return mismatched[ifID] })
-	}
-}
-
 // confirmEntry sends one held entry's link request over the link's one-hop
 // path — the peer's control service addressed by it, the dial naming the
 // entry's own interface so the link's verdict gates nothing — and lands the
@@ -949,94 +866,6 @@ func (z *Provider) confirmEntry(ctx context.Context, l *links.Link) bool {
 	slog.Info("Confirmed a held entry", "neighbor", l.NeighborIA,
 		"local", l.Local, "remote", l.Remote, "interface", l.IfID)
 	return true
-}
-
-// runRepunch keeps punched links on their peers' current mappings. A NAT
-// that remaps one end of a punched link leaves it down for good while the
-// far end's NAT filters by address: that NAT drops what the new mapping
-// sends, so no flow arrives for the follow loop to follow. The loop punches
-// such a link again once its verdict has stayed down for RepunchGrace, up to
-// RepunchAttempts times per down period. A node whose own published
-// rendezvous address answers holds no punched link: its peers' flows reach
-// it, and the follow loop keeps its links.
-func (z *Provider) runRepunch(ctx context.Context) {
-	st := newRepunchState()
-	for loops.Sleep(ctx, FollowInterval) {
-		if !z.unanswered.Load() {
-			continue
-		}
-		entries, err := z.env.Store.All(ctx)
-		if err != nil {
-			slog.Error("Reading the link store", "err", err)
-			continue
-		}
-		state := z.linkState.Latest()
-		undialable := make(map[addr.IA]bool)
-		for _, e := range z.directory.Entries() {
-			if e.Reach.RendezvousUnanswered {
-				undialable[e.IA] = true
-			}
-		}
-		for _, l := range st.due(z.env.IA, entries, state.Up, undialable, time.Now()) {
-			z.repunch(ctx, z.puncher, l)
-		}
-	}
-}
-
-// repunchState is the re-punch loop's memory of the punched links whose
-// verdict is down, by interface ID: since when each has been down, and its
-// re-punches' backoff.
-type repunchState struct {
-	downSince map[uint16]time.Time
-	attempts  loops.Attempts[uint16]
-}
-
-// newRepunchState returns the memory of a loop that has seen no down link.
-func newRepunchState() *repunchState {
-	return &repunchState{attempts: loops.Attempts[uint16]{
-		Backoff: loops.Backoff{Base: RepunchRetry},
-		Limit:   RepunchAttempts,
-	}}
-}
-
-// due returns the punched links the node punches again at now and advances
-// the memory. A punched link is an established, serving entry whose peer
-// reports its published rendezvous address unanswered. Of its two ends, the
-// one with the lower ISD-AS punches it again and the other's handler takes
-// its own down entry, so the two never punch toward each other at once. A
-// link is due once its verdict has stayed down for RepunchGrace, then again
-// on the backoff from RepunchRetry, until the down period has taken
-// RepunchAttempts. A link whose verdict came back, as linkUp reports it, is
-// forgotten.
-func (st *repunchState) due(
-	mine addr.IA, entries []*links.Link, linkUp func(ifID uint16) bool, undialable map[addr.IA]bool,
-	now time.Time,
-) []*links.Link {
-
-	down := make(map[uint16]time.Time, len(st.downSince))
-	var due []*links.Link
-	for _, l := range entries {
-		if linkUp(l.IfID) || l.State != links.StateEstablished ||
-			!l.Serving() || !undialable[l.NeighborIA] || mine >= l.NeighborIA {
-			continue
-		}
-		since, ok := st.downSince[l.IfID]
-		if !ok {
-			since = now
-		}
-		down[l.IfID] = since
-		if now.Sub(since) < RepunchGrace || !st.attempts.Due(l.IfID, now) {
-			continue
-		}
-		st.attempts.Tried(l.IfID, now)
-		due = append(due, l)
-	}
-	st.downSince = down
-	st.attempts.Retain(func(ifID uint16) bool {
-		_, ok := down[ifID]
-		return ok
-	})
-	return due
 }
 
 // repunch punches a down link again and records both ends' current

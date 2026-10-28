@@ -104,8 +104,9 @@ func TestBackoffTriesEndWithContext(t *testing.T) {
 }
 
 // TestAttempts checks the per-key tracking: a key never tried is due, a
-// tried one again once its delay passed, never past Limit; a forgotten key
-// is due at once, and Retain forgets the keys it rejects.
+// tried one again once its delay passed, never past Limit, and Next tells
+// when; a forgotten key is due at once, and Retain forgets the keys it
+// rejects.
 func TestAttempts(t *testing.T) {
 	a := Attempts[int]{Backoff: Backoff{Base: time.Second, Max: 4 * time.Second}, Limit: 3}
 	t0 := time.Unix(1000, 0)
@@ -120,9 +121,18 @@ func TestAttempts(t *testing.T) {
 		t.Error("a key is not due at its first delay's upper bound")
 	}
 	a.Tried(1, t0.Add(time.Second))
+	if next, ok := a.Next(1); !ok || next.Before(t0.Add(2*time.Second)) || next.After(t0.Add(3*time.Second)) {
+		t.Errorf("Next(1) = %v, %t, want within [2s, 3s] past t0", next.Sub(t0), ok)
+	}
 	a.Tried(1, t0.Add(3*time.Second))
 	if a.Due(1, t0.Add(time.Hour)) {
 		t.Error("a key is due past its Limit")
+	}
+	if _, ok := a.Next(1); ok {
+		t.Error("Next reports a try past the key's Limit")
+	}
+	if next, ok := a.Next(9); !ok || !next.IsZero() {
+		t.Errorf("Next(9) = %v, %t, want a key never tried due at once", next, ok)
 	}
 	a.Forget(1)
 	if !a.Due(1, t0.Add(time.Hour)) {
