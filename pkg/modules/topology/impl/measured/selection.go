@@ -15,6 +15,7 @@ import (
 	"github.com/scionproto/scion/pkg/addr"
 	spath "github.com/scionproto/scion/pkg/slayers/path/scion"
 
+	"github.com/fancl20/cion/pkg/libs/bus"
 	"github.com/fancl20/cion/pkg/libs/loops"
 	"github.com/fancl20/cion/pkg/libs/scion"
 	"github.com/fancl20/cion/pkg/libs/scionrpc"
@@ -99,11 +100,13 @@ type SelectionConfig struct {
 	Store links.DB
 	// Directory snapshots the node directory's entries.
 	Directory func() []DirectoryEntry
-	// Verdicts returns the health monitor's link verdicts by interface ID:
-	// an established neighbor whose verdict is down counts as infinitely
-	// slow for the window whatever its last sample said, and the redundancy
-	// floor counts up links only. Nil treats every link as up.
-	Verdicts func() map[uint16]bool
+	// Links is the node's link state topic. An established neighbor whose
+	// verdict is down counts as infinitely slow for the window whatever its
+	// last sample said, and the redundancy floor counts up links only; a
+	// confirm records the observed source of the link its reply arrived
+	// over, where the peer's packets come from, else the reply's claim. A
+	// nil topic treats every link as up and observes nothing.
+	Links *bus.Topic[bus.LinkState]
 	// Latencies receives the window's per-link one-way delay estimates —
 	// each neighbor's echo round trip halved — for the beaconer's entries
 	// to declare; nil discards them.
@@ -125,11 +128,6 @@ type SelectionConfig struct {
 	LinkHost netip.Addr
 	// Link establishes a link in-band.
 	Link LinkRequester
-	// Observed returns a serving link's last observed underlay source by
-	// interface ID — where the peer's packets, the confirm's reply among
-	// them, come from; nil observes nothing, and a confirm records the
-	// reply's claim.
-	Observed func(ifID uint16) netip.AddrPort
 	// Punch reaches the candidates whose published rendezvous address
 	// answers nothing, by probe and by establishment; nil reaches none.
 	Punch Puncher
@@ -447,21 +445,10 @@ func liveNeighbor(entries []*links.Link, ia addr.IA) bool {
 	return false
 }
 
-// linkUp reports the interface's verdict; a loop without the monitor's
-// verdicts treats every link as up.
+// linkUp reports the interface's verdict; a loop without the link state
+// treats every link as up.
 func (s *selection) linkUp(ifID uint16) bool {
-	return verdictUp(s.cfg.Verdicts, ifID)
-}
-
-// verdictUp reports an interface's verdict from the monitor's verdicts: an
-// interface with none is up, as the monitor counts it, and a nil source
-// reports every link up.
-func verdictUp(verdicts func() map[uint16]bool, ifID uint16) bool {
-	if verdicts == nil {
-		return true
-	}
-	up, ok := verdicts()[ifID]
-	return !ok || up
+	return s.cfg.Links.Latest().Up(ifID)
 }
 
 // directory snapshots the node directory; nil Directory serves none.
@@ -1143,7 +1130,7 @@ func (s *selection) landConfirm(
 		slog.Error("The link reply carries a malformed address", "err", err)
 		return false
 	}
-	entry.Remote = observedOr(s.cfg.Observed, entry.IfID,
+	entry.Remote = observedOr(s.cfg.Links.Latest(), entry.IfID,
 		recordedLinkAddr(remote, netip.AddrPortFrom(published, remote.Port())))
 	entry.RemoteIfID = uint16(reply.IfId)
 	entry.State = links.StateEstablished

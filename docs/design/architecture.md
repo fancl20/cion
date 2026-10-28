@@ -96,6 +96,13 @@ run no loops of their own and hold no policy.
 *   **State files** — the files a node keeps in its state directory, written
     whole: a reader sees the old content or the new one, and a crash leaves
     one of the two.
+*   **Node bus** — the node's event bus: a component publishes the state
+    it owns as events, each carrying the full state, and the components
+    that depend on it subscribe to its changes or read its last event
+    ([ADR-0031](/docs/adrs/0031-publish-node-state-as-events-on-a-node-bus.md)).
+    The link state is the first topic: the neighbor table's live entries,
+    each with its link's verdict and the source the link observes its peer
+    at.
 
 ### Modules
 
@@ -198,7 +205,10 @@ the new data plane is built from the neighbor table's snapshot and the old
 one retires. Liveness runs beside the source: a session per link feeds the
 monitor, whose verdict stops forwarding on a dead link and resumes it on
 recovery — a state flip within the same generation, faster and reversible
-where membership changes are damped.
+where membership changes are damped. The node publishes its link state on
+its bus whenever the table, a verdict, or a link's observation changes:
+beaconing, path composition, the sockets, and the topology source read the
+links there.
 
 ### Endhost service
 

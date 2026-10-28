@@ -115,7 +115,7 @@ func newBenchNode(tb testing.TB, rc RunConfig) *benchNode {
 	if err != nil {
 		tb.Fatal(err)
 	}
-	provider := NewUDPProvider(rc.BatchSize, rc.ReceiveBufferSize, rc.SendBufferSize, underlay.Kernel)
+	provider := NewUDPProvider(rc.BatchSize, rc.ReceiveBufferSize, rc.SendBufferSize, underlay.Kernel, nil)
 	srcEnd, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
 	if err != nil {
 		tb.Fatal(err)

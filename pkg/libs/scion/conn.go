@@ -28,6 +28,7 @@ import (
 	"github.com/scionproto/scion/pkg/slayers/path/onehop"
 	spath "github.com/scionproto/scion/pkg/slayers/path/scion"
 
+	"github.com/fancl20/cion/pkg/libs/bus"
 	"github.com/fancl20/cion/pkg/libs/underlay"
 )
 
@@ -87,11 +88,10 @@ type Conn struct {
 	// mac MACs the hop fields of outgoing one-hop paths, with the same key
 	// the data plane verifies.
 	mac hash.Hash
-	// links snapshots the links one-hop writes may leave through, interface
-	// ID to neighbor IA, to resolve the egress interface of fresh one-hop
-	// paths. Read live, so a topology change reaches the conn without
-	// rebuilding it.
-	links func() map[uint16]addr.IA
+	// links holds the links one-hop writes may leave through, to resolve the
+	// egress interface of fresh one-hop paths. Read live, so a topology
+	// change reaches the conn without rebuilding it.
+	links *bus.Topic[bus.LinkState]
 	// ifDown is the node's shared negative cache of interface-down signals;
 	// nil drops them as before.
 	ifDown *InterfaceDownCache
@@ -118,10 +118,11 @@ type ConnConfig struct {
 	InternalAddr string
 	// MACKey is the data-plane forwarding key, used to MAC one-hop paths.
 	MACKey []byte
-	// Links snapshots the links one-hop writes may leave through, interface
-	// ID to neighbor IA; the conn resolves one-hop egress through it live,
-	// and a write to a neighbor the snapshot lacks fails at once.
-	Links func() map[uint16]addr.IA
+	// Links is the node's link state topic, whose usable links are the links
+	// one-hop writes may leave through; the conn resolves one-hop egress
+	// through it live, and a write to a neighbor the usable links lack fails
+	// at once. A nil topic resolves nothing.
+	Links *bus.Topic[bus.LinkState]
 	// InterfaceDown is the node's shared negative cache of SCMP
 	// interface-down signals; the conn's receive paths recognize the signal
 	// and record it. Nil drops them.
@@ -343,14 +344,11 @@ func (c *Conn) SetWriteDeadline(t time.Time) error {
 	return c.conn.SetWriteDeadline(t)
 }
 
-// resolveLink reads the link table's snapshot for the neighbor's egress
-// interface. A nil source — a conn with no link table — resolves nothing.
+// resolveLink reads the usable links for the neighbor's egress interface.
 func (c *Conn) resolveLink(neighborIA addr.IA) (uint16, error) {
-	if c.links != nil {
-		for ifID, neighbor := range c.links() {
-			if neighbor.Equal(neighborIA) {
-				return ifID, nil
-			}
+	for ifID, neighbor := range c.links.Latest().Usable() {
+		if neighbor.Equal(neighborIA) {
+			return ifID, nil
 		}
 	}
 	return 0, fmt.Errorf("no link to neighbor %s", neighborIA)

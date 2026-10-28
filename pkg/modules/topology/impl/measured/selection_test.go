@@ -19,6 +19,7 @@ import (
 
 	"github.com/fancl20/cion/pkg/core/controlplane"
 	"github.com/fancl20/cion/pkg/core/dataplane/dataplanetest"
+	"github.com/fancl20/cion/pkg/libs/bus"
 	"github.com/fancl20/cion/pkg/libs/scion"
 	"github.com/fancl20/cion/pkg/libs/scionrpc"
 	"github.com/fancl20/cion/pkg/libs/segment"
@@ -38,7 +39,7 @@ type selFixture struct {
 	store     *memory.DB
 	directory []DirectoryEntry
 	samples   map[addr.IA]sample
-	verdicts  map[uint16]bool
+	links     *bus.Topic[bus.LinkState]
 	down      map[addr.IA]bool // neighbors whose verdict is down
 	// alive holds the candidates whose rendezvous socket answers the
 	// sweep's probe, keyed by neighbor ISD-AS.
@@ -112,13 +113,13 @@ func (f *selFixture) accept(t *testing.T, ia addr.IA) {
 func newSelFixture(t *testing.T, neighbors ...addr.IA) *selFixture {
 	t.Helper()
 	f := &selFixture{
-		store:    memory.New(),
-		samples:  make(map[addr.IA]sample),
-		verdicts: make(map[uint16]bool),
-		down:     make(map[addr.IA]bool),
-		alive:    make(map[addr.IA]bool),
-		probed:   make(map[addr.IA]bool),
-		echoes:   make(map[string]time.Duration),
+		store:   memory.New(),
+		samples: make(map[addr.IA]sample),
+		links:   new(bus.Topic[bus.LinkState]),
+		down:    make(map[addr.IA]bool),
+		alive:   make(map[addr.IA]bool),
+		probed:  make(map[addr.IA]bool),
+		echoes:  make(map[string]time.Duration),
 	}
 	for _, ia := range neighbors {
 		if err := f.store.Insert(context.Background(),
@@ -158,26 +159,44 @@ func newSelFixture(t *testing.T, neighbors ...addr.IA) *selFixture {
 		},
 	}
 	f.sel.cfg.Directory = func() []DirectoryEntry { return f.directory }
-	f.sel.cfg.Verdicts = func() map[uint16]bool { return f.verdicts }
+	f.sel.cfg.Links = f.links
 	f.sel.aliveFn = func(l *links.Link) bool { return f.alive[l.NeighborIA] }
 	f.refresh()
 	return f
 }
 
-// refresh rebuilds the verdict map from the established entries, minus the
-// down ones.
+// refresh publishes the link state of the established entries, the down
+// ones' verdicts down.
 func (f *selFixture) refresh() {
 	entries, err := f.store.All(context.Background())
 	if err != nil {
 		return
 	}
-	f.verdicts = make(map[uint16]bool)
+	var ls []bus.Link
 	for _, l := range entries {
 		if l.State != links.StateEstablished {
 			continue
 		}
-		f.verdicts[l.IfID] = !f.down[l.NeighborIA]
+		ls = append(ls, bus.Link{Entry: *l, Down: f.down[l.NeighborIA]})
 	}
+	f.links.Publish(bus.NewLinkState(ls...))
+}
+
+// verdictState returns the link state of the verdicts' interfaces, each
+// link down where its verdict is; an interface with no verdict is up.
+func verdictState(verdicts map[uint16]bool) bus.LinkState {
+	ls := make([]bus.Link, 0, len(verdicts))
+	for ifID, up := range verdicts {
+		ls = append(ls, bus.Link{Entry: links.Link{IfID: ifID}, Down: !up})
+	}
+	return bus.NewLinkState(ls...)
+}
+
+// verdictTopic returns a link state topic holding verdictState(verdicts).
+func verdictTopic(verdicts map[uint16]bool) *bus.Topic[bus.LinkState] {
+	t := new(bus.Topic[bus.LinkState])
+	t.Publish(verdictState(verdicts))
+	return t
 }
 
 // pass runs one evaluation window, refreshing liveness first.
@@ -1364,12 +1383,14 @@ func TestProbeSendsNothingOverAnUnusableLink(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = router.Close() }()
+	noLinks := new(bus.Topic[bus.LinkState])
+	noLinks.Publish(bus.NewLinkState())
 	conn, err := scion.NewConn(scion.ConnConfig{
 		IA:           selIA,
 		Bind:         netip.AddrPortFrom(host, 0).String(),
 		InternalAddr: router.LocalAddr().String(),
 		MACKey:       make([]byte, 16),
-		Links:        func() map[uint16]addr.IA { return map[uint16]addr.IA{} },
+		Links:        noLinks,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1427,7 +1448,7 @@ func TestProbeEchoesTheHostThePeerResolves(t *testing.T) {
 			Bind:         netip.AddrPortFrom(n.ControlIP, port).String(),
 			InternalAddr: n.Internal,
 			MACKey:       n.MACKey,
-			Links:        n.Links,
+			Links:        n.Links(),
 		})
 		if err != nil {
 			t.Fatal(err)

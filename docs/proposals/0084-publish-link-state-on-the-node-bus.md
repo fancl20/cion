@@ -214,3 +214,10 @@ There is no wire or storage change.
     bus, hold.
 
 ## Implementation history
+
+*   Landed as proposed: the bus and the link state
+    ([bus.go](/pkg/libs/bus/bus.go), [links.go](/pkg/libs/bus/links.go)),
+    the producer ([linkstate.go](/internal/services/linkstate.go)) and its
+    hooks ([monitor.go](/pkg/core/liveness/monitor.go),
+    [udpip.go](/pkg/core/dataplane/udpip.go)), and the readers. The
+    Summary's figures are the benchmarks' runs.

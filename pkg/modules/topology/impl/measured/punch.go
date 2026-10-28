@@ -349,7 +349,7 @@ func (s *LinkService) punchEntry(ctx context.Context, peer addr.IA, remoteIfID u
 		entry.RemoteIfID = remoteIfID
 		return entry, nil
 	}
-	if entry != nil && (entry.RemoteIfID != remoteIfID || verdictUp(s.Verdicts, entry.IfID)) {
+	if entry != nil && (entry.RemoteIfID != remoteIfID || s.Links.Latest().Up(entry.IfID)) {
 		return nil, connect.Errorf(connect.CodeAlreadyExists, "a link to %s stands", peer)
 	}
 	entries, err := s.Store.All(ctx)

@@ -178,21 +178,6 @@ func Check(entries []*Link, l *Link) error {
 	return nil
 }
 
-// Links maps each live entry's interface ID to its neighbor ISD-AS — the
-// snapshot every consumer of the link set reads: the beaconer's neighbor
-// checks and propagation targets, the path library's one-hop egress
-// resolution, and the core route's one-hop shortcut.
-func Links(entries []*Link) map[uint16]addr.IA {
-	out := make(map[uint16]addr.IA, len(entries))
-	for _, l := range entries {
-		if !l.Live() {
-			continue
-		}
-		out[l.IfID] = l.NeighborIA
-	}
-	return out
-}
-
 // Serving returns the entries a data plane generation is built from: the live
 // ones with both link addresses.
 func Serving(entries []*Link) []*Link {

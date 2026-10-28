@@ -20,6 +20,7 @@ import (
 	"github.com/fancl20/cion/pkg/core/liveness"
 	"github.com/fancl20/cion/pkg/core/trust"
 	"github.com/fancl20/cion/pkg/core/webpki"
+	"github.com/fancl20/cion/pkg/libs/bus"
 	"github.com/fancl20/cion/pkg/libs/scion"
 	"github.com/fancl20/cion/pkg/libs/scionrpc"
 	"github.com/fancl20/cion/pkg/libs/underlay"
@@ -72,6 +73,13 @@ type node struct {
 	linkStore   links.DB
 	linkChanges chan struct{}
 
+	// bus is the node's bus. The link state loop publishes its link state —
+	// the store's live entries with their verdicts and observations — on
+	// each nudge: a store write, a verdict's flip, an observation's move, a
+	// generation swap, coalesced in linkNudges.
+	bus        *bus.Bus
+	linkNudges chan struct{}
+
 	// Data plane generations, served by the data plane loop.
 	metrics *dataplane.Metrics
 
@@ -80,12 +88,6 @@ type node struct {
 	backendsMtx sync.Mutex
 	gen         *generation
 	backends    []backend
-
-	// tableMtx guards the cached link snapshot and its version.
-	tableMtx      sync.Mutex
-	tableVersion  uint64
-	tableBuilt    uint64
-	tableSnapshot map[uint16]addr.IA
 
 	// Control plane, assembled by setupControlPlane's phases.
 	trustDB      trustdb.DB
@@ -278,6 +280,8 @@ func setupNode(
 		opts:        opts,
 		sockets:     sockets,
 		linkChanges: make(chan struct{}, 1),
+		bus:         bus.New(),
+		linkNudges:  make(chan struct{}, 1),
 		group:       group,
 	}
 	if err := n.selectProvider(); err != nil {
@@ -318,18 +322,19 @@ func setupNode(
 }
 
 // start launches the node's loops on its group, each under its policy: the
-// core's — the data plane serving the generation boot built, the BFD health
-// monitor, beaconing, the control endpoint, the SCMP echo responder — and
-// the HTTPS server under Fatal, a failure stopping the node; the loaded
-// topology provider's and the resident applications under Degrade, a
-// failure logged and the node serving on; and the role's own loops under
-// the policies its case in setupTrustRole gave them. Nothing serves before
-// start, so assembly and serving stay separate lifecycles.
+// core's — the data plane serving the generation boot built, the link state
+// publisher, the BFD health monitor, beaconing, the control endpoint, the
+// SCMP echo responder — and the HTTPS server under Fatal, a failure stopping
+// the node; the loaded topology provider's and the resident applications
+// under Degrade, a failure logged and the node serving on; and the role's own
+// loops under the policies its case in setupTrustRole gave them. Nothing
+// serves before start, so assembly and serving stay separate lifecycles.
 func (n *node) start(gen *generation) {
 	g := n.group
 	g.Go("data plane", supervise.Fatal, func(ctx context.Context) error {
 		return n.serveGenerations(ctx, gen)
 	})
+	g.Go("link state", supervise.Fatal, n.serveLinkState)
 	g.Go("health monitor", supervise.Fatal, func(ctx context.Context) error {
 		n.monitor.Run(ctx)
 		return nil
@@ -374,9 +379,8 @@ func (n *node) start(gen *generation) {
 }
 
 // observedSource returns a serving link's last observed underlay source,
-// the zero AddrPort while no generation serves the interface — the record
-// the authenticated link request's agreement rule reads, the data plane's
-// own witness of where the peer's packets come from.
+// the zero AddrPort while no generation serves the interface: the data
+// plane's own witness of where the peer's packets come from.
 func (n *node) observedSource(ifID uint16) netip.AddrPort {
 	n.backendsMtx.Lock()
 	gen := n.gen

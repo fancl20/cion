@@ -14,7 +14,9 @@ import (
 	"github.com/scionproto/scion/pkg/scrypto"
 	spath "github.com/scionproto/scion/pkg/slayers/path/scion"
 
+	"github.com/fancl20/cion/pkg/libs/bus"
 	"github.com/fancl20/cion/pkg/libs/segment"
+	"github.com/fancl20/cion/pkg/modules/links"
 	"github.com/fancl20/cion/pkg/modules/pathdb"
 )
 
@@ -1038,11 +1040,11 @@ func TestEnumerateDeclaredLatency(t *testing.T) {
 }
 
 // TestEnumerateSkipsRetiredInterfaces checks the live filter: a candidate
-// naming one of the node's own interfaces the link-table snapshot lacks
-// never composes — the interface the up part arrives on, or either
-// interface of the node's entry on a down segment — while the candidates
-// over live interfaces compose as before, and a nil snapshot filters
-// nothing.
+// naming one of the node's own interfaces the usable links lack never
+// composes — the interface the up part arrives on, or either interface of
+// the node's entry on a down segment — while the candidates over live
+// interfaces compose as before, and a topic nothing has published on
+// filters nothing.
 func TestEnumerateSkipsRetiredInterfaces(t *testing.T) {
 	up := signedLine(t, time.Now(),
 		linkHop{ia: iaCore, eg: 11},
@@ -1066,7 +1068,7 @@ func TestEnumerateSkipsRetiredInterfaces(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	var live map[uint16]addr.IA
+	live := tableTopic(nil)
 	p := &PathProvider{
 		IA: iaLeaf,
 		DB: db,
@@ -1076,7 +1078,7 @@ func TestEnumerateSkipsRetiredInterfaces(t *testing.T) {
 				{Type: pathdb.SegmentTypeDown, PCB: through},
 			}
 		},
-		Links: func() map[uint16]addr.IA { return live },
+		Links: live,
 	}
 	naming := func(candidates []Candidate, ifID uint16) int {
 		n := 0
@@ -1100,10 +1102,10 @@ func TestEnumerateSkipsRetiredInterfaces(t *testing.T) {
 		{"the up part's interface retired", map[uint16]addr.IA{32: iaCore, 33: iaDest}, 0, 1},
 		{"the entry's core-ward interface retired", map[uint16]addr.IA{14: iaCore, 33: iaDest}, 1, 0},
 		{"the entry's onward interface retired", map[uint16]addr.IA{14: iaCore, 32: iaCore}, 1, 0},
-		{"a nil snapshot", nil, 1, 1},
+		{"nothing published", nil, 1, 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			live = tc.live
+			live.Publish(tableState(tc.live))
 			candidates, err := p.Enumerate(context.Background(), iaDest)
 			if err != nil {
 				t.Fatal(err)
@@ -1144,12 +1146,11 @@ func TestProviderLocalPathSkipsRetiredInterface(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	live := map[uint16]addr.IA{24: iaCore}
 	p := &PathProvider{
 		IA:     iaLeaf,
 		DB:     db,
 		Lookup: func(context.Context, addr.IA) []*pathdb.Segment { return nil },
-		Links:  func() map[uint16]addr.IA { return live },
+		Links:  tableTopic(map[uint16]addr.IA{24: iaCore}),
 	}
 
 	path, err := p.LocalPath(iaCore)
@@ -1172,23 +1173,23 @@ func TestProviderLocalPathSkipsRetiredInterface(t *testing.T) {
 	checkHops(t, path, fresh.Entries[1], fresh.Entries[0])
 
 	// Every containing segment arrived on a retired interface: no route.
-	p.Links = func() map[uint16]addr.IA { return map[uint16]addr.IA{} }
+	p.Links = tableTopic(map[uint16]addr.IA{})
 	if _, err := p.LocalPath(iaCore); err == nil {
 		t.Error("LocalPath over retired interfaces only succeeded, want no path")
 	}
 }
 
-// TestProviderBootstrapRouteNeedsItsInterface checks the snapshot filter on
-// the bootstrap route: it serves while the interface it leaves through is
-// in the snapshot, and resolves nothing once the interface is not — a link
-// the node retired or can no longer send over.
+// TestProviderBootstrapRouteNeedsItsInterface checks the usable-link filter
+// on the bootstrap route: it serves while the interface it leaves through
+// is usable, and resolves nothing once the interface is not — a link the
+// node retired or can no longer send over.
 func TestProviderBootstrapRouteNeedsItsInterface(t *testing.T) {
 	beacon := signedLine(t, time.Now(),
 		linkHop{ia: iaCore, eg: 11},
 		linkHop{ia: iaLeaf, in: 14},
 	)
 	route := beacon.ReversePath()
-	live := map[uint16]addr.IA{14: iaCore}
+	live := tableTopic(map[uint16]addr.IA{14: iaCore})
 	p := &PathProvider{
 		IA:     iaLeaf,
 		DB:     &fakePathDB{},
@@ -1196,18 +1197,18 @@ func TestProviderBootstrapRouteNeedsItsInterface(t *testing.T) {
 		Bootstrap: func(addr.IA) *spath.Decoded {
 			return route
 		},
-		Links: func() map[uint16]addr.IA { return live },
+		Links: live,
 	}
 
 	if _, err := p.LocalPath(iaCore); err != nil {
 		t.Fatalf("LocalPath over the bootstrap route's live interface: %v", err)
 	}
-	live = map[uint16]addr.IA{}
+	live.Publish(tableState(map[uint16]addr.IA{}))
 	if _, err := p.LocalPath(iaCore); err == nil {
-		t.Error("LocalPath took the bootstrap route through an interface the snapshot lacks")
+		t.Error("LocalPath took the bootstrap route through an interface the usable links lack")
 	}
 	if _, err := p.Path(context.Background(), iaCore); err == nil {
-		t.Error("Path took the bootstrap route through an interface the snapshot lacks")
+		t.Error("Path took the bootstrap route through an interface the usable links lack")
 	}
 }
 
@@ -1558,4 +1559,25 @@ func TestProviderChooseRanksContainingBranchesWithTheRest(t *testing.T) {
 	if len(local.Segments) != 1 || local.Segments[0].PCB != staleUp {
 		t.Errorf("LocalPath resolves %v, want the containing branch", local.Segments)
 	}
+}
+
+// tableState returns the link state of an up link to each of the table's
+// neighbors, by interface ID; a nil table returns the state of a topic
+// nothing has published on, which filters nothing.
+func tableState(table map[uint16]addr.IA) bus.LinkState {
+	if table == nil {
+		return bus.LinkState{}
+	}
+	ls := make([]bus.Link, 0, len(table))
+	for ifID, ia := range table {
+		ls = append(ls, bus.Link{Entry: links.Link{IfID: ifID, NeighborIA: ia}})
+	}
+	return bus.NewLinkState(ls...)
+}
+
+// tableTopic returns a link state topic holding tableState(table).
+func tableTopic(table map[uint16]addr.IA) *bus.Topic[bus.LinkState] {
+	t := new(bus.Topic[bus.LinkState])
+	t.Publish(tableState(table))
+	return t
 }

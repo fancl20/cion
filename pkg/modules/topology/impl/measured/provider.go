@@ -21,6 +21,7 @@ import (
 	"connectrpc.com/connect/v2/connecthttp"
 	"github.com/scionproto/scion/pkg/addr"
 
+	"github.com/fancl20/cion/pkg/libs/bus"
 	"github.com/fancl20/cion/pkg/libs/loops"
 	"github.com/fancl20/cion/pkg/libs/scion"
 	"github.com/fancl20/cion/pkg/libs/scionrpc"
@@ -122,6 +123,8 @@ type Pacing struct {
 type Provider struct {
 	cfg Config
 	env topology.Environment
+	// linkState is the node's link state topic on the environment's bus.
+	linkState *bus.Topic[bus.LinkState]
 
 	// external is the learned external host, persisted beside the identity
 	// so a restart republishes it; domain resolves the founding core's own
@@ -355,6 +358,7 @@ func (z *Provider) CompleteIdentity(ctx context.Context, ia addr.IA) (addr.IA, e
 // Wire stores the phases' products for the machinery's assembly.
 func (z *Provider) Wire(env topology.Environment) {
 	z.env = env
+	z.linkState = env.Bus.Links()
 }
 
 // Seed seeds the store with an entry per --topology.neighbor, aimed at
@@ -466,11 +470,10 @@ func (z *Provider) assemble() error {
 		LinkHost:    z.cfg.ControlHost,
 		MinInterval: z.cfg.Pacing.RendezvousRate,
 		Sockets:     z.cfg.Sockets,
-		Observed:    z.env.Observed,
+		Links:       z.linkState,
 		Echo:        z.echoPublished,
 		Reflector:   z.reflector,
 		Punching:    z.puncher.punching,
-		Verdicts:    z.env.Verdicts,
 	}
 	z.linker = &linkClient{peer: z.env.Peer, answered: z.recordAnswer}
 	directoryCfg := NodeDirectoryConfig{
@@ -572,11 +575,8 @@ func (z *Provider) reflector(ctx context.Context) (netip.AddrPort, error) {
 	if err != nil {
 		return netip.AddrPort{}, fmt.Errorf("reading the link store: %w", err)
 	}
-	var verdicts map[uint16]bool
-	if z.env.Verdicts != nil {
-		verdicts = z.env.Verdicts()
-	}
-	if ap, ok := pickReflector(entries, verdicts, z.directory.Entries()); ok {
+	state := z.linkState.Latest()
+	if ap, ok := pickReflector(entries, state.Up, z.directory.Entries()); ok {
 		return ap, nil
 	}
 	return netip.AddrPort{}, errNoReflector
@@ -584,15 +584,14 @@ func (z *Provider) reflector(ctx context.Context) (netip.AddrPort, error) {
 
 // pickReflector returns the published rendezvous address of the first
 // directory entry whose node reports its address answering and holds an
-// established link to this node whose verdict is up; an interface with no
-// verdict is up.
+// established link to this node whose verdict, as linkUp reports it, is up.
 func pickReflector(
-	entries []*links.Link, verdicts map[uint16]bool, directory []DirectoryEntry,
+	entries []*links.Link, linkUp func(ifID uint16) bool, directory []DirectoryEntry,
 ) (netip.AddrPort, bool) {
 
 	up := make(map[addr.IA]bool, len(entries))
 	for _, l := range entries {
-		if v, ok := verdicts[l.IfID]; l.State == links.StateEstablished && (!ok || v) {
+		if l.State == links.StateEstablished && linkUp(l.IfID) {
 			up[l.NeighborIA] = true
 		}
 	}
@@ -639,7 +638,7 @@ func (z *Provider) selectionConfig() SelectionConfig {
 		IA:          z.env.IA,
 		Store:       z.env.Store,
 		Directory:   z.directory.Entries,
-		Verdicts:    z.env.Verdicts,
+		Links:       z.linkState,
 		Latencies:   z.env.Latencies,
 		Paths:       z.env.Paths,
 		Conn:        z.probeConn,
@@ -647,7 +646,6 @@ func (z *Provider) selectionConfig() SelectionConfig {
 		LinkHost:    z.cfg.ControlHost,
 		Sockets:     z.cfg.Sockets,
 		Link:        z.linker,
-		Observed:    z.env.Observed,
 		Punch:       z.puncher,
 		Learn:       z.learn,
 		Stranded:    &z.stranded,
@@ -876,16 +874,13 @@ func (z *Provider) runFollow(ctx context.Context) {
 			slog.Error("Reading the link store", "err", err)
 			continue
 		}
-		var verdicts map[uint16]bool
-		if z.env.Verdicts != nil {
-			verdicts = z.env.Verdicts()
-		}
+		state := z.linkState.Latest()
 		mismatched := make(map[uint16]bool)
 		for _, l := range entries {
 			if !l.Live() || l.NeighborIA.IsZero() || !l.Remote.IsValid() {
 				continue
 			}
-			observed := observedOr(z.env.Observed, l.IfID, netip.AddrPort{})
+			observed := state.Observed(l.IfID)
 			if !observed.IsValid() || observed == l.Remote {
 				continue
 			}
@@ -901,7 +896,7 @@ func (z *Provider) runFollow(ctx context.Context) {
 					"remote", l.Remote, "observed", observed, "interface", l.IfID)
 				z.confirmEntry(ctx, l)
 			case links.StateCandidate:
-				if !verdicts[l.IfID] {
+				if !state.Up(l.IfID) {
 					continue
 				}
 				l.Remote = observed
@@ -939,7 +934,8 @@ func (z *Provider) confirmEntry(ctx context.Context, l *links.Link) bool {
 	}
 	// The reply refreshes only what changed: an answered confirm of an
 	// established entry whose side already matches writes nothing.
-	if recorded := observedOr(z.env.Observed, l.IfID, recordedLinkAddr(remote, claimFallback(l))); recorded != l.Remote ||
+	state := z.linkState.Latest()
+	if recorded := observedOr(state, l.IfID, recordedLinkAddr(remote, claimFallback(l))); recorded != l.Remote ||
 		uint16(reply.IfId) != l.RemoteIfID || l.State != links.StateEstablished {
 
 		l.Remote = recorded
@@ -974,17 +970,14 @@ func (z *Provider) runRepunch(ctx context.Context) {
 			slog.Error("Reading the link store", "err", err)
 			continue
 		}
-		var verdicts map[uint16]bool
-		if z.env.Verdicts != nil {
-			verdicts = z.env.Verdicts()
-		}
+		state := z.linkState.Latest()
 		undialable := make(map[addr.IA]bool)
 		for _, e := range z.directory.Entries() {
 			if e.Reach.RendezvousUnanswered {
 				undialable[e.IA] = true
 			}
 		}
-		for _, l := range st.due(z.env.IA, entries, verdicts, undialable, time.Now()) {
+		for _, l := range st.due(z.env.IA, entries, state.Up, undialable, time.Now()) {
 			z.repunch(ctx, z.puncher, l)
 		}
 	}
@@ -1013,16 +1006,17 @@ func newRepunchState() *repunchState {
 // its own down entry, so the two never punch toward each other at once. A
 // link is due once its verdict has stayed down for RepunchGrace, then again
 // on the backoff from RepunchRetry, until the down period has taken
-// RepunchAttempts. A link whose verdict came back is forgotten.
+// RepunchAttempts. A link whose verdict came back, as linkUp reports it, is
+// forgotten.
 func (st *repunchState) due(
-	mine addr.IA, entries []*links.Link, verdicts map[uint16]bool, undialable map[addr.IA]bool,
+	mine addr.IA, entries []*links.Link, linkUp func(ifID uint16) bool, undialable map[addr.IA]bool,
 	now time.Time,
 ) []*links.Link {
 
 	down := make(map[uint16]time.Time, len(st.downSince))
 	var due []*links.Link
 	for _, l := range entries {
-		if up, ok := verdicts[l.IfID]; !ok || up || l.State != links.StateEstablished ||
+		if linkUp(l.IfID) || l.State != links.StateEstablished ||
 			!l.Serving() || !undialable[l.NeighborIA] || mine >= l.NeighborIA {
 			continue
 		}
@@ -1105,11 +1099,9 @@ func claimFallback(l *links.Link) netip.AddrPort {
 // peer at, else the fallback: the observation is the peer's socket as its
 // packets cross every NAT between, where a claim names only the
 // socket the peer bound.
-func observedOr(observed func(uint16) netip.AddrPort, ifID uint16, fallback netip.AddrPort) netip.AddrPort {
-	if observed != nil {
-		if ap := observed(ifID); ap.IsValid() {
-			return ap
-		}
+func observedOr(state bus.LinkState, ifID uint16, fallback netip.AddrPort) netip.AddrPort {
+	if ap := state.Observed(ifID); ap.IsValid() {
+		return ap
 	}
 	return fallback
 }

@@ -163,6 +163,59 @@ func TestMonitorTransmitsOncePerInterval(t *testing.T) {
 	})
 }
 
+// TestMonitorReportsVerdictChanges checks the change hook: a new session,
+// up for its startup grace, reports nothing; the verdict's fall at the
+// grace's end reports once; the handshake's rise reports once; and the
+// departed link's stopped session reports once. The grace is fake time in
+// the bubble.
+func TestMonitorReportsVerdictChanges(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		changes := 0
+		store := memory.New()
+		m, err := NewHealthMonitor(HealthMonitorConfig{
+			IA:       bfdIA,
+			MACKey:   []byte("0123456789abcdef"),
+			Store:    store,
+			OnChange: func() { changes++ },
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		ctx := context.Background()
+		entry := servingEntry(bfdPeer)
+		if err := store.Insert(ctx, entry); err != nil {
+			t.Fatal(err)
+		}
+		m.reconcile()
+		s := m.Session(entry)
+		s.SetRawWriter(&fakeWriter{})
+		if changes != 0 {
+			t.Fatalf("changes after the session started = %d, want 0", changes)
+		}
+
+		time.Sleep(time.Duration(BFDDetectMultiplier) * BFDTransmissionInterval)
+		m.tickAll()
+		if s.IsUp() || changes != 1 {
+			t.Fatalf("after the grace: up = %v, changes = %d, want down and 1", s.IsUp(), changes)
+		}
+		s.ReceiveMessage(peerMessage(layers.BFDStateInit, 0x2a2a2a2a, s.myDisc))
+		m.tickAll()
+		if !s.IsUp() || changes != 2 {
+			t.Fatalf("after the handshake: up = %v, changes = %d, want up and 2", s.IsUp(), changes)
+		}
+
+		entry.State = links.StateRetired
+		entry.Retired = time.Now()
+		if err := store.Update(ctx, entry); err != nil {
+			t.Fatal(err)
+		}
+		m.reconcile()
+		if changes != 3 {
+			t.Fatalf("changes after the departed session stopped = %d, want 3", changes)
+		}
+	})
+}
+
 // TestMonitorRetargetsSession checks that the session's frames follow the
 // entry's current addresses — the store's entry, not the construction-time
 // snapshot, is the truth.

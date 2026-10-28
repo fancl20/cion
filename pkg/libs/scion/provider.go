@@ -9,6 +9,7 @@ import (
 	"github.com/scionproto/scion/pkg/private/serrors"
 	spath "github.com/scionproto/scion/pkg/slayers/path/scion"
 
+	"github.com/fancl20/cion/pkg/libs/bus"
 	"github.com/fancl20/cion/pkg/libs/segment"
 	"github.com/fancl20/cion/pkg/modules/pathdb"
 )
@@ -42,15 +43,16 @@ type PathProvider struct {
 	// interface until the entry lapses, keeping a crossing path only when
 	// nothing else exists. Nil composes without the filter.
 	InterfaceDown *InterfaceDownCache
-	// Links snapshots the interfaces routes may leave the node through and
-	// their neighbors. A segment through an interface the node retired stays
-	// until it expires, while the data plane serves the interface no more,
-	// and a link whose verdict is down keeps its segments while the data
-	// plane refuses its egress: composition drops every path naming one of
-	// the node's own interfaces the snapshot lacks, and so does the
-	// bootstrap route, never a last resort. Nil, or a nil snapshot, composes
-	// without the filter.
-	Links func() map[uint16]addr.IA
+	// Links is the node's link state topic, whose usable links are the
+	// interfaces routes may leave the node through. A segment through an
+	// interface the node retired stays until it expires, while the data plane
+	// serves the interface no more, and a link whose verdict is down keeps
+	// its segments while the data plane refuses its egress: composition drops
+	// every path naming one of the node's own interfaces the usable links
+	// lack, and so does the bootstrap route, never a last resort. A nil
+	// topic, or one nothing has been published on, composes without the
+	// filter.
+	Links *bus.Topic[bus.LinkState]
 }
 
 // LocalPath resolves a data-plane path from local state only: up segments
@@ -501,12 +503,9 @@ func (p *PathProvider) containing(ia addr.IA, live map[uint16]addr.IA) (*Candida
 	return crossing, nil
 }
 
-// liveInterfaces snapshots the node's live interfaces; nil filters nothing.
+// liveInterfaces snapshots the node's usable links; nil filters nothing.
 func (p *PathProvider) liveInterfaces() map[uint16]addr.IA {
-	if p.Links == nil {
-		return nil
-	}
-	return p.Links()
+	return p.Links.Latest().Usable()
 }
 
 // retired reports whether the live snapshot lacks one of the node's own

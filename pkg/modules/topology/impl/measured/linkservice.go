@@ -11,6 +11,7 @@ import (
 	"connectrpc.com/connect/v2"
 	"github.com/scionproto/scion/pkg/addr"
 
+	"github.com/fancl20/cion/pkg/libs/bus"
 	"github.com/fancl20/cion/pkg/libs/peeria"
 	"github.com/fancl20/cion/pkg/libs/ratelimit"
 	"github.com/fancl20/cion/pkg/libs/scionrpc"
@@ -47,11 +48,13 @@ type LinkService struct {
 	// Sockets is the socket source the allocated addresses probe through;
 	// the zero value is the kernel's.
 	Sockets underlay.Sockets
-	// Observed returns a serving link's last observed underlay source by
-	// interface ID — the data plane's witness of where the peer's packets
-	// come from, the record the request's agreement rule reads. Nil serves
-	// none and no locator moves.
-	Observed func(ifID uint16) netip.AddrPort
+	// Links is the node's link state topic. Each serving link's observed
+	// source, the data plane's witness of where the peer's packets come
+	// from, is the record the request's agreement rule reads, and a link's
+	// punch takes over a caller's standing entry only while the entry's
+	// verdict is down. A nil topic observes nothing, so no locator moves, and
+	// reports every link up.
+	Links *bus.Topic[bus.LinkState]
 	// Echo echoes the peer's published rendezvous address and reports
 	// whether it answered; ok is false when the directory names no address
 	// for the peer. Nil echoes nothing, and the reply reports nothing.
@@ -64,10 +67,6 @@ type LinkService struct {
 	// Punching reports whether the node's own link punch toward the peer is
 	// in flight; nil reports none.
 	Punching func(peer addr.IA) bool
-	// Verdicts returns the health monitor's link verdicts by interface ID:
-	// a link's punch takes over a caller's standing entry only while its
-	// verdict is down. Nil reports every link up.
-	Verdicts func() map[uint16]bool
 
 	limiterOnce sync.Once
 	limiter     *ratelimit.Keyed[addr.IA]
@@ -239,13 +238,13 @@ func (s *LinkService) record(
 
 // arrivalSource returns the last observed underlay source of the link the
 // request arrived on — the request's own arrival the latest witness — and
-// the zero AddrPort when no link holds the interface or no source serves
-// reads. A zero interface, the composed path's mark, observes nothing.
+// the zero AddrPort when the link state holds none for the interface. A
+// zero interface, the composed path's mark, observes nothing.
 func (s *LinkService) arrivalSource(arrival uint16) netip.AddrPort {
-	if arrival == 0 || s.Observed == nil {
+	if arrival == 0 {
 		return netip.AddrPort{}
 	}
-	return s.Observed(arrival)
+	return s.Links.Latest().Observed(arrival)
 }
 
 // liveLinks counts the live entries, the ones the service's cap bounds.

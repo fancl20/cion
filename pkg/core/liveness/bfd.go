@@ -81,11 +81,15 @@ type BFDSession struct {
 	stopped   bool
 
 	up atomic.Bool
+	// onChange runs after each flip of the verdict, under mtx; nil runs
+	// nothing.
+	onChange func()
 }
 
 // newBFDSession starts a session on the link's interface: transmitting at
 // the monitor's next interval, its protocol state Down per RFC 5880, its
-// verdict up for the startup grace.
+// verdict up for the startup grace. onChange runs after each flip of the
+// verdict.
 func newBFDSession(
 	localIA addr.IA,
 	macFactory func() hash.Hash,
@@ -94,6 +98,7 @@ func newBFDSession(
 	ifID uint16,
 	neighbor addr.IA,
 	localHost, remoteHost netip.Addr,
+	onChange func(),
 ) *BFDSession {
 
 	disc := make([]byte, 4)
@@ -112,6 +117,7 @@ func newBFDSession(
 		localHost:  localHost,
 		remoteHost: remoteHost,
 		started:    time.Now(),
+		onChange:   onChange,
 	}
 	s.up.Store(true)
 	return s
@@ -218,10 +224,10 @@ func (s *BFDSession) advance(remote layers.BFDState) {
 	}
 }
 
-// refresh sets the verdict from the protocol state, logging each edge: up
-// while the session is Up, and for a session that never reached Up, up
-// until one detection time from its start. Must be called with the mutex
-// held.
+// refresh sets the verdict from the protocol state, logging and reporting
+// each edge: up while the session is Up, and for a session that never
+// reached Up, up until one detection time from its start. Must be called
+// with the mutex held.
 func (s *BFDSession) refresh(now time.Time) {
 	if s.localState == layers.BFDStateUp {
 		s.reachedUp = true
@@ -231,6 +237,9 @@ func (s *BFDSession) refresh(now time.Time) {
 		!s.reachedUp && now.Sub(s.started) < detection
 	if s.up.Swap(up) == up {
 		return
+	}
+	if s.onChange != nil {
+		s.onChange()
 	}
 	if up {
 		slog.Info("Link up", "interface", s.ifID, "neighbor", s.neighborIA)

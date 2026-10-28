@@ -86,8 +86,8 @@ func TestWindowTierFacts(t *testing.T) {
 	neighbors := map[addr.IA]*links.Link{selA: up, selB: dead}
 	s := &selection{
 		cfg: SelectionConfig{
-			IA:       selIA,
-			Verdicts: func() map[uint16]bool { return verdicts },
+			IA:    selIA,
+			Links: verdictTopic(verdicts),
 		},
 		pathEchoFn: func(addr.IA, *scion.Candidate) time.Duration { return 0 },
 	}
@@ -176,8 +176,8 @@ func TestExcludedCutsOffTheLinksOwnNeighbor(t *testing.T) {
 	}
 	s := &selection{
 		cfg: SelectionConfig{
-			IA:       selIA,
-			Verdicts: func() map[uint16]bool { return verdicts },
+			IA:    selIA,
+			Links: verdictTopic(verdicts),
 		},
 		pathEchoFn: func(addr.IA, *scion.Candidate) time.Duration { return 20 * ms },
 	}

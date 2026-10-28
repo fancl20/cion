@@ -12,8 +12,10 @@ import (
 	"github.com/scionproto/scion/pkg/addr"
 	"github.com/scionproto/scion/pkg/scrypto"
 
+	"github.com/fancl20/cion/pkg/libs/bus"
 	"github.com/fancl20/cion/pkg/libs/scion"
 	"github.com/fancl20/cion/pkg/libs/segment"
+	"github.com/fancl20/cion/pkg/modules/links"
 	"github.com/fancl20/cion/pkg/modules/pathdb"
 )
 
@@ -97,12 +99,16 @@ func testMeshSocket(t *testing.T, db pathdb.DB) (*meshSocket, *countingDB) {
 	t.Cleanup(func() { _ = internal.Close() })
 	counting := &countingDB{inner: db}
 	provider := &scion.PathProvider{IA: addr.MustIAFrom(20, 1), DB: counting}
+	linkState := new(bus.Topic[bus.LinkState])
+	linkState.Publish(bus.NewLinkState(bus.Link{
+		Entry: links.Link{IfID: 1, NeighborIA: addr.MustIAFrom(20, 2)},
+	}))
 	conn, err := scion.NewConn(scion.ConnConfig{
 		IA:           addr.MustIAFrom(20, 1),
 		Bind:         "127.0.0.1:0",
 		InternalAddr: internal.LocalAddr().String(),
 		MACKey:       testMACKey,
-		Links:        func() map[uint16]addr.IA { return map[uint16]addr.IA{1: addr.MustIAFrom(20, 2)} },
+		Links:        linkState,
 	})
 	if err != nil {
 		t.Fatal(err)

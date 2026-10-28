@@ -10,9 +10,9 @@ import (
 	"hash"
 	"net"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -24,8 +24,10 @@ import (
 	"github.com/scionproto/scion/pkg/scrypto/cppki"
 
 	"github.com/fancl20/cion/pkg/core/trust"
+	"github.com/fancl20/cion/pkg/libs/bus"
 	"github.com/fancl20/cion/pkg/libs/scion"
 	"github.com/fancl20/cion/pkg/libs/segment"
+	"github.com/fancl20/cion/pkg/modules/links"
 	"github.com/fancl20/cion/pkg/modules/pathdb"
 	pathdbbbolt "github.com/fancl20/cion/pkg/modules/pathdb/impl/bbolt"
 	"github.com/fancl20/cion/pkg/modules/trustdb"
@@ -118,6 +120,8 @@ type beaconFixture struct {
 	store    *BeaconStore
 	sender   *fakeSender
 	beaconer *Beaconer
+	// links is B's link state, which the beaconer reads on every pass.
+	links *bus.Topic[bus.LinkState]
 }
 
 var (
@@ -143,9 +147,7 @@ func newBeaconFixture(t *testing.T) *beaconFixture {
 
 	// B's three links: interface 1 to the core A, interface 2 to C,
 	// interface 3 to the fellow core A2.
-	links := func() map[uint16]addr.IA {
-		return map[uint16]addr.IA{1: coreIATest, 2: iaLineC, 3: iaCore2Test}
-	}
+	links := tableTopic(map[uint16]addr.IA{1: coreIATest, 2: iaLineC, 3: iaCore2Test})
 	store := NewBeaconStore()
 	sender := &fakeSender{}
 	beaconer, err := NewBeaconer(BeaconerConfig{
@@ -162,7 +164,7 @@ func newBeaconFixture(t *testing.T) *beaconFixture {
 	}
 	return &beaconFixture{
 		db: founder.DB, pathDB: pathDB, engines: engines, store: store,
-		sender: sender, beaconer: beaconer,
+		sender: sender, beaconer: beaconer, links: links,
 	}
 }
 
@@ -261,9 +263,7 @@ func TestHandleBeaconAsksTheSender(t *testing.T) {
 			MACKey: []byte(testMACKey),
 			Store:  NewBeaconStore(),
 			DB:     f.pathDB,
-			Links: func() map[uint16]addr.IA {
-				return map[uint16]addr.IA{1: coreIATest}
-			},
+			Links:  tableTopic(map[uint16]addr.IA{1: coreIATest}),
 			Sender: &fakeSender{},
 		})
 		if err != nil {
@@ -449,7 +449,7 @@ func TestHandleBeaconFabricatedIdentity(t *testing.T) {
 		MACKey: []byte(testMACKey),
 		Store:  f.store,
 		DB:     f.pathDB,
-		Links:  func() map[uint16]addr.IA { return map[uint16]addr.IA{2: nodeIATest} },
+		Links:  tableTopic(map[uint16]addr.IA{2: nodeIATest}),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -530,7 +530,7 @@ func TestHandleBeaconNonCoreOriginWaivedWithoutTRC(t *testing.T) {
 		MACKey: []byte(testMACKey),
 		Store:  f.store,
 		DB:     f.pathDB,
-		Links:  func() map[uint16]addr.IA { return map[uint16]addr.IA{2: iaLineC} },
+		Links:  tableTopic(map[uint16]addr.IA{2: iaLineC}),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -649,14 +649,14 @@ func TestHandleBeaconWithoutTRC(t *testing.T) {
 		t.Fatal(err)
 	}
 	fresh := trust.NewEngine(nodeIATest, key, &trust.NetworkProvider{DB: freshDB})
-	table := map[uint16]addr.IA{1: coreIATest}
+	links := tableTopic(map[uint16]addr.IA{1: coreIATest})
 	beaconer, err := NewBeaconer(BeaconerConfig{
 		IA:     nodeIATest,
 		Engine: fresh,
 		MACKey: []byte(testMACKey),
 		Store:  f.store,
 		DB:     f.pathDB,
-		Links:  func() map[uint16]addr.IA { return table },
+		Links:  links,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -689,7 +689,7 @@ func TestHandleBeaconWithoutTRC(t *testing.T) {
 	}
 	// The link to the core moves to a fresh interface: the data plane
 	// carries the beacon's arrival interface no more, so the route goes.
-	table = map[uint16]addr.IA{2: coreIATest}
+	links.Publish(tableState(map[uint16]addr.IA{2: coreIATest}))
 	if beaconer.BootstrapRoute(coreIATest) != nil {
 		t.Error("bootstrap route served over an interface the link table no longer holds")
 	}
@@ -718,9 +718,7 @@ func TestBootstrapAlternatesOrigins(t *testing.T) {
 		MACKey: []byte(testMACKey),
 		Store:  f.store,
 		DB:     f.pathDB,
-		Links: func() map[uint16]addr.IA {
-			return map[uint16]addr.IA{1: coreIATest, 3: iaCore2Test}
-		},
+		Links:  tableTopic(map[uint16]addr.IA{1: coreIATest, 3: iaCore2Test}),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -794,9 +792,7 @@ func TestBootstrapRouteFollowsVerifiedBeacons(t *testing.T) {
 		MACKey: []byte(testMACKey),
 		Store:  f.store,
 		DB:     f.pathDB,
-		Links: func() map[uint16]addr.IA {
-			return map[uint16]addr.IA{1: coreIATest, 3: iaCore2Test}
-		},
+		Links:  tableTopic(map[uint16]addr.IA{1: coreIATest, 3: iaCore2Test}),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -881,10 +877,8 @@ func TestCoreOpensBootstrapSlots(t *testing.T) {
 		MACKey: []byte(testMACKey),
 		Store:  NewBeaconStore(),
 		DB:     f.pathDB,
-		Links: func() map[uint16]addr.IA {
-			return map[uint16]addr.IA{3: iaCore2Test}
-		},
-		Core: true,
+		Links:  tableTopic(map[uint16]addr.IA{3: iaCore2Test}),
+		Core:   true,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -995,8 +989,8 @@ func crossingBeacon(
 }
 
 // beaconerOver builds B's beaconer over the fixture's stores and sender, its
-// link table read through links on every pass.
-func beaconerOver(t *testing.T, f *beaconFixture, links func() map[uint16]addr.IA) *Beaconer {
+// link state read from links on every pass.
+func beaconerOver(t *testing.T, f *beaconFixture, links *bus.Topic[bus.LinkState]) *Beaconer {
 	t.Helper()
 	beaconer, err := NewBeaconer(BeaconerConfig{
 		IA:     nodeIATest,
@@ -1040,9 +1034,7 @@ func propagatedHops(t *testing.T, f *beaconFixture) map[addr.IA][][]addr.IA {
 func TestPropagateOnceSkipsNeighborsTheBeaconCrosses(t *testing.T) {
 	f := newBeaconFixture(t)
 	ctx := context.Background()
-	b := beaconerOver(t, f, func() map[uint16]addr.IA {
-		return map[uint16]addr.IA{1: coreIATest, 2: iaLineC, 4: iaLineD}
-	})
+	b := beaconerOver(t, f, tableTopic(map[uint16]addr.IA{1: coreIATest, 2: iaLineC, 4: iaLineD}))
 	now := time.Now()
 	if err := b.HandleBeacon(ctx, lineBeacon(t, f, now), 1); err != nil {
 		t.Fatal(err)
@@ -1075,8 +1067,8 @@ func TestPropagateOnceSkipsNeighborsTheBeaconCrosses(t *testing.T) {
 func TestBeaconerSkipsCandidatesOfDepartedInterfaces(t *testing.T) {
 	f := newBeaconFixture(t)
 	ctx := context.Background()
-	table := map[uint16]addr.IA{1: coreIATest, 2: iaLineC}
-	b := beaconerOver(t, f, func() map[uint16]addr.IA { return table })
+	links := tableTopic(map[uint16]addr.IA{1: coreIATest, 2: iaLineC})
+	b := beaconerOver(t, f, links)
 	now := time.Now()
 	if err := b.HandleBeacon(ctx, lineBeacon(t, f, now), 1); err != nil {
 		t.Fatal(err)
@@ -1085,7 +1077,7 @@ func TestBeaconerSkipsCandidatesOfDepartedInterfaces(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	table = map[uint16]addr.IA{5: coreIATest, 6: iaLineC, 2: iaLineD}
+	links.Publish(tableState(map[uint16]addr.IA{5: coreIATest, 6: iaLineC, 2: iaLineD}))
 	b.propagateOnce(ctx)
 	b.registerOnce(ctx)
 	b.sends.Wait()
@@ -1299,16 +1291,13 @@ func TestCoreTierBeaconerRunsTheCoreLoops(t *testing.T) {
 
 	// The core A under test: the child B on link 1, the fellow core A2 on
 	// link 2.
-	links := func() map[uint16]addr.IA {
-		return map[uint16]addr.IA{1: nodeIATest, 2: iaCore2Test}
-	}
 	core, err := NewBeaconer(BeaconerConfig{
 		IA:     coreIATest,
 		Engine: f.engines[coreIATest],
 		MACKey: []byte(testMACKey),
 		Store:  f.store,
 		DB:     f.pathDB,
-		Links:  links,
+		Links:  tableTopic(map[uint16]addr.IA{1: nodeIATest, 2: iaCore2Test}),
 		Sender: f.sender,
 		Core:   true,
 	})
@@ -1520,9 +1509,7 @@ func TestOriginationSkipsASilentNeighbor(t *testing.T) {
 		MACKey: []byte(testMACKey),
 		Store:  NewBeaconStore(),
 		DB:     f.pathDB,
-		Links: func() map[uint16]addr.IA {
-			return map[uint16]addr.IA{1: nodeIATest, 2: iaCore2Test}
-		},
+		Links:  tableTopic(map[uint16]addr.IA{1: nodeIATest, 2: iaCore2Test}),
 		Sender: f.sender,
 		Core:   true,
 	})
@@ -1637,7 +1624,7 @@ func TestHandleRegistration(t *testing.T) {
 		MACKey: []byte(testMACKey),
 		Store:  NewBeaconStore(),
 		DB:     f.pathDB,
-		Links:  func() map[uint16]addr.IA { return map[uint16]addr.IA{1: nodeIATest} },
+		Links:  tableTopic(map[uint16]addr.IA{1: nodeIATest}),
 		Core:   true,
 	})
 	if err != nil {
@@ -1708,7 +1695,7 @@ func TestHandleRegistrationFabricatedIdentity(t *testing.T) {
 		MACKey: []byte(testMACKey),
 		Store:  NewBeaconStore(),
 		DB:     f.pathDB,
-		Links:  func() map[uint16]addr.IA { return map[uint16]addr.IA{1: nodeIATest} },
+		Links:  tableTopic(map[uint16]addr.IA{1: nodeIATest}),
 		Core:   true,
 	})
 	if err != nil {
@@ -1734,9 +1721,8 @@ func TestBeaconerPausesOnDownInterface(t *testing.T) {
 	ctx := context.Background()
 
 	// Interface 2 — toward C — is verdict-down.
-	f.beaconer.verdicts = func() map[uint16]bool {
-		return map[uint16]bool{1: true, 2: false}
-	}
+	table := map[uint16]addr.IA{1: coreIATest, 2: iaLineC, 3: iaCore2Test}
+	f.links.Publish(tableState(table, 2))
 
 	pcb := lineBeacon(t, f, time.Now())
 	if err := f.beaconer.HandleBeacon(ctx, pcb, 1); err != nil {
@@ -1753,15 +1739,14 @@ func TestBeaconerPausesOnDownInterface(t *testing.T) {
 
 	// The core's origination pauses the same way.
 	core, err := NewBeaconer(BeaconerConfig{
-		IA:       coreIATest,
-		Engine:   f.engines[coreIATest],
-		MACKey:   []byte(testMACKey),
-		Store:    NewBeaconStore(),
-		DB:       f.pathDB,
-		Links:    func() map[uint16]addr.IA { return map[uint16]addr.IA{1: nodeIATest} },
-		Verdicts: func() map[uint16]bool { return map[uint16]bool{1: false} },
-		Sender:   f.sender,
-		Core:     true,
+		IA:     coreIATest,
+		Engine: f.engines[coreIATest],
+		MACKey: []byte(testMACKey),
+		Store:  NewBeaconStore(),
+		DB:     f.pathDB,
+		Links:  tableTopic(map[uint16]addr.IA{1: nodeIATest}, 1),
+		Sender: f.sender,
+		Core:   true,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1775,9 +1760,8 @@ func TestBeaconerPausesOnDownInterface(t *testing.T) {
 		t.Fatalf("originated %d beacons on a down interface, want 0", sent)
 	}
 
-	// The verdict's up edge resumes: a missing verdict — no session —
-	// treats the link as up, as a node restarts with every link up.
-	f.beaconer.verdicts = func() map[uint16]bool { return map[uint16]bool{} }
+	// The verdict's up edge resumes.
+	f.links.Publish(tableState(table))
 	f.beaconer.propagateOnce(ctx)
 	f.beaconer.sends.Wait()
 	f.sender.mtx.Lock()
@@ -1795,18 +1779,13 @@ func TestBeaconerPausesOnDownInterface(t *testing.T) {
 func TestBeaconingRunReturnsOnCancel(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		f := newBeaconFixture(t)
-		var rounds atomic.Int32
-		links := func() map[uint16]addr.IA {
-			rounds.Add(1)
-			return map[uint16]addr.IA{}
-		}
 		b, err := NewBeaconer(BeaconerConfig{
 			IA:                   coreIATest,
 			Engine:               f.engines[coreIATest],
 			MACKey:               []byte(testMACKey),
 			Store:                f.store,
 			DB:                   f.pathDB,
-			Links:                links,
+			Links:                tableTopic(map[uint16]addr.IA{1: nodeIATest}),
 			Sender:               f.sender,
 			Core:                 true,
 			PropagationInterval:  time.Millisecond,
@@ -1824,8 +1803,11 @@ func TestBeaconingRunReturnsOnCancel(t *testing.T) {
 			b.Run(ctx)
 		}()
 		time.Sleep(10 * time.Millisecond)
-		if got := rounds.Load(); got < 3 {
-			t.Fatalf("origination rounds = %d, want the loops stepping on their tickers", got)
+		f.sender.mtx.Lock()
+		rounds := len(f.sender.beacons)
+		f.sender.mtx.Unlock()
+		if rounds < 3 {
+			t.Fatalf("origination rounds = %d, want the loops stepping on their tickers", rounds)
 		}
 
 		cancel()
@@ -1836,4 +1818,24 @@ func TestBeaconingRunReturnsOnCancel(t *testing.T) {
 			t.Fatal("Run did not return once its loops had exited")
 		}
 	})
+}
+
+// tableState returns the link state of a link to each of the table's
+// neighbors, by interface ID, the down interfaces' verdicts down.
+func tableState(table map[uint16]addr.IA, down ...uint16) bus.LinkState {
+	ls := make([]bus.Link, 0, len(table))
+	for ifID, ia := range table {
+		ls = append(ls, bus.Link{
+			Entry: links.Link{IfID: ifID, NeighborIA: ia},
+			Down:  slices.Contains(down, ifID),
+		})
+	}
+	return bus.NewLinkState(ls...)
+}
+
+// tableTopic returns a link state topic holding tableState(table, down...).
+func tableTopic(table map[uint16]addr.IA, down ...uint16) *bus.Topic[bus.LinkState] {
+	t := new(bus.Topic[bus.LinkState])
+	t.Publish(tableState(table, down...))
+	return t
 }

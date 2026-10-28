@@ -13,6 +13,7 @@ import (
 	"connectrpc.com/connect/v2"
 	"github.com/scionproto/scion/pkg/addr"
 
+	"github.com/fancl20/cion/pkg/libs/bus"
 	"github.com/fancl20/cion/pkg/libs/peeria"
 	"github.com/fancl20/cion/pkg/libs/scion"
 	"github.com/fancl20/cion/pkg/libs/underlay"
@@ -218,7 +219,7 @@ func TestPunchLinkMovesADownEntry(t *testing.T) {
 		if err := s.Store.Insert(context.Background(), standing); err != nil {
 			t.Fatal(err)
 		}
-		s.Verdicts = func() map[uint16]bool { return map[uint16]bool{standing.IfID: false} }
+		s.Links = verdictTopic(map[uint16]bool{standing.IfID: false})
 	})
 	caller := udpSocket(t)
 	nonce := [16]byte{4}
@@ -349,7 +350,7 @@ func TestPunchRefusals(t *testing.T) {
 			if err := s.Store.Insert(context.Background(), standing); err != nil {
 				t.Fatal(err)
 			}
-			s.Verdicts = func() map[uint16]bool { return map[uint16]bool{standing.IfID: false} }
+			s.Links = verdictTopic(map[uint16]bool{standing.IfID: false})
 		},
 		peer: linkIA,
 		req:  valid,
@@ -479,6 +480,7 @@ func TestEstablishmentPunchesUnansweredCandidates(t *testing.T) {
 	reflexive := netip.MustParseAddrPort("192.0.2.9:26001")
 	punch := &stubPuncher{reflexive: reflexive, ifID: 4}
 	var dialedIfID uint16
+	state := new(bus.Topic[bus.LinkState])
 	s := &selection{
 		streaks: make(map[addr.IA]*peerStreak),
 		cfg: SelectionConfig{
@@ -486,10 +488,14 @@ func TestEstablishmentPunchesUnansweredCandidates(t *testing.T) {
 			Store:    store,
 			LinkHost: netip.MustParseAddr("127.0.0.1"),
 			Punch:    punch,
-			Observed: func(uint16) netip.AddrPort { return reflexive },
+			Links:    state,
 			Link: linkRequester(func(_ context.Context, _ *scion.Addr,
 				_ netip.AddrPort, ifID uint16) (*nodev1.LinkReply, error) {
 				dialedIfID = ifID
+				// The reply arrives over the link, which observes the
+				// peer at its reflexive address.
+				state.Publish(bus.NewLinkState(
+					bus.Link{Entry: links.Link{IfID: ifID}, Observed: reflexive}))
 				return &nodev1.LinkReply{LocalAddr: "10.0.0.9:31001", IfId: 4}, nil
 			}),
 		}}

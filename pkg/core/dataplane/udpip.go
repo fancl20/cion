@@ -69,6 +69,7 @@ type UDPProvider struct {
 	receiveBufferSize  int
 	sendBufferSize     int
 	sockets            underlay.Sockets
+	onObserved         func()
 }
 
 // udpLink is the extension of Link implemented by all the links of this
@@ -86,9 +87,12 @@ type udpLink interface {
 }
 
 // NewUDPProvider returns a new provider for exclusive use by the caller,
-// binding its sockets through the source.
+// binding its sockets through the source. onObserved runs whenever an
+// external link's observed source moves, on the link's receive path, so it
+// must not block; nil runs nothing.
 func NewUDPProvider(
 	batchSize int, receiveBufferSize int, sendBufferSize int, sockets underlay.Sockets,
+	onObserved func(),
 ) *UDPProvider {
 
 	return &UDPProvider{
@@ -98,6 +102,7 @@ func NewUDPProvider(
 		receiveBufferSize: receiveBufferSize,
 		sendBufferSize:    sendBufferSize,
 		sockets:           sockets,
+		onObserved:        onObserved,
 	}
 }
 
@@ -258,6 +263,7 @@ func (u *UDPProvider) newExternalLink(
 		raw:        c,
 		seed:       makeHashSeed(),
 		ifID:       ifID,
+		onObserved: u.onObserved,
 	}
 	el.locator.Store(udpAddrPointer(remoteAddr))
 	if bfd != nil {
@@ -635,8 +641,10 @@ type externalLink struct {
 	// observed is the source of the link's last arrival, the destination its
 	// answers carry — nil until one arrives.
 	observed atomic.Pointer[net.UDPAddr]
-	seed     uint32
-	ifID     uint16
+	// onObserved runs after each move of observed; nil runs nothing.
+	onObserved func()
+	seed       uint32
+	ifID       uint16
 }
 
 func (l *externalLink) start(
@@ -732,9 +740,15 @@ func (l *externalLink) receive(size int, srcAddr *net.UDPAddr, p *Packet) {
 
 	// The arrival's source is the link's latest observation, the address its
 	// answers carry; the packet itself carries none, for every send on this
-	// connection follows the link's own addresses.
+	// connection follows the link's own addresses. Only a move replaces the
+	// record and reports it.
 	ap := netip.AddrPortFrom(srcAddr.AddrPort().Addr().Unmap(), srcAddr.AddrPort().Port())
-	l.observed.Store(net.UDPAddrFromAddrPort(ap))
+	if last := l.observed.Load(); last == nil || last.AddrPort() != ap {
+		l.observed.Store(net.UDPAddrFromAddrPort(ap))
+		if l.onObserved != nil {
+			l.onObserved()
+		}
+	}
 
 	p.Link = l
 

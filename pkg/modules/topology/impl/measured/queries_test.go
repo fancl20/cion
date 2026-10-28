@@ -24,8 +24,8 @@ var selX = addr.MustIAFrom(20, 0xfd0000000031)
 func TestFreshestClean(t *testing.T) {
 	verdicts := map[uint16]bool{7: false} // the node's own dead interface
 	s := &selection{cfg: SelectionConfig{
-		IA:       selIA,
-		Verdicts: func() map[uint16]bool { return verdicts },
+		IA:    selIA,
+		Links: verdictTopic(verdicts),
 	}}
 	now := time.Now()
 	dirty := []scion.Candidate{
@@ -205,8 +205,8 @@ func TestMeasureExcluded(t *testing.T) {
 	}
 	s := &selection{
 		cfg: SelectionConfig{
-			IA:       selIA,
-			Verdicts: func() map[uint16]bool { return verdicts },
+			IA:    selIA,
+			Links: verdictTopic(verdicts),
 		},
 		pathEchoFn: func(_ addr.IA, c *scion.Candidate) time.Duration {
 			return echoes[routeKey(c)]

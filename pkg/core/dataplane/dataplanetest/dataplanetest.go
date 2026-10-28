@@ -15,7 +15,9 @@ import (
 	"github.com/scionproto/scion/pkg/addr"
 
 	"github.com/fancl20/cion/pkg/core/dataplane"
+	"github.com/fancl20/cion/pkg/libs/bus"
 	"github.com/fancl20/cion/pkg/libs/underlay"
+	"github.com/fancl20/cion/pkg/modules/links"
 )
 
 // IfID is the interface ID of every node's external link.
@@ -70,7 +72,7 @@ func StartNode(t *testing.T, host netip.Addr, ia, neighbor addr.IA, extLocal, ex
 	if err != nil {
 		t.Fatal(err)
 	}
-	provider := dataplane.NewUDPProvider(64, 0, 0, underlay.Kernel)
+	provider := dataplane.NewUDPProvider(64, 0, 0, underlay.Kernel, nil)
 	il, err := provider.NewInternalLink(internal, 64,
 		metrics.NewInterfaceMetrics(0, ia, 0))
 	if err != nil {
@@ -118,10 +120,12 @@ func StartNode(t *testing.T, host netip.Addr, ia, neighbor addr.IA, extLocal, ex
 	}
 }
 
-// Links returns the node's link table, its one external link, for its
-// sockets.
-func (n *Node) Links() map[uint16]addr.IA {
-	return map[uint16]addr.IA{IfID: n.Neighbor}
+// Links returns a link state topic holding the node's one external link up,
+// for its sockets.
+func (n *Node) Links() *bus.Topic[bus.LinkState] {
+	b := bus.New()
+	b.Links().Publish(bus.NewLinkState(bus.Link{Entry: links.Link{IfID: IfID, NeighborIA: n.Neighbor}}))
+	return b.Links()
 }
 
 // MapService registers svc at port on the node's host, where the data

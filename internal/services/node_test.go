@@ -18,7 +18,6 @@ import (
 	"github.com/fancl20/cion/pkg/libs/underlay"
 	"github.com/fancl20/cion/pkg/modules/enrollauth"
 	"github.com/fancl20/cion/pkg/modules/links"
-	"github.com/fancl20/cion/pkg/modules/links/impl/memory"
 )
 
 // setupFounderNode assembles a founding core from the minimal run arguments
@@ -182,16 +181,21 @@ func TestSetupFounderServesTheConsole(t *testing.T) {
 }
 
 // TestLinkStoreWritesSignal checks the node's link store: a write through
-// it, whoever makes it, wakes the data plane loop, and the entry it writes
-// appears in the link table's next read with no wait.
+// it, whoever makes it, wakes the data plane loop and nudges the link state,
+// whose next publish carries the entry the write lands.
 func TestLinkStoreWritesSignal(t *testing.T) {
 	n := setupFounderNode(t, func(*NodeConfig) {})
-	if table := n.linkTable(); len(table) != 0 {
-		t.Fatalf("the founder's link table = %v, want empty", table)
+	if err := n.publishLinkState(t.Context()); err != nil {
+		t.Fatal(err)
 	}
-	select {
-	case <-n.linkChanges:
-	default:
+	if state := n.bus.Links().Latest(); len(state.Table()) != 0 {
+		t.Fatalf("the founder's link table = %v, want empty", state.Table())
+	}
+	for _, c := range []chan struct{}{n.linkChanges, n.linkNudges} {
+		select {
+		case <-c:
+		default:
+		}
 	}
 	neighbor := addr.MustIAFrom(n.ident.ia.ISD(), 0xfd0000000099)
 	l := &links.Link{
@@ -208,51 +212,50 @@ func TestLinkStoreWritesSignal(t *testing.T) {
 	default:
 		t.Error("the write did not wake the data plane loop")
 	}
-	if got, ok := n.linkTable()[l.IfID]; !ok || !got.Equal(neighbor) {
-		t.Errorf("the link table after the write = %v, want interface %d naming %v",
-			n.linkTable(), l.IfID, neighbor)
+	select {
+	case <-n.linkNudges:
+	default:
+		t.Error("the write did not nudge the link state")
 	}
-}
-
-// TestLinkTableServesPersistedLinks checks the link table's first read: the
-// entries a store holds before any write signals, a restart's persisted
-// table, serve at once.
-func TestLinkTableServesPersistedLinks(t *testing.T) {
-	persisted := memory.New()
-	neighbor := addr.MustIAFrom(20, 0xfd0000000099)
-	l := &links.Link{
-		NeighborIA: neighbor,
-		Local:      netip.MustParseAddrPort("127.0.0.124:31001"),
-		Remote:     netip.MustParseAddrPort("127.0.0.124:31002"),
-		State:      links.StateEstablished,
-	}
-	if err := persisted.Insert(t.Context(), l); err != nil {
+	if err := n.publishLinkState(t.Context()); err != nil {
 		t.Fatal(err)
 	}
-	n := &node{linkChanges: make(chan struct{}, 1)}
-	n.linkStore = links.Notifying(persisted, n.notifyLinkChange)
-	if got, ok := n.linkTable()[l.IfID]; !ok || !got.Equal(neighbor) {
-		t.Errorf("the first link table = %v, want interface %d naming %v",
-			n.linkTable(), l.IfID, neighbor)
+	state := n.bus.Links().Latest()
+	if got, ok := state.Table()[l.IfID]; !ok || !got.Equal(neighbor) {
+		t.Errorf("the link table after the write = %v, want interface %d naming %v",
+			state.Table(), l.IfID, neighbor)
 	}
 }
 
-// TestUsableLinksDropDownVerdicts checks the snapshot every route out of
-// the node resolves over: the table's links whose verdict is up, and those
-// the monitor holds no verdict for; a down verdict's link is dropped, and a
-// table that failed to read stays nil.
-func TestUsableLinksDropDownVerdicts(t *testing.T) {
-	up := addr.MustIAFrom(20, 0xfd0000000001)
-	down := addr.MustIAFrom(20, 0xfd0000000002)
-	unseen := addr.MustIAFrom(20, 0xfd0000000003)
-	table := map[uint16]addr.IA{1: up, 2: down, 3: unseen}
-	verdicts := map[uint16]bool{1: true, 2: false}
+// TestLinkStateOf checks the link state the store's entries make up: every
+// live entry, its verdict down only where the monitor holds it down — an
+// interface the monitor runs no session for is up — and its observation;
+// a retired entry is no link.
+func TestLinkStateOf(t *testing.T) {
+	up := &links.Link{IfID: 1, NeighborIA: addr.MustIAFrom(20, 0xfd0000000001), State: links.StateEstablished}
+	down := &links.Link{IfID: 2, NeighborIA: addr.MustIAFrom(20, 0xfd0000000002), State: links.StateEstablished}
+	unseen := &links.Link{IfID: 3, NeighborIA: addr.MustIAFrom(20, 0xfd0000000003), State: links.StateCandidate}
+	retired := &links.Link{IfID: 4, NeighborIA: addr.MustIAFrom(20, 0xfd0000000004), State: links.StateRetired}
+	seen := netip.MustParseAddrPort("192.0.2.1:30000")
+	state := linkStateOf(
+		[]*links.Link{up, down, unseen, retired},
+		map[uint16]bool{1: true, 2: false, 4: true},
+		func(ifID uint16) netip.AddrPort {
+			if ifID == 1 {
+				return seen
+			}
+			return netip.AddrPort{}
+		})
 
-	want := map[uint16]addr.IA{1: up, 3: unseen}
-	if diff := cmp.Diff(want, usable(table, verdicts)); diff != "" {
+	wantTable := map[uint16]addr.IA{1: up.NeighborIA, 2: down.NeighborIA, 3: unseen.NeighborIA}
+	if diff := cmp.Diff(wantTable, state.Table()); diff != "" {
+		t.Errorf("link table (-want +got):\n%s", diff)
+	}
+	wantUsable := map[uint16]addr.IA{1: up.NeighborIA, 3: unseen.NeighborIA}
+	if diff := cmp.Diff(wantUsable, state.Usable()); diff != "" {
 		t.Errorf("usable links (-want +got):\n%s", diff)
 	}
-	if got := usable(nil, verdicts); got != nil {
-		t.Errorf("usable links of an unread table = %v, want nil", got)
+	if got := state.Observed(1); got != seen {
+		t.Errorf("interface 1 observed %v, want %v", got, seen)
 	}
 }

@@ -40,7 +40,7 @@ func (n *testNode) newConn(t *testing.T, port uint16) *Conn {
 		Bind:         netip.AddrPortFrom(n.ControlIP, port).String(),
 		InternalAddr: n.Internal,
 		MACKey:       n.MACKey,
-		Links:        n.Links,
+		Links:        n.Links(),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -192,7 +192,7 @@ func TestConnWildcardSource(t *testing.T) {
 			Bind:         netip.AddrPortFrom(netip.MustParseAddr("0.0.0.0"), 0).String(),
 			InternalAddr: n.Internal,
 			MACKey:       n.MACKey,
-			Links:        n.Links,
+			Links:        n.Links(),
 			WildcardHost: func(context.Context) netip.Addr {
 				return host()
 			},

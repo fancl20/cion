@@ -24,13 +24,13 @@ package topology
 import (
 	"context"
 	"net/http"
-	"net/netip"
 	"time"
 
 	"github.com/scionproto/scion/pkg/addr"
 	spath "github.com/scionproto/scion/pkg/slayers/path/scion"
 
 	"github.com/fancl20/cion/pkg/core/trust"
+	"github.com/fancl20/cion/pkg/libs/bus"
 	"github.com/fancl20/cion/pkg/libs/scion"
 	"github.com/fancl20/cion/pkg/libs/scionrpc"
 	"github.com/fancl20/cion/pkg/modules/links"
@@ -94,20 +94,16 @@ type Environment struct {
 	// Engine provides the node's chain as the directory client's
 	// certificate.
 	Engine *trust.Engine
-	// Verdicts returns the health monitor's link verdicts by interface ID:
-	// the selection loop's floor and demotions read them — established-but-
-	// down entries satisfy no floor and a down neighbor counts as
-	// infinitely slow.
-	Verdicts func() map[uint16]bool
 	// Latencies receives the selection loop's per-link one-way delay
 	// estimates; the beaconer's entries declare them.
 	Latencies LatencyRecorder
-	// Observed returns a serving link's last observed underlay source by
-	// interface ID, and the zero AddrPort when no serving link holds the
-	// interface: the record the authenticated link request's agreement rule
-	// reads, the data plane's own witness of where the peer's packets come
-	// from. Nil serves none.
-	Observed func(ifID uint16) netip.AddrPort
+	// Bus is the node's bus. The provider reads its link state: the verdicts
+	// the selection loop's floor and demotions count — established-but-down
+	// entries satisfy no floor and a down neighbor counts as infinitely
+	// slow — and each serving link's observed source, the data plane's own
+	// witness of where the peer's packets come from, which the
+	// authenticated link request's agreement rule reads.
+	Bus *bus.Bus
 }
 
 // PeerChannel is the node's channel to its peers.

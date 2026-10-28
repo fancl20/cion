@@ -9,6 +9,7 @@ import (
 
 	"github.com/scionproto/scion/pkg/addr"
 
+	"github.com/fancl20/cion/pkg/libs/bus"
 	"github.com/fancl20/cion/pkg/modules/links"
 	"github.com/fancl20/cion/pkg/modules/topology"
 )
@@ -45,7 +46,7 @@ func Run(t *testing.T, s Suite) {
 	})
 	t.Run("contract: seeding is idempotent", func(t *testing.T) {
 		p := s.New(t)
-		p.Wire(topology.Environment{Store: s.Store})
+		p.Wire(topology.Environment{Store: s.Store, Bus: bus.New()})
 		if err := p.Seed(ctx); err != nil {
 			t.Fatalf("the first seed: %v", err)
 		}

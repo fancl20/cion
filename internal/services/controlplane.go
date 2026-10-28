@@ -97,7 +97,7 @@ func (n *node) openState(ctx context.Context) error {
 	}
 	n.group.Own("link database", linkStore.Close)
 	// Every write to the store, whoever makes it, signals the generation
-	// swap and the link table snapshot's rebuild.
+	// swap and the link state's next publish.
 	n.linkStore = links.Notifying(linkStore, n.notifyLinkChange)
 	return nil
 }
@@ -443,8 +443,7 @@ func (n *node) buildBeaconing() error {
 		MACKey:               n.ident.key,
 		Store:                beacons,
 		DB:                   n.pathDB,
-		Links:                n.linkTable,
-		Verdicts:             n.monitor.Verdicts,
+		Links:                n.bus.Links(),
 		Latencies:            n.linkLatency,
 		Sender:               n.peerClt,
 		Core:                 coreTier,
@@ -463,7 +462,7 @@ func (n *node) buildBeaconing() error {
 		Bootstrap:     beaconer.BootstrapRoute,
 		Cores:         cores,
 		InterfaceDown: n.ifDown,
-		Links:         n.usableLinks,
+		Links:         n.bus.Links(),
 	}
 	return nil
 }
@@ -471,11 +470,12 @@ func (n *node) buildBeaconing() error {
 // wireTopology delivers the phases' products to the loaded provider: the
 // completed identity, the store its decisions land in, the peer client its
 // in-band requests ride, the path provider its comparator baselines with,
-// the trust engine its directory channel authenticates with, the monitor's
-// verdicts, and the data plane's per-link observations the confirm's
-// agreement rule reads. The last step before the provider mounts and runs,
-// and the one direction the dependency ever crosses: the application
-// imports the core and the shared libraries, never the reverse.
+// the trust engine its directory channel authenticates with, the latency
+// table its samples land in, and the node's bus, whose link state carries
+// the monitor's verdicts and the data plane's per-link observations the
+// confirm's agreement rule reads. The last step before the provider mounts
+// and runs, and the one direction the dependency ever crosses: the
+// application imports the core and the shared libraries, never the reverse.
 func (n *node) wireTopology() {
 	n.topology.Wire(topology.Environment{
 		IA:        n.ident.ia,
@@ -483,9 +483,8 @@ func (n *node) wireTopology() {
 		Peer:      n.peerClt,
 		Paths:     n.pathProvider,
 		Engine:    n.engine,
-		Verdicts:  n.monitor.Verdicts,
 		Latencies: n.linkLatency,
-		Observed:  n.observedSource,
+		Bus:       n.bus,
 	})
 }
 
@@ -495,15 +494,17 @@ func (n *node) wireTopology() {
 // which makes answering a service of the node itself. It is assembled
 // before the first data plane generation, so every generation finds a
 // session per serving link, and the file provider's nodes get them too:
-// the monitor reads the store, not the provider. The interface-down cache
-// is assembled with it — the conns the phases bind record the signals the
-// data plane's egress-down branch sends.
+// the monitor reads the store, not the provider. Each change of its
+// verdicts nudges the link state. The interface-down cache is assembled
+// with it — the conns the phases bind record the signals the data plane's
+// egress-down branch sends.
 func (n *node) assembleMonitor() error {
 	monitor, err := liveness.NewHealthMonitor(liveness.HealthMonitorConfig{
 		IA:       n.ident.ia,
 		MACKey:   n.ident.key,
 		Store:    n.linkStore,
 		Interval: n.cfg.Pacing.BFD,
+		OnChange: n.nudgeLinkState,
 	})
 	if err != nil {
 		return err
@@ -572,7 +573,7 @@ func (n *node) scionConn(port uint16) (*scion.Conn, error) {
 		Bind:          netip.AddrPortFrom(n.cfg.controlAddr.Addr(), port).String(),
 		InternalAddr:  n.cfg.internalAddr.String(),
 		MACKey:        n.ident.key,
-		Links:         n.usableLinks,
+		Links:         n.bus.Links(),
 		InterfaceDown: n.ifDown,
 		WildcardHost:  n.wildcardHost.resolve,
 		Sockets:       n.sockets,
@@ -594,7 +595,8 @@ func (n *node) scionConn(port uint16) (*scion.Conn, error) {
 func (n *node) coreRoute() *scion.Addr {
 	// The one-hop shortcut: an issuer core a usable link reaches directly —
 	// a link the monitor marked down falls through to the composed route.
-	for ifID, neighborIA := range n.usableLinks() {
+	state := n.bus.Links().Latest()
+	for ifID, neighborIA := range state.Usable() {
 		if !neighborIA.IsZero() && n.issuerASes()[neighborIA] {
 			return &scion.Addr{IA: neighborIA, Service: addr.SvcCS, IfID: ifID}
 		}

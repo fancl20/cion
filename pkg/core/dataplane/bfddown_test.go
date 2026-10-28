@@ -34,7 +34,7 @@ func startDownNode(t *testing.T) (n *node, key []byte) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	provider := NewUDPProvider(64, 0, 0, underlay.Kernel)
+	provider := NewUDPProvider(64, 0, 0, underlay.Kernel, nil)
 	internal, ext := freeUDPAddr(t), freeUDPAddr(t)
 	il, err := provider.NewInternalLink(internal, 64,
 		metrics.NewInterfaceMetrics(0, ia, 0))

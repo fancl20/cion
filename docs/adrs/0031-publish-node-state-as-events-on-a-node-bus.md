@@ -1,6 +1,6 @@
 # Publish Node State as Events on a Node Bus
 
-*   Status: proposed
+*   Status: accepted
 *   Date: 2026-10-27
 
 [TOC]

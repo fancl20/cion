@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/netip"
 	"reflect"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -83,7 +84,7 @@ func TestExternalLinkSendReceive(t *testing.T) {
 	defer func() { _ = remote.Close() }()
 	remoteAddr := remote.LocalAddr().String()
 
-	provider := NewUDPProvider(64, 0, 0, underlay.Kernel)
+	provider := NewUDPProvider(64, 0, 0, underlay.Kernel, nil)
 	link, err := provider.NewExternalLink(
 		64, nil, "127.0.0.1:0", remoteAddr, 1, newTestMetrics(t, 1),
 	)
@@ -142,7 +143,7 @@ func TestExternalLinkSendReceive(t *testing.T) {
 // TestInternalLinkSendReceive exercises both directions of the internal link
 // over the UDP/IP underlay, including address resolution.
 func TestInternalLinkSendReceive(t *testing.T) {
-	provider := NewUDPProvider(64, 0, 0, underlay.Kernel)
+	provider := NewUDPProvider(64, 0, 0, underlay.Kernel, nil)
 	internal := freeUDPAddr(t)
 	link, err := provider.NewInternalLink(internal, 64, newTestMetrics(t, 0))
 	if err != nil {
@@ -214,7 +215,7 @@ func TestInternalLinkSendReceive(t *testing.T) {
 // TestInternalLinkResolveSVC checks that SVC destinations resolve to the
 // registered service address.
 func TestInternalLinkResolveSVC(t *testing.T) {
-	provider := NewUDPProvider(64, 0, 0, underlay.Kernel)
+	provider := NewUDPProvider(64, 0, 0, underlay.Kernel, nil)
 	link, err := provider.NewInternalLink("127.0.0.1:0", 64, newTestMetrics(t, 0))
 	if err != nil {
 		t.Fatal(err)
@@ -239,7 +240,7 @@ func TestInternalLinkResolveSVC(t *testing.T) {
 
 // TestInternalLinkResolveErrors checks the address validation error paths.
 func TestInternalLinkResolveErrors(t *testing.T) {
-	provider := NewUDPProvider(64, 0, 0, underlay.Kernel)
+	provider := NewUDPProvider(64, 0, 0, underlay.Kernel, nil)
 	link, err := provider.NewInternalLink("127.0.0.1:0", 64, newTestMetrics(t, 0))
 	if err != nil {
 		t.Fatal(err)
@@ -284,17 +285,19 @@ func onehopDatagram(payload []byte) []byte {
 // TestExternalLinkReaimAndObserved checks the unconnected link's live state:
 // an arrival from a source the recorded locator does not name is processed
 // all the same and records itself as the link's last observed source — the
-// new answer the control plane reads — while the locator it names moves
-// nothing; the link's own conversation answers that source — the one-hop
-// send and the raw write alike — while transit keeps the recorded locator; a
-// re-aim then changes transit's destination without rebuilding anything, and
-// the answers follow only an arrival from the new locator itself.
+// new answer the control plane reads, reported once per move — while the
+// locator it names moves nothing; the link's own conversation answers that
+// source — the one-hop send and the raw write alike — while transit keeps
+// the recorded locator; a re-aim then changes transit's destination without
+// rebuilding anything, and the answers follow only an arrival from the new
+// locator itself.
 func TestExternalLinkReaimAndObserved(t *testing.T) {
 	aimed := newPeerSocket(t)
 	moved := newPeerSocket(t)
 	stranger := newPeerSocket(t)
 
-	provider := NewUDPProvider(64, 0, 0, underlay.Kernel)
+	var moves atomic.Int32
+	provider := NewUDPProvider(64, 0, 0, underlay.Kernel, func() { moves.Add(1) })
 	link, err := provider.NewExternalLink(
 		64, nil, "127.0.0.1:0", aimed.LocalAddr().String(), 3, newTestMetrics(t, 3),
 	)
@@ -322,6 +325,15 @@ func TestExternalLinkReaimAndObserved(t *testing.T) {
 	}
 	if got := provider.Observed(3); got != stranger.LocalAddr().(*net.UDPAddr).AddrPort() {
 		t.Errorf("observed source = %v, want the stranger's %v", got, stranger.LocalAddr())
+	}
+	// A second arrival from the same source moves nothing and reports
+	// nothing.
+	if _, err := stranger.WriteToUDP(in, el.raw.LocalAddr()); err != nil {
+		t.Fatal(err)
+	}
+	recvFromQueues(t, procQs)
+	if got := moves.Load(); got != 1 {
+		t.Errorf("observation moves reported = %d, want 1", got)
 	}
 
 	// The locator the arrival named moved nothing: a transit send still
@@ -396,6 +408,9 @@ func TestExternalLinkReaimAndObserved(t *testing.T) {
 	if rpkt := recvFromQueues(t, procQs); rpkt.Link.IfID() != 3 {
 		t.Fatalf("the new locator's arrival dispatched as %d", rpkt.Link.IfID())
 	}
+	if got := moves.Load(); got != 2 {
+		t.Errorf("observation moves reported = %d, want 2", got)
+	}
 	if err := el.WriteRaw(answer); err != nil {
 		t.Fatal(err)
 	}
@@ -415,7 +430,7 @@ func TestExternalLinkReaimAndObserved(t *testing.T) {
 // address having stopped naming the link.
 func TestExternalLinksShareLocator(t *testing.T) {
 	shared := newPeerSocket(t)
-	provider := NewUDPProvider(64, 0, 0, underlay.Kernel)
+	provider := NewUDPProvider(64, 0, 0, underlay.Kernel, nil)
 	for _, ifID := range []uint16{1, 2} {
 		if _, err := provider.NewExternalLink(
 			64, nil, "127.0.0.1:0", shared.LocalAddr().String(), ifID,

@@ -13,6 +13,7 @@ import (
 	"github.com/quic-go/quic-go/http3"
 	"github.com/scionproto/scion/pkg/addr"
 
+	"github.com/fancl20/cion/pkg/libs/bus"
 	"github.com/fancl20/cion/pkg/libs/peeria"
 	"github.com/fancl20/cion/pkg/libs/scion"
 	"github.com/fancl20/cion/pkg/modules/links"
@@ -320,12 +321,8 @@ func TestLinkServiceConfirmInstallsObservation(t *testing.T) {
 	observing := func() *LinkService {
 		return newLinkService(t, func(s *LinkService) {
 			s.MinInterval = time.Millisecond
-			s.Observed = func(ifID uint16) netip.AddrPort {
-				if ifID == 7 {
-					return observed
-				}
-				return netip.AddrPort{}
-			}
+			s.Links = new(bus.Topic[bus.LinkState])
+			s.Links.Publish(bus.NewLinkState(bus.Link{Entry: links.Link{IfID: 7}, Observed: observed}))
 		})
 	}
 

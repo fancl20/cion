@@ -35,6 +35,7 @@ type HealthMonitor struct {
 	tick       time.Duration
 	detectMult uint8
 	macFactory func() hash.Hash
+	onChange   func()
 
 	mtx      sync.Mutex
 	sessions map[uint16]*BFDSession
@@ -56,6 +57,10 @@ type HealthMonitorConfig struct {
 	// DetectMultiplier is the count of intervals without an arrival that
 	// marks a link down; zero uses BFDDetectMultiplier.
 	DetectMultiplier uint8
+	// OnChange runs whenever Verdicts may return another result: after a
+	// session's verdict flips, under the session's lock, and after departed
+	// links' sessions stop. It must not block. Nil runs nothing.
+	OnChange func()
 }
 
 func (cfg HealthMonitorConfig) interval() time.Duration {
@@ -86,6 +91,7 @@ func NewHealthMonitor(cfg HealthMonitorConfig) (*HealthMonitor, error) {
 		tick:       cfg.interval(),
 		detectMult: cfg.detectMultiplier(),
 		macFactory: macFactory,
+		onChange:   cfg.OnChange,
 		sessions:   make(map[uint16]*BFDSession),
 	}, nil
 }
@@ -106,7 +112,7 @@ func (m *HealthMonitor) session(l *links.Link) *BFDSession {
 		return s
 	}
 	s := newBFDSession(m.ia, m.macFactory, m.tick, m.detectMult,
-		l.IfID, l.NeighborIA, l.Local.Addr(), l.Remote.Addr())
+		l.IfID, l.NeighborIA, l.Local.Addr(), l.Remote.Addr(), m.onChange)
 	m.sessions[l.IfID] = s
 	return s
 }
@@ -123,11 +129,11 @@ func (m *HealthMonitor) Up(ifID uint16) bool {
 	return s.IsUp()
 }
 
-// Verdicts returns the per-interface verdicts the node's consumers read: a
-// down interface originates and propagates nothing, carries no route out of
-// the node — no composed path, one-hop write, or core route's shortcut
-// leaves through it — and the selection loop's floor and demotions count up
-// links only.
+// Verdicts returns the per-interface verdicts, which the node's link state
+// carries to its consumers: a down interface originates and propagates
+// nothing, carries no route out of the node — no composed path, one-hop
+// write, or core route's shortcut leaves through it — and the selection
+// loop's floor and demotions count up links only.
 func (m *HealthMonitor) Verdicts() map[uint16]bool {
 	m.mtx.Lock()
 	defer m.mtx.Unlock()
@@ -177,11 +183,16 @@ func (m *HealthMonitor) reconcile() {
 		serving[l.IfID] = true
 		m.session(l)
 	}
+	stopped := false
 	for ifID, s := range m.sessions {
 		if !serving[ifID] {
 			s.stop()
 			delete(m.sessions, ifID)
+			stopped = true
 		}
+	}
+	if stopped && m.onChange != nil {
+		m.onChange()
 	}
 }
 

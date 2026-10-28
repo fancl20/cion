@@ -15,7 +15,9 @@ import (
 	"github.com/scionproto/scion/pkg/scrypto/cppki"
 
 	"github.com/fancl20/cion/pkg/core/trust"
+	"github.com/fancl20/cion/pkg/libs/bus"
 	"github.com/fancl20/cion/pkg/libs/scion"
+	"github.com/fancl20/cion/pkg/modules/links"
 	"github.com/fancl20/cion/pkg/modules/trustdb"
 )
 
@@ -192,6 +194,10 @@ func newTestWireguard(
 	provider := &scion.PathProvider{IA: ia, DB: &memDB{}}
 	directory := &recordingDirectory{published: make(chan Entry, 16)}
 	regs := &recordingRegs{}
+	linkState := new(bus.Topic[bus.LinkState])
+	linkState.Publish(bus.NewLinkState(bus.Link{
+		Entry: links.Link{IfID: 1, NeighborIA: addr.MustIAFrom(20, 2)},
+	}))
 	cfg := Config{
 		IA:         ia,
 		ListenHost: testHost,
@@ -209,7 +215,7 @@ func newTestWireguard(
 				Bind:         "127.0.0.1:0",
 				InternalAddr: internal.LocalAddr().String(),
 				MACKey:       testMACKey,
-				Links:        func() map[uint16]addr.IA { return map[uint16]addr.IA{1: addr.MustIAFrom(20, 2)} },
+				Links:        linkState,
 			})
 		},
 		RegisterSvc:     regs.register,

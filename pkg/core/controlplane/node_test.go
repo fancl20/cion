@@ -54,7 +54,7 @@ func (n *testNode) newConn(t *testing.T, port uint16) *scion.Conn {
 		Bind:         netip.AddrPortFrom(n.ControlIP, port).String(),
 		InternalAddr: n.Internal,
 		MACKey:       n.MACKey,
-		Links:        n.Links,
+		Links:        n.Links(),
 	})
 	if err != nil {
 		t.Fatal(err)

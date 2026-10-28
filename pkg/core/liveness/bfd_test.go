@@ -44,7 +44,7 @@ func newTestSession(t *testing.T) (*BFDSession, *fakeWriter) {
 	}
 	s := newBFDSession(bfdIA, mac, BFDTransmissionInterval, BFDDetectMultiplier,
 		7, bfdPeer,
-		netip.MustParseAddr("127.0.0.1"), netip.MustParseAddr("127.0.0.2"))
+		netip.MustParseAddr("127.0.0.1"), netip.MustParseAddr("127.0.0.2"), nil)
 	s.SetRawWriter(w)
 	return s, w
 }

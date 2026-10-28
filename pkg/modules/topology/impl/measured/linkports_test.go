@@ -9,6 +9,7 @@ import (
 	"os"
 	"testing"
 
+	"github.com/fancl20/cion/pkg/libs/bus"
 	"github.com/fancl20/cion/pkg/libs/underlay"
 	"github.com/fancl20/cion/pkg/modules/links"
 	"github.com/fancl20/cion/pkg/modules/links/impl/memory"
@@ -134,7 +135,7 @@ func TestSeedDrawsAgainstEarlierSeeds(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		z.Wire(topology.Environment{IA: zeroconfDraw, Store: store})
+		z.Wire(topology.Environment{IA: zeroconfDraw, Store: store, Bus: bus.New()})
 		if err := z.Seed(context.Background()); err != nil {
 			t.Fatal(err)
 		}

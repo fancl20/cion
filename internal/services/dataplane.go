@@ -125,7 +125,8 @@ func (n *node) startGeneration(ctx context.Context) (*generation, error) {
 	if err != nil {
 		return nil, err
 	}
-	provider := dataplane.NewUDPProvider(n.opts.BatchSize, receiveBufferSize, sendBufferSize, n.sockets)
+	provider := dataplane.NewUDPProvider(
+		n.opts.BatchSize, receiveBufferSize, sendBufferSize, n.sockets, n.nudgeLinkState)
 
 	dlinks := make([]dataplane.Link, 0, len(entries)+1)
 	internalLink, err := provider.NewInternalLink(
@@ -245,59 +246,6 @@ func (n *node) servingLinks(ctx context.Context) ([]*links.Link, error) {
 	return links.Serving(entries), nil
 }
 
-// linkTable snapshots the live links' interface IDs and neighbors — the
-// source every consumer of the link set reads: the beaconer's checks and
-// targets whole, the routes out of the node through usableLinks. The
-// snapshot caches, for a one-hop send reads it per packet, and rebuilds
-// once the store's signal moved its version: every write to the node's
-// store signals.
-func (n *node) linkTable() map[uint16]addr.IA {
-	n.tableMtx.Lock()
-	defer n.tableMtx.Unlock()
-	if n.tableSnapshot != nil && n.tableBuilt == n.tableVersion {
-		return n.tableSnapshot
-	}
-	entries, err := n.linkStore.All(context.Background())
-	if err != nil {
-		// The write path reads this from quic-go's send goroutines, which
-		// outlive Close by a write in flight: a closed store here is the
-		// shutdown racing one last send, not corruption.
-		slog.Error("Reading the link store", "err", err)
-		return nil
-	}
-	n.tableSnapshot = links.Links(entries)
-	n.tableBuilt = n.tableVersion
-	return n.tableSnapshot
-}
-
-// usableLinks snapshots the links the node can send over: the link table's
-// entries whose BFD verdict is up. The data plane refuses a down link's
-// egress, and forwards a one-hop packet onto it without that check, so no
-// signal tells the sender; every route out of the node — a composed path's
-// first hop, the bootstrap route, a one-hop write, the core route's
-// shortcut — resolves over these links alone, and fails at once where none
-// serves. The beaconer reads the whole table: a beacon arriving on a down
-// link still names its neighbor. A failed read of the store serves nil, as
-// the table does.
-func (n *node) usableLinks() map[uint16]addr.IA {
-	return usable(n.linkTable(), n.monitor.Verdicts())
-}
-
-// usable keeps the table's links whose verdict is up; an interface with no
-// verdict — one the monitor has not seen — is up, as the monitor counts it.
-func usable(table map[uint16]addr.IA, verdicts map[uint16]bool) map[uint16]addr.IA {
-	if table == nil {
-		return nil
-	}
-	out := make(map[uint16]addr.IA, len(table))
-	for ifID, neighbor := range table {
-		if up, ok := verdicts[ifID]; !ok || up {
-			out[ifID] = neighbor
-		}
-	}
-	return out
-}
-
 // registerControlService registers the CS service on a data plane provider:
 // the control endpoint's socket is the service's backend, so a packet
 // addressed to the service destination — the peer RPCs' QUIC and the drafts'
@@ -372,23 +320,23 @@ func (n *node) unregisterSvc(svc addr.SVC, port uint16) error {
 }
 
 // setGeneration records the serving generation under the lock the service
-// registration callbacks read it by.
+// registration callbacks read it by, and nudges the link state: the
+// generation's links observe their peers afresh.
 func (n *node) setGeneration(g *generation) {
 	n.backendsMtx.Lock()
-	defer n.backendsMtx.Unlock()
 	n.gen = g
+	n.backendsMtx.Unlock()
+	n.nudgeLinkState()
 }
 
 // notifyLinkChange is the link store's signal, run after every write: it
-// moves the cached snapshot's version and wakes the data plane loop, which
-// lands the write as a generation swap. A burst of writes coalesces in the
-// one-slot channel.
+// wakes the data plane loop, which lands the write as a generation swap,
+// and nudges the link state. A burst of writes coalesces in the one-slot
+// channel.
 func (n *node) notifyLinkChange() {
-	n.tableMtx.Lock()
-	n.tableVersion++
-	n.tableMtx.Unlock()
 	select {
 	case n.linkChanges <- struct{}{}:
 	default:
 	}
+	n.nudgeLinkState()
 }

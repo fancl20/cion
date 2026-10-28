@@ -23,7 +23,7 @@ func TestEchoWireRoundTrip(t *testing.T) {
 		Bind:         "127.0.0.1:0",
 		InternalAddr: "127.0.0.1:30041",
 		MACKey:       testMACKeyBytes,
-		Links:        func() map[uint16]addr.IA { return map[uint16]addr.IA{1: addr.MustIAFrom(20, 0xff0000000002)} },
+		Links:        tableTopic(map[uint16]addr.IA{1: addr.MustIAFrom(20, 0xff0000000002)}),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -160,7 +160,7 @@ func TestReadEchoReply(t *testing.T) {
 			Bind:         netip.AddrPortFrom(testHost, 0).String(),
 			InternalAddr: router.LocalAddr().String(),
 			MACKey:       testMACKeyBytes,
-			Links:        func() map[uint16]addr.IA { return map[uint16]addr.IA{testIfID: peer} },
+			Links:        tableTopic(map[uint16]addr.IA{testIfID: peer}),
 		})
 		if err != nil {
 			t.Fatal(err)

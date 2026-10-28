@@ -3,11 +3,9 @@ package measured
 import (
 	"context"
 	"errors"
-	"maps"
 	"net"
 	"net/netip"
 	"slices"
-	"sync"
 	"sync/atomic"
 	"testing"
 	"testing/synctest"
@@ -15,6 +13,7 @@ import (
 
 	"github.com/scionproto/scion/pkg/addr"
 
+	"github.com/fancl20/cion/pkg/libs/bus"
 	"github.com/fancl20/cion/pkg/libs/scion"
 	"github.com/fancl20/cion/pkg/libs/scionrpc"
 	"github.com/fancl20/cion/pkg/libs/underlay"
@@ -63,7 +62,7 @@ func TestZeroconfCompletesByEcho(t *testing.T) {
 	// The seed lands the bootstrap's neighbor retargeted: the reply's
 	// addresses carry, the entry a candidate.
 	store := memory.New()
-	z.Wire(topology.Environment{IA: ia, Store: store})
+	z.Wire(topology.Environment{IA: ia, Store: store, Bus: bus.New()})
 	if err := z.Seed(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -112,7 +111,7 @@ func TestZeroconfFirstStartNeedsNeighbor(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	z.Wire(topology.Environment{Store: memory.New()})
+	z.Wire(topology.Environment{Store: memory.New(), Bus: bus.New()})
 	if _, err := z.CompleteIdentity(context.Background(), zeroconfDraw); err == nil {
 		t.Error("a first start whose bootstrap neighbor never answered completed")
 	}
@@ -128,7 +127,7 @@ func TestZeroconfFirstStartNeedsNeighbor(t *testing.T) {
 	if _, err := z.CompleteIdentity(context.Background(), zeroconfDraw); err != nil {
 		t.Fatal(err)
 	}
-	z.Wire(topology.Environment{Store: memory.New()})
+	z.Wire(topology.Environment{Store: memory.New(), Bus: bus.New()})
 	if err := z.Seed(context.Background()); err != nil {
 		t.Fatalf("seeding with a bootstrap neighbor: %v", err)
 	}
@@ -152,7 +151,7 @@ func TestZeroconfMounts(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		z.Wire(topology.Environment{Store: memory.New()})
+		z.Wire(topology.Environment{Store: memory.New(), Bus: bus.New()})
 		// Mounts binds the rendezvous port; releasing it lets a rerun of the
 		// test in the same process bind it again.
 		t.Cleanup(func() { _ = z.Close() })
@@ -207,7 +206,7 @@ func TestProviderRunReturnsAndCloseReleases(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	z.Wire(topology.Environment{IA: zeroconfDraw, Store: memory.New()})
+	z.Wire(topology.Environment{IA: zeroconfDraw, Store: memory.New(), Bus: bus.New()})
 	if _, err := z.Mounts(); err != nil {
 		t.Fatal(err)
 	}
@@ -401,7 +400,7 @@ func TestStrandedRedial(t *testing.T) {
 		t.Fatal(err)
 	}
 	store := memory.New()
-	z.Wire(topology.Environment{IA: zeroconfDraw, Store: store})
+	z.Wire(topology.Environment{IA: zeroconfDraw, Store: store, Bus: bus.New()})
 	retired := &links.Link{
 		NeighborIA: rendezvousIA,
 		Local:      netip.MustParseAddrPort("127.0.0.1:40001"),
@@ -912,11 +911,9 @@ func TestConfirmRecordsTheObservation(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			store := memory.New()
+			b := bus.New()
 			z := &Provider{}
-			z.Wire(topology.Environment{
-				Store:    store,
-				Observed: func(uint16) netip.AddrPort { return tc.observed },
-			})
+			z.Wire(topology.Environment{Store: store, Bus: b})
 			l := &links.Link{
 				NeighborIA: linkIA,
 				Local:      netip.MustParseAddrPort("127.0.0.1:40001"),
@@ -926,6 +923,8 @@ func TestConfirmRecordsTheObservation(t *testing.T) {
 			if err := store.Insert(context.Background(), l); err != nil {
 				t.Fatal(err)
 			}
+			b.Links().Publish(bus.NewLinkState(
+				bus.Link{Entry: *l, Observed: tc.observed}))
 			z.linker = linkClientOf(map[*links.Link]*fakeLinkServiceClient{
 				l: {reply: &nodev1.LinkReply{LocalAddr: claim.String(), IfId: 7}},
 			})
@@ -948,23 +947,9 @@ func TestConfirmRecordsTheObservation(t *testing.T) {
 func TestFollowKeepsTheLocatorOnTheFlow(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		store := memory.New()
-		var mtx sync.Mutex
-		observed := map[uint16]netip.AddrPort{}
-		verdicts := map[uint16]bool{}
+		b := bus.New()
 		z := &Provider{}
-		z.Wire(topology.Environment{
-			Store: store,
-			Observed: func(ifID uint16) netip.AddrPort {
-				mtx.Lock()
-				defer mtx.Unlock()
-				return observed[ifID]
-			},
-			Verdicts: func() map[uint16]bool {
-				mtx.Lock()
-				defer mtx.Unlock()
-				return maps.Clone(verdicts)
-			},
-		})
+		z.Wire(topology.Environment{Store: store, Bus: b})
 		entry := func(ia addr.IA, port uint16, state links.State) *links.Link {
 			l := &links.Link{
 				NeighborIA: ia,
@@ -984,13 +969,17 @@ func TestFollowKeepsTheLocatorOnTheFlow(t *testing.T) {
 		flow := func(port uint16) netip.AddrPort {
 			return netip.AddrPortFrom(netip.MustParseAddr("198.51.100.7"), port)
 		}
-		mtx.Lock()
-		observed[moved.IfID] = flow(1)
-		observed[failing.IfID] = flow(2)
-		observed[candidate.IfID] = flow(3)
-		observed[steady.IfID] = steady.Remote
-		verdicts[candidate.IfID] = false
-		mtx.Unlock()
+		// publish lands the links' observations, the candidate's verdict as
+		// given.
+		publish := func(candidateUp bool) {
+			b.Links().Publish(bus.NewLinkState(
+				bus.Link{Entry: *moved, Observed: flow(1)},
+				bus.Link{Entry: *failing, Observed: flow(2)},
+				bus.Link{Entry: *candidate, Down: !candidateUp, Observed: flow(3)},
+				bus.Link{Entry: *steady, Observed: steady.Remote},
+			))
+		}
+		publish(false)
 		fakes := map[*links.Link]*fakeLinkServiceClient{
 			moved:   {reply: &nodev1.LinkReply{LocalAddr: "10.0.0.5:31001", IfId: 7}},
 			failing: {err: errors.New("no answer")},
@@ -1021,9 +1010,7 @@ func TestFollowKeepsTheLocatorOnTheFlow(t *testing.T) {
 
 		// The session answers at the observation, and the candidate takes
 		// it; past FollowRetry, the failing entry tries once more.
-		mtx.Lock()
-		verdicts[candidate.IfID] = true
-		mtx.Unlock()
+		publish(true)
 		time.Sleep(FollowRetry)
 		synctest.Wait()
 		if got := entryByIfID(t, store, candidate.IfID).Remote; got != flow(3) {
@@ -1074,7 +1061,7 @@ func TestRepunchDue(t *testing.T) {
 		{later.Add(2*time.Second + RepunchGrace), down, 1},
 	}
 	for _, step := range steps {
-		if got := st.due(rendezvousIA, entries, step.verdicts, undialable, step.at); len(got) != step.want {
+		if got := st.due(rendezvousIA, entries, verdictState(step.verdicts).Up, undialable, step.at); len(got) != step.want {
 			t.Errorf("at %v: %d links due, want %d", step.at.Sub(t0), len(got), step.want)
 		}
 	}
@@ -1103,7 +1090,7 @@ func TestRepunchDue(t *testing.T) {
 	for _, tt := range never {
 		st := newRepunchState()
 		for _, after := range []time.Duration{0, RepunchGrace, RepunchGrace + RepunchRetry} {
-			if got := st.due(tt.mine, []*links.Link{tt.entry()}, tt.verdicts, tt.undialable,
+			if got := st.due(tt.mine, []*links.Link{tt.entry()}, verdictState(tt.verdicts).Up, tt.undialable,
 				t0.Add(after)); len(got) != 0 {
 				t.Errorf("%s: due at %v", tt.name, after)
 			}
@@ -1179,7 +1166,7 @@ func TestPickReflector(t *testing.T) {
 			map[uint16]bool{1: false}, ""},
 	}
 	for _, tt := range tests {
-		got, ok := pickReflector(tt.entries, tt.verdicts, directory)
+		got, ok := pickReflector(tt.entries, verdictState(tt.verdicts).Up, directory)
 		if want := tt.want != ""; ok != want || want && got != netip.MustParseAddrPort(tt.want) {
 			t.Errorf("%s: picked %v (%t), want %q", tt.name, got, ok, tt.want)
 		}
@@ -1194,7 +1181,7 @@ func wiredProvider(t *testing.T, ia addr.IA, entries ...*links.Link) (*Provider,
 		t.Fatal(err)
 	}
 	store := memory.New()
-	z.Wire(topology.Environment{IA: ia, Store: store})
+	z.Wire(topology.Environment{IA: ia, Store: store, Bus: bus.New()})
 	for _, l := range entries {
 		if err := store.Insert(context.Background(), l); err != nil {
 			t.Fatal(err)

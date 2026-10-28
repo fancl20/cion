@@ -19,6 +19,7 @@ import (
 	spath "github.com/scionproto/scion/pkg/slayers/path/scion"
 
 	"github.com/fancl20/cion/pkg/core/trust"
+	"github.com/fancl20/cion/pkg/libs/bus"
 	"github.com/fancl20/cion/pkg/libs/scion"
 	"github.com/fancl20/cion/pkg/libs/segment"
 	"github.com/fancl20/cion/pkg/modules/pathdb"
@@ -74,8 +75,7 @@ type Beaconer struct {
 	macFactory   func() hash.Hash
 	store        *BeaconStore
 	db           pathdb.DB
-	links        func() map[uint16]addr.IA
-	verdicts     func() map[uint16]bool
+	links        *bus.Topic[bus.LinkState]
 	latencies    *LinkLatency
 	sender       SegmentSender
 	core         bool
@@ -136,15 +136,12 @@ type BeaconerConfig struct {
 	Store *BeaconStore
 	// DB is the persistent path database for registered segments.
 	DB pathdb.DB
-	// Links snapshots the external links, interface ID to neighbor IA; the
-	// beaconer reads it fresh each pass, so a node may start with zero
-	// links. It is the store's snapshot alone: the neighbor's identity and
-	// the destination its beacons are addressed with both come from it.
-	Links func() map[uint16]addr.IA
-	// Verdicts returns the health monitor's link verdicts by interface ID;
-	// a down interface originates and propagates nothing, resuming with the
-	// verdict's up edge. Nil treats every link as up.
-	Verdicts func() map[uint16]bool
+	// Links is the node's link state topic, read fresh each pass, so a node
+	// may start with zero links. Its table alone names each neighbor's
+	// identity and the destination its beacons are addressed with; a down
+	// interface originates and propagates nothing, resuming with the
+	// verdict's up edge. A nil topic serves no links.
+	Links *bus.Topic[bus.LinkState]
 	// Latencies holds the node's latest per-link one-way delay samples; the
 	// entries the beaconer signs declare them. Nil declares nothing.
 	Latencies *LinkLatency
@@ -185,7 +182,6 @@ func NewBeaconer(cfg BeaconerConfig) (*Beaconer, error) {
 		store:            cfg.Store,
 		db:               cfg.DB,
 		links:            cfg.Links,
-		verdicts:         cfg.Verdicts,
 		latencies:        cfg.Latencies,
 		sender:           cfg.Sender,
 		core:             cfg.Core,
@@ -197,16 +193,6 @@ func NewBeaconer(cfg BeaconerConfig) (*Beaconer, error) {
 	}, nil
 }
 
-// linkUp reports the interface's verdict; a beaconer without the monitor's
-// verdicts treats every link as up.
-func (b *Beaconer) linkUp(ifID uint16) bool {
-	if b.verdicts == nil {
-		return true
-	}
-	up, ok := b.verdicts()[ifID]
-	return !ok || up
-}
-
 // egressLatency returns the egress link's latest one-way delay sample — the
 // declaration the entry carries; a nil table and an unsampled link declare
 // nothing.
@@ -215,14 +201,6 @@ func (b *Beaconer) egressLatency(ifID uint16) time.Duration {
 		return 0
 	}
 	return b.latencies.Sample(ifID)
-}
-
-// linkTable snapshots the links; a nil source serves none.
-func (b *Beaconer) linkTable() map[uint16]addr.IA {
-	if b.links == nil {
-		return nil
-	}
-	return b.links()
 }
 
 // Run executes the beaconing loops until the context is canceled:
@@ -372,7 +350,7 @@ func (b *Beaconer) BootstrapRoute(dst addr.IA) *spath.Decoded {
 		return nil
 	}
 	ingress := b.bootstrapIngress[dst]
-	if _, live := b.linkTable()[ingress]; !live {
+	if _, live := b.links.Latest().Table()[ingress]; !live {
 		return nil
 	}
 	route, err := pcb.Clone()
@@ -470,7 +448,7 @@ func (b *Beaconer) checkBeacon(pcb *segment.PCB, ingress uint16) error {
 		return serrors.New("beacon does not originate at a core the TRC names",
 			"origin", pcb.FirstIA())
 	}
-	neighbor, ok := b.linkTable()[ingress]
+	neighbor, ok := b.links.Latest().Table()[ingress]
 	if !ok {
 		return serrors.New("beacon arrived on unknown interface", "interface", ingress)
 	}
@@ -582,11 +560,12 @@ func (b *Beaconer) coreASes() (map[addr.IA]bool, error) {
 // the store's snapshot. Each neighbor's send runs off the loop; a neighbor
 // whose previous beacon is still in flight gets none this round.
 func (b *Beaconer) originateOnce(ctx context.Context) {
-	for ifID, neighborIA := range b.linkTable() {
+	state := b.links.Latest()
+	for ifID, neighborIA := range state.Table() {
 		if neighborIA.IsZero() {
 			continue // a link whose neighbor establishment has not named
 		}
-		if !b.linkUp(ifID) {
+		if !state.Up(ifID) {
 			continue // a down interface originates nothing
 		}
 		target := sendTarget{originating, neighborIA}
@@ -632,15 +611,16 @@ func (b *Beaconer) propagateOnce(ctx context.Context) {
 		slog.Error("Propagating beacons", "err", err)
 		return
 	}
-	cands := b.bestSet()
-	for egress, neighborIA := range b.linkTable() {
+	state := b.links.Latest()
+	cands := b.bestSet(state)
+	for egress, neighborIA := range state.Table() {
 		if neighborIA.IsZero() {
 			continue // a link whose neighbor establishment has not named
 		}
 		if cores[neighborIA] {
 			continue
 		}
-		if !b.linkUp(egress) {
+		if !state.Up(egress) {
 			continue // a down interface propagates nothing
 		}
 		target := sendTarget{propagating, neighborIA}
@@ -696,7 +676,7 @@ func (b *Beaconer) propagateOnce(ctx context.Context) {
 // dial that fails logs and a later pass retries.
 func (b *Beaconer) registerOnce(ctx context.Context) {
 	peers := make(map[addr.IA][]*control_plane.PathSegment)
-	for _, cand := range b.bestSet() {
+	for _, cand := range b.bestSet(b.links.Latest()) {
 		terminated, err := b.terminate(cand)
 		if err != nil {
 			slog.Error("Terminating beacon", "err", err)
@@ -736,7 +716,7 @@ func (b *Beaconer) registerCoreOnce(ctx context.Context) {
 		slog.Error("Terminating core beacons", "err", err)
 		return
 	}
-	for _, cand := range b.bestSet() {
+	for _, cand := range b.bestSet(b.links.Latest()) {
 		if !cores[cand.PCB.LastIA()] {
 			continue
 		}
@@ -764,10 +744,10 @@ func (b *Beaconer) registerCoreOnce(ctx context.Context) {
 // to its sender, and a hop extended or terminated through it would publish a
 // route the data plane cannot carry: the beaconer neither propagates nor
 // terminates it.
-func (b *Beaconer) bestSet() []Candidate {
-	links := b.linkTable()
+func (b *Beaconer) bestSet(state bus.LinkState) []Candidate {
+	table := state.Table()
 	return b.store.BestSet(BestSetSize, func(c Candidate) bool {
-		return links[c.Ingress].Equal(c.PCB.LastIA())
+		return table[c.Ingress].Equal(c.PCB.LastIA())
 	})
 }
 
