@@ -461,7 +461,7 @@ func (n *node) buildBeaconing() error {
 		Lookup:        n.lookup.Down,
 		Bootstrap:     beaconer.BootstrapRoute,
 		Cores:         cores,
-		InterfaceDown: n.ifDown,
+		InterfaceDown: n.bus.InterfaceDown(),
 		Links:         n.bus.Links(),
 	}
 	return nil
@@ -495,9 +495,7 @@ func (n *node) wireTopology() {
 // before the first data plane generation, so every generation finds a
 // session per serving link, and the file provider's nodes get them too:
 // the monitor reads the store, not the provider. Each change of its
-// verdicts nudges the link state. The interface-down cache is assembled
-// with it — the conns the phases bind record the signals the data plane's
-// egress-down branch sends.
+// verdicts nudges the link state.
 func (n *node) assembleMonitor() error {
 	monitor, err := liveness.NewHealthMonitor(liveness.HealthMonitorConfig{
 		IA:       n.ident.ia,
@@ -510,7 +508,6 @@ func (n *node) assembleMonitor() error {
 		return err
 	}
 	n.monitor = monitor
-	n.ifDown = scion.NewInterfaceDownCache()
 	return nil
 }
 
@@ -562,8 +559,8 @@ func (n *node) assembleEndpoint() error {
 // scionConn returns a SCION connection bound to the control address's host
 // with the given port, sending through the node's internal link. Every conn
 // resolves its one-hop writes over the links the node can send over and
-// shares the node's interface-down cache — each receive path recognizes the
-// signal the data plane's egress-down branch sends back — and, under the
+// publishes on the node's interface-down topic — each receive path recognizes
+// the signal the data plane's egress-down branch sends back — and, under the
 // wildcard bind, which names no host itself, names the wildcard host as its
 // packets' source and its service-resolution answers' host: an address the
 // node's own router delivers to.
@@ -574,7 +571,7 @@ func (n *node) scionConn(port uint16) (*scion.Conn, error) {
 		InternalAddr:  n.cfg.internalAddr.String(),
 		MACKey:        n.ident.key,
 		Links:         n.bus.Links(),
-		InterfaceDown: n.ifDown,
+		InterfaceDown: n.bus.InterfaceDown(),
 		WildcardHost:  n.wildcardHost.resolve,
 		Sockets:       n.sockets,
 	})

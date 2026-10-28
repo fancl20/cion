@@ -446,7 +446,7 @@ func TestProviderFilterCountsTraversedHopsOnly(t *testing.T) {
 		return &PathProvider{
 			IA:            iaLeaf,
 			DB:            db,
-			InterfaceDown: NewInterfaceDownCache(),
+			InterfaceDown: new(bus.Topic[bus.InterfaceDownState]),
 			Lookup: func(context.Context, addr.IA) []*pathdb.Segment {
 				return []*pathdb.Segment{
 					{Type: pathdb.SegmentTypeDown, PCB: downMid},
@@ -460,7 +460,7 @@ func TestProviderFilterCountsTraversedHopsOnly(t *testing.T) {
 	// stretch: the clean join through the other core wins even though it is
 	// the longer one.
 	p := newProvider()
-	p.InterfaceDown.Record(InterfaceDownSignal{IA: iaMid, IfID: testIfID})
+	signal(p.InterfaceDown, iaMid, testIfID)
 	path, err := p.Path(context.Background(), iaDest)
 	if err != nil {
 		t.Fatal(err)
@@ -474,7 +474,7 @@ func TestProviderFilterCountsTraversedHopsOnly(t *testing.T) {
 	// The signal on the other core's stretch — traversed only by the join
 	// through it — leaves the middle join clean and shorter.
 	p = newProvider()
-	p.InterfaceDown.Record(InterfaceDownSignal{IA: iaCore2, IfID: testIfID})
+	signal(p.InterfaceDown, iaCore2, testIfID)
 	path, err = p.Path(context.Background(), iaDest)
 	if err != nil {
 		t.Fatal(err)
@@ -487,7 +487,7 @@ func TestProviderFilterCountsTraversedHopsOnly(t *testing.T) {
 	// A signal on the dropped core-ward stretch of the up segment — the
 	// entry above the meeting — leaves its join clean.
 	p = newProvider()
-	p.InterfaceDown.Record(InterfaceDownSignal{IA: iaCore, IfID: testIfID})
+	signal(p.InterfaceDown, iaCore, testIfID)
 	path, err = p.Path(context.Background(), iaDest)
 	if err != nil {
 		t.Fatal(err)
@@ -918,12 +918,12 @@ func TestEnumerateLastResortAndBounds(t *testing.T) {
 	p := &PathProvider{
 		IA:            iaLeaf,
 		DB:            db,
-		InterfaceDown: NewInterfaceDownCache(),
+		InterfaceDown: new(bus.Topic[bus.InterfaceDownState]),
 		Lookup: func(context.Context, addr.IA) []*pathdb.Segment {
 			return []*pathdb.Segment{{Type: pathdb.SegmentTypeDown, PCB: down}}
 		},
 	}
-	p.InterfaceDown.Record(InterfaceDownSignal{IA: iaMid, IfID: testIfID})
+	signal(p.InterfaceDown, iaMid, testIfID)
 	candidates, err := p.Enumerate(context.Background(), iaDest)
 	if err != nil {
 		t.Fatal(err)
@@ -1270,7 +1270,7 @@ func TestProviderLastResortFirstCrossing(t *testing.T) {
 	p := &PathProvider{
 		IA:            iaLeaf,
 		DB:            db,
-		InterfaceDown: NewInterfaceDownCache(),
+		InterfaceDown: new(bus.Topic[bus.InterfaceDownState]),
 		Lookup: func(context.Context, addr.IA) []*pathdb.Segment {
 			return []*pathdb.Segment{
 				{Type: pathdb.SegmentTypeDown, PCB: downLong},
@@ -1281,7 +1281,7 @@ func TestProviderLastResortFirstCrossing(t *testing.T) {
 	// Every join leaves through the signaled core interface, so every
 	// candidate crosses; the shorter join would win a rank the last resort
 	// never holds.
-	p.InterfaceDown.Record(InterfaceDownSignal{IA: iaCore, IfID: testIfID})
+	signal(p.InterfaceDown, iaCore, testIfID)
 
 	path, err := p.Path(context.Background(), iaDest)
 	if err != nil {
@@ -1335,8 +1335,8 @@ func TestProviderChoose(t *testing.T) {
 		return beacon.ReversePath()
 	}
 	crossing := provider(iaLeaf, []*segment.PCB{upShort}, []*segment.PCB{down, downShort})
-	crossing.InterfaceDown = NewInterfaceDownCache()
-	crossing.InterfaceDown.Record(InterfaceDownSignal{IA: iaCore, IfID: testIfID})
+	crossing.InterfaceDown = new(bus.Topic[bus.InterfaceDownState])
+	signal(crossing.InterfaceDown, iaCore, testIfID)
 
 	for _, tc := range []struct {
 		name string

@@ -29,6 +29,7 @@ import (
 	spath "github.com/scionproto/scion/pkg/slayers/path/scion"
 
 	"github.com/fancl20/cion/pkg/libs/bus"
+	"github.com/fancl20/cion/pkg/libs/segment"
 	"github.com/fancl20/cion/pkg/libs/underlay"
 )
 
@@ -92,9 +93,9 @@ type Conn struct {
 	// egress interface of fresh one-hop paths. Read live, so a topology
 	// change reaches the conn without rebuilding it.
 	links *bus.Topic[bus.LinkState]
-	// ifDown is the node's shared negative cache of interface-down signals;
-	// nil drops them as before.
-	ifDown *InterfaceDownCache
+	// ifDown is the node's interface-down topic, which the conn updates with
+	// each signal it recognizes; nil publishes none.
+	ifDown *bus.Topic[bus.InterfaceDownState]
 	// wildcardHost resolves the host the conn names for itself under a
 	// wildcard bind; nil names nothing, and no packet leaves the bind until a
 	// host lands.
@@ -123,10 +124,10 @@ type ConnConfig struct {
 	// through it live, and a write to a neighbor the usable links lack fails
 	// at once. A nil topic resolves nothing.
 	Links *bus.Topic[bus.LinkState]
-	// InterfaceDown is the node's shared negative cache of SCMP
-	// interface-down signals; the conn's receive paths recognize the signal
-	// and record it. Nil drops them.
-	InterfaceDown *InterfaceDownCache
+	// InterfaceDown is the node's interface-down topic: the conn's receive
+	// paths recognize each SCMP External Interface Down signal and update
+	// the topic with it, held for InterfaceDownHold. Nil publishes none.
+	InterfaceDown *bus.Topic[bus.InterfaceDownState]
 	// WildcardHost resolves the host the conn names for itself where a
 	// wildcard bind names none: the packets' source host, which the peer's
 	// replies are addressed to and the local router delivers them by, and the
@@ -179,13 +180,17 @@ func NewConn(cfg ConnConfig) (*Conn, error) {
 }
 
 // recordInterfaceDown recognizes an interface-down signal in a received
-// packet — the drafts' error the library's receive paths once dropped
-// silently — and enters it in the shared cache when the conn has one.
-// Reports the signal and whether one was recognized.
+// packet and, when the conn has the topic, updates it with the signal, held
+// for InterfaceDownHold from its arrival. Reports the signal and whether one
+// was recognized.
 func (c *Conn) recordInterfaceDown(raw []byte) (InterfaceDownSignal, bool) {
 	sig, ok := parseInterfaceDownPacket(raw)
 	if ok && c.ifDown != nil {
-		c.ifDown.Record(sig)
+		now := time.Now()
+		link := segment.LinkID{IA: sig.IA, IfID: sig.IfID}
+		c.ifDown.Update(func(s bus.InterfaceDownState) bus.InterfaceDownState {
+			return s.Signaled(link, sig.Dst, now, now.Add(InterfaceDownHold))
+		})
 	}
 	return sig, ok
 }

@@ -3,6 +3,7 @@ package scion
 import (
 	"context"
 	"net/netip"
+	"slices"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -12,47 +13,51 @@ import (
 	"github.com/scionproto/scion/pkg/slayers"
 	"github.com/scionproto/scion/pkg/slayers/path/empty"
 
+	"github.com/fancl20/cion/pkg/libs/bus"
 	"github.com/fancl20/cion/pkg/libs/segment"
 	"github.com/fancl20/cion/pkg/modules/pathdb"
 )
 
-// newTestCache returns a cache at the package's own signal TTL.
-func newTestCache() *InterfaceDownCache {
-	return NewInterfaceDownCache()
-}
-
-// TestIfDownCacheHoldsAndLapses checks the retention: an entry lives exactly
-// the TTL, to the nanosecond. The TTL's passage is a fake-time sleep in the
-// bubble.
-func TestIfDownCacheHoldsAndLapses(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		c := newTestCache()
-		c.Record(InterfaceDownSignal{IA: iaMid, IfID: testIfID, Dst: iaLeaf})
-		if !c.Holds(iaMid, testIfID) {
-			t.Fatal("a fresh signal is not held")
-		}
-		time.Sleep(IfDownCacheTTL - time.Nanosecond)
-		if !c.Holds(iaMid, testIfID) {
-			t.Fatal("the signal lapsed before its TTL")
-		}
-		time.Sleep(time.Nanosecond)
-		if c.Holds(iaMid, testIfID) {
-			t.Error("the signal outlived its TTL")
-		}
+// signal updates the topic with a signal naming the interface, received
+// now and quoting no packet.
+func signal(topic *bus.Topic[bus.InterfaceDownState], ia addr.IA, ifID uint16) {
+	now := time.Now()
+	topic.Update(func(s bus.InterfaceDownState) bus.InterfaceDownState {
+		return s.Signaled(segment.LinkID{IA: ia, IfID: ifID}, 0, now, now.Add(InterfaceDownHold))
 	})
 }
 
-// TestIfDownCacheDeliversToSubscriber checks the receiver: every recognized
-// signal reaches the registered subscriber with its quoted destination —
-// the WireGuard bind's drop key.
-func TestIfDownCacheDeliversToSubscriber(t *testing.T) {
-	c := newTestCache()
-	var got []InterfaceDownSignal
-	c.OnSignal(func(sig InterfaceDownSignal) { got = append(got, sig) })
-	c.Record(InterfaceDownSignal{IA: iaMid, IfID: testIfID, Dst: iaLeaf})
-	if len(got) != 1 || !got[0].Dst.Equal(iaLeaf) {
-		t.Fatalf("delivered %v, want the one signal with its destination", got)
-	}
+// TestConnPublishesInterfaceDown checks the publisher: a conn that
+// recognizes a signal updates the topic with the signaled link, held for
+// exactly InterfaceDownHold, and the quoted destination; one without the
+// topic recognizes the signal all the same. The hold's passage is a
+// fake-time sleep in the bubble.
+func TestConnPublishesInterfaceDown(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		quoted := echoPacket(t, iaLeaf, iaDest, slayers.SCMPTypeEchoRequest, 40441, 1)
+		raw := interfaceDownPacket(t, iaMid, iaLeaf, iaMid, testIfID, quoted)
+		topic := new(bus.Topic[bus.InterfaceDownState])
+		c := &Conn{ifDown: topic}
+		if _, ok := c.recordInterfaceDown(raw); !ok {
+			t.Fatal("the signal was not recognized")
+		}
+		link := segment.LinkID{IA: iaMid, IfID: testIfID}
+		state := topic.Latest()
+		if dsts := slices.Collect(state.QuotedAfter(0)); len(dsts) != 1 || !dsts[0].Equal(iaDest) {
+			t.Errorf("quoted destinations = %v, want the quote's %v", dsts, iaDest)
+		}
+		time.Sleep(InterfaceDownHold - time.Nanosecond)
+		if !state.Holds(link, time.Now()) {
+			t.Error("the signal lapsed before its hold")
+		}
+		time.Sleep(time.Nanosecond)
+		if state.Holds(link, time.Now()) {
+			t.Error("the signal outlived its hold")
+		}
+		if _, ok := (&Conn{}).recordInterfaceDown(raw); !ok {
+			t.Error("a conn without the topic did not recognize the signal")
+		}
+	})
 }
 
 // scmpHosts addresses the two ends of a crafted exchange.
@@ -140,10 +145,10 @@ func echoPacket(
 }
 
 // TestParseInterfaceDownPacket checks the recognition: a type-5 error names
-// the signaled ISD-AS and interface, and the quote names whose cached path
-// just failed and the echo request it carried; every other packet is not
-// one — a forged signal from any speaker on a path is worth no more than
-// one cache entry.
+// the signaled ISD-AS and interface, and the quote names whose path just
+// failed and the echo request it carried; every other packet is not one — a
+// forged signal from any speaker on a path is worth no more than one held
+// signal.
 func TestParseInterfaceDownPacket(t *testing.T) {
 	quoted := echoPacket(t, iaLeaf, iaMid, slayers.SCMPTypeEchoRequest, 40441, 1)
 	raw := interfaceDownPacket(t, iaMid, iaLeaf, iaMid, testIfID, quoted)
@@ -157,9 +162,6 @@ func TestParseInterfaceDownPacket(t *testing.T) {
 	}
 	if !sig.Dst.Equal(iaMid) {
 		t.Errorf("quoted destination = %v, want %v", sig.Dst, iaMid)
-	}
-	if sig.DstHost != scmpDstHost.IP() {
-		t.Errorf("quoted destination host = %v, want %v", sig.DstHost, scmpDstHost.IP())
 	}
 	if sig.Echo == nil || sig.Echo.Reply || sig.Echo.Identifier != 40441 || sig.Echo.Seq != 1 {
 		t.Errorf("quoted echo = %+v, want the request 40441/1", sig.Echo)
@@ -190,7 +192,8 @@ func TestParseInterfaceDownPacket(t *testing.T) {
 }
 
 // crossingSegment builds an up segment whose entries traverse the given
-// interface — the crossing the cache skips — ending at the given terminator.
+// interface — the crossing a held signal demotes — ending at the given
+// terminator.
 func crossingSegment(
 	t *testing.T,
 	egressIA, endIA addr.IA,
@@ -224,13 +227,13 @@ func upSegment(t *testing.T, now time.Time, ias ...addr.IA) *pathdb.Segment {
 }
 
 // TestCompositionSkipsCrossingPaths checks the sender's reaction: a
-// signaled interface's crossing composition is skipped while the entry
-// lives — the freshest clean segment serves instead, and a crossing path
-// stays a last resort when nothing else exists. The entry's lapse is a
+// signaled interface's crossing composition is skipped while the signal
+// holds — the freshest clean segment serves instead, and a crossing path
+// stays a last resort when nothing else exists. The signal's lapse is a
 // fake-time sleep in the bubble.
 func TestCompositionSkipsCrossingPaths(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		cache := newTestCache()
+		down := new(bus.Topic[bus.InterfaceDownState])
 		now := time.Now()
 		// The crossing segment is the freshest; the clean one a moment older.
 		crossing := crossingSegment(t, iaMid, iaLeaf, testIfID, now)
@@ -238,7 +241,7 @@ func TestCompositionSkipsCrossingPaths(t *testing.T) {
 		p := &PathProvider{
 			IA:            iaLeaf,
 			DB:            &fakePathDB{segs: []*pathdb.Segment{crossing, clean}},
-			InterfaceDown: cache,
+			InterfaceDown: down,
 		}
 
 		path, err := p.LocalPath(iaMid)
@@ -252,7 +255,7 @@ func TestCompositionSkipsCrossingPaths(t *testing.T) {
 
 		// Signal the interface the crossing segment traverses; the composition
 		// avoids it.
-		cache.Record(InterfaceDownSignal{IA: iaMid, IfID: testIfID})
+		signal(down, iaMid, testIfID)
 		path, err = p.LocalPath(iaMid)
 		if err != nil {
 			t.Fatal(err)
@@ -267,14 +270,14 @@ func TestCompositionSkipsCrossingPaths(t *testing.T) {
 		lone := &PathProvider{
 			IA:            iaLeaf,
 			DB:            &fakePathDB{segs: []*pathdb.Segment{crossing}},
-			InterfaceDown: cache,
+			InterfaceDown: down,
 		}
 		if _, err := lone.LocalPath(iaMid); err != nil {
 			t.Fatalf("the lone crossing path was dropped: %v", err)
 		}
 
-		// The entry lapses and the freshest crossing segment serves again.
-		time.Sleep(IfDownCacheTTL + time.Second)
+		// The signal lapses and the freshest crossing segment serves again.
+		time.Sleep(InterfaceDownHold + time.Second)
 		path, err = p.LocalPath(iaMid)
 		if err != nil {
 			t.Fatal(err)
@@ -290,7 +293,7 @@ func TestCompositionSkipsCrossingPaths(t *testing.T) {
 // half: a down segment crossing a signaled interface is skipped in favor of
 // a clean one, the crossing kept only as the last resort.
 func TestCompositionSkipsCrossingDownSegment(t *testing.T) {
-	cache := newTestCache()
+	down := new(bus.Topic[bus.InterfaceDownState])
 	now := time.Now()
 	up := upSegment(t, now, iaMid, iaLeaf)
 	crossingDown := crossingSegment(t, iaMid, iaDest, testIfID, now)
@@ -303,9 +306,9 @@ func TestCompositionSkipsCrossingDownSegment(t *testing.T) {
 		Lookup: func(context.Context, addr.IA) []*pathdb.Segment {
 			return []*pathdb.Segment{crossingDown, cleanDown}
 		},
-		InterfaceDown: cache,
+		InterfaceDown: down,
 	}
-	cache.Record(InterfaceDownSignal{IA: iaMid, IfID: testIfID})
+	signal(down, iaMid, testIfID)
 	path, err := p.Path(context.Background(), iaDest)
 	if err != nil {
 		t.Fatal(err)

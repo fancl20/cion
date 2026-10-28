@@ -7,10 +7,12 @@ import (
 	"net"
 	"net/netip"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/scionproto/scion/pkg/addr"
 	"github.com/scionproto/scion/pkg/scrypto"
+	spath "github.com/scionproto/scion/pkg/slayers/path/scion"
 
 	"github.com/fancl20/cion/pkg/libs/bus"
 	"github.com/fancl20/cion/pkg/libs/scion"
@@ -255,10 +257,19 @@ func TestMeshBindEndpointRoundTrip(t *testing.T) {
 	}
 }
 
-// TestMeshSocketDropsPathOnSignal checks the signal's prompting: the
-// interface-down cache's quoted destination names the peer whose cached
-// path just failed; the bind drops exactly that path, and the next send
-// re-resolves through the filtered composition.
+// quoting returns the state with one more signal, held from now, naming an
+// interface of the leaf and quoting a packet to dst.
+func quoting(s bus.InterfaceDownState, dst addr.IA) bus.InterfaceDownState {
+	now := time.Now()
+	link := segment.LinkID{IA: addr.MustIAFrom(20, 0xff0000000062), IfID: 1}
+	return s.Signaled(link, dst, now, now.Add(scion.InterfaceDownHold))
+}
+
+// TestMeshSocketDropsPathOnSignal checks the signal's prompting: a signal
+// quoting the peer drops exactly the peer's cached path, the next send
+// re-resolving through the filtered composition; a signal quoting another
+// destination drops nothing, and a signal already handled drops no path
+// again.
 func TestMeshSocketDropsPathOnSignal(t *testing.T) {
 	core, leaf := addr.MustIAFrom(20, 0xff0000000061), addr.MustIAFrom(20, 0xff0000000062)
 	fresh := upSegmentAt(t, time.Now(), core, leaf)
@@ -281,9 +292,8 @@ func TestMeshSocketDropsPathOnSignal(t *testing.T) {
 	}
 
 	// The signal's quote names the destination; the bind drops its path.
-	socket.dropPathOf(scion.InterfaceDownSignal{
-		IA: leaf, IfID: 1, Dst: core,
-	})
+	first := quoting(bus.InterfaceDownState{}, core)
+	socket.dropQuoted(first, 0)
 	socket.mtx.Lock()
 	_, kept := socket.paths[core]
 	socket.mtx.Unlock()
@@ -298,21 +308,71 @@ func TestMeshSocketDropsPathOnSignal(t *testing.T) {
 			counting.queries, queries+1)
 	}
 
-	// A signal naming another destination drops exactly that one.
-	if err := socket.send(peer, [][]byte{[]byte("datagram")}); err != nil {
-		t.Fatal(err)
-	}
+	// A signal naming another destination drops nothing, and the first
+	// signal, handled, drops the re-resolved path no more.
 	before := socket.cnt.sentDatagrams.Load()
-	socket.dropPathOf(scion.InterfaceDownSignal{
-		IA: leaf, IfID: 1, Dst: addr.MustIAFrom(20, 0xff0000000099),
-	})
+	socket.dropQuoted(quoting(first, addr.MustIAFrom(20, 0xff0000000099)), first.Seq())
 	socket.mtx.Lock()
 	_, kept = socket.paths[core]
 	socket.mtx.Unlock()
 	if !kept {
-		t.Error("a signal naming another destination dropped this peer's path")
+		t.Error("a signal naming another destination, or one handled, dropped this peer's path")
 	}
 	if socket.cnt.sentDatagrams.Load() != before {
 		t.Error("a signal counted a send")
 	}
+}
+
+// TestMeshSocketFollowsSignals checks the subscription: each event drops
+// the cached paths its new quotes name, a quote an earlier event carried
+// drops no path again, and the following ends with its context.
+func TestMeshSocketFollowsSignals(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		socket := newMeshSocket(nil, nil, &counters{})
+		near, far := addr.MustIAFrom(20, 0xff0000000071), addr.MustIAFrom(20, 0xff0000000072)
+		cache := func(ias ...addr.IA) {
+			socket.mtx.Lock()
+			defer socket.mtx.Unlock()
+			for _, ia := range ias {
+				socket.paths[ia] = &spath.Decoded{}
+			}
+		}
+		cached := func(ia addr.IA) bool {
+			socket.mtx.Lock()
+			defer socket.mtx.Unlock()
+			_, ok := socket.paths[ia]
+			return ok
+		}
+		topic := new(bus.Topic[bus.InterfaceDownState])
+		ctx, cancel := context.WithCancel(t.Context())
+		done := make(chan struct{})
+		go func() {
+			socket.followSignals(ctx, topic)
+			close(done)
+		}()
+
+		cache(near, far)
+		topic.Update(func(s bus.InterfaceDownState) bus.InterfaceDownState { return quoting(s, near) })
+		synctest.Wait()
+		if cached(near) || !cached(far) {
+			t.Errorf("after a signal quoting %v: cached %v %t, %v %t; want only %v dropped",
+				near, near, cached(near), far, cached(far), near)
+		}
+
+		cache(near)
+		topic.Update(func(s bus.InterfaceDownState) bus.InterfaceDownState { return quoting(s, far) })
+		synctest.Wait()
+		if !cached(near) || cached(far) {
+			t.Errorf("after a signal quoting %v: cached %v %t, %v %t; want only %v dropped",
+				far, near, cached(near), far, cached(far), far)
+		}
+
+		cancel()
+		synctest.Wait()
+		select {
+		case <-done:
+		default:
+			t.Error("the following outlived its context")
+		}
+	})
 }

@@ -36,13 +36,12 @@ type PathProvider struct {
 	Bootstrap func(core addr.IA) *spath.Decoded
 	// Cores enumerates the core ASes of an ISD named by the pinned TRC.
 	Cores func(isd addr.ISD) []addr.IA
-	// InterfaceDown is the node's shared negative cache of SCMP
-	// interface-down signals. Composition consults it at the moment it
-	// holds full knowledge — each segment's entries carry their ISD-ASes
-	// and interface IDs — skipping a composed path that crosses a signaled
-	// interface until the entry lapses, keeping a crossing path only when
-	// nothing else exists. Nil composes without the filter.
-	InterfaceDown *InterfaceDownCache
+	// InterfaceDown is the node's interface-down topic. Composition reads it
+	// where it holds full knowledge — each segment's entries carry their
+	// ISD-ASes and interface IDs — and demotes a composed path that crosses
+	// a link a held signal names, keeping it only when nothing else exists.
+	// A nil topic composes without the filter.
+	InterfaceDown *bus.Topic[bus.InterfaceDownState]
 	// Links is the node's link state topic, whose usable links are the
 	// interfaces routes may leave the node through. A segment through an
 	// interface the node retired stays until it expires, while the data plane
@@ -74,19 +73,19 @@ func (p *PathProvider) local(dst addr.IA) (*Candidate, error) {
 	if dst.Equal(p.IA) {
 		return nil, serrors.New("destination is the local ISD-AS", "isd_as", dst)
 	}
-	live := p.liveInterfaces()
+	v := p.view()
 	// A destination an up segment already contains is on a route from here —
 	// a core at the segment's origin, an on-path AS mid-segment — and the
 	// containing segment whose truncated reversal ranks first is the route
 	// to it.
-	if c, err := p.containing(dst, live); err != nil || c != nil {
+	if c, err := p.containing(dst, v); err != nil || c != nil {
 		return c, err
 	}
 	// Before any up segment is verified — a fresh node that has not even
 	// pinned the TRC — the bootstrap beacon's reversed route serves the
 	// core; beacons originate only at cores.
 	if p.Bootstrap != nil {
-		if bs := p.Bootstrap(dst); bs != nil && !retired(live, egress(bs)) {
+		if bs := p.Bootstrap(dst); bs != nil && !v.retired(egress(bs)) {
 			return &Candidate{Path: bs, Hops: len(bs.HopFields)}, nil
 		}
 	}
@@ -160,8 +159,8 @@ type Candidate struct {
 	// Path is the composed data-plane path.
 	Path *spath.Decoded
 	// Links are the (ISD-AS, interface ID) pairs of the traversed stretch —
-	// both interface IDs of each entry — the identity the interface-down
-	// cache keys on. Entries dropped by truncation contribute nothing.
+	// both interface IDs of each entry — the identity interface-down signals
+	// name. Entries dropped by truncation contribute nothing.
 	Links []segment.LinkID
 	// Hops is the joined hop count.
 	Hops int
@@ -228,16 +227,17 @@ func (c *Candidate) Before(o *Candidate) bool {
 // A pair meeting at the local node or at the destination leaves one part no
 // travel and composes nothing: its path is the down-only meeting's or the
 // containing branch's, which carry it once rather than once per segment of
-// the idle part. A candidate naming one of the node's own interfaces the live
-// snapshot lacks never composes, the snapshot taken once per call; a signaled
-// interface keeps its demote-to-last-resort semantics, a flagged candidate.
+// the idle part. A candidate naming one of the node's own interfaces the
+// usable links lack never composes; a candidate crossing a signaled link
+// keeps its demote-to-last-resort semantics, a flagged candidate. The link
+// state and the interface-down state are read once per call.
 // The local ISD-AS is the one error, a caller mistake failed fast at entry;
 // an unreachable destination is the empty answer.
 func (p *PathProvider) Enumerate(ctx context.Context, dst addr.IA) ([]Candidate, error) {
 	if dst.Equal(p.IA) {
 		return nil, serrors.New("destination is the local ISD-AS", "isd_as", dst)
 	}
-	live := p.liveInterfaces()
+	v := p.view()
 	var downs []*pathdb.Segment
 	if p.Lookup != nil {
 		downs = p.Lookup(ctx, dst)
@@ -245,7 +245,7 @@ func (p *PathProvider) Enumerate(ctx context.Context, dst addr.IA) ([]Candidate,
 	ups := p.upSegments()
 	var out []Candidate
 	emit := func(up *pathdb.Segment, mUp int, down *pathdb.Segment, mDown int) error {
-		c, err := p.compose(up, mUp, down, mDown, live)
+		c, err := p.compose(up, mUp, down, mDown, v)
 		if err != nil {
 			return err
 		}
@@ -297,13 +297,12 @@ func (p *PathProvider) Enumerate(ctx context.Context, dst addr.IA) ([]Candidate,
 // compose builds the candidate of one meeting — the up segment truncated at
 // its entry mUp, the down segment at its entry mDown, either side optional —
 // or nil when a hop of either traversed stretch names one of the node's own
-// interfaces the live snapshot lacks: the data plane serves no such
-// interface, so the candidate is dropped before composition, never a
-// flagged survivor.
+// interfaces the usable links lack: the data plane serves no such interface,
+// so the candidate is dropped before composition, never a flagged survivor.
 func (p *PathProvider) compose(
 	up *pathdb.Segment, mUp int,
 	down *pathdb.Segment, mDown int,
-	live map[uint16]addr.IA,
+	v view,
 ) (*Candidate, error) {
 
 	// A meeting at the local node carries no up part: the reversed up
@@ -313,25 +312,24 @@ func (p *PathProvider) compose(
 	downTravel := down != nil && mDown < len(down.PCB.Entries)-1
 	var links []segment.LinkID
 	latency, known := time.Duration(0), true
-	crossing := false
 	if upTravel {
 		upLinks, sum, upKnown := stretch(up, mUp)
 		links = append(links, upLinks...)
 		latency += sum
 		known = known && upKnown
-		crossing = p.crossesFrom(up, mUp)
 	}
 	if downTravel {
 		downLinks, sum, downKnown := stretch(down, mDown)
 		links = append(links, downLinks...)
 		latency += sum
 		known = known && downKnown
-		crossing = crossing || p.crossesFrom(down, mDown)
 	}
+	crossing := false
 	for _, link := range links {
-		if link.IA.Equal(p.IA) && retired(live, link.IfID) {
+		if link.IA.Equal(p.IA) && v.retired(link.IfID) {
 			return nil, nil
 		}
+		crossing = crossing || v.down.Holds(link, v.now)
 	}
 	var parts []*spath.Decoded
 	if upTravel {
@@ -439,26 +437,6 @@ func meeting(up, down *pathdb.Segment) (mUp, mDown int, ok bool) {
 	return mUp, mDown, ok
 }
 
-// crossesFrom reports whether the segment's entries from index from — the
-// stretch a joined path traverses — cross a signaled interface: the check
-// composition makes of the cache at the moment it holds full knowledge, each
-// entry carrying its ISD-AS and interface IDs.
-func (p *PathProvider) crossesFrom(seg *pathdb.Segment, from int) bool {
-	if p.InterfaceDown == nil {
-		return false
-	}
-	for _, e := range seg.PCB.Entries[from:] {
-		if e.Hop.ConsIngress != 0 &&
-			p.InterfaceDown.Holds(e.IA, e.Hop.ConsIngress) {
-			return true
-		}
-		if e.Hop.ConsEgress != 0 && p.InterfaceDown.Holds(e.IA, e.Hop.ConsEgress) {
-			return true
-		}
-	}
-	return false
-}
-
 // upSegments returns every stored up segment. Each is a candidate meeting —
 // not only the freshest per origin core — because a staler segment through a
 // deeper parent can meet a down segment the freshest one cannot.
@@ -475,15 +453,15 @@ func (p *PathProvider) upSegments() []*pathdb.Segment {
 // mid-segment — and returns the one Outranks puts first among those crossing
 // no signaled interface, the first-ranked crossing one when nothing else
 // composes; nil when no up segment contains it. A segment the node
-// terminated on an interface the live snapshot lacks composes nothing.
-func (p *PathProvider) containing(ia addr.IA, live map[uint16]addr.IA) (*Candidate, error) {
+// terminated on an interface the usable links lack composes nothing.
+func (p *PathProvider) containing(ia addr.IA, v view) (*Candidate, error) {
 	var clean, crossing *Candidate
 	for _, seg := range p.upSegments() {
 		at := seg.PCB.IndexOfIA(ia)
 		if at < 0 {
 			continue
 		}
-		c, err := p.compose(seg, at, nil, -1, live)
+		c, err := p.compose(seg, at, nil, -1, v)
 		if err != nil {
 			return nil, err
 		}
@@ -503,17 +481,25 @@ func (p *PathProvider) containing(ia addr.IA, live map[uint16]addr.IA) (*Candida
 	return crossing, nil
 }
 
-// liveInterfaces snapshots the node's usable links; nil filters nothing.
-func (p *PathProvider) liveInterfaces() map[uint16]addr.IA {
-	return p.Links.Latest().Usable()
+// view is the state one call composes from, read once: the node's usable
+// links, and the interface-down signals that hold at now.
+type view struct {
+	live map[uint16]addr.IA
+	down bus.InterfaceDownState
+	now  time.Time
 }
 
-// retired reports whether the live snapshot lacks one of the node's own
-// interfaces; a nil snapshot lacks none.
-func retired(live map[uint16]addr.IA, ifID uint16) bool {
-	if live == nil {
+// view reads the link state and the interface-down state.
+func (p *PathProvider) view() view {
+	return view{live: p.Links.Latest().Usable(), down: p.InterfaceDown.Latest(), now: time.Now()}
+}
+
+// retired reports whether the usable links lack one of the node's own
+// interfaces; nil usable links lack none.
+func (v view) retired(ifID uint16) bool {
+	if v.live == nil {
 		return false
 	}
-	_, ok := live[ifID]
+	_, ok := v.live[ifID]
 	return !ok
 }

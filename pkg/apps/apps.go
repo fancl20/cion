@@ -24,6 +24,7 @@ import (
 
 	"github.com/fancl20/cion/pkg/apps/voting"
 	"github.com/fancl20/cion/pkg/core/trust"
+	"github.com/fancl20/cion/pkg/libs/bus"
 	"github.com/fancl20/cion/pkg/libs/scion"
 	"github.com/fancl20/cion/pkg/modules/enrollauth"
 )
@@ -85,9 +86,9 @@ type Environment struct {
 	// NewConn binds the node's sending conn on an ephemeral port: the
 	// socket the application's own services ride.
 	NewConn func() (*scion.Conn, error)
-	// InterfaceDown is the node's shared negative cache of SCMP
-	// interface-down signals.
-	InterfaceDown *scion.InterfaceDownCache
+	// Bus is the node's bus, the topics of the state the node's components
+	// share.
+	Bus *bus.Bus
 	// RegisterSvc and UnregisterSvc register and retire one of the
 	// application's sockets as a SCION service in this AS, on the serving
 	// data plane generation and on every one to come.

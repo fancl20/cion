@@ -127,3 +127,14 @@ There is no wire or storage change.
 *   **The benchmarks:** five runs each. The NAT and cut benchmarks hold.
 
 ## Implementation history
+
+*   Landed as proposed: the topic ([bus.go](/pkg/libs/bus/bus.go),
+    [ifdown.go](/pkg/libs/bus/ifdown.go)), the conns' publish and the
+    provider's read ([conn.go](/pkg/libs/scion/conn.go),
+    [provider.go](/pkg/libs/scion/provider.go)), and the mesh socket's
+    subscription ([bind.go](/pkg/apps/wireguard/bind.go)). Five runs each,
+    the benchmarks held: a rebind recovered in 16.5 seconds, and a restarted
+    peer in 13.0 to 13.1 in four runs, the fifth failing to boot on a link
+    address still held, as runs before the change did. The regions network
+    recovered from its cut in 279 to 309 seconds, once in 13, and the
+    stranded network in 21 to 285.

@@ -18,6 +18,7 @@ import (
 	"github.com/fancl20/cion/pkg/core/controlplane"
 	"github.com/fancl20/cion/pkg/core/liveness"
 	"github.com/fancl20/cion/pkg/core/trust"
+	"github.com/fancl20/cion/pkg/libs/bus"
 	"github.com/fancl20/cion/pkg/libs/scion"
 	"github.com/fancl20/cion/pkg/libs/underlay"
 	"github.com/fancl20/cion/pkg/modules/links"
@@ -127,9 +128,9 @@ func (a *App) Links() links.DB { return a.node.linkStore }
 // verdicts, one per serving link.
 func (a *App) Monitor() *liveness.HealthMonitor { return a.node.monitor }
 
-// InterfaceDown returns the node's shared negative cache of SCMP
-// interface-down signals.
-func (a *App) InterfaceDown() *scion.InterfaceDownCache { return a.node.ifDown }
+// Bus returns the node's bus, the topics of the state the node's components
+// share.
+func (a *App) Bus() *bus.Bus { return a.node.bus }
 
 // TrustDB returns the node's trust database.
 func (a *App) TrustDB() trustdb.DB { return a.node.trustDB }

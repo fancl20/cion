@@ -38,7 +38,7 @@ func bfdPacing(cfg *services.NodeConfig) {
 // a direct link to C and reaches C over it. A marks the A–B link down within
 // the window while its BFD keeps leaving on the link's own socket; an echo
 // from A across the dead link toward B's far side receives the type-5 signal
-// and A's interface cache records it; lifting the blackhole — B restarted —
+// and A's interface-down topic holds it; lifting the blackhole — B restarted —
 // returns the link up with no generation swap: the serving instance's
 // session continuous across the episode. The selection loop retires a link
 // whose verdict stays down for DemoteWindows windows, so every wait on path
@@ -105,7 +105,7 @@ func TestBFDLivenessEpisode(t *testing.T) {
 
 	// An echo from A toward B's far side — C — over the path through the
 	// dead link: the egress-down branch answers with the type-5 signal, and
-	// A's conn records the signaled interface in the shared cache.
+	// A's conn publishes the signaled interface on the interface-down topic.
 	echoAcrossDownLink(t, a, c.app.IA(), c.host,
 		segment.LinkID{IA: a.app.IA(), IfID: abIfID}, throughB)
 
@@ -168,7 +168,7 @@ func TestBFDStaticLabEpisode(t *testing.T) {
 	Poll(t, "A to mark the static link down", func() bool {
 		return !a.app.Monitor().Up(ifID)
 	})
-	// The dead route answers the source with the signal; A's cache holds it.
+	// The dead route answers the source with the signal; A's topic holds it.
 	echoAcrossDownLink(t, a.Node, c.app.IA(), c.host,
 		segment.LinkID{IA: a.app.IA(), IfID: ifID}, throughB)
 
@@ -193,16 +193,16 @@ func establishedOf(ctx context.Context, n *Node, ia addr.IA) bool {
 // echoAcrossDownLink sends echoes toward the destination over a path
 // through a down or retired interface — one of the node's own captured
 // while its link was up, for the provider composes no path through an
-// interface the node cannot send over — until the node's shared cache holds
-// the type-5 signal naming that interface, which the receive path records
-// while each echo goes unanswered.
+// interface the node cannot send over — until the node's interface-down
+// topic holds the type-5 signal naming that interface, which the receive
+// path publishes while each echo goes unanswered.
 func echoAcrossDownLink(t *testing.T, n *Node, dst addr.IA,
 	host netip.Addr, down segment.LinkID, path *spath.Decoded) {
 
 	t.Helper()
-	Poll(t, "the interface-down signal to land in the cache", func() bool {
+	Poll(t, "the interface-down signal to reach the topic", func() bool {
 		echoOver(t, n, dst, host, path, 100*time.Millisecond)
-		return n.app.InterfaceDown().Holds(down.IA, down.IfID)
+		return n.app.Bus().InterfaceDown().Latest().Holds(down, time.Now())
 	})
 }
 
@@ -240,8 +240,8 @@ func echoVia(ctx context.Context, t *testing.T, n *Node, dst addr.IA,
 
 // echoOver sends an echo request toward the destination over the path and
 // reads the socket until the reply arrives or the wait elapses, reporting
-// whether the reply arrived. The receive path records an interface-down
-// signal in the node's shared cache as it reads.
+// whether the reply arrived. The receive path publishes an interface-down
+// signal on the node's topic as it reads.
 func echoOver(t *testing.T, n *Node, dst addr.IA, host netip.Addr,
 	path *spath.Decoded, wait time.Duration) bool {
 

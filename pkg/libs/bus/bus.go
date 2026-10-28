@@ -20,7 +20,8 @@ import (
 
 // Bus is one node's topics.
 type Bus struct {
-	links Topic[LinkState]
+	links  Topic[LinkState]
+	ifDown Topic[InterfaceDownState]
 }
 
 // New returns a bus nothing has been published on.
@@ -34,6 +35,13 @@ func New() *Bus {
 // topology provider read it.
 func (b *Bus) Links() *Topic[LinkState] {
 	return &b.links
+}
+
+// InterfaceDown returns the node's interface-down topic. The node's conns
+// update it with each SCMP External Interface Down signal they recognize;
+// the path provider and the WireGuard application read it.
+func (b *Bus) InterfaceDown() *Topic[InterfaceDownState] {
+	return &b.ifDown
 }
 
 // Topic carries one kind of event and remembers the last one published. Its
@@ -51,6 +59,23 @@ type Topic[T any] struct {
 func (t *Topic[T]) Publish(e T) {
 	t.mtx.Lock()
 	defer t.mtx.Unlock()
+	t.publishLocked(e)
+}
+
+// Update publishes, as Publish does, the event f makes of the topic's last
+// one, the zero event before the first: no other publish comes between the
+// read and the publish, so each of a topic's publishers adds to the state
+// the others left. f runs under the topic's lock: it must not block, and
+// builds a new event rather than mutate the last.
+func (t *Topic[T]) Update(f func(T) T) {
+	t.mtx.Lock()
+	defer t.mtx.Unlock()
+	t.publishLocked(f(t.last))
+}
+
+// publishLocked makes e the last event and delivers it; the caller holds
+// the topic's lock.
+func (t *Topic[T]) publishLocked(e T) {
 	t.last, t.held = e, true
 	for s := range t.subs {
 		// The publishers alone send, under the lock, so the slot the

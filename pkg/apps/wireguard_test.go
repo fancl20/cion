@@ -8,6 +8,7 @@ import (
 	"github.com/scionproto/scion/pkg/addr"
 
 	"github.com/fancl20/cion/pkg/core/trust"
+	"github.com/fancl20/cion/pkg/libs/bus"
 	"github.com/fancl20/cion/pkg/libs/scion"
 )
 
@@ -28,16 +29,18 @@ func wireguardEnvironment(t *testing.T, core bool) *Environment {
 		Domain: "core.example.org",
 		Engine: trust.NewEngine(ia, nil, nil),
 		Paths:  &scion.PathProvider{},
+		Bus:    bus.New(),
 	}
 }
 
 // TestWireguardConfigFromEnvironment checks the configuration the entry
 // derives: the shared port its arguments name — no slice, the directory
 // assigning it — the published-host resolver beside the bind host, the
-// relay presence from the core's domain, and the core's own store beside
-// the joiner's core route.
+// relay presence from the core's domain, the node's interface-down topic,
+// and the core's own store beside the joiner's core route.
 func TestWireguardConfigFromEnvironment(t *testing.T) {
-	core, err := wireguardConfig(wireguardEnvironment(t, true))
+	env := wireguardEnvironment(t, true)
+	core, err := wireguardConfig(env)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -56,6 +59,9 @@ func TestWireguardConfigFromEnvironment(t *testing.T) {
 	}
 	if cfg.DERP == nil || cfg.DERP.URL != "https://core.example.org/derp" {
 		t.Errorf("relay presence = %+v, want the core's domain", cfg.DERP)
+	}
+	if cfg.InterfaceDown != env.Bus.InterfaceDown() {
+		t.Error("the entry did not hand the application the node's interface-down topic")
 	}
 	if cfg.CoreRoute != nil {
 		t.Error("the core node got a core route")

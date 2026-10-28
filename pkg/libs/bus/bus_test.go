@@ -2,6 +2,7 @@ package bus
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"testing/synctest"
 )
@@ -60,6 +61,32 @@ func TestTopicLatest(t *testing.T) {
 	var none *Topic[int]
 	if e := none.Latest(); e != 0 {
 		t.Errorf("a nil topic's latest = %d, want 0", e)
+	}
+}
+
+// TestTopicUpdate checks the update: it builds on the last event, the zero
+// event before the first publish, delivers what it builds as a publish
+// does, and many publishers' updates each add to the state the others left.
+func TestTopicUpdate(t *testing.T) {
+	var topic Topic[int]
+	sub := topic.Subscribe(t.Context())
+	topic.Update(func(e int) int { return e + 1 })
+	if e, ok := taken(sub); !ok || e != 1 {
+		t.Errorf("the first update delivered %d (%t), want 1 built on the zero event", e, ok)
+	}
+	topic.Publish(10)
+	topic.Update(func(e int) int { return e + 1 })
+	if e := topic.Latest(); e != 11 {
+		t.Errorf("an update after a publish left %d, want 11", e)
+	}
+
+	var wg sync.WaitGroup
+	for range 100 {
+		wg.Go(func() { topic.Update(func(e int) int { return e + 1 }) })
+	}
+	wg.Wait()
+	if e := topic.Latest(); e != 111 {
+		t.Errorf("100 concurrent updates left %d, want 111", e)
 	}
 }
 

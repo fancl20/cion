@@ -243,8 +243,8 @@ func TestStaticLabByLinkSet(t *testing.T) {
 // and its chosen path crosses B's link to D, the branch of fewer hops.
 // Removing D's entry from B's file retires the link while the segments
 // through it stay fresh for minutes: B's data plane answers an echo over
-// them with the interface-down signal, A's cache holds B's interface, and A
-// reaches D over C and E at once.
+// them with the interface-down signal, A's interface-down topic holds B's
+// interface, and A reaches D over C and E at once.
 func TestRetiredLinkAnswersInterfaceDown(t *testing.T) {
 	t.Parallel()
 	iaD := addr.MustIAFrom(20, 0xff0000000091)
@@ -292,7 +292,7 @@ func TestRetiredLinkAnswersInterfaceDown(t *testing.T) {
 	})
 
 	// B's data plane answers an echo over the path through the retired link
-	// with the signal, and A, its cache holding the signal, reaches D over C
+	// with the signal, and A, its topic holding the signal, reaches D over C
 	// and E while the path through B still ranks first.
 	echoAcrossDownLink(t, a.Node, iaD, d.host, viaB, throughB)
 	Poll(t, "A to reach D around the retired link", func() bool {

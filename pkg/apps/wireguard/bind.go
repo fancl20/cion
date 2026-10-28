@@ -22,6 +22,7 @@ import (
 	spath "github.com/scionproto/scion/pkg/slayers/path/scion"
 	"golang.zx2c4.com/wireguard/conn"
 
+	"github.com/fancl20/cion/pkg/libs/bus"
 	"github.com/fancl20/cion/pkg/libs/scion"
 )
 
@@ -228,23 +229,34 @@ func (s *meshSocket) setPath(ia addr.IA, path *spath.Decoded) {
 	delete(s.routes, ia)
 }
 
-// dropPathOf releases the cached path of the destination an interface-down
-// signal's quote names — the signal's cached path just failed — so the next
-// send re-resolves through the filtered composition; the existing
-// failure-and-refresh behavior, prompted by the signal instead of a lost
-// datagram. The bind cannot recover an ISD-AS from a decoded path and does
-// not try.
-func (s *meshSocket) dropPathOf(sig scion.InterfaceDownSignal) {
-	if sig.Dst.IsZero() {
-		return
+// followSignals keeps the path cache off the paths interface-down signals
+// report failed, until ctx ends: each event of the topic drops the cached
+// path of every destination a signal quoted after the last event it
+// handled, so a signal drops a path once.
+func (s *meshSocket) followSignals(ctx context.Context, topic *bus.Topic[bus.InterfaceDownState]) {
+	var handled uint64
+	for state := range topic.Subscribe(ctx) {
+		s.dropQuoted(state, handled)
+		handled = state.Seq()
 	}
+}
+
+// dropQuoted releases the cached path of each destination a signal of the
+// state quoted after its handled-th signal — the path the quoted packet rode
+// just failed — so the next send re-resolves through the filtered
+// composition: the existing failure-and-refresh behavior, prompted by the
+// signal instead of a lost datagram. A decoded path names no ISD-AS for its
+// hops, so the drop goes by the quoted destination.
+func (s *meshSocket) dropQuoted(state bus.InterfaceDownState, handled uint64) {
 	s.mtx.Lock()
 	defer s.mtx.Unlock()
-	if _, ok := s.paths[sig.Dst]; ok {
-		s.cnt.pathRefreshes.Add(1)
-		delete(s.paths, sig.Dst)
-		delete(s.expiry, sig.Dst)
-		delete(s.routes, sig.Dst)
+	for dst := range state.QuotedAfter(handled) {
+		if _, ok := s.paths[dst]; ok {
+			s.cnt.pathRefreshes.Add(1)
+			delete(s.paths, dst)
+			delete(s.expiry, dst)
+			delete(s.routes, dst)
+		}
 	}
 }
 

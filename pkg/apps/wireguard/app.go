@@ -21,6 +21,7 @@ import (
 	"go.opentelemetry.io/otel"
 	"golang.zx2c4.com/wireguard/device"
 
+	"github.com/fancl20/cion/pkg/libs/bus"
 	"github.com/fancl20/cion/pkg/libs/loops"
 	"github.com/fancl20/cion/pkg/libs/scion"
 	"github.com/fancl20/cion/pkg/libs/scionrpc"
@@ -108,12 +109,11 @@ type Config struct {
 	RegisterSvc func(svc addr.SVC, port uint16) error
 	// UnregisterSvc deregisters a socket RegisterSvc registered.
 	UnregisterSvc func(svc addr.SVC, port uint16) error
-	// InterfaceDown is the node's shared negative cache of SCMP
-	// interface-down signals; the mesh transport drops the cached path of
-	// the destination a signal's quote names, so its next send re-resolves
-	// through the filtered composition. Nil leaves the failure-and-refresh
-	// behavior alone.
-	InterfaceDown *scion.InterfaceDownCache
+	// InterfaceDown is the node's interface-down topic; the mesh transport
+	// drops the cached path of each destination a signal's quote names, so
+	// its next send re-resolves through the filtered composition. Nil leaves
+	// the failure-and-refresh behavior alone.
+	InterfaceDown *bus.Topic[bus.InterfaceDownState]
 
 	// Cadence overrides for tests; zero means the package constant.
 	PublishInterval time.Duration
@@ -227,12 +227,6 @@ func New(cfg Config) (*App, error) {
 		assigned:  make(chan struct{}),
 		logger:    device.NewLogger(device.LogLevelError, "cion-wireguard"),
 	}
-	if cfg.InterfaceDown != nil {
-		// The signal drops the quoted destination's cached path — the bind's
-		// existing failure-and-refresh behavior, prompted by the signal
-		// instead of a lost datagram.
-		cfg.InterfaceDown.OnSignal(a.mesh.dropPathOf)
-	}
 	if err := a.register(SvcWireguard, meshConn.LocalPort()); err != nil {
 		a.release()
 		return nil, fmt.Errorf("registering the mesh socket: %w", err)
@@ -317,16 +311,12 @@ func (a *App) deregisterAll() {
 	a.regs = nil
 }
 
-// release closes what New opened beneath the devices: the interface-down
-// receiver New installed resets, the service registrations undo, and the
-// sockets and the directory client close. A failed construction runs it
-// alone — the store stays the caller's: it opened it, and a construction
-// that never returned owns nothing of it — and Close runs it between the
-// devices and the store.
+// release closes what New opened beneath the devices: the service
+// registrations undo, and the sockets and the directory client close. A
+// failed construction runs it alone — the store stays the caller's: it opened
+// it, and a construction that never returned owns nothing of it — and Close
+// runs it between the devices and the store.
 func (a *App) release() {
-	if a.cfg.InterfaceDown != nil {
-		a.cfg.InterfaceDown.OnSignal(nil)
-	}
 	a.deregisterAll()
 	a.mesh.Close()
 	a.host.Close()
@@ -558,9 +548,10 @@ func (a *App) Registry() Registry {
 }
 
 // Run serves the application until the context is canceled: the sockets'
-// readers, the host device's drain, the relay presence, the directory —
-// served by the core, published and fetched by everyone — and the counters
-// on the process's meter. It returns once every goroutine it started has
+// readers, the mesh socket's following of the interface-down signals, the
+// host device's drain, the relay presence, the directory — served by the
+// core, published and fetched by everyone — and the counters on the
+// process's meter. It returns once every goroutine it started has
 // returned, the mesh peers' drains among them, and leaves what New bound to
 // Close.
 func (a *App) Run(ctx context.Context) error {
@@ -571,6 +562,11 @@ func (a *App) Run(ctx context.Context) error {
 	defer func() { _ = served.Unregister() }()
 	loops.Go(ctx, &a.wg, "wireguard mesh socket", a.mesh.run)
 	loops.Go(ctx, &a.wg, "wireguard host socket", a.host.run)
+	if a.cfg.InterfaceDown != nil {
+		loops.Go(ctx, &a.wg, "wireguard interface-down signals", func(ctx context.Context) {
+			a.mesh.followSignals(ctx, a.cfg.InterfaceDown)
+		})
+	}
 	if a.hosts != nil {
 		pipe := a.hosts.pipe
 		loops.Go(ctx, &a.wg, "wireguard host drain", func(ctx context.Context) {

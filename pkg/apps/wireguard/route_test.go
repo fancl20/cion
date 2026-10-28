@@ -13,6 +13,7 @@ import (
 	"github.com/scionproto/scion/pkg/scrypto"
 	spath "github.com/scionproto/scion/pkg/slayers/path/scion"
 
+	"github.com/fancl20/cion/pkg/libs/bus"
 	"github.com/fancl20/cion/pkg/libs/scion"
 	"github.com/fancl20/cion/pkg/libs/segment"
 	"github.com/fancl20/cion/pkg/modules/pathdb"
@@ -768,7 +769,7 @@ func TestMeshSocketEvictionsClearRoute(t *testing.T) {
 
 	// The interface-down signal: the quoted destination's drop clears the
 	// route entry with the cached path.
-	socket.dropPathOf(scion.InterfaceDownSignal{IA: tp.dest, IfID: 1, Dst: tp.dest})
+	socket.dropQuoted(quoting(bus.InterfaceDownState{}, tp.dest), 0)
 	if path := pathOf(socket, tp.dest); path != nil {
 		t.Errorf("the interface-down signal left the cache entry %v", path)
 	}

@@ -57,8 +57,8 @@ type Info struct {
 }
 
 // LinkID identifies one link by an ISD-AS and one of its interface IDs —
-// either end names the link — the identity the interface-down cache keys on
-// and composed paths' link sets carry.
+// either end names the link — the identity interface-down signals name and
+// composed paths' link sets carry.
 type LinkID struct {
 	// IA is the ISD-AS of the interface's end.
 	IA addr.IA

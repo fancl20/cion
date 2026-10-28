@@ -104,11 +104,8 @@ type node struct {
 	// linkLatency carries the selection loop's per-link one-way delay
 	// samples to the beaconer's entries; both sides hold this one table.
 	linkLatency *controlplane.LinkLatency
-	// monitor owns the BFD sessions and their verdicts; ifDown is the
-	// node's shared negative cache of interface-down signals its conns
-	// record and its path composition consults.
+	// monitor owns the BFD sessions and their verdicts.
 	monitor *liveness.HealthMonitor
-	ifDown  *scion.InterfaceDownCache
 
 	// The trust role's products for the later phases, each held as the type
 	// its consumer takes and nil where the role offers none: the engine's
