@@ -1163,14 +1163,15 @@ func TestBeaconerReturnsTrustDBFailures(t *testing.T) {
 }
 
 // TestPropagateOnceDeclaresLatency checks the entry's declaration: the
-// propagated entry declares the egress link's latest one-way sample — the
-// window's echo round trip halved — and an unsampled egress declares
-// nothing. The declaration sits in the signed body the signature covers.
+// propagated entry declares the egress link's estimate in the latency
+// topic's last event — the window's echo round trip halved — and an egress
+// the event lacks declares nothing. The declaration sits in the signed body
+// the signature covers.
 func TestPropagateOnceDeclaresLatency(t *testing.T) {
 	f := newBeaconFixture(t)
 	ctx := context.Background()
-	f.beaconer.latencies = NewLinkLatency()
-	f.beaconer.latencies.Record(2, 4*time.Millisecond)
+	f.beaconer.latencies = new(bus.Topic[bus.LinkLatencies])
+	f.beaconer.latencies.Publish(bus.NewLinkLatencies(map[uint16]time.Duration{2: 4 * time.Millisecond}))
 
 	pcb := lineBeacon(t, f, time.Now())
 	if err := f.beaconer.HandleBeacon(ctx, pcb, 1); err != nil {
@@ -1213,8 +1214,8 @@ func TestPropagateOnceDeclaresLatency(t *testing.T) {
 		t.Fatalf("declaring entry does not verify: %v", err)
 	}
 
-	// An unsampled egress — the sample table's zero — declares nothing.
-	f.beaconer.latencies.Record(2, 0)
+	// An egress the latencies lack declares nothing.
+	f.beaconer.latencies.Publish(bus.NewLinkLatencies(nil))
 	f.sender.mtx.Lock()
 	f.sender.beacons = nil
 	f.sender.mtx.Unlock()
@@ -1229,7 +1230,7 @@ func TestPropagateOnceDeclaresLatency(t *testing.T) {
 		t.Fatal(err)
 	}
 	if parsed.Entries[1].Latency != nil {
-		t.Errorf("entry without a sample declares %v, want nothing",
+		t.Errorf("entry without an estimate declares %v, want nothing",
 			parsed.Entries[1].Latency)
 	}
 }

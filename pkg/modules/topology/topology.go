@@ -24,7 +24,6 @@ package topology
 import (
 	"context"
 	"net/http"
-	"time"
 
 	"github.com/scionproto/scion/pkg/addr"
 	spath "github.com/scionproto/scion/pkg/slayers/path/scion"
@@ -94,15 +93,14 @@ type Environment struct {
 	// Engine provides the node's chain as the directory client's
 	// certificate.
 	Engine *trust.Engine
-	// Latencies receives the selection loop's per-link one-way delay
-	// estimates; the beaconer's entries declare them.
-	Latencies LatencyRecorder
 	// Bus is the node's bus. The provider reads its link state: the verdicts
 	// the selection loop's floor and demotions count — established-but-down
 	// entries satisfy no floor and a down neighbor counts as infinitely
 	// slow — and each serving link's observed source, the data plane's own
 	// witness of where the peer's packets come from, which the
-	// authenticated link request's agreement rule reads.
+	// authenticated link request's agreement rule reads. It publishes the
+	// selection loop's per-link one-way delay estimates on the latency
+	// topic, which the beaconer's entries declare.
 	Bus *bus.Bus
 }
 
@@ -129,10 +127,4 @@ type Paths interface {
 	// LocalPath resolves a data-plane path from local state only, never a
 	// fetch: the variant safe to call from inside a dial.
 	LocalPath(dst addr.IA) (*spath.Decoded, error)
-}
-
-// LatencyRecorder receives per-link one-way delay estimates.
-type LatencyRecorder interface {
-	// Record records a link's one-way delay estimate by interface ID.
-	Record(ifID uint16, oneWay time.Duration)
 }

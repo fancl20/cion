@@ -76,7 +76,7 @@ type Beaconer struct {
 	store        *BeaconStore
 	db           pathdb.DB
 	links        *bus.Topic[bus.LinkState]
-	latencies    *LinkLatency
+	latencies    *bus.Topic[bus.LinkLatencies]
 	sender       SegmentSender
 	core         bool
 	propagation  time.Duration
@@ -142,9 +142,10 @@ type BeaconerConfig struct {
 	// interface originates and propagates nothing, resuming with the
 	// verdict's up edge. A nil topic serves no links.
 	Links *bus.Topic[bus.LinkState]
-	// Latencies holds the node's latest per-link one-way delay samples; the
-	// entries the beaconer signs declare them. Nil declares nothing.
-	Latencies *LinkLatency
+	// Latencies is the node's link latency topic, whose last event's
+	// estimates the entries the beaconer signs declare. A nil topic declares
+	// nothing.
+	Latencies *bus.Topic[bus.LinkLatencies]
 	// Sender sends beacon and registration RPCs over the SCION-native
 	// channel.
 	Sender SegmentSender
@@ -193,14 +194,11 @@ func NewBeaconer(cfg BeaconerConfig) (*Beaconer, error) {
 	}, nil
 }
 
-// egressLatency returns the egress link's latest one-way delay sample — the
-// declaration the entry carries; a nil table and an unsampled link declare
-// nothing.
+// egressLatency returns the egress link's latest one-way delay estimate —
+// the declaration the entry carries; a nil topic and a link the last event
+// lacks declare nothing.
 func (b *Beaconer) egressLatency(ifID uint16) time.Duration {
-	if b.latencies == nil {
-		return 0
-	}
-	return b.latencies.Sample(ifID)
+	return b.latencies.Latest().Of(ifID)
 }
 
 // Run executes the beaconing loops until the context is canceled:

@@ -103,8 +103,9 @@ run no loops of their own and hold no policy.
     ([ADR-0031](/docs/adrs/0031-publish-node-state-as-events-on-a-node-bus.md)).
     Its topics are the link state — the neighbor table's live entries, each
     with its link's verdict and the source the link observes its peer at —
-    and the interface-down signals the node's conns receive, each held for
-    ten seconds.
+    the interface-down signals the node's conns receive, each held for ten
+    seconds, and the per-link one-way delay estimates the selection loop
+    measures, which the beacons declare.
 
 ### Modules
 

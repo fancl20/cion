@@ -17,7 +17,6 @@ import (
 	"github.com/scionproto/scion/pkg/slayers/path/empty"
 	"google.golang.org/protobuf/proto"
 
-	"github.com/fancl20/cion/pkg/core/controlplane"
 	"github.com/fancl20/cion/pkg/core/dataplane/dataplanetest"
 	"github.com/fancl20/cion/pkg/libs/bus"
 	"github.com/fancl20/cion/pkg/libs/scion"
@@ -281,18 +280,18 @@ func (f *selFixture) ifID(t *testing.T, ia addr.IA) uint16 {
 }
 
 // TestSelectionDeclaresLatency checks the window's declarations: each
-// neighbor's echo round trip halved lands in the shared table the
+// neighbor's echo round trip halved lands in the latency topic the
 // beaconer's entries read, and a link the next window does not measure
 // declares nothing again.
 func TestSelectionDeclaresLatency(t *testing.T) {
 	f := newSelFixture(t, selPeer)
-	latencies := controlplane.NewLinkLatency()
+	latencies := new(bus.Topic[bus.LinkLatencies])
 	f.sel.cfg.Latencies = latencies
 	ifID := f.ifID(t, selPeer)
 
 	f.samples[selPeer] = sm(10*time.Millisecond, 20*time.Millisecond)
 	f.pass(t)
-	if got := latencies.Sample(ifID); got != 5*time.Millisecond {
+	if got := latencies.Latest().Of(ifID); got != 5*time.Millisecond {
 		t.Errorf("declared one-way delay = %v, want the halved round trip 5ms", got)
 	}
 
@@ -300,7 +299,7 @@ func TestSelectionDeclaresLatency(t *testing.T) {
 	// carry no stale sample.
 	f.samples[selPeer] = sm(0, 0)
 	f.pass(t)
-	if got := latencies.Sample(ifID); got != 0 {
+	if got := latencies.Latest().Of(ifID); got != 0 {
 		t.Errorf("declared one-way delay past an unanswered window = %v, want 0", got)
 	}
 }
@@ -1190,7 +1189,7 @@ func TestSelectionCancelledPassLandsNothing(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		f := newSelFixture(t, selPeer) // below the floor
 		f.sel.cfg.Window = 50 * time.Millisecond
-		latencies := controlplane.NewLinkLatency()
+		latencies := new(bus.Topic[bus.LinkLatencies])
 		f.sel.cfg.Latencies = latencies
 		if err := f.store.Insert(context.Background(), &links.Link{
 			NeighborIA: selB,
@@ -1218,7 +1217,7 @@ func TestSelectionCancelledPassLandsNothing(t *testing.T) {
 		if len(f.established) != 0 {
 			t.Errorf("promoted %v, want nothing", f.established)
 		}
-		if got := latencies.Sample(f.ifID(t, selPeer)); got != 0 {
+		if got := latencies.Latest().Of(f.ifID(t, selPeer)); got != 0 {
 			t.Errorf("declared one-way delay = %v, want nothing declared", got)
 		}
 	})

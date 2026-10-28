@@ -20,8 +20,9 @@ import (
 
 // Bus is one node's topics.
 type Bus struct {
-	links  Topic[LinkState]
-	ifDown Topic[InterfaceDownState]
+	links     Topic[LinkState]
+	ifDown    Topic[InterfaceDownState]
+	latencies Topic[LinkLatencies]
 }
 
 // New returns a bus nothing has been published on.
@@ -42,6 +43,12 @@ func (b *Bus) Links() *Topic[LinkState] {
 // the path provider and the WireGuard application read it.
 func (b *Bus) InterfaceDown() *Topic[InterfaceDownState] {
 	return &b.ifDown
+}
+
+// Latencies returns the node's link latency topic. The topology provider's
+// selection publishes on it once per window; the beaconer reads it.
+func (b *Bus) Latencies() *Topic[LinkLatencies] {
+	return &b.latencies
 }
 
 // Topic carries one kind of event and remembers the last one published. Its

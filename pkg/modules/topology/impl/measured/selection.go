@@ -21,7 +21,6 @@ import (
 	"github.com/fancl20/cion/pkg/libs/scionrpc"
 	"github.com/fancl20/cion/pkg/libs/underlay"
 	"github.com/fancl20/cion/pkg/modules/links"
-	"github.com/fancl20/cion/pkg/modules/topology"
 	nodev1 "github.com/fancl20/cion/proto/node/v1"
 )
 
@@ -107,10 +106,11 @@ type SelectionConfig struct {
 	// over, where the peer's packets come from, else the reply's claim. A
 	// nil topic treats every link as up and observes nothing.
 	Links *bus.Topic[bus.LinkState]
-	// Latencies receives the window's per-link one-way delay estimates —
-	// each neighbor's echo round trip halved — for the beaconer's entries
-	// to declare; nil discards them.
-	Latencies topology.LatencyRecorder
+	// Latencies is the node's link latency topic, which the selection
+	// publishes each window's per-link one-way delay estimates on — each
+	// neighbor's echo round trip halved — for the beaconer's entries to
+	// declare; nil publishes none.
+	Latencies *bus.Topic[bus.LinkLatencies]
 	// Paths resolves the freshest path to a candidate — the baseline — and
 	// enumerates the composed ones.
 	Paths SelectionPaths
@@ -630,18 +630,19 @@ func (s *selection) peerHost(ctx context.Context, ia addr.IA, path *spath.Decode
 	return resolved.Addr(), true
 }
 
-// declare lands the window's per-link one-way estimates in the shared table
-// the beaconer's entries declare: each neighbor's echo round trip halved —
-// half a round trip is the node's estimate of the one-way delay the
-// extension defines. A link the window did not measure declares nothing
-// again.
+// declare publishes the window's per-link one-way estimates, which the
+// beaconer's entries declare: each neighbor's echo round trip halved — half
+// a round trip is the node's estimate of the one-way delay the extension
+// defines. A link the window did not measure declares nothing.
 func (s *selection) declare(neighbors map[addr.IA]*links.Link, samples map[addr.IA]sample) {
 	if s.cfg.Latencies == nil {
 		return
 	}
+	estimates := make(map[uint16]time.Duration, len(neighbors))
 	for ia, l := range neighbors {
-		s.cfg.Latencies.Record(l.IfID, samples[ia].m.direct/2)
+		estimates[l.IfID] = samples[ia].m.direct / 2
 	}
+	s.cfg.Latencies.Publish(bus.NewLinkLatencies(estimates))
 }
 
 // echoRTT takes the median SCMP echo round trip to the destination — over

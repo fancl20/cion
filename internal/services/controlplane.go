@@ -436,7 +436,6 @@ func (n *node) buildBeaconing() error {
 
 	beacons := controlplane.NewBeaconStore()
 	n.beaconStore = beacons
-	n.linkLatency = controlplane.NewLinkLatency()
 	beaconer, err := controlplane.NewBeaconer(controlplane.BeaconerConfig{
 		IA:                   n.ident.ia,
 		Engine:               n.engine,
@@ -444,7 +443,7 @@ func (n *node) buildBeaconing() error {
 		Store:                beacons,
 		DB:                   n.pathDB,
 		Links:                n.bus.Links(),
-		Latencies:            n.linkLatency,
+		Latencies:            n.bus.Latencies(),
 		Sender:               n.peerClt,
 		Core:                 coreTier,
 		PropagationInterval:  n.cfg.Pacing.Propagation,
@@ -469,22 +468,21 @@ func (n *node) buildBeaconing() error {
 
 // wireTopology delivers the phases' products to the loaded provider: the
 // completed identity, the store its decisions land in, the peer client its
-// in-band requests ride, the path provider its comparator baselines with,
-// the trust engine its directory channel authenticates with, the latency
-// table its samples land in, and the node's bus, whose link state carries
-// the monitor's verdicts and the data plane's per-link observations the
-// confirm's agreement rule reads. The last step before the provider mounts
-// and runs, and the one direction the dependency ever crosses: the
+// in-band requests ride, the path provider its comparator baselines with, the
+// trust engine its directory channel authenticates with, and the node's bus,
+// whose link state carries the monitor's verdicts and the data plane's
+// per-link observations the confirm's agreement rule reads, and whose latency
+// topic the selection's samples land on. The last step before the provider
+// mounts and runs, and the one direction the dependency ever crosses: the
 // application imports the core and the shared libraries, never the reverse.
 func (n *node) wireTopology() {
 	n.topology.Wire(topology.Environment{
-		IA:        n.ident.ia,
-		Store:     n.linkStore,
-		Peer:      n.peerClt,
-		Paths:     n.pathProvider,
-		Engine:    n.engine,
-		Latencies: n.linkLatency,
-		Bus:       n.bus,
+		IA:     n.ident.ia,
+		Store:  n.linkStore,
+		Peer:   n.peerClt,
+		Paths:  n.pathProvider,
+		Engine: n.engine,
+		Bus:    n.bus,
 	})
 }
 

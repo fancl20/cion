@@ -611,7 +611,7 @@ func (z *Provider) selectionConfig() SelectionConfig {
 		Store:       z.env.Store,
 		Directory:   z.directory.Entries,
 		Links:       z.linkState,
-		Latencies:   z.env.Latencies,
+		Latencies:   z.env.Bus.Latencies(),
 		Paths:       z.env.Paths,
 		Conn:        z.probeConn,
 		ControlAddr: netip.AddrPortFrom(z.cfg.ControlHost, scionrpc.EndpointPort),

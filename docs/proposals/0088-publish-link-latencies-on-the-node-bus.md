@@ -99,3 +99,16 @@ There is no wire or storage change.
     whose paths rank on the declared delays, hold.
 
 ## Implementation history
+
+*   Landed as proposed: the topic ([bus.go](/pkg/libs/bus/bus.go),
+    [latencies.go](/pkg/libs/bus/latencies.go)), the selection's publish
+    ([selection.go](/pkg/modules/topology/impl/measured/selection.go)), and
+    the beaconer's read ([beacon.go](/pkg/core/controlplane/beacon.go)).
+    Five runs each against the node before it, the stranded and NAT
+    settled benchmarks and both delay-lowered benchmarks held. The regions
+    network settled with its worst pair at 1.13 to 1.23 times the
+    reference in fifteen runs, mostly 1.16, where the node before it
+    measured 1.11 to 1.23, mostly 1.13, in fifteen. The declared estimates
+    differ only for a retired entry revived as a candidate, which no run
+    revived, and a variant keeping the table's semantics measured 1.11 to
+    1.16, mostly 1.13, in ten runs.
