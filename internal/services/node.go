@@ -49,13 +49,6 @@ type node struct {
 	// completes a first start's identity, seeds the store, mounts its
 	// services on the endpoint, and runs its loops under start.
 	topology topology.Provider
-	// nodeReach returns each node's report of how its peers reach it, as
-	// the measured provider's directory copy holds them; nil under the file
-	// provider, which runs no directory.
-	nodeReach func() map[addr.IA]apps.Reach
-	// directory returns the measured provider's directory copy; nil under
-	// the file provider.
-	directory func() []measured.DirectoryEntry
 	// wildcardHost resolves the host the node's conns name for themselves
 	// under a wildcard bind: the local address routing toward the published
 	// host, which the node's own router delivers to.
@@ -223,18 +216,6 @@ func (n *node) selectProvider() error {
 		return err
 	}
 	n.topology = provider
-	n.directory = provider.Directory
-	n.nodeReach = func() map[addr.IA]apps.Reach {
-		entries := n.directory()
-		reach := make(map[addr.IA]apps.Reach, len(entries))
-		for _, e := range entries {
-			reach[e.IA] = apps.Reach{
-				BehindNAT:            e.Reach.BehindNAT,
-				RendezvousUnanswered: e.Reach.RendezvousUnanswered,
-			}
-		}
-		return reach
-	}
 	return nil
 }
 

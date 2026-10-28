@@ -457,10 +457,10 @@ func TestProbePunchesUnansweredCandidates(t *testing.T) {
 			Lookup: func(context.Context, addr.IA) []*pathdb.Segment { return nil },
 		},
 	}}
-	e := DirectoryEntry{
+	e := bus.DirectoryEntry{
 		IA:             selPeer,
 		RendezvousAddr: netip.MustParseAddrPort("192.0.2.9:30043"),
-		Reach:          Reach{RendezvousUnanswered: true},
+		Reach:          bus.Reach{RendezvousUnanswered: true},
 	}
 	if sm := s.probe(context.Background(), e, nil); sm.m.direct != punch.rtt {
 		t.Errorf("direct sample = %v, want the punch's %v", sm.m.direct, punch.rtt)
@@ -499,11 +499,11 @@ func TestEstablishmentPunchesUnansweredCandidates(t *testing.T) {
 				return &nodev1.LinkReply{LocalAddr: "10.0.0.9:31001", IfId: 4}, nil
 			}),
 		}}
-	e := DirectoryEntry{
+	e := bus.DirectoryEntry{
 		IA:             selB,
 		ControlAddr:    netip.MustParseAddrPort("192.0.2.9:30042"),
 		RendezvousAddr: netip.MustParseAddrPort("192.0.2.9:30043"),
-		Reach:          Reach{BehindNAT: true, RendezvousUnanswered: true},
+		Reach:          bus.Reach{BehindNAT: true, RendezvousUnanswered: true},
 	}
 	if !s.establishLink(context.Background(), e, "the test") {
 		t.Fatal("the establishment failed")

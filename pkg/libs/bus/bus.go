@@ -24,6 +24,7 @@ type Bus struct {
 	ifDown    Topic[InterfaceDownState]
 	latencies Topic[LinkLatencies]
 	self      Topic[SelfState]
+	directory Topic[Directory]
 }
 
 // New returns a bus nothing has been published on.
@@ -58,6 +59,13 @@ func (b *Bus) Latencies() *Topic[LinkLatencies] {
 // WireGuard application, and the wildcard-bound conns read it.
 func (b *Bus) Self() *Topic[SelfState] {
 	return &b.self
+}
+
+// Directory returns the node directory topic. The topology provider
+// publishes each directory fetch on it; the topology provider's own loops
+// and the portal read it.
+func (b *Bus) Directory() *Topic[Directory] {
+	return &b.directory
 }
 
 // Topic carries one kind of event and remembers the last one published. Its

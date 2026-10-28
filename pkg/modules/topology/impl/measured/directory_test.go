@@ -8,6 +8,7 @@ import (
 	"net/netip"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -37,12 +38,12 @@ func directoryPublish(
 	return err
 }
 
-func directoryList(ctx context.Context, svc *DirectoryService) ([]DirectoryEntry, error) {
+func directoryList(ctx context.Context, svc *DirectoryService) ([]bus.DirectoryEntry, error) {
 	resp, err := svc.List(ctx, &nodev1.ListRequest{})
 	if err != nil {
 		return nil, err
 	}
-	var out []DirectoryEntry
+	var out []bus.DirectoryEntry
 	for _, pb := range resp.Entries {
 		entry, err := entryFromPB(pb)
 		if err != nil {
@@ -330,6 +331,79 @@ func TestDirectoryPublishesOnSelfEvents(t *testing.T) {
 	})
 }
 
+// listingClient lists the entries it holds, or fails with its error.
+type listingClient struct {
+	mtx     sync.Mutex
+	entries []bus.DirectoryEntry
+	err     error
+}
+
+func (c *listingClient) set(entries []bus.DirectoryEntry, err error) {
+	c.mtx.Lock()
+	defer c.mtx.Unlock()
+	c.entries, c.err = entries, err
+}
+
+func (c *listingClient) Publish(context.Context, bus.DirectoryEntry) error { return nil }
+
+func (c *listingClient) List(context.Context) ([]bus.DirectoryEntry, error) {
+	c.mtx.Lock()
+	defer c.mtx.Unlock()
+	return c.entries, c.err
+}
+
+// TestDirectoryFetchPublishes checks the fetch's publication: each fetch
+// publishes the entries it listed on the directory topic, and a failed one
+// publishes nothing, the last fetched entries standing.
+func TestDirectoryFetchPublishes(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		first := bus.DirectoryEntry{IA: directoryIA,
+			RendezvousAddr: netip.MustParseAddrPort("192.0.2.7:30043")}
+		second := bus.DirectoryEntry{IA: addr.MustIAFrom(20, 0xfd0000000042),
+			RendezvousAddr: netip.MustParseAddrPort("192.0.2.8:30043")}
+		client := &listingClient{}
+		client.set([]bus.DirectoryEntry{first}, nil)
+		topic := new(bus.Topic[bus.Directory])
+		d := &NodeDirectory{
+			cfg:    NodeDirectoryConfig{Directory: topic, FetchInterval: time.Minute},
+			client: client,
+		}
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		events := topic.Subscribe(ctx)
+		go d.runFetch(ctx)
+		// fetched returns the entries of the event published since the last
+		// call, and whether one was.
+		fetched := func() ([]bus.DirectoryEntry, bool) {
+			synctest.Wait()
+			select {
+			case e := <-events:
+				return e.Entries(), true
+			default:
+				return nil, false
+			}
+		}
+		if got, ok := fetched(); !ok || !slices.Equal(got, []bus.DirectoryEntry{first}) {
+			t.Errorf("the first fetch published %v (%t), want the one entry", got, ok)
+		}
+
+		client.set(nil, errors.New("the core is unreachable"))
+		time.Sleep(time.Minute)
+		if got, ok := fetched(); ok {
+			t.Errorf("a failed fetch published %v, want nothing", got)
+		}
+		if got := topic.Latest().Entries(); !slices.Equal(got, []bus.DirectoryEntry{first}) {
+			t.Errorf("after a failed fetch the topic holds %v, want the last fetched", got)
+		}
+
+		client.set([]bus.DirectoryEntry{first, second}, nil)
+		time.Sleep(time.Minute)
+		if got, ok := fetched(); !ok || !slices.Equal(got, []bus.DirectoryEntry{first, second}) {
+			t.Errorf("the next fetch published %v (%t), want both entries", got, ok)
+		}
+	})
+}
+
 // TestDirectoryCarriesTheReach checks the report rides the directory: a
 // publisher's report lists as published, and an entry without one — an
 // earlier publisher's — lists the zero report.
@@ -350,11 +424,11 @@ func TestDirectoryCarriesTheReach(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got := make(map[addr.IA]Reach, len(entries))
+	got := make(map[addr.IA]bus.Reach, len(entries))
 	for _, e := range entries {
 		got[e.IA] = e.Reach
 	}
-	want := map[addr.IA]Reach{
+	want := map[addr.IA]bus.Reach{
 		directoryIA: {BehindNAT: true, RendezvousUnanswered: true},
 		earlier:     {},
 	}
@@ -370,7 +444,7 @@ func TestDirectoryCarriesTheReach(t *testing.T) {
 func TestDirectoryPublishReportsReach(t *testing.T) {
 	store := NewDirectoryStore()
 	host := netip.MustParseAddr("203.0.113.7")
-	report := Reach{BehindNAT: true, RendezvousUnanswered: true}
+	report := bus.Reach{BehindNAT: true, RendezvousUnanswered: true}
 	self := new(bus.Topic[bus.SelfState])
 	self.Publish(bus.SelfState{Host: host, RendezvousUnanswered: true})
 	var asked []netip.Addr

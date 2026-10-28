@@ -23,7 +23,6 @@ import (
 	"github.com/fancl20/cion/pkg/libs/underlay"
 	"github.com/fancl20/cion/pkg/modules/links"
 	"github.com/fancl20/cion/pkg/modules/pathdb"
-	measured "github.com/fancl20/cion/pkg/modules/topology/impl/measured"
 	"github.com/fancl20/cion/pkg/modules/trustdb"
 )
 
@@ -155,26 +154,6 @@ func (a *App) PeerClient() *controlplane.PeerClient { return a.node.peerClt }
 // host peers — the same assertion the borrowing entries make.
 func (a *App) Application(name string) apps.Application {
 	return apps.AppOf(a.node.apps, name)
-}
-
-// NodeReach returns each node's report of how its peers reach it, as the
-// measured provider's directory copy holds them — the reports the portal
-// tags. A node under the file provider runs no directory and has none.
-func (a *App) NodeReach() map[addr.IA]apps.Reach {
-	if a.node.nodeReach == nil {
-		return nil
-	}
-	return a.node.nodeReach()
-}
-
-// Directory returns the measured provider's directory copy: each node's
-// entry as the node's own fetch last found it. A node under the file
-// provider runs no directory and has none.
-func (a *App) Directory() []measured.DirectoryEntry {
-	if a.node.directory == nil {
-		return nil
-	}
-	return a.node.directory()
 }
 
 // Close stops the node and returns what Wait returns.

@@ -97,8 +97,9 @@ type SelectionConfig struct {
 	IA addr.IA
 	// Store is the neighbor table — the loop's decisions land in it.
 	Store links.DB
-	// Directory snapshots the node directory's entries.
-	Directory func() []DirectoryEntry
+	// Directory is the node directory topic, whose last event's entries
+	// each window draws its candidates from; nil draws none.
+	Directory *bus.Topic[bus.Directory]
 	// Links is the node's link state topic. An established neighbor whose
 	// verdict is down counts as infinitely slow for the window whatever its
 	// last sample said, and the redundancy floor counts up links only; a
@@ -198,10 +199,10 @@ type selection struct {
 	// probeFn, pathEchoFn, aliveFn, and establishFn override the
 	// measurement, the excluded measurement's echo, the candidate-grace
 	// probe, and the establishment in tests; nil uses the real ones.
-	probeFn     func(context.Context, DirectoryEntry, *links.Link) sample
+	probeFn     func(context.Context, bus.DirectoryEntry, *links.Link) sample
 	pathEchoFn  func(addr.IA, *scion.Candidate) time.Duration
 	aliveFn     func(*links.Link) bool
-	establishFn func(context.Context, DirectoryEntry, string) bool
+	establishFn func(context.Context, bus.DirectoryEntry, string) bool
 }
 
 // peerStreak counts a peer's consecutive windows of evidence, one count per
@@ -259,7 +260,7 @@ func (s *selection) pass(ctx context.Context) {
 	// echo. The scope filter skips what the viewer cannot dial, whoever
 	// published it.
 	samples := make(map[addr.IA]sample)
-	candidates := make([]DirectoryEntry, 0, len(directory))
+	candidates := make([]bus.DirectoryEntry, 0, len(directory))
 	for _, e := range directory {
 		if e.IA.Equal(s.cfg.IA) ||
 			!probeable(s.cfg.ControlAddr.Addr(), e.RendezvousAddr.Addr()) {
@@ -451,12 +452,9 @@ func (s *selection) linkUp(ifID uint16) bool {
 	return s.cfg.Links.Latest().Up(ifID)
 }
 
-// directory snapshots the node directory; nil Directory serves none.
-func (s *selection) directory() []DirectoryEntry {
-	if s.cfg.Directory == nil {
-		return nil
-	}
-	return s.cfg.Directory()
+// directory returns the node directory's entries as last fetched.
+func (s *selection) directory() []bus.DirectoryEntry {
+	return s.cfg.Directory.Latest().Entries()
 }
 
 // addrScope is an address's reachability scope: what can route to it.
@@ -510,7 +508,7 @@ func probeable(viewer, entry netip.Addr) bool {
 // measure runs the window's probe of one peer — a nil neighbor entry means
 // a candidate — through the test seam when set.
 func (s *selection) measure(
-	ctx context.Context, e DirectoryEntry, l *links.Link,
+	ctx context.Context, e bus.DirectoryEntry, l *links.Link,
 ) sample {
 	if s.probeFn != nil {
 		return s.probeFn(ctx, e, l)
@@ -519,7 +517,7 @@ func (s *selection) measure(
 }
 
 // establish lands a promotion, through the test seam when set.
-func (s *selection) establish(ctx context.Context, e DirectoryEntry, why string) bool {
+func (s *selection) establish(ctx context.Context, e bus.DirectoryEntry, why string) bool {
 	if s.establishFn != nil {
 		return s.establishFn(ctx, e, why)
 	}
@@ -544,7 +542,7 @@ func (s *selection) establish(ctx context.Context, e DirectoryEntry, why string)
 // no entry a candidate sweep could mistake for a peer — deduplicated by the
 // control address it claims. Both SCMP echoes address the host the peer's own
 // resolution names.
-func (s *selection) probe(ctx context.Context, e DirectoryEntry, l *links.Link) sample {
+func (s *selection) probe(ctx context.Context, e bus.DirectoryEntry, l *links.Link) sample {
 	var m measurement
 	switch {
 	case l != nil:
@@ -697,14 +695,14 @@ func (s *selection) promote(
 	ctx context.Context,
 	entries []*links.Link,
 	neighbors map[addr.IA]*links.Link,
-	candidates []DirectoryEntry,
+	candidates []bus.DirectoryEntry,
 	samples map[addr.IA]sample,
 	ts []tier,
 ) {
 
 	live := s.upCount(neighbors)
 	// Rank the reachable candidates: fastest first.
-	var reachable []DirectoryEntry
+	var reachable []bus.DirectoryEntry
 	for _, e := range candidates {
 		if samples[e.IA].m.direct > 0 {
 			reachable = append(reachable, e)
@@ -729,7 +727,7 @@ func (s *selection) promote(
 	// A stranded tier: its fastest reachable member, at once. The fastest
 	// candidate overall that a stranded tier holds is that member, for the
 	// ranking is global.
-	var rescue *DirectoryEntry
+	var rescue *bus.DirectoryEntry
 	for i, e := range reachable {
 		if t := tierOf(ts, e.IA); t != nil && t.stranded {
 			rescue = &reachable[i]
@@ -789,7 +787,7 @@ func (s *selection) admit(
 	neighbors map[addr.IA]*links.Link,
 	ts []tier,
 	samples map[addr.IA]sample,
-	e DirectoryEntry,
+	e bus.DirectoryEntry,
 	why string,
 ) {
 
@@ -997,7 +995,7 @@ func (s *selection) retire(ctx context.Context, l *links.Link, why string) bool 
 // request lands and this one when the reply answers. An entry already holding
 // its remote — seeded by an earlier window or the joiner's own dial — skips
 // the exchange: the seed taught both sides already.
-func (s *selection) establishLink(ctx context.Context, e DirectoryEntry, why string) bool {
+func (s *selection) establishLink(ctx context.Context, e bus.DirectoryEntry, why string) bool {
 	entry, err := s.ownEntry(ctx, e)
 	if err != nil {
 		slog.Error("Recording the local side of a promoted candidate",
@@ -1032,7 +1030,7 @@ func (s *selection) establishLink(ctx context.Context, e DirectoryEntry, why str
 // host when the answer names none; the entry stays the candidate the
 // confirm waits on.
 func (s *selection) establishByRendezvous(
-	ctx context.Context, e DirectoryEntry, entry *links.Link,
+	ctx context.Context, e bus.DirectoryEntry, entry *links.Link,
 ) bool {
 	reply, observed, _, err := s.echo(ctx, entry.Local, e.RendezvousAddr, s.cfg.IA, entry.Local)
 	if err != nil {
@@ -1057,7 +1055,7 @@ func (s *selection) establishByRendezvous(
 // the entry's own link address, released before the entry records the peer's
 // reflexive address, so the mapping each NAT opened is the one the link
 // keeps. The entry stays the candidate the confirm waits on.
-func (s *selection) establishByPunch(ctx context.Context, e DirectoryEntry, entry *links.Link) bool {
+func (s *selection) establishByPunch(ctx context.Context, e bus.DirectoryEntry, entry *links.Link) bool {
 	theirs, ifID, err := s.cfg.Punch.Establish(ctx, e.IA, entry)
 	if err != nil {
 		slog.Warn("The punch establishment failed", "neighbor", e.IA, "err", err)
@@ -1074,7 +1072,7 @@ func (s *selection) establishByPunch(ctx context.Context, e DirectoryEntry, entr
 
 // punched reports whether the loop reaches the candidate by punch: its own
 // report says its published rendezvous address answers nothing.
-func (s *selection) punched(e DirectoryEntry) bool {
+func (s *selection) punched(e bus.DirectoryEntry) bool {
 	return s.cfg.Punch != nil && e.Reach.RendezvousUnanswered
 }
 
@@ -1091,7 +1089,7 @@ func (s *selection) punched(e DirectoryEntry) bool {
 // confirm that never lands leaves the candidate to the window, the next
 // window's promotion re-running it.
 func (s *selection) confirm(
-	ctx context.Context, e DirectoryEntry, entry *links.Link, why string,
+	ctx context.Context, e bus.DirectoryEntry, entry *links.Link, why string,
 ) bool {
 
 	rpcCtx, cancel := context.WithTimeout(ctx, EstablishTimeout)
@@ -1150,7 +1148,7 @@ func (s *selection) landConfirm(
 // live entry and a second live entry on one local address, and a promotion
 // that loses either race looks again: it proceeds on the winner's entry, or
 // records its own on a fresh address.
-func (s *selection) ownEntry(ctx context.Context, e DirectoryEntry) (*links.Link, error) {
+func (s *selection) ownEntry(ctx context.Context, e bus.DirectoryEntry) (*links.Link, error) {
 	entry, err := s.recordEntry(ctx, e)
 	if errors.Is(err, links.ErrDuplicateNeighbor) || errors.Is(err, links.ErrDuplicateLocal) {
 		entry, err = s.recordEntry(ctx, e)
@@ -1165,7 +1163,7 @@ func (s *selection) ownEntry(ctx context.Context, e DirectoryEntry) (*links.Link
 // established until the neighbor's own verdict retires it, its socket
 // still aimed at that address, and its acceptor answers a rendezvous claim
 // with that side unchanged.
-func (s *selection) recordEntry(ctx context.Context, e DirectoryEntry) (*links.Link, error) {
+func (s *selection) recordEntry(ctx context.Context, e bus.DirectoryEntry) (*links.Link, error) {
 	entry, err := s.cfg.Store.ByNeighbor(ctx, e.IA)
 	if err != nil {
 		return nil, err

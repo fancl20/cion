@@ -108,3 +108,15 @@ There is no wire or storage change.
     improve.
 
 ## Implementation history
+
+*   Landed as proposed: the topic ([bus.go](/pkg/libs/bus/bus.go),
+    [directory.go](/pkg/libs/bus/directory.go)), the fetch's publication
+    ([directory.go](/pkg/modules/topology/impl/measured/directory.go)), the
+    provider's readers
+    ([provider.go](/pkg/modules/topology/impl/measured/provider.go),
+    [selection.go](/pkg/modules/topology/impl/measured/selection.go),
+    [upkeep.go](/pkg/modules/topology/impl/measured/upkeep.go)), and the
+    portal's ([portal.go](/pkg/apps/portal.go)). The labs and benchmarks ran
+    once over this change and proposal 0089's; that proposal's
+    [history](/docs/proposals/0089-publish-the-nodes-own-host-and-reach-on-the-node-bus.md)
+    records them.

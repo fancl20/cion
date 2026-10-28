@@ -29,17 +29,18 @@ import (
 	nodev1 "github.com/fancl20/cion/proto/node/v1"
 )
 
-// selFixture is the selection loop's test harness: a memory link store, a
-// directory snapshot, the monitor's verdicts, injected measurements and path
-// echoes, and injected candidate-grace probes. The establishment is
-// recorded rather than performed; the promotion and retirement rules are
-// what the tests assert.
+// selFixture is the selection loop's test harness: a memory link store, the
+// directory's entries and the monitor's verdicts, which each pass publishes
+// first, injected measurements and path echoes, and injected candidate-grace
+// probes. The establishment is recorded rather than performed; the promotion
+// and retirement rules are what the tests assert.
 type selFixture struct {
-	store     *memory.DB
-	directory []DirectoryEntry
-	samples   map[addr.IA]sample
-	links     *bus.Topic[bus.LinkState]
-	down      map[addr.IA]bool // neighbors whose verdict is down
+	store          *memory.DB
+	directory      []bus.DirectoryEntry
+	directoryTopic *bus.Topic[bus.Directory]
+	samples        map[addr.IA]sample
+	links          *bus.Topic[bus.LinkState]
+	down           map[addr.IA]bool // neighbors whose verdict is down
 	// alive holds the candidates whose rendezvous socket answers the
 	// sweep's probe, keyed by neighbor ISD-AS.
 	alive map[addr.IA]bool
@@ -66,8 +67,8 @@ var (
 	selE    = addr.MustIAFrom(20, 0xfd0000000015)
 )
 
-func entryOf(ia addr.IA) DirectoryEntry {
-	return DirectoryEntry{
+func entryOf(ia addr.IA) bus.DirectoryEntry {
+	return bus.DirectoryEntry{
 		IA:             ia,
 		ControlAddr:    netip.MustParseAddrPort("127.0.0.1:30042"),
 		RendezvousAddr: netip.MustParseAddrPort("127.0.0.1:30043"),
@@ -76,8 +77,8 @@ func entryOf(ia addr.IA) DirectoryEntry {
 
 // scopedEntry builds a directory entry whose published rendezvous address
 // sits at the given scope's address.
-func scopedEntry(ia addr.IA, rendezvous string) DirectoryEntry {
-	return DirectoryEntry{
+func scopedEntry(ia addr.IA, rendezvous string) bus.DirectoryEntry {
+	return bus.DirectoryEntry{
 		IA:             ia,
 		ControlAddr:    netip.MustParseAddrPort("127.0.0.1:30042"),
 		RendezvousAddr: netip.MustParseAddrPort(rendezvous),
@@ -112,13 +113,14 @@ func (f *selFixture) accept(t *testing.T, ia addr.IA) {
 func newSelFixture(t *testing.T, neighbors ...addr.IA) *selFixture {
 	t.Helper()
 	f := &selFixture{
-		store:   memory.New(),
-		samples: make(map[addr.IA]sample),
-		links:   new(bus.Topic[bus.LinkState]),
-		down:    make(map[addr.IA]bool),
-		alive:   make(map[addr.IA]bool),
-		probed:  make(map[addr.IA]bool),
-		echoes:  make(map[string]time.Duration),
+		store:          memory.New(),
+		directoryTopic: new(bus.Topic[bus.Directory]),
+		samples:        make(map[addr.IA]sample),
+		links:          new(bus.Topic[bus.LinkState]),
+		down:           make(map[addr.IA]bool),
+		alive:          make(map[addr.IA]bool),
+		probed:         make(map[addr.IA]bool),
+		echoes:         make(map[string]time.Duration),
 	}
 	for _, ia := range neighbors {
 		if err := f.store.Insert(context.Background(),
@@ -140,14 +142,14 @@ func newSelFixture(t *testing.T, neighbors ...addr.IA) *selFixture {
 			ControlAddr: netip.MustParseAddrPort("127.0.0.1:30042"),
 		},
 		streaks: make(map[addr.IA]*peerStreak),
-		probeFn: func(_ context.Context, e DirectoryEntry, _ *links.Link) sample {
+		probeFn: func(_ context.Context, e bus.DirectoryEntry, _ *links.Link) sample {
 			f.probed[e.IA] = true
 			return f.samples[e.IA]
 		},
 		pathEchoFn: func(_ addr.IA, c *scion.Candidate) time.Duration {
 			return f.echoes[routeKey(c)]
 		},
-		establishFn: func(_ context.Context, e DirectoryEntry, _ string) bool {
+		establishFn: func(_ context.Context, e bus.DirectoryEntry, _ string) bool {
 			if err := f.store.Insert(context.Background(),
 				neighborLink(e.IA, links.StateEstablished)); err != nil {
 				t.Error(err)
@@ -157,16 +159,17 @@ func newSelFixture(t *testing.T, neighbors ...addr.IA) *selFixture {
 			return true
 		},
 	}
-	f.sel.cfg.Directory = func() []DirectoryEntry { return f.directory }
+	f.sel.cfg.Directory = f.directoryTopic
 	f.sel.cfg.Links = f.links
 	f.sel.aliveFn = func(l *links.Link) bool { return f.alive[l.NeighborIA] }
 	f.refresh()
 	return f
 }
 
-// refresh publishes the link state of the established entries, the down
-// ones' verdicts down.
+// refresh publishes the directory's entries, and the link state of the
+// established entries, the down ones' verdicts down.
 func (f *selFixture) refresh() {
+	f.directoryTopic.Publish(bus.NewDirectory(slices.Clone(f.directory)...))
 	entries, err := f.store.All(context.Background())
 	if err != nil {
 		return
@@ -1015,7 +1018,7 @@ func TestSelectionStrandedFlag(t *testing.T) {
 	var stranded atomic.Bool
 	f.sel.cfg.Stranded = &stranded
 	// The establishments fail, so the windows below keep the table as set.
-	f.sel.establishFn = func(context.Context, DirectoryEntry, string) bool { return false }
+	f.sel.establishFn = func(context.Context, bus.DirectoryEntry, string) bool { return false }
 
 	// At the floor, every directory peer a neighbor: no candidate answers,
 	// and still the node is not stranded.
@@ -1406,7 +1409,7 @@ func TestProbeSendsNothingOverAnUnusableLink(t *testing.T) {
 
 	start := time.Now()
 	sm := s.probe(context.Background(),
-		DirectoryEntry{IA: selPeer, ControlAddr: netip.AddrPortFrom(host, 30042)},
+		bus.DirectoryEntry{IA: selPeer, ControlAddr: netip.AddrPortFrom(host, 30042)},
 		&links.Link{NeighborIA: selPeer, IfID: 1, State: links.StateEstablished})
 	if held := time.Since(start); held >= ProbeWait {
 		t.Errorf("the probe returned after %v, want under one ProbeWait", held)
@@ -1503,7 +1506,7 @@ func TestProbeEchoesTheHostThePeerResolves(t *testing.T) {
 	}}
 	external := netip.MustParseAddr("192.0.2.1")
 	sm := s.probe(t.Context(),
-		DirectoryEntry{IA: selPeer, ControlAddr: netip.AddrPortFrom(external, 30042)},
+		bus.DirectoryEntry{IA: selPeer, ControlAddr: netip.AddrPortFrom(external, 30042)},
 		&links.Link{NeighborIA: selPeer, IfID: dataplanetest.IfID, State: links.StateEstablished})
 	if sm.m.direct <= 0 {
 		t.Errorf("direct sample = %v, want the round trip to the resolved host", sm.m.direct)
@@ -1676,7 +1679,7 @@ func TestEstablishmentSeedsAndConfirms(t *testing.T) {
 			}),
 		}}
 	published := netip.MustParseAddr("198.51.100.7")
-	e := DirectoryEntry{
+	e := bus.DirectoryEntry{
 		IA:             selB,
 		ControlAddr:    netip.AddrPortFrom(published, 30042),
 		RendezvousAddr: netip.AddrPortFrom(netip.MustParseAddr("127.0.0.1"), f.addr.Port()),

@@ -25,6 +25,7 @@ import (
 	"github.com/fancl20/cion/pkg/apps/wireguard"
 	"github.com/fancl20/cion/pkg/apps/wireguard/impl/dbtest"
 	"github.com/fancl20/cion/pkg/core/webpki/webpkitest"
+	"github.com/fancl20/cion/pkg/libs/bus"
 )
 
 // chainFor builds a two-certificate chain whose AS certificate names the
@@ -100,18 +101,18 @@ func TestPortalRecordsNodes(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	b := bus.New()
+	b.Directory().Publish(bus.NewDirectory(
+		bus.DirectoryEntry{IA: core, Reach: bus.Reach{BehindNAT: true, RendezvousUnanswered: true}},
+		bus.DirectoryEntry{IA: node, Reach: bus.Reach{RendezvousUnanswered: true}},
+		bus.DirectoryEntry{IA: cloud, Reach: bus.Reach{BehindNAT: true}},
+	))
 	r := &portalRecords{
-		chains:  func(context.Context) ([][]*x509.Certificate, error) { return chains, nil },
-		cores:   func(addr.ISD) ([]addr.IA, error) { return []addr.IA{founder, core}, nil },
-		founder: founder,
-		reach: func() map[addr.IA]Reach {
-			return map[addr.IA]Reach{
-				core:  {BehindNAT: true, RendezvousUnanswered: true},
-				node:  {RendezvousUnanswered: true},
-				cloud: {BehindNAT: true},
-			}
-		},
-		registry: registry,
+		chains:        func(context.Context) ([][]*x509.Certificate, error) { return chains, nil },
+		cores:         func(addr.ISD) ([]addr.IA, error) { return []addr.IA{founder, core}, nil },
+		founder:       founder,
+		nodeDirectory: b.Directory(),
+		registry:      registry,
 	}
 	nodes, err := r.Nodes(ctx)
 	if err != nil {

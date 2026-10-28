@@ -27,8 +27,8 @@ import (
 )
 
 // Node directory cadence: once enrolled, a node publishes its entry on a
-// constant cadence and a fetch constant refreshes the local copy in between;
-// entries expire without refresh.
+// constant cadence and a fetch constant republishes the directory on the node
+// bus in between; entries expire without refresh.
 const (
 	// NodePublishInterval is the re-publication cadence.
 	NodePublishInterval = time.Minute
@@ -43,62 +43,31 @@ const (
 	NodeDirectoryTTL = 5 * time.Minute
 )
 
-// DirectoryEntry is one node's publication: everything the selection loop
-// needs to probe the node as a candidate, and the node's report of how its
-// peers reach it. The ISD-AS comes from the authenticated publisher's
-// certificate chain, never from the claim.
-type DirectoryEntry struct {
-	// IA is the publisher's ISD-AS.
-	IA addr.IA
-	// ControlAddr is the underlay address of the publisher's control
-	// service, the endpoint port on the published host.
-	ControlAddr netip.AddrPort
-	// RendezvousAddr is the underlay address the publisher's rendezvous
-	// acceptor listens on for first contact, the fixed rendezvous port on
-	// the published host.
-	RendezvousAddr netip.AddrPort
-	// Reach is the publisher's report of how its peers reach it.
-	Reach Reach
-	// Published is the publish time the core recorded.
-	Published time.Time
-}
-
-// Reach is a node's report of how its peers reach it. The zero value
-// reports nothing observed.
-type Reach struct {
-	// BehindNAT reports that the node's published host is not an address
-	// of its own: a NAT stands between it and its peers.
-	BehindNAT bool
-	// RendezvousUnanswered reports that the acceptor of the node's latest
-	// link request got no answer at its published rendezvous address.
-	RendezvousUnanswered bool
-}
-
 // DirectoryStore is the core's in-memory directory. Entries expire without
 // refresh; a core restart empties the directory until the publishers' next
 // cadence re-populates it.
 type DirectoryStore struct {
 	mtx     sync.Mutex
-	entries map[addr.IA]DirectoryEntry
+	entries map[addr.IA]bus.DirectoryEntry
 }
 
 // NewDirectoryStore returns an empty directory.
 func NewDirectoryStore() *DirectoryStore {
-	return &DirectoryStore{entries: make(map[addr.IA]DirectoryEntry)}
+	return &DirectoryStore{entries: make(map[addr.IA]bus.DirectoryEntry)}
 }
 
 // Publish records the entry under its ISD-AS.
-func (s *DirectoryStore) Publish(e DirectoryEntry) {
+func (s *DirectoryStore) Publish(e bus.DirectoryEntry) {
 	s.mtx.Lock()
 	defer s.mtx.Unlock()
 	s.entries[e.IA] = e
 }
 
 // List returns every entry published within the TTL.
-func (s *DirectoryStore) List(now time.Time) []DirectoryEntry {
+func (s *DirectoryStore) List(now time.Time) []bus.DirectoryEntry {
 	s.mtx.Lock()
 	defer s.mtx.Unlock()
-	var out []DirectoryEntry
+	var out []bus.DirectoryEntry
 	for ia, e := range s.entries {
 		if now.Sub(e.Published) > NodeDirectoryTTL {
 			delete(s.entries, ia)
@@ -160,32 +129,33 @@ func (s *DirectoryService) List(
 	entries := s.Store.List(time.Now())
 	resp := &nodev1.ListResponse{}
 	for _, e := range entries {
-		resp.Entries = append(resp.Entries, e.pb())
+		resp.Entries = append(resp.Entries, entryPB(e))
 	}
 	return resp, nil
 }
 
-func entryFromPB(pb *nodev1.Entry) (DirectoryEntry, error) {
+func entryFromPB(pb *nodev1.Entry) (bus.DirectoryEntry, error) {
 	control, err := netip.ParseAddrPort(pb.ControlAddr)
 	if err != nil {
-		return DirectoryEntry{}, fmt.Errorf("parsing control address: %w", err)
+		return bus.DirectoryEntry{}, fmt.Errorf("parsing control address: %w", err)
 	}
 	rendezvous, err := netip.ParseAddrPort(pb.RendezvousAddr)
 	if err != nil {
-		return DirectoryEntry{}, fmt.Errorf("parsing rendezvous address: %w", err)
+		return bus.DirectoryEntry{}, fmt.Errorf("parsing rendezvous address: %w", err)
 	}
-	return DirectoryEntry{
+	return bus.DirectoryEntry{
 		IA:             addr.IA(pb.IsdAs),
 		ControlAddr:    control,
 		RendezvousAddr: rendezvous,
-		Reach: Reach{
+		Reach: bus.Reach{
 			BehindNAT:            pb.BehindNat,
 			RendezvousUnanswered: pb.RendezvousUnanswered,
 		},
 	}, nil
 }
 
-func (e DirectoryEntry) pb() *nodev1.Entry {
+// entryPB returns the entry's wire form.
+func entryPB(e bus.DirectoryEntry) *nodev1.Entry {
 	return &nodev1.Entry{
 		IsdAs:                uint64(e.IA),
 		ControlAddr:          e.ControlAddr.String(),
@@ -199,8 +169,8 @@ func (e DirectoryEntry) pb() *nodev1.Entry {
 // network serves it: the RPC client on every node, the local store on the
 // core itself.
 type directoryClient interface {
-	Publish(ctx context.Context, entry DirectoryEntry) error
-	List(ctx context.Context) ([]DirectoryEntry, error)
+	Publish(ctx context.Context, entry bus.DirectoryEntry) error
+	List(ctx context.Context) ([]bus.DirectoryEntry, error)
 }
 
 // storeDirectoryClient serves the core's own node from its local store: the
@@ -209,13 +179,13 @@ type storeDirectoryClient struct {
 	store *DirectoryStore
 }
 
-func (c storeDirectoryClient) Publish(_ context.Context, entry DirectoryEntry) error {
+func (c storeDirectoryClient) Publish(_ context.Context, entry bus.DirectoryEntry) error {
 	entry.Published = time.Now()
 	c.store.Publish(entry)
 	return nil
 }
 
-func (c storeDirectoryClient) List(_ context.Context) ([]DirectoryEntry, error) {
+func (c storeDirectoryClient) List(_ context.Context) ([]bus.DirectoryEntry, error) {
 	return c.store.List(time.Now()), nil
 }
 
@@ -279,19 +249,19 @@ func (c *rpcDirectoryClient) client() (nodev1connect.DirectoryServiceClient, err
 }
 
 // Publish records the node's entry with the core.
-func (c *rpcDirectoryClient) Publish(ctx context.Context, entry DirectoryEntry) error {
+func (c *rpcDirectoryClient) Publish(ctx context.Context, entry bus.DirectoryEntry) error {
 	clt, err := c.client()
 	if err != nil {
 		return err
 	}
 	_, err = clt.Publish(ctx, &nodev1.PublishRequest{
-		Entry: entry.pb(),
+		Entry: entryPB(entry),
 	})
 	return err
 }
 
 // List fetches the directory from the core.
-func (c *rpcDirectoryClient) List(ctx context.Context) ([]DirectoryEntry, error) {
+func (c *rpcDirectoryClient) List(ctx context.Context) ([]bus.DirectoryEntry, error) {
 	clt, err := c.client()
 	if err != nil {
 		return nil, err
@@ -300,7 +270,7 @@ func (c *rpcDirectoryClient) List(ctx context.Context) ([]DirectoryEntry, error)
 	if err != nil {
 		return nil, err
 	}
-	entries := make([]DirectoryEntry, 0, len(resp.Entries))
+	entries := make([]bus.DirectoryEntry, 0, len(resp.Entries))
 	for _, pb := range resp.Entries {
 		entry, err := entryFromPB(pb)
 		if err != nil {
@@ -312,20 +282,16 @@ func (c *rpcDirectoryClient) List(ctx context.Context) ([]DirectoryEntry, error)
 }
 
 // NodeDirectory is the node's view of the directory: the publish loop that
-// records the node's own entry once enrollment has produced its chain, the
-// fetch loop that refreshes the local copy, and the snapshot the selection
-// loop draws its candidates from. The measured provider runs it on every
-// node; the core serves the store it publishes into.
+// records the node's own entry once enrollment has produced its chain, and
+// the fetch loop that publishes each fetched copy on the directory topic,
+// which the selection loop draws its candidates from. The measured provider
+// runs it on every node; the core serves the store it publishes into.
 type NodeDirectory struct {
 	cfg NodeDirectoryConfig
 
 	// client is the publish and list surface: the RPC client, or the local
 	// store on the core itself.
 	client directoryClient
-
-	mtx sync.Mutex
-	// local is the fetched copy; nil until the first fetch lands.
-	local []DirectoryEntry
 }
 
 // DirectoryPaths is the path resolution the directory's channel calls: the
@@ -360,6 +326,9 @@ type NodeDirectoryConfig struct {
 	CoreRoute func() *scion.Addr
 	// Store is the core's own directory store (core only).
 	Store *DirectoryStore
+	// Directory is the node directory topic, which each fetch publishes
+	// its copy on; nil publishes none.
+	Directory *bus.Topic[bus.Directory]
 	// PublishInterval, FetchInterval, and PublishRetry override the
 	// defaults; zero keeps them.
 	PublishInterval time.Duration
@@ -469,14 +438,14 @@ func (d *NodeDirectory) publish(ctx context.Context) error {
 	if !host.IsValid() {
 		return fmt.Errorf("%w: the entry's host did not resolve", errNotReady)
 	}
-	reach := Reach{RendezvousUnanswered: self.RendezvousUnanswered}
+	reach := bus.Reach{RendezvousUnanswered: self.RendezvousUnanswered}
 	if d.cfg.BehindNAT != nil {
 		var err error
 		if reach.BehindNAT, err = d.cfg.BehindNAT(host); err != nil {
 			return fmt.Errorf("reporting the entry's reach: %w", err)
 		}
 	}
-	return d.client.Publish(ctx, DirectoryEntry{
+	return d.client.Publish(ctx, bus.DirectoryEntry{
 		IA:             d.cfg.IA,
 		ControlAddr:    netip.AddrPortFrom(host, scionrpc.EndpointPort),
 		RendezvousAddr: netip.AddrPortFrom(host, RendezvousPort),
@@ -484,7 +453,8 @@ func (d *NodeDirectory) publish(ctx context.Context) error {
 	})
 }
 
-// runFetch re-fetches the directory on the cadence, replacing the local copy.
+// runFetch re-fetches the directory on the cadence, publishing each copy on
+// the directory topic.
 func (d *NodeDirectory) runFetch(ctx context.Context) {
 	interval := intervalOr(d.cfg.FetchInterval, NodeFetchInterval)
 	for {
@@ -494,22 +464,13 @@ func (d *NodeDirectory) runFetch(ctx context.Context) {
 				return
 			}
 			slog.Debug("Node directory fetch", "err", err)
-		} else {
-			d.mtx.Lock()
-			d.local = entries
-			d.mtx.Unlock()
+		} else if d.cfg.Directory != nil {
+			d.cfg.Directory.Publish(bus.NewDirectory(entries...))
 		}
 		if !loops.Sleep(ctx, interval) {
 			return
 		}
 	}
-}
-
-// Entries returns the current local copy of the directory.
-func (d *NodeDirectory) Entries() []DirectoryEntry {
-	d.mtx.Lock()
-	defer d.mtx.Unlock()
-	return d.local
 }
 
 func intervalOr(v, def time.Duration) time.Duration {

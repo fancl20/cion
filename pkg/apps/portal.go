@@ -16,6 +16,7 @@ import (
 	"github.com/fancl20/cion/pkg/apps/coordination"
 	"github.com/fancl20/cion/pkg/apps/portal"
 	"github.com/fancl20/cion/pkg/apps/wireguard"
+	"github.com/fancl20/cion/pkg/libs/bus"
 	"github.com/fancl20/cion/pkg/modules/enrollauth"
 )
 
@@ -40,10 +41,10 @@ var portalEntry = Entry{
 // owners loaded before it.
 func newPortal(env *Environment, loaded []Loaded) (Application, error) {
 	records := &portalRecords{
-		chains:  env.IssuedChains,
-		cores:   env.Engine.CoreASes,
-		founder: env.IA,
-		reach:   env.NodeReach,
+		chains:        env.IssuedChains,
+		cores:         env.Engine.CoreASes,
+		founder:       env.IA,
+		nodeDirectory: env.Bus.Directory(),
 	}
 	if wg, ok := AppOf(loaded, "wireguard").(*wireguard.App); ok {
 		records.registry = wg.Registry()
@@ -68,9 +69,10 @@ type portalRecords struct {
 	chains  func(context.Context) ([][]*x509.Certificate, error)
 	cores   func(addr.ISD) ([]addr.IA, error)
 	founder addr.IA
-	// reach returns the node directory's reports by ISD-AS; nil where the
+	// nodeDirectory is the node directory topic: its last event's entries
+	// carry each node's report of how its peers reach it, none where the
 	// measured provider did not load.
-	reach func() map[addr.IA]Reach
+	nodeDirectory *bus.Topic[bus.Directory]
 	// registry is the WireGuard application's directory; nil where it did
 	// not load.
 	registry wireguard.Registry
@@ -108,18 +110,16 @@ func (r *portalRecords) Nodes(ctx context.Context) ([]portal.Node, error) {
 			return nil, fmt.Errorf("reading the directory: %w", err)
 		}
 	}
-	var reach map[addr.IA]Reach
-	if r.reach != nil {
-		reach = r.reach()
-	}
+	reports := r.nodeDirectory.Latest()
 	nodes := make([]portal.Node, 0, len(newest))
 	for ia, chain := range newest {
+		report, _ := reports.Entry(ia)
 		node := portal.Node{
 			IA:      ia,
 			Key:     hex.EncodeToString(chain[0].SubjectKeyId),
 			Expires: chain[0].NotAfter,
 			Role:    portal.RoleNormal,
-			Reach:   reachTag(reach[ia]),
+			Reach:   reachTag(report.Reach),
 		}
 		switch {
 		case ia.Equal(r.founder):
@@ -148,7 +148,7 @@ func (r *portalRecords) Nodes(ctx context.Context) ([]portal.Node, error) {
 // reachTag tags a node's report: NAT when peers cannot dial it behind a
 // NAT, Degraded when they cannot dial it otherwise, and nothing
 // while they can or nothing was observed.
-func reachTag(r Reach) portal.Reach {
+func reachTag(r bus.Reach) portal.Reach {
 	switch {
 	case !r.RendezvousUnanswered:
 		return ""

@@ -7,13 +7,11 @@ import (
 	"testing/synctest"
 	"time"
 
-	"github.com/scionproto/scion/pkg/addr"
-
 	"github.com/fancl20/cion/internal/services"
 	"github.com/fancl20/cion/internal/testnetwork"
 	"github.com/fancl20/cion/internal/testnetwork/fabric"
 	"github.com/fancl20/cion/pkg/core/webpki/webpkitest"
-	"github.com/fancl20/cion/pkg/modules/topology/impl/measured"
+	"github.com/fancl20/cion/pkg/libs/bus"
 )
 
 // The site network: the founder 0, the authoritative core 1, and the public
@@ -137,8 +135,8 @@ func reportLinks(t *testing.T, name string, n *network) {
 	)
 }
 
-// siteReads records the founder's directory copy read by read: for each
-// site node, the host its entry publishes — its inside address or the
+// siteReads records the founder's last directory fetch read by read: for
+// each site node, the host its entry publishes — its inside address or the
 // site's gateway — and the tag its report earns, counting the changes of
 // each, those after the network settled, and the reads that found the
 // inside address.
@@ -167,15 +165,12 @@ func newSiteReads(n *network, gateway netip.Addr) *siteReads {
 	return r
 }
 
-// read records one read of the founder's directory copy; a node the copy
-// holds no entry of records nothing.
+// read records one read of the founder's last directory fetch; a node the
+// fetch holds no entry of records nothing.
 func (r *siteReads) read() {
-	entries := make(map[addr.IA]measured.DirectoryEntry)
-	for _, e := range r.n.nodes[0].App().Directory() {
-		entries[e.IA] = e
-	}
+	directory := r.n.nodes[0].App().Bus().Directory().Latest()
 	for _, i := range siteMembers {
-		e, ok := entries[r.n.nodes[i].App().IA()]
+		e, ok := directory.Entry(r.n.nodes[i].App().IA())
 		if !ok {
 			continue
 		}
@@ -210,7 +205,7 @@ func (r *siteReads) read() {
 // tagOf names the tag a report earns on the portal: NAT when peers cannot
 // dial the node behind a NAT, Degraded when they cannot dial it
 // otherwise, none while they can or nothing was observed.
-func tagOf(r measured.Reach) string {
+func tagOf(r bus.Reach) string {
 	switch {
 	case !r.RendezvousUnanswered:
 		return "none"
@@ -222,8 +217,8 @@ func tagOf(r measured.Reach) string {
 }
 
 // TestBenchSiteHosts benchmarks the hosts the site's nodes publish and the
-// tags their reports earn, as the founder's directory copy holds them, in
-// each way of joining: read each settleSample from the boot until the
+// tags their reports earn, as the founder's last directory fetch holds them,
+// in each way of joining: read each settleSample from the boot until the
 // network settles and siteWatch beyond, beside the site's pairs linked at
 // their inside addresses at the end.
 func TestBenchSiteHosts(t *testing.T) {

@@ -12,6 +12,7 @@ import (
 	"github.com/fancl20/cion/internal/services"
 	"github.com/fancl20/cion/pkg/apps"
 	"github.com/fancl20/cion/pkg/core/webpki/webpkitest"
+	"github.com/fancl20/cion/pkg/libs/bus"
 	"github.com/fancl20/cion/pkg/libs/underlay"
 	"github.com/fancl20/cion/pkg/modules/topology/impl/measured"
 )
@@ -99,10 +100,10 @@ func TestWildcardControlBoots(t *testing.T) {
 	// The founder's entry publishes the loopback the namespace holds, and
 	// its report names it neither behind a NAT nor unanswered.
 	Poll(t, "the founder's entry to publish", func() bool {
-		_, ok := n.app.NodeReach()[n.app.IA()]
+		_, ok := n.app.Bus().Directory().Latest().Entry(n.app.IA())
 		return ok
 	})
-	if got := n.app.NodeReach()[n.app.IA()]; got != (apps.Reach{}) {
-		t.Errorf("the founder's report = %+v, want its published host its own", got)
+	if e, _ := n.app.Bus().Directory().Latest().Entry(n.app.IA()); e.Reach != (bus.Reach{}) {
+		t.Errorf("the founder's report = %+v, want its published host its own", e.Reach)
 	}
 }

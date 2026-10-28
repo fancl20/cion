@@ -96,8 +96,10 @@ type Pacing struct {
 type Provider struct {
 	cfg Config
 	env topology.Environment
-	// linkState is the node's link state topic on the environment's bus.
-	linkState *bus.Topic[bus.LinkState]
+	// linkState is the node's link state topic on the environment's bus,
+	// and directoryState its node directory topic.
+	linkState      *bus.Topic[bus.LinkState]
+	directoryState *bus.Topic[bus.Directory]
 
 	// external is the learned external host, persisted beside the identity
 	// so a restart republishes it; domain looks up the founding core's own
@@ -248,27 +250,18 @@ func (z *Provider) recordAnswer(answered bool) {
 // echoPublished echoes the peer's published rendezvous address as the
 // selection loop's probe does — from an ephemeral port on the control host,
 // claiming the zero ISD-AS and the control address — and reports whether it
-// answered; ok is false when the directory copy holds no entry for the
+// answered; ok is false when the node directory holds no entry for the
 // peer. The echo checks the peer alone: its answer teaches the node nothing
 // of its own external host.
 func (z *Provider) echoPublished(ctx context.Context, peer addr.IA) (answered, ok bool) {
-	for _, e := range z.directory.Entries() {
-		if !e.IA.Equal(peer) {
-			continue
-		}
-		_, _, _, err := RendezvousEcho(ctx, z.cfg.Sockets,
-			netip.AddrPortFrom(z.cfg.ControlHost, 0), e.RendezvousAddr, addr.IA(0),
-			netip.AddrPortFrom(z.cfg.ControlHost, scionrpc.EndpointPort))
-		return err == nil, true
+	e, ok := z.directoryState.Latest().Entry(peer)
+	if !ok {
+		return false, false
 	}
-	return false, false
-}
-
-// Directory returns the node's directory copy once Mounts assembled it:
-// the entries the selection loop draws its candidates from, nil until the
-// first fetch lands.
-func (z *Provider) Directory() []DirectoryEntry {
-	return z.directory.Entries()
+	_, _, _, err := RendezvousEcho(ctx, z.cfg.Sockets,
+		netip.AddrPortFrom(z.cfg.ControlHost, 0), e.RendezvousAddr, addr.IA(0),
+		netip.AddrPortFrom(z.cfg.ControlHost, scionrpc.EndpointPort))
+	return err == nil, true
 }
 
 // bootstrapped is what a first-start joiner's rendezvous taught it: the
@@ -353,6 +346,7 @@ func (z *Provider) CompleteIdentity(ctx context.Context, ia addr.IA) (addr.IA, e
 func (z *Provider) Wire(env topology.Environment) {
 	z.env = env
 	z.linkState = env.Bus.Links()
+	z.directoryState = env.Bus.Directory()
 	z.self = env.Bus.Self()
 	z.self.Publish(bus.SelfState{Host: z.knownHost()})
 }
@@ -476,6 +470,7 @@ func (z *Provider) assemble() error {
 		IA:              z.env.IA,
 		Self:            z.self,
 		BehindNAT:       z.behindNAT,
+		Directory:       z.directoryState,
 		Engine:          z.env.Engine,
 		Paths:           z.env.Paths,
 		PublishInterval: z.cfg.Pacing.Directory,
@@ -575,7 +570,7 @@ func (z *Provider) reflector(ctx context.Context) (netip.AddrPort, error) {
 		return netip.AddrPort{}, fmt.Errorf("reading the link store: %w", err)
 	}
 	state := z.linkState.Latest()
-	if ap, ok := pickReflector(entries, state.Up, z.directory.Entries()); ok {
+	if ap, ok := pickReflector(entries, state.Up, z.directoryState.Latest().Entries()); ok {
 		return ap, nil
 	}
 	return netip.AddrPort{}, errNoReflector
@@ -585,7 +580,7 @@ func (z *Provider) reflector(ctx context.Context) (netip.AddrPort, error) {
 // directory entry whose node reports its address answering and holds an
 // established link to this node whose verdict, as linkUp reports it, is up.
 func pickReflector(
-	entries []*links.Link, linkUp func(ifID uint16) bool, directory []DirectoryEntry,
+	entries []*links.Link, linkUp func(ifID uint16) bool, directory []bus.DirectoryEntry,
 ) (netip.AddrPort, bool) {
 
 	up := make(map[addr.IA]bool, len(entries))
@@ -636,7 +631,7 @@ func (z *Provider) selectionConfig() SelectionConfig {
 	return SelectionConfig{
 		IA:          z.env.IA,
 		Store:       z.env.Store,
-		Directory:   z.directory.Entries,
+		Directory:   z.directoryState,
 		Links:       z.linkState,
 		Latencies:   z.env.Bus.Latencies(),
 		Paths:       z.env.Paths,

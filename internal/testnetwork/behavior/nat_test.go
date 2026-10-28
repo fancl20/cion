@@ -15,9 +15,9 @@ import (
 	"github.com/fancl20/cion/internal/services"
 	"github.com/fancl20/cion/internal/testnetwork"
 	"github.com/fancl20/cion/internal/testnetwork/fabric"
-	"github.com/fancl20/cion/pkg/apps"
 	"github.com/fancl20/cion/pkg/apps/ping"
 	"github.com/fancl20/cion/pkg/core/webpki/webpkitest"
+	"github.com/fancl20/cion/pkg/libs/bus"
 	"github.com/fancl20/cion/pkg/modules/links"
 )
 
@@ -227,20 +227,22 @@ func allNodes(n *network) []int {
 	return which
 }
 
-// reports maps each node's index to the reach the founder's directory copy
-// reports of it.
-func reports(n *network) map[int]apps.Reach {
-	reach := n.nodes[0].App().NodeReach()
-	got := make(map[int]apps.Reach, len(n.nodes))
+// reports maps each node's index to the reach the founder's last directory
+// fetch reports of it.
+func reports(n *network) map[int]bus.Reach {
+	directory := n.nodes[0].App().Bus().Directory().Latest()
+	got := make(map[int]bus.Reach, len(n.nodes))
 	for i, node := range n.nodes {
-		got[i] = reach[node.App().IA()]
+		e, _ := directory.Entry(node.App().IA())
+		got[i] = e.Reach
 	}
 	return got
 }
 
 // awaitReports fails the test, naming what differs, unless the founder's
-// directory copy reports each node's reach as want holds it within budget.
-func awaitReports(t *testing.T, n *network, want map[int]apps.Reach, budget time.Duration) {
+// last directory fetch reports each node's reach as want holds it within
+// budget.
+func awaitReports(t *testing.T, n *network, want map[int]bus.Reach, budget time.Duration) {
 	t.Helper()
 	start := time.Now()
 	for {
@@ -300,8 +302,8 @@ func TestNATNetworkReaches(t *testing.T) {
 		awaitReach(t, n, reachBudget)
 		awaitPings(t, n, allNodes(n), reachBudget)
 		awaitNATLinks(t, n, []int{3, 4, 5, 6}, reachBudget)
-		nat := apps.Reach{BehindNAT: true, RendezvousUnanswered: true}
-		awaitReports(t, n, map[int]apps.Reach{
+		nat := bus.Reach{BehindNAT: true, RendezvousUnanswered: true}
+		awaitReports(t, n, map[int]bus.Reach{
 			0: {}, 1: {}, 2: {}, 3: nat, 4: nat, 5: nat, 6: nat,
 		}, reachBudget)
 	})

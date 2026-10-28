@@ -110,6 +110,7 @@ run no loops of their own and hold no policy.
         which the beacons declare.
     *   The node's own state: the host its publications carry and whether
         its published rendezvous address went unanswered.
+    *   The node directory as the node last fetched it.
 
 ### Modules
 
