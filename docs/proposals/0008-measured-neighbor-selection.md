@@ -405,3 +405,13 @@ Establishing a promoted candidate is the in-band request; the joiner's
     generation swap mid-traffic and B's death through A; a bare restart
     serves from the persisted link store; and a bootstrap without an answer
     fails cleanly and joins on retry.
+*   Fix, beside the plan's rebind retry: the rebind also races the sockets an
+    establishment binds on an entry's link address — the rendezvous dial's
+    for its round trip, the punch's for up to its establish timeout — and an
+    entry that turned serving while such a socket held its address collided
+    past the ten tries a tenth of a second apart, stopping the node. A
+    generation now leaves a link whose address another socket holds unbound
+    and serves the others, at boot as at a swap, and the data plane loop
+    rebuilds it on the retry schedule, from a tenth of a second doubling up
+    to a minute, until every link binds
+    ([dataplane.go](/internal/services/dataplane.go)).

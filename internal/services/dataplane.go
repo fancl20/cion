@@ -2,9 +2,11 @@ package services
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"runtime"
+	"syscall"
 	"time"
 
 	"github.com/scionproto/scion/pkg/addr"
@@ -23,12 +25,18 @@ const (
 	sendBufferSize    = 1 << 20
 )
 
-// The generation swap's rebind retry: the serving generation's sockets close
-// before the replacement binds the same addresses, and the operating system
-// releases them on its own schedule — a bounded retry covers the gap.
+// The generation swap's rebind retries. The serving generation's sockets close
+// before the replacement binds the same addresses, and a replacement that
+// fails is retried bindAttempts times, bindRetryPause apart. An external link
+// whose address another socket holds — an establishment's dial or punch still
+// in flight on the entry, which releases the address when it ends — is left
+// unbound instead: the generation serves the other links, and the data plane
+// loop rebuilds it from bindRetryPause doubling up to bindRetryMax until every
+// link binds.
 const (
 	bindAttempts   = 10
 	bindRetryPause = 100 * time.Millisecond
+	bindRetryMax   = time.Minute
 )
 
 // DataplaneOptions carries the run command's data-plane tuning; BootApp
@@ -54,9 +62,11 @@ func DefaultDataplaneOptions() DataplaneOptions {
 // never mutates while serving: a membership change retires the serving
 // generation and brings up its replacement, built from the link store's
 // non-retired entries with each link's stable local address rebound
-// identically — the swap invisible to the peers. A locator change is not a
-// membership change: the serving generation re-aims the link in place, the
-// locator live state its sends read at egress.
+// identically — the swap invisible to the peers. A link whose address
+// another socket still holds is left unbound, and a later generation binds
+// it. A locator change is not a membership change: the serving generation
+// re-aims the link in place, the locator live state its sends read at
+// egress.
 type generation struct {
 	provider *dataplane.UDPProvider
 	dp       *dataplane.DataPlane
@@ -68,6 +78,10 @@ type generation struct {
 	// observations holds each serving interface's observation record, the
 	// one its link continues.
 	observations map[uint16]*dataplane.Observation
+	// unbound lists the serving interfaces whose link address another
+	// socket held when the generation bound its links; the generation
+	// serves without them until the data plane loop's retry binds them.
+	unbound []uint16
 }
 
 // carryObservations returns the observation records of a generation built
@@ -150,9 +164,9 @@ func (n *node) setupMetrics() error {
 // serving entries: a provider, the internal link, one external link per
 // entry, every service backend registered on the new provider. Its links
 // continue the observation records carryObservations takes from prev, the
-// generation it replaces; a nil prev hands on none. It fails only while the
-// serving generation's addresses are still releasing; the data plane loop's
-// bounded retry covers that.
+// generation it replaces; a nil prev hands on none. An external link whose
+// address another socket holds is left unbound, the generation recording it;
+// any other failure fails the generation.
 func (n *node) startGeneration(ctx context.Context, prev *generation) (*generation, error) {
 	entries, err := n.servingLinks(ctx)
 	if err != nil {
@@ -170,6 +184,7 @@ func (n *node) startGeneration(ctx context.Context, prev *generation) (*generati
 		return nil, fmt.Errorf("creating internal link: %w", err)
 	}
 	dlinks = append(dlinks, internalLink)
+	var unbound []uint16
 	for _, l := range entries {
 		// Each serving link carries its BFD session — the monitor's, keyed by
 		// interface ID and surviving the swap — and the verdict through it: the link
@@ -182,6 +197,12 @@ func (n *node) startGeneration(ctx context.Context, prev *generation) (*generati
 			l.Local.String(), l.Remote.String(), l.IfID,
 			n.metrics.NewInterfaceMetrics(l.IfID, n.ident.ia, 0),
 		)
+		if errors.Is(err, syscall.EADDRINUSE) {
+			slog.Warn("A link's address is held; serving without the link",
+				"interface", l.IfID, "local", l.Local, "err", err)
+			unbound = append(unbound, l.IfID)
+			continue
+		}
 		if err != nil {
 			provider.Stop()
 			return nil, fmt.Errorf("creating interface %d: %w", l.IfID, err)
@@ -218,7 +239,7 @@ func (n *node) startGeneration(ctx context.Context, prev *generation) (*generati
 	done := make(chan struct{})
 	g := &generation{
 		provider: provider, dp: d, cancel: cancel, done: done,
-		entries: entries, observations: observations,
+		entries: entries, observations: observations, unbound: unbound,
 	}
 	go func() {
 		defer close(done)
@@ -233,12 +254,34 @@ func (n *node) startGeneration(ctx context.Context, prev *generation) (*generati
 // built and, on each link-store change, lands it — a locator change re-aims
 // the link in place, anything else retires the serving generation — stop
 // ingest, drain, close — and brings up its replacement, the same link
-// addresses rebound. The control plane never restarts: its sockets are its
-// own, and it submits packets to the internal link's address, which each
-// generation rebinds. A swap is packet loss measured in milliseconds; the
-// QUIC connections of the control channel retransmit through it. The loop
-// stops the serving generation before it returns.
+// addresses rebound. While the serving generation leaves a link unbound, the
+// loop also rebuilds it on the retry schedule, so the link serves once the
+// socket that held its address lets go. The control plane never restarts:
+// its sockets are its own, and it submits packets to the internal link's
+// address, which each generation rebinds. A swap is packet loss measured in
+// milliseconds; the QUIC connections of the control channel retransmit
+// through it. The loop stops the serving generation before it returns.
 func (n *node) serveGenerations(ctx context.Context, gen *generation) error {
+	rebinds := loops.Attempts[struct{}]{
+		Backoff: loops.Backoff{Base: bindRetryPause, Max: bindRetryMax},
+	}
+	retry := time.NewTimer(0)
+	retry.Stop()
+	defer retry.Stop()
+	// schedule arms the retry while the serving generation leaves a link
+	// unbound, and starts the schedule afresh once none is.
+	schedule := func() {
+		if len(gen.unbound) == 0 {
+			rebinds.Forget(struct{}{})
+			retry.Stop()
+			return
+		}
+		now := time.Now()
+		rebinds.Tried(struct{}{}, now)
+		next, _ := rebinds.Next(struct{}{})
+		retry.Reset(next.Sub(now))
+	}
+	schedule()
 	for {
 		select {
 		case <-ctx.Done():
@@ -253,26 +296,29 @@ func (n *node) serveGenerations(ctx context.Context, gen *generation) error {
 			if gen.reaim(entries) {
 				continue
 			}
-			gen.stop()
-			n.setGeneration(nil)
-			var next *generation
-			for attempt := range bindAttempts {
-				next, err = n.startGeneration(ctx, gen)
-				if err == nil {
-					break
-				}
-				slog.Warn("Building the replacement data plane", "attempt", attempt, "err", err)
-				if !loops.Sleep(ctx, bindRetryPause) {
-					return nil
-				}
-			}
-			if err != nil {
-				return fmt.Errorf("building the replacement data plane: %w", err)
-			}
-			gen = next
-			n.setGeneration(gen)
-			slog.Info("Swapped the data plane generation")
+		case <-retry.C:
 		}
+		gen.stop()
+		n.setGeneration(nil)
+		var next *generation
+		var err error
+		for attempt := range bindAttempts {
+			next, err = n.startGeneration(ctx, gen)
+			if err == nil {
+				break
+			}
+			slog.Warn("Building the replacement data plane", "attempt", attempt, "err", err)
+			if !loops.Sleep(ctx, bindRetryPause) {
+				return nil
+			}
+		}
+		if err != nil {
+			return fmt.Errorf("building the replacement data plane: %w", err)
+		}
+		gen = next
+		n.setGeneration(gen)
+		slog.Info("Swapped the data plane generation")
+		schedule()
 	}
 }
 

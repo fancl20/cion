@@ -47,10 +47,11 @@ func Run(
 // boot installs the process's meter provider, assembles the node, builds
 // its first data plane generation, publishes its first link state, and
 // starts its loops, all on one group. The generation builds synchronously,
-// so a bind failure surfaces here instead of as a lost packet, and the
-// loops start after it and the link state, so their first passes read the
-// links the store holds. A failed boot stops the group, releasing what the
-// boot acquired.
+// so a bind failure surfaces here instead of as a lost packet — but for a
+// link whose address another socket holds, which the generation leaves
+// unbound for the data plane loop to retry — and the loops start after it
+// and the link state, so their first passes read the links the store holds.
+// A failed boot stops the group, releasing what the boot acquired.
 func boot(
 	ctx context.Context, cfg NodeConfig, opts DataplaneOptions, sockets underlay.Sockets,
 ) (*node, error) {
