@@ -146,3 +146,22 @@ last one fixing the settle time.
     same paths, later by the drain where they retire useless links.
 
 ## Implementation history
+
+*   Not landed. The full implementation — the drain, the beaconer's
+    withdrawal, the selection's drain and retirement rules, and the node's
+    own draining links counted as gone for its other links' useless tests —
+    removed the cut tail: across five runs the regions network recovered
+    from its cut in 253 to 296 seconds, against 261 to 298 and one run at
+    483. But a drain is invisible beyond the node draining: the link
+    forwards, answers probes, and keeps fresh segments until it retires, so
+    every other node's useless test counts it as an alternative. Across ten
+    settled regions runs, the worst pair reached 1.23 to 1.36 times the
+    reference in six, against 1.13 to 1.20 in ten before; in the two runs
+    read link by link, five and six region-B nodes began draining their
+    links to node 6 within 80 seconds, each counting the others', and all
+    retired. Raising a draining link's declared latency would make a drain
+    visible within a registration cycle, but not stop decisions made at the
+    same time. Ordering retirements that depend on one another takes
+    coordination between nodes, which belongs to a coordinated topology
+    layer with this per-node selection as its fallback, and a fallback need
+    not be perfect: retirement stays immediate.
