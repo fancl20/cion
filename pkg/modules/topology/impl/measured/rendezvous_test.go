@@ -732,10 +732,14 @@ func TestRendezvousRecordsTheObservation(t *testing.T) {
 	loopback := netip.MustParseAddr("127.0.0.1")
 	target := netip.AddrPortFrom(loopback, f.addr.Port())
 
-	// A named dial whose claim spells the wildcard: the dial binds the
-	// wildcard at the claimed port, and the record is the observation — the
-	// loopback host the request arrived from under the bound port.
-	claim := netip.AddrPortFrom(wildcard, 31001)
+	// A named dial whose claim spells the wildcard at a port drawn from the
+	// link band: the dial binds the wildcard at the claimed port, and the
+	// record is the observation — the loopback host the request arrived from
+	// under the bound port.
+	claim, err := AllocateLinkAddr(underlay.Kernel, wildcard, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 	reply, observed, _, err := RendezvousEcho(context.Background(), underlay.Kernel,
 		claim, target, rendezvousIA, claim)
 	if err != nil {
