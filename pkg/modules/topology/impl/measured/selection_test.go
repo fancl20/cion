@@ -957,12 +957,14 @@ func TestSelectionEquilibrium(t *testing.T) {
 	f := newSelFixture(t, r1, r2, z)
 	f.sel.cfg.MaxLinks = 3
 	// R1 and R2 reach each other over their own links, and both by the
-	// round route through the bridge. R2's route through R1 stays within
-	// the demotion ratio of its round trip, its transit charged, while R3's
-	// one route rides R1's link: R2's is the regional link an eviction may
-	// take.
+	// round route through the bridge; R1's one hop over its own link
+	// declares its delay, pricing R1 whichever regional link an exclusion
+	// leaves out. R2's route through R1 stays within the demotion ratio of
+	// its round trip, its transit charged, while R3's one route rides R1's
+	// link: R2's is the regional link an eviction may take.
+	oneHop := route(0, 10*time.Millisecond, local(f.ifID(t, r1)), link(r1))
 	f.carried(r1, 10*time.Millisecond, 20*time.Millisecond,
-		f.via(t, r2, 0, r2, r1), f.via(t, z, -time.Minute, z, selX, r1))
+		f.via(t, r2, 0, r2, r1), oneHop, f.via(t, z, -time.Minute, z, selX, r1))
 	f.carried(r2, 18*time.Millisecond, 12*time.Millisecond,
 		f.via(t, r1, 0, r1, r2), f.via(t, z, -time.Minute, z, selX, r2))
 	f.carried(z, 100*time.Millisecond, 200*time.Millisecond, f.via(t, z, 0, z))

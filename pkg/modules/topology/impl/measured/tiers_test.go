@@ -284,9 +284,11 @@ func TestTierQualifies(t *testing.T) {
 // TestJudge checks the useless test: with the tier's route count and price
 // held, a link is useless only while every member keeps a route within the
 // demotion ratio of its own price — the link's own neighbor of its direct
-// round trip. A survivor of a member no route prices counts for nothing, and
-// a member cut off, priced or not, decides the link useful. A tier nothing
-// prices, or a survivor that went unanswered, decides nothing.
+// round trip. A priced member the survivors reach but none prices leaves the
+// window undecided, unless another member decides the link useful; a
+// survivor of a member no route prices counts for nothing, and a member cut
+// off, priced or not, decides the link useful. A tier nothing prices, or a
+// survivor that went unanswered, decides nothing.
 func TestJudge(t *testing.T) {
 	ms := time.Millisecond
 	type prices = map[addr.IA]time.Duration
@@ -333,7 +335,10 @@ func TestJudge(t *testing.T) {
 			held(prices{selA: 13 * ms, selB: 24 * ms}), true, false},
 		{"another member past the ratio of its price",
 			held(prices{selA: 12 * ms, selB: 26 * ms}), true, false},
-		{"a member no survivor prices", held(prices{selA: 12 * ms}), true, true},
+		{"a member no survivor prices", held(prices{selA: 12 * ms}), false, false},
+		{"the neighbor no survivor prices", held(prices{selB: 24 * ms}), false, false},
+		{"a member no survivor prices, another past the ratio",
+			held(prices{selA: 13 * ms}), true, false},
 		{"a member cut off", held(prices{selA: 12 * ms}, selB), true, false},
 		{"a member no route prices, cut off", held(within, selC), true, false},
 		{"a survivor of a member no route prices",

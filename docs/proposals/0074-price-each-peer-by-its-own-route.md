@@ -183,3 +183,32 @@ converges, each end applying its own rule to the links it dialed.
     chose paths over gone links: the cut one, and one retired before it. The
     recovery time's upper bound is left to a follow-up: how long a pair can
     hold no fresh candidate after a cut, and what delays its fresh segments.
+*   A member the survivors reach but none prices now leaves the window
+    undecided, where the landed copy let it pass: its price without the
+    link is unknown, not within the ratio
+    ([tiers.go](/pkg/modules/topology/impl/measured/tiers.go)). Behind the
+    NAT, a node retired its link to a public node as useless while no
+    surviving route priced that node, and promoted the link again 71 seconds
+    later, once a route priced the node at 70 ms against the link's 40 ms.
+    Against the node before, five runs each, ten of the settled NAT and
+    regions networks:
+    *   **NAT network:** every run settled in 2m10s to 2m50s, where two of
+        five took 4m30s. One run's worst pair reached 1.70 times the
+        reference over links that held a path at the reference, a path
+        choice, against at most 1.35. A rebind, a restarted peer, a join
+        behind a symmetric NAT, and the founder's return held their ranges.
+    *   **Regions network:** its worst pair reached 1.13 to 1.20 times the
+        reference, one run 1.19 or more, against 1.13 to 1.31 in fifteen
+        runs, eight of them 1.19 or more.
+    *   **Stranded network:** it settled as before.
+    *   **Site network:** joined inside, it formed three of its six inside
+        links in every run, against three to five, its formed links' worst
+        pair eight times the reference against 4.5 in four of five runs. Its
+        inside links still wait on the host flip's timing.
+    *   **Cuts:** the regions network recovered from its cut in 270 to 277
+        seconds in three runs and in 460 and 481 in two, against 255 to 297
+        in ten; the stranded network in 21 to 265 seconds in four runs and
+        in 408 in one, against 10 to 287 in ten. In each slow run, a node
+        promoted a link within a minute of the cut and retired it as useless
+        100 to 121 seconds later, and recovery came about five minutes after
+        the retirement, the staleness horizon of the paths over it.

@@ -255,9 +255,11 @@ func (s *selection) measureExcluded(
 // ratio of the tier's, cuts no member off, and leaves every priced member a
 // survivor within the demotion ratio of its own price — the link's own
 // neighbor of its direct round trip, the sample promotion compares with the
-// same price. A member no survivor prices holds nothing against the link. A
-// link no answered route avoids decides nothing — the cut-critical link,
-// which no useless retirement takes.
+// same price. A priced member the survivors reach but none prices leaves the
+// window undecided: its price without the link is unknown, not within the
+// ratio. A member no route prices holds nothing against the link. A link no
+// answered route avoids decides nothing — the cut-critical link, which no
+// useless retirement takes.
 func judge(t *tier, ia addr.IA) (decided, useless bool) {
 	if t == nil || t.price == 0 {
 		return false, false
@@ -269,16 +271,23 @@ func judge(t *tier, ia addr.IA) (decided, useless bool) {
 	if ex.routes != t.routes || ex.price > ratioOf(t.price, DemotionRatio) {
 		return true, false
 	}
+	unpriced := false
 	for _, m := range t.members {
 		price := t.prices[m.ia]
 		if m.ia.Equal(ia) {
 			price = m.direct
 		}
-		if ex.cutOff[m.ia] || price > 0 && ex.prices[m.ia] > ratioOf(price, DemotionRatio) {
+		switch {
+		case ex.cutOff[m.ia]:
+			return true, false
+		case price == 0:
+		case ex.prices[m.ia] == 0:
+			unpriced = true
+		case ex.prices[m.ia] > ratioOf(price, DemotionRatio):
 			return true, false
 		}
 	}
-	return true, true
+	return !unpriced, !unpriced
 }
 
 // harm is how far a link's exclusion moves its tier's price.
