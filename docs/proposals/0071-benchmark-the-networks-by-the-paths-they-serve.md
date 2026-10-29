@@ -285,3 +285,10 @@ demand.
     up to 133 times. The stranded network dropped its link at 50 or 100
     percent and took it back at 20 percent in every run, three or four of
     its fifteen levels never settling.
+*   Recovery counts from the start of the final run of reads at the reach
+    before the change, where it counted from the first such read: a held
+    interface-down signal lifts a read's reach for the hold alone, and the
+    reads' own segment fetches and the selection's probes draw such signals
+    from the cut link's end. In five instrumented runs of the stranded cut,
+    three recorded 11, 40, and 50 seconds, while their reach held only from
+    254, 284, and 132 seconds.

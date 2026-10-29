@@ -33,7 +33,9 @@ type response struct {
 	// and the cheapest candidates the segments present then offer.
 	interim grading
 	// recover is how long until as many pairs reached as before the
-	// scenario's first change: a stale segment can hold a pair unreached
+	// scenario's first change and stayed so: the start of the final run of
+	// reads at that reach, for a held interface-down signal lifts a read's
+	// reach for the hold alone. A stale segment can hold a pair unreached
 	// before any change.
 	recover   time.Duration
 	recovered bool
@@ -97,7 +99,10 @@ func respond(t *testing.T, n *network, before paths, target int, verdict func() 
 		if !r.detected && verdict == nil && read.set != before.set {
 			r.detect, r.detected = since, true
 		}
-		if !r.recovered && g.reached >= target {
+		switch {
+		case g.reached < target:
+			r.recovered = false
+		case !r.recovered:
 			r.recover, r.recovered = since, true
 		}
 		if !r.surfaced && g.surfaced {
