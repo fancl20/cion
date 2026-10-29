@@ -148,9 +148,10 @@ func (p *PathProvider) Choose(ctx context.Context, dst addr.IA) (*Candidate, err
 
 // StaleAfter is the age past which a candidate's staler piece reads stale.
 // Registration refreshes the routes beaconing selects every minute, and a
-// fetched down segment is cached for at most a minute, so a selected route's
-// pieces stay a few minutes fresh; a route ages past five once the beacons
-// stopped refreshing it, because it died or because beaconing selects others.
+// lookup serving fetched down segments a minute old refreshes them, so a
+// selected route's pieces stay a few minutes fresh; a route ages past five
+// once the beacons stopped refreshing it, because it died or because
+// beaconing selects others.
 const StaleAfter = 5 * time.Minute
 
 // Candidate is one composed path beside the facts composition holds on its

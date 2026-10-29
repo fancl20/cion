@@ -138,3 +138,50 @@ all while set aside.
     other NAT benchmarks hold.
 
 ## Implementation history
+
+*   Landed as proposed: each core's last answer, its refresh behind the
+    lookup, the core set aside, and the first lookup
+    ([lookup.go](/pkg/core/controlplane/lookup.go)), and the founder-down
+    benchmark's reads
+    ([nat_test.go](/internal/testnetwork/behavior/nat_test.go)). Beside the
+    plan:
+    *   A core holding no answer is refreshed behind a lookup that serves
+        another core's answer, not only by the first lookup.
+    *   Refreshes of one core that fail together count as one try of its
+        retry schedule.
+    *   A fetch that finds no route to the core sets nothing aside: it asked
+        nothing, and the next lookup asks again. A send with neither a path
+        nor a link to its destination fails with `scion.ErrNoLink`
+        ([conn.go](/pkg/libs/scion/conn.go)).
+    *   `StaleAfter`'s comment states the refresh
+        ([provider.go](/pkg/libs/scion/provider.go)).
+
+    Five runs each against the node before it, ten of the symmetric join and
+    of the regions network's settling:
+    *   **Founder down:** every read reached all 30 surviving pairs, and no
+        lookup waited, against 28 or 29 pairs, the slowest lookup taking the
+        read's whole 2 seconds and the mean 0.61 to 0.68. The survivors
+        answered in 0.73 seconds as before, and the restarted node returned
+        in 195 to 292 seconds against 218 to 293.
+    *   **NAT network:** it settled in 2m10s to 2m50s on paths as short, as
+        before. A rebind recovered in 16.5 seconds against 16.5 to 18.4, and
+        a restarted peer in 12.9 against 13.0 to 13.1. A node behind a
+        symmetric NAT joined in 43 to 54 seconds in nine runs and 170 in one,
+        against 33 to 55 in nine and 175 in one: the slow run waits for a
+        link to the authoritative core.
+    *   **Settled networks:** the regions network's worst pair reached 1.13
+        to 1.23 times the reference in four runs, the fifth failing at boot
+        on a port another socket held, against 1.13 to 1.36 in ten runs, four
+        of them 1.23 or more. The stranded network settled in 2.5 to 2.7
+        minutes with its worst pair at 1.3, against 2.0 to 2.5 and 1.15 to
+        1.3. The site network settled as before.
+    *   **Cut networks:** the stranded network recovered from its cut in 110
+        to 300 seconds against 122 to 285. The regions network recovered in
+        260 to 280 seconds in three runs and in 500 and 540 in two: the tail
+        in which a link promoted after the cut retires as useless, seen at 460
+        to 488 seconds in one or two of five runs before.
+
+    A refresh behind the lookup serves an answer up to one caller's period
+    older than a lookup that waits for the fetch: the selection asks every 30
+    seconds, so its windows read down segments 31 to 62 seconds old, against
+    0 to 31.

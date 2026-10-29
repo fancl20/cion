@@ -349,6 +349,10 @@ func (c *Conn) SetWriteDeadline(t time.Time) error {
 	return c.conn.SetWriteDeadline(t)
 }
 
+// ErrNoLink reports a send addressed by ISD-AS alone — no path, no
+// interface — to a node no usable link reaches: nothing left the node.
+var ErrNoLink = errors.New("no link to neighbor")
+
 // resolveLink reads the usable links for the neighbor's egress interface.
 func (c *Conn) resolveLink(neighborIA addr.IA) (uint16, error) {
 	for ifID, neighbor := range c.links.Latest().Usable() {
@@ -356,7 +360,7 @@ func (c *Conn) resolveLink(neighborIA addr.IA) (uint16, error) {
 			return ifID, nil
 		}
 	}
-	return 0, fmt.Errorf("no link to neighbor %s", neighborIA)
+	return 0, fmt.Errorf("%w %s", ErrNoLink, neighborIA)
 }
 
 // scionHeader returns the SCION layer addressing the peer, over the peer's

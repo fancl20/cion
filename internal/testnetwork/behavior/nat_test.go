@@ -1,6 +1,7 @@
 package behavior
 
 import (
+	"context"
 	"fmt"
 	"maps"
 	"strings"
@@ -482,9 +483,58 @@ func TestBenchNATSymmetric(t *testing.T) {
 	})
 }
 
+// readReach reads every ordered pair of the given nodes' chosen path each
+// settleSample until watch passes, each lookup bounded by lookupBudget, and
+// returns the fewest pairs a read reached over the formed links, and the
+// slowest and the mean lookup.
+func readReach(
+	t *testing.T, n *network, which []int, watch time.Duration,
+) (fewest int, slowest, mean time.Duration) {
+
+	t.Helper()
+	fewest = len(which) * (len(which) - 1)
+	var total time.Duration
+	lookups := 0
+	start := time.Now()
+	for {
+		synctest.Wait()
+		f := formedLinks(t, n)
+		reached := 0
+		for _, s := range which {
+			for _, d := range which {
+				if s == d {
+					continue
+				}
+				ctx, cancel := context.WithTimeout(t.Context(), lookupBudget)
+				began := time.Now()
+				c, err := n.nodes[s].App().Provider().Choose(ctx, n.nodes[d].App().IA())
+				took := time.Since(began)
+				cancel()
+				slowest = max(slowest, took)
+				total += took
+				lookups++
+				if err != nil {
+					continue
+				}
+				if _, ok := f.walk(s, d, c.Path); ok {
+					reached++
+				}
+			}
+		}
+		fewest = min(fewest, reached)
+		if time.Since(start) >= watch {
+			return fewest, slowest, total / time.Duration(lookups)
+		}
+		time.Sleep(settleSample)
+	}
+}
+
 // TestBenchNATFounderDown benchmarks the NAT network losing
 // its founder: every pair the founder holds is cut, and the time until
-// every surviving pair answers its pings is read. Then node 5, whose parent
+// every surviving pair answers its pings is read. Then every surviving
+// pair's chosen path is read each settleSample for natWatch, each lookup
+// bounded by lookupBudget: the fewest pairs a read reached over the formed
+// links, and the slowest and the mean lookup. Then node 5, whose parent
 // is the founder, stops; once its peers retired its links it boots again on
 // its state, and the time until every survivor's ping to it and its pings
 // to every survivor answer is read.
@@ -500,6 +550,7 @@ func TestBenchNATFounderDown(t *testing.T) {
 			n.cutPair(0, j)
 		}
 		survive, silent := pingAll(t, n, survivors, natWatch)
+		reached, slowest, mean := readReach(t, n, survivors, natWatch)
 
 		const restarted = 5
 		host, state := n.nodes[restarted].Host(), n.nodes[restarted].StateDir()
@@ -534,6 +585,9 @@ func TestBenchNATFounderDown(t *testing.T) {
 		reportValues(t, "NATFounderDown",
 			benchValue{survive.Seconds(), "survive-s"},
 			benchValue{flag(len(silent) == 0), "survived"},
+			benchValue{float64(reached), "reads-reached-min"},
+			benchValue{slowest.Seconds(), "reads-lookup-max-s"},
+			benchValue{mean.Seconds(), "reads-lookup-mean-s"},
 			benchValue{ret.Seconds(), "return-s"},
 			benchValue{flag(returned), "returned"},
 		)
