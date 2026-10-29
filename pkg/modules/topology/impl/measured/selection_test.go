@@ -139,7 +139,7 @@ func newSelFixture(t *testing.T, neighbors ...addr.IA) *selFixture {
 			Window: time.Hour, // the candidate sweep never retires in these
 			// The viewer sits on loopback, so the loopback entries below
 			// share its scope and pass the loop's filter.
-			ControlAddr: netip.MustParseAddrPort("127.0.0.1:30042"),
+			ControlHost: netip.MustParseAddr("127.0.0.1"),
 		},
 		streaks: make(map[addr.IA]*peerStreak),
 		probeFn: func(_ context.Context, e bus.DirectoryEntry, _ *links.Link) sample {
@@ -1556,7 +1556,7 @@ func TestSelectionScopeFilter(t *testing.T) {
 
 	// The global viewer: the global entries alone.
 	f = newSelFixture(t)
-	f.sel.cfg.ControlAddr = netip.MustParseAddrPort("203.0.113.7:30042")
+	f.sel.cfg.ControlHost = netip.MustParseAddr("203.0.113.7")
 	ias, rendezvous = newDirectory()
 	for _, ia := range ias {
 		f.directory = append(f.directory, scopedEntry(ia, rendezvous[ia]))
@@ -1571,6 +1571,47 @@ func TestSelectionScopeFilter(t *testing.T) {
 			t.Errorf("the global viewer probed %v at %s, want it skipped", ia,
 				rendezvous[ia])
 		}
+	}
+}
+
+// TestProbeRendezvousRecordsNothing checks the round trips that ask a
+// candidate's rendezvous socket whether it answers: the window's probe
+// measures the candidate's direct round trip and the sweep finds it alive,
+// each over a binding request that teaches the node its external host, while
+// the candidate's acceptor records nothing.
+func TestProbeRendezvousRecordsNothing(t *testing.T) {
+	f := newRendezvousFixture(t, func(cfg *RendezvousConfig) {
+		cfg.IA = selB
+	})
+	loopback := netip.MustParseAddr("127.0.0.1")
+	var learned []netip.Addr
+	s := &selection{cfg: SelectionConfig{
+		ControlHost: loopback,
+		Paths: &scion.PathProvider{
+			IA:     selIA,
+			DB:     emptyPathDB{},
+			Lookup: func(context.Context, addr.IA) []*pathdb.Segment { return nil },
+		},
+		Learn: func(host netip.Addr) { learned = append(learned, host) },
+	}}
+
+	sm := s.probe(t.Context(), bus.DirectoryEntry{IA: selB, RendezvousAddr: f.addr}, nil)
+	if sm.m.direct <= 0 {
+		t.Errorf("direct sample = %v, want the binding request's round trip", sm.m.direct)
+	}
+	candidate := &links.Link{NeighborIA: selB, Rendezvous: f.addr, State: links.StateCandidate}
+	if !s.candidateAlive(t.Context(), candidate) {
+		t.Error("the sweep found the answering candidate silent")
+	}
+	if want := []netip.Addr{loopback, loopback}; !slices.Equal(learned, want) {
+		t.Errorf("learned hosts = %v, want the reflexive host of each answer %v", learned, want)
+	}
+	entries, err := f.store.All(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("the candidate's acceptor recorded %v, want nothing", entries)
 	}
 }
 

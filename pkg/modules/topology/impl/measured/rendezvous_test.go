@@ -155,31 +155,30 @@ func TestRendezvousRoundTrip(t *testing.T) {
 }
 
 // TestRendezvousNamesCandidate checks identity adoption as the exchange's
-// own act: a bootstrap claim with the zero ISD-AS mints an unnamed candidate,
-// and the same socket's named dial — the joiner's identity completed — names
-// that entry instead of minting a second one. No live entry is left unnamed
-// past the exchange.
+// own act: a bootstrap claim with the zero ISD-AS mints an unnamed candidate
+// at the dial's observed source, whatever the claim names — behind a NAT, an
+// address inside it — and the same socket's named dial, the joiner's
+// identity completed, names that entry instead of minting a second one. No
+// live entry is left unnamed past the exchange.
 func TestRendezvousNamesCandidate(t *testing.T) {
 	f := newRendezvousFixture(t, nil)
 	local := linkAddr(t)
+	inside := netip.MustParseAddrPort("10.0.0.5:31001")
 
 	if _, _, _, err := RendezvousEcho(context.Background(), underlay.Kernel,
-		local, f.addr, addr.IA(0), local); err != nil {
+		local, f.addr, addr.IA(0), inside); err != nil {
 		t.Fatal(err)
 	}
-	// The unnamed claim keeps the claim rule: a concrete claim records
-	// verbatim, so the entry the named dial looks for is the bind's own
-	// address.
 	entry, err := f.store.ByRemote(context.Background(), local)
 	if err != nil || entry == nil {
-		t.Fatalf("no unnamed candidate recorded (%v)", err)
+		t.Fatalf("no unnamed candidate recorded at the dial's source (%v)", err)
 	}
 	if !entry.NeighborIA.IsZero() {
 		t.Fatalf("bootstrap claim recorded %v, want unnamed", entry.NeighborIA)
 	}
 
 	reply, _, _, err := RendezvousEcho(context.Background(), underlay.Kernel,
-		local, f.addr, rendezvousIA, local)
+		local, f.addr, rendezvousIA, inside)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -648,13 +647,10 @@ func TestRendezvousEchoEndsWithItsContext(t *testing.T) {
 	}
 }
 
-// TestRendezvousEchoSpeaksForTheLink checks the answered dial of an exchange
-// that binds a link address: before the socket is released, one empty
-// datagram leaves it for the acceptor's link address — the answer's port on
-// the host the reply arrived from, the claim rule's record — so a NAT
-// maps the link's own flow first. A probe's ephemeral dial sends none: the
-// first datagram the link socket reads after the probe returned is a
-// sentinel sent after it.
+// TestRendezvousEchoSpeaksForTheLink checks an answered dial: before the
+// socket is released, one empty datagram leaves it for the acceptor's link
+// address — the answer's port on the host the reply arrived from, the claim
+// rule's record — so a NAT maps the link's own flow first.
 func TestRendezvousEchoSpeaksForTheLink(t *testing.T) {
 	host := netip.MustParseAddr("127.0.0.1")
 	listen := func() *net.UDPConn {
@@ -716,35 +712,15 @@ func TestRendezvousEchoSpeaksForTheLink(t *testing.T) {
 		t.Errorf("the link socket read %d bytes from %v, want an empty datagram from the dial's bind %v",
 			n, got, local)
 	}
-
-	if _, _, _, err := RendezvousEcho(context.Background(), underlay.Kernel,
-		netip.AddrPortFrom(host, 0), target, addr.IA(0),
-		netip.AddrPortFrom(host, scionrpc.EndpointPort)); err != nil {
-		t.Fatal(err)
-	}
-	sentinel := listen()
-	if _, err := sentinel.WriteToUDP([]byte("sentinel"), link.LocalAddr().(*net.UDPAddr)); err != nil {
-		t.Fatal(err)
-	}
-	n, src, err = link.ReadFromUDP(buf)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got, want := observedAddr(src), sentinel.LocalAddr().(*net.UDPAddr).AddrPort(); got != want {
-		t.Errorf("the link socket's next datagram came from %v (%d bytes), want the sentinel from %v",
-			got, n, want)
-	}
 }
 
-// TestRendezvousRecordsTheObservation checks the acceptor's record: a named
-// claim — the joiner's dial from the socket that will serve — records the
-// request's observed source whole, host and port both, whatever the claim
-// spells, for the observation names the dialing socket's mapping; an
-// unnamed one — a probe's ephemeral dial, a bootstrap's pre-identity claim
-// — keeps the claim rule, so the probes of one node answer one entry
-// instead of minting one per ephemeral port. The wildcard bind rides the
-// same rule: a wildcard-bound dialer claims the wildcard, and what it
-// cannot name the exchange observes.
+// TestRendezvousRecordsTheObservation checks the acceptor's record: a claim
+// — a joiner's dial from the socket that will serve, unnamed before its
+// identity completes — records the request's observed source whole, host
+// and port both, whatever the claim spells, for the observation names the
+// dialing socket's mapping. The wildcard bind rides the same rule: a
+// wildcard-bound dialer claims the wildcard, and what it cannot name the
+// exchange observes.
 func TestRendezvousRecordsTheObservation(t *testing.T) {
 	wildcard := netip.MustParseAddr("0.0.0.0")
 	f := newRendezvousFixture(t, func(cfg *RendezvousConfig) {
@@ -810,31 +786,18 @@ func TestRendezvousRecordsTheObservation(t *testing.T) {
 			entry.Remote)
 	}
 
-	// An unnamed claim keeps the claim rule: the probes of one node —
-	// ephemeral dials claiming the control address — answer one entry, the
-	// cap they bound not filling with one per port.
-	probe := netip.AddrPortFrom(loopback, 30042)
-	for range 2 {
-		if _, _, _, err := RendezvousEcho(context.Background(), underlay.Kernel,
-			ephemeral, target, addr.IA(0), probe); err != nil {
-			t.Fatal(err)
-		}
-	}
-	entries, err := f.store.All(context.Background())
-	if err != nil {
+	// An unnamed claim records the observation too: a joiner's first dial,
+	// claiming an address its socket's mapping is not — behind a NAT, the
+	// address inside it — records the socket it came from.
+	first := linkAddr(t)
+	if _, _, _, err := RendezvousEcho(context.Background(), underlay.Kernel,
+		first, target, addr.IA(0), lying); err != nil {
 		t.Fatal(err)
 	}
-	var unnamed int
-	for _, l := range entries {
-		if l.NeighborIA.IsZero() {
-			unnamed++
-			if l.Remote != probe {
-				t.Errorf("the unnamed entry's remote = %v, want the claimed %v", l.Remote, probe)
-			}
-		}
-	}
-	if unnamed != 1 {
-		t.Errorf("the two probes minted %d unnamed entries, want the one", unnamed)
+	unnamed, err := f.store.ByRemote(context.Background(), first)
+	if err != nil || unnamed == nil || !unnamed.NeighborIA.IsZero() {
+		t.Errorf("the unnamed claim's record at %v = %+v (%v), want an unnamed entry",
+			first, unnamed, err)
 	}
 }
 

@@ -133,3 +133,44 @@ There is no wire change: every node answers binding requests since
     NAT benchmarks hold or improve.
 
 ## Implementation history
+
+*   Landed as proposed: the binding echo and the acceptor's record
+    ([rendezvous.go](/pkg/modules/topology/impl/measured/rendezvous.go)),
+    the probe and the sweep
+    ([selection.go](/pkg/modules/topology/impl/measured/selection.go)), the
+    echo ([provider.go](/pkg/modules/topology/impl/measured/provider.go)),
+    the fabric's watch ([watch.go](/internal/testnetwork/fabric/watch.go)),
+    and the stranded lab
+    ([stranded_test.go](/internal/testnetwork/behavior/stranded_test.go)).
+    `SelectionConfig.ControlAddr` became `ControlHost`, for the probes claim
+    no address. Five runs each against the node before it:
+    *   **Churn:** the regions network minted 8 unnamed entries a run, the
+        joiners' first claims, against 300 to 337, and swapped generations
+        53 to 65 times against 511 to 563; the stranded network 5 and 26 to
+        28 against 86 to 91 and 165 to 171; the NAT network 6 and 36 to 38
+        against 26 to 33 and 73 to 84. Neither the regions nor the stranded
+        network attempted a punch.
+    *   **NAT network:** it settled in 2m40s in three runs and 4m30s in two,
+        against 2m20s to 2m50s in four and 4m30s in one, on paths as short;
+        each slow run retired a public pair's link as useless and promoted
+        it again a minute later, as before. A rebind recovered in 16.5 to
+        18.7 seconds, a restarted peer in 13.0 to 13.4, a node behind a
+        symmetric NAT joined in 54 to 55, and the founder returned in 206
+        to 275.
+    *   **Stranded and site networks:** they settled as before, and the
+        stranded network recovered from its cut as before.
+    *   **Regions network:** its worst pair reached 1.13 to 1.31 times the
+        reference in fifteen runs, eight of them 1.19 or more, against 1.11
+        to 1.16 in fifteen, and after its cut 1.23 to 1.36 against 1.20 to
+        1.23. The link between nodes 2 and 6, the cheapest between the
+        regions, was missing in five of ten runs, and in none on the node
+        before. Every candidate now measures in every window; before, a
+        probe the target's caps refused left its candidate unmeasured and
+        its promotion streak reset. Node 2 promoted three links within its
+        region in every run, its link to node 1 among them, against one or
+        two and never that one. Above its floor, node 2 retires its link to
+        node 6 as useless: node 0's link serves node 2's own routes within
+        the demotion ratio, while node 6's routes into node 2's region cost
+        up to 1.23 times the reference without it. The end that dialed a
+        link judges it by its own routes alone; the selection's fix follows
+        in a proposal of its own.

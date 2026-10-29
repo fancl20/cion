@@ -121,10 +121,9 @@ type SelectionConfig struct {
 	// Sockets is the socket source the dials and the band probes construct
 	// through; the zero value is the kernel's.
 	Sockets underlay.Sockets
-	// ControlAddr is the node's own control address, claimed in probes; its
-	// host is the scope the loop's own dials leave from, the half of the
-	// scope filter the viewer supplies.
-	ControlAddr netip.AddrPort
+	// ControlHost is the control address's host: the host the loop's
+	// probes leave from, and the viewer's half of the scope filter.
+	ControlHost netip.Addr
 	// LinkHost is the host link addresses are allocated on.
 	LinkHost netip.Addr
 	// Link establishes a link in-band.
@@ -263,7 +262,7 @@ func (s *selection) pass(ctx context.Context) {
 	candidates := make([]bus.DirectoryEntry, 0, len(directory))
 	for _, e := range directory {
 		if e.IA.Equal(s.cfg.IA) ||
-			!probeable(s.cfg.ControlAddr.Addr(), e.RendezvousAddr.Addr()) {
+			!probeable(s.cfg.ControlHost, e.RendezvousAddr.Addr()) {
 			continue
 		}
 		if l, ok := neighbors[e.IA]; ok {
@@ -312,11 +311,11 @@ func (s *selection) pass(ctx context.Context) {
 // retires when it goes silent. Push became pull: the same UDP round trip to
 // the same rendezvous socket the window's measurement already rides is now
 // the grace's only evidence, and it is spent on named candidates alone —
-// the unnamed entries the probes themselves mint on their targets retire
-// with the window, or the cap they bound would fill with them. A candidate
-// establishes by the authenticated link request alone — the confirm the
-// establishment or the returning node's pass sends — never by the sweep's
-// own reading.
+// an unnamed entry, a joiner's first claim no named dial followed, retires
+// with the window, or the cap the unnamed entries count toward would fill
+// with them. A candidate establishes by the authenticated link request
+// alone — the confirm the establishment or the returning node's pass sends
+// — never by the sweep's own reading.
 func (s *selection) sweep(ctx context.Context, entries []*links.Link) {
 	window := s.cfg.Window
 	if window == 0 {
@@ -338,10 +337,9 @@ func (s *selection) sweep(ctx context.Context, entries []*links.Link) {
 	}
 }
 
-// candidateAlive runs one rendezvous echo against the candidate's own
+// candidateAlive sends one binding request to the candidate's own
 // rendezvous socket, through the test seam when set. An answer is a peer
-// alive and trying; the echo claims the zero ISD-AS like every probe,
-// minting no entry a sweep could mistake for a peer.
+// alive and trying; the request records nothing at the peer.
 func (s *selection) candidateAlive(ctx context.Context, l *links.Link) bool {
 	if l.NeighborIA.IsZero() {
 		return false
@@ -353,8 +351,7 @@ func (s *selection) candidateAlive(ctx context.Context, l *links.Link) bool {
 	if !target.IsValid() {
 		return false
 	}
-	_, _, _, err := s.echo(ctx, netip.AddrPortFrom(s.cfg.ControlAddr.Addr(), 0), target,
-		addr.IA(0), s.cfg.ControlAddr)
+	_, err := s.probeRendezvous(ctx, target)
 	return err == nil
 }
 
@@ -373,13 +370,11 @@ func rendezvousTarget(l *links.Link) netip.AddrPort {
 	return netip.AddrPort{}
 }
 
-// echo dials one rendezvous exchange, recording the external host the
-// reply's observed source names for the node — every dial teaches the
-// dialer its external host — and returning the reply's source beside the
-// reply, the observation an unspecified answer records under. The dial binds
-// the given address: the establishment's own link address when the exchange
-// records an entry's locator, port 0 — ephemeral — when the measurement
-// probe records nothing.
+// echo dials one rendezvous exchange from the entry's own link address,
+// recording the external host the reply's reflexive address names for the
+// node — every dial teaches the dialer its external host — and returning the
+// reply's source beside the reply, the observation an unspecified answer
+// records under.
 func (s *selection) echo(
 	ctx context.Context,
 	bind netip.AddrPort,
@@ -392,6 +387,18 @@ func (s *selection) echo(
 		s.cfg.Learn(reply.Reflexive.Addr())
 	}
 	return reply, observed, rtt, err
+}
+
+// probeRendezvous sends a binding request to a peer's rendezvous socket from
+// an ephemeral port on the control host and returns the round trip,
+// recording the external host the reply's reflexive address names for the
+// node: the acceptor answers it as it answers a dial, and records nothing.
+func (s *selection) probeRendezvous(ctx context.Context, target netip.AddrPort) (time.Duration, error) {
+	reply, rtt, err := bindingEcho(ctx, s.cfg.Sockets, s.cfg.ControlHost, target)
+	if err == nil && s.cfg.Learn != nil {
+		s.cfg.Learn(reply.Reflexive.Addr())
+	}
+	return rtt, err
 }
 
 // neighbors maps the established entries by their neighbor ISD-AS.
@@ -419,8 +426,7 @@ func (s *selection) upCount(neighbors map[addr.IA]*links.Link) int {
 
 // named reports whether the entry is live and names its neighbor — the
 // entries the link cap bounds, since only they carry beacons. Unnamed
-// candidates, probes and bootstrap claims, retire with the candidate
-// window.
+// candidates, the joiners' first claims, retire with the candidate window.
 func named(l *links.Link) bool {
 	return l.Live() && !l.NeighborIA.IsZero()
 }
@@ -528,20 +534,19 @@ func (s *selection) establish(ctx context.Context, e bus.DirectoryEntry, why str
 // neighbor's direct side by SCMP echo over the one-hop path — the conn
 // resolving the egress interface from the link table as every one-hop write
 // does, the responder in the peer's core answering on the reversed arrival
-// path — a candidate's (a demoted neighbor included) by the rendezvous echo
-// that reaches where no path and no interface exist, and a candidate whose
-// published rendezvous address answers nothing by the punch that opens both
-// NATs between. A neighbor whose link the conn cannot send over — its verdict
-// down — fails its writes at once, and the zero sample is what it would
-// measure. The baseline is the same SCMP echo instrument over the freshest
-// clean composed route of the enumeration the probe keeps beside the sample,
-// the route recorded as the sample's carrier: one destination, two routes,
-// the same median-of-runs discipline, and no clean route leaves the baseline
-// unmeasured for the window rather than measured over a route the network
-// would not serve. The rendezvous echo claims the zero ISD-AS — a probe mints
-// no entry a candidate sweep could mistake for a peer — deduplicated by the
-// control address it claims. Both SCMP echoes address the host the peer's own
-// resolution names.
+// path — a candidate's (a demoted neighbor included) by a binding request to
+// its rendezvous socket, which reaches where no path and no interface exist,
+// and a candidate whose published rendezvous address answers nothing by the
+// punch that opens both NATs between. A neighbor whose link the conn cannot
+// send over — its verdict down — fails its writes at once, and the zero
+// sample is what it would measure. The baseline is the same SCMP echo
+// instrument over the freshest clean composed route of the enumeration the
+// probe keeps beside the sample, the route recorded as the sample's carrier:
+// one destination, two routes, the same median-of-runs discipline, and no
+// clean route leaves the baseline unmeasured for the window rather than
+// measured over a route the network would not serve. The binding request
+// records nothing at the candidate. Both SCMP echoes address the host the
+// peer's own resolution names.
 func (s *selection) probe(ctx context.Context, e bus.DirectoryEntry, l *links.Link) sample {
 	var m measurement
 	switch {
@@ -554,8 +559,7 @@ func (s *selection) probe(ctx context.Context, e bus.DirectoryEntry, l *links.Li
 			slog.Debug("The punch probe did not answer", "peer", e.IA, "err", err)
 		}
 	default:
-		if _, _, rtt, err := s.echo(ctx, netip.AddrPortFrom(s.cfg.ControlAddr.Addr(), 0),
-			e.RendezvousAddr, addr.IA(0), s.cfg.ControlAddr); err == nil {
+		if rtt, err := s.probeRendezvous(ctx, e.RendezvousAddr); err == nil {
 			m.direct = rtt
 		}
 	}

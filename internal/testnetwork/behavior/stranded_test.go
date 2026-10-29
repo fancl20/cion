@@ -103,14 +103,15 @@ func healStranded(t *testing.T, fab *fabric.Fabric, wpki *webpkitest.CA) *networ
 
 	// The blackholes lift while A links the sides: every node of each
 	// side probes the other's — the founder among them, standing in the
-	// directory — landing an entry on its acceptor.
+	// directory — its datagram reaching the other's rendezvous socket.
+	probes := watchRendezvous(fab, n.nodes)
 	for _, lift := range blackholes {
 		lift()
 	}
 	testnetwork.PollVirtual(t, strandedBudget, "the sides' probes to land", func() bool {
 		for _, x := range near {
 			for _, y := range far {
-				if !probedBy(ctx, x, y) || !probedBy(ctx, y, x) {
+				if !probes.probedBy(ctx, x, y) || !probes.probedBy(ctx, y, x) {
 					return false
 				}
 			}

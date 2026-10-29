@@ -195,10 +195,10 @@ type Rendezvous struct {
 	// mtx serializes the handlers' lookup-and-mutate runs over the store.
 	mtx sync.Mutex
 
-	// byAddr rate-caps unnamed claims by the address claimed, byIA named
-	// ones by the ISD-AS: a node's dials share one key however many
-	// ephemeral sockets they use. bySource rate-caps binding requests by
-	// the source observed: each socket its own key.
+	// byAddr rate-caps unnamed claims by the source observed, byIA named
+	// ones by the ISD-AS: a node's named dials share one key however many
+	// sockets they leave from. bySource rate-caps binding requests by the
+	// source observed: each socket its own key.
 	byAddr   *ratelimit.Keyed[netip.AddrPort]
 	byIA     *ratelimit.Keyed[addr.IA]
 	bySource *ratelimit.Keyed[netip.AddrPort]
@@ -290,8 +290,8 @@ func (r *Rendezvous) Run(ctx context.Context) {
 // address the exchange's own round trip proved answers — the claim's port
 // always, for it names the socket that will receive. A wildcard-bound peer
 // claims the wildcard; what it cannot name, the exchange observes. The
-// acceptor's own record of a named claim takes the observation whole, host
-// and port both — see handle.
+// acceptor's own record of a claim takes the observation whole, host and
+// port both — see handle.
 func recordedLinkAddr(claim, observed netip.AddrPort) netip.AddrPort {
 	if !claim.Addr().IsUnspecified() {
 		return claim
@@ -314,14 +314,12 @@ func observedAddr(src *net.UDPAddr) netip.AddrPort {
 // check — so a claim only ever mints, names, or retargets a candidate: an
 // established entry answers with its recorded side untouched, and a claim
 // at an address another serving link holds is turned away, the store
-// refusing the second. A named claim — the joiner's dial from the socket
-// that will serve — records the request's observed source whole, host and
-// port both: the observation names the dialing socket's mapping, whatever
-// the middle made of it. An unnamed one — a probe's ephemeral dial, a
-// bootstrap's pre-identity claim — keeps the claim rule, so the probes of
-// one node answer one entry instead of minting one per ephemeral port. A
-// binding request claims nothing and records nothing. The store calls run
-// under ctx, the loop's.
+// refusing the second. A claim — a joiner's dial from the socket that will
+// serve, unnamed before its identity completes — records the request's
+// observed source whole, host and port both: the observation names the
+// dialing socket's mapping, whatever the middle made of it. A binding
+// request claims nothing and records nothing. The store calls run under
+// ctx, the loop's.
 func (r *Rendezvous) handle(ctx context.Context, raw []byte, src *net.UDPAddr) ([]byte, error) {
 	req, err := ParseRendezvousRequest(raw)
 	if err != nil {
@@ -330,11 +328,7 @@ func (r *Rendezvous) handle(ctx context.Context, raw []byte, src *net.UDPAddr) (
 	if req.Binding {
 		return r.answerBinding(req, len(raw), src)
 	}
-	if req.IA.IsZero() {
-		req.LinkAddr = recordedLinkAddr(req.LinkAddr, observedAddr(src))
-	} else {
-		req.LinkAddr = observedAddr(src)
-	}
+	req.LinkAddr = observedAddr(src)
 	if req.IA.IsZero() {
 		if !r.byAddr.Admit(req.LinkAddr) {
 			return nil, fmt.Errorf("claim %s exceeds the admission rate", req.LinkAddr)
@@ -403,8 +397,8 @@ func (r *Rendezvous) admit(ctx context.Context, req RendezvousRequest) (*links.L
 	var entry *links.Link
 	var err error
 	if req.IA.IsZero() {
-		// An unnamed claim — a probe, or a bootstrap joiner whose identity
-		// is not final — deduplicates by the address it claims.
+		// An unnamed claim — a joiner whose identity is not final —
+		// deduplicates by its observed source.
 		entry, err = r.cfg.Store.ByRemote(ctx, req.LinkAddr)
 		if err != nil {
 			return nil, err
@@ -415,10 +409,11 @@ func (r *Rendezvous) admit(ctx context.Context, req RendezvousRequest) (*links.L
 			return nil, err
 		}
 		if entry == nil {
-			// A named claim the table holds only by the address claimed —
-			// the bootstrap joiner's second dial, its identity completed —
-			// names that entry instead of minting a second one: adoption is
-			// the request's own act.
+			// A named claim the table holds only by its observed source —
+			// the bootstrap joiner's second dial, its identity completed,
+			// from the socket its first left from — names that entry
+			// instead of minting a second one: adoption is the request's
+			// own act.
 			byRemote, err := r.cfg.Store.ByRemote(ctx, req.LinkAddr)
 			if err != nil {
 				return nil, err
@@ -468,9 +463,9 @@ func (r *Rendezvous) admit(ctx context.Context, req RendezvousRequest) (*links.L
 	return entry, nil
 }
 
-// unnamedLinks counts the live entries without a neighbor name — probes and
-// bootstrap claims, bounded by the same cap until the candidate window
-// retires them.
+// unnamedLinks counts the live entries without a neighbor name — the
+// joiners' first claims, bounded by the same cap until their named dials
+// name them or the candidate window retires them.
 func (r *Rendezvous) unnamedLinks(ctx context.Context) (int, error) {
 	return r.countLinks(ctx, func(l *links.Link) bool {
 		return l.Live() && l.NeighborIA.IsZero()
@@ -505,23 +500,21 @@ func rendezvousSilenceHint(target netip.AddrPort) string {
 		"rendezvous packets — the acceptor binds %d", scionrpc.EndpointPort, RendezvousPort)
 }
 
-// RendezvousEcho sends one request run to the target and returns the reply
-// with the round trip and the address the reply arrived from — the acceptor's
-// routable host on the path the dial proved, the observation an unspecified
-// answer records under the answer's port. The dial binds the given address: an
-// exchange that records an entry's locator binds the entry's own link address,
-// so the mapping the acceptor observes is the socket that will serve — the
-// socket held for the round trip alone and released before the store write
-// lands and the generation binds, the same probe-and-release the band
-// allocation performs — while a probe that records nothing binds port 0 and
-// dials ephemeral. An answered exchange of the former sends one empty
-// datagram from the held socket to the acceptor's link address — the
-// answer's, under the claim rule — before the release, so a NAT maps
-// the link's own flow before the acceptor's link can claim it. The requester
-// claims the given address; a probe claims its control address, a promotion
-// its link address. The context's end moves the read deadline to the past,
-// ending a wait in flight; each attempt reads the context after setting its
-// own deadline, so no attempt overrides the move unseen.
+// RendezvousEcho sends one request run to the target from a link's own socket
+// and returns the reply with the round trip and the address the reply
+// arrived from — the acceptor's routable host on the path the dial proved,
+// the observation an unspecified answer records under the answer's port. The
+// dial binds the given address, the entry's own link address, so the mapping
+// the acceptor observes is the socket that will serve — the socket held for
+// the round trip alone and released before the store write lands and the
+// generation binds, the same probe-and-release the band allocation performs.
+// An answered exchange sends one empty datagram from the held socket to the
+// acceptor's link address — the answer's, under the claim rule — before the
+// release, so a NAT maps the link's own flow before the acceptor's link can
+// claim it. The requester claims the given link address. The context's end
+// moves the read deadline to the past, ending a wait in flight; each attempt
+// reads the context after setting its own deadline, so no attempt overrides
+// the move unseen.
 func RendezvousEcho(
 	ctx context.Context,
 	sockets underlay.Sockets,
@@ -545,17 +538,30 @@ func RendezvousEcho(
 		return RendezvousReply{}, netip.AddrPort{}, 0,
 			fmt.Errorf("the acceptor %s names no link address", target)
 	}
-	if bind.Port() != 0 {
-		// The link's flow speaks before the acceptor's link can: a NAT keeps
-		// the dial's port for the flow toward the acceptor's link socket
-		// only while no packet of that socket has reached the mapping
-		// first, and the acceptor's link sends to the recorded mapping from
-		// the moment its entry lands. The acceptor's data plane drops the
-		// empty datagram as malformed; a lost one costs only the race it
-		// would have won.
-		_, _ = conn.WriteToUDP(nil, udpAddr(recordedLinkAddr(reply.LinkAddr, observed)))
-	}
+	// The link's flow speaks before the acceptor's link can: a NAT keeps the
+	// dial's port for the flow toward the acceptor's link socket only while
+	// no packet of that socket has reached the mapping first, and the
+	// acceptor's link sends to the recorded mapping from the moment its
+	// entry lands. The acceptor's data plane drops the empty datagram as
+	// malformed; a lost one costs only the race it would have won.
+	_, _ = conn.WriteToUDP(nil, udpAddr(recordedLinkAddr(reply.LinkAddr, observed)))
 	return reply, observed, rtt, nil
+}
+
+// bindingEcho sends one binding request run from an ephemeral socket on the
+// host to the target and returns the reply — the acceptor's ISD-AS and the
+// requester's reflexive address — with the round trip. The acceptor records
+// nothing.
+func bindingEcho(
+	ctx context.Context, sockets underlay.Sockets, host netip.Addr, target netip.AddrPort,
+) (RendezvousReply, time.Duration, error) {
+	conn, err := sockets.NewUDP(net.UDPAddrFromAddrPort(netip.AddrPortFrom(host, 0)), netip.AddrPort{})
+	if err != nil {
+		return RendezvousReply{}, 0, fmt.Errorf("binding the rendezvous client: %w", err)
+	}
+	defer func() { _ = conn.Close() }()
+	reply, _, rtt, err := echoOn(ctx, conn, target, RendezvousRequest{Binding: true})
+	return reply, rtt, err
 }
 
 // echoOn sends one request run from a socket the caller holds — the request

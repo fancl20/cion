@@ -145,6 +145,47 @@ func TestDropTapsDropAndLiftRestores(t *testing.T) {
 	}
 }
 
+// TestWatchHearsDeliveredDatagrams checks the fabric's watch: it hears the
+// source host of a datagram delivered to its address, and nothing delivered
+// before it was drawn, dropped by a tap, or addressed to another port.
+func TestWatchHearsDeliveredDatagrams(t *testing.T) {
+	f := New(t)
+	a, b, s := f.Node(insideAddr), f.Node(upstreamAddr), f.Node(strangerAddr)
+	ca, _ := listen(t, a)
+	cs, _ := listen(t, s)
+	cb, watched := listen(t, b)
+	co, other := listen(t, b)
+	// arrives reports whether a datagram from the socket reaches the
+	// receiver within the wait, the fabric's walk done once it does.
+	arrives := func(from underlay.UDPConn, to netip.AddrPort, at underlay.UDPConn) bool {
+		send(t, from, to, "watched")
+		got, _ := recv(t, at, testWait)
+		return got == "watched"
+	}
+
+	if !arrives(ca, watched, cb) {
+		t.Fatal("the datagram before the watch did not arrive")
+	}
+	heard := f.Watch(watched)
+	if heard(insideAddr) {
+		t.Error("the watch heard a datagram delivered before it was drawn")
+	}
+	lift := f.Blackhole(strangerAddr, upstreamAddr)
+	if arrives(cs, watched, cb) {
+		t.Fatal("the blackhole let a datagram through")
+	}
+	lift()
+	if !arrives(cs, other, co) {
+		t.Fatal("the datagram to the other port did not arrive")
+	}
+	if heard(strangerAddr) {
+		t.Error("the watch heard a dropped datagram or one to another port")
+	}
+	if !arrives(ca, watched, cb) || !heard(insideAddr) {
+		t.Error("the watch missed a datagram delivered to its address")
+	}
+}
+
 // TestNamesResolveOnEveryStack checks the fabric's names: a name the lab
 // drew resolves to its host through every node's socket source, an IPv6
 // resolution of it answers nothing, and a name the lab never drew is refused

@@ -58,15 +58,16 @@ type Fabric struct {
 	wg     sync.WaitGroup
 
 	// mtx guards the drawn network: the stacks by host, the taps, the
-	// NATs, and the names. A packet's walk from one stack to another
-	// reads it twice — once for the taps, once for the destination — so no
-	// tap draw or node boot waits on a packet in flight.
-	mtx    sync.Mutex
-	hosts  map[netip.Addr]*Node
-	taps   []*tap
-	nats   []*NAT
-	names  map[string]netip.Addr
-	closed bool
+	// NATs, the names, and the watches. A packet's walk from one stack to
+	// another reads it twice — once for the taps, once for the destination
+	// — so no tap draw or node boot waits on a packet in flight.
+	mtx     sync.Mutex
+	hosts   map[netip.Addr]*Node
+	taps    []*tap
+	nats    []*NAT
+	names   map[string]netip.Addr
+	watches []*watch
+	closed  bool
 
 	// udpOnly boots every stack with the UDP transport alone.
 	udpOnly bool
@@ -399,10 +400,14 @@ func (f *Fabric) crossNATs(pkt []byte) {
 }
 
 // deliver injects the packet into the stack that holds the destination
-// host, dropping it where none does.
+// host, dropping it where none does, and notes it in the watches on its
+// destination address.
 func (f *Fabric) deliver(dst netip.Addr, pkt []byte) {
 	f.mtx.Lock()
 	n := f.hosts[dst]
+	if n != nil {
+		f.recordLocked(dst, pkt)
+	}
 	f.mtx.Unlock()
 	if n == nil {
 		return

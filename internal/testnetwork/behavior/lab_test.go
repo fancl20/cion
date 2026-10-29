@@ -315,10 +315,28 @@ func upLinks(ctx context.Context, n *testnetwork.Node) int {
 	return up
 }
 
-// probedBy reports whether the prober's rendezvous probe ever landed on the
-// node's acceptor: the probe mints an entry aimed at the prober's host,
-// which proves the prober's directory holds the node.
-func probedBy(ctx context.Context, n, prober *testnetwork.Node) bool {
+// rendezvousWatch hears each node's rendezvous socket on the fabric, from
+// the moment it is drawn.
+type rendezvousWatch map[*testnetwork.Node]func(src netip.Addr) bool
+
+// watchRendezvous draws a watch on each node's rendezvous socket.
+func watchRendezvous(fab *fabric.Fabric, nodes []*testnetwork.Node) rendezvousWatch {
+	w := make(rendezvousWatch, len(nodes))
+	for _, n := range nodes {
+		w[n] = fab.Watch(netip.AddrPortFrom(n.Host(), measured.RendezvousPort))
+	}
+	return w
+}
+
+// probedBy reports whether the prober reached the node since the watch was
+// drawn — a datagram of its own heard at the node's rendezvous socket, the
+// probe that proves the prober's directory holds the node — or the node
+// holds an entry aimed at the prober's host: a link, whose ends measure each
+// other over it.
+func (w rendezvousWatch) probedBy(ctx context.Context, n, prober *testnetwork.Node) bool {
+	if w[n](prober.Host()) {
+		return true
+	}
 	entries, err := n.App().Links().All(ctx)
 	if err != nil {
 		return false

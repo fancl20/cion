@@ -808,7 +808,8 @@ func TestProviderReportsReach(t *testing.T) {
 // TestEchoPublishedReportsTheAnswer checks the acceptor's echo: a peer whose
 // published rendezvous address answers is answered, one whose address is
 // silent is not, and a peer the directory lacks is not echoed. No answer
-// teaches the node its own external host.
+// teaches the node its own external host, and the answering peer records
+// nothing.
 func TestEchoPublishedReportsTheAnswer(t *testing.T) {
 	acceptor := newRendezvousFixture(t, nil)
 	silent := addr.MustIAFrom(20, 0xfd0000000052)
@@ -841,6 +842,9 @@ func TestEchoPublishedReportsTheAnswer(t *testing.T) {
 	}
 	if got := z.external.host(); got.IsValid() {
 		t.Errorf("the echoes taught the node the external host %v, want none", got)
+	}
+	if entries, err := acceptor.store.All(t.Context()); err != nil || len(entries) != 0 {
+		t.Errorf("the answering peer recorded %v (%v), want nothing", entries, err)
 	}
 }
 

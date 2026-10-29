@@ -64,7 +64,7 @@ type Config struct {
 	// empty keeps it in memory alone.
 	StateDir string
 	// ControlHost is the control address's host: every socket binds it,
-	// the rendezvous port and the probe claims among them.
+	// the rendezvous port and the probes' among them.
 	ControlHost netip.Addr
 	// NewConn binds a SCION connection on an ephemeral port: the socket the
 	// directory's publish and fetch ride on non-core nodes, the selection
@@ -247,20 +247,17 @@ func (z *Provider) recordAnswer(answered bool) {
 	z.updateSelf(func(s *bus.SelfState) { s.RendezvousUnanswered = !answered })
 }
 
-// echoPublished echoes the peer's published rendezvous address as the
-// selection loop's probe does — from an ephemeral port on the control host,
-// claiming the zero ISD-AS and the control address — and reports whether it
-// answered; ok is false when the node directory holds no entry for the
-// peer. The echo checks the peer alone: its answer teaches the node nothing
-// of its own external host.
+// echoPublished sends a binding request to the peer's published rendezvous
+// address as the selection loop's probe does — from an ephemeral port on the
+// control host — and reports whether it answered; ok is false when the node
+// directory holds no entry for the peer. The echo checks the peer alone: its
+// answer teaches the node nothing of its own external host.
 func (z *Provider) echoPublished(ctx context.Context, peer addr.IA) (answered, ok bool) {
 	e, ok := z.directoryState.Latest().Entry(peer)
 	if !ok {
 		return false, false
 	}
-	_, _, _, err := RendezvousEcho(ctx, z.cfg.Sockets,
-		netip.AddrPortFrom(z.cfg.ControlHost, 0), e.RendezvousAddr, addr.IA(0),
-		netip.AddrPortFrom(z.cfg.ControlHost, scionrpc.EndpointPort))
+	_, _, err := bindingEcho(ctx, z.cfg.Sockets, z.cfg.ControlHost, e.RendezvousAddr)
 	return err == nil, true
 }
 
@@ -636,7 +633,7 @@ func (z *Provider) selectionConfig() SelectionConfig {
 		Latencies:   z.env.Bus.Latencies(),
 		Paths:       z.env.Paths,
 		Conn:        z.probeConn,
-		ControlAddr: netip.AddrPortFrom(z.cfg.ControlHost, scionrpc.EndpointPort),
+		ControlHost: z.cfg.ControlHost,
 		LinkHost:    z.cfg.ControlHost,
 		Sockets:     z.cfg.Sockets,
 		Link:        z.linker,
@@ -961,8 +958,8 @@ func observedOr(state bus.LinkState, ifID uint16, fallback netip.AddrPort) netip
 // named entry is re-dialed while no live entry names its neighbor, so a
 // revival never doubles a live neighbor. An unnamed entry is re-dialed only
 // when it records the rendezvous address it was seeded with: the entries a
-// probe mints on the acceptor name no peer. Either waits while the named
-// live entries fill the cap.
+// joiner's first claim mints on the acceptor name no peer. Either waits
+// while the named live entries fill the cap.
 func revivable(entries []*links.Link, l *links.Link) bool {
 	if namedLive(entries) >= MaxNeighbors {
 		return false
