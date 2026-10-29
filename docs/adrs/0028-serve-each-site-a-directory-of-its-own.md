@@ -1,6 +1,7 @@
 # Serve Each Site a Directory of Its Own
 
-*   Status: proposed
+*   Status: superseded by
+    [ADR-0032](/docs/adrs/0032-replicate-the-node-directory-on-every-node.md)
 *   Date: 2026-10-26
 
 [TOC]
