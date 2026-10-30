@@ -303,10 +303,14 @@ func (b *Beaconer) HandleBeacon(
 }
 
 // HandleRegistration verifies a down segment registered with this core and
-// stores it in the path database (Sections 3.1.3 and 3.3).
+// stores it in the path database (Sections 3.1.3 and 3.3). Missing trust
+// material is asked of server, the registrant's control service, before the
+// provider's own source: the registrant holds every chain its segment
+// references, whichever core issued them.
 func (b *Beaconer) HandleRegistration(
 	ctx context.Context,
 	pb *control_plane.PathSegment,
+	server net.Addr,
 ) error {
 
 	pcb, err := segment.ParsePCB(pb)
@@ -316,7 +320,7 @@ func (b *Beaconer) HandleRegistration(
 	if err := b.checkRegistered(pcb); err != nil {
 		return err
 	}
-	if err := b.verifySignatures(ctx, pcb, nil); err != nil {
+	if err := b.verifySignatures(ctx, pcb, server); err != nil {
 		return err
 	}
 	seg, err := pathdb.NewSegment(pathdb.SegmentTypeDown, pb)
@@ -508,8 +512,9 @@ func checkTimeWindow(pcb *segment.PCB, now time.Time) error {
 // TRC-anchored chain the entry references, bound to the identity the entry
 // claims: the signer's key must name the entry's own ISD-AS, so an enrolled AS
 // cannot sign entries in another's name. Missing TRCs and chains are asked of
-// server, the sending AS's control service (Section 2.3.1, check 1); a nil
-// server asks the provider's own source.
+// server — the sending AS's control service for a beacon (Section 2.3.1,
+// check 1), the registrant's for a registration — before the provider's own
+// source.
 func (b *Beaconer) verifySignatures(ctx context.Context, pcb *segment.PCB, server net.Addr) error {
 	for i := range pcb.Entries {
 		entry := pcb.Entries[i]

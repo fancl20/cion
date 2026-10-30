@@ -31,8 +31,9 @@ type PeerClientConfig struct {
 	Key crypto.Signer
 	// Conn is the SCION connection QUIC rides.
 	Conn *scion.Conn
-	// PathTo resolves the data-plane path to a destination that is not a
-	// direct neighbor; nil, or a nil result, sends over a one-hop path.
+	// PathTo resolves the data-plane path to a destination whose authority
+	// names no path and that is not a direct neighbor; nil, or a nil result,
+	// sends over a one-hop path.
 	PathTo func(dst addr.IA) *spath.Decoded
 }
 
@@ -46,8 +47,9 @@ const maxConnAge = 10 * time.Minute
 // NewSCIONClient returns an HTTP client over the SCION-native channel: HTTP/3
 // (QUIC) riding the connection's SCION paths, presenting the node's chain as
 // the client certificate and — with verifyServer set — verifying the peer's
-// chain against the pinned TRC. Closing qclt releases the connections the
-// client dials.
+// chain against the pinned TRC. A dial rides the path the peer's authority
+// names, else the one PathTo resolves. Closing qclt releases the connections
+// the client dials.
 func NewSCIONClient(
 	cfg PeerClientConfig,
 	qclt *quic.Transport,
@@ -56,15 +58,16 @@ func NewSCIONClient(
 
 	// QUIC datagrams are capped so a datagram wrapped in a SCION header
 	// still fits a standard 1500-byte MTU. The pool holds a connection by its
-	// peer alone, riding the path its dial resolved. One whose route went
+	// authority, riding the path its dial took. One whose route went
 	// dark is detectable only by its silence: keep-alives sustain the healthy
 	// ones while an idle timeout an order below QUIC's half-minute default
 	// retires a dark one. Over resolved paths the age cap retires the healthy
-	// ones too; a one-hop path needs none, created afresh for every packet.
-	// Either way the next request dials the route the provider resolves
-	// then. (A request that times out on a dark connection leaves it pooled:
-	// only the connection's own silence closes it.) A connection dialed
-	// before the node held a chain retires once it holds one.
+	// ones too, and the next request dials the route the provider resolves
+	// then; a one-hop path needs no cap, created afresh for every packet, and
+	// neither does a path the authority names, which keys the connection. (A
+	// request that times out on a dark connection leaves it pooled: only the
+	// connection's own silence closes it.) A connection dialed before the
+	// node held a chain retires once it holds one.
 	unchained := &unchainedConns{creds: cfg.Credentials}
 	quicConf := &quic.Config{
 		InitialPacketSize: 1200,
@@ -84,7 +87,7 @@ func NewSCIONClient(
 			if err != nil {
 				return nil, err
 			}
-			if cfg.PathTo != nil {
+			if peer.Path == nil && cfg.PathTo != nil {
 				peer.Path = cfg.PathTo(peer.IA)
 			}
 			ephemeral := !holdsChain(ctx, cfg.Credentials)
@@ -221,9 +224,26 @@ func PeerAuthority(peer *scion.Addr) string {
 	return hex.EncodeToString([]byte(endpoint))
 }
 
+// RouteAuthority encodes the peer address as PeerAuthority does, and the
+// path the address carries beside it: the authority of a dial that rides
+// that path rather than one resolved at dial time, such as the reverse of a
+// received request's. An address without a path encodes as PeerAuthority's.
+func RouteAuthority(peer *scion.Addr) (string, error) {
+	if peer.Path == nil {
+		return PeerAuthority(peer), nil
+	}
+	raw := make([]byte, peer.Path.Len())
+	if err := peer.Path.SerializeTo(raw); err != nil {
+		return "", fmt.Errorf("encoding the peer's path: %w", err)
+	}
+	endpoint := fmt.Sprintf("%s,%d,%s", peer, peer.IfID, raw)
+	return hex.EncodeToString([]byte(endpoint)), nil
+}
+
 // peerFromAuthority decodes the URL authority back into a peer address. The
 // HTTP/3 transport appends a default port to authorities without one; the
 // separator is not a hexadecimal character, so it is cut unconditionally.
+// The path, the last field, is raw bytes and may hold the separator itself.
 func peerFromAuthority(authority string) (*scion.Addr, error) {
 	if i := strings.IndexByte(authority, ':'); i >= 0 {
 		authority = authority[:i]
@@ -232,8 +252,8 @@ func peerFromAuthority(authority string) (*scion.Addr, error) {
 	if err != nil {
 		return nil, fmt.Errorf("decoding peer authority: %w", err)
 	}
-	parts := strings.Split(string(raw), ",")
-	if len(parts) != 2 && len(parts) != 3 {
+	parts := strings.SplitN(string(raw), ",", 4)
+	if len(parts) < 2 {
 		return nil, fmt.Errorf("malformed peer authority %q", authority)
 	}
 	ia, err := addr.ParseIA(parts[0])
@@ -254,12 +274,19 @@ func peerFromAuthority(authority string) (*scion.Addr, error) {
 		}
 		peer.Addr = ap
 	}
-	if len(parts) == 3 {
+	if len(parts) >= 3 {
 		ifID, err := strconv.ParseUint(parts[2], 10, 16)
 		if err != nil {
 			return nil, fmt.Errorf("parsing peer egress interface: %w", err)
 		}
 		peer.IfID = uint16(ifID)
+	}
+	if len(parts) == 4 {
+		path := &spath.Decoded{}
+		if err := path.DecodeFromBytes([]byte(parts[3])); err != nil {
+			return nil, fmt.Errorf("parsing peer path: %w", err)
+		}
+		peer.Path = path
 	}
 	return peer, nil
 }

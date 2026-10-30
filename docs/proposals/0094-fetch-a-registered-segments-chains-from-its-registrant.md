@@ -114,3 +114,18 @@ lacks.
     a node that renewed at the authoritative core.
 
 ## Implementation history
+
+*   Landed as proposed: the registration's server
+    ([segmentservice.go](/pkg/core/controlplane/segmentservice.go)) and its
+    verification ([beacon.go](/pkg/core/controlplane/beacon.go)), the
+    fetcher's route ([peerclient.go](/pkg/core/controlplane/peerclient.go)),
+    and `RouteAuthority` ([client.go](/pkg/libs/scionrpc/client.go)). Beside
+    the plan:
+    *   Every client of the channel dials the path an authority names, the
+        verified channel's included.
+    *   The fetcher keeps no client for a server whose address carries a
+        path, so the routes registrants arrive over do not pile up clients.
+    *   The channel's episode reaches the peer over the reverse of the path
+        its request arrived on, across one link: the unit tests' data plane
+        runs two ASes. A further episode fetches the registrant's chain over
+        its path.

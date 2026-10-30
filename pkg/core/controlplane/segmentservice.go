@@ -4,10 +4,12 @@ import (
 	"context"
 
 	"connectrpc.com/connect"
+	"github.com/scionproto/scion/pkg/addr"
 	"github.com/scionproto/scion/pkg/private/serrors"
 	cppb "github.com/scionproto/scion/pkg/proto/control_plane"
 	"github.com/scionproto/scion/pkg/proto/control_plane/v1/control_planeconnect"
 
+	"github.com/fancl20/cion/pkg/libs/scion"
 	"github.com/fancl20/cion/pkg/libs/scionrpc"
 	"github.com/fancl20/cion/pkg/libs/segment"
 )
@@ -56,7 +58,8 @@ func (s *SegmentService) Beacon(
 
 // SegmentsRegistration receives down segments registered by a non-core
 // (Sections 3.1.3 and 3.3); the receiving core verifies each registered
-// segment as on beacon reception.
+// segment as on beacon reception, asking the registrant for the trust
+// material it lacks.
 func (s *SegmentService) SegmentsRegistration(
 	ctx context.Context,
 	req *connect.Request[cppb.SegmentsRegistrationRequest],
@@ -66,8 +69,12 @@ func (s *SegmentService) SegmentsRegistration(
 	if !ok {
 		return connect.NewResponse(&cppb.SegmentsRegistrationResponse{}), nil
 	}
+	registrant, err := registrantServer(ctx)
+	if err != nil {
+		return nil, connect.NewError(connect.CodeFailedPrecondition, err)
+	}
 	for _, pb := range downs.Segments {
-		if err := s.Beaconer.HandleRegistration(ctx, pb); err != nil {
+		if err := s.Beaconer.HandleRegistration(ctx, pb, registrant); err != nil {
 			return nil, connect.NewError(connect.CodeInvalidArgument, err)
 		}
 	}
@@ -96,4 +103,22 @@ func arrivalInterface(ctx context.Context) (uint16, error) {
 			"peer", remote.IA, "addr", remote.Addr)
 	}
 	return remote.IfID, nil
+}
+
+// registrantServer returns the control service of a registration's sender,
+// which holds every chain its segments reference (control plane draft,
+// Section 1.6): the remote ISD-AS's control service over the reverse of the
+// path the request arrived on, or over the link it arrived on when it came
+// one hop.
+func registrantServer(ctx context.Context) (*scion.Addr, error) {
+	remote := scionrpc.RemoteAddr(ctx)
+	if remote == nil {
+		return nil, serrors.New("peer address unavailable in request context")
+	}
+	return &scion.Addr{
+		IA:      remote.IA,
+		Service: addr.SvcCS,
+		IfID:    remote.IfID,
+		Path:    remote.Path,
+	}, nil
 }

@@ -32,8 +32,9 @@ type PeerClient struct {
 	qclt *quic.Transport
 	// beaconHCLT pools connections for beacon sends; verifiedHCLT for the
 	// mutually verified RPCs; oneHopHCLT for the mutually verified RPCs that
-	// dial one-hop paths alone — the confirm's channel, and the trust fetches
-	// from a beacon's sender. All ride the same QUIC transport.
+	// dial the route their peer's address names rather than a resolved one —
+	// one hop for the confirm's channel and a beacon sender's trust fetches,
+	// the reversed path for a registrant's. All ride the same QUIC transport.
 	beaconHCLT   *http.Client
 	verifiedHCLT *http.Client
 	oneHopHCLT   *http.Client
@@ -64,8 +65,9 @@ func NewPeerClient(cfg scionrpc.PeerClientConfig) *PeerClient {
 	c.verifiedHCLT = scionrpc.NewSCIONClient(cfg, c.qclt, true)
 	// The one-hop channel keeps the beacon dial's discipline with the
 	// verified channel's mutual authentication: a request it carries rides
-	// the direct link of the entry it names, so the observation the peer's
-	// link records is the sender's link socket.
+	// the route its peer's address names, never a resolved one — the direct
+	// link of the entry it names, so the observation the peer's link records
+	// is the sender's link socket, or the path a registrant's address carries.
 	c.oneHopHCLT = scionrpc.NewSCIONClient(beaconCfg, c.qclt, true)
 	return c
 }
@@ -123,11 +125,12 @@ func (c *PeerClient) VerifiedClient() *http.Client {
 	return c.verifiedHCLT
 }
 
-// Fetcher returns the trust fetcher that asks server — a neighbor's control
+// Fetcher returns the trust fetcher that asks server — a node's control
 // service, named by its ISD-AS as a service destination — for TRCs and
-// chains over the one-hop channel (Section 2.4): the source a received
-// beacon's missing material comes from, reached over the link the beacon
-// arrived on whatever routes the node holds beyond it.
+// chains over the one-hop channel (Section 2.4): a neighbor reached over the
+// link a beacon arrived on, whatever routes the node holds beyond it, or a
+// registrant reached over the path its address carries, the reverse of the
+// one its registration arrived on.
 func (c *PeerClient) Fetcher(server net.Addr) trust.Fetcher {
 	return peerFetcher{client: c, server: server}
 }
@@ -163,13 +166,22 @@ func (f peerFetcher) Chains(ctx context.Context, q trustdb.ChainQuery) ([][]*x50
 }
 
 // trustClient returns the one-hop channel's client of the server, which the
-// beaconer names by its SCION address.
+// beaconer names by its SCION address. A server whose address carries a path
+// is dialed over it, by a client kept for this fetch alone: registrants
+// arrive over routes that change, and a kept client per route would pile up.
 func (f peerFetcher) trustClient() (*Client, error) {
 	peer, ok := f.server.(*scion.Addr)
 	if !ok {
 		return nil, serrors.New("trust server is not a SCION address", "server", f.server)
 	}
-	return f.client.client(peer, f.client.oneHopHCLT, f.client.oneHopClt), nil
+	if peer.Path == nil {
+		return f.client.client(peer, f.client.oneHopHCLT, f.client.oneHopClt), nil
+	}
+	authority, err := scionrpc.RouteAuthority(peer)
+	if err != nil {
+		return nil, err
+	}
+	return NewClient(f.client.oneHopHCLT, "https://"+authority), nil
 }
 
 // OneHopClient returns the HTTP client of the mutually verified channel's

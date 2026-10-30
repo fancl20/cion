@@ -22,6 +22,7 @@ import (
 	cppb "github.com/scionproto/scion/pkg/proto/control_plane"
 	"github.com/scionproto/scion/pkg/scrypto"
 	"github.com/scionproto/scion/pkg/scrypto/cppki"
+	spath "github.com/scionproto/scion/pkg/slayers/path/scion"
 
 	"github.com/fancl20/cion/pkg/core/trust"
 	"github.com/fancl20/cion/pkg/libs/bus"
@@ -1631,7 +1632,7 @@ func TestHandleRegistration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := coreBeaconer.HandleRegistration(ctx, terminated.PB); err != nil {
+	if err := coreBeaconer.HandleRegistration(ctx, terminated.PB, nil); err != nil {
 		t.Fatalf("handle registration: %v", err)
 	}
 	downs, err := f.pathDB.Get(ctx, pathdb.Query{Type: pathdb.SegmentTypeDown, DstIA: nodeIATest})
@@ -1658,7 +1659,7 @@ func TestHandleRegistration(t *testing.T) {
 	}, macFactory(), f.engines[iaLineC]); err != nil {
 		t.Fatal(err)
 	}
-	if err := coreBeaconer.HandleRegistration(ctx, foreign.PB); err == nil {
+	if err := coreBeaconer.HandleRegistration(ctx, foreign.PB, nil); err == nil {
 		t.Error("registration of a foreign-origin segment accepted")
 	}
 }
@@ -1702,7 +1703,7 @@ func TestHandleRegistrationFabricatedIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := coreBeaconer.HandleRegistration(ctx, fab.PB); err == nil {
+	if err := coreBeaconer.HandleRegistration(ctx, fab.PB, nil); err == nil {
 		t.Fatal("registration of a fabricated segment accepted")
 	}
 	downs, err := f.pathDB.Get(ctx, pathdb.Query{Type: pathdb.SegmentTypeDown})
@@ -1711,6 +1712,111 @@ func TestHandleRegistrationFabricatedIdentity(t *testing.T) {
 	}
 	if len(downs) != 0 {
 		t.Errorf("down segments = %d, want 0", len(downs))
+	}
+}
+
+// TestHandleRegistrationAsksTheRegistrant checks where a registration's
+// missing trust material comes from: the core A holds the TRC and none of
+// the chains — the shape of a core that issued none of them and has no
+// remote — and verifies the segment [A, C, B] B registers with the chains B
+// serves, asked of the registrant's control service it is handed, keeping
+// them. A registrant that serves none leaves the segment refused and
+// nothing stored.
+func TestHandleRegistrationAsksTheRegistrant(t *testing.T) {
+	f := newBeaconFixture(t)
+	ctx := context.Background()
+	trc, err := f.db.SignedTRC(ctx, cppki.TRCID{ISD: coreIATest.ISD(), Base: 1, Serial: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	registered, err := segment.NewPCB(time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, hop := range []struct {
+		ia   addr.IA
+		opts segment.EntryOptions
+	}{
+		{coreIATest, segment.EntryOptions{Next: iaLineC, EgressIfID: 1}},
+		{iaLineC, segment.EntryOptions{Next: nodeIATest, IngressIfID: 1, EgressIfID: 2}},
+		{nodeIATest, segment.EntryOptions{IngressIfID: 2}},
+	} {
+		if err := registered.AppendEntry(ctx, hop.ia, hop.opts, macFactory(),
+			f.engines[hop.ia]); err != nil {
+			t.Fatal(err)
+		}
+	}
+	registrant := &scion.Addr{IA: nodeIATest, Service: addr.SvcCS, Path: &spath.Decoded{}}
+
+	// coreOf returns the core A whose provider holds the TRC alone and asks
+	// the server it is handed of serving, recording each server asked.
+	coreOf := func(serving trustdb.DB, asked *[]net.Addr) (*Beaconer, trustdb.DB, pathdb.DB) {
+		t.Helper()
+		db := openTrustDB(t, t.TempDir())
+		if _, err := db.InsertTRC(ctx, trc); err != nil {
+			t.Fatal(err)
+		}
+		pathDB, err := pathdbbbolt.New(filepath.Join(t.TempDir(), "path.db"), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = pathDB.Close() })
+		provider := &trust.NetworkProvider{DB: db, Peer: func(server net.Addr) trust.Fetcher {
+			*asked = append(*asked, server)
+			return dbFetcher{db: serving}
+		}}
+		b, err := NewBeaconer(BeaconerConfig{
+			IA:     coreIATest,
+			Engine: trust.NewEngine(coreIATest, f.engines[coreIATest].Key, provider),
+			MACKey: []byte(testMACKey),
+			Store:  NewBeaconStore(),
+			DB:     pathDB,
+			Links:  tableTopic(map[uint16]addr.IA{1: iaLineC}),
+			Core:   true,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return b, db, pathDB
+	}
+
+	var asked []net.Addr
+	core, db, pathDB := coreOf(f.db, &asked)
+	if err := core.HandleRegistration(ctx, registered.PB, registrant); err != nil {
+		t.Fatalf("handle registration: %v", err)
+	}
+	if len(asked) == 0 {
+		t.Fatal("the core asked no registrant for the missing chains")
+	}
+	for _, server := range asked {
+		if server != net.Addr(registrant) {
+			t.Errorf("asked %v, want the registrant's control service it was handed", server)
+		}
+	}
+	for _, ia := range []addr.IA{iaLineC, nodeIATest} {
+		if chains, err := db.Chains(ctx, trustdb.ChainQuery{IA: ia}); err != nil || len(chains) == 0 {
+			t.Errorf("stored chains of %s = %d (%v), want the fetched chain kept", ia, len(chains), err)
+		}
+	}
+	if downs, err := pathDB.Get(ctx, pathdb.Query{Type: pathdb.SegmentTypeDown}); err != nil ||
+		len(downs) != 1 {
+
+		t.Errorf("down segments = %d (%v), want the registered one", len(downs), err)
+	}
+
+	silent := openTrustDB(t, t.TempDir())
+	if _, err := silent.InsertTRC(ctx, trc); err != nil {
+		t.Fatal(err)
+	}
+	var askedSilent []net.Addr
+	core, _, pathDB = coreOf(silent, &askedSilent)
+	if err := core.HandleRegistration(ctx, registered.PB, registrant); err == nil {
+		t.Fatal("a registration whose chains the registrant does not serve was accepted")
+	}
+	if downs, err := pathDB.Get(ctx, pathdb.Query{Type: pathdb.SegmentTypeDown}); err != nil ||
+		len(downs) != 0 {
+
+		t.Errorf("down segments = %d (%v), want none stored", len(downs), err)
 	}
 }
 
