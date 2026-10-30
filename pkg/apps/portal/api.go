@@ -210,8 +210,8 @@ func (a *App) handleLogout(w http.ResponseWriter, r *http.Request) {
 // nodeView is one node as the API answers it.
 type nodeView struct {
 	IA       string    `json:"ia"`
-	Key      string    `json:"key"`
-	Expires  time.Time `json:"expires"`
+	Key      string    `json:"key,omitempty"`
+	Reported time.Time `json:"reported,omitzero"`
 	Role     Role      `json:"role"`
 	Reach    Reach     `json:"reach,omitempty"`
 	Overlay  string    `json:"overlay,omitempty"`
@@ -233,7 +233,7 @@ func (a *App) handleNodes(w http.ResponseWriter, r *http.Request) {
 		v := nodeView{
 			IA:       n.IA.String(),
 			Key:      n.Key,
-			Expires:  n.Expires,
+			Reported: n.Reported,
 			Role:     n.Role,
 			Reach:    n.Reach,
 			Issued:   n.Issued,

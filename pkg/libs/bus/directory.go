@@ -7,31 +7,31 @@ import (
 	"github.com/scionproto/scion/pkg/addr"
 )
 
-// Directory is the node directory as the node last fetched it: each node's
-// publication by ISD-AS. A published Directory is never mutated. The zero
-// Directory, the topic's before the first fetch, holds no entry.
+// Directory is the node's view of the node directory: each node's entry by
+// ISD-AS. A published Directory is never mutated. The zero Directory, the
+// topic's before the view's first publication, holds no entry.
 type Directory struct {
 	entries []DirectoryEntry
 	byIA    map[addr.IA]DirectoryEntry
 }
 
-// DirectoryEntry is one node's publication: everything the selection loop
-// needs to probe the node as a candidate, and the node's report of how its
-// peers reach it. The ISD-AS comes from the authenticated publisher's
-// certificate chain, never from the claim.
+// DirectoryEntry is one node's entry: everything the selection loop needs
+// to probe the node as a candidate, and the node's report of how its peers
+// reach it. The node signed it, and its ISD-AS is the one the signer's
+// chain certifies.
 type DirectoryEntry struct {
-	// IA is the publisher's ISD-AS.
+	// IA is the node's ISD-AS.
 	IA addr.IA
-	// ControlAddr is the underlay address of the publisher's control
-	// service, the endpoint port on the published host.
+	// ControlAddr is the underlay address of the node's control service,
+	// the endpoint port on the published host.
 	ControlAddr netip.AddrPort
-	// RendezvousAddr is the underlay address the publisher's rendezvous
-	// acceptor listens on for first contact, the fixed rendezvous port on
-	// the published host.
+	// RendezvousAddr is the underlay address the node's rendezvous acceptor
+	// listens on for first contact, the fixed rendezvous port on the
+	// published host.
 	RendezvousAddr netip.AddrPort
-	// Reach is the publisher's report of how its peers reach it.
+	// Reach is the node's report of how its peers reach it.
 	Reach Reach
-	// Published is the publish time the core recorded.
+	// Published is the time the node signed the entry.
 	Published time.Time
 }
 
@@ -55,8 +55,8 @@ func NewDirectory(entries ...DirectoryEntry) Directory {
 	return d
 }
 
-// Entries returns the directory's entries, nil before the first fetch. The
-// slice is never mutated.
+// Entries returns the directory's entries, nil before the view's first
+// publication. The slice is never mutated.
 func (d Directory) Entries() []DirectoryEntry {
 	return d.entries
 }

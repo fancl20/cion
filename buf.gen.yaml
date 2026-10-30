@@ -2,12 +2,17 @@
 # application's directory API, the node services, and the voting
 # application's submission API — with the connect plugin emitting each
 # connect package beside the messages, the pattern the vendored SCION
-# control-plane protos follow.
+# control-plane protos follow. The SCION protos vendored under proto/crypto
+# are imported, never generated: their Go code is the scion module's.
 # Requires
 # protoc-gen-go v1.36.12 and protoc-gen-connect-go v2.0.1 on PATH, the
 # connect plugin installed from the connectrpc.com/connect/v2 module,
 # matching the module's protobuf and connect versions.
 version: v2
+inputs:
+  - directory: .
+    exclude_paths:
+      - proto/crypto
 plugins:
   - local: protoc-gen-go
     out: .

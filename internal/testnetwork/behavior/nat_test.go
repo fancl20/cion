@@ -228,8 +228,8 @@ func allNodes(n *network) []int {
 	return which
 }
 
-// reports maps each node's index to the reach the founder's last directory
-// fetch reports of it.
+// reports maps each node's index to the reach the founder's view of the
+// directory reports of it.
 func reports(n *network) map[int]bus.Reach {
 	directory := n.nodes[0].App().Bus().Directory().Latest()
 	got := make(map[int]bus.Reach, len(n.nodes))
@@ -241,7 +241,7 @@ func reports(n *network) map[int]bus.Reach {
 }
 
 // awaitReports fails the test, naming what differs, unless the founder's
-// last directory fetch reports each node's reach as want holds it within
+// view of the directory reports each node's reach as want holds it within
 // budget.
 func awaitReports(t *testing.T, n *network, want map[int]bus.Reach, budget time.Duration) {
 	t.Helper()
@@ -253,7 +253,7 @@ func awaitReports(t *testing.T, n *network, want map[int]bus.Reach, budget time.
 			return
 		}
 		if time.Since(start) >= budget {
-			t.Fatalf("the founder's directory reports mismatch after %v (-want +got):\n%s",
+			t.Fatalf("the founder's view reports mismatch after %v (-want +got):\n%s",
 				budget, diff)
 		}
 		time.Sleep(settleSample)
@@ -292,9 +292,9 @@ func awaitNATLinks(t *testing.T, n *network, which []int, budget time.Duration) 
 // reaches over its chosen path and answers a ping — the links of the nodes
 // behind NATs to the public nodes carrying their traffic both ways, and
 // every pair of nodes behind NATs holding a link punched through both
-// NATs. The founder's directory reports each node behind a NAT as behind
-// one with its published rendezvous address unanswered, and each public
-// node as neither.
+// NATs. The founder's view of the directory reports each node behind a NAT
+// as behind one with its published rendezvous address unanswered, and each
+// public node as neither.
 func TestNATNetworkReaches(t *testing.T) {
 	testnetwork.InBubble(t, func(t *testing.T, fab *fabric.Fabric, wpki *webpkitest.CA) {
 		n, _ := bootNAT(t, fab, wpki, coneNATs)

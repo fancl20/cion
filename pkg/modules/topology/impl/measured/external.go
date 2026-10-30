@@ -23,10 +23,10 @@ import (
 // persists for a restart to republish.
 const ExternalHostFile = "external-host"
 
-// The founding core's domain lookups: the next comes a publication cadence
-// after an answer and domainFailureTTL after a failure.
+// The founding core's domain lookups: the next comes domainSuccessTTL after
+// an answer and domainFailureTTL after a failure.
 const (
-	domainSuccessTTL = NodePublishInterval
+	domainSuccessTTL = time.Minute
 	domainFailureTTL = 30 * time.Second
 	// domainLookupTimeout bounds one lookup.
 	domainLookupTimeout = 2 * time.Second

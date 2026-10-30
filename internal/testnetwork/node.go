@@ -22,15 +22,16 @@ import (
 // outlast a BFD detection and the re-handshake after it, so a stall that
 // drops a session on one side does not retire the link on that side alone.
 var fastPacing = services.NodePacing{
-	Propagation:     Propagation,
-	Registration:    Registration,
-	Enrollment:      EnrollRetry,
-	Selection:       2 * time.Second,
-	CandidateWindow: 5 * time.Second,
-	Directory:       100 * time.Millisecond,
-	RendezvousRate:  10 * time.Millisecond,
-	LinkSetPoll:     100 * time.Millisecond,
-	BFD:             liveness.BFDTransmissionInterval,
+	Propagation:      Propagation,
+	Registration:     Registration,
+	Enrollment:       EnrollRetry,
+	Selection:        2 * time.Second,
+	CandidateWindow:  5 * time.Second,
+	Directory:        100 * time.Millisecond,
+	DirectorySummary: 2 * time.Second,
+	RendezvousRate:   10 * time.Millisecond,
+	LinkSetPoll:      100 * time.Millisecond,
+	BFD:              liveness.BFDTransmissionInterval,
 }
 
 // Node is a node booted through the run command's own assembly.

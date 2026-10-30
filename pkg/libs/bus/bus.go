@@ -62,8 +62,8 @@ func (b *Bus) Self() *Topic[SelfState] {
 }
 
 // Directory returns the node directory topic. The topology provider
-// publishes each directory fetch on it; the topology provider's own loops
-// and the portal read it.
+// publishes its view of the directory on it whenever the view changes; the
+// topology provider's own loops and the portal read it.
 func (b *Bus) Directory() *Topic[Directory] {
 	return &b.directory
 }

@@ -135,7 +135,7 @@ func reportLinks(t *testing.T, name string, n *network) {
 	)
 }
 
-// siteReads records the founder's last directory fetch read by read: for
+// siteReads records the founder's view of the directory read by read: for
 // each site node, the host its entry publishes — its inside address or the
 // site's gateway — and the tag its report earns, counting the changes of
 // each, those after the network settled, and the reads that found the
@@ -165,8 +165,8 @@ func newSiteReads(n *network, gateway netip.Addr) *siteReads {
 	return r
 }
 
-// read records one read of the founder's last directory fetch; a node the
-// fetch holds no entry of records nothing.
+// read records one read of the founder's view of the directory; a node the
+// view holds no entry of records nothing.
 func (r *siteReads) read() {
 	directory := r.n.nodes[0].App().Bus().Directory().Latest()
 	for _, i := range siteMembers {
@@ -217,7 +217,7 @@ func tagOf(r bus.Reach) string {
 }
 
 // TestBenchSiteHosts benchmarks the hosts the site's nodes publish and the
-// tags their reports earn, as the founder's last directory fetch holds them,
+// tags their reports earn, as the founder's view of the directory holds them,
 // in each way of joining: read each settleSample from the boot until the
 // network settles and siteWatch beyond, beside the site's pairs linked at
 // their inside addresses at the end.

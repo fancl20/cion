@@ -270,8 +270,6 @@ tbody tr:not(.empty):hover td { background: var(--hover); }
 tr.empty td { padding: 24px 16px; color: var(--muted); text-align: center; }
 
 .cell-action { width: 1%; text-align: right; white-space: nowrap; }
-.cert { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; color: var(--muted); }
-.cert time { white-space: normal; }
 
 .presence { display: inline-flex; align-items: center; gap: 6px; }
 .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--dot); }

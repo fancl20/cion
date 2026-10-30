@@ -101,6 +101,8 @@ type portalAsk struct {
 
 type portalNode struct {
 	IA       string `json:"ia"`
+	Key      string `json:"key"`
+	Reported string `json:"reported"`
 	Endpoint string `json:"endpoint"`
 }
 
@@ -153,8 +155,9 @@ func programsHost(n *Node, ip netip.Addr) bool {
 // a joining node's enrollment pends in the console and completes on its
 // approval; a host joins unattended with an auth key the console minted
 // naming the leaf, landing on the leaf and listed with the key's note, the
-// leaf's host endpoint, and its presence; and its release closes its
-// tunnel, the leaf dropping the peer.
+// leaf's host endpoint, and its presence; its release closes its tunnel,
+// the leaf dropping the peer; and the leaf, listed with its last report
+// while it runs, is listed silent once it stops.
 func TestPortalConsole(t *testing.T) {
 	t.Parallel()
 	wpki := packageWebPKI
@@ -256,4 +259,24 @@ func TestPortalConsole(t *testing.T) {
 			t.Errorf("the console still lists the released host: %+v", h)
 		}
 	}
+
+	// The leaf reports through the node directory; stopped, it withdraws
+	// its entry, and the console lists it silent beside its chain.
+	leafNode := func() portalNode {
+		nodes, _ := console.nodes()
+		for _, n := range nodes {
+			if n.IA == leaf {
+				return n
+			}
+		}
+		return portalNode{}
+	}
+	Poll(t, "the leaf listed with its last report", func() bool {
+		return leafNode().Reported != ""
+	})
+	b.Stop(t)
+	Poll(t, "the stopped leaf listed silent", func() bool {
+		n := leafNode()
+		return n.IA == leaf && n.Key != "" && n.Reported == ""
+	})
 }

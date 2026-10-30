@@ -50,7 +50,7 @@ const confirmPassWindows = 4
 // products of the node's phases, before Seed, Mounts, and Run.
 type Config struct {
 	// Core marks the founding core: its draw is its network's name already,
-	// and it serves the node directory from its own store.
+	// and its published host is its domain's.
 	Core bool
 	// Neighbors are the --topology.neighbor rendezvous addresses; a
 	// non-core's first start needs at least one, later starts seed
@@ -66,13 +66,9 @@ type Config struct {
 	// ControlHost is the control address's host: every socket binds it,
 	// the rendezvous port and the probes' among them.
 	ControlHost netip.Addr
-	// NewConn binds a SCION connection on an ephemeral port: the socket the
-	// directory's publish and fetch ride on non-core nodes, the selection
-	// probe's socket, and the punch requests' socket.
+	// NewConn binds a SCION connection on an ephemeral port: the selection
+	// probe's socket and the punch requests' socket.
 	NewConn func() (*scion.Conn, error)
-	// FounderRoute resolves the founding core's endpoint, which the
-	// directory's client rides on non-core nodes.
-	FounderRoute func() *scion.Addr
 	// Sockets is the socket source the acceptor's bind, the dials, and the
 	// band probes construct through, and the founding core's domain
 	// resolves through; the zero value is the kernel's.
@@ -85,10 +81,11 @@ type Config struct {
 
 // Pacing carries the test pacing of the provider's loops.
 type Pacing struct {
-	RendezvousRate  time.Duration // admission rate caps
-	Directory       time.Duration // directory publish, its retry, and fetch
-	Selection       time.Duration // selection evaluation window
-	CandidateWindow time.Duration // unproven candidate lifetime
+	RendezvousRate   time.Duration // admission rate caps
+	Directory        time.Duration // directory retry and forwarding bound
+	DirectorySummary time.Duration // directory summary period
+	Selection        time.Duration // selection evaluation window
+	CandidateWindow  time.Duration // unproven candidate lifetime
 }
 
 // Provider is the measured provider, the node's configuration source by
@@ -129,19 +126,17 @@ type Provider struct {
 
 	// mtx guards the one-time assembly of the serving machinery.
 	mtx sync.Mutex
-	// rendezvous, links, linker, puncher, directoryStore, directory, and
-	// the three conns drawn through NewConn are the assembled machinery,
-	// built by Mounts before Run.
-	rendezvous     *Rendezvous
-	links          *LinkService
-	linker         *linkClient
-	puncher        *puncher
-	directoryStore *DirectoryStore
-	directory      *NodeDirectory
-	directoryConn  *scion.Conn
-	probeConn      *scion.Conn
-	punchConn      *scion.Conn
-	assembled      bool
+	// rendezvous, links, linker, puncher, directory, and the two conns
+	// drawn through NewConn are the assembled machinery, built by Mounts
+	// before Run.
+	rendezvous *Rendezvous
+	links      *LinkService
+	linker     *linkClient
+	puncher    *puncher
+	directory  *NodeDirectory
+	probeConn  *scion.Conn
+	punchConn  *scion.Conn
+	assembled  bool
 }
 
 // New builds the measured provider, loading the learned external host a
@@ -414,9 +409,8 @@ func (z *Provider) Seed(ctx context.Context) error {
 }
 
 // assemble builds the serving machinery once: the acceptor every node
-// serves, the in-band link service, the directory — the core's store and
-// service beside every node's publish and fetch — and the selection probe
-// socket.
+// serves, the in-band link service, the node directory, and the selection
+// probe socket.
 func (z *Provider) assemble() error {
 	z.mtx.Lock()
 	defer z.mtx.Unlock()
@@ -464,27 +458,18 @@ func (z *Provider) assemble() error {
 	}
 	z.linker = &linkClient{peer: z.env.Peer, answered: z.recordAnswer}
 	directoryCfg := NodeDirectoryConfig{
-		IA:              z.env.IA,
-		Self:            z.self,
-		BehindNAT:       z.behindNAT,
-		Directory:       z.directoryState,
-		Engine:          z.env.Engine,
-		Paths:           z.env.Paths,
-		PublishInterval: z.cfg.Pacing.Directory,
-		PublishRetry:    z.cfg.Pacing.Directory,
-		FetchInterval:   z.cfg.Pacing.Directory,
+		IA:            z.env.IA,
+		Self:          z.self,
+		BehindNAT:     z.behindNAT,
+		Links:         z.linkState,
+		Peer:          z.env.Peer,
+		Directory:     z.directoryState,
+		Retry:         z.cfg.Pacing.Directory,
+		ForwardBound:  z.cfg.Pacing.Directory,
+		SummaryPeriod: z.cfg.Pacing.DirectorySummary,
 	}
-	if z.cfg.Core {
-		z.directoryStore = NewDirectoryStore()
-		directoryCfg.Store = z.directoryStore
-	} else {
-		conn, err := z.cfg.NewConn()
-		if err != nil {
-			return err
-		}
-		z.directoryConn = conn
-		directoryCfg.Conn = conn
-		directoryCfg.FounderRoute = z.cfg.FounderRoute
+	if z.env.Engine != nil {
+		directoryCfg.Trust = z.env.Engine
 	}
 	z.directory = NewNodeDirectory(directoryCfg)
 	if z.cfg.NewConn != nil {
@@ -501,39 +486,32 @@ func (z *Provider) assemble() error {
 	return nil
 }
 
-// Mounts returns the measured provider's services: the in-band link service
-// on every node, the node directory's beside it on the core. Both register
-// on the one connect server, which connecthttp.Mount spreads over a private
-// mux; the tuples carry each service name's canonical pattern with that mux
-// as their handler.
+// Mounts returns the measured provider's services, both on every node: the
+// in-band link service and the node directory's. Both register on the one
+// connect server, which connecthttp.Mount spreads over a private mux; the
+// tuples carry each service name's canonical pattern with that mux as their
+// handler.
 func (z *Provider) Mounts() ([]scionrpc.Mount, error) {
 	if err := z.assemble(); err != nil {
 		return nil, err
 	}
 	server := connect.NewServer()
 	nodev1connect.RegisterLinkServiceHandler(server, z.links)
-	if z.directoryStore != nil {
-		nodev1connect.RegisterDirectoryServiceHandler(server,
-			&DirectoryService{Store: z.directoryStore})
-	}
+	nodev1connect.RegisterDirectoryServiceHandler(server, z.directory)
 	mux := http.NewServeMux()
 	connecthttp.Mount(mux, server)
-	mounts := []scionrpc.Mount{{
+	return []scionrpc.Mount{{
 		Pattern: "/" + nodev1connect.LinkServiceName + "/",
 		Handler: mux,
-	}}
-	if z.directoryStore != nil {
-		mounts = append(mounts, scionrpc.Mount{
-			Pattern: "/" + nodev1connect.DirectoryServiceName + "/",
-			Handler: mux,
-		})
-	}
-	return mounts, nil
+	}, {
+		Pattern: "/" + nodev1connect.DirectoryServiceName + "/",
+		Handler: mux,
+	}}, nil
 }
 
 // Run owns the measured provider's loops until the context is canceled — the
-// rendezvous acceptor, the joiner's dials, the node directory's publish and
-// fetch, the selection sweep, the confirm pass over the entries the node
+// rendezvous acceptor, the joiner's dials, the node directory's signing,
+// view, flooding, and catch-up, the selection sweep, the confirm pass over the entries the node
 // holds, the link upkeep keeping each link on its peer's current mapping, by
 // following its flow or punching it again, and the founding core's lookup of
 // its domain when the domain is a name — and returns once every one has
@@ -594,19 +572,24 @@ func pickReflector(
 	return netip.AddrPort{}, false
 }
 
-// Close releases what Mounts bound, once Run has returned: the directory's
-// and the punches' transports, the three conns drawn through NewConn
-// beneath them, and the acceptor's socket. A provider never assembled
-// releases nothing.
+// Drain withdraws the node's directory entry from its neighbors while its
+// links still serve, once the node stops on purpose. A provider never
+// assembled withdraws nothing.
+func (z *Provider) Drain(ctx context.Context) {
+	if z.directory != nil {
+		z.directory.Withdraw(ctx)
+	}
+}
+
+// Close releases what Mounts bound, once Run has returned: the punches'
+// transport, the two conns drawn through NewConn, and the acceptor's
+// socket. A provider never assembled releases nothing.
 func (z *Provider) Close() error {
 	var errs []error
-	if z.directory != nil {
-		errs = append(errs, z.directory.Close())
-	}
 	if z.puncher != nil {
 		errs = append(errs, z.puncher.Close())
 	}
-	for _, conn := range []*scion.Conn{z.directoryConn, z.probeConn, z.punchConn} {
+	for _, conn := range []*scion.Conn{z.probeConn, z.punchConn} {
 		if conn != nil {
 			errs = append(errs, conn.Close())
 		}

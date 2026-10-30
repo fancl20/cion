@@ -7,6 +7,7 @@
 package nodev1
 
 import (
+	crypto "github.com/scionproto/scion/pkg/proto/crypto"
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 	reflect "reflect"
@@ -21,26 +22,30 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
-// Entry is one node's publication: everything the selection loop needs to
-// probe the node as a candidate neighbor, and the node's report of how its
-// peers reach it.
+// Entry is one node's statement in the node directory: everything the
+// selection loop needs to probe the node as a candidate neighbor, and the
+// node's report of how its peers reach it. It travels as the body of a SCION
+// signed message its node signed, as a beacon's AS entry does: the header
+// names the signer's ISD-AS, its subject key, the TRC its chain verifies
+// under, and the signing time. An entry naming no address withdraws its
+// signer.
 type Entry struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// isd_as is the publisher's ISD-AS. The directory records the ISD-AS the
-	// authenticated publisher's certificate names, never the claimed one.
+	// isd_as is the signer's ISD-AS; a receiver refuses an entry whose signer
+	// is another.
 	IsdAs uint64 `protobuf:"varint,1,opt,name=isd_as,json=isdAs,proto3" json:"isd_as,omitempty"`
-	// control_addr is the underlay "host:port" address of the publisher's
-	// control service, the endpoint port on the published host.
+	// control_addr is the underlay "host:port" address of the signer's control
+	// service, the endpoint port on the published host.
 	ControlAddr string `protobuf:"bytes,2,opt,name=control_addr,json=controlAddr,proto3" json:"control_addr,omitempty"`
-	// rendezvous_addr is the underlay "host:port" address the publisher's
+	// rendezvous_addr is the underlay "host:port" address the signer's
 	// rendezvous acceptor listens on for first contact, the fixed rendezvous
 	// port on the published host.
 	RendezvousAddr string `protobuf:"bytes,3,opt,name=rendezvous_addr,json=rendezvousAddr,proto3" json:"rendezvous_addr,omitempty"`
 	// behind_nat reports that the published host is not an address of the
-	// publisher's own: a NAT stands between it and its peers.
+	// signer's own: a NAT stands between it and its peers.
 	BehindNat bool `protobuf:"varint,4,opt,name=behind_nat,json=behindNat,proto3" json:"behind_nat,omitempty"`
-	// rendezvous_unanswered reports that the acceptor of the publisher's
-	// latest link request got no answer at the published rendezvous address.
+	// rendezvous_unanswered reports that the acceptor of the signer's latest
+	// link request got no answer at the published rendezvous address.
 	RendezvousUnanswered bool `protobuf:"varint,5,opt,name=rendezvous_unanswered,json=rendezvousUnanswered,proto3" json:"rendezvous_unanswered,omitempty"`
 	unknownFields        protoimpl.UnknownFields
 	sizeCache            protoimpl.SizeCache
@@ -111,29 +116,37 @@ func (x *Entry) GetRendezvousUnanswered() bool {
 	return false
 }
 
-type PublishRequest struct {
+// Summary names a signer's greatest entry by what orders it: the TRC the
+// signer named, the signing time, and a digest of the signed bytes.
+type Summary struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// entry is the publisher's claimed entry; the ISD-AS comes from the
-	// authenticated certificate chain, the rest from the entry.
-	Entry         *Entry `protobuf:"bytes,1,opt,name=entry,proto3" json:"entry,omitempty"`
+	// isd_as is the signer's ISD-AS.
+	IsdAs uint64 `protobuf:"varint,1,opt,name=isd_as,json=isdAs,proto3" json:"isd_as,omitempty"`
+	// trc_base and trc_serial name the TRC the signer named.
+	TrcBase   uint64 `protobuf:"varint,2,opt,name=trc_base,json=trcBase,proto3" json:"trc_base,omitempty"`
+	TrcSerial uint64 `protobuf:"varint,3,opt,name=trc_serial,json=trcSerial,proto3" json:"trc_serial,omitempty"`
+	// signed_at is the signing time, in nanoseconds since the Unix epoch.
+	SignedAt int64 `protobuf:"varint,4,opt,name=signed_at,json=signedAt,proto3" json:"signed_at,omitempty"`
+	// digest is the SHA-256 of the signed message's header_and_body.
+	Digest        []byte `protobuf:"bytes,5,opt,name=digest,proto3" json:"digest,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
-func (x *PublishRequest) Reset() {
-	*x = PublishRequest{}
+func (x *Summary) Reset() {
+	*x = Summary{}
 	mi := &file_proto_node_v1_directory_proto_msgTypes[1]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *PublishRequest) String() string {
+func (x *Summary) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*PublishRequest) ProtoMessage() {}
+func (*Summary) ProtoMessage() {}
 
-func (x *PublishRequest) ProtoReflect() protoreflect.Message {
+func (x *Summary) ProtoReflect() protoreflect.Message {
 	mi := &file_proto_node_v1_directory_proto_msgTypes[1]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -145,38 +158,69 @@ func (x *PublishRequest) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use PublishRequest.ProtoReflect.Descriptor instead.
-func (*PublishRequest) Descriptor() ([]byte, []int) {
+// Deprecated: Use Summary.ProtoReflect.Descriptor instead.
+func (*Summary) Descriptor() ([]byte, []int) {
 	return file_proto_node_v1_directory_proto_rawDescGZIP(), []int{1}
 }
 
-func (x *PublishRequest) GetEntry() *Entry {
+func (x *Summary) GetIsdAs() uint64 {
 	if x != nil {
-		return x.Entry
+		return x.IsdAs
+	}
+	return 0
+}
+
+func (x *Summary) GetTrcBase() uint64 {
+	if x != nil {
+		return x.TrcBase
+	}
+	return 0
+}
+
+func (x *Summary) GetTrcSerial() uint64 {
+	if x != nil {
+		return x.TrcSerial
+	}
+	return 0
+}
+
+func (x *Summary) GetSignedAt() int64 {
+	if x != nil {
+		return x.SignedAt
+	}
+	return 0
+}
+
+func (x *Summary) GetDigest() []byte {
+	if x != nil {
+		return x.Digest
 	}
 	return nil
 }
 
-type PublishResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
+type PushRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// entries are the entries pushed, each a signed message whose body is an
+	// Entry.
+	Entries       []*crypto.SignedMessage `protobuf:"bytes,1,rep,name=entries,proto3" json:"entries,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
-func (x *PublishResponse) Reset() {
-	*x = PublishResponse{}
+func (x *PushRequest) Reset() {
+	*x = PushRequest{}
 	mi := &file_proto_node_v1_directory_proto_msgTypes[2]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *PublishResponse) String() string {
+func (x *PushRequest) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*PublishResponse) ProtoMessage() {}
+func (*PushRequest) ProtoMessage() {}
 
-func (x *PublishResponse) ProtoReflect() protoreflect.Message {
+func (x *PushRequest) ProtoReflect() protoreflect.Message {
 	mi := &file_proto_node_v1_directory_proto_msgTypes[2]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -188,31 +232,38 @@ func (x *PublishResponse) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use PublishResponse.ProtoReflect.Descriptor instead.
-func (*PublishResponse) Descriptor() ([]byte, []int) {
+// Deprecated: Use PushRequest.ProtoReflect.Descriptor instead.
+func (*PushRequest) Descriptor() ([]byte, []int) {
 	return file_proto_node_v1_directory_proto_rawDescGZIP(), []int{2}
 }
 
-type ListRequest struct {
+func (x *PushRequest) GetEntries() []*crypto.SignedMessage {
+	if x != nil {
+		return x.Entries
+	}
+	return nil
+}
+
+type PushResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
-func (x *ListRequest) Reset() {
-	*x = ListRequest{}
+func (x *PushResponse) Reset() {
+	*x = PushResponse{}
 	mi := &file_proto_node_v1_directory_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *ListRequest) String() string {
+func (x *PushResponse) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*ListRequest) ProtoMessage() {}
+func (*PushResponse) ProtoMessage() {}
 
-func (x *ListRequest) ProtoReflect() protoreflect.Message {
+func (x *PushResponse) ProtoReflect() protoreflect.Message {
 	mi := &file_proto_node_v1_directory_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -224,33 +275,33 @@ func (x *ListRequest) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use ListRequest.ProtoReflect.Descriptor instead.
-func (*ListRequest) Descriptor() ([]byte, []int) {
+// Deprecated: Use PushResponse.ProtoReflect.Descriptor instead.
+func (*PushResponse) Descriptor() ([]byte, []int) {
 	return file_proto_node_v1_directory_proto_rawDescGZIP(), []int{3}
 }
 
-type ListResponse struct {
+type SyncRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// entries holds one entry per publishing node.
-	Entries       []*Entry `protobuf:"bytes,1,rep,name=entries,proto3" json:"entries,omitempty"`
+	// summaries names each signer's greatest entry the caller holds.
+	Summaries     []*Summary `protobuf:"bytes,1,rep,name=summaries,proto3" json:"summaries,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
-func (x *ListResponse) Reset() {
-	*x = ListResponse{}
+func (x *SyncRequest) Reset() {
+	*x = SyncRequest{}
 	mi := &file_proto_node_v1_directory_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *ListResponse) String() string {
+func (x *SyncRequest) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*ListResponse) ProtoMessage() {}
+func (*SyncRequest) ProtoMessage() {}
 
-func (x *ListResponse) ProtoReflect() protoreflect.Message {
+func (x *SyncRequest) ProtoReflect() protoreflect.Message {
 	mi := &file_proto_node_v1_directory_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -262,14 +313,70 @@ func (x *ListResponse) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use ListResponse.ProtoReflect.Descriptor instead.
-func (*ListResponse) Descriptor() ([]byte, []int) {
+// Deprecated: Use SyncRequest.ProtoReflect.Descriptor instead.
+func (*SyncRequest) Descriptor() ([]byte, []int) {
 	return file_proto_node_v1_directory_proto_rawDescGZIP(), []int{4}
 }
 
-func (x *ListResponse) GetEntries() []*Entry {
+func (x *SyncRequest) GetSummaries() []*Summary {
+	if x != nil {
+		return x.Summaries
+	}
+	return nil
+}
+
+type SyncResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// entries holds the entries the caller lacks or holds a lesser one of,
+	// each a signed message whose body is an Entry.
+	Entries []*crypto.SignedMessage `protobuf:"bytes,1,rep,name=entries,proto3" json:"entries,omitempty"`
+	// wanted names the signers whose entries the receiver lacks or holds a
+	// lesser one of; the caller pushes them.
+	Wanted        []uint64 `protobuf:"varint,2,rep,packed,name=wanted,proto3" json:"wanted,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SyncResponse) Reset() {
+	*x = SyncResponse{}
+	mi := &file_proto_node_v1_directory_proto_msgTypes[5]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SyncResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SyncResponse) ProtoMessage() {}
+
+func (x *SyncResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_node_v1_directory_proto_msgTypes[5]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SyncResponse.ProtoReflect.Descriptor instead.
+func (*SyncResponse) Descriptor() ([]byte, []int) {
+	return file_proto_node_v1_directory_proto_rawDescGZIP(), []int{5}
+}
+
+func (x *SyncResponse) GetEntries() []*crypto.SignedMessage {
 	if x != nil {
 		return x.Entries
+	}
+	return nil
+}
+
+func (x *SyncResponse) GetWanted() []uint64 {
+	if x != nil {
+		return x.Wanted
 	}
 	return nil
 }
@@ -278,23 +385,32 @@ var File_proto_node_v1_directory_proto protoreflect.FileDescriptor
 
 const file_proto_node_v1_directory_proto_rawDesc = "" +
 	"\n" +
-	"\x1dproto/node/v1/directory.proto\x12\anode.v1\"\xbe\x01\n" +
+	"\x1dproto/node/v1/directory.proto\x12\anode.v1\x1a\x1cproto/crypto/v1/signed.proto\"\xbe\x01\n" +
 	"\x05Entry\x12\x15\n" +
 	"\x06isd_as\x18\x01 \x01(\x04R\x05isdAs\x12!\n" +
 	"\fcontrol_addr\x18\x02 \x01(\tR\vcontrolAddr\x12'\n" +
 	"\x0frendezvous_addr\x18\x03 \x01(\tR\x0erendezvousAddr\x12\x1d\n" +
 	"\n" +
 	"behind_nat\x18\x04 \x01(\bR\tbehindNat\x123\n" +
-	"\x15rendezvous_unanswered\x18\x05 \x01(\bR\x14rendezvousUnanswered\"6\n" +
-	"\x0ePublishRequest\x12$\n" +
-	"\x05entry\x18\x01 \x01(\v2\x0e.node.v1.EntryR\x05entry\"\x11\n" +
-	"\x0fPublishResponse\"\r\n" +
-	"\vListRequest\"8\n" +
-	"\fListResponse\x12(\n" +
-	"\aentries\x18\x01 \x03(\v2\x0e.node.v1.EntryR\aentries2\x85\x01\n" +
-	"\x10DirectoryService\x12<\n" +
-	"\aPublish\x12\x17.node.v1.PublishRequest\x1a\x18.node.v1.PublishResponse\x123\n" +
-	"\x04List\x12\x14.node.v1.ListRequest\x1a\x15.node.v1.ListResponseB.Z,github.com/fancl20/cion/proto/node/v1;nodev1b\x06proto3"
+	"\x15rendezvous_unanswered\x18\x05 \x01(\bR\x14rendezvousUnanswered\"\x8f\x01\n" +
+	"\aSummary\x12\x15\n" +
+	"\x06isd_as\x18\x01 \x01(\x04R\x05isdAs\x12\x19\n" +
+	"\btrc_base\x18\x02 \x01(\x04R\atrcBase\x12\x1d\n" +
+	"\n" +
+	"trc_serial\x18\x03 \x01(\x04R\ttrcSerial\x12\x1b\n" +
+	"\tsigned_at\x18\x04 \x01(\x03R\bsignedAt\x12\x16\n" +
+	"\x06digest\x18\x05 \x01(\fR\x06digest\"G\n" +
+	"\vPushRequest\x128\n" +
+	"\aentries\x18\x01 \x03(\v2\x1e.proto.crypto.v1.SignedMessageR\aentries\"\x0e\n" +
+	"\fPushResponse\"=\n" +
+	"\vSyncRequest\x12.\n" +
+	"\tsummaries\x18\x01 \x03(\v2\x10.node.v1.SummaryR\tsummaries\"`\n" +
+	"\fSyncResponse\x128\n" +
+	"\aentries\x18\x01 \x03(\v2\x1e.proto.crypto.v1.SignedMessageR\aentries\x12\x16\n" +
+	"\x06wanted\x18\x02 \x03(\x04R\x06wanted2|\n" +
+	"\x10DirectoryService\x123\n" +
+	"\x04Push\x12\x14.node.v1.PushRequest\x1a\x15.node.v1.PushResponse\x123\n" +
+	"\x04Sync\x12\x14.node.v1.SyncRequest\x1a\x15.node.v1.SyncResponseB.Z,github.com/fancl20/cion/proto/node/v1;nodev1b\x06proto3"
 
 var (
 	file_proto_node_v1_directory_proto_rawDescOnce sync.Once
@@ -308,26 +424,29 @@ func file_proto_node_v1_directory_proto_rawDescGZIP() []byte {
 	return file_proto_node_v1_directory_proto_rawDescData
 }
 
-var file_proto_node_v1_directory_proto_msgTypes = make([]protoimpl.MessageInfo, 5)
+var file_proto_node_v1_directory_proto_msgTypes = make([]protoimpl.MessageInfo, 6)
 var file_proto_node_v1_directory_proto_goTypes = []any{
-	(*Entry)(nil),           // 0: node.v1.Entry
-	(*PublishRequest)(nil),  // 1: node.v1.PublishRequest
-	(*PublishResponse)(nil), // 2: node.v1.PublishResponse
-	(*ListRequest)(nil),     // 3: node.v1.ListRequest
-	(*ListResponse)(nil),    // 4: node.v1.ListResponse
+	(*Entry)(nil),                // 0: node.v1.Entry
+	(*Summary)(nil),              // 1: node.v1.Summary
+	(*PushRequest)(nil),          // 2: node.v1.PushRequest
+	(*PushResponse)(nil),         // 3: node.v1.PushResponse
+	(*SyncRequest)(nil),          // 4: node.v1.SyncRequest
+	(*SyncResponse)(nil),         // 5: node.v1.SyncResponse
+	(*crypto.SignedMessage)(nil), // 6: proto.crypto.v1.SignedMessage
 }
 var file_proto_node_v1_directory_proto_depIdxs = []int32{
-	0, // 0: node.v1.PublishRequest.entry:type_name -> node.v1.Entry
-	0, // 1: node.v1.ListResponse.entries:type_name -> node.v1.Entry
-	1, // 2: node.v1.DirectoryService.Publish:input_type -> node.v1.PublishRequest
-	3, // 3: node.v1.DirectoryService.List:input_type -> node.v1.ListRequest
-	2, // 4: node.v1.DirectoryService.Publish:output_type -> node.v1.PublishResponse
-	4, // 5: node.v1.DirectoryService.List:output_type -> node.v1.ListResponse
-	4, // [4:6] is the sub-list for method output_type
-	2, // [2:4] is the sub-list for method input_type
-	2, // [2:2] is the sub-list for extension type_name
-	2, // [2:2] is the sub-list for extension extendee
-	0, // [0:2] is the sub-list for field type_name
+	6, // 0: node.v1.PushRequest.entries:type_name -> proto.crypto.v1.SignedMessage
+	1, // 1: node.v1.SyncRequest.summaries:type_name -> node.v1.Summary
+	6, // 2: node.v1.SyncResponse.entries:type_name -> proto.crypto.v1.SignedMessage
+	2, // 3: node.v1.DirectoryService.Push:input_type -> node.v1.PushRequest
+	4, // 4: node.v1.DirectoryService.Sync:input_type -> node.v1.SyncRequest
+	3, // 5: node.v1.DirectoryService.Push:output_type -> node.v1.PushResponse
+	5, // 6: node.v1.DirectoryService.Sync:output_type -> node.v1.SyncResponse
+	5, // [5:7] is the sub-list for method output_type
+	3, // [3:5] is the sub-list for method input_type
+	3, // [3:3] is the sub-list for extension type_name
+	3, // [3:3] is the sub-list for extension extendee
+	0, // [0:3] is the sub-list for field type_name
 }
 
 func init() { file_proto_node_v1_directory_proto_init() }
@@ -341,7 +460,7 @@ func file_proto_node_v1_directory_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_proto_node_v1_directory_proto_rawDesc), len(file_proto_node_v1_directory_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   5,
+			NumMessages:   6,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

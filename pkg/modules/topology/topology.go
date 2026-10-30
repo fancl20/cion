@@ -42,7 +42,8 @@ import (
 // it runs the loops that decide links under the node's supervision — with
 // Wire delivering the environment the phases build between the first and
 // the rest, Seed landing the links it vouches for before the first data plane
-// generation builds, and Close releasing its sockets.
+// generation builds, Drain taking its leave of its peers once the node stops
+// on purpose, and Close releasing its sockets.
 type Provider interface {
 	// CompleteIdentity completes a first start's provisional ISD draw — the
 	// measured provider's from a bootstrap neighbor's rendezvous reply, the
@@ -68,6 +69,11 @@ type Provider interface {
 	// must not take the provider's down — and returns once every loop it
 	// started has returned.
 	Run(ctx context.Context)
+	// Drain runs once the node stops on purpose, before Run's context ends,
+	// while the node's links still serve: the measured provider withdraws
+	// the node's directory entry from its neighbors, and the file provider
+	// has nothing to drain. It returns once done or once ctx ends.
+	Drain(ctx context.Context)
 	// Close releases what assembly bound, once Run has returned.
 	Close() error
 }
@@ -88,10 +94,10 @@ type Environment struct {
 	// its mutually verified side.
 	Peer PeerChannel
 	// Paths resolves the node's paths: the freshest one is the comparator's
-	// baseline, and the local one routes the directory's channel.
+	// baseline and the punch requests' route.
 	Paths Paths
-	// Engine provides the node's chain as the directory client's
-	// certificate.
+	// Engine signs the node's directory entry and verifies the entries its
+	// neighbors offer.
 	Engine *trust.Engine
 	// Bus is the node's bus. The provider reads its link state: the verdicts
 	// the selection loop's floor and demotions count — established-but-down
@@ -124,7 +130,4 @@ type Paths interface {
 	// Enumerate returns every composed candidate path to dst with its
 	// facts.
 	Enumerate(ctx context.Context, dst addr.IA) ([]scion.Candidate, error)
-	// LocalPath resolves a data-plane path from local state only, never a
-	// fetch: the variant safe to call from inside a dial.
-	LocalPath(dst addr.IA) (*spath.Decoded, error)
 }

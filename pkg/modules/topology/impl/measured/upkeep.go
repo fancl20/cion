@@ -39,10 +39,10 @@ const (
 // runUpkeep keeps each link on its peer's current mapping: it follows each
 // link's flow, and punches a punched link again once its verdict stays down.
 // It wakes on each link state event, each event of the node's own state,
-// and each directory fetch, when an entry's action ends, and when the next
-// retry or grace it waits on is due, never on a cadence of its own.
-// Each entry's action runs off the loop, one at a time; the loop returns
-// once every action has.
+// and each change of the directory's view, when an entry's action ends, and
+// when the next retry or grace it waits on is due, never on a cadence of its
+// own. Each entry's action runs off the loop, one at a time; the loop
+// returns once every action has.
 func (z *Provider) runUpkeep(ctx context.Context) {
 	u := &upkeep{
 		z:         z,

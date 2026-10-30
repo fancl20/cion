@@ -21,6 +21,7 @@ import (
 	"context"
 	"crypto/x509"
 	"net"
+	"time"
 
 	"github.com/scionproto/scion/pkg/scrypto/cppki"
 
@@ -49,10 +50,28 @@ type options struct {
 	allowInactive bool
 	client        net.Addr
 	server        net.Addr
+	at            time.Time
 }
 
 // Option is a function that sets an option.
 type Option func(o *options)
+
+// collect returns the options set.
+func collect(opts []Option) options {
+	var o options
+	for _, opt := range opts {
+		opt(&o)
+	}
+	return o
+}
+
+// At verifies chains at the given time rather than now: their certificates
+// valid then, anchored by the TRCs active now.
+func At(at time.Time) Option {
+	return func(o *options) {
+		o.at = at
+	}
+}
 
 // AllowInactive allows chains that are verifiable with TRCs that are no longer
 // active.

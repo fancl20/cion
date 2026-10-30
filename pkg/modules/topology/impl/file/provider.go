@@ -245,6 +245,9 @@ func (f *Provider) Run(ctx context.Context) {
 	}
 }
 
+// Drain has nothing to drain: the provider tells its peers nothing.
+func (f *Provider) Drain(context.Context) {}
+
 // Close releases nothing: the provider holds no sockets.
 func (f *Provider) Close() error { return nil }
 

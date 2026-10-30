@@ -5,9 +5,11 @@
 // becomes its result, and its panic crashes the process: an ordered stop
 // would wait on loops that may block on state the panicking goroutine left
 // behind. A Degrade loop's panic and error are logged, and its siblings
-// serve on. The boot registers each resource where it acquires it, and the
-// resources release in reverse order of registration after the last loop
-// has returned, on a failed boot as on a stop.
+// serve on. A stop the parent context or Stop brings runs the group's
+// drains first, while the loops still serve. The boot registers each
+// resource where it acquires it, and the resources release in reverse order
+// of registration after the last loop has returned, on a failed boot as on
+// a stop.
 package supervise
 
 import (
@@ -19,6 +21,8 @@ import (
 	"runtime/debug"
 	"slices"
 	"sync"
+	"sync/atomic"
+	"time"
 )
 
 // Policy is how a loop's failure bears on its group.
@@ -34,8 +38,13 @@ const (
 	Degrade
 )
 
-// Group is a set of loops under one context and the stack of resources they
-// use. The boot starts the loops and registers the resources before it
+// DrainTimeout bounds a stop's drains: their context ends this long after
+// the stop began.
+const DrainTimeout = 2 * time.Second
+
+// Group is a set of loops under one context, the drains a stop runs before
+// that context ends, and the stack of resources the loops use. The boot
+// starts the loops and registers the drains and the resources before it
 // waits on the group or stops it.
 type Group struct {
 	ctx    context.Context
@@ -43,9 +52,13 @@ type Group struct {
 	log    *slog.Logger
 	loops  sync.WaitGroup
 
-	mu    sync.Mutex
-	owned []resource
+	mu     sync.Mutex
+	owned  []resource
+	drains []drain
 
+	// stopping marks the stop claimed: the first caller of stop runs it,
+	// and the others return at once, Wait waiting on the context.
+	stopping atomic.Bool
 	released sync.Once
 	result   error
 }
@@ -54,6 +67,12 @@ type Group struct {
 type resource struct {
 	name    string
 	release func() error
+}
+
+// drain is one registered drain, named for the panic it logs.
+type drain struct {
+	name string
+	run  func(context.Context)
 }
 
 // loopError is a Fatal loop's failure as the group's cancellation cause,
@@ -67,11 +86,14 @@ func (e *loopError) Error() string { return e.loop + ": " + e.err.Error() }
 
 func (e *loopError) Unwrap() error { return e.err }
 
-// New returns an empty group and its context, which ends when the parent
-// context does, when the group is stopped, or when a Fatal loop fails.
-func New(ctx context.Context) (*Group, context.Context) {
-	ctx, cancel := context.WithCancelCause(ctx)
-	return &Group{ctx: ctx, cancel: cancel, log: slog.Default()}, ctx
+// New returns an empty group and its context, which ends once the parent
+// context ends or the group is stopped, after the group's drains, and at
+// once when a Fatal loop fails.
+func New(parent context.Context) (*Group, context.Context) {
+	ctx, cancel := context.WithCancelCause(context.WithoutCancel(parent))
+	g := &Group{ctx: ctx, cancel: cancel, log: slog.Default()}
+	context.AfterFunc(parent, g.stop)
+	return g, ctx
 }
 
 // Go runs fn in its own goroutine under the group's context and the
@@ -116,6 +138,48 @@ func (g *Group) Own(name string, release func() error) {
 	g.owned = append(g.owned, resource{name: name, release: release})
 }
 
+// Drain registers fn to run when the parent context ends or Stop is called,
+// before the group's context ends, so the loops still serve while it runs.
+// The drains run at once, each with a context that ends DrainTimeout after
+// the stop began, and the group's context ends once every drain has
+// returned; a panic in one is logged. A Fatal loop's failure ends the
+// context without them.
+func (g *Group) Drain(name string, fn func(context.Context)) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.drains = append(g.drains, drain{name: name, run: fn})
+}
+
+// stop runs the drains, unless a Fatal loop's failure ended the group's
+// context already, and then ends the context. Only its first call does: a
+// later one returns at once.
+func (g *Group) stop() {
+	if !g.stopping.CompareAndSwap(false, true) {
+		return
+	}
+	if g.ctx.Err() == nil {
+		g.mu.Lock()
+		drains := g.drains
+		g.mu.Unlock()
+		ctx, cancel := context.WithTimeout(context.WithoutCancel(g.ctx), DrainTimeout)
+		var wg sync.WaitGroup
+		for _, d := range drains {
+			wg.Go(func() {
+				defer func() {
+					if r := recover(); r != nil {
+						g.log.Error("Drain panicked", "drain", d.name, "panic", r,
+							"stack", string(debug.Stack()))
+					}
+				}()
+				d.run(ctx)
+			})
+		}
+		wg.Wait()
+		cancel()
+	}
+	g.cancel(nil)
+}
+
 // Wait blocks until the group's context ends, waits for every loop, and runs
 // the releases in reverse order of registration. It returns the Fatal
 // failure that stopped the group, wrapped with its loop's name, joined with
@@ -143,9 +207,10 @@ func (g *Group) Wait() error {
 	return g.result
 }
 
-// Stop cancels the group and returns what Wait returns. It is idempotent,
-// and on a failed boot it releases what the boot acquired.
+// Stop runs the group's drains, cancels the group, and returns what Wait
+// returns. It is idempotent, and on a failed boot it releases what the boot
+// acquired.
 func (g *Group) Stop() error {
-	g.cancel(nil)
+	g.stop()
 	return g.Wait()
 }

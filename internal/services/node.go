@@ -196,13 +196,13 @@ func (n *node) selectProvider() error {
 		NewConn: func() (*scion.Conn, error) {
 			return n.scionConn(0)
 		},
-		FounderRoute: n.founderRoute,
-		Sockets:      n.sockets,
+		Sockets: n.sockets,
 		Pacing: measured.Pacing{
-			RendezvousRate:  n.cfg.Pacing.RendezvousRate,
-			Directory:       n.cfg.Pacing.Directory,
-			Selection:       n.cfg.Pacing.Selection,
-			CandidateWindow: n.cfg.Pacing.CandidateWindow,
+			RendezvousRate:   n.cfg.Pacing.RendezvousRate,
+			Directory:        n.cfg.Pacing.Directory,
+			DirectorySummary: n.cfg.Pacing.DirectorySummary,
+			Selection:        n.cfg.Pacing.Selection,
+			CandidateWindow:  n.cfg.Pacing.CandidateWindow,
 		},
 	}
 	if founding {
@@ -291,8 +291,10 @@ func setupNode(
 // SCMP echo responder — and the HTTPS server under Fatal, a failure stopping
 // the node; the loaded topology provider's and the resident applications
 // under Degrade, a failure logged and the node serving on; and the role's own
-// loops under the policies its case in setupTrustRole gave them. Nothing
-// serves before start, so assembly and serving stay separate lifecycles.
+// loops under the policies its case in setupTrustRole gave them. The
+// topology provider's drain runs on a stop, while the loops still serve.
+// Nothing serves before start, so assembly and serving stay separate
+// lifecycles.
 func (n *node) start(gen *generation) {
 	g := n.group
 	g.Go("data plane", supervise.Fatal, func(ctx context.Context) error {
@@ -324,6 +326,7 @@ func (n *node) start(gen *generation) {
 		n.topology.Run(ctx)
 		return nil
 	})
+	g.Drain("topology provider", n.topology.Drain)
 	slog.Info("Serving control endpoint", "port", scionrpc.EndpointPort)
 	if n.httpsLn != nil {
 		// The node's HTTPS server: the listener is held from assembly, and the

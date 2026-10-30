@@ -458,7 +458,7 @@ func (s *selection) linkUp(ifID uint16) bool {
 	return s.cfg.Links.Latest().Up(ifID)
 }
 
-// directory returns the node directory's entries as last fetched.
+// directory returns the entries of the node directory's view.
 func (s *selection) directory() []bus.DirectoryEntry {
 	return s.cfg.Directory.Latest().Entries()
 }

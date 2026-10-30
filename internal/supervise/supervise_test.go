@@ -9,10 +9,12 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
 	"testing/synctest"
+	"time"
 
 	"github.com/google/go-cmp/cmp"
 )
@@ -263,6 +265,114 @@ func TestReleaseErrors(t *testing.T) {
 		g.Own("store", func() error { return errStore })
 		if err, want := g.Stop(), "releasing store: store fault"; err == nil || err.Error() != want {
 			t.Errorf("Stop = %v, want %q", err, want)
+		}
+	})
+}
+
+// TestDrainsRunWhileLoopsServe checks a stop's drains, on Stop and on the
+// parent context's end alike: each runs while the group's context holds and
+// its loops serve, and the context ends once every drain has returned.
+func TestDrainsRunWhileLoopsServe(t *testing.T) {
+	for _, viaParent := range []bool{false, true} {
+		synctest.Test(t, func(t *testing.T) {
+			parent, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			g, ctx := New(parent)
+			serving := true
+			g.Go("loop", Degrade, func(ctx context.Context) error {
+				<-ctx.Done()
+				serving = false
+				return nil
+			})
+			var drained []string
+			var mtx sync.Mutex
+			for _, name := range []string{"directory", "slow"} {
+				g.Drain(name, func(context.Context) {
+					if name == "slow" {
+						time.Sleep(time.Second)
+					}
+					mtx.Lock()
+					defer mtx.Unlock()
+					if ctx.Err() == nil && serving {
+						drained = append(drained, name)
+					}
+				})
+			}
+			if viaParent {
+				cancel()
+				if err := g.Wait(); err != nil {
+					t.Errorf("Wait = %v, want nil", err)
+				}
+			} else if err := g.Stop(); err != nil {
+				t.Errorf("Stop = %v, want nil", err)
+			}
+			slices.Sort(drained)
+			if diff := cmp.Diff([]string{"directory", "slow"}, drained); diff != "" {
+				t.Errorf("drains run while the loops served, parent's end %t (-want +got):\n%s",
+					viaParent, diff)
+			}
+		})
+	}
+}
+
+// TestDrainTimeout checks a drain's bound: its context ends DrainTimeout
+// after the stop began, and the group's context with it.
+func TestDrainTimeout(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		g, ctx, _ := newGroup()
+		start := time.Now()
+		g.Drain("stuck", func(ctx context.Context) { <-ctx.Done() })
+		if err := g.Stop(); err != nil {
+			t.Errorf("Stop = %v, want nil", err)
+		}
+		if ctx.Err() == nil {
+			t.Error("the group's context holds after the stop")
+		}
+		if took := time.Since(start); took != DrainTimeout {
+			t.Errorf("the stop took %v, want the drain timeout %v", took, DrainTimeout)
+		}
+	})
+}
+
+// TestStopsTogether checks a stop the parent context's end and Stop bring
+// at once: the drains run once, and the later stop waits on the context
+// alone, so a fake clock in a bubble still reaches the drains' deadline.
+func TestStopsTogether(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		parent, cancel := context.WithCancel(context.Background())
+		g, _ := New(parent)
+		runs := 0
+		g.Drain("stuck", func(ctx context.Context) {
+			runs++
+			<-ctx.Done()
+		})
+		stopped := make(chan error)
+		go func() { stopped <- g.Stop() }()
+		synctest.Wait()
+		cancel()
+		if err := <-stopped; err != nil {
+			t.Errorf("Stop = %v, want nil", err)
+		}
+		if runs != 1 {
+			t.Errorf("the drain ran %d times, want once", runs)
+		}
+	})
+}
+
+// TestFatalFailureSkipsDrains checks a Fatal loop's failure: the group's
+// context ends at once, and no drain runs, then or on a later Stop.
+func TestFatalFailureSkipsDrains(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		g, _, _ := newGroup()
+		drained := false
+		g.Drain("directory", func(context.Context) { drained = true })
+		g.Go("beaconer", Fatal, func(context.Context) error { return errBoom })
+		if err := g.Wait(); !errors.Is(err, errBoom) {
+			t.Errorf("Wait = %v, want the loop's error", err)
+		}
+		_ = g.Stop()
+		if drained {
+			t.Error("a drain ran after a Fatal loop's failure")
 		}
 	})
 }

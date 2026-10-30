@@ -9,8 +9,6 @@ const POLL_MS = 5000;
 const MINUTE = 60e3;
 const HOUR = 60 * MINUTE;
 const DAY = 24 * HOUR;
-// Below 23 hours left, a node is an hour past its renewal threshold.
-const NOT_RENEWING = 23 * HOUR;
 
 const TABS = { nodes: "Nodes", hosts: "Hosts", keys: "Auth keys", settings: "Settings" };
 // The list endpoint behind each tab.
@@ -532,23 +530,21 @@ function tags(node) {
 }
 
 // One node: its ISD-AS and tags, key, overlay, endpoint, issued addresses,
-// and certificate.
+// and last report.
 function nodeRow(node) {
   return h("tr", null,
     h("td", null, h("div", { class: "id" }, node.ia), h("div", { class: "below tags" }, tags(node).map(tag => badge(...tag)))),
-    h("td", null, shortKey(node.key)),
+    h("td", null, node.key ? shortKey(node.key) : dash()),
     h("td", null, node.overlay ? mono(node.overlay) : dash()),
     h("td", null, node.endpoint ? mono(node.endpoint) : dash()),
     h("td", null, node.overlay ? `${node.issued} / ${node.capacity}` : dash()),
-    h("td", null, certificate(node.expires)));
+    h("td", null, lastReport(node.reported)));
 }
 
-// The certificate's expiry, flagged once the node is past renewing it.
-function certificate(expires) {
-  const left = parseTime(expires) - Date.now();
-  return h("div", { class: "cert" },
-    timeEl(expires, left < 0 ? "expired " : "expires "),
-    left < NOT_RENEWING && badge("Not renewing", "amber"));
+// The time the node signed its directory entry, "Silent" while the
+// directory holds none.
+function lastReport(reported) {
+  return h("span", { class: "muted" }, reported ? timeEl(reported) : "Silent");
 }
 
 // ---- Hosts ----

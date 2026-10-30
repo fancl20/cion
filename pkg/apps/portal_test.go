@@ -68,17 +68,21 @@ func chainFor(t *testing.T, ia addr.IA, skid byte, notAfter time.Time) []*x509.C
 }
 
 // TestPortalRecordsNodes checks the console's view of the nodes: one per
-// ISD-AS holding a chain, its newest chain's key and expiry; the roles from
-// the founder's ISD-AS and the TRC's cores; the tag each node's directory
-// report earns — NAT when behind a NAT and unanswered, Degraded when
-// unanswered alone, none for a node behind a NAT peers dial or a node without
-// a report; and the directory's slice, endpoint, and issued count beside
-// each.
+// ISD-AS holding a chain, with its newest chain's key, beside one per entry
+// of the node directory's view, a node whose chain the founder does not hold
+// among them; each node's last report, the signing time of its entry in the
+// view, none for a silent node; the roles from the founder's ISD-AS and the
+// TRC's cores; the tag each node's report earns — NAT when behind a NAT and
+// unanswered, Degraded when unanswered alone, none for a node behind a NAT
+// peers dial or a node without a report; and the WireGuard directory's
+// slice, endpoint, and issued count beside each.
 func TestPortalRecordsNodes(t *testing.T) {
 	ctx := t.Context()
 	founder, core := addr.MustParseIA("1-ff00:0:1"), addr.MustParseIA("1-ff00:0:2")
 	node, cloud := addr.MustParseIA("1-ff00:0:3"), addr.MustParseIA("1-ff00:0:4")
+	roamer := addr.MustParseIA("1-ff00:0:5")
 	now := time.Now().UTC().Truncate(time.Second)
+	reported := func(minutes int) time.Time { return now.Add(-time.Duration(minutes) * time.Minute) }
 	chains := [][]*x509.Certificate{
 		chainFor(t, founder, 0x01, now.Add(72*time.Hour)),
 		chainFor(t, core, 0x02, now.Add(60*time.Hour)),
@@ -103,9 +107,12 @@ func TestPortalRecordsNodes(t *testing.T) {
 	}
 	b := bus.New()
 	b.Directory().Publish(bus.NewDirectory(
-		bus.DirectoryEntry{IA: core, Reach: bus.Reach{BehindNAT: true, RendezvousUnanswered: true}},
-		bus.DirectoryEntry{IA: node, Reach: bus.Reach{RendezvousUnanswered: true}},
-		bus.DirectoryEntry{IA: cloud, Reach: bus.Reach{BehindNAT: true}},
+		bus.DirectoryEntry{IA: core, Published: reported(1),
+			Reach: bus.Reach{BehindNAT: true, RendezvousUnanswered: true}},
+		bus.DirectoryEntry{IA: node, Published: reported(2),
+			Reach: bus.Reach{RendezvousUnanswered: true}},
+		bus.DirectoryEntry{IA: cloud, Published: reported(3), Reach: bus.Reach{BehindNAT: true}},
+		bus.DirectoryEntry{IA: roamer, Published: reported(4)},
 	))
 	r := &portalRecords{
 		chains:        func(context.Context) ([][]*x509.Certificate, error) { return chains, nil },
@@ -122,21 +129,21 @@ func TestPortalRecordsNodes(t *testing.T) {
 		{
 			IA:       founder,
 			Key:      "0101",
-			Expires:  now.Add(72 * time.Hour),
 			Role:     portal.RoleFounder,
 			Overlay:  netip.MustParsePrefix("100.64.0.0/24"),
 			Endpoint: netip.MustParseAddrPort("198.51.100.10:41641"),
 			Issued:   2,
 		},
 		{
-			IA: core, Key: "0202", Expires: now.Add(60 * time.Hour),
+			IA: core, Key: "0202", Reported: reported(1),
 			Role: portal.RoleCore, Reach: portal.ReachNAT,
 		},
 		{
-			IA: node, Key: "0303", Expires: now.Add(48 * time.Hour),
+			IA: node, Key: "0303", Reported: reported(2),
 			Role: portal.RoleNormal, Reach: portal.ReachDegraded,
 		},
-		{IA: cloud, Key: "0404", Expires: now.Add(36 * time.Hour), Role: portal.RoleNormal},
+		{IA: cloud, Key: "0404", Reported: reported(3), Role: portal.RoleNormal},
+		{IA: roamer, Reported: reported(4), Role: portal.RoleNormal},
 	}
 	if diff := cmp.Diff(want, nodes,
 		cmpopts.EquateComparable(netip.Prefix{}, netip.AddrPort{})); diff != "" {

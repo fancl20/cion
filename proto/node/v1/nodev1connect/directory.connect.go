@@ -24,35 +24,37 @@ const (
 // reflection-formatted method names, remove the leading slash and convert the remaining slash to a
 // period.
 const (
-	// DirectoryServicePublishProcedure is the procedure name of the DirectoryService's Publish RPC.
-	DirectoryServicePublishProcedure = "/node.v1.DirectoryService/Publish"
-	// DirectoryServiceListProcedure is the procedure name of the DirectoryService's List RPC.
-	DirectoryServiceListProcedure = "/node.v1.DirectoryService/List"
+	// DirectoryServicePushProcedure is the procedure name of the DirectoryService's Push RPC.
+	DirectoryServicePushProcedure = "/node.v1.DirectoryService/Push"
+	// DirectoryServiceSyncProcedure is the procedure name of the DirectoryService's Sync RPC.
+	DirectoryServiceSyncProcedure = "/node.v1.DirectoryService/Sync"
 )
 
 var (
-	directoryServicePublishSpec = sync.OnceValue(func() connect.Spec {
+	directoryServicePushSpec = sync.OnceValue(func() connect.Spec {
 		return connect.Spec{
 			StreamType: connect.StreamTypeUnary,
-			Schema:     v1.File_proto_node_v1_directory_proto.Services().ByName("DirectoryService").Methods().ByName("Publish"),
-			Procedure:  DirectoryServicePublishProcedure,
+			Schema:     v1.File_proto_node_v1_directory_proto.Services().ByName("DirectoryService").Methods().ByName("Push"),
+			Procedure:  DirectoryServicePushProcedure,
 		}
 	})
-	directoryServiceListSpec = sync.OnceValue(func() connect.Spec {
+	directoryServiceSyncSpec = sync.OnceValue(func() connect.Spec {
 		return connect.Spec{
 			StreamType: connect.StreamTypeUnary,
-			Schema:     v1.File_proto_node_v1_directory_proto.Services().ByName("DirectoryService").Methods().ByName("List"),
-			Procedure:  DirectoryServiceListProcedure,
+			Schema:     v1.File_proto_node_v1_directory_proto.Services().ByName("DirectoryService").Methods().ByName("Sync"),
+			Procedure:  DirectoryServiceSyncProcedure,
 		}
 	})
 )
 
 // DirectoryServiceClient is a client for the node.v1.DirectoryService service.
 type DirectoryServiceClient interface {
-	// Publish records the caller's entry.
-	Publish(context.Context, *v1.PublishRequest) (*v1.PublishResponse, error)
-	// List returns every published entry.
-	List(context.Context, *v1.ListRequest) (*v1.ListResponse, error)
+	// Push hands the receiver entries; it keeps the greater ones and floods
+	// them on.
+	Push(context.Context, *v1.PushRequest) (*v1.PushResponse, error)
+	// Sync hands the receiver the caller's summary; it answers with the
+	// entries the caller lacks, and names the ones it lacks itself.
+	Sync(context.Context, *v1.SyncRequest) (*v1.SyncResponse, error)
 }
 
 // NewDirectoryServiceClient constructs a client for the node.v1.DirectoryService service. Multiple
@@ -63,10 +65,12 @@ func NewDirectoryServiceClient(client *connect.Client) DirectoryServiceClient {
 
 // DirectoryServiceHandler is an implementation of the node.v1.DirectoryService service.
 type DirectoryServiceHandler interface {
-	// Publish records the caller's entry.
-	Publish(context.Context, *v1.PublishRequest) (*v1.PublishResponse, error)
-	// List returns every published entry.
-	List(context.Context, *v1.ListRequest) (*v1.ListResponse, error)
+	// Push hands the receiver entries; it keeps the greater ones and floods
+	// them on.
+	Push(context.Context, *v1.PushRequest) (*v1.PushResponse, error)
+	// Sync hands the receiver the caller's summary; it answers with the
+	// entries the caller lacks, and names the ones it lacks itself.
+	Sync(context.Context, *v1.SyncRequest) (*v1.SyncResponse, error)
 }
 
 // RegisterDirectoryServiceHandler registers svc as the node.v1.DirectoryService implementation on
@@ -74,37 +78,37 @@ type DirectoryServiceHandler interface {
 func RegisterDirectoryServiceHandler(server *connect.Server, svc DirectoryServiceHandler) {
 	adapter := directoryServiceHandler{svc: svc}
 	server.Register(
-		connect.Method{Spec: directoryServicePublishSpec(), Handler: adapter.publish},
-		connect.Method{Spec: directoryServiceListSpec(), Handler: adapter.list},
+		connect.Method{Spec: directoryServicePushSpec(), Handler: adapter.push},
+		connect.Method{Spec: directoryServiceSyncSpec(), Handler: adapter.sync},
 	)
 }
 
 // UnimplementedDirectoryServiceHandler returns CodeUnimplemented from all methods.
 type UnimplementedDirectoryServiceHandler struct{}
 
-func (UnimplementedDirectoryServiceHandler) Publish(context.Context, *v1.PublishRequest) (*v1.PublishResponse, error) {
-	return nil, connect.NewError(connect.CodeUnimplemented, "node.v1.DirectoryService.Publish is not implemented")
+func (UnimplementedDirectoryServiceHandler) Push(context.Context, *v1.PushRequest) (*v1.PushResponse, error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, "node.v1.DirectoryService.Push is not implemented")
 }
 
-func (UnimplementedDirectoryServiceHandler) List(context.Context, *v1.ListRequest) (*v1.ListResponse, error) {
-	return nil, connect.NewError(connect.CodeUnimplemented, "node.v1.DirectoryService.List is not implemented")
+func (UnimplementedDirectoryServiceHandler) Sync(context.Context, *v1.SyncRequest) (*v1.SyncResponse, error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, "node.v1.DirectoryService.Sync is not implemented")
 }
 
 type directoryServiceClient struct {
 	client *connect.Client
 }
 
-func (c *directoryServiceClient) Publish(ctx context.Context, req *v1.PublishRequest) (*v1.PublishResponse, error) {
-	var res v1.PublishResponse
-	if err := c.client.CallUnary(ctx, directoryServicePublishSpec(), req, &res); err != nil {
+func (c *directoryServiceClient) Push(ctx context.Context, req *v1.PushRequest) (*v1.PushResponse, error) {
+	var res v1.PushResponse
+	if err := c.client.CallUnary(ctx, directoryServicePushSpec(), req, &res); err != nil {
 		return nil, err
 	}
 	return &res, nil
 }
 
-func (c *directoryServiceClient) List(ctx context.Context, req *v1.ListRequest) (*v1.ListResponse, error) {
-	var res v1.ListResponse
-	if err := c.client.CallUnary(ctx, directoryServiceListSpec(), req, &res); err != nil {
+func (c *directoryServiceClient) Sync(ctx context.Context, req *v1.SyncRequest) (*v1.SyncResponse, error) {
+	var res v1.SyncResponse
+	if err := c.client.CallUnary(ctx, directoryServiceSyncSpec(), req, &res); err != nil {
 		return nil, err
 	}
 	return &res, nil
@@ -112,24 +116,24 @@ func (c *directoryServiceClient) List(ctx context.Context, req *v1.ListRequest) 
 
 type directoryServiceHandler struct{ svc DirectoryServiceHandler }
 
-func (h directoryServiceHandler) publish(ctx context.Context, _ connect.Spec, stream connect.ServerStream) error {
-	var req v1.PublishRequest
+func (h directoryServiceHandler) push(ctx context.Context, _ connect.Spec, stream connect.ServerStream) error {
+	var req v1.PushRequest
 	if err := stream.Receive(&req); err != nil {
 		return err
 	}
-	res, err := h.svc.Publish(ctx, &req)
+	res, err := h.svc.Push(ctx, &req)
 	if err != nil {
 		return err
 	}
 	return stream.Send(res)
 }
 
-func (h directoryServiceHandler) list(ctx context.Context, _ connect.Spec, stream connect.ServerStream) error {
-	var req v1.ListRequest
+func (h directoryServiceHandler) sync(ctx context.Context, _ connect.Spec, stream connect.ServerStream) error {
+	var req v1.SyncRequest
 	if err := stream.Receive(&req); err != nil {
 		return err
 	}
-	res, err := h.svc.List(ctx, &req)
+	res, err := h.svc.Sync(ctx, &req)
 	if err != nil {
 		return err
 	}

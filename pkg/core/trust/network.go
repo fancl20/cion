@@ -94,21 +94,23 @@ func (p *NetworkProvider) GetSignedTRC(
 	opts ...Option,
 ) (cppki.SignedTRC, error) {
 
-	return fetchTRC(ctx, p.DB, p.fetcher(opts), id)
+	return fetchTRC(ctx, p.DB, p.fetcher(collect(opts)), id)
 }
 
 // GetChains returns the chains matching the query that verify against the
 // anchor pool — the newest pinned TRC's roots, the predecessor's beside them
-// while the newest is within its grace period: the database's when any of
-// them verifies, else the network's, which are cached. A stored chain whose
-// root no pooled TRC carries is passed over.
+// while the newest is within its grace period — now, or at the time an At
+// option names: the database's when any of them verifies, else the
+// network's, which are cached. A stored chain whose root no pooled TRC
+// carries is passed over.
 func (p *NetworkProvider) GetChains(
 	ctx context.Context,
 	q trustdb.ChainQuery,
 	opts ...Option,
 ) ([][]*x509.Certificate, error) {
 
-	fetcher := p.fetcher(opts)
+	o := collect(opts)
+	fetcher := p.fetcher(o)
 	stored, err := p.DB.Chains(ctx, q)
 	if err != nil {
 		return nil, err
@@ -120,7 +122,8 @@ func (p *NetworkProvider) GetChains(
 	if err != nil {
 		return nil, serrors.Wrap("fetching TRCs to verify chains", err)
 	}
-	if verified, _ := verifiedChains(stored, pool); len(verified) != 0 {
+	verify := cppki.VerifyOptions{TRC: pool, CurrentTime: o.at}
+	if verified, _ := verifiedChains(stored, verify); len(verified) != 0 {
 		return verified, nil
 	}
 	if fetcher == nil {
@@ -130,7 +133,7 @@ func (p *NetworkProvider) GetChains(
 	if err != nil {
 		return nil, serrors.Wrap("fetching chains", err)
 	}
-	verified, failures := verifiedChains(fetched, pool)
+	verified, failures := verifiedChains(fetched, verify)
 	for _, err := range failures {
 		slog.Warn("Dropping fetched chain that does not verify against TRC", "err", err)
 	}
@@ -144,11 +147,7 @@ func (p *NetworkProvider) GetChains(
 
 // fetcher returns where the options send a fetch: the Peer fetcher of the
 // server a Server option names, then the Remote; nil when neither applies.
-func (p *NetworkProvider) fetcher(opts []Option) Fetcher {
-	var o options
-	for _, opt := range opts {
-		opt(&o)
-	}
+func (p *NetworkProvider) fetcher(o options) Fetcher {
 	var sources inOrder
 	if o.server != nil && p.Peer != nil {
 		sources = append(sources, p.Peer(o.server))
@@ -198,16 +197,16 @@ func (fs inOrder) Chains(ctx context.Context, q trustdb.ChainQuery) ([][]*x509.C
 	return nil, errors.Join(errs...)
 }
 
-// verifiedChains returns the chains that verify against the pool, beside
+// verifiedChains returns the chains that verify with the options, beside
 // the failures of the ones that do not.
 func verifiedChains(
-	chains [][]*x509.Certificate, pool []*cppki.TRC,
+	chains [][]*x509.Certificate, opts cppki.VerifyOptions,
 ) ([][]*x509.Certificate, []error) {
 
 	var verified [][]*x509.Certificate
 	var failures []error
 	for _, chain := range chains {
-		if err := cppki.VerifyChain(chain, cppki.VerifyOptions{TRC: pool}); err != nil {
+		if err := cppki.VerifyChain(chain, opts); err != nil {
 			failures = append(failures, err)
 			continue
 		}

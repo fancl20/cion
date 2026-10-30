@@ -63,16 +63,17 @@ func newPortal(env *Environment, loaded []Loaded) (Application, error) {
 }
 
 // portalRecords is the console's view of the founder's records: the chains
-// its trust database holds, the TRC's cores, the node directory's reports,
-// the WireGuard directory, and the coordination application's registry and
+// its trust database holds, the TRC's cores, the node directory's view, the
+// WireGuard directory, and the coordination application's registry and
 // presence.
 type portalRecords struct {
 	chains  func(context.Context) ([][]*x509.Certificate, error)
 	cores   func(addr.ISD) ([]addr.IA, error)
 	founder addr.IA
-	// nodeDirectory is the node directory topic: its last event's entries
-	// carry each node's report of how its peers reach it, none where the
-	// measured provider did not load.
+	// nodeDirectory is the node directory topic: its last event is the
+	// founder's view, whose entries carry each node's signing time and its
+	// report of how its peers reach it, none where the measured provider did
+	// not load.
 	nodeDirectory *bus.Topic[bus.Directory]
 	// registry is the WireGuard application's directory; nil where it did
 	// not load.
@@ -84,8 +85,9 @@ type portalRecords struct {
 var _ portal.Records = (*portalRecords)(nil)
 
 // Nodes lists every node holding a chain valid now, the newest chain per
-// ISD-AS, beside the tag the node directory's report earns it and the
-// node's WireGuard directory entry where the registry holds one.
+// ISD-AS, beside every node the node directory's view holds, each with its
+// last report and the tag the report earns it, and the node's WireGuard
+// directory entry where the registry holds one.
 func (r *portalRecords) Nodes(ctx context.Context) ([]portal.Node, error) {
 	chains, err := r.chains(ctx)
 	if err != nil {
@@ -111,16 +113,25 @@ func (r *portalRecords) Nodes(ctx context.Context) ([]portal.Node, error) {
 			return nil, fmt.Errorf("reading the directory: %w", err)
 		}
 	}
-	reports := r.nodeDirectory.Latest()
-	nodes := make([]portal.Node, 0, len(newest))
-	for ia, chain := range newest {
-		report, _ := reports.Entry(ia)
+	view := r.nodeDirectory.Latest()
+	listed := make(map[addr.IA]bool, len(newest))
+	for ia := range newest {
+		listed[ia] = true
+	}
+	for _, e := range view.Entries() {
+		listed[e.IA] = true
+	}
+	nodes := make([]portal.Node, 0, len(listed))
+	for ia := range listed {
+		report, _ := view.Entry(ia)
 		node := portal.Node{
-			IA:      ia,
-			Key:     hex.EncodeToString(chain[0].SubjectKeyId),
-			Expires: chain[0].NotAfter,
-			Role:    portal.RoleNormal,
-			Reach:   reachTag(report.Reach),
+			IA:       ia,
+			Reported: report.Published,
+			Role:     portal.RoleNormal,
+			Reach:    reachTag(report.Reach),
+		}
+		if chain, ok := newest[ia]; ok {
+			node.Key = hex.EncodeToString(chain[0].SubjectKeyId)
 		}
 		switch {
 		case ia.Equal(r.founder):

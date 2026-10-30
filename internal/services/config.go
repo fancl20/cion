@@ -148,7 +148,8 @@ type NodePacing struct {
 	EnrollmentInspect time.Duration // enrollment inspection of a valid chain
 	Selection         time.Duration // selection evaluation window
 	CandidateWindow   time.Duration // unproven candidate lifetime
-	Directory         time.Duration // directory publish, its retry, and fetch
+	Directory         time.Duration // directory retries, bounds, and cadences
+	DirectorySummary  time.Duration // node directory summary period
 	RendezvousRate    time.Duration // admission rate caps (rendezvous, link, and enrollment doors)
 	LinkSetPoll       time.Duration // the file provider's link-set poll
 	BFD               time.Duration // BFD transmission interval

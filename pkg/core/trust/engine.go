@@ -159,6 +159,24 @@ func (e *Engine) VerifyBound(
 	return v.Verify(ctx, signedMsg, associatedData...)
 }
 
+// VerifyBoundAt verifies the signed message as VerifyBound does, against a
+// chain of the signer valid at the given time rather than now, anchored by
+// the TRCs active now: a message whose acceptance must not depend on the
+// verifier's clock verifies at the time its signer signed it.
+func (e *Engine) VerifyBoundAt(
+	ctx context.Context,
+	ia addr.IA,
+	server net.Addr,
+	signedMsg *cryptopb.SignedMessage,
+	at time.Time,
+	associatedData ...[]byte,
+) (*signed.Message, error) {
+
+	v := Verifier{Engine: e.Provider, notifies: e.notifies,
+		BoundIA: ia, BoundServer: server, At: at}
+	return v.Verify(ctx, signedMsg, associatedData...)
+}
+
 // Chain returns the node's newest chain valid now, for the SCION-native TLS
 // channel's certificates. It reads local state only: a TLS handshake must
 // not spawn trust fetches, and an un-enrolled node simply has none.

@@ -55,6 +55,11 @@ type Verifier struct {
 	// MaxCacheExpiration bounds how long fetched chains are cached; zero
 	// means a minute, and a chain's own validity can shorten the window.
 	MaxCacheExpiration time.Duration
+	// At is the time the signer's chain must be valid at, anchored by the
+	// TRCs active now; zero means now. A verification at a given time reads
+	// the provider past the cache, whose chains are the ones valid when
+	// they were read.
+	At time.Time
 
 	// chains and notifies hold the verifier's recently used certificate
 	// chains and deduplicate its TRC reports for a minute; the engine sets
@@ -65,7 +70,7 @@ type Verifier struct {
 }
 
 // Verify verifies the signature of the msg with a chain of the signer valid
-// now.
+// now, or at At when it is set.
 func (v Verifier) Verify(ctx context.Context, signedMsg *cryptopb.SignedMessage,
 	associatedData ...[]byte) (*signed.Message, error) {
 
@@ -96,12 +101,15 @@ func (v Verifier) Verify(ctx context.Context, signedMsg *cryptopb.SignedMessage,
 		return nil, serrors.Wrap("reporting TRC", err, "id", id)
 	}
 	// The store keeps expired chains until its sweep; the query bound to the
-	// present leaves them out.
-	now := time.Now()
+	// verification's time leaves them out.
+	at := v.At
+	if at.IsZero() {
+		at = time.Now()
+	}
 	query := trustdb.ChainQuery{
 		IA:           ia,
 		SubjectKeyID: keyID.SubjectKeyId,
-		Validity:     cppki.Validity{NotBefore: now, NotAfter: now},
+		Validity:     cppki.Validity{NotBefore: at, NotAfter: at},
 	}
 	chains, err := v.getChains(ctx, query)
 	if err != nil {
@@ -137,6 +145,9 @@ func (v *Verifier) notifyTRC(ctx context.Context, id cppki.TRCID) error {
 }
 
 func (v *Verifier) getChains(ctx context.Context, q trustdb.ChainQuery) ([][]*x509.Certificate, error) {
+	if !v.At.IsZero() {
+		return v.Engine.GetChains(ctx, q, Server(v.BoundServer), At(v.At))
+	}
 	key := fmt.Sprintf("chain-%s-%x", q.IA, q.SubjectKeyID)
 
 	if chains, ok := v.chains.Get(key); ok {

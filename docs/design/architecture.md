@@ -110,7 +110,8 @@ run no loops of their own and hold no policy.
         which the beacons declare.
     *   The node's own state: the host its publications carry and whether
         its published rendezvous address went unanswered.
-    *   The node directory as the node last fetched it.
+    *   The node directory as the node holds it: each node's signed entry
+        its view shows.
 
 ### Modules
 
@@ -204,10 +205,14 @@ applications reach it through the SCION library's socket.
 
 The topology source meets candidate peers at the rendezvous exchange — first
 contact, admission probe, and a joiner's establishment in one — and learns
-of them from the core-served node directory. It reaches a candidate that
-reports itself undialable, such as a node behind a NAT, by punch instead:
-over a request both chains authenticate, each side learns its socket's
-reflexive address from a dialable neighbor and sends toward the other's.
+of them from the node directory every node holds: each node signs its own
+entry, and linked nodes flood new entries to each other and exchange
+summaries to catch up
+([ADR-0032](/docs/adrs/0032-replicate-the-node-directory-on-every-node.md)).
+It reaches a candidate that reports itself undialable, such as a node behind
+a NAT, by punch instead: over a request both chains authenticate, each side
+learns its socket's reflexive address from a dialable neighbor and sends
+toward the other's.
 Admitted links enter the neighbor table; the selection loop then measures
 every peer and keeps a link for what it adds into the region beyond its peer
 — a cheaper route or an independent one, judged by the end that dialed the

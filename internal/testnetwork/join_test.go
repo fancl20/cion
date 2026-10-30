@@ -209,11 +209,11 @@ func bootRendezvousLine(t *testing.T, wpki *webpkitest.CA, ipA, ipB, ipC netip.A
 
 // TestJoinByRendezvous is the rendezvous join's integration proof: a
 // three-node line — the core A, the middle B, and C below — where B and C join by
-// rendezvous with one bootstrap neighbor and the core's domain, enroll,
-// publish, and fetch the node directory; C probes A by rendezvous echo
-// against the two-hop path and promotes the direct link below the
-// redundancy floor; killing B leaves C connected through A; and a bare
-// restart serves from the persisted link store without rendezvous.
+// rendezvous with one bootstrap neighbor and the core's domain, enroll, and
+// hold the node directory; C probes A by rendezvous echo against the
+// two-hop path and promotes the direct link below the redundancy floor;
+// killing B leaves C connected through A; and a bare restart serves from the
+// persisted link store without rendezvous.
 func TestJoinByRendezvous(t *testing.T) {
 	t.Parallel()
 	wpki := webpkitest.New(t)
@@ -240,9 +240,9 @@ func TestJoinByRendezvous(t *testing.T) {
 	Poll(t, "B enrolled", func() bool { return pingFrom(ctx, b, a.app.IA(), a.host) })
 	Poll(t, "C enrolled", func() bool { return pingFrom(ctx, c, a.app.IA(), a.host) })
 
-	// C publishes and fetches the directory, probes A by rendezvous echo
-	// against the two-hop path, and promotes the direct link — below the
-	// floor of two, outright on reachability.
+	// C learns A from the directory, probes A by rendezvous echo against
+	// the two-hop path, and promotes the direct link — below the floor of
+	// two, outright on reachability.
 	Poll(t, "C's direct link to A", func() bool {
 		e := entryOf(ctx, c, a.app.IA())
 		return e != nil && e.State == links.StateEstablished

@@ -221,3 +221,68 @@ Beside the decisions:
     seconds, where today it waits for each node's next fetch, up to 30.
 
 ## Implementation history
+
+*   Landed as proposed: the entry and the service
+    ([directory.proto](/proto/node/v1/directory.proto)) over SCION's signed
+    message ([signed.proto](/proto/crypto/v1/signed.proto)), the bound
+    verification at a given time ([engine.go](/pkg/core/trust/engine.go),
+    [verifier.go](/pkg/core/trust/verifier.go)), the replicated directory,
+    its view, its flooding, and its catch-up
+    ([directory.go](/pkg/modules/topology/impl/measured/directory.go)), the
+    provider's wiring
+    ([provider.go](/pkg/modules/topology/impl/measured/provider.go)), and the
+    console's last report ([portal.go](/pkg/apps/portal.go),
+    [api.go](/pkg/apps/portal/api.go)). Beside the plan:
+    *   The verification at the signing time checks the chain's validity
+        then, against the TRCs that anchor chains now: the provider's
+        verification of a chain takes the time
+        ([network.go](/pkg/core/trust/network.go)).
+    *   The withdrawal needs the node's links to outlive its decision to
+        stop. The node's supervision gains drains, run when the node stops
+        on purpose, before its loops' context ends, within two seconds
+        ([supervise.go](/internal/supervise/supervise.go)), and the topology
+        provider's contract gains the drain the node runs
+        ([topology.go](/pkg/modules/topology/topology.go)).
+    *   A node's signing waits for its clock to pass the signing time of
+        the node's entry it holds, by up to a second, so its entries grow:
+        under the labs' virtual time a withdrawal, a restart's first entry,
+        or a change at the instant of the last signing would otherwise tie
+        with the entry before it, and lose to it by the signed bytes.
+    *   The catch-up the first pinned TRC was to trigger runs at the node's
+        first signing: before its chain the channel admits the node to no
+        neighbor, and a node holds its chain only once it pinned the TRC.
+    *   A failed sync retries from five seconds, doubling up to the summary
+        period, rather than waiting a full period.
+    *   A summary carries a digest rather than the signed bytes, so on a tie
+        of TRC and signing time each side sends its own entry and the join
+        picks.
+    *   An entry the directory would discard is refused on arrival, before
+        its verification: else a copy two nodes pass back and forth would
+        never age out.
+    *   The console's API omits the key of a node whose chain the founder
+        does not hold.
+    *   The labs pace the summary period at two seconds, beside the
+        directory's other bounds.
+    *   The view reads no TRC, where ADR-0032's decision 3 shows an entry
+        only under the pinned TRC, or its predecessor while that one's grace
+        period runs, and has a node sign anew at each newly pinned TRC.
+        Onboarding a core is a TRC update with no grace period: under that
+        rule every entry left the views at each onboarding until its signer
+        signed anew. The order alone ends a runaway clock, as the signer's
+        first entry under the next TRC outranks the runaway one wherever it
+        arrives, so a node moves to a newly pinned TRC at its next signing.
+        Two leftovers remain: a runaway entry of a signer that never signs
+        again, at most a chain's validity ahead, shows for about a lifetime
+        once the clock reaches it, as a crashed node's last entry does; and
+        a revoking update leaves the revoked signers' entries in the views
+        until they age out.
+    *   The benchmarks, five runs each against the node before this
+        proposal: the NAT network settles in 2.7–3.2 minutes against
+        2.2–2.8, its topology optimal in every run; the site joined from
+        outside settles in 1.8–3.3 against 2.2–2.8, and the one joined
+        inside in 3.7–5.5 against 5.3–11.8, its worst pair at 4.5–26 and 3
+        to 5 inside links against 1.35–26 and 3 to 6; the regions' worst
+        pair is 1.20–1.23 against 1.23–1.40. The founder-down network
+        survives as before and its founder returns in 177–273 s, against
+        198–232 here and 196–276 in earlier batches; restart, rebind,
+        symmetric join, and the stranded network hold.

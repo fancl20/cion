@@ -427,6 +427,33 @@ func TestVerifierRefusesExpiredChain(t *testing.T) {
 	})
 }
 
+// TestEngineVerifyBoundAt checks the verification at a given time: a
+// signature whose chain has expired since verifies at its signing time,
+// though neither now nor at a time past the chain's expiry.
+func TestEngineVerifyBoundAt(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		f := newEngineFixture(t)
+		ctx := context.Background()
+		signedMsg, err := f.engine.Sign(ctx, []byte("ping"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		signedAt := time.Now()
+
+		// A fake-time sleep in the bubble past the chain's expiry.
+		time.Sleep(time.Until(f.chain[0].NotAfter) + time.Second)
+		if _, err := f.engine.VerifyBound(ctx, iaNode, nil, signedMsg); err == nil {
+			t.Error("a signature verified now under an expired chain")
+		}
+		if _, err := f.engine.VerifyBoundAt(ctx, iaNode, nil, signedMsg, signedAt); err != nil {
+			t.Errorf("verifying at the signing time: %v", err)
+		}
+		if _, err := f.engine.VerifyBoundAt(ctx, iaNode, nil, signedMsg, time.Now()); err == nil {
+			t.Error("a signature verified at a time past its chain's expiry")
+		}
+	})
+}
+
 // newOnboardedFixture is an engine fixture whose ISD has onboarding behind
 // it: the successor TRC naming a second core, with its root, is pinned
 // beside the base, and the node's chain still verifies against the

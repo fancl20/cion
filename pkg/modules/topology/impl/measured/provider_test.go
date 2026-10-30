@@ -135,19 +135,17 @@ func TestZeroconfFirstStartNeedsNeighbor(t *testing.T) {
 }
 
 // TestZeroconfMounts checks the mounts: the measured provider mounts the
-// in-band link service on every node and the node directory's service
-// beside it on the core, at the patterns the handlers name. The conventional
-// rendezvous port is part of what mounts, so each join takes a loopback
-// host of this package's own — the shared first host's fixed slot is not
-// this suite's to hold.
+// in-band link service and the node directory's service on every node, at
+// the patterns the handlers name. The conventional rendezvous port is part
+// of what mounts, so each join takes a loopback host of this package's own
+// — the shared first host's fixed slot is not this suite's to hold.
 func TestZeroconfMounts(t *testing.T) {
 	joined := func(t *testing.T, host string, core bool) []string {
 		t.Helper()
 		z, err := New(Config{
-			Core:         core,
-			ControlHost:  netip.MustParseAddr(host),
-			NewConn:      func() (*scion.Conn, error) { return nil, nil },
-			FounderRoute: func() *scion.Addr { return nil },
+			Core:        core,
+			ControlHost: netip.MustParseAddr(host),
+			NewConn:     func() (*scion.Conn, error) { return nil, nil },
 		})
 		if err != nil {
 			t.Fatal(err)
@@ -170,12 +168,12 @@ func TestZeroconfMounts(t *testing.T) {
 	directoryPath := "/" + nodev1connect.DirectoryServiceName + "/"
 	// Hosts no integration lab takes: the testnetwork pool starts above
 	// 127.0.0.0/24, so the package-parallel run holds no rendezvous collision.
-	if got := joined(t, "127.0.0.119", false); len(got) != 1 || got[0] != linkPath {
-		t.Errorf("a non-core's mounts = %v, want the link service's alone", got)
+	want := []string{linkPath, directoryPath}
+	if got := joined(t, "127.0.0.119", false); !slices.Equal(got, want) {
+		t.Errorf("a non-core's mounts = %v, want %v", got, want)
 	}
-	got := joined(t, "127.0.0.120", true)
-	if len(got) != 2 || got[0] != linkPath || got[1] != directoryPath {
-		t.Errorf("the core's mounts = %v, want the link and directory services'", got)
+	if got := joined(t, "127.0.0.120", true); !slices.Equal(got, want) {
+		t.Errorf("the core's mounts = %v, want %v", got, want)
 	}
 }
 
@@ -202,7 +200,6 @@ func TestProviderRunReturnsAndCloseReleases(t *testing.T) {
 			}
 			return conn, err
 		},
-		FounderRoute: func() *scion.Addr { return nil },
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -211,9 +208,8 @@ func TestProviderRunReturnsAndCloseReleases(t *testing.T) {
 	if _, err := z.Mounts(); err != nil {
 		t.Fatal(err)
 	}
-	if len(drawn) != 3 {
-		t.Fatalf("NewConn drew %d conns, want the punches', the directory's, and the probe's",
-			len(drawn))
+	if len(drawn) != 2 {
+		t.Fatalf("NewConn drew %d conns, want the punches' and the probe's", len(drawn))
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -849,25 +845,23 @@ func TestEchoPublishedReportsTheAnswer(t *testing.T) {
 }
 
 // TestReachUnderTheWildcardBind checks the report under the default bind,
-// on the kernel's sockets: a wildcard-bound node publishes nothing until it
-// learns a host, then checks the learned host its entry publishes — never
-// the wildcard — so the loopback, which the machine holds, reports no NAT,
-// and documentation space no interface holds, behind a NAT.
+// on the kernel's sockets: a wildcard-bound node signs nothing until it
+// learns a host, then checks the learned host its entry names — never the
+// wildcard — so the loopback, which the machine holds, reports no NAT, and
+// documentation space no interface holds, behind a NAT.
 func TestReachUnderTheWildcardBind(t *testing.T) {
 	z, err := New(Config{ControlHost: netip.MustParseAddr("0.0.0.0")})
 	if err != nil {
 		t.Fatal(err)
 	}
-	store := NewDirectoryStore()
+	self := wiredSelf(z)
 	d := NewNodeDirectory(NodeDirectoryConfig{
 		IA:        directoryIA,
-		Self:      wiredSelf(z),
+		Self:      self,
 		BehindNAT: z.behindNAT,
-		Store:     store,
 	})
-	ctx := context.Background()
-	if err := d.publish(ctx); err == nil {
-		t.Fatal("the unlearned wildcard published an entry")
+	if err := d.signOwn(t.Context()); !errors.Is(err, errNotReady) {
+		t.Fatalf("signing under the unlearned wildcard = %v, want it waiting on the host", err)
 	}
 	for _, tc := range []struct {
 		learned   netip.Addr
@@ -877,17 +871,14 @@ func TestReachUnderTheWildcardBind(t *testing.T) {
 		{learned: netip.MustParseAddr("192.0.2.1"), behindNAT: true},
 	} {
 		z.learn(tc.learned)
-		if err := d.publish(ctx); err != nil {
+		body, err := d.ownBody(self.Latest())
+		if err != nil {
 			t.Fatal(err)
 		}
-		entries := store.List(time.Now())
-		if len(entries) != 1 {
-			t.Fatalf("entries = %v, want the one", entries)
-		}
-		want := bus.Reach{BehindNAT: tc.behindNAT}
-		if got := entries[0]; got.RendezvousAddr.Addr() != tc.learned || got.Reach != want {
-			t.Errorf("learning %v published %v with %+v, want the learned host with %+v",
-				tc.learned, got.RendezvousAddr, got.Reach, want)
+		rendezvous := netip.MustParseAddrPort(body.RendezvousAddr)
+		if rendezvous.Addr() != tc.learned || body.BehindNat != tc.behindNAT {
+			t.Errorf("learning %v named %v behind a NAT %t, want the learned host, %t",
+				tc.learned, rendezvous, body.BehindNat, tc.behindNAT)
 		}
 	}
 }
