@@ -25,6 +25,7 @@ import (
 	spath "github.com/scionproto/scion/pkg/slayers/path/scion"
 
 	"github.com/fancl20/cion/pkg/core/trust"
+	"github.com/fancl20/cion/pkg/core/trust/trusttest"
 	"github.com/fancl20/cion/pkg/libs/bus"
 	"github.com/fancl20/cion/pkg/libs/scion"
 	"github.com/fancl20/cion/pkg/libs/segment"
@@ -115,6 +116,7 @@ func (s *fakeSender) attempt(ctx context.Context, ia addr.IA) error {
 // beaconFixture is a three-AS line — the core A, the middle B under test,
 // and C below — with engines anchored in one TRC and a path database.
 type beaconFixture struct {
+	founder  *trusttest.Founder
 	db       trustdb.DB
 	pathDB   pathdb.DB
 	engines  map[addr.IA]*trust.Engine
@@ -164,9 +166,52 @@ func newBeaconFixture(t *testing.T) *beaconFixture {
 		t.Fatal(err)
 	}
 	return &beaconFixture{
-		db: founder.DB, pathDB: pathDB, engines: engines, store: store,
+		founder: founder, db: founder.DB, pathDB: pathDB, engines: engines, store: store,
 		sender: sender, beaconer: beaconer, links: links,
 	}
+}
+
+// carryRoot returns the founder-completed successor of its base TRC that
+// carries the root certificate of the fellow core the base names.
+func carryRoot(t *testing.T, f *trusttest.Founder, fellow addr.IA) cppki.SignedTRC {
+	t.Helper()
+	state := t.TempDir()
+	votingKey, err := trust.LoadOrCreateVotingKey(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	votingCert, err := trust.LoadOrCreateVotingCert(state, fellow, votingKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keys, err := trust.LoadOrCreateIssuerKeys(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rootCert, err := trust.LoadOrCreateRootCert(state, fellow, keys.Root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	trc, err := trust.AssembleOnboarding(f.TRC, fellow, votingCert, rootCert)
+	if err != nil {
+		t.Fatal(err)
+	}
+	partial, err := trust.SignUpdate(trc, trust.KeyCert{Key: keys.Root, Cert: rootCert})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sensitive, err := trust.SignerCert(f.TRC.TRC, cppki.Sensitive)
+	if err != nil {
+		t.Fatal(err)
+	}
+	completed, err := trust.CoSign(partial, f.Keys.Sensitive, sensitive)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := completed.Verify(&f.TRC.TRC); err != nil {
+		t.Fatal(err)
+	}
+	return completed
 }
 
 // lineBeacon builds the beacon the core A sends to B: [A] with next B.
@@ -701,7 +746,8 @@ func TestHandleBeaconWithoutTRC(t *testing.T) {
 // origin's freshest unverified beacon, BootstrapCore alternates across the
 // origins with the freshest first, and BootstrapRoute serves each origin
 // its own route — one origin's fresher beacons cannot starve the other's.
-// Once the TRC is pinned, the turns go to the issuer alone.
+// Once the TRC is pinned, the turns go to the founder alone, though the TRC
+// carries the fellow core's root beside the founder's.
 func TestBootstrapAlternatesOrigins(t *testing.T) {
 	f := newBeaconFixture(t)
 	ctx := context.Background()
@@ -753,18 +799,16 @@ func TestBootstrapAlternatesOrigins(t *testing.T) {
 		t.Error("a bootstrap route served an origin no beacon named")
 	}
 
-	// The pin: the TRC names the founder's root alone, so the fellow core
-	// takes no more turns.
-	trc, err := f.db.SignedTRC(ctx, cppki.TRCID{ISD: coreIATest.ISD(), Base: 1, Serial: 1})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := freshDB.InsertTRC(ctx, trc); err != nil {
-		t.Fatal(err)
+	// The pin: the TRC carries both cores' roots, and the founder alone —
+	// the holder of the sensitive voting certificate — takes the turns.
+	for _, trc := range []cppki.SignedTRC{f.founder.TRC, carryRoot(t, f.founder, iaCore2Test)} {
+		if _, err := freshDB.InsertTRC(ctx, trc); err != nil {
+			t.Fatal(err)
+		}
 	}
 	for i := range 3 {
 		if got := beaconer.BootstrapCore(); !got.Equal(coreIATest) {
-			t.Errorf("pinned bootstrap core %d = %v, want the issuer %v", i, got, coreIATest)
+			t.Errorf("pinned bootstrap core %d = %v, want the founder %v", i, got, coreIATest)
 		}
 	}
 }

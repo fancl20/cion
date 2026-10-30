@@ -1,6 +1,6 @@
 # Renew Chains at Every Core
 
-*   Status: proposed
+*   Status: accepted
 *   Date: 2026-10-30
 
 [TOC]

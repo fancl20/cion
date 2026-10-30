@@ -33,7 +33,7 @@ func wireguardEnvironment(t *testing.T, core bool) *Environment {
 // derives: the shared port its arguments name — no slice, the directory
 // assigning it — the node's own state beside the bind host, the relay
 // presence from the core's domain, the node's interface-down topic, and the
-// core's own store beside the joiner's core route.
+// core's own store beside the joiner's founder route.
 func TestWireguardConfigFromEnvironment(t *testing.T) {
 	env := wireguardEnvironment(t, true)
 	core, err := wireguardConfig(env)
@@ -59,8 +59,8 @@ func TestWireguardConfigFromEnvironment(t *testing.T) {
 	if cfg.InterfaceDown != env.Bus.InterfaceDown() {
 		t.Error("the entry did not hand the application the node's interface-down topic")
 	}
-	if cfg.CoreRoute != nil {
-		t.Error("the core node got a core route")
+	if cfg.FounderRoute != nil {
+		t.Error("the core node got a founder route")
 	}
 	if cfg.Store == nil {
 		t.Error("the core node got no directory store")
@@ -73,8 +73,8 @@ func TestWireguardConfigFromEnvironment(t *testing.T) {
 	if cfg.Store != nil {
 		t.Error("the joiner got a directory store")
 	}
-	if cfg.CoreRoute == nil {
-		t.Error("the joiner got no core route")
+	if cfg.FounderRoute == nil {
+		t.Error("the joiner got no founder route")
 	}
 
 	// An address identity derives its own relay URL, an IPv6 literal

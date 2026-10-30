@@ -66,7 +66,7 @@ func newWireguard(env *Environment, _ []Loaded) (Application, error) {
 // wireguardConfig builds the application's configuration from the node's
 // facts: the shared port the entry's arguments name, the relay presence
 // derived from the domain, the application's own state directory, the
-// founding core's directory store or every other node's core route, and
+// founding core's directory store or every other node's founder route, and
 // the pacing riders.
 func wireguardConfig(env *Environment) (wireguard.Config, error) {
 	listenHost, err := underlay.ResolveAddrPort(env.ControlHost)
@@ -98,7 +98,7 @@ func wireguardConfig(env *Environment) (wireguard.Config, error) {
 		// The founding core serves the directory from its own store,
 		// following the trust DB's bbolt pattern; every other node, a
 		// joining core among them, publishes to and fetches from it over
-		// the core route.
+		// the founder route.
 		if err := os.MkdirAll(cfg.StateDir, 0o700); err != nil {
 			return wireguard.Config{}, fmt.Errorf(
 				"creating the application's state: %w", err)
@@ -111,7 +111,7 @@ func wireguardConfig(env *Environment) (wireguard.Config, error) {
 		}
 		cfg.Store = store
 	} else {
-		cfg.CoreRoute = directoryRoute(env.CoreRoute)
+		cfg.FounderRoute = directoryRoute(env.FounderRoute)
 	}
 	return cfg, nil
 }
@@ -144,13 +144,13 @@ func urlHost(identity string) string {
 	return identity
 }
 
-// directoryRoute resolves the core's directory endpoint: the core's
-// ISD-AS addressed by the directory service, over the route the
-// enrollment core client rides — a neighbor core one hop, anything else
-// the reversed freshest up segment.
-func directoryRoute(coreRoute func() *scion.Addr) func() *scion.Addr {
+// directoryRoute resolves the founding core's directory endpoint: its
+// ISD-AS addressed by the directory service, over the founder route the
+// enrollment rides — one hop when the founder is a neighbor, anything else
+// the reversed freshest up segment from it.
+func directoryRoute(founderRoute func() *scion.Addr) func() *scion.Addr {
 	return func() *scion.Addr {
-		route := coreRoute()
+		route := founderRoute()
 		if route == nil {
 			return nil
 		}

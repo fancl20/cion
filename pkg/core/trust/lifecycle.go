@@ -51,6 +51,8 @@ type EnrollmentConfig struct {
 	// them.
 	RetryInterval   time.Duration
 	InspectInterval time.Duration
+	// RenewalThreshold overrides ChainRenewalThreshold; zero keeps it.
+	RenewalThreshold time.Duration
 }
 
 func (cfg EnrollmentConfig) interval(v, def time.Duration) time.Duration {
@@ -65,8 +67,10 @@ func (cfg EnrollmentConfig) interval(v, def time.Duration) time.Duration {
 // is valid. FounderRenewal, NormalRenewal, and AuthoritativeRenewal build the
 // three.
 type Renewal interface {
-	// renew obtains a fresh chain for the node's key and stores it.
-	renew(ctx context.Context, cfg EnrollmentConfig) error
+	// renew obtains a fresh chain for the node's key and stores it. chain
+	// is the node's valid chain that verifies against its anchor pool, the
+	// authority a renewal rests on, and nil when it holds none.
+	renew(ctx context.Context, cfg EnrollmentConfig, chain []*x509.Certificate) error
 	// owed runs at a pass whose chain needs no renewal: it does the work
 	// the role still owes, reporting whether any was owed, or the work's
 	// terminal failure.
@@ -84,13 +88,13 @@ type founderRenewal struct {
 	issuer *Issuer
 }
 
-func (r founderRenewal) renew(ctx context.Context, cfg EnrollmentConfig) error {
+func (r founderRenewal) renew(ctx context.Context, cfg EnrollmentConfig, _ []*x509.Certificate) error {
 	return SelfIssue(ctx, cfg.DB, r.issuer, cfg.IA, cfg.Key)
 }
 
-// SelfIssue issues ia's chain for key through the issuer that serves the
-// enrollment requests and stores it in db: the founding core's renewal, and
-// the chain its boot holds before the endpoint serves.
+// SelfIssue issues ia's chain for key through the core's own issuer and
+// stores it in db: a core's renewal, and the chain the founder's boot holds
+// before the endpoint serves.
 func SelfIssue(
 	ctx context.Context,
 	db trustdb.DB,
@@ -115,18 +119,35 @@ func (founderRenewal) owed(context.Context, EnrollmentConfig) (bool, error) {
 	return false, nil
 }
 
-// NormalRenewal is the normal node's renewal: its chain renewed against the
-// core's endpoint through the remote, and nothing more owed.
-func NormalRenewal(remote Remote) Renewal {
-	return normalRenewal{remote: remote}
+// NormalRenewal is the normal node's renewal: its chain renewed on its
+// current one at any issuer through the issuers' remote, or enrolled at the
+// founder through the founder's without one, and nothing more owed.
+func NormalRenewal(founder, issuers Remote) Renewal {
+	return normalRenewal{founder: founder, issuers: issuers}
 }
 
 type normalRenewal struct {
-	remote Remote
+	founder, issuers Remote
 }
 
-func (r normalRenewal) renew(ctx context.Context, cfg EnrollmentConfig) error {
-	_, err := RenewChain(ctx, cfg.DB, r.remote, cfg.IA, cfg.Key)
+func (r normalRenewal) renew(ctx context.Context, cfg EnrollmentConfig, chain []*x509.Certificate) error {
+	return renewOrEnroll(ctx, cfg, r.founder, r.issuers, chain)
+}
+
+// renewOrEnroll renews the node's chain on its current one through the
+// issuers' remote, or enrolls through the founder's when it holds none.
+func renewOrEnroll(
+	ctx context.Context,
+	cfg EnrollmentConfig,
+	founder, issuers Remote,
+	chain []*x509.Certificate,
+) error {
+
+	remote := founder
+	if chain != nil {
+		remote = issuers
+	}
+	_, err := RenewChain(ctx, cfg.DB, remote, cfg.IA, cfg.Key, chain)
 	return err
 }
 
@@ -134,54 +155,74 @@ func (normalRenewal) owed(context.Context, EnrollmentConfig) (bool, error) {
 	return false, nil
 }
 
-// AuthoritativeRenewal is the joining core's renewal: its chain renewed
-// against the core's endpoint through the remote and, once the chain is
-// valid, the sensitive update that onboards it, owed until the newest
-// pinned TRC names the core — a successor carrying the voting certificate,
-// signed with the voting key as its proof of possession, and submitted
-// through the caster to the founder's voting application.
+// AuthoritativeRenewal is the joining core's renewal: its chain renewed as
+// a normal node's until its own issuer is anchored, and self-issued through
+// the issuer from then on. Once the chain is valid, the sensitive update
+// that onboards the core is owed until the newest pinned TRC names it and
+// carries its root — a successor carrying the voting and root certificates,
+// signed with both keys as their proofs of possession, and submitted through
+// the caster to the founder's voting application — and the issuer is
+// anchored in the TRC that carries the root.
 func AuthoritativeRenewal(
-	remote Remote,
+	founder, issuers Remote,
 	caster TRCCaster,
-	votingKey crypto.Signer,
-	votingCert *x509.Certificate,
+	voting, root KeyCert,
+	issuer *Issuer,
 ) Renewal {
 
 	return authoritativeRenewal{
-		remote:     remote,
-		caster:     caster,
-		votingKey:  votingKey,
-		votingCert: votingCert,
+		founder: founder,
+		issuers: issuers,
+		caster:  caster,
+		voting:  voting,
+		root:    root,
+		issuer:  issuer,
 	}
 }
 
 type authoritativeRenewal struct {
-	remote     Remote
-	caster     TRCCaster
-	votingKey  crypto.Signer
-	votingCert *x509.Certificate
+	founder, issuers Remote
+	caster           TRCCaster
+	voting, root     KeyCert
+	issuer           *Issuer
 }
 
-func (r authoritativeRenewal) renew(ctx context.Context, cfg EnrollmentConfig) error {
-	_, err := RenewChain(ctx, cfg.DB, r.remote, cfg.IA, cfg.Key)
-	return err
+func (r authoritativeRenewal) renew(ctx context.Context, cfg EnrollmentConfig, chain []*x509.Certificate) error {
+	if r.issuer.Anchored() {
+		return SelfIssue(ctx, cfg.DB, r.issuer, cfg.IA, cfg.Key)
+	}
+	return renewOrEnroll(ctx, cfg, r.founder, r.issuers, chain)
 }
 
-// owed performs one onboarding attempt while the newest pinned TRC does
-// not name the core: the submission's round trip, bounded like an
+// owed performs one onboarding attempt while the newest pinned TRC does not
+// carry the core with its root: the submission's round trip, bounded like an
 // enrollment attempt. A core that hosts no voting application is terminal,
-// returned as ErrNoVotingApp: nothing the node does obtains voting
-// power through the founder, and the network the node leaves behind keeps
-// serving everything else, the application none of it depends on. Every
-// other failure is logged for the next pass to retry.
+// returned as ErrNoVotingApp: nothing the node does obtains voting power
+// through the founder, and the network the node leaves behind keeps serving
+// everything else, the application none of it depends on. Every other
+// failure is logged for the next pass to retry. Once the newest pinned TRC
+// carries the core, the issuer still unanchored is anchored in it.
 func (r authoritativeRenewal) owed(ctx context.Context, cfg EnrollmentConfig) (bool, error) {
-	if onboarded(ctx, cfg) {
+	newest, err := cfg.DB.SignedTRC(ctx, NewestTRCID(cfg.IA.ISD()))
+	if err != nil {
+		slog.Error("Reading the newest pinned TRC", "isd_as", cfg.IA, "err", err)
+		return true, nil
+	}
+	if Onboarded(newest.TRC, cfg.IA) {
+		if r.issuer.Anchored() {
+			return false, nil
+		}
+		if err := r.issuer.Anchor(newest); err != nil {
+			slog.Error("Anchoring the issuer", "isd_as", cfg.IA, "trc", newest.TRC.ID, "err", err)
+			return true, nil
+		}
+		slog.Info("Issuing chains under the core's own root", "isd_as", cfg.IA,
+			"trc", newest.TRC.ID)
 		return false, nil
 	}
 	attemptCtx, cancel := context.WithTimeout(ctx, EnrollmentTimeout)
 	defer cancel()
-	err := JoinCore(attemptCtx, cfg.DB, r.remote, r.caster,
-		cfg.IA, r.votingKey, r.votingCert)
+	err = JoinCore(attemptCtx, cfg.DB, r.founder, r.caster, cfg.IA, r.voting, r.root)
 	switch {
 	case err == nil:
 		slog.Info("Onboarded as an authoritative core", "isd_as", cfg.IA)
@@ -191,17 +232,6 @@ func (r authoritativeRenewal) owed(ctx context.Context, cfg EnrollmentConfig) (b
 		slog.Warn("Submitting the onboarding update", "isd_as", cfg.IA, "err", err)
 	}
 	return true, nil
-}
-
-// onboarded reports whether the newest pinned TRC names the node a core of
-// its ISD; a node that has pinned no TRC yet is not onboarded.
-func onboarded(ctx context.Context, cfg EnrollmentConfig) bool {
-	trc, err := cfg.DB.SignedTRC(ctx, NewestTRCID(cfg.IA.ISD()))
-	if err != nil {
-		slog.Error("Reading the newest pinned TRC", "isd_as", cfg.IA, "err", err)
-		return false
-	}
-	return CoreNamed(trc.TRC, cfg.IA)
 }
 
 // RunEnrollment runs a node's chain lifecycle: each pass reads the newest
@@ -253,19 +283,19 @@ func (cfg EnrollmentConfig) enrollPass(ctx context.Context) (time.Duration, erro
 	switch {
 	case chain == nil:
 		slog.Warn("No valid chain; enrolling", "isd_as", cfg.IA)
-		cfg.attemptRenewal(ctx)
+		cfg.attemptRenewal(ctx, nil)
 	case remaining <= 0:
 		slog.Error("Last chain expired; re-enrolling",
 			"isd_as", cfg.IA, "expired_for", -remaining)
-		cfg.attemptRenewal(ctx)
-	case remaining < ChainRenewalThreshold:
-		slog.Warn("Chain approaching expiry; re-enrolling",
+		cfg.attemptRenewal(ctx, nil)
+	case remaining < cfg.interval(cfg.RenewalThreshold, ChainRenewalThreshold):
+		slog.Warn("Chain approaching expiry; renewing",
 			"isd_as", cfg.IA, "remaining", remaining)
-		cfg.attemptRenewal(ctx)
+		cfg.attemptRenewal(ctx, cfg.renewable(ctx, chain))
 	case !newest.IsZero() && !anchoredIn(chain, newest):
-		slog.Warn("Chain does not anchor in the newest TRC; re-enrolling",
+		slog.Warn("Chain does not anchor in the newest TRC; renewing",
 			"isd_as", cfg.IA, "trc", newest.TRC.ID)
-		cfg.attemptRenewal(ctx)
+		cfg.attemptRenewal(ctx, cfg.renewable(ctx, chain))
 	default:
 		owed, err := cfg.Renewal.owed(ctx, cfg)
 		if err != nil {
@@ -284,12 +314,28 @@ func anchoredIn(chain []*x509.Certificate, trc cppki.SignedTRC) bool {
 	return cppki.VerifyChain(chain, cppki.VerifyOptions{TRC: []*cppki.TRC{&trc.TRC}}) == nil
 }
 
-// attemptRenewal performs one renewal attempt the Renewal's way, bounded so
-// a wedged connection does not stall the loop renewing through it.
-func (cfg EnrollmentConfig) attemptRenewal(ctx context.Context) {
+// renewable returns the chain when it verifies against the node's anchor
+// pool — the newest pinned TRC and its predecessor in its grace period — so
+// a renewal may rest on it, and nil otherwise.
+func (cfg EnrollmentConfig) renewable(ctx context.Context, chain []*x509.Certificate) []*x509.Certificate {
+	pool, err := PinnedPool(ctx, cfg.DB, cfg.IA.ISD())
+	if err != nil {
+		slog.Error("Reading the pinned TRCs", "isd_as", cfg.IA, "err", err)
+		return nil
+	}
+	if cppki.VerifyChain(chain, cppki.VerifyOptions{TRC: pool}) != nil {
+		return nil
+	}
+	return chain
+}
+
+// attemptRenewal performs one renewal attempt the Renewal's way on the
+// renewable chain, bounded so a wedged connection does not stall the loop
+// renewing through it.
+func (cfg EnrollmentConfig) attemptRenewal(ctx context.Context, chain []*x509.Certificate) {
 	attemptCtx, cancel := context.WithTimeout(ctx, EnrollmentTimeout)
 	defer cancel()
-	if err := cfg.Renewal.renew(attemptCtx, cfg); err != nil {
+	if err := cfg.Renewal.renew(attemptCtx, cfg, chain); err != nil {
 		slog.Warn("Renewing chain", "isd_as", cfg.IA, "err", err)
 		return
 	}

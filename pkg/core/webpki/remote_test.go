@@ -130,7 +130,7 @@ func TestCoreClientConsultsItsLocatorOncePerRequest(t *testing.T) {
 			return err
 		}},
 		{"RenewChain", func() error {
-			_, err := c.RenewChain(ctx, csr, key)
+			_, err := c.RenewChain(ctx, csr, key, nil)
 			return err
 		}},
 	} {

@@ -125,7 +125,9 @@ func createVotingCert(
 
 // createRootCert creates the self-signed CP root certificate for key. The
 // root certificate carries id-kp-root, never votes, and signs CP CA
-// certificates.
+// certificates. The common name names the holder, as a voting
+// certificate's does: cppki refuses a TRC whose roots share a name, and an
+// ISD's every core holds a root.
 func createRootCert(ia addr.IA, key crypto.Signer, now time.Time) (*x509.Certificate, error) {
 	skid, err := cppki.SubjectKeyID(key.Public())
 	if err != nil {
@@ -139,7 +141,7 @@ func createRootCert(ia addr.IA, key crypto.Signer, now time.Time) (*x509.Certifi
 		SignatureAlgorithm: x509.ECDSAWithSHA256,
 		Version:            cppki.CertVersion,
 		SerialNumber:       serial,
-		Subject:            subject(ia, "cp root"),
+		Subject:            subject(ia, ia.String()+" cp root"),
 		NotBefore:          now.UTC(),
 		NotAfter:           now.UTC().Add(RootValidity),
 		KeyUsage:           x509.KeyUsageCertSign,
@@ -165,8 +167,9 @@ func createRootCert(ia addr.IA, key crypto.Signer, now time.Time) (*x509.Certifi
 }
 
 // createCACert creates the CP CA certificate for caKey, signed by the CP
-// root key. It is never placed in the TRC (PKI draft, Section 3.2.11); the resulting chain is [AS certificate, CP CA certificate]
-// anchored in the TRC's root certificate.
+// root key. It is never placed in the TRC (PKI draft, Section 3.2.11); the
+// resulting chain is [AS certificate, CP CA certificate] anchored in the
+// issuing core's root certificate among the TRC's.
 func createCACert(
 	ia addr.IA,
 	caKey crypto.Signer,

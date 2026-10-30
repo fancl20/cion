@@ -233,16 +233,17 @@ func (c *CoreClient) Chains(
 	return trust.ParseChains(resp.Msg)
 }
 
-// RenewChain requests a chain for the CSR. The CMS wrapper is signed by the
-// subject key itself, the proof of possession a first-issuance request
-// offers.
+// RenewChain requests a chain for the CSR. The CMS wrapper is signed with
+// key under chain, the node's current one, or — with a nil chain, a first
+// issuance — by the subject key itself as its proof of possession.
 func (c *CoreClient) RenewChain(
 	ctx context.Context,
 	csr *x509.CertificateRequest,
 	key crypto.Signer,
+	chain []*x509.Certificate,
 ) ([]*x509.Certificate, error) {
 
-	cmsReq, err := trust.BuildRenewalRequest(csr, key)
+	cmsReq, err := trust.BuildRenewalRequest(csr, key, chain)
 	if err != nil {
 		return nil, fmt.Errorf("building renewal request: %w", err)
 	}

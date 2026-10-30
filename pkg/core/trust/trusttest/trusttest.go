@@ -46,7 +46,7 @@ func NewFounder(t testing.TB, db trustdb.DB, ia addr.IA, fellows ...addr.IA) *Fo
 	if err != nil {
 		t.Fatal(err)
 	}
-	issuer, err := trust.NewIssuer(ia, keys, trc)
+	issuer, err := trust.NewIssuer(ia, keys.IssuerKeys, trc)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -1,14 +1,21 @@
 package services
 
 import (
+	"errors"
+	"net/netip"
 	"path/filepath"
 	"strings"
 	"testing"
 	"testing/synctest"
 
+	"github.com/google/go-cmp/cmp"
+	"github.com/google/go-cmp/cmp/cmpopts"
+	"github.com/scionproto/scion/pkg/addr"
+	spath "github.com/scionproto/scion/pkg/slayers/path/scion"
 	"go.etcd.io/bbolt"
 
 	"github.com/fancl20/cion/internal/supervise"
+	"github.com/fancl20/cion/pkg/libs/scion"
 )
 
 // TestOpenStateRefusesHeldDatabase checks a database another process holds
@@ -38,5 +45,34 @@ func TestOpenStateRefusesHeldDatabase(t *testing.T) {
 				}
 			})
 		})
+	}
+}
+
+// TestOrderIssuerRoutes checks the order a renewal asks the issuers in: the
+// issuers a usable link reaches first, by ISD-AS, over the link — a
+// neighbor that issues nothing passed over — then the others by the
+// freshness of their up segments over the composed path, an issuer no path
+// reaches left out.
+func TestOrderIssuerRoutes(t *testing.T) {
+	ia := func(as addr.AS) addr.IA { return addr.MustIAFrom(20, as) }
+	issuers := map[addr.IA]bool{ia(1): true, ia(2): true, ia(3): true, ia(4): true, ia(5): true}
+	usable := map[uint16]addr.IA{7: ia(3), 8: ia(9), 9: ia(1)}
+	composed := &spath.Decoded{}
+	localPath := func(dst addr.IA) (*spath.Decoded, error) {
+		if dst == ia(5) {
+			return nil, errors.New("no path")
+		}
+		return composed, nil
+	}
+
+	got := orderIssuerRoutes(issuers, usable, []addr.IA{ia(4), ia(3), ia(5), ia(2)}, localPath)
+	want := []*scion.Addr{
+		{IA: ia(1), Service: addr.SvcCS, IfID: 9},
+		{IA: ia(3), Service: addr.SvcCS, IfID: 7},
+		{IA: ia(4), Service: addr.SvcCS, Path: composed},
+		{IA: ia(2), Service: addr.SvcCS, Path: composed},
+	}
+	if diff := cmp.Diff(want, got, cmpopts.EquateComparable(netip.AddrPort{})); diff != "" {
+		t.Errorf("the issuer routes (-want +got):\n%s", diff)
 	}
 }

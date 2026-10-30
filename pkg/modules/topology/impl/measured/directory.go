@@ -192,10 +192,10 @@ func (c storeDirectoryClient) List(_ context.Context) ([]bus.DirectoryEntry, err
 // rpcDirectoryClient publishes and fetches over the SCION-native channel
 // toward the core's endpoint, the core's chain verified against the TRC.
 type rpcDirectoryClient struct {
-	conn      *scion.Conn
-	engine    *trust.Engine
-	paths     DirectoryPaths
-	coreRoute func() *scion.Addr
+	conn         *scion.Conn
+	engine       *trust.Engine
+	paths        DirectoryPaths
+	founderRoute func() *scion.Addr
 
 	qclt *quic.Transport
 
@@ -215,7 +215,7 @@ type rpcDirectoryClient struct {
 // keep-alives would otherwise hold open, unused, until the age cap's next
 // sweep.
 func (c *rpcDirectoryClient) client() (nodev1connect.DirectoryServiceClient, error) {
-	core := c.coreRoute()
+	core := c.founderRoute()
 	if core == nil {
 		return nil, errors.New("no route to the core's endpoint yet")
 	}
@@ -321,9 +321,9 @@ type NodeDirectoryConfig struct {
 	Conn *scion.Conn
 	// Paths resolves the path to the core.
 	Paths DirectoryPaths
-	// CoreRoute resolves the core's endpoint; nil on the core itself, which
-	// serves the directory from Store.
-	CoreRoute func() *scion.Addr
+	// FounderRoute resolves the founding core's endpoint; nil on the core
+	// itself, which serves the directory from Store.
+	FounderRoute func() *scion.Addr
 	// Store is the core's own directory store (core only).
 	Store *DirectoryStore
 	// Directory is the node directory topic, which each fetch publishes
@@ -340,15 +340,15 @@ type NodeDirectoryConfig struct {
 // store as the client.
 func NewNodeDirectory(cfg NodeDirectoryConfig) *NodeDirectory {
 	d := &NodeDirectory{cfg: cfg}
-	if cfg.CoreRoute == nil {
+	if cfg.FounderRoute == nil {
 		d.client = storeDirectoryClient{store: cfg.Store}
 		return d
 	}
 	rpc := &rpcDirectoryClient{
-		conn:      cfg.Conn,
-		engine:    cfg.Engine,
-		paths:     cfg.Paths,
-		coreRoute: cfg.CoreRoute,
+		conn:         cfg.Conn,
+		engine:       cfg.Engine,
+		paths:        cfg.Paths,
+		founderRoute: cfg.FounderRoute,
 	}
 	// The transport exists only over a conn: a provider whose conn is
 	// absent mounts its services without one, and Close has nothing to

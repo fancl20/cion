@@ -1,7 +1,6 @@
 package trust
 
 import (
-	"bytes"
 	"crypto"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -38,11 +37,15 @@ const (
 	// of an authoritative core, created once its provisional identity
 	// completes so retries, restarts, and operators all see the same bytes.
 	RegularVotingCertFile = "regular-voting.crt"
-	// RootKeyFile holds the CP root key of the founding core. It signs CP
-	// CA certificates and is part of the TRC's anchor set.
+	// RootKeyFile holds a core's CP root key. It signs CP CA certificates and
+	// is part of the TRC's anchor set.
 	RootKeyFile = "cp-root.key"
-	// CAKeyFile holds the CP CA key of the founding core. It signs AS
-	// certificates; the matching certificate is never placed in the TRC.
+	// RootCertFile holds the self-signed CP root certificate of an
+	// authoritative core, created once its provisional identity completes,
+	// as its voting certificate is.
+	RootCertFile = "cp-root.crt"
+	// CAKeyFile holds a core's CP CA key. It signs AS certificates; the
+	// matching certificate is never placed in the TRC.
 	CAKeyFile = "cp-ca.key"
 	// StagedFile holds a roll's fresh material from before anything can pin
 	// it until a pinned TRC names it: PEM blocks, each one's File header
@@ -56,6 +59,11 @@ type CoreKeys struct {
 	Sensitive crypto.Signer
 	// Regular signs TRC updates with the regular voting certificate.
 	Regular crypto.Signer
+	IssuerKeys
+}
+
+// IssuerKeys is the key material a core issues chains with.
+type IssuerKeys struct {
 	// Root signs CP CA certificates.
 	Root crypto.Signer
 	// CA signs AS certificate chains.
@@ -151,21 +159,33 @@ func LoadOrCreateCoreKeys(stateDir string) (CoreKeys, error) {
 	if err != nil {
 		return CoreKeys{}, fmt.Errorf("regular voting key: %w", err)
 	}
+	issuer, err := LoadOrCreateIssuerKeys(stateDir)
+	if err != nil {
+		return CoreKeys{}, err
+	}
+	return CoreKeys{Sensitive: sensitive, Regular: regular, IssuerKeys: issuer}, nil
+}
+
+// LoadOrCreateIssuerKeys returns a core's root and CA keys, generating and
+// persisting any missing key on first start. Both tiers keep them in the
+// same files, for they never share a state directory.
+func LoadOrCreateIssuerKeys(stateDir string) (IssuerKeys, error) {
+	dir := keyDir(stateDir)
 	root, err := loadOrCreateKey(dir, RootKeyFile)
 	if err != nil {
-		return CoreKeys{}, fmt.Errorf("CP root key: %w", err)
+		return IssuerKeys{}, fmt.Errorf("CP root key: %w", err)
 	}
 	ca, err := loadOrCreateKey(dir, CAKeyFile)
 	if err != nil {
-		return CoreKeys{}, fmt.Errorf("CP CA key: %w", err)
+		return IssuerKeys{}, fmt.Errorf("CP CA key: %w", err)
 	}
-	return CoreKeys{Sensitive: sensitive, Regular: regular, Root: root, CA: ca}, nil
+	return IssuerKeys{Root: root, CA: ca}, nil
 }
 
 // LoadOrCreateVotingKey returns the authoritative core's regular voting key,
 // generating and persisting it on first start. It occupies the file the
 // founder's regular voting key occupies — the tiers never share a state
-// directory — and nothing else is created: no sensitive, root, or CA key.
+// directory.
 func LoadOrCreateVotingKey(stateDir string) (crypto.Signer, error) {
 	return loadOrCreateKey(keyDir(stateDir), RegularKeyFile)
 }
@@ -183,15 +203,11 @@ func LoadOrCreateVotingCert(
 
 	return statefile.LoadOrCreate(filepath.Join(keyDir(stateDir), RegularVotingCertFile),
 		func(raw []byte) (*x509.Certificate, error) {
-			block, _ := pem.Decode(raw)
-			if block == nil {
-				return nil, errors.New("no PEM block")
-			}
-			cert, err := x509.ParseCertificate(block.Bytes)
+			cert, err := parseCert(raw)
 			if err != nil {
 				return nil, err
 			}
-			if err := checkVotingCert(cert, ia, key); err != nil {
+			if err := checkHeldCert(cert, cppki.Regular, ia, key); err != nil {
 				return nil, err
 			}
 			return cert, nil
@@ -209,23 +225,63 @@ func LoadOrCreateVotingCert(
 		})
 }
 
-// checkVotingCert checks that the persisted voting certificate is the regular
-// shape naming the ISD-AS over the key's public half.
-func checkVotingCert(cert *x509.Certificate, ia addr.IA, key crypto.Signer) error {
-	if ct, err := cppki.ValidateCert(cert); err != nil || ct != cppki.Regular {
-		return fmt.Errorf("not a regular voting certificate")
+// LoadOrCreateRootCert returns the authoritative core's self-signed root
+// certificate, minting and persisting it beside the root key when none is
+// persisted yet, as LoadOrCreateVotingCert does the voting certificate: it
+// names the completed ISD-AS, so it is created only after the provisional
+// identity completes, and a persisted certificate that does not cover the
+// key or name the ISD-AS is refused, not silently replaced.
+func LoadOrCreateRootCert(
+	stateDir string,
+	ia addr.IA,
+	key crypto.Signer,
+) (*x509.Certificate, error) {
+
+	return statefile.LoadOrCreate(filepath.Join(keyDir(stateDir), RootCertFile),
+		func(raw []byte) (*x509.Certificate, error) {
+			cert, err := parseCert(raw)
+			if err != nil {
+				return nil, err
+			}
+			if err := checkHeldCert(cert, cppki.Root, ia, key); err != nil {
+				return nil, err
+			}
+			return cert, nil
+		},
+		func() (*x509.Certificate, []byte, error) {
+			now := time.Now().UTC().Add(signingBackdate).Truncate(time.Second)
+			cert, err := createRootCert(ia, key, now)
+			if err != nil {
+				return nil, nil, err
+			}
+			return cert, pem.EncodeToMemory(certBlock(cert)), nil
+		})
+}
+
+// checkHeldCert checks that the persisted certificate is of the class,
+// naming the ISD-AS over the key's public half.
+func checkHeldCert(cert *x509.Certificate, class cppki.CertType, ia addr.IA,
+	key crypto.Signer) error {
+
+	if ct, err := cppki.ValidateCert(cert); err != nil || ct != class {
+		return fmt.Errorf("not a %s certificate", class)
 	}
 	if certIA, err := cppki.ExtractIA(cert.Subject); err != nil || !certIA.Equal(ia) {
 		return fmt.Errorf("certificate names %s, want %s", cert.Subject, ia)
 	}
-	skid, err := cppki.SubjectKeyID(key.Public())
-	if err != nil {
-		return err
-	}
-	if !bytes.Equal(cert.SubjectKeyId, skid) {
-		return fmt.Errorf("certificate does not cover the voting key")
+	if !KeyMatchesCert(key, cert) {
+		return fmt.Errorf("certificate does not cover the key")
 	}
 	return nil
+}
+
+// parseCert parses the certificate a certificate file holds.
+func parseCert(raw []byte) (*x509.Certificate, error) {
+	block, _ := pem.Decode(raw)
+	if block == nil {
+		return nil, errors.New("no PEM block")
+	}
+	return x509.ParseCertificate(block.Bytes)
 }
 
 func keyDir(stateDir string) string {

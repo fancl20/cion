@@ -101,6 +101,7 @@ func Run(t *testing.T, db TestableDB, cfg Config) {
 		"test TRC":         testTRC,
 		"test chain":       testChain,
 		"test chain sweep": testChainSweep,
+		"test key binding": testKeyBinding,
 	}
 	// Run test suite on DB directly.
 	for name, test := range tests {
@@ -593,6 +594,47 @@ func testChainSweep(t *testing.T, db trustdb.DB, cfg Config) {
 	}
 	if !cmp.Equal(trc, aTRC) {
 		t.Errorf("SignedTRC after the sweep = %v, want the inserted TRC", aTRC)
+	}
+}
+
+// testKeyBinding checks the bindings of names to keys: a free name binds and
+// reads back its key, a name bound to the same key binds again unchanged, a
+// name bound to another key refuses the binding and keeps its own, a name
+// extending another's binds apart, and a sweep of the chains leaves the
+// bindings.
+func testKeyBinding(t *testing.T, db trustdb.DB, _ Config) {
+	ctx, cancelF := context.WithTimeout(context.Background(), DefaultTimeout)
+	defer cancelF()
+	bern := addr.MustParseIA("1-ff00:0:110")
+	extending := addr.MustParseIA("1-ff00:0:1100")
+	key, other := []byte("bern's key"), []byte("another key")
+
+	if bound, err := db.BoundKey(ctx, bern); err != nil || bound != nil {
+		t.Fatalf("BoundKey of a free name = (%q, %v), want (nil, nil)", bound, err)
+	}
+	if err := db.BindKey(ctx, bern, key); err != nil {
+		t.Fatalf("BindKey of a free name: %v", err)
+	}
+	if err := db.BindKey(ctx, bern, key); err != nil {
+		t.Errorf("BindKey of the name to its own key: %v", err)
+	}
+	if err := db.BindKey(ctx, bern, other); err == nil {
+		t.Error("BindKey of the name to another key succeeded")
+	}
+	if bound, err := db.BoundKey(ctx, bern); err != nil || string(bound) != string(key) {
+		t.Errorf("BoundKey = (%q, %v), want (%q, nil)", bound, err, key)
+	}
+	if bound, err := db.BoundKey(ctx, extending); err != nil || bound != nil {
+		t.Errorf("BoundKey of the extending name = (%q, %v), want (nil, nil)", bound, err)
+	}
+	if err := db.BindKey(ctx, extending, other); err != nil {
+		t.Errorf("BindKey of the extending name: %v", err)
+	}
+	if _, err := db.DeleteExpiredChains(ctx, time.Date(2100, 1, 1, 0, 0, 0, 0, time.UTC)); err != nil {
+		t.Fatal(err)
+	}
+	if bound, err := db.BoundKey(ctx, bern); err != nil || string(bound) != string(key) {
+		t.Errorf("BoundKey after a sweep = (%q, %v), want (%q, nil)", bound, err, key)
 	}
 }
 

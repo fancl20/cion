@@ -6,7 +6,6 @@ import (
 	"hash"
 	"log/slog"
 	"net"
-	"slices"
 	"sort"
 	"sync"
 	"time"
@@ -387,25 +386,25 @@ func (b *Beaconer) recordBootstrap(ingress uint16, pcb *segment.PCB, add bool) {
 
 // BootstrapCore returns the ISD-AS a bootstrap beacon originated — the
 // freshest origin first, alternating across calls, so the destination a
-// node that has not pinned the TRC aims its core route at reaches every
+// node that has not pinned the TRC aims its founder route at reaches every
 // origin the beacons name: one origin's fresher beacons cannot starve
-// another's route, and the issuer's is the one a retrying enrollment
-// completes against. Once the TRC is pinned, only the origins it names
-// issuers take turns, as in the core route's other branches: a core without
-// a root certificate serves no renewal and hosts no voting application, and
-// a joining core whose onboarding submission lands there stops. Zero when no
-// origin qualifies. Beacons originate only at cores.
+// another's route, and the founder's is the one a retrying enrollment
+// completes against. Once the TRC is pinned, only the founder it names
+// qualifies, as in the founder route's other branches: no other core serves
+// first issuance or hosts the voting application, and a joining core whose
+// onboarding submission lands elsewhere stops. Zero when no origin
+// qualifies. Beacons originate only at cores.
 func (b *Beaconer) BootstrapCore() addr.IA {
-	issuers, err := b.engine.IssuerASes(b.ia.ISD())
+	founder, err := b.engine.FounderAS(b.ia.ISD())
 	if err != nil {
-		slog.Error("Enumerating the issuer cores", "err", err)
+		slog.Error("Reading the founding core", "err", err)
 		return 0
 	}
 	b.bootstrapMtx.Lock()
 	defer b.bootstrapMtx.Unlock()
 	origins := make([]addr.IA, 0, len(b.bootstraps))
 	for origin := range b.bootstraps {
-		if len(issuers) == 0 || slices.Contains(issuers, origin) {
+		if founder.IsZero() || origin.Equal(founder) {
 			origins = append(origins, origin)
 		}
 	}

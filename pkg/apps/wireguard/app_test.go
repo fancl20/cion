@@ -127,6 +127,12 @@ func (d *flippableTrustDB) SignedTRC(context.Context, cppki.TRCID) (cppki.Signed
 func (d *flippableTrustDB) InsertTRC(context.Context, cppki.SignedTRC) (bool, error) {
 	return false, nil
 }
+func (d *flippableTrustDB) BoundKey(context.Context, addr.IA) ([]byte, error) {
+	return nil, nil
+}
+func (d *flippableTrustDB) BindKey(context.Context, addr.IA, []byte) error {
+	return nil
+}
 func (d *flippableTrustDB) Close() error { return nil }
 
 // recordingRegs records the service registrations the application makes.
@@ -617,7 +623,7 @@ func TestWireguardClosesTheDirectoryClientConn(t *testing.T) {
 	a, _ := newTestWireguard(t, addr.MustIAFrom(20, 0xff0000000253),
 		&flippableTrustDB{}, func(cfg *Config) {
 			cfg.Store = nil
-			cfg.CoreRoute = func() *scion.Addr { return nil }
+			cfg.FounderRoute = func() *scion.Addr { return nil }
 		})
 	a.Close()
 	assertReadsClosed(t, "the directory client's conn after Close", a.dirConn.conn)

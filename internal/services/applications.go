@@ -42,7 +42,7 @@ func (n *node) setupApplications() error {
 // identity and role, the state root, the control host, the domain and the
 // HTTPS server's origin, the trust engine and path provider, the issued
 // chains, the sending conn, the node's bus, the service-socket registration,
-// the admission authorizer, the core route the joiner's directory fetch
+// the admission authorizer, the founder route the joiner's directory fetch
 // rides, the relay derivation's inputs with the harness's placement among
 // them, the directory pacing, the control plane's TRC decision the voting
 // application hands its submissions to, the control-endpoint mounting behind
@@ -68,7 +68,7 @@ func (n *node) appEnvironment() *apps.Environment {
 		UnregisterSvc:   n.unregisterSvc,
 		Authorizer:      n.cfg.enrollAuth,
 		TRCDecision:     n.trcDecision,
-		CoreRoute:       n.coreRoute,
+		FounderRoute:    n.founderRoute,
 		DirectoryPacing: n.cfg.Pacing.Directory,
 		MountControlEndpoint: func(pattern string, handler http.Handler) {
 			n.services.Mounts = append(n.services.Mounts, scionrpc.Mount{

@@ -6,6 +6,7 @@ import (
 	"crypto/x509"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -131,26 +132,21 @@ func TestAssembleRotation(t *testing.T) {
 		t.Errorf("grace period = %v, want the AS certificate validity %v", got, ASValidity)
 	}
 	// The staged certificates replace their counterparts in place, over fresh
-	// keys under the same distinguished names; the joiner's certificate the
-	// predecessor carries rides unchanged.
-	var joinerCert *x509.Certificate
-	for _, cert := range pred.TRC.Certificates {
-		if certIA, err := cppki.ExtractIA(cert.Subject); err == nil && certIA.Equal(joinerIA) {
-			joinerCert = cert
-		}
-	}
-	if joinerCert == nil {
+	// keys of the same class naming the same ISD-AS; the joiner's
+	// certificates the predecessor carries ride unchanged.
+	joinerCerts := CertsOf(pred.TRC, joinerIA)
+	if len(joinerCerts) == 0 {
 		t.Fatal("the predecessor carries no certificate of the joiner")
 	}
 	replaced := 0
 	for i, cert := range trc.Certificates {
 		switch {
-		case cert.Equal(joinerCert):
+		case slices.ContainsFunc(joinerCerts, cert.Equal):
 			if pred.TRC.Certificates[i].Equal(cert) {
 				continue // carried in place
 			}
-			t.Error("the carried certificate moved inside the set")
-		case sameSubject(cert.Subject, pred.TRC.Certificates[i].Subject):
+			t.Error("a carried certificate moved inside the set")
+		case sameHolder(cert, pred.TRC.Certificates[i]):
 			replaced++
 			if cert.Equal(pred.TRC.Certificates[i]) {
 				t.Error("the replaced certificate is the predecessor's own")
@@ -371,11 +367,12 @@ func liveCoreKeys(t *testing.T, state string) CoreKeys {
 }
 
 // newRollFixture brings up the joiner of an onboarded founder — the caster
-// deciding on the founder's pinned newest — and the joiner's live voting
-// pair.
+// deciding on the founder's pinned newest — with the joiner's live voting and
+// issuing material, and its issuer anchored in the founder's newest.
 func newRollFixture(
 	t *testing.T,
-) (f *rotationFixture, joiner, founderDB trustdb.DB, caster *fakeCaster, state string) {
+) (f *rotationFixture, joiner, founderDB trustdb.DB, caster *fakeCaster, state string,
+	issuer *Issuer) {
 
 	t.Helper()
 	f = newRotationFixture(t)
@@ -392,26 +389,56 @@ func newRollFixture(
 		}
 	}
 	state = t.TempDir()
-	writeVotingPair(t, state, f.joiner.key, f.joiner.cert)
-	return f, joiner, founderDB, &fakeCaster{keys: f.founder.keys, db: founderDB}, state
+	ca, err := generateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeVotingPair(t, state, f.joiner.voting.Key, f.joiner.voting.Cert)
+	writeRootPair(t, state, f.joiner.root.Key, f.joiner.root.Cert)
+	writeKey(t, state, CAKeyFile, ca)
+	issuer, err = NewIssuer(joinerIA, IssuerKeys{Root: f.joiner.root.Key, CA: ca}, f.pred)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !issuer.Anchored() {
+		t.Fatal("the joiner's issuer is not anchored in the TRC carrying its root")
+	}
+	caster = &fakeCaster{keys: f.founder.keys, db: founderDB}
+	return f, joiner, founderDB, caster, state, issuer
 }
 
-// TestRollVotingKey checks the authoritative core's roll end to end: the
+// roll runs the joiner's roll against the fixture's founder.
+func roll(
+	t *testing.T,
+	joiner, founderDB trustdb.DB,
+	caster *fakeCaster,
+	state string,
+	issuer *Issuer,
+) error {
+
+	t.Helper()
+	return RollCoreMaterial(context.Background(), joiner, founderRemote{db: founderDB}, caster,
+		joinerIA, state, issuer)
+}
+
+// TestRollCoreMaterial checks the authoritative core's roll end to end: the
 // submission resolves the founder's newest, the successor replaces exactly
-// the joiner's certificate, both sides pin, and the staged pair becomes the
-// live pair. The routine roll is a regular update the joiner's live key
-// votes on, the founder casting nothing; a live pair the newest TRC does not
-// name re-rolls by sensitive update, the founder voting.
-func TestRollVotingKey(t *testing.T) {
-	f, joiner, founderDB, caster, state := newRollFixture(t)
+// the joiner's voting and root certificates, both sides pin, the issuer
+// issues under the fresh root, and the staged material becomes the live
+// material. The routine roll is a regular update the joiner's live keys
+// sign — the voting key's signature its vote, the root key's the
+// acknowledgment the replaced root owes — the founder casting nothing; a
+// live root key or a live voting key the newest TRC does not cover re-rolls
+// by sensitive update, the founder voting.
+func TestRollCoreMaterial(t *testing.T) {
+	f, joiner, founderDB, caster, state, issuer := newRollFixture(t)
 	ctx := context.Background()
 
-	if err := RollVotingKey(ctx, joiner, founderRemote{db: founderDB}, caster,
-		joinerIA, state); err != nil {
-
+	if err := roll(t, joiner, founderDB, caster, state, issuer); err != nil {
 		t.Fatalf("the roll failed: %v", err)
 	}
 	successor := cppki.TRCID{ISD: coreIA.ISD(), Base: 1, Serial: f.pred.TRC.ID.Serial + 1}
+	original := []*x509.Certificate{f.joiner.voting.Cert, f.joiner.root.Cert}
 	for name, db := range map[string]trustdb.DB{
 		"the joiner": joiner, "the founder": founderDB,
 	} {
@@ -422,10 +449,7 @@ func TestRollVotingKey(t *testing.T) {
 		if pinned.IsZero() {
 			t.Fatalf("%s pinned no successor", name)
 		}
-		rolled := CertsOf(pinned.TRC, joinerIA)
-		if len(rolled) != 1 || rolled[0].Equal(f.joiner.cert) {
-			t.Errorf("%s's successor carries the joiner's old certificate", name)
-		}
+		checkRolled(t, pinned, original)
 		if !CoreNamed(pinned.TRC, coreIA) {
 			t.Errorf("%s's successor dropped the founder's material", name)
 		}
@@ -434,7 +458,8 @@ func TestRollVotingKey(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	checkLivePair(t, state, pinned)
+	checkLiveMaterial(t, state, pinned)
+	checkIssuesUnder(t, issuer, pinned)
 	update, err := pinned.TRC.ValidateUpdate(&f.pred.TRC)
 	if err != nil {
 		t.Fatal(err)
@@ -442,74 +467,89 @@ func TestRollVotingKey(t *testing.T) {
 	if update.Type != cppki.RegularUpdate {
 		t.Errorf("the routine roll's update type = %v, want a regular update", update.Type)
 	}
-	if len(pinned.SignerInfos) != 2 {
-		t.Errorf("the routine roll carries %d signer infos, want the vote and the possession proof",
-			len(pinned.SignerInfos))
+	if len(update.RootAcknowledgments) != 1 ||
+		!update.RootAcknowledgments[0].Equal(f.joiner.root.Cert) {
+
+		t.Errorf("root acknowledgments = %v, want the replaced root's", update.RootAcknowledgments)
+	}
+	if len(pinned.SignerInfos) != 4 {
+		t.Errorf("the routine roll carries %d signer infos, want the vote, the "+
+			"acknowledgment, and the two possession proofs", len(pinned.SignerInfos))
 	}
 	if caster.votes != 0 {
 		t.Errorf("the founder voted %d times on the routine roll, want none", caster.votes)
 	}
 
-	// The mismatch roll: a live pair the newest TRC's certificate does not
-	// cover — an operator's replacement — rolls again, and the rules accept
-	// the successor.
-	stranger, err := generateKey()
-	if err != nil {
-		t.Fatal(err)
-	}
-	strangerCert, err := createVotingCert(joinerIA, stranger, false,
-		time.Now().UTC().Add(signingBackdate).Truncate(time.Second))
-	if err != nil {
-		t.Fatal(err)
-	}
-	writeVotingPair(t, state, stranger, strangerCert)
-	if err := RollVotingKey(ctx, joiner, founderRemote{db: founderDB}, caster,
-		joinerIA, state); err != nil {
-
-		t.Fatalf("the mismatch roll failed: %v", err)
-	}
-	rerolled := cppki.TRCID{ISD: coreIA.ISD(), Base: 1, Serial: successor.Serial + 1}
-	repinned, err := joiner.SignedTRC(ctx, rerolled)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if repinned.IsZero() {
-		t.Fatal("the re-roll pinned no successor")
-	}
-	rolled := CertsOf(repinned.TRC, joinerIA)
-	if len(rolled) != 1 || rolled[0].Equal(f.joiner.cert) {
-		t.Error("the re-roll carried the joiner's original certificate")
-	}
-	checkLivePair(t, state, repinned)
-	update, err = repinned.TRC.ValidateUpdate(&pinned.TRC)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if update.Type != cppki.SensitiveUpdate {
-		t.Errorf("the re-roll's update type = %v, want a sensitive update", update.Type)
-	}
-	if caster.votes != 1 {
-		t.Errorf("the founder voted %d times after the re-roll, want 1", caster.votes)
+	// The mismatch rolls: a live root key, then a live voting key, the
+	// newest TRC's certificate does not cover — an operator's replacement —
+	// each rolls again by sensitive update, and the rules accept the
+	// successor.
+	now := time.Now().UTC().Add(signingBackdate).Truncate(time.Second)
+	for i, replace := range []func(key crypto.Signer){
+		func(key crypto.Signer) {
+			cert, err := createRootCert(joinerIA, key, now)
+			if err != nil {
+				t.Fatal(err)
+			}
+			writeRootPair(t, state, key, cert)
+		},
+		func(key crypto.Signer) {
+			cert, err := createVotingCert(joinerIA, key, false, now)
+			if err != nil {
+				t.Fatal(err)
+			}
+			writeVotingPair(t, state, key, cert)
+		},
+	} {
+		stranger, err := generateKey()
+		if err != nil {
+			t.Fatal(err)
+		}
+		replace(stranger)
+		pred := pinned
+		if err := roll(t, joiner, founderDB, caster, state, issuer); err != nil {
+			t.Fatalf("mismatch roll %d failed: %v", i, err)
+		}
+		rerolled := cppki.TRCID{ISD: coreIA.ISD(), Base: 1, Serial: pred.TRC.ID.Serial + 1}
+		pinned, err = joiner.SignedTRC(ctx, rerolled)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if pinned.IsZero() {
+			t.Fatalf("mismatch roll %d pinned no successor", i)
+		}
+		checkRolled(t, pinned, CertsOf(pred.TRC, joinerIA))
+		checkLiveMaterial(t, state, pinned)
+		checkIssuesUnder(t, issuer, pinned)
+		update, err := pinned.TRC.ValidateUpdate(&pred.TRC)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if update.Type != cppki.SensitiveUpdate {
+			t.Errorf("mismatch roll %d's update type = %v, want a sensitive update", i, update.Type)
+		}
+		if caster.votes != i+1 {
+			t.Errorf("the founder voted %d times after mismatch roll %d, want %d",
+				caster.votes, i, i+1)
+		}
 	}
 }
 
-// TestRollVotingKeyRefused checks the roll whose submission never lands: the
-// live pair is untouched, the fresh pair stays staged, and nothing pins on
-// either side; the retry with the founder taking submissions again submits
-// the staged certificate and lands.
-func TestRollVotingKeyRefused(t *testing.T) {
-	f, joiner, founderDB, caster, state := newRollFixture(t)
+// TestRollCoreMaterialRefused checks the roll whose submission never lands:
+// the live material is untouched, the fresh material stays staged, and
+// nothing pins on either side; the retry with the founder taking submissions
+// again submits the staged certificates and lands.
+func TestRollCoreMaterialRefused(t *testing.T) {
+	f, joiner, founderDB, caster, state, issuer := newRollFixture(t)
 	caster.holds = true
 	ctx := context.Background()
 
-	before := livePair(t, state)
-	if err := RollVotingKey(ctx, joiner, founderRemote{db: founderDB}, caster,
-		joinerIA, state); err == nil {
-
+	before := liveMaterial(t, state)
+	if err := roll(t, joiner, founderDB, caster, state, issuer); err == nil {
 		t.Fatal("the refused roll succeeded")
 	}
-	if after := livePair(t, state); string(before) != string(after) {
-		t.Error("the refused roll replaced the live pair")
+	if after := liveMaterial(t, state); string(before) != string(after) {
+		t.Error("the refused roll replaced the live material")
 	}
 	staged := stagedVotingCert(t, state)
 	successor := cppki.TRCID{ISD: coreIA.ISD(), Base: 1, Serial: f.pred.TRC.ID.Serial + 1}
@@ -526,9 +566,7 @@ func TestRollVotingKeyRefused(t *testing.T) {
 	}
 
 	caster.holds = false
-	if err := RollVotingKey(ctx, joiner, founderRemote{db: founderDB}, caster,
-		joinerIA, state); err != nil {
-
+	if err := roll(t, joiner, founderDB, caster, state, issuer); err != nil {
 		t.Fatalf("the retried roll failed: %v", err)
 	}
 	pinned, err := joiner.SignedTRC(ctx, successor)
@@ -538,29 +576,29 @@ func TestRollVotingKeyRefused(t *testing.T) {
 	if pinned.IsZero() {
 		t.Fatal("the retried roll pinned no successor")
 	}
-	if rolled := CertsOf(pinned.TRC, joinerIA); len(rolled) != 1 || !rolled[0].Equal(staged) {
-		t.Error("the retry did not submit the staged certificate")
+	if !slices.ContainsFunc(CertsOf(pinned.TRC, joinerIA), staged.Equal) {
+		t.Error("the retry did not submit the staged certificates")
 	}
-	checkLivePair(t, state, pinned)
+	checkLiveMaterial(t, state, pinned)
+	checkIssuesUnder(t, issuer, pinned)
 }
 
-// TestRollVotingKeyLostAnswer checks the roll whose answer is lost after the
-// founder pinned it: the live pair is untouched and the fresh pair stays
-// staged, and the next roll finds the founder's newest naming the staged
-// pair and promotes it without a submission.
-func TestRollVotingKeyLostAnswer(t *testing.T) {
-	f, joiner, founderDB, caster, state := newRollFixture(t)
+// TestRollCoreMaterialLostAnswer checks the roll whose answer is lost after
+// the founder pinned it: the live material is untouched and the fresh
+// material stays staged, and the next roll finds the founder's newest naming
+// the staged material and promotes it without a submission, the issuer
+// taking the promoted keys.
+func TestRollCoreMaterialLostAnswer(t *testing.T) {
+	f, joiner, founderDB, caster, state, issuer := newRollFixture(t)
 	caster.loses = true
 	ctx := context.Background()
 
-	before := livePair(t, state)
-	if err := RollVotingKey(ctx, joiner, founderRemote{db: founderDB}, caster,
-		joinerIA, state); err == nil {
-
+	before := liveMaterial(t, state)
+	if err := roll(t, joiner, founderDB, caster, state, issuer); err == nil {
 		t.Fatal("the roll whose answer was lost succeeded")
 	}
-	if after := livePair(t, state); string(before) != string(after) {
-		t.Error("the roll whose answer was lost replaced the live pair")
+	if after := liveMaterial(t, state); string(before) != string(after) {
+		t.Error("the roll whose answer was lost replaced the live material")
 	}
 	successor := cppki.TRCID{ISD: coreIA.ISD(), Base: 1, Serial: f.pred.TRC.ID.Serial + 1}
 	landed, err := founderDB.SignedTRC(ctx, successor)
@@ -570,17 +608,13 @@ func TestRollVotingKeyLostAnswer(t *testing.T) {
 	if landed.IsZero() {
 		t.Fatal("the founder pinned no successor")
 	}
-	if rolled := CertsOf(landed.TRC, joinerIA); len(rolled) != 1 ||
-		!rolled[0].Equal(stagedVotingCert(t, state)) {
-
-		t.Fatal("the founder's successor does not name the staged pair")
+	if !slices.ContainsFunc(CertsOf(landed.TRC, joinerIA), stagedVotingCert(t, state).Equal) {
+		t.Fatal("the founder's successor does not name the staged material")
 	}
 
 	// The caster still loses every answer: the roll completes without one.
 	submissions := caster.submissions
-	if err := RollVotingKey(ctx, joiner, founderRemote{db: founderDB}, caster,
-		joinerIA, state); err != nil {
-
+	if err := roll(t, joiner, founderDB, caster, state, issuer); err != nil {
 		t.Fatalf("the roll after the lost answer failed: %v", err)
 	}
 	if n := caster.submissions - submissions; n != 0 {
@@ -593,15 +627,18 @@ func TestRollVotingKeyLostAnswer(t *testing.T) {
 	if string(pinned.Raw) != string(landed.Raw) {
 		t.Fatal("the joiner did not pin the founder's successor")
 	}
-	checkLivePair(t, state, pinned)
+	checkLiveMaterial(t, state, pinned)
+	checkIssuesUnder(t, issuer, pinned)
 }
 
-// livePair reads the joiner's live key and certificate files, for the
+// liveMaterial reads the joiner's live key and certificate files, for the
 // untouched-files check.
-func livePair(t *testing.T, state string) []byte {
+func liveMaterial(t *testing.T, state string) []byte {
 	t.Helper()
 	var raw []byte
-	for _, file := range []string{RegularKeyFile, RegularVotingCertFile} {
+	for _, file := range []string{RegularKeyFile, RegularVotingCertFile, RootKeyFile,
+		RootCertFile, CAKeyFile} {
+
 		b, err := os.ReadFile(filepath.Join(keyDir(state), file))
 		if err != nil {
 			t.Fatal(err)
@@ -611,32 +648,69 @@ func livePair(t *testing.T, state string) []byte {
 	return raw
 }
 
-// checkLivePair fails the test unless the joiner's live key and certificate
-// load as a pair, the certificate the one the TRC names for the joiner, and
-// no staged file remains.
-func checkLivePair(t *testing.T, state string, trc cppki.SignedTRC) {
+// checkRolled fails the test unless the TRC names two certificates of the
+// joiner, neither among the replaced ones.
+func checkRolled(t *testing.T, trc cppki.SignedTRC, replaced []*x509.Certificate) {
 	t.Helper()
-	named := CertsOf(trc.TRC, joinerIA)
-	if len(named) != 1 {
-		t.Fatalf("%v names %d certificates of the joiner, want 1", trc.TRC.ID, len(named))
+	rolled := CertsOf(trc.TRC, joinerIA)
+	if len(rolled) != 2 {
+		t.Fatalf("%v names %d certificates of the joiner, want 2", trc.TRC.ID, len(rolled))
 	}
-	key, err := LoadOrCreateVotingKey(state)
+	for _, cert := range rolled {
+		if slices.ContainsFunc(replaced, cert.Equal) {
+			t.Errorf("%v carries a replaced certificate of the joiner", trc.TRC.ID)
+		}
+	}
+}
+
+// checkLiveMaterial fails the test unless the joiner's live voting pair and
+// root pair load, each certificate the one the TRC names for the joiner, and
+// no staged file remains.
+func checkLiveMaterial(t *testing.T, state string, trc cppki.SignedTRC) {
+	t.Helper()
+	votingKey, err := LoadOrCreateVotingKey(state)
 	if err != nil {
 		t.Fatal(err)
 	}
-	cert, err := LoadOrCreateVotingCert(state, joinerIA, key)
+	votingCert, err := LoadOrCreateVotingCert(state, joinerIA, votingKey)
 	if err != nil {
-		t.Fatalf("the live pair does not load: %v", err)
+		t.Fatalf("the live voting pair does not load: %v", err)
 	}
-	if !cert.Equal(named[0]) {
-		t.Errorf("the live certificate is not the one %v names", trc.TRC.ID)
+	keys, err := LoadOrCreateIssuerKeys(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rootCert, err := LoadOrCreateRootCert(state, joinerIA, keys.Root)
+	if err != nil {
+		t.Fatalf("the live root pair does not load: %v", err)
+	}
+	for _, cert := range []*x509.Certificate{votingCert, rootCert} {
+		if !slices.ContainsFunc(CertsOf(trc.TRC, joinerIA), cert.Equal) {
+			t.Errorf("the live certificate %s is not one %v names", cert.Subject, trc.TRC.ID)
+		}
 	}
 	if hasStaged(t, state) {
 		t.Error("the staged file outlived its promotion")
 	}
 }
 
-// stagedVotingCert reads the certificate the joiner's roll staged.
+// checkIssuesUnder fails the test unless a chain the issuer issues verifies
+// against the TRC alone.
+func checkIssuesUnder(t *testing.T, issuer *Issuer, trc cppki.SignedTRC) {
+	t.Helper()
+	csr, _ := newChainCSR(t, nodeIA)
+	chain, err := issuer.IssueChain(csr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cppki.VerifyChain(chain, cppki.VerifyOptions{
+		TRC: []*cppki.TRC{&trc.TRC},
+	}); err != nil {
+		t.Errorf("the issued chain does not verify against %v alone: %v", trc.TRC.ID, err)
+	}
+}
+
+// stagedVotingCert reads the voting certificate the joiner's roll staged.
 func stagedVotingCert(t *testing.T, state string) *x509.Certificate {
 	t.Helper()
 	blocks, err := readStaged(state)
@@ -661,7 +735,7 @@ func TestAnchorPoolRidesGrace(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		f := newGenesisFixture(t)
 		ctx := context.Background()
-		issuer, err := NewIssuer(coreIA, f.keys, f.trc)
+		issuer, err := NewIssuer(coreIA, f.keys.IssuerKeys, f.trc)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -693,7 +767,7 @@ func TestAnchorPoolRidesGrace(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := issuer.Rekey(fresh, completed); err != nil {
+		if err := issuer.Rekey(fresh.IssuerKeys, completed); err != nil {
 			t.Fatal(err)
 		}
 		promoteFounder(t, f.dir, completed)
@@ -729,7 +803,7 @@ func TestAnchorPoolRidesGrace(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := issuer.Rekey(fresh2, completed2); err != nil {
+		if err := issuer.Rekey(fresh2.IssuerKeys, completed2); err != nil {
 			t.Fatal(err)
 		}
 		pool = anchors()
@@ -780,4 +854,69 @@ func newChainCSR(t *testing.T, ia addr.IA) (*x509.CertificateRequest, crypto.Sig
 		t.Fatal(err)
 	}
 	return csr, key
+}
+
+// TestFounderRootTakesTheHoldersName checks the founder's root minted under
+// the name every root once shared: the roll pairs the fresh root with it by
+// class and ISD-AS, and the successor carries the root under its holder's
+// name, verifying against the predecessor.
+func TestFounderRootTakesTheHoldersName(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	keys, err := LoadOrCreateCoreKeys(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Add(signingBackdate).Truncate(time.Second)
+	sensitive, err := createVotingCert(coreIA, keys.Sensitive, true, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	regular, err := createVotingCert(coreIA, keys.Regular, false, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	shared, err := createRootCert(coreIA, keys.Root, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The root under the shared name: the same construction, renamed.
+	tmpl := *shared
+	tmpl.Subject, tmpl.RawSubject = subject(coreIA, "cp root"), nil
+	legacy, err := createCertificate(&tmpl, &tmpl, keys.Root.Public(), keys.Root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if legacy.Subject.CommonName != "cp root" {
+		t.Fatalf("the legacy root is named %q, want the shared name", legacy.Subject.CommonName)
+	}
+	base, err := signTRC(cppki.TRC{
+		Version:           1,
+		ID:                cppki.TRCID{ISD: coreIA.ISD(), Base: 1, Serial: 1},
+		Validity:          cppki.Validity{NotBefore: now, NotAfter: now.Add(TRCValidity)},
+		Quorum:            1,
+		CoreASes:          []addr.AS{coreIA.AS()},
+		AuthoritativeASes: []addr.AS{coreIA.AS()},
+		Description:       "a base TRC from before roots named their holders",
+		Certificates:      []*x509.Certificate{sensitive, regular, legacy},
+	}, keys)
+	if err != nil {
+		t.Fatal(err)
+	}
+	db := newTestDB(t)
+	if _, err := db.InsertTRC(ctx, base); err != nil {
+		t.Fatal(err)
+	}
+
+	_, completed, err := RotateCoreKeys(ctx, db, dir, coreIA, base)
+	if err != nil {
+		t.Fatalf("the roll of the root under the shared name failed: %v", err)
+	}
+	root := heldCert(completed.TRC, coreIA, cppki.Root)
+	if root == nil || root.Subject.CommonName != coreIA.String()+" cp root" {
+		t.Errorf("the rolled root = %v, want it named after its holder", root)
+	}
+	if err := completed.Verify(&base.TRC); err != nil {
+		t.Errorf("the successor does not verify against the predecessor: %v", err)
+	}
 }

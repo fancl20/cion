@@ -354,3 +354,32 @@ Beside the decisions:
 *   **The labs and benchmarks** hold.
 
 ## Implementation history
+
+*   Landed as proposed: the issuing keys and the root certificate
+    ([keys.go](/pkg/core/trust/keys.go), [certs.go](/pkg/core/trust/certs.go)),
+    the onboarding ([update.go](/pkg/core/trust/update.go)) and the
+    decision's gates ([trccast.go](/pkg/core/trust/trccast.go)), the issuer
+    ([issuer.go](/pkg/core/trust/issuer.go)), the renewals
+    ([lifecycle.go](/pkg/core/trust/lifecycle.go),
+    [renewal.go](/pkg/core/trust/renewal.go)), the bindings
+    ([binding.go](/pkg/core/trust/binding.go),
+    [trustdb.go](/pkg/modules/trustdb/trustdb.go)), the trust service
+    ([trustservice.go](/pkg/core/controlplane/trustservice.go)), the issuer
+    remote ([peerclient.go](/pkg/core/controlplane/peerclient.go)), the
+    routes ([controlplane.go](/internal/services/controlplane.go)), and the
+    authoritative core's roll ([rotation.go](/pkg/core/trust/rotation.go)).
+    Beside the plan:
+    *   The labs' threshold renews a node within seconds of each issuance
+        rather than at every inspection: an authoritative core onboards only
+        at a pass that renews nothing.
+    *   The founder route has no unit test of its own. The join labs route
+        an enrollment and a submission past an authoritative neighbor, and
+        the bootstrap route's filter has its unit test.
+    *   The two-core path lab checks nothing new. Within a lab's span the
+        founder still holds each node's first chain, under the key every
+        renewal keeps, so it verifies a renewed node's registrations without
+        asking the registrant; proposal 0094's unit tests cover that route.
+    *   Against the node before this proposal, with the threshold's override
+        alone, the founder-down lab fails: both nodes renew while the
+        founder runs, and neither renews in the minute after its stop, every
+        attempt failing to reach the founder.

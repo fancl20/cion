@@ -25,10 +25,10 @@ import (
 // presenting the node's certificate chain and verifying the core's against
 // the pinned TRC — so the core's verified chain identifies the publisher.
 type rpcDirectoryClient struct {
-	conn      *scion.Conn
-	engine    *Engine
-	resolver  localPaths
-	coreRoute func() *scion.Addr
+	conn         *scion.Conn
+	engine       *Engine
+	resolver     localPaths
+	founderRoute func() *scion.Addr
 
 	// qclt is the one QUIC transport every dial rides.
 	qclt *quic.Transport
@@ -47,16 +47,16 @@ type rpcDirectoryClient struct {
 // endpoint.
 func newRPCDirectoryClient(
 	conn *scion.Conn,
-	coreRoute func() *scion.Addr,
+	founderRoute func() *scion.Addr,
 	engine *Engine,
 	resolver localPaths,
 ) *rpcDirectoryClient {
 	return &rpcDirectoryClient{
-		conn:      conn,
-		engine:    engine,
-		resolver:  resolver,
-		coreRoute: coreRoute,
-		qclt:      &quic.Transport{Conn: conn},
+		conn:         conn,
+		engine:       engine,
+		resolver:     resolver,
+		founderRoute: founderRoute,
+		qclt:         &quic.Transport{Conn: conn},
 	}
 }
 
@@ -72,7 +72,7 @@ func (c *rpcDirectoryClient) Close() error {
 // endpoint's, which its keep-alives would otherwise hold open, unused, until
 // the age cap's next sweep.
 func (c *rpcDirectoryClient) client() (wireguardv1connect.DirectoryServiceClient, error) {
-	core := c.coreRoute()
+	core := c.founderRoute()
 	if core == nil {
 		return nil, errors.New("no route to the core's directory yet")
 	}

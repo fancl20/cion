@@ -13,6 +13,7 @@ import (
 	"github.com/fancl20/cion/pkg/libs/statefile"
 	"github.com/fancl20/cion/pkg/modules/trustdb"
 
+	"github.com/scionproto/scion/pkg/addr"
 	"github.com/scionproto/scion/pkg/scrypto/cppki"
 	"go.etcd.io/bbolt"
 )
@@ -23,7 +24,7 @@ type bboltDB struct {
 
 // New opens the trust database at path, creating it if needed.
 func New(path string, opts *bbolt.Options) (trustdb.DB, error) {
-	db, err := statefile.OpenBolt(path, opts, "chains", "trcs")
+	db, err := statefile.OpenBolt(path, opts, "chains", "trcs", "bindings")
 	if err != nil {
 		return nil, err
 	}
@@ -229,6 +230,34 @@ func (b *bboltDB) InsertTRC(ctx context.Context, trc cppki.SignedTRC) (bool, err
 
 	return !existed, nil
 }
+
+// BoundKey returns the subject key ID the ISD-AS is bound to, nil when it is
+// bound to none.
+func (b *bboltDB) BoundKey(ctx context.Context, ia addr.IA) ([]byte, error) {
+	var skid []byte
+	err := b.db.View(func(tx *bbolt.Tx) error {
+		skid = slices.Clone(tx.Bucket([]byte("bindings")).Get([]byte(ia.String())))
+		return nil
+	})
+	return skid, err
+}
+
+// BindKey binds the ISD-AS to the subject key ID unless it is bound already:
+// to the same key it stays as it is, to another the binding is refused.
+func (b *bboltDB) BindKey(ctx context.Context, ia addr.IA, skid []byte) error {
+	return b.db.Update(func(tx *bbolt.Tx) error {
+		bindings := tx.Bucket([]byte("bindings"))
+		name := []byte(ia.String())
+		if bound := bindings.Get(name); bound != nil {
+			if !bytes.Equal(bound, skid) {
+				return fmt.Errorf("ISD-AS %s is bound to another key", ia)
+			}
+			return nil
+		}
+		return bindings.Put(name, skid)
+	})
+}
+
 func (b *bboltDB) Close() error {
 	return b.db.Close()
 }

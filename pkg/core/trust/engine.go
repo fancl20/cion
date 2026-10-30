@@ -246,7 +246,7 @@ func (e *Engine) CoreASes(isd addr.ISD) ([]addr.IA, error) {
 
 // IssuerASes returns the ASes of the given ISD a root certificate in the
 // newest pinned TRC names as its subject — exactly the nodes that can serve
-// a chain renewal, the signal enrollment's core route selects by. An empty
+// a chain renewal, the signal renewal's issuer routes select by. An empty
 // result means the TRC is not pinned.
 func (e *Engine) IssuerASes(isd addr.ISD) ([]addr.IA, error) {
 	trc, err := e.newestLocalTRC()
@@ -269,6 +269,29 @@ func (e *Engine) IssuerASes(isd addr.ISD) ([]addr.IA, error) {
 		issuers = append(issuers, addr.MustIAFrom(isd, ia.AS()))
 	}
 	return issuers, nil
+}
+
+// FounderAS returns the founding core of the given ISD: the AS the newest
+// pinned TRC's sensitive voting certificate names as its subject, the one
+// core that serves first issuance and decides TRC submissions. Zero means
+// the TRC is not pinned.
+func (e *Engine) FounderAS(isd addr.ISD) (addr.IA, error) {
+	trc, err := e.newestLocalTRC()
+	if err != nil {
+		return 0, err
+	}
+	if trc.IsZero() {
+		return 0, nil
+	}
+	sensitive, err := SignerCert(trc.TRC, cppki.Sensitive)
+	if err != nil {
+		return 0, err
+	}
+	ia, err := cppki.ExtractIA(sensitive.Subject)
+	if err != nil {
+		return 0, serrors.Wrap("extracting the sensitive voting certificate's ISD-AS", err)
+	}
+	return addr.MustIAFrom(isd, ia.AS()), nil
 }
 
 // NewestChain returns the chain for ia with the latest expiration among the

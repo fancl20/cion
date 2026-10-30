@@ -36,7 +36,7 @@ func serveCore(t *testing.T, n *testNode, wpki *webpkitest.CA) *trusttest.Founde
 		t.Fatal(err)
 	}
 	tlsConf := certMgr.TLSConfig()
-	svc := &TrustService{DB: f.DB, Issuer: f.Issuer}
+	svc := &TrustService{DB: f.DB, Issuer: f.Issuer, Enrolls: true}
 	// The server outlives the test's own thread — it serves until the test's
 	// context ends, just before cleanup — so it reports through the package
 	// logger and its cleanup waits for the exit.
@@ -88,7 +88,7 @@ func enrollNode(
 		return err
 	}
 	defer func() { _ = client.Close() }()
-	_, enrollErr := trust.RenewChain(ctx, db, client, n.IA, key)
+	_, enrollErr := trust.RenewChain(ctx, db, client, n.IA, key, nil)
 	return enrollErr
 }
 
@@ -210,7 +210,7 @@ func (nilRemote) Chains(ctx context.Context, q trustdb.ChainQuery) ([][]*x509.Ce
 }
 
 func (nilRemote) RenewChain(ctx context.Context, csr *x509.CertificateRequest,
-	key crypto.Signer) ([]*x509.Certificate, error) {
+	key crypto.Signer, chain []*x509.Certificate) ([]*x509.Certificate, error) {
 
 	return nil, errNilRemote
 }

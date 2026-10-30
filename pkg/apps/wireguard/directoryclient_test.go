@@ -48,8 +48,8 @@ func TestDirectoryClientReleasesTheReplacedEndpoint(t *testing.T) {
 	moved := &scion.Addr{IA: addr.MustIAFrom(20, 0xff0000000002), Service: SvcDirectory}
 	route := first
 	rpc := &rpcDirectoryClient{
-		coreRoute: func() *scion.Addr { return route },
-		hclt:      &http.Client{Transport: transport},
+		founderRoute: func() *scion.Addr { return route },
+		hclt:         &http.Client{Transport: transport},
 	}
 
 	ctx := t.Context()

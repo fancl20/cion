@@ -6,6 +6,7 @@ import (
 	"crypto/x509"
 	"errors"
 	"fmt"
+	"slices"
 
 	"github.com/scionproto/scion/pkg/addr"
 	"github.com/scionproto/scion/pkg/private/serrors"
@@ -36,20 +37,31 @@ type TRCCaster interface {
 	SubmitTRC(ctx context.Context, trc cppki.SignedTRC) (cppki.SignedTRC, error)
 }
 
+// KeyCert is a key and the certificate over it: a core's voting or root
+// material in the TRC.
+type KeyCert struct {
+	Key  crypto.Signer
+	Cert *x509.Certificate
+}
+
 // AssembleOnboarding builds the successor TRC that onboards an admitted
 // joiner as an authoritative core: the serial incremented on the same base,
-// the joiner's AS appended to the core and authoritative AS lists, its regular
-// voting certificate appended to the certificate set, and the quorum,
-// noTrustReset, and grace period untouched — a sensitive update, as cppki's
-// classification reads it. The votes field carries the predecessor's index of
-// the founder's sensitive voting certificate (PKI draft, Section 3.5.5), and
-// the validity is the window every certificate the successor carries still
-// covers — the joiner's fresh certificate never rules that window; the
+// the joiner's AS appended to the core and authoritative AS lists, its
+// regular voting certificate and its root certificate appended to the
+// certificate set, and the quorum, noTrustReset, and grace period untouched
+// — a sensitive update, as cppki's classification reads it. A joiner the
+// predecessor names a core already, onboarded before cores held roots,
+// gains its root certificate alone, a sensitive update too: it changes the
+// number of roots. The votes field carries the predecessor's index of the
+// founder's sensitive voting certificate (PKI draft, Section 3.5.5), and the
+// validity is the window every certificate the successor carries still
+// covers — the joiner's fresh certificates never rule that window; the
 // founder's carried ones do.
 func AssembleOnboarding(
 	pred cppki.SignedTRC,
 	joiner addr.IA,
 	votingCert *x509.Certificate,
+	rootCert *x509.Certificate,
 ) (cppki.TRC, error) {
 
 	if err := validateISD(joiner); err != nil {
@@ -59,18 +71,24 @@ func AssembleOnboarding(
 		return cppki.TRC{}, serrors.New("joiner outside the TRC's ISD",
 			"joiner", joiner, "isd", pred.TRC.ID.ISD)
 	}
-	if ct, err := cppki.ValidateCert(votingCert); err != nil || ct != cppki.Regular {
-		return cppki.TRC{}, serrors.New("the presented certificate is not a regular voting certificate")
-	}
-	if certIA, err := cppki.ExtractIA(votingCert.Subject); err != nil || !certIA.Equal(joiner) {
-		return cppki.TRC{}, serrors.New("the presented certificate names another ISD-AS",
-			"certificate", votingCert.Subject, "joiner", joiner)
-	}
-	for _, as := range pred.TRC.CoreASes {
-		if as == joiner.AS() {
-			return cppki.TRC{}, serrors.New("the joiner is already a core of the TRC",
-				"joiner", joiner, "trc", pred.TRC.ID)
+	for _, presented := range []struct {
+		cert  *x509.Certificate
+		class cppki.CertType
+	}{{votingCert, cppki.Regular}, {rootCert, cppki.Root}} {
+		if ct, err := cppki.ValidateCert(presented.cert); err != nil || ct != presented.class {
+			return cppki.TRC{}, serrors.New("the presented certificate is of another class",
+				"want", presented.class)
 		}
+		if certIA, err := cppki.ExtractIA(presented.cert.Subject); err != nil ||
+			!certIA.Equal(joiner) {
+
+			return cppki.TRC{}, serrors.New("the presented certificate names another ISD-AS",
+				"certificate", presented.cert.Subject, "joiner", joiner)
+		}
+	}
+	if Onboarded(pred.TRC, joiner) {
+		return cppki.TRC{}, serrors.New("the TRC already carries the joiner as a core with its root",
+			"joiner", joiner, "trc", pred.TRC.ID)
 	}
 	sensitiveIdx := -1
 	for i, cert := range pred.TRC.Certificates {
@@ -83,7 +101,17 @@ func AssembleOnboarding(
 		return cppki.TRC{}, serrors.New("the predecessor holds no sensitive voting certificate",
 			"trc", pred.TRC.ID)
 	}
-	certs := append(append([]*x509.Certificate{}, pred.TRC.Certificates...), votingCert)
+	certs := slices.Clone(pred.TRC.Certificates)
+	coreASes := slices.Clone(pred.TRC.CoreASes)
+	authoritativeASes := slices.Clone(pred.TRC.AuthoritativeASes)
+	description := fmt.Sprintf("CION root certificate of %s", joiner)
+	if !CoreNamed(pred.TRC, joiner) {
+		certs = append(certs, votingCert)
+		coreASes = append(coreASes, joiner.AS())
+		authoritativeASes = append(authoritativeASes, joiner.AS())
+		description = fmt.Sprintf("CION onboarding of %s", joiner)
+	}
+	certs = append(certs, rootCert)
 	return cppki.TRC{
 		Version:  1,
 		ID:       successorID(pred.TRC.ID),
@@ -94,24 +122,25 @@ func AssembleOnboarding(
 		NoTrustReset:      pred.TRC.NoTrustReset,
 		Votes:             []int{sensitiveIdx},
 		Quorum:            pred.TRC.Quorum,
-		CoreASes:          append(append([]addr.AS{}, pred.TRC.CoreASes...), joiner.AS()),
-		AuthoritativeASes: append(append([]addr.AS{}, pred.TRC.AuthoritativeASes...), joiner.AS()),
-		Description:       fmt.Sprintf("CION onboarding of %s", joiner),
+		CoreASes:          coreASes,
+		AuthoritativeASes: authoritativeASes,
+		Description:       description,
 		Certificates:      certs,
 	}, nil
 }
 
-// SignUpdate signs the assembled successor with the joining core's regular
-// voting key — the proof of possession the draft requires of every new voter
-// (PKI draft, Section 3.5.6). The artifact carries exactly the one
-// signature; the founder's sensitive vote is what completes it.
-func SignUpdate(
-	trc cppki.TRC,
-	key crypto.Signer,
-	cert *x509.Certificate,
-) (cppki.SignedTRC, error) {
-
-	return signTRCPayload(trc, []*x509.Certificate{cert}, []crypto.Signer{key})
+// SignUpdate signs the assembled successor with each key under its
+// certificate — the proof of possession the draft requires of every new
+// certificate (PKI draft, Section 3.5.6). The artifact carries exactly those
+// signatures; the founder's sensitive vote is what completes it.
+func SignUpdate(trc cppki.TRC, signers ...KeyCert) (cppki.SignedTRC, error) {
+	keys := make([]crypto.Signer, 0, len(signers))
+	certs := make([]*x509.Certificate, 0, len(signers))
+	for _, signer := range signers {
+		keys = append(keys, signer.Key)
+		certs = append(certs, signer.Cert)
+	}
+	return signTRCPayload(trc, certs, keys)
 }
 
 // CoSign adds the signer info the given key makes over the signed TRC,
@@ -143,38 +172,43 @@ func CoSign(
 	return cppki.DecodeSignedTRC(raw)
 }
 
-// JoinCore obtains voting power for the authoritative core by sensitive TRC
-// update: it resolves the founder's newest TRC — the drafts' numbers-less
-// ask, verified against the pinned chain and pinned — assembles the
-// successor onboarding itself, signs the proof of possession, and submits
-// the partially signed artifact to the founder's voting application, whose
-// control plane casts the sensitive vote and pins the completion. A core the
-// newest TRC already names casts nothing: the resolved TRC pins, and the
-// dance ends.
+// JoinCore onboards the authoritative core by sensitive TRC update: it
+// resolves the founder's newest TRC — the drafts' numbers-less ask, verified
+// against the pinned chain and pinned — assembles the successor onboarding
+// itself, signs the proofs of possession, and submits the partially signed
+// artifact to the founder's voting application, whose control plane casts
+// the sensitive vote and pins the completion. A core the newest TRC names
+// without its root signs for the root alone. A core the newest TRC already
+// carries with its root casts nothing: the resolved TRC pins, and the dance
+// ends.
 func JoinCore(
 	ctx context.Context,
 	db trustdb.DB,
 	remote Remote,
 	caster TRCCaster,
 	ia addr.IA,
-	key crypto.Signer,
-	cert *x509.Certificate,
+	voting KeyCert,
+	root KeyCert,
 ) error {
 
 	newest, err := pullNewestTRC(ctx, db, remote, ia.ISD())
 	if err != nil {
 		return err
 	}
-	if CoreNamed(newest.TRC, ia) {
+	if Onboarded(newest.TRC, ia) {
 		// The join already landed, whether here or before a restart: the
-		// newest names the core and nothing is cast.
+		// newest carries the core and nothing is cast.
 		return nil
 	}
-	trc, err := AssembleOnboarding(newest, ia, cert)
+	trc, err := AssembleOnboarding(newest, ia, voting.Cert, root.Cert)
 	if err != nil {
 		return err
 	}
-	partial, err := SignUpdate(trc, key, cert)
+	signers := []KeyCert{root}
+	if !CoreNamed(newest.TRC, ia) {
+		signers = []KeyCert{voting, root}
+	}
+	partial, err := SignUpdate(trc, signers...)
 	if err != nil {
 		return err
 	}
@@ -216,6 +250,22 @@ func CoreNamed(trc cppki.TRC, ia addr.IA) bool {
 		}
 	}
 	return false
+}
+
+// Onboarded reports whether the TRC names the ISD-AS a core and carries a
+// root certificate naming it: the core's onboarding has landed whole.
+func Onboarded(trc cppki.TRC, ia addr.IA) bool {
+	if !CoreNamed(trc, ia) {
+		return false
+	}
+	roots, err := trc.RootCerts()
+	if err != nil {
+		return false
+	}
+	return slices.ContainsFunc(roots, func(root *x509.Certificate) bool {
+		certIA, err := cppki.ExtractIA(root.Subject)
+		return err == nil && certIA.Equal(ia)
+	})
 }
 
 // SignerCert returns the voting certificate of the given type in the TRC's

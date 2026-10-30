@@ -12,16 +12,19 @@ import (
 type ASType int
 
 const (
-	// ASTypeNormal is a non-core AS. It holds no voting or CA key material
-	// and obtains its certificate chain by enrollment.
+	// ASTypeNormal is a non-core AS. It holds no voting or CA key material;
+	// it enrolls at the founding core and renews its chain at any core.
 	ASTypeNormal ASType = iota
 	// ASTypeAuthoritative is a core AS that joined its ISD over the network:
-	// it holds a regular voting certificate beside the AS key, enrolls and
-	// renews its chain like any node, and issues no trust material of its
-	// own — the founding core stays the ISD's sensitive voter and CA.
+	// it holds a regular voting certificate and the issuing material — a
+	// root certificate and a CA key — beside the AS key, and enrolls like
+	// any node. Once its root is in the TRC it issues its own chain and
+	// renews any node's; the founding core stays the ISD's sensitive voter
+	// and its only issuer of first chains.
 	ASTypeAuthoritative
 	// ASTypeCore is the founding core of an ISD. It self-issues the base
-	// TRC and signs certificate chains for the ISD.
+	// TRC and signs certificate chains for the ISD, every first chain among
+	// them.
 	ASTypeCore
 )
 

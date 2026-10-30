@@ -1105,7 +1105,7 @@ func TestPathProviderCompose(t *testing.T) {
 
 // TestPathProviderBootstrap checks the enrollment route fallback: before the
 // TRC is pinned, the reversed unverified beacon — already extended with the
-// node's own hop — serves the core route.
+// node's own hop — serves the founder route.
 func TestPathProviderBootstrap(t *testing.T) {
 	fx := newLookupFixture(t)
 	db, err := pathdbbbolt.New(filepath.Join(t.TempDir(), "path.db"), nil)

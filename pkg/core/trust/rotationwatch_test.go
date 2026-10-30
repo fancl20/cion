@@ -46,7 +46,7 @@ func (r trcRemote) Chains(
 
 func (r trcRemote) RenewChain(
 	ctx context.Context, csr *x509.CertificateRequest,
-	key crypto.Signer) ([]*x509.Certificate, error) {
+	key crypto.Signer, chain []*x509.Certificate) ([]*x509.Certificate, error) {
 
 	return nil, serrors.New("the rotation watch tests renew no chains")
 }
@@ -317,7 +317,7 @@ func replaceKeyFiles(t *testing.T, from, to string, files ...string) {
 
 // authoritativeRotationFixture is an onboarded authoritative core — the
 // founder's decision beside it, its admission policy allowing — with its
-// live voting pair and the watch over it.
+// live voting and root material, its issuer, and the watch over them.
 type authoritativeRotationFixture struct {
 	db        trustdb.DB
 	state     string
@@ -334,21 +334,6 @@ type authoritativeRotationFixture struct {
 	auth *authtest.Recorder
 }
 
-// enroll issues the joiner a fresh chain on the founder, the gate the
-// decision asks — the enrollment loop's renewal the test stands in for once
-// the fake clock has outlived the chain it holds.
-func (f *authoritativeRotationFixture) enroll(t *testing.T) {
-	t.Helper()
-	csr, _ := trusttest.NewCSR(t, joinerIATest)
-	chain, err := f.issuer.IssueChain(csr)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := f.founderDB.InsertChain(context.Background(), chain); err != nil {
-		t.Fatal(err)
-	}
-}
-
 func newAuthoritativeRotationFixture(t *testing.T) *authoritativeRotationFixture {
 	t.Helper()
 	f := newFounder(t)
@@ -359,7 +344,7 @@ func newAuthoritativeRotationFixture(t *testing.T) *authoritativeRotationFixture
 		Sensitive:  f.Keys.Sensitive,
 		Authorizer: auth,
 	}
-	// The joiner enrolled and onboarded: the founder's newest names it.
+	// The joiner onboarded: the founder's newest carries it with its root.
 	state := t.TempDir()
 	key, err := trust.LoadOrCreateVotingKey(state)
 	if err != nil {
@@ -369,19 +354,20 @@ func newAuthoritativeRotationFixture(t *testing.T) *authoritativeRotationFixture
 	if err != nil {
 		t.Fatal(err)
 	}
-	csr, _ := trusttest.NewCSR(t, joinerIATest)
-	chain, err := f.Issuer.IssueChain(csr)
+	keys, err := trust.LoadOrCreateIssuerKeys(state)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.DB.InsertChain(context.Background(), chain); err != nil {
-		t.Fatal(err)
-	}
-	onboarding, err := trust.AssembleOnboarding(f.TRC, joinerIATest, cert)
+	rootCert, err := trust.LoadOrCreateRootCert(state, joinerIATest, keys.Root)
 	if err != nil {
 		t.Fatal(err)
 	}
-	partial, err := trust.SignUpdate(onboarding, key, cert)
+	onboarding, err := trust.AssembleOnboarding(f.TRC, joinerIATest, cert, rootCert)
+	if err != nil {
+		t.Fatal(err)
+	}
+	partial, err := trust.SignUpdate(onboarding, trust.KeyCert{Key: key, Cert: cert},
+		trust.KeyCert{Key: keys.Root, Cert: rootCert})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -395,19 +381,23 @@ func newAuthoritativeRotationFixture(t *testing.T) *authoritativeRotationFixture
 			t.Fatal(err)
 		}
 	}
+	issuer, err := trust.NewIssuer(joinerIATest, keys, pinnedAt(t, f.DB, 2))
+	if err != nil {
+		t.Fatal(err)
+	}
 	remote := trcRemote{db: f.DB}
 	caster := deciderCaster{decider: decider, presenter: joinerIATest}
 	cfg := trust.RotationConfig{
 		IA:              joinerIATest,
 		DB:              db,
 		State:           state,
-		Roll:            trust.AuthoritativeRoll(remote, caster),
+		Roll:            trust.AuthoritativeRoll(remote, caster, issuer),
 		RetryInterval:   time.Millisecond,
 		InspectInterval: 7 * time.Minute,
 	}
 	return &authoritativeRotationFixture{
 		db: db, state: state, cfg: cfg, remote: remote, caster: caster,
-		issuer: f.Issuer, founderDB: f.DB, decider: decider, auth: auth,
+		issuer: issuer, founderDB: f.DB, decider: decider, auth: auth,
 	}
 }
 
@@ -428,9 +418,10 @@ func (c deciderCaster) SubmitTRC(
 // fake-time bubble: material beyond the threshold only inspects, material
 // within it submits the roll through the channel its join used — a regular
 // update the founder pins without asking its policy, both sides pinning, the
-// staged pair promoted to the live files — and the mismatch trigger rolls at
-// the next pass whatever the calendar says, by a sensitive update the policy
-// is asked of once.
+// staged material promoted to the live files, the issuer issuing under the
+// fresh root — and the mismatch trigger, a replaced voting pair or a
+// replaced root pair, rolls at the next pass whatever the calendar says, by
+// a sensitive update the policy is asked of once.
 func TestAuthoritativeRotationPasses(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		f := newAuthoritativeRotationFixture(t)
@@ -447,7 +438,6 @@ func TestAuthoritativeRotationPasses(t *testing.T) {
 		// Approaching expiry: the clock advances past the threshold — the
 		// roll submits and pins on both sides.
 		time.Sleep(trust.VotingValidity - trust.RotationThreshold + time.Minute)
-		f.enroll(t)
 		if got := trust.RotationPass(f.cfg, ctx); got != time.Millisecond {
 			t.Errorf("pass interval = %v, want the retry interval", got)
 		}
@@ -455,7 +445,8 @@ func TestAuthoritativeRotationPasses(t *testing.T) {
 		if pinned.IsZero() {
 			t.Fatal("the roll pinned no successor")
 		}
-		checkLiveVotingPair(t, f.state, pinned)
+		checkLiveCoreMaterial(t, f.state, pinned)
+		checkIssuesUnder(t, f.issuer, pinned)
 		if got := updateType(t, pinned, pinnedAt(t, f.db, 2)); got != cppki.RegularUpdate {
 			t.Errorf("the routine roll's update type = %v, want a regular update", got)
 		}
@@ -464,21 +455,26 @@ func TestAuthoritativeRotationPasses(t *testing.T) {
 				len(f.auth.Asked))
 		}
 
-		// The mismatch: a replaced pair rolls at the next pass.
-		replaceVotingPair(t, f.state)
-		if got := trust.RotationPass(f.cfg, ctx); got != time.Millisecond {
-			t.Errorf("pass interval = %v, want the retry interval on the mismatch", got)
-		}
-		mismatch := pinnedAt(t, f.db, 4)
-		if mismatch.IsZero() {
-			t.Fatal("the mismatch roll pinned no successor")
-		}
-		if got := updateType(t, mismatch, pinned); got != cppki.SensitiveUpdate {
-			t.Errorf("the mismatch roll's update type = %v, want a sensitive update", got)
-		}
-		if len(f.auth.Asked) != 1 {
-			t.Errorf("the mismatch roll asked the founder's policy %d times, want 1",
-				len(f.auth.Asked))
+		// The mismatches: a replaced pair rolls at the next pass.
+		for i, replace := range []func(t *testing.T, state string){replaceVotingPair, replaceRootPair} {
+			pred := pinnedAt(t, f.db, scrypto.Version(3+i))
+			replace(t, f.state)
+			if got := trust.RotationPass(f.cfg, ctx); got != time.Millisecond {
+				t.Errorf("pass interval = %v, want the retry interval on mismatch %d", got, i)
+			}
+			mismatch := pinnedAt(t, f.db, scrypto.Version(4+i))
+			if mismatch.IsZero() {
+				t.Fatalf("mismatch roll %d pinned no successor", i)
+			}
+			if got := updateType(t, mismatch, pred); got != cppki.SensitiveUpdate {
+				t.Errorf("mismatch roll %d's update type = %v, want a sensitive update", i, got)
+			}
+			if len(f.auth.Asked) != i+1 {
+				t.Errorf("mismatch roll %d asked the founder's policy %d times in all, want %d",
+					i, len(f.auth.Asked), i+1)
+			}
+			checkLiveCoreMaterial(t, f.state, mismatch)
+			checkIssuesUnder(t, f.issuer, mismatch)
 		}
 	})
 }
@@ -493,10 +489,9 @@ func TestAuthoritativeRotationLostAnswer(t *testing.T) {
 		f := newAuthoritativeRotationFixture(t)
 		ctx := context.Background()
 		caster := &losingCaster{TRCCaster: f.caster}
-		f.cfg.Roll = trust.AuthoritativeRoll(f.remote, caster)
+		f.cfg.Roll = trust.AuthoritativeRoll(f.remote, caster, f.issuer)
 
 		time.Sleep(trust.VotingValidity - trust.RotationThreshold + time.Minute)
-		f.enroll(t)
 		if got := trust.RotationPass(f.cfg, ctx); got != time.Millisecond {
 			t.Errorf("pass interval = %v, want the retry interval", got)
 		}
@@ -519,7 +514,8 @@ func TestAuthoritativeRotationLostAnswer(t *testing.T) {
 		if string(pinned.Raw) != string(landed.Raw) {
 			t.Fatal("the joiner did not pin the founder's successor")
 		}
-		checkLiveVotingPair(t, f.state, pinned)
+		checkLiveCoreMaterial(t, f.state, pinned)
+		checkIssuesUnder(t, f.issuer, pinned)
 		if got := trust.RotationPass(f.cfg, ctx); got != 7*time.Minute {
 			t.Errorf("pass interval = %v, want the inspection interval once complete", got)
 		}
@@ -558,7 +554,7 @@ func TestAuthoritativeRotationPendingFallback(t *testing.T) {
 		if diff := cmp.Diff(auth.asked[0].Keys, auth.asked[1].Keys); diff != "" {
 			t.Errorf("the retry asked about other keys (-first +retry):\n%s", diff)
 		}
-		checkLiveVotingPair(t, f.state, pinned)
+		checkLiveCoreMaterial(t, f.state, pinned)
 	})
 }
 
@@ -614,25 +610,50 @@ func replaceVotingPair(t *testing.T, state string) {
 	replaceKeyFiles(t, stranger, state, trust.RegularKeyFile, trust.RegularVotingCertFile)
 }
 
-// checkLiveVotingPair fails the test unless the joiner's live key and
-// certificate load as a pair, the certificate the one the TRC names for the
-// joiner, and no staged file remains.
-func checkLiveVotingPair(t *testing.T, state string, trc cppki.SignedTRC) {
+// replaceRootPair replaces the joiner's live root pair with a stranger's,
+// the operator's replacement of the node's root material.
+func replaceRootPair(t *testing.T, state string) {
+	t.Helper()
+	stranger := t.TempDir()
+	keys, err := trust.LoadOrCreateIssuerKeys(stranger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := trust.LoadOrCreateRootCert(stranger, joinerIATest, keys.Root); err != nil {
+		t.Fatal(err)
+	}
+	replaceKeyFiles(t, stranger, state, trust.RootKeyFile, trust.RootCertFile)
+}
+
+// checkLiveCoreMaterial fails the test unless the joiner's live voting pair
+// and root pair load, the certificates the two the TRC names for the joiner,
+// and no staged file remains.
+func checkLiveCoreMaterial(t *testing.T, state string, trc cppki.SignedTRC) {
 	t.Helper()
 	named := trust.CertsOf(trc.TRC, joinerIATest)
-	if len(named) != 1 {
-		t.Fatalf("%v names %d certificates of the joiner, want 1", trc.TRC.ID, len(named))
+	if len(named) != 2 {
+		t.Fatalf("%v names %d certificates of the joiner, want 2", trc.TRC.ID, len(named))
 	}
 	key, err := trust.LoadOrCreateVotingKey(state)
 	if err != nil {
 		t.Fatal(err)
 	}
-	cert, err := trust.LoadOrCreateVotingCert(state, joinerIATest, key)
+	votingCert, err := trust.LoadOrCreateVotingCert(state, joinerIATest, key)
 	if err != nil {
-		t.Fatalf("the live pair does not load: %v", err)
+		t.Fatalf("the live voting pair does not load: %v", err)
 	}
-	if !cert.Equal(named[0]) {
-		t.Errorf("the live certificate is not the one %v names", trc.TRC.ID)
+	keys, err := trust.LoadOrCreateIssuerKeys(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rootCert, err := trust.LoadOrCreateRootCert(state, joinerIATest, keys.Root)
+	if err != nil {
+		t.Fatalf("the live root pair does not load: %v", err)
+	}
+	for _, cert := range []*x509.Certificate{votingCert, rootCert} {
+		if !slices.ContainsFunc(named, cert.Equal) {
+			t.Errorf("the live certificate %s is not one %v names", cert.Subject, trc.TRC.ID)
+		}
 	}
 	checkNoStaged(t, state)
 }

@@ -132,7 +132,7 @@ type Authorizer struct {
 // askKey names one identity: the boundary asking, the exchange's claim,
 // and a digest of the presented keys' fingerprints, so two strangers
 // claiming one name present two asks and the operator approves at most one
-// — the name-taken check settles the loser on its next retry. The digest
+// — the name's binding settles the loser on its next retry. The digest
 // is what an answer button carries; the standing decision it resolves
 // holds the fingerprints in full.
 type askKey struct {

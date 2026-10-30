@@ -179,10 +179,14 @@ provider and the neighbor table.
 
 The founding core self-issues the TRC and anchors it in the WebPKI through
 its identity. A joiner's first fetch of the core is the only WebPKI-anchored
-exchange; enrollment then issues the chain that authenticates everything the
-node says thereafter, and renewal is automatic. First issuance is the
+exchange; enrollment at the founding core then issues the chain that
+authenticates everything the node says thereafter. First issuance is the
 admission gate, where enrollment policy — if a deployment selects one —
-decides on the verified facts of the exchange.
+decides on the verified facts of the exchange, and it binds the node's
+ISD-AS to its key for good. Every core's root is in the TRC, and renewal is
+automatic at any of them: a node renews on its current chain over the
+authenticated channel, and a core renews its own chain itself
+([ADR-0033](/docs/adrs/0033-renew-chains-at-every-core.md)).
 
 ### Path discovery
 

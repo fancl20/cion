@@ -26,9 +26,9 @@ type Submitter struct {
 	// hclt is the verified peer channel's HTTP client, the node's peer
 	// client's own.
 	hclt *http.Client
-	// coreRoute resolves the core's endpoint, the route the drafts' RPCs
-	// already take.
-	coreRoute func() *scion.Addr
+	// founderRoute resolves the founding core's endpoint, the route the
+	// drafts' RPCs already take.
+	founderRoute func() *scion.Addr
 
 	mtx sync.Mutex
 	// clt serves the current core endpoint; the authority it is keyed by
@@ -38,8 +38,8 @@ type Submitter struct {
 }
 
 // NewSubmitter builds the submitter over the verified peer channel.
-func NewSubmitter(hclt *http.Client, coreRoute func() *scion.Addr) *Submitter {
-	return &Submitter{hclt: hclt, coreRoute: coreRoute}
+func NewSubmitter(hclt *http.Client, founderRoute func() *scion.Addr) *Submitter {
+	return &Submitter{hclt: hclt, founderRoute: founderRoute}
 }
 
 // SubmitTRC hands the signed successor to the core's voting application and
@@ -52,7 +52,7 @@ func (s *Submitter) SubmitTRC(
 	trc cppki.SignedTRC,
 ) (cppki.SignedTRC, error) {
 
-	core := s.coreRoute()
+	core := s.founderRoute()
 	if core == nil {
 		return cppki.SignedTRC{}, errors.New("no route to the core yet")
 	}

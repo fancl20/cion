@@ -12,6 +12,8 @@ import (
 	"testing/synctest"
 	"time"
 
+	"github.com/google/go-cmp/cmp"
+	"github.com/google/go-cmp/cmp/cmpopts"
 	"github.com/scionproto/scion/pkg/addr"
 	"github.com/scionproto/scion/pkg/scrypto/cppki"
 	"github.com/scionproto/scion/pkg/scrypto/signed"
@@ -425,25 +427,37 @@ func TestVerifierRefusesExpiredChain(t *testing.T) {
 }
 
 // newOnboardedFixture is an engine fixture whose ISD has onboarding behind
-// it: the successor TRC naming a second core is pinned beside the base, and
-// the node's chain still verifies against the successor's carried root.
+// it: the successor TRC naming a second core, with its root, is pinned
+// beside the base, and the node's chain still verifies against the
+// successor's carried root.
 func newOnboardedFixture(t *testing.T) *engineFixture {
 	t.Helper()
 	f := newEngineFixture(t)
-	joinerKey, err := trust.LoadOrCreateVotingKey(t.TempDir())
+	state := t.TempDir()
+	votingKey, err := trust.LoadOrCreateVotingKey(state)
 	if err != nil {
 		t.Fatal(err)
 	}
-	cert, err := trust.LoadOrCreateVotingCert(t.TempDir(), joinerCoreIA, joinerKey)
+	votingCert, err := trust.LoadOrCreateVotingCert(state, joinerCoreIA, votingKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	issuerKeys, err := trust.LoadOrCreateIssuerKeys(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rootCert, err := trust.LoadOrCreateRootCert(state, joinerCoreIA, issuerKeys.Root)
 	if err != nil {
 		t.Fatal(err)
 	}
 	pred := f.trc
-	trc, err := trust.AssembleOnboarding(pred, joinerCoreIA, cert)
+	trc, err := trust.AssembleOnboarding(pred, joinerCoreIA, votingCert, rootCert)
 	if err != nil {
 		t.Fatal(err)
 	}
-	partial, err := trust.SignUpdate(trc, joinerKey, cert)
+	partial, err := trust.SignUpdate(trc,
+		trust.KeyCert{Key: votingKey, Cert: votingCert},
+		trust.KeyCert{Key: issuerKeys.Root, Cert: rootCert})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -498,8 +512,10 @@ func TestEngineCoreASesReadNewest(t *testing.T) {
 }
 
 // TestEngineIssuerASes checks the issuer signal: the ASes a root certificate
-// in the newest pinned TRC names as its subject — the founder alone, for the
-// on-boarded core holds no root certificate of its own.
+// in the newest pinned TRC names as its subject — the founder and the
+// on-boarded core, whose root the onboarding carried — and the founder
+// signal: the founder alone, the holder of the sensitive voting
+// certificate.
 func TestEngineIssuerASes(t *testing.T) {
 	f := newOnboardedFixture(t)
 
@@ -507,8 +523,13 @@ func TestEngineIssuerASes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(issuers) != 1 || !issuers[0].Equal(iaCore) {
-		t.Errorf("issuer ASes = %v, want the founder %v alone", issuers, iaCore)
+	if diff := cmp.Diff([]addr.IA{iaCore, joinerCoreIA}, issuers, cmpopts.SortSlices(
+		func(a, b addr.IA) bool { return a < b })); diff != "" {
+
+		t.Errorf("issuer ASes (-want +got):\n%s", diff)
+	}
+	if founder, err := f.engine.FounderAS(iaCore.ISD()); err != nil || !founder.Equal(iaCore) {
+		t.Errorf("founder AS = %v (%v), want %v", founder, err, iaCore)
 	}
 
 	// Without a pinned TRC there is no signal at all.
@@ -520,5 +541,8 @@ func TestEngineIssuerASes(t *testing.T) {
 	engine := trust.NewEngine(iaNode, f.asKey, &trust.NetworkProvider{DB: fresh})
 	if issuers, err := engine.IssuerASes(iaCore.ISD()); err != nil || len(issuers) != 0 {
 		t.Errorf("issuer ASes without a pinned TRC = %v (%v), want none", issuers, err)
+	}
+	if founder, err := engine.FounderAS(iaCore.ISD()); err != nil || !founder.IsZero() {
+		t.Errorf("founder AS without a pinned TRC = %v (%v), want none", founder, err)
 	}
 }

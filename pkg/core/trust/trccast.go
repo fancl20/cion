@@ -9,10 +9,10 @@ import (
 	"net/netip"
 	"slices"
 	"sync"
-	"time"
 
 	"github.com/scionproto/scion/pkg/addr"
 	"github.com/scionproto/scion/pkg/private/serrors"
+	"github.com/scionproto/scion/pkg/scrypto/cms/protocol"
 	"github.com/scionproto/scion/pkg/scrypto/cppki"
 
 	"github.com/fancl20/cion/pkg/modules/enrollauth"
@@ -27,7 +27,7 @@ import (
 // the completed artifact verified against the newest pinned TRC before it
 // pins. The founder's own casts run through CastLocal instead.
 type TRCDecider struct {
-	// DB serves and pins the founder's TRCs and chains.
+	// DB serves and pins the founder's TRCs.
 	DB trustdb.DB
 	// IA is the founding core's ISD-AS, the ISD the updates belong to.
 	IA addr.IA
@@ -51,12 +51,14 @@ type TRCDecider struct {
 // submitted. A submission whose landing the newest pinned TRC already
 // carries is answered with that TRC — the idempotent re-presentation, read
 // from what the submission holds, never from the presenter's name. Otherwise
-// the update must classify against the newest pinned TRC and the presenter
-// must be the channel's verified peer holding an enrolled chain. Past those
-// gates a submission that verifies as submitted pins as it is, the founder
-// signing nothing; a sensitive update that does not verify yet gets the
-// founder's vote on the admission policy's allow; anything else is refused.
-// What refuses pins nothing.
+// the update must classify against the newest pinned TRC, the presenter must
+// be the channel's verified peer — the channel admits a chain only if it
+// verifies against the founder's pinned TRC, whichever core issued it — and
+// what the submission adds must be the presenter's. Past those gates a
+// submission that verifies as submitted pins as it is, the founder signing
+// nothing; a sensitive update that does not verify yet gets the founder's
+// vote on the admission policy's allow; anything else is refused. What
+// refuses pins nothing.
 func (c *TRCDecider) DecideTRC(
 	ctx context.Context,
 	presenter addr.IA,
@@ -88,18 +90,8 @@ func (c *TRCDecider) DecideTRC(
 			"against the newest pinned TRC", err, "submitted", trc.TRC.ID,
 			"predecessor", newest.TRC.ID)
 	}
-	// The enrolled core's gate: the submission is an enrolled core's, never
-	// the enrollment's shortcut.
-	chains, err := c.DB.Chains(ctx, trustdb.ChainQuery{
-		IA:       presenter,
-		Validity: cppki.Validity{NotBefore: time.Now(), NotAfter: time.Now()},
-	})
-	if err != nil {
-		return cppki.SignedTRC{}, serrors.Wrap("querying the presenter's chains", err)
-	}
-	if len(chains) == 0 {
-		return cppki.SignedTRC{}, serrors.New("the submitting core holds no chain yet; "+
-			"enroll before submitting", "presenter", presenter)
+	if err := presentersOwn(trc, newest.TRC, presenter); err != nil {
+		return cppki.SignedTRC{}, err
 	}
 	// A submission carrying every signature its update requires — a regular
 	// update its voters signed — pins as submitted.
@@ -158,6 +150,37 @@ func landed(sub, newest cppki.TRC) bool {
 		}
 	}
 	return true
+}
+
+// presentersOwn checks that what the submission adds is its presenter's:
+// every certificate the successor adds names the presenter, and every root
+// certificate it adds signed the submission, its proof of possession (PKI
+// draft, Section 3.5.6) — cppki checks a new voter's alone.
+func presentersOwn(sub cppki.SignedTRC, pred cppki.TRC, presenter addr.IA) error {
+	for _, cert := range novelCerts(sub.TRC, pred) {
+		if certIA, err := cppki.ExtractIA(cert.Subject); err != nil || !certIA.Equal(presenter) {
+			return serrors.New("the submission adds a certificate of another ISD-AS",
+				"presenter", presenter, "subject", cert.Subject)
+		}
+		if ct, err := cppki.ValidateCert(cert); err == nil && ct == cppki.Root &&
+			!signedBy(sub, cert) {
+
+			return serrors.New("the submission adds a root certificate that did not sign it",
+				"presenter", presenter, "subject", cert.Subject)
+		}
+	}
+	return nil
+}
+
+// signedBy reports whether a signature over the signed TRC verifies under
+// the certificate.
+func signedBy(signed cppki.SignedTRC, cert *x509.Certificate) bool {
+	return slices.ContainsFunc(signed.SignerInfos, func(si protocol.SignerInfo) bool {
+		if _, err := si.FindCertificate([]*x509.Certificate{cert}); err != nil {
+			return false
+		}
+		return verifySignerInfo(si, cert, signed.TRC.Raw) == nil
+	})
 }
 
 // novelCerts returns the certificates the successor holds that the

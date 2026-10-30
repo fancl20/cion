@@ -2,7 +2,10 @@ package controlplane
 
 import (
 	"context"
+	"crypto"
 	"crypto/x509"
+	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"sync"
@@ -189,6 +192,94 @@ func (f peerFetcher) trustClient() (*Client, error) {
 // the entry they confirm.
 func (c *PeerClient) OneHopClient() *http.Client {
 	return c.oneHopHCLT
+}
+
+// Issuers returns the trust remote that asks the issuers the routes list —
+// the cores whose root the TRC carries — over the mutually verified channel:
+// TRCs, chains, and chain renewals, each asked of the issuer whose turn it
+// is. A call that fails moves the remote's next call to the next issuer the
+// routes list, so a renewal retried moves on from an issuer that does not
+// answer.
+func (c *PeerClient) Issuers(routes func() []*scion.Addr) trust.Remote {
+	return &issuerRemote{client: c, routes: routes}
+}
+
+// issuerRemote asks the issuers the routes list in turn.
+type issuerRemote struct {
+	client *PeerClient
+	routes func() []*scion.Addr
+
+	mtx  sync.Mutex
+	turn int
+}
+
+// issuer returns the client of the issuer whose turn it is.
+func (r *issuerRemote) issuer() (*Client, error) {
+	routes := r.routes()
+	if len(routes) == 0 {
+		return nil, errors.New("no issuer is reachable")
+	}
+	r.mtx.Lock()
+	peer := routes[r.turn%len(routes)]
+	r.mtx.Unlock()
+	return r.client.client(peer, r.client.verifiedHCLT, r.client.verifiedClt), nil
+}
+
+// failed moves the remote's next call to the next issuer.
+func (r *issuerRemote) failed() {
+	r.mtx.Lock()
+	defer r.mtx.Unlock()
+	r.turn++
+}
+
+func (r *issuerRemote) TRC(ctx context.Context, id cppki.TRCID) (cppki.SignedTRC, error) {
+	clt, err := r.issuer()
+	if err != nil {
+		return cppki.SignedTRC{}, err
+	}
+	resp, err := clt.TRC(ctx, connect.NewRequest(trust.TRCRequest(id)))
+	if err != nil {
+		r.failed()
+		return cppki.SignedTRC{}, err
+	}
+	return cppki.DecodeSignedTRC(resp.Msg.Trc)
+}
+
+func (r *issuerRemote) Chains(ctx context.Context, q trustdb.ChainQuery) ([][]*x509.Certificate, error) {
+	clt, err := r.issuer()
+	if err != nil {
+		return nil, err
+	}
+	resp, err := clt.Chains(ctx, connect.NewRequest(trust.ChainsRequest(q)))
+	if err != nil {
+		r.failed()
+		return nil, err
+	}
+	return trust.ParseChains(resp.Msg)
+}
+
+func (r *issuerRemote) RenewChain(
+	ctx context.Context,
+	csr *x509.CertificateRequest,
+	key crypto.Signer,
+	chain []*x509.Certificate,
+) ([]*x509.Certificate, error) {
+
+	clt, err := r.issuer()
+	if err != nil {
+		return nil, err
+	}
+	cmsReq, err := trust.BuildRenewalRequest(csr, key, chain)
+	if err != nil {
+		return nil, fmt.Errorf("building renewal request: %w", err)
+	}
+	resp, err := clt.ChainRenewal(ctx, connect.NewRequest(
+		&cppb.ChainRenewalRequest{CmsSignedRequest: cmsReq}))
+	if err != nil {
+		r.failed()
+		return nil, err
+	}
+	return trust.ParseRenewalResponse(resp.Msg.CmsSignedResponse)
 }
 
 // Close releases the underlying QUIC transport.

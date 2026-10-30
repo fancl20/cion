@@ -37,12 +37,11 @@ const seedValidity = 6 * time.Hour
 // seedFounder writes the founding core's pre-seeded state: the identity, the
 // four live keys, and the trust database pinning the base TRC the
 // material signs — the founder's three certificates and the authoritative's
-// one, all short-dated, both ASes named cores.
+// voting and root certificates, all short-dated, both ASes named cores.
 func seedFounder(
 	t *testing.T,
 	founderIA, authIA addr.IA,
-	authKey crypto.Signer,
-	authCert *x509.Certificate,
+	authVoting, authRoot trust.KeyCert,
 ) (string, cppki.SignedTRC) {
 
 	t.Helper()
@@ -60,8 +59,9 @@ func seedFounder(
 	// earliest end: each mint takes its own truncated clock, and the TRC's
 	// window must sit inside each certificate's own whatever second a mint
 	// fell on.
-	validity := cppki.Validity{NotBefore: authCert.NotBefore, NotAfter: authCert.NotAfter}
-	for _, cert := range []*x509.Certificate{sensitive, regular, root} {
+	certs := []*x509.Certificate{sensitive, regular, root, authVoting.Cert, authRoot.Cert}
+	validity := cppki.Validity{NotBefore: root.NotBefore, NotAfter: root.NotAfter}
+	for _, cert := range certs {
 		if cert.NotBefore.After(validity.NotBefore) {
 			validity.NotBefore = cert.NotBefore
 		}
@@ -79,11 +79,11 @@ func seedFounder(
 			founderIA.AS(), authIA.AS(),
 		},
 		Description:  "CION seeded rotation lab TRC",
-		Certificates: []*x509.Certificate{sensitive, regular, root, authCert},
+		Certificates: certs,
 	}
 	signed, err := trust.SignRotation(trc,
-		[]crypto.Signer{keys.Sensitive, keys.Regular, authKey},
-		[]*x509.Certificate{sensitive, regular, authCert})
+		[]crypto.Signer{keys.Sensitive, keys.Regular, authVoting.Key},
+		[]*x509.Certificate{sensitive, regular, authVoting.Cert})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -104,18 +104,26 @@ func seedFounder(
 }
 
 // seedAuthoritative writes the authoritative core's pre-seeded state: the
-// identity and the short-dated voting pair.
-func seedAuthoritative(t *testing.T, ia addr.IA) (string, crypto.Signer, *x509.Certificate) {
+// identity, the short-dated voting pair, and the issuing keys beside the
+// short-dated root certificate over the root key. It returns the voting and
+// root pairs beside the state directory.
+func seedAuthoritative(t *testing.T, ia addr.IA) (string, trust.KeyCert, trust.KeyCert) {
 	t.Helper()
 	state := t.TempDir()
-	key, err := trust.LoadOrCreateVotingKey(state)
+	votingKey, err := trust.LoadOrCreateVotingKey(state)
 	if err != nil {
 		t.Fatal(err)
 	}
-	cert := mintVotingCert(t, ia, key, false)
+	issuer, err := trust.LoadOrCreateIssuerKeys(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	voting := trust.KeyCert{Key: votingKey, Cert: mintVotingCert(t, ia, votingKey, false)}
+	root := trust.KeyCert{Key: issuer.Root, Cert: mintRootCert(t, ia, issuer.Root)}
 	persistIAFile(t, state, ia)
-	persistCertFile(t, state, trust.RegularVotingCertFile, cert)
-	return state, key, cert
+	persistCertFile(t, state, trust.RegularVotingCertFile, voting.Cert)
+	persistCertFile(t, state, trust.RootCertFile, root.Cert)
+	return state, voting, root
 }
 
 // mintKey mints a fresh ECDSA P-256 key.
@@ -175,7 +183,8 @@ func mintVotingCert(t *testing.T, ia addr.IA, key crypto.Signer, sensitive bool)
 	return createSeedCert(t, tmpl, tmpl, key.Public(), key)
 }
 
-// mintRootCert mints the self-signed CP root certificate over the key.
+// mintRootCert mints the self-signed CP root certificate over the key, its
+// common name naming its holder, as the production certificate's does.
 func mintRootCert(t *testing.T, ia addr.IA, key crypto.Signer) *x509.Certificate {
 	t.Helper()
 	skid, err := cppki.SubjectKeyID(key.Public())
@@ -192,7 +201,7 @@ func mintRootCert(t *testing.T, ia addr.IA, key crypto.Signer) *x509.Certificate
 		SignatureAlgorithm:    x509.ECDSAWithSHA256,
 		Version:               cppki.CertVersion,
 		SerialNumber:          new(big.Int).SetBytes(serial),
-		Subject:               seedSubject(ia, "cp root"),
+		Subject:               seedSubject(ia, ia.String()+" cp root"),
 		NotBefore:             now,
 		NotAfter:              now.Add(seedValidity),
 		KeyUsage:              x509.KeyUsageCertSign,
@@ -264,14 +273,16 @@ func persistCertFile(t *testing.T, state, name string, cert *x509.Certificate) {
 // TestCoresRotateByTRCUpdate is the rotation seam's integration proof: a
 // founder and an authoritative core whose state is pre-seeded so each
 // holder's material approaches expiry — the founder's watch casts its own
-// roll by sensitive update, the authoritative's submits its own by regular
-// update, both pin, and the ladder's serials stay monotone; the founder's
-// pre-pin chain verifies through the window its rung opened; a third node
-// discovers the successors from the founder's signed messages, and it and
-// the founder leave the replaced root; a node enrolled after the founder's
-// pin holds a chain under the fresh root; replacing the authoritative's live
-// voting pair fires the mismatch roll at the next pass, a sensitive update
-// the founder votes on at its admission policy's allow.
+// roll by sensitive update, the authoritative's submits the roll of its
+// voting and root certificates by regular update, both pin, and the
+// ladder's serials stay monotone; the founder's pre-pin chain verifies
+// through the window its rung opened; a third node discovers the successors
+// from the founder's signed messages, and it and the founder leave the
+// replaced root, and the authoritative's chain comes to issue under its
+// fresh root; a node enrolled after the founder's pin holds a chain under
+// the fresh root; replacing the authoritative's live voting pair fires the
+// mismatch roll at the next pass, a sensitive update the founder votes on
+// at its admission policy's allow.
 func TestCoresRotateByTRCUpdate(t *testing.T) {
 	t.Parallel()
 	wpki := webpkitest.New(t)
@@ -286,8 +297,8 @@ func TestCoresRotateByTRCUpdate(t *testing.T) {
 		t.Fatal(err)
 	}
 	authIA := addr.MustIAFrom(founderIA.ISD(), drawn.AS())
-	authState, authKey, authCert := seedAuthoritative(t, authIA)
-	founderState, base := seedFounder(t, founderIA, authIA, authKey, authCert)
+	authState, authVoting, authRoot := seedAuthoritative(t, authIA)
+	founderState, base := seedFounder(t, founderIA, authIA, authVoting, authRoot)
 
 	// The founding core, its material pre-seeded: the founder's watch rolls
 	// its own three inside the cast it signs itself, and its admission
@@ -304,9 +315,12 @@ func TestCoresRotateByTRCUpdate(t *testing.T) {
 		cfg.EnrollAuth = votingAuth
 		cfg.Pacing.EnrollmentInspect = EnrollRetry
 	})
-	// The authoritative core, its material pre-seeded and already named by
-	// the seeded base: its watch submits its own roll through the channel
-	// its join used.
+	// The authoritative core, its material pre-seeded and already carried
+	// by the seeded base, its root among the base's: it enrolls at the
+	// founder and anchors its issuer in the TRC it pulls, its watch submits
+	// its own roll through the channel its join used, and it renews within
+	// seconds of each issuance, each renewal under the root its issuer
+	// holds.
 	b := bootAssembly(t, func(cfg *services.NodeConfig) {
 		cfg.Core = true
 		cfg.State = authState
@@ -314,7 +328,7 @@ func TestCoresRotateByTRCUpdate(t *testing.T) {
 		cfg.Control = FreeUDPAddrOn(t, ipB)
 		cfg.Neighbors = []string{a.Rendezvous()}
 		cfg.RootCAs = wpki.Pool
-		cfg.Pacing.EnrollmentInspect = EnrollRetry
+		renewSoon(cfg)
 	})
 	// A third node joining the founder, to watch the successors spread.
 	c := bootAssembly(t, func(cfg *services.NodeConfig) {
@@ -333,7 +347,7 @@ func TestCoresRotateByTRCUpdate(t *testing.T) {
 	preChain := chainUnder(t, a, base)
 
 	// Both holders roll their own material: the founder's three inside its
-	// own cast, the authoritative's one through its submission.
+	// own cast, the authoritative's two through its submission.
 	founderRolled := pollRolled(t, a, founderIA, base)
 	authRolled := pollRolled(t, b, authIA, base)
 
@@ -341,8 +355,9 @@ func TestCoresRotateByTRCUpdate(t *testing.T) {
 	// roller: every successor the rollers pinned verifies against the pin
 	// before it, a rung that changes the founder's certificates is a
 	// sensitive update, and one that changes only the authoritative's is a
-	// regular update its old key voted on. The founder's rung is the one
-	// that replaced the root.
+	// regular update its old voting key voted on and its old root key
+	// acknowledged. The founder's rung is the one that replaced the
+	// founder's root.
 	var founderRung, founderPred cppki.SignedTRC
 	pred := base
 	top := max(founderRolled.TRC.ID.Serial, authRolled.TRC.ID.Serial)
@@ -386,16 +401,29 @@ func TestCoresRotateByTRCUpdate(t *testing.T) {
 		}
 		return true
 	})
+	authCerts := trust.CertsOf(authRolled.TRC, authIA)
+	if len(authCerts) != 2 {
+		t.Fatalf("the authoritative's roll carries %d certificates of it, want its voting and root ones",
+			len(authCerts))
+	}
 	Poll(t, "the authoritative's roll to promote", func() bool {
 		if hasStaged(t, authState) {
 			return false
 		}
-		key, err := trust.LoadOrCreateVotingKey(authState)
+		voting, err := trust.LoadOrCreateVotingKey(authState)
 		if err != nil {
 			t.Fatal(err)
 		}
-		cert := trust.CertsOf(authRolled.TRC, authIA)
-		return len(cert) == 1 && trust.KeyMatchesCert(key, cert[0])
+		issuer, err := trust.LoadOrCreateIssuerKeys(authState)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, cert := range authCerts {
+			if !trust.KeyMatchesCert(voting, cert) && !trust.KeyMatchesCert(issuer.Root, cert) {
+				return false
+			}
+		}
+		return true
 	})
 
 	// The founder's rung opened a grace window for the replaced root: the
@@ -425,6 +453,14 @@ func TestCoresRotateByTRCUpdate(t *testing.T) {
 			return anchoredInNewest(t, n.node, base)
 		})
 	}
+
+	// The authoritative's chain comes to issue under its fresh root: its
+	// renewals self-issue through the issuer its roll rekeyed.
+	freshRoot := rootOf(t, authRolled.TRC, authIA)
+	Poll(t, "the authoritative's chain to issue under its fresh root", func() bool {
+		chain := newestChain(t, b)
+		return chain != nil && chain[1].CheckSignatureFrom(freshRoot) == nil
+	})
 
 	// A node enrolled after the founder's pin holds a chain under the fresh
 	// root: it verifies against the successor the founder pinned.
@@ -708,6 +744,19 @@ func covers(keys trust.CoreKeys, cert *x509.Certificate) bool {
 		}
 	}
 	return false
+}
+
+// rootOf returns the root certificate the TRC carries for the ISD-AS,
+// failing the test when it carries none.
+func rootOf(t *testing.T, trc cppki.TRC, ia addr.IA) *x509.Certificate {
+	t.Helper()
+	for _, cert := range trust.CertsOf(trc, ia) {
+		if class, err := cppki.ValidateCert(cert); err == nil && class == cppki.Root {
+			return cert
+		}
+	}
+	t.Fatalf("%v carries no root certificate of %v", trc.ID, ia)
+	return nil
 }
 
 // hasStaged reports whether the state directory holds a staged file: a roll

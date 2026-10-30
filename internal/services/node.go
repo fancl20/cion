@@ -196,8 +196,8 @@ func (n *node) selectProvider() error {
 		NewConn: func() (*scion.Conn, error) {
 			return n.scionConn(0)
 		},
-		CoreRoute: n.coreRoute,
-		Sockets:   n.sockets,
+		FounderRoute: n.founderRoute,
+		Sockets:      n.sockets,
 		Pacing: measured.Pacing{
 			RendezvousRate:  n.cfg.Pacing.RendezvousRate,
 			Directory:       n.cfg.Pacing.Directory,

@@ -7,6 +7,7 @@ import (
 	"crypto/x509/pkix"
 	"fmt"
 	"math/big"
+	"slices"
 	"time"
 
 	"github.com/scionproto/scion/pkg/private/serrors"
@@ -16,27 +17,58 @@ import (
 )
 
 // BuildRenewalRequest builds the CMS-signed chain renewal request for the
-// CSR. The wrapper is signed by the CSR's subject key itself — proof of
-// possession (PKI draft, Section 4.3) — because a fresh node has no
-// certificate chain yet. CMS identifies signers by certificate, so the
+// CSR. A node that holds a valid chain signs with its AS key under the chain
+// and carries it: the requester's current chain is the authority a renewal
+// rests on (PKI draft, Section 4.3), and the CSR certifies the same key. A
+// node without one — a first issuance — signs with the CSR's subject key
+// itself, proof of possession: CMS identifies signers by certificate, so the
 // wrapper carries a self-signed certificate minted on the spot for the
 // subject key; it is never trusted or used beyond binding the signature to
 // the CSR.
 func BuildRenewalRequest(
 	csr *x509.CertificateRequest,
 	key crypto.Signer,
+	chain []*x509.Certificate,
 ) ([]byte, error) {
 
+	raw, err := proto.Marshal(&cppb.ChainRenewalRequestBody{Csr: csr.Raw})
+	if err != nil {
+		return nil, err
+	}
+	if chain != nil {
+		return SignCMS(raw, chain, key)
+	}
 	wrapper, err := enrollmentWrapperCert(key, time.Now())
 	if err != nil {
 		return nil, fmt.Errorf("minting wrapper certificate: %w", err)
 	}
-	body := &cppb.ChainRenewalRequestBody{Csr: csr.Raw}
-	raw, err := proto.Marshal(body)
-	if err != nil {
-		return nil, err
-	}
 	return SignCMS(raw, []*x509.Certificate{wrapper}, key)
+}
+
+// RequestChain returns the chain a renewal request carries, its AS
+// certificate first: the request's one signer, beside the CA certificate
+// that issued it. A request carrying one certificate — a first issuance's
+// wrapper — carries no chain, and a nil chain answers it; any other shape
+// is refused.
+func RequestChain(signed *CMSSigned) ([]*x509.Certificate, error) {
+	if len(signed.Certificates) == 1 {
+		return nil, nil
+	}
+	if len(signed.Certificates) != 2 {
+		return nil, serrors.New("the request carries neither a chain nor a wrapper",
+			"certificates", len(signed.Certificates))
+	}
+	chain := slices.Clone(signed.Certificates)
+	if ct, err := cppki.ValidateCert(chain[0]); err == nil && ct == cppki.CA {
+		chain[0], chain[1] = chain[1], chain[0]
+	}
+	if err := cppki.ValidateChain(chain); err != nil {
+		return nil, serrors.Wrap("the request's certificates form no chain", err)
+	}
+	if len(signed.SignerCerts) != 1 || !signed.SignerCerts[0].Equal(chain[0]) {
+		return nil, serrors.New("the request is not signed by its chain's AS certificate alone")
+	}
+	return chain, nil
 }
 
 // ParseRenewalResponse extracts the certificate chain from the CMS-signed

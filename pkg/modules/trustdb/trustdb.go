@@ -81,5 +81,13 @@ type DB interface {
 	// the DB.
 	InsertTRC(ctx context.Context, trc cppki.SignedTRC) (bool, error)
 
+	// BoundKey returns the subject key ID the ISD-AS is bound to, nil when it
+	// is bound to none.
+	BoundKey(ctx context.Context, ia addr.IA) ([]byte, error)
+	// BindKey binds the ISD-AS to the subject key ID for good: a free ISD-AS
+	// is bound, one bound to the same key stays as it is, and one bound to
+	// another key is refused. No sweep removes a binding.
+	BindKey(ctx context.Context, ia addr.IA, skid []byte) error
+
 	Close() error
 }

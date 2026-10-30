@@ -6,6 +6,7 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/x509"
+	"errors"
 	"sync"
 	"testing"
 	"testing/synctest"
@@ -28,7 +29,7 @@ func newTestASKey(t *testing.T) crypto.Signer {
 
 func TestIssueChain(t *testing.T) {
 	f := newGenesisFixture(t)
-	issuer, err := NewIssuer(coreIA, f.keys, f.trc)
+	issuer, err := NewIssuer(coreIA, f.keys.IssuerKeys, f.trc)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -63,7 +64,7 @@ func TestIssueChain(t *testing.T) {
 // without a subject ISD-AS are rejected.
 func TestIssueChainRejectsForeignCSR(t *testing.T) {
 	f := newGenesisFixture(t)
-	issuer, err := NewIssuer(coreIA, f.keys, f.trc)
+	issuer, err := NewIssuer(coreIA, f.keys.IssuerKeys, f.trc)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -93,7 +94,7 @@ func TestIssueChainRejectsForeignCSR(t *testing.T) {
 // not match the subject key — no proof of possession — is rejected.
 func TestIssueChainRejectsUnsignedCSR(t *testing.T) {
 	f := newGenesisFixture(t)
-	issuer, err := NewIssuer(coreIA, f.keys, f.trc)
+	issuer, err := NewIssuer(coreIA, f.keys.IssuerKeys, f.trc)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -115,7 +116,7 @@ func TestIssueChainRejectsUnsignedCSR(t *testing.T) {
 func TestIssuerReissuesCACert(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		f := newGenesisFixture(t)
-		issuer, err := NewIssuer(coreIA, f.keys, f.trc)
+		issuer, err := NewIssuer(coreIA, f.keys.IssuerKeys, f.trc)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -162,7 +163,7 @@ func TestIssuerReissuesCACert(t *testing.T) {
 // certificate it carries, the certificate and its key read as one set.
 func TestSignResponseConcurrentRekey(t *testing.T) {
 	f := newGenesisFixture(t)
-	issuer, err := NewIssuer(coreIA, f.keys, f.trc)
+	issuer, err := NewIssuer(coreIA, f.keys.IssuerKeys, f.trc)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -175,7 +176,7 @@ func TestSignResponseConcurrentRekey(t *testing.T) {
 				t.Error(err)
 				return
 			}
-			keys := f.keys
+			keys := f.keys.IssuerKeys
 			keys.CA = ca
 			if err := issuer.Rekey(keys, f.trc); err != nil {
 				t.Error(err)
@@ -196,4 +197,76 @@ func TestSignResponseConcurrentRekey(t *testing.T) {
 			t.Fatalf("a response does not verify against the certificate it carries: %v", err)
 		}
 	}
+}
+
+// TestIssuerPicksItsOwnRoot checks the issuer among several roots: over a TRC
+// carrying the founder's root and a joiner's, each issuer issues under the
+// root its own root key covers; an issuer whose root the TRC does not carry
+// is unanchored and issues nothing until Anchor hands it one that does.
+func TestIssuerPicksItsOwnRoot(t *testing.T) {
+	f := newCastFixture(t)
+	base, _, completed := f.successor(t)
+	joinerCA, err := generateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	joinerKeys := IssuerKeys{Root: f.joiner.root.Key, CA: joinerCA}
+
+	for _, tc := range []struct {
+		name string
+		ia   addr.IA
+		keys IssuerKeys
+		root *x509.Certificate
+	}{
+		{"the founder", coreIA, f.founder.keys.IssuerKeys, mustCert(t, base, cppki.Root)},
+		{"the joiner", joinerIA, joinerKeys, f.joiner.root.Cert},
+	} {
+		issuer, err := NewIssuer(tc.ia, tc.keys, completed)
+		if err != nil {
+			t.Fatal(err)
+		}
+		chain, err := issuer.IssueChain(mustCSR(t))
+		if err != nil {
+			t.Fatalf("%s's issuer: %v", tc.name, err)
+		}
+		if err := chain[1].CheckSignatureFrom(tc.root); err != nil {
+			t.Errorf("%s's CA certificate is not issued by its own root: %v", tc.name, err)
+		}
+	}
+
+	unanchored, err := NewIssuer(joinerIA, joinerKeys, base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := unanchored.IssueChain(mustCSR(t)); !errors.Is(err, ErrUnanchored) {
+		t.Errorf("the unanchored issuer's error = %v, want ErrUnanchored", err)
+	}
+	if err := unanchored.Anchor(base); err == nil {
+		t.Error("the issuer anchored in a TRC that carries no root of it")
+	}
+	if err := unanchored.Anchor(completed); err != nil {
+		t.Fatal(err)
+	}
+	if !unanchored.Anchored() {
+		t.Fatal("the issuer is not anchored once handed the TRC carrying its root")
+	}
+	chain, err := unanchored.IssueChain(mustCSR(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cppki.VerifyChain(chain, cppki.VerifyOptions{
+		TRC: []*cppki.TRC{&completed.TRC},
+	}); err != nil {
+		t.Errorf("the anchored issuer's chain does not verify: %v", err)
+	}
+}
+
+// mustCSR returns a CSR for a fresh key of the node.
+func mustCSR(t *testing.T) *x509.CertificateRequest {
+	t.Helper()
+	csr, err := CreateCSR(nodeIA, newTestASKey(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return csr
 }

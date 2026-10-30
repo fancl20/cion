@@ -107,13 +107,11 @@ func TestFounderBootPromotesPinnedRoll(t *testing.T) {
 // pair, and the boot's promotion against the newest pinned TRC completes the
 // pair.
 func TestAuthoritativeBootCompletesPromotion(t *testing.T) {
-	_, joiner, founderDB, caster, state := newRollFixture(t)
+	_, joiner, founderDB, caster, state, issuer := newRollFixture(t)
 	caster.loses = true
 	ctx := context.Background()
 
-	if err := RollVotingKey(ctx, joiner, founderRemote{db: founderDB}, caster,
-		joinerIA, state); err == nil {
-
+	if err := roll(t, joiner, founderDB, caster, state, issuer); err == nil {
 		t.Fatal("the roll whose answer was lost succeeded")
 	}
 	// The joiner pins the founder's successor, and the promotion stops after
@@ -147,7 +145,7 @@ func TestAuthoritativeBootCompletesPromotion(t *testing.T) {
 	if !promoted {
 		t.Fatal("the boot did not promote the pinned roll")
 	}
-	checkLivePair(t, state, newest)
+	checkLiveMaterial(t, state, newest)
 }
 
 // failingPin is a trust database whose pins fail.
@@ -173,7 +171,7 @@ func bootFounder(t *testing.T, f *genesisFixture) bool {
 	if err != nil {
 		t.Fatal(err)
 	}
-	issuer, err := NewIssuer(coreIA, liveCoreKeys(t, f.dir), newest)
+	issuer, err := NewIssuer(coreIA, liveCoreKeys(t, f.dir).IssuerKeys, newest)
 	if err != nil {
 		t.Fatalf("the live keys anchor no issuer in %v: %v", newest.TRC.ID, err)
 	}
@@ -271,7 +269,20 @@ func writeKey(t *testing.T, state, file string, key crypto.Signer) {
 func writeVotingPair(t *testing.T, state string, key crypto.Signer, cert *x509.Certificate) {
 	t.Helper()
 	writeKey(t, state, RegularKeyFile, key)
-	if err := statefile.Write(filepath.Join(keyDir(state), RegularVotingCertFile),
+	writeCert(t, state, RegularVotingCertFile, cert)
+}
+
+// writeRootPair writes the root key and its certificate to the live files.
+func writeRootPair(t *testing.T, state string, key crypto.Signer, cert *x509.Certificate) {
+	t.Helper()
+	writeKey(t, state, RootKeyFile, key)
+	writeCert(t, state, RootCertFile, cert)
+}
+
+// writeCert writes the certificate to the named live file.
+func writeCert(t *testing.T, state, file string, cert *x509.Certificate) {
+	t.Helper()
+	if err := statefile.Write(filepath.Join(keyDir(state), file),
 		pem.EncodeToMemory(certBlock(cert))); err != nil {
 
 		t.Fatal(err)

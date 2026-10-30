@@ -92,11 +92,11 @@ type Config struct {
 	Engine *Engine
 	// Store is the directory store the core node's application serves, and
 	// publishes and fetches through locally; nil on every other node, which
-	// reaches the core's over CoreRoute instead.
+	// reaches the core's over FounderRoute instead.
 	Store DirectoryStore
-	// CoreRoute resolves the core's directory endpoint — its ISD-AS named by
-	// the directory service — on non-core nodes.
-	CoreRoute func() *scion.Addr
+	// FounderRoute resolves the founding core's directory endpoint — its
+	// ISD-AS named by the directory service — on non-core nodes.
+	FounderRoute func() *scion.Addr
 	// NewConn binds a SCION connection of this node on an ephemeral port:
 	// the socket the mesh transport serves on, the one the core's directory
 	// serves on beside it, and the one every other node's client publishes
@@ -253,7 +253,7 @@ func New(cfg Config) (*App, error) {
 			a.release()
 			return nil, fmt.Errorf("binding the directory socket: %w", err)
 		}
-		a.dirConn = newRPCDirectoryClient(dirConn, cfg.CoreRoute, cfg.Engine, cfg.Paths)
+		a.dirConn = newRPCDirectoryClient(dirConn, cfg.FounderRoute, cfg.Engine, cfg.Paths)
 		a.directory = a.dirConn
 	}
 	if cfg.DERP != nil {

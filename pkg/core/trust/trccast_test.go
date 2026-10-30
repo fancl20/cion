@@ -2,7 +2,6 @@ package trust_test
 
 import (
 	"context"
-	"crypto"
 	"crypto/x509"
 	"encoding/hex"
 	"net/netip"
@@ -24,8 +23,9 @@ var joinerIATest = addr.MustIAFrom(20, 0xff0000000f01)
 
 // deciderFixture is a founder holding the decision — its trust fixture, the
 // sensitive key beside the decider, and an admission policy that allows
-// unless the test says otherwise — and the joiner's voting material, with
-// the joiner enrolled unless the test says otherwise.
+// unless the test says otherwise — and the joiner's voting and root
+// material. The founder's database holds no chain of the joiner: the
+// channel's verification is the presenter's one gate.
 type deciderFixture struct {
 	tf      *trusttest.Founder
 	decider *trust.TRCDecider
@@ -34,15 +34,14 @@ type deciderFixture struct {
 	pred    cppki.SignedTRC
 
 	joiner struct {
-		ia   addr.IA
-		key  crypto.Signer
-		cert *x509.Certificate
+		ia           addr.IA
+		voting, root trust.KeyCert
 	}
 }
 
-// newDeciderFixture brings up the founder's decision and the joiner's voting
-// material, enrolling the joiner unless enroll is false.
-func newDeciderFixture(t *testing.T, enroll bool) *deciderFixture {
+// newDeciderFixture brings up the founder's decision and the joiner's
+// material.
+func newDeciderFixture(t *testing.T) *deciderFixture {
 	t.Helper()
 	f := newFounder(t)
 	c := &deciderFixture{tf: f, db: f.DB, pred: f.TRC}
@@ -54,78 +53,80 @@ func newDeciderFixture(t *testing.T, enroll bool) *deciderFixture {
 		Authorizer: c.auth,
 	}
 	c.joiner.ia = joinerIATest
-	c.joiner.key, c.joiner.cert = votingMaterial(t, c.joiner.ia)
-	if enroll {
-		c.enroll(t, c.joiner.ia)
-	}
+	c.joiner.voting, c.joiner.root = coreMaterial(t, c.joiner.ia)
 	return c
 }
 
-// enroll issues and stores a chain for the IA, the gate the decision asks.
-func (c *deciderFixture) enroll(t *testing.T, ia addr.IA) {
+// coreMaterial returns a core's fresh voting and root material naming the
+// IA, the shapes the loaders persist.
+func coreMaterial(t *testing.T, ia addr.IA) (voting, root trust.KeyCert) {
 	t.Helper()
-	csr, _ := trusttest.NewCSR(t, ia)
-	chain, err := c.tf.Issuer.IssueChain(csr)
+	state := t.TempDir()
+	votingKey, err := trust.LoadOrCreateVotingKey(state)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := c.db.InsertChain(context.Background(), chain); err != nil {
-		t.Fatal(err)
-	}
-}
-
-// votingMaterial returns fresh voting material naming the IA.
-func votingMaterial(t *testing.T, ia addr.IA) (crypto.Signer, *x509.Certificate) {
-	t.Helper()
-	key, err := trust.LoadOrCreateVotingKey(t.TempDir())
+	votingCert, err := trust.LoadOrCreateVotingCert(state, ia, votingKey)
 	if err != nil {
 		t.Fatal(err)
 	}
-	cert, err := trust.LoadOrCreateVotingCert(t.TempDir(), ia, key)
+	keys, err := trust.LoadOrCreateIssuerKeys(state)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return key, cert
+	rootCert, err := trust.LoadOrCreateRootCert(state, ia, keys.Root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return trust.KeyCert{Key: votingKey, Cert: votingCert},
+		trust.KeyCert{Key: keys.Root, Cert: rootCert}
 }
 
 // fingerprint is the hex subject key ID the decision names a key by.
-func fingerprint(cert *x509.Certificate) string {
-	return hex.EncodeToString(cert.SubjectKeyId)
+func fingerprint(kc trust.KeyCert) string {
+	return hex.EncodeToString(kc.Cert.SubjectKeyId)
 }
 
-// submission returns the joiner's partially signed successor over the given
-// predecessor.
+// submission returns the joiner's successor over the given predecessor,
+// onboarding it with its voting and root certificates, signed by the
+// signers.
 func (c *deciderFixture) submission(
 	t *testing.T,
 	pred cppki.SignedTRC,
-	presenter func() (crypto.Signer, *x509.Certificate),
+	signers ...trust.KeyCert,
 ) cppki.SignedTRC {
 
 	t.Helper()
-	trc, err := trust.AssembleOnboarding(pred, c.joiner.ia, c.joiner.cert)
+	trc, err := trust.AssembleOnboarding(pred, c.joiner.ia, c.joiner.voting.Cert,
+		c.joiner.root.Cert)
 	if err != nil {
 		t.Fatal(err)
 	}
-	key, cert := presenter()
-	partial, err := trust.SignUpdate(trc, key, cert)
+	partial, err := trust.SignUpdate(trc, signers...)
 	if err != nil {
 		t.Fatal(err)
 	}
 	return partial
 }
 
-// TestTRCDeciderOnboards checks the founder's decision on an enrolled
-// joiner's submission: the founder's vote lands beside the proof of
-// possession, the completed TRC verifies against the newest pin and pins,
-// and a joiner re-presenting itself is answered with that pin unchanged —
-// it casts nothing.
+// onboarding returns the joiner's onboarding over the fixture's
+// predecessor, signed with both of its keys.
+func (c *deciderFixture) onboarding(t *testing.T) cppki.SignedTRC {
+	t.Helper()
+	return c.submission(t, c.pred, c.joiner.voting, c.joiner.root)
+}
+
+// TestTRCDeciderOnboards checks the founder's decision on a joiner's
+// submission: the founder's vote lands beside the proofs of possession, the
+// completed TRC verifies against the newest pin and pins, and a joiner
+// re-presenting itself is answered with that pin unchanged — it casts
+// nothing. The founder's database holds no chain of the joiner: the channel
+// verified it, whichever core issued its chain.
 func TestTRCDeciderOnboards(t *testing.T) {
-	c := newDeciderFixture(t, true)
+	c := newDeciderFixture(t)
 	ctx := context.Background()
 
-	partial := c.submission(t, c.pred, func() (crypto.Signer, *x509.Certificate) {
-		return c.joiner.key, c.joiner.cert
-	})
+	partial := c.onboarding(t)
 	completed, err := c.decider.DecideTRC(ctx, c.joiner.ia, netip.AddrPort{}, partial)
 	if err != nil {
 		t.Fatal(err)
@@ -133,12 +134,15 @@ func TestTRCDeciderOnboards(t *testing.T) {
 	if want := (cppki.TRCID{ISD: coreIATest.ISD(), Base: 1, Serial: 2}); completed.TRC.ID != want {
 		t.Fatalf("the decided TRC = %v, want the successor %v", completed.TRC.ID, want)
 	}
-	if len(completed.SignerInfos) != 2 {
-		t.Errorf("the decided TRC carries %d signer infos, want the vote and the possession proof",
-			len(completed.SignerInfos))
+	if len(completed.SignerInfos) != 3 {
+		t.Errorf("the decided TRC carries %d signer infos, want the vote and the two "+
+			"possession proofs", len(completed.SignerInfos))
 	}
 	if err := completed.Verify(&c.pred.TRC); err != nil {
 		t.Errorf("the decided TRC does not verify against the predecessor: %v", err)
+	}
+	if !trust.Onboarded(completed.TRC, c.joiner.ia) {
+		t.Error("the decided TRC does not carry the joiner with its root")
 	}
 	pinned, err := c.db.SignedTRC(ctx, completed.TRC.ID)
 	if err != nil {
@@ -146,6 +150,12 @@ func TestTRCDeciderOnboards(t *testing.T) {
 	}
 	if pinned.IsZero() || string(pinned.Raw) != string(completed.Raw) {
 		t.Error("the decided TRC did not pin as completed")
+	}
+	if chains, err := c.db.Chains(ctx, trustdb.ChainQuery{IA: c.joiner.ia}); err != nil ||
+		len(chains) != 0 {
+
+		t.Errorf("the founder's database holds %d chains of the joiner (%v), want none",
+			len(chains), err)
 	}
 
 	// The re-presentation decides nothing: the same TRC comes back.
@@ -159,35 +169,17 @@ func TestTRCDeciderOnboards(t *testing.T) {
 	}
 }
 
-// TestTRCDeciderRequiresEnrollment checks the gate: a joiner that holds no
-// chain yet — never having enrolled — is refused, and nothing pins.
-func TestTRCDeciderRequiresEnrollment(t *testing.T) {
-	c := newDeciderFixture(t, false)
-
-	_, err := c.decider.DecideTRC(context.Background(), c.joiner.ia, netip.AddrPort{},
-		c.submission(t, c.pred, func() (crypto.Signer, *x509.Certificate) {
-			return c.joiner.key, c.joiner.cert
-		}))
-	if err == nil {
-		t.Fatal("the unenrolled joiner's submission was decided, want refusal")
-	}
-	if stored := pinnedAt(t, c.db, 2); !stored.IsZero() {
-		t.Error("the unenrolled joiner's submission pinned something")
-	}
-}
-
 // TestTRCDeciderAsksAdmission checks the question before the founder's vote:
 // once the mechanical gates pass, the decision asks the admission policy
-// with the voting boundary, the presenter as the claim, the fingerprint of
-// the key the successor adds, and the channel's source, and an allowance is
-// what the vote lands on. A join already landed asks nothing: the
-// re-presentation is answered with the pin whatever the policy would say.
+// with the voting boundary, the presenter as the claim, the fingerprints of
+// the keys the successor adds in its order — the voting key's and the root
+// key's — and the channel's source, and an allowance is what the vote lands
+// on. A join already landed asks nothing: the re-presentation is answered
+// with the pin whatever the policy would say.
 func TestTRCDeciderAsksAdmission(t *testing.T) {
-	c := newDeciderFixture(t, true)
+	c := newDeciderFixture(t)
 
-	partial := c.submission(t, c.pred, func() (crypto.Signer, *x509.Certificate) {
-		return c.joiner.key, c.joiner.cert
-	})
+	partial := c.onboarding(t)
 	completed, err := c.decider.DecideTRC(context.Background(), c.joiner.ia, askSource, partial)
 	if err != nil {
 		t.Fatal(err)
@@ -205,7 +197,8 @@ func TestTRCDeciderAsksAdmission(t *testing.T) {
 	if got.Claim != c.joiner.ia {
 		t.Errorf("asked claim = %v, want the presenter %v", got.Claim, c.joiner.ia)
 	}
-	if diff := cmp.Diff([]string{fingerprint(c.joiner.cert)}, got.Keys); diff != "" {
+	want := []string{fingerprint(c.joiner.voting), fingerprint(c.joiner.root)}
+	if diff := cmp.Diff(want, got.Keys); diff != "" {
 		t.Errorf("asked keys (-want +got):\n%s", diff)
 	}
 	if want := netip.MustParseAddrPort("198.51.100.7:41234"); got.Source != want {
@@ -222,61 +215,40 @@ func TestTRCDeciderAsksAdmission(t *testing.T) {
 	}
 }
 
-// TestTRCDeciderAsksForEveryAddedKey checks the facts of a successor adding
-// two certificates: the policy is asked once, with the presenter as the
-// claim and both fingerprints in the successor's order, a deny refusing the
-// whole submission and an allow pinning it with the vote.
-func TestTRCDeciderAsksForEveryAddedKey(t *testing.T) {
-	c := newDeciderFixture(t, true)
-	second := addr.MustIAFrom(coreIATest.ISD(), joinerIATest.AS()+1)
-	secondKey, secondCert := votingMaterial(t, second)
-
-	trc, err := trust.AssembleOnboarding(c.pred, c.joiner.ia, c.joiner.cert)
+// TestTRCDeciderRefusesWhatIsNotThePresenters checks the gates on what a
+// submission adds: a certificate naming another ISD-AS than the presenter,
+// and a root certificate that did not sign the submission, refuse it before
+// any question, and nothing pins.
+func TestTRCDeciderRefusesWhatIsNotThePresenters(t *testing.T) {
+	c := newDeciderFixture(t)
+	other := addr.MustIAFrom(coreIATest.ISD(), joinerIATest.AS()+1)
+	otherVoting, otherRoot := coreMaterial(t, other)
+	otherTRC, err := trust.AssembleOnboarding(c.pred, other, otherVoting.Cert, otherRoot.Cert)
 	if err != nil {
 		t.Fatal(err)
 	}
-	trc.CoreASes = append(trc.CoreASes, second.AS())
-	trc.AuthoritativeASes = append(trc.AuthoritativeASes, second.AS())
-	trc.Certificates = append(trc.Certificates, secondCert)
-	if secondCert.NotBefore.After(trc.Validity.NotBefore) {
-		trc.Validity.NotBefore = secondCert.NotBefore
-	}
-	if secondCert.NotAfter.Before(trc.Validity.NotAfter) {
-		trc.Validity.NotAfter = secondCert.NotAfter
-	}
-	partial, err := trust.SignRotation(trc,
-		[]crypto.Signer{c.joiner.key, secondKey},
-		[]*x509.Certificate{c.joiner.cert, secondCert})
+	otherSubmission, err := trust.SignUpdate(otherTRC, otherVoting, otherRoot)
 	if err != nil {
 		t.Fatal(err)
 	}
+	for name, submission := range map[string]cppki.SignedTRC{
+		"another ISD-AS's certificates": otherSubmission,
+		"a root that did not sign":      c.submission(t, c.pred, c.joiner.voting),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := c.decider.DecideTRC(context.Background(), c.joiner.ia, askSource,
+				submission); err == nil {
 
-	c.auth.Verdict = enrollauth.AdmissionDeny
-	if _, err := c.decider.DecideTRC(context.Background(), c.joiner.ia, askSource, partial); err == nil {
-		t.Fatal("a denied submission adding two certificates was decided")
-	}
-	if stored := pinnedAt(t, c.db, 2); !stored.IsZero() {
-		t.Error("the denied submission pinned something")
-	}
-	if len(c.auth.Asked) != 1 {
-		t.Fatalf("the authorizer was asked %d times, want 1", len(c.auth.Asked))
-	}
-	got := c.auth.Asked[0]
-	if got.Claim != c.joiner.ia {
-		t.Errorf("asked claim = %v, want the presenter %v", got.Claim, c.joiner.ia)
-	}
-	want := []string{fingerprint(c.joiner.cert), fingerprint(secondCert)}
-	if diff := cmp.Diff(want, got.Keys); diff != "" {
-		t.Errorf("asked keys (-want +got):\n%s", diff)
-	}
-
-	c.auth.Verdict = enrollauth.AdmissionAllow
-	completed, err := c.decider.DecideTRC(context.Background(), c.joiner.ia, askSource, partial)
-	if err != nil {
-		t.Fatalf("the allowed submission was refused: %v", err)
-	}
-	if !trust.CoreNamed(completed.TRC, c.joiner.ia) || !trust.CoreNamed(completed.TRC, second) {
-		t.Error("the decided TRC does not name both added cores")
+				t.Fatal("the submission was decided")
+			}
+			if len(c.auth.Asked) != 0 {
+				t.Errorf("the authorizer was asked %d times, want none behind a refused gate",
+					len(c.auth.Asked))
+			}
+			if stored := pinnedAt(t, c.db, 2); !stored.IsZero() {
+				t.Error("the refused submission pinned something")
+			}
+		})
 	}
 }
 
@@ -292,13 +264,11 @@ func TestTRCDeciderRefusesDenied(t *testing.T) {
 		{"a pending submission", enrollauth.AdmissionPending},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			c := newDeciderFixture(t, true)
+			c := newDeciderFixture(t)
 			c.auth.Verdict = tc.verdict
 
 			if _, err := c.decider.DecideTRC(context.Background(), c.joiner.ia, askSource,
-				c.submission(t, c.pred, func() (crypto.Signer, *x509.Certificate) {
-					return c.joiner.key, c.joiner.cert
-				})); err == nil {
+				c.onboarding(t)); err == nil {
 
 				t.Fatal("the submission was decided against the policy's answer")
 			}
@@ -313,13 +283,11 @@ func TestTRCDeciderRefusesDenied(t *testing.T) {
 // authorizer the founder casts no vote, so an onboarding is refused and
 // nothing pins.
 func TestTRCDeciderDeniesWithoutAuthorizer(t *testing.T) {
-	c := newDeciderFixture(t, true)
+	c := newDeciderFixture(t)
 	c.decider.Authorizer = nil
 
 	if _, err := c.decider.DecideTRC(context.Background(), c.joiner.ia, askSource,
-		c.submission(t, c.pred, func() (crypto.Signer, *x509.Certificate) {
-			return c.joiner.key, c.joiner.cert
-		})); err == nil {
+		c.onboarding(t)); err == nil {
 
 		t.Fatal("the founder voted with no admission policy configured")
 	}
@@ -328,42 +296,22 @@ func TestTRCDeciderDeniesWithoutAuthorizer(t *testing.T) {
 	}
 }
 
-// TestTRCDeciderAsksAfterTheGates checks the ask's place: a submission the
-// mechanical gates refuse — the presenter holds no chain — reaches no
-// question.
-func TestTRCDeciderAsksAfterTheGates(t *testing.T) {
-	c := newDeciderFixture(t, false)
-
-	if _, err := c.decider.DecideTRC(context.Background(), c.joiner.ia, askSource,
-		c.submission(t, c.pred, func() (crypto.Signer, *x509.Certificate) {
-			return c.joiner.key, c.joiner.cert
-		})); err == nil {
-
-		t.Fatal("the unenrolled joiner's submission was decided")
-	}
-	if len(c.auth.Asked) != 0 {
-		t.Errorf("the authorizer was asked %d times, want none behind a refused gate",
-			len(c.auth.Asked))
-	}
-}
-
 // TestTRCDeciderRefusesStalePredecessor checks the submission built on an
 // older view: the founder has onboarded another core since, and the decision
 // refuses what does not increment its newest pin — the submitter resolves
 // the newest TRC and submits again.
 func TestTRCDeciderRefusesStalePredecessor(t *testing.T) {
-	c := newDeciderFixture(t, true)
+	c := newDeciderFixture(t)
 	ctx := context.Background()
 
 	// Another core joins first: the founder's newest advances.
 	other := addr.MustIAFrom(coreIATest.ISD(), joinerIATest.AS()+1)
-	otherKey, otherCert := votingMaterial(t, other)
-	c.enroll(t, other)
-	otherTRC, err := trust.AssembleOnboarding(c.pred, other, otherCert)
+	otherVoting, otherRoot := coreMaterial(t, other)
+	otherTRC, err := trust.AssembleOnboarding(c.pred, other, otherVoting.Cert, otherRoot.Cert)
 	if err != nil {
 		t.Fatal(err)
 	}
-	otherPartial, err := trust.SignUpdate(otherTRC, otherKey, otherCert)
+	otherPartial, err := trust.SignUpdate(otherTRC, otherVoting, otherRoot)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -373,9 +321,7 @@ func TestTRCDeciderRefusesStalePredecessor(t *testing.T) {
 
 	// The joiner's submission still builds on the base and is refused.
 	if _, err := c.decider.DecideTRC(ctx, c.joiner.ia, netip.AddrPort{},
-		c.submission(t, c.pred, func() (crypto.Signer, *x509.Certificate) {
-			return c.joiner.key, c.joiner.cert
-		})); err == nil {
+		c.onboarding(t)); err == nil {
 
 		t.Fatal("a submission over a stale predecessor was decided")
 	}
@@ -384,24 +330,19 @@ func TestTRCDeciderRefusesStalePredecessor(t *testing.T) {
 	}
 }
 
-// TestTRCDeciderRefusesUnsigned checks the possession proof's absence: a
-// successor the presenter did not sign is completed by the vote and then
-// fails the verification, pinning nothing.
+// TestTRCDeciderRefusesUnsigned checks the voting key's possession proof's
+// absence: a successor the joiner's voting key did not sign is completed by
+// the vote and then fails the verification, pinning nothing.
 func TestTRCDeciderRefusesUnsigned(t *testing.T) {
-	c := newDeciderFixture(t, true)
+	c := newDeciderFixture(t)
 
-	trc, err := trust.AssembleOnboarding(c.pred, c.joiner.ia, c.joiner.cert)
-	if err != nil {
-		t.Fatal(err)
-	}
-	// Signed by a key the update does not carry: the new voter's proof of
-	// possession never rides it.
-	strangerKey, strangerCert := votingMaterial(t, c.joiner.ia)
-	unsigned, err := trust.SignUpdate(trc, strangerKey, strangerCert)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := c.decider.DecideTRC(context.Background(), c.joiner.ia, netip.AddrPort{}, unsigned); err == nil {
+	// Signed by a voting key the update does not carry: the new voter's
+	// proof of possession never rides it.
+	stranger, _ := coreMaterial(t, c.joiner.ia)
+	unsigned := c.submission(t, c.pred, stranger, c.joiner.root)
+	if _, err := c.decider.DecideTRC(context.Background(), c.joiner.ia, netip.AddrPort{},
+		unsigned); err == nil {
+
 		t.Fatal("an update without the presenter's signature was decided")
 	}
 	if stored := pinnedAt(t, c.db, 2); !stored.IsZero() {
@@ -412,12 +353,10 @@ func TestTRCDeciderRefusesUnsigned(t *testing.T) {
 // TestTRCDeciderRefusesUnverifiedPresenter checks the submission no channel
 // verified: a zero presenter is refused, pinning nothing.
 func TestTRCDeciderRefusesUnverifiedPresenter(t *testing.T) {
-	c := newDeciderFixture(t, true)
+	c := newDeciderFixture(t)
 
 	if _, err := c.decider.DecideTRC(context.Background(), addr.IA(0), netip.AddrPort{},
-		c.submission(t, c.pred, func() (crypto.Signer, *x509.Certificate) {
-			return c.joiner.key, c.joiner.cert
-		})); err == nil {
+		c.onboarding(t)); err == nil {
 
 		t.Error("a submission without a verified presenter was decided")
 	}
@@ -433,11 +372,9 @@ func TestTRCDeciderRefusesUnverifiedPresenter(t *testing.T) {
 // detector reports a read of the signer outside it however the goroutines
 // are scheduled.
 func TestTRCDeciderSignerSwapUnderCast(t *testing.T) {
-	c := newDeciderFixture(t, true)
+	c := newDeciderFixture(t)
 	ctx := context.Background()
-	partial := c.submission(t, c.pred, func() (crypto.Signer, *x509.Certificate) {
-		return c.joiner.key, c.joiner.cert
-	})
+	partial := c.onboarding(t)
 
 	held, release := make(chan struct{}), make(chan struct{})
 	cast := make(chan error, 1)
@@ -469,7 +406,7 @@ func TestTRCDeciderSignerSwapUnderCast(t *testing.T) {
 }
 
 // rollFixture is a founder whose decision has onboarded the joiner — the
-// pinned successor the joiner's roll replaces its own certificate on — with
+// pinned successor the joiner's roll replaces its own certificates on — with
 // the onboarding's question cleared from the policy's record.
 type rollFixture struct {
 	deciderFixture
@@ -479,11 +416,9 @@ type rollFixture struct {
 
 func newRollFixture(t *testing.T) *rollFixture {
 	t.Helper()
-	c := newDeciderFixture(t, true)
+	c := newDeciderFixture(t)
 	completed, err := c.decider.DecideTRC(context.Background(), c.joiner.ia, netip.AddrPort{},
-		c.submission(t, c.pred, func() (crypto.Signer, *x509.Certificate) {
-			return c.joiner.key, c.joiner.cert
-		}))
+		c.onboarding(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -491,40 +426,43 @@ func newRollFixture(t *testing.T) *rollFixture {
 	return &rollFixture{deciderFixture: *c, rolled: completed}
 }
 
-// rollSubmission returns the joiner's routine roll over the given
-// predecessor: a fresh voting pair replacing the certificate the predecessor
-// names for it, by the regular update the replaced certificate's key votes
-// on beside the fresh key's proof of possession.
-func (c *rollFixture) rollSubmission(
+// roll returns the joiner's roll over the fixture's pinned successor: fresh
+// voting and root material replacing the certificates the successor names
+// for it, the voter given, signed by the signers the fresh material chooses.
+func (c *rollFixture) roll(
 	t *testing.T,
-	pred cppki.SignedTRC,
-) (cppki.SignedTRC, *x509.Certificate) {
+	voter *x509.Certificate,
+	signers func(freshVoting, freshRoot trust.KeyCert) []trust.KeyCert,
+) (submitted cppki.SignedTRC, freshVoting, freshRoot trust.KeyCert) {
 
 	t.Helper()
-	key, cert := votingMaterial(t, c.joiner.ia)
-	trc, err := trust.AssembleRotation(pred, c.joiner.cert, []*x509.Certificate{cert})
+	freshVoting, freshRoot = coreMaterial(t, c.joiner.ia)
+	trc, err := trust.AssembleRotation(c.rolled, voter,
+		[]*x509.Certificate{freshVoting.Cert, freshRoot.Cert})
 	if err != nil {
 		t.Fatal(err)
 	}
-	signed, err := trust.SignRotation(trc,
-		[]crypto.Signer{key, c.joiner.key},
-		[]*x509.Certificate{cert, c.joiner.cert})
+	submitted, err = trust.SignUpdate(trc, signers(freshVoting, freshRoot)...)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return signed, cert
+	return submitted, freshVoting, freshRoot
 }
 
 // TestTRCDeciderRolls checks the decision on a routine roll: the regular
-// update the presenter's current key voted on verifies as submitted and
-// pins exactly as submitted — the founder signing nothing and asking no
-// policy, not even one that would deny — and its re-presentation is
-// answered with the pin, casting nothing.
+// update the presenter's live voting key voted on, its live root key
+// acknowledging the root it replaces and both fresh keys proving possession,
+// verifies as submitted and pins exactly as submitted — the founder signing
+// nothing and asking no policy, not even one that would deny — and its
+// re-presentation is answered with the pin, casting nothing.
 func TestTRCDeciderRolls(t *testing.T) {
 	c := newRollFixture(t)
 	c.auth.Verdict = enrollauth.AdmissionDeny
 
-	submitted, freshCert := c.rollSubmission(t, c.rolled)
+	submitted, freshVoting, freshRoot := c.roll(t, c.joiner.voting.Cert,
+		func(freshVoting, freshRoot trust.KeyCert) []trust.KeyCert {
+			return []trust.KeyCert{freshVoting, c.joiner.voting, freshRoot, c.joiner.root}
+		})
 	pinned, err := c.decider.DecideTRC(context.Background(), c.joiner.ia, askSource, submitted)
 	if err != nil {
 		t.Fatal(err)
@@ -539,8 +477,10 @@ func TestTRCDeciderRolls(t *testing.T) {
 	if update.Type != cppki.RegularUpdate {
 		t.Errorf("the decided roll's update type = %v, want a regular update", update.Type)
 	}
-	if !trust.CertsOf(pinned.TRC, c.joiner.ia)[0].Equal(freshCert) {
-		t.Error("the decided roll does not carry the presenter's fresh certificate")
+	if diff := cmp.Diff([]*x509.Certificate{freshVoting.Cert, freshRoot.Cert},
+		trust.CertsOf(pinned.TRC, c.joiner.ia)); diff != "" {
+
+		t.Errorf("the decided roll's certificates of the presenter (-want +got):\n%s", diff)
 	}
 	if len(c.auth.Asked) != 0 {
 		t.Errorf("the authorizer was asked %d times, want none behind a routine roll",
@@ -564,27 +504,21 @@ func TestTRCDeciderRolls(t *testing.T) {
 	}
 }
 
-// TestTRCDeciderLostKeyRoll checks the roll whose current key cannot vote:
-// the sensitive update the founder's sensitive certificate is the voter of,
-// signed by the fresh key alone, asks the policy with the fresh key's
-// fingerprint — refused and pinning nothing on deny, pinned with the
-// founder's vote beside the possession proof on allow.
+// TestTRCDeciderLostKeyRoll checks the roll whose live keys cannot sign: the
+// sensitive update the founder's sensitive certificate is the voter of,
+// signed by the fresh keys alone, asks the policy with the fresh keys'
+// fingerprints — refused and pinning nothing on deny, pinned with the
+// founder's vote beside the possession proofs on allow.
 func TestTRCDeciderLostKeyRoll(t *testing.T) {
 	c := newRollFixture(t)
-	key, cert := votingMaterial(t, c.joiner.ia)
 	sensitive, err := trust.SignerCert(c.rolled.TRC, cppki.Sensitive)
 	if err != nil {
 		t.Fatal(err)
 	}
-	trc, err := trust.AssembleRotation(c.rolled, sensitive, []*x509.Certificate{cert})
-	if err != nil {
-		t.Fatal(err)
-	}
-	submitted, err := trust.SignRotation(trc,
-		[]crypto.Signer{key}, []*x509.Certificate{cert})
-	if err != nil {
-		t.Fatal(err)
-	}
+	submitted, freshVoting, freshRoot := c.roll(t, sensitive,
+		func(freshVoting, freshRoot trust.KeyCert) []trust.KeyCert {
+			return []trust.KeyCert{freshVoting, freshRoot}
+		})
 
 	c.auth.Verdict = enrollauth.AdmissionDeny
 	if _, err := c.decider.DecideTRC(context.Background(), c.joiner.ia, askSource, submitted); err == nil {
@@ -596,7 +530,8 @@ func TestTRCDeciderLostKeyRoll(t *testing.T) {
 	if len(c.auth.Asked) != 1 {
 		t.Fatalf("the authorizer was asked %d times, want 1", len(c.auth.Asked))
 	}
-	if diff := cmp.Diff([]string{fingerprint(cert)}, c.auth.Asked[0].Keys); diff != "" {
+	want := []string{fingerprint(freshVoting), fingerprint(freshRoot)}
+	if diff := cmp.Diff(want, c.auth.Asked[0].Keys); diff != "" {
 		t.Errorf("asked keys (-want +got):\n%s", diff)
 	}
 
@@ -605,9 +540,9 @@ func TestTRCDeciderLostKeyRoll(t *testing.T) {
 	if err != nil {
 		t.Fatalf("the allowed lost-key roll was refused: %v", err)
 	}
-	if len(completed.SignerInfos) != 2 {
-		t.Errorf("the decided roll carries %d signer infos, want the vote and the possession proof",
-			len(completed.SignerInfos))
+	if len(completed.SignerInfos) != 3 {
+		t.Errorf("the decided roll carries %d signer infos, want the vote and the two "+
+			"possession proofs", len(completed.SignerInfos))
 	}
 	if err := completed.Verify(&c.rolled.TRC); err != nil {
 		t.Errorf("the decided roll does not verify against the predecessor: %v", err)
@@ -617,31 +552,40 @@ func TestTRCDeciderLostKeyRoll(t *testing.T) {
 	}
 }
 
-// TestTRCDeciderRefusesUnvotedRegularUpdate checks a regular update short of
-// its vote: the roll the replaced certificate's key did not sign is refused
-// without a question — the founder's vote completes no regular update — and
-// pins nothing.
-func TestTRCDeciderRefusesUnvotedRegularUpdate(t *testing.T) {
-	c := newRollFixture(t)
-	key, cert := votingMaterial(t, c.joiner.ia)
-	trc, err := trust.AssembleRotation(c.rolled, c.joiner.cert, []*x509.Certificate{cert})
-	if err != nil {
-		t.Fatal(err)
-	}
-	unvoted, err := trust.SignRotation(trc,
-		[]crypto.Signer{key}, []*x509.Certificate{cert})
-	if err != nil {
-		t.Fatal(err)
-	}
+// TestTRCDeciderRefusesIncompleteRolls checks the regular updates short of a
+// signature: a roll the replaced voting certificate's key did not vote on,
+// and a roll whose fresh root did not sign, are refused without a question —
+// the founder's vote completes no regular update — and pin nothing.
+func TestTRCDeciderRefusesIncompleteRolls(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		signers func(c *rollFixture, freshVoting, freshRoot trust.KeyCert) []trust.KeyCert
+	}{
+		{"unvoted", func(c *rollFixture, freshVoting, freshRoot trust.KeyCert) []trust.KeyCert {
+			return []trust.KeyCert{freshVoting, freshRoot, c.joiner.root}
+		}},
+		{"no root proof", func(c *rollFixture, freshVoting, _ trust.KeyCert) []trust.KeyCert {
+			return []trust.KeyCert{freshVoting, c.joiner.voting, c.joiner.root}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newRollFixture(t)
+			submitted, _, _ := c.roll(t, c.joiner.voting.Cert,
+				func(freshVoting, freshRoot trust.KeyCert) []trust.KeyCert {
+					return tc.signers(c, freshVoting, freshRoot)
+				})
+			if _, err := c.decider.DecideTRC(context.Background(), c.joiner.ia, askSource,
+				submitted); err == nil {
 
-	if _, err := c.decider.DecideTRC(context.Background(), c.joiner.ia, askSource, unvoted); err == nil {
-		t.Fatal("a regular update without its vote was decided")
-	}
-	if len(c.auth.Asked) != 0 {
-		t.Errorf("the authorizer was asked %d times, want none for a regular update",
-			len(c.auth.Asked))
-	}
-	if stored := pinnedAt(t, c.db, 3); !stored.IsZero() {
-		t.Error("the unvoted roll pinned something")
+				t.Fatal("the incomplete roll was decided")
+			}
+			if len(c.auth.Asked) != 0 {
+				t.Errorf("the authorizer was asked %d times, want none for a regular update",
+					len(c.auth.Asked))
+			}
+			if stored := pinnedAt(t, c.db, 3); !stored.IsZero() {
+				t.Error("the incomplete roll pinned something")
+			}
+		})
 	}
 }

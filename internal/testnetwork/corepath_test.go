@@ -86,8 +86,8 @@ func TestPathLayerServesTwoCores(t *testing.T) {
 
 	// The node under the authoritative enrolls — its retries riding the
 	// alternation of the bootstrap slot to the founder's fresher beacon, for
-	// the authoritative issues nothing — and pins the successor that names
-	// its neighbor a core.
+	// the founder alone serves the bootstrap channel — and pins the
+	// successor that names its neighbor a core.
 	Poll(t, "the node under the authoritative enrolled", func() bool {
 		return holdsAssemblyChain(t, d, d.app.IA())
 	})

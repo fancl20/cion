@@ -11,6 +11,7 @@ import (
 	spath "github.com/scionproto/scion/pkg/slayers/path/scion"
 
 	"github.com/fancl20/cion/pkg/core/dataplane/dataplanetest"
+	"github.com/fancl20/cion/pkg/core/trust"
 	"github.com/fancl20/cion/pkg/libs/scion"
 	"github.com/fancl20/cion/pkg/libs/scionrpc"
 	"github.com/fancl20/cion/pkg/libs/segment"
@@ -107,5 +108,64 @@ func TestPeerFetcherRidesTheServersPath(t *testing.T) {
 	}
 	if got := <-arrivals; got == nil || got.Path != nil || got.IfID == 0 {
 		t.Errorf("the registrant saw the fetch arrive from %v, want one hop", got)
+	}
+}
+
+// TestIssuersMoveOnFromAFailingIssuer checks the issuers' remote: a call to
+// the issuer whose turn it is that fails — no backend answers it — moves
+// the next call to the next issuer the routes list, which answers, and the
+// calls after it stay there while it does.
+func TestIssuersMoveOnFromAFailingIssuer(t *testing.T) {
+	f := newFounder(t)
+	extA, extB := freeUDPAddr(t), freeUDPAddr(t)
+	core := startTestNode(t, coreIATest, nodeIATest, extA, extB)
+	node := startTestNode(t, nodeIATest, coreIATest, extB, extA)
+	coreEngine, nodeEngine := f.Engine(t, coreIATest), f.Engine(t, nodeIATest)
+
+	done := make(chan error, 1)
+	t.Cleanup(func() {
+		select {
+		case err := <-done:
+			if err != nil {
+				slog.Debug("core endpoint exited", "err", err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Error("the core's endpoint did not stop with the test's context")
+		}
+	})
+	endpoint := core.newConn(t, scionrpc.EndpointPort)
+	go func() {
+		done <- scionrpc.ServeHTTP3(t.Context(), endpoint, NewServer(&TrustService{DB: f.DB}).Handler,
+			scionrpc.EndpointTLS(scionrpc.EndpointTLSConfig{
+				Credentials: coreEngine, Key: coreEngine.Key,
+			}))
+	}()
+
+	peerClt := NewPeerClient(scionrpc.PeerClientConfig{
+		Credentials: nodeEngine,
+		Key:         nodeEngine.Key,
+		Conn:        node.newConn(t, 0),
+	})
+	t.Cleanup(func() { _ = peerClt.Close() })
+	dead := &scion.Addr{IA: coreIATest, Service: addr.SVC(0x7ff2)}
+	live := &scion.Addr{IA: coreIATest, Service: addr.SvcCS}
+	remote := peerClt.Issuers(func() []*scion.Addr { return []*scion.Addr{dead, live} })
+	newest := trust.NewestTRCID(coreIATest.ISD())
+
+	short, cancel := context.WithTimeout(t.Context(), 500*time.Millisecond)
+	defer cancel()
+	if _, err := remote.TRC(short, newest); err == nil {
+		t.Fatal("the issuer without a backend answered")
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
+	defer cancel()
+	for i := range 2 {
+		trc, err := remote.TRC(ctx, newest)
+		if err != nil {
+			t.Fatalf("call %d after the failure: %v", i, err)
+		}
+		if trc.TRC.ID != f.TRC.TRC.ID {
+			t.Errorf("call %d answered %v, want the founder's %v", i, trc.TRC.ID, f.TRC.TRC.ID)
+		}
 	}
 }

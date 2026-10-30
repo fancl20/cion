@@ -55,7 +55,7 @@ func (r *fakeRemote) Chains(ctx context.Context, q trustdb.ChainQuery) ([][]*x50
 }
 
 func (r *fakeRemote) RenewChain(ctx context.Context, csr *x509.CertificateRequest,
-	key crypto.Signer) ([]*x509.Certificate, error) {
+	key crypto.Signer, _ []*x509.Certificate) ([]*x509.Certificate, error) {
 
 	r.renewalReqs++
 	if r.failFollowing {
@@ -67,7 +67,7 @@ func (r *fakeRemote) RenewChain(ctx context.Context, csr *x509.CertificateReques
 func newFakeRemote(t *testing.T) *fakeRemote {
 	t.Helper()
 	f := newGenesisFixture(t)
-	issuer, err := NewIssuer(coreIA, f.keys, f.trc)
+	issuer, err := NewIssuer(coreIA, f.keys.IssuerKeys, f.trc)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -120,7 +120,7 @@ func TestGetChainsVerifiesStoredChains(t *testing.T) {
 	// Issued with a DIFFERENT core's keys, so the stored chain does not
 	// verify against the pinned TRC.
 	other := newGenesisFixture(t)
-	otherIssuer, err := NewIssuer(coreIA, other.keys, other.trc)
+	otherIssuer, err := NewIssuer(coreIA, other.keys.IssuerKeys, other.trc)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -222,7 +222,7 @@ func TestNetworkProviderAsksTheServer(t *testing.T) {
 
 	// Issued under another genesis, so no pinned TRC anchors it.
 	other := newGenesisFixture(t)
-	otherIssuer, err := NewIssuer(coreIA, other.keys, other.trc)
+	otherIssuer, err := NewIssuer(coreIA, other.keys.IssuerKeys, other.trc)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -277,7 +277,7 @@ func TestRenewChain(t *testing.T) {
 	db := newTestDB(t)
 	key := newTestASKey(t)
 
-	chain, err := RenewChain(context.Background(), db, remote, nodeIA, key)
+	chain, err := RenewChain(context.Background(), db, remote, nodeIA, key, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -314,7 +314,7 @@ func TestRenewChainPullsBeforeItAsks(t *testing.T) {
 	remote := newFakeRemote(t)
 	remote.trcErr = context.DeadlineExceeded
 
-	_, err := RenewChain(context.Background(), newTestDB(t), remote, nodeIA, newTestASKey(t))
+	_, err := RenewChain(context.Background(), newTestDB(t), remote, nodeIA, newTestASKey(t), nil)
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("renewal error = %v, want the pull's", err)
 	}
@@ -334,13 +334,13 @@ func TestRenewChainRejectsUnanchoredChain(t *testing.T) {
 	// Issue with a DIFFERENT core's keys, so the chain does not verify
 	// against the served TRC.
 	other := newGenesisFixture(t)
-	otherIssuer, err := NewIssuer(coreIA, other.keys, other.trc)
+	otherIssuer, err := NewIssuer(coreIA, other.keys.IssuerKeys, other.trc)
 	if err != nil {
 		t.Fatal(err)
 	}
 	remote.issuer = otherIssuer
 
-	if _, err := RenewChain(context.Background(), db, remote, nodeIA, newTestASKey(t)); err == nil {
+	if _, err := RenewChain(context.Background(), db, remote, nodeIA, newTestASKey(t), nil); err == nil {
 		t.Error("renewal with unanchored chain succeeded, want rejection")
 	}
 	// The bogus chain must not be stored.
@@ -360,7 +360,7 @@ func TestRenewChainRejectsUnanchoredChain(t *testing.T) {
 func TestRenewChainPullsTheNewestTRC(t *testing.T) {
 	ctx := context.Background()
 	f := newGenesisFixture(t)
-	issuer, err := NewIssuer(coreIA, f.keys, f.trc)
+	issuer, err := NewIssuer(coreIA, f.keys.IssuerKeys, f.trc)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -368,7 +368,7 @@ func TestRenewChainPullsTheNewestTRC(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := issuer.Rekey(fresh, completed); err != nil {
+	if err := issuer.Rekey(fresh.IssuerKeys, completed); err != nil {
 		t.Fatal(err)
 	}
 	remote := &fakeRemote{trc: completed, issuer: issuer, byID: map[cppki.TRCID]cppki.SignedTRC{
@@ -379,7 +379,7 @@ func TestRenewChainPullsTheNewestTRC(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	chain, err := RenewChain(ctx, db, remote, nodeIA, newTestASKey(t))
+	chain, err := RenewChain(ctx, db, remote, nodeIA, newTestASKey(t), nil)
 	if err != nil {
 		t.Fatalf("renewing under the fresh root: %v", err)
 	}
@@ -412,7 +412,7 @@ func TestRenewChainRefusesAForeignNewestTRC(t *testing.T) {
 	}
 	remote.trc = foreign
 
-	if _, err := RenewChain(ctx, db, remote, nodeIA, newTestASKey(t)); err == nil {
+	if _, err := RenewChain(ctx, db, remote, nodeIA, newTestASKey(t), nil); err == nil {
 		t.Error("the renewal succeeded on another ISD's newest TRC, want refusal")
 	}
 	if pinned, err := db.SignedTRC(ctx, foreign.TRC.ID); err != nil || !pinned.IsZero() {
@@ -501,7 +501,7 @@ func TestFetchTRCRefusesForgeries(t *testing.T) {
 	forgeries := map[string]cppki.SignedTRC{}
 	// A serial that jumps two: signed raw over both keys, for the assembly
 	// itself refuses to build what the increment does not allow.
-	jump, err := AssembleOnboarding(base, joinerIA, f.joiner.cert)
+	jump, err := AssembleOnboarding(base, joinerIA, f.joiner.voting.Cert, f.joiner.root.Cert)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -511,13 +511,13 @@ func TestFetchTRCRefusesForgeries(t *testing.T) {
 		t.Fatal(err)
 	}
 	if forged, err := signTRCPayload(jump,
-		[]*x509.Certificate{f.joiner.cert, sensitiveCert},
-		[]crypto.Signer{f.joiner.key, f.founder.keys.Sensitive}); err == nil {
+		[]*x509.Certificate{f.joiner.voting.Cert, sensitiveCert},
+		[]crypto.Signer{f.joiner.voting.Key, f.founder.keys.Sensitive}); err == nil {
 		forgeries["serial that does not increment"] = forged
 	}
 	// A missing proof of possession: the founder's vote alone, raw-signed
 	// over the assembled payload.
-	assembly, err := AssembleOnboarding(base, joinerIA, f.joiner.cert)
+	assembly, err := AssembleOnboarding(base, joinerIA, f.joiner.voting.Cert, f.joiner.root.Cert)
 	if err != nil {
 		t.Fatal(err)
 	}

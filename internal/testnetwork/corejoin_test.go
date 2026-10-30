@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/scionproto/scion/pkg/addr"
-	"github.com/scionproto/scion/pkg/scrypto"
 	"github.com/scionproto/scion/pkg/scrypto/cppki"
 
 	"github.com/fancl20/cion/internal/services"
@@ -28,10 +27,12 @@ const votingAuth = "cidrs=127.0.0.0/8"
 // path, the core flag beside a neighbor — where the joiner completes its ISD
 // from the neighbor's reply, enrolls, submits the successor it signed to the
 // founder's voting application, and the founder's decision votes on its
-// admission policy's allow and pins; both pin the completed TRC, a third
-// node discovers it from the founder's signed messages and enumerates two
-// core ASes, and a node neighboring the joiner enrolls through the founder's
-// endpoint — the issuer the route selects.
+// admission policy's allow and pins; both pin the completed TRC, which
+// carries the joiner's root, and the joiner's chain comes to issue under
+// that root; a third node discovers the TRC from the founder's signed
+// messages and enumerates two core ASes, and a node neighboring the joiner
+// enrolls at the founder, its route passing over the joiner: an issuer, but
+// one without the founder's WebPKI identity.
 func TestCoreJoinsBySensitiveUpdate(t *testing.T) {
 	t.Parallel()
 	wpki := webpkitest.New(t)
@@ -49,6 +50,8 @@ func TestCoreJoinsBySensitiveUpdate(t *testing.T) {
 	})
 	// The joining core: the core flag beside the founder's rendezvous
 	// address, the network's core domain the bootstrap channel anchors to.
+	// It renews within seconds of each issuance, so its chain comes to
+	// issue under its own root once the root lands.
 	b := bootAssembly(t, func(cfg *services.NodeConfig) {
 		cfg.Core = true
 		cfg.State = t.TempDir()
@@ -56,6 +59,7 @@ func TestCoreJoinsBySensitiveUpdate(t *testing.T) {
 		cfg.Control = FreeUDPAddrOn(t, ipB)
 		cfg.Neighbors = []string{a.Rendezvous()}
 		cfg.RootCAs = wpki.Pool
+		renewSoon(cfg)
 	})
 	// A third node joining the founder, to watch the successor spread.
 	c := bootAssembly(t, func(cfg *services.NodeConfig) {
@@ -63,15 +67,6 @@ func TestCoreJoinsBySensitiveUpdate(t *testing.T) {
 		cfg.Internal = PinnedUDPAddrOn(t, ipC)
 		cfg.Control = FreeUDPAddrOn(t, ipC)
 		cfg.Neighbors = []string{a.Rendezvous()}
-		cfg.RootCAs = wpki.Pool
-	})
-	// A node neighboring the joining core alone, whose enrollments must
-	// route past it to the founder.
-	d := bootAssembly(t, func(cfg *services.NodeConfig) {
-		cfg.State = t.TempDir()
-		cfg.Internal = PinnedUDPAddrOn(t, ipD)
-		cfg.Control = FreeUDPAddrOn(t, ipD)
-		cfg.Neighbors = []string{b.Rendezvous()}
 		cfg.RootCAs = wpki.Pool
 	})
 	ctx := t.Context()
@@ -83,7 +78,8 @@ func TestCoreJoinsBySensitiveUpdate(t *testing.T) {
 		t.Fatalf("the joining core's ISD = %d, want the network's %d", got, a.app.IA().ISD())
 	}
 
-	// The cast lands: both sides pin the successor naming the joiner a core.
+	// The cast lands: both sides pin the successor naming the joiner a core
+	// and carrying its root.
 	successor := cppki.TRCID{ISD: a.app.IA().ISD(), Base: 1, Serial: 2}
 	pollTRC := func(name string, app *services.App) cppki.SignedTRC {
 		var trc cppki.SignedTRC
@@ -108,16 +104,17 @@ func TestCoreJoinsBySensitiveUpdate(t *testing.T) {
 		if err := trc.Verify(nil); err == nil {
 			t.Errorf("%s successor verified without its predecessor", name)
 		}
-		named := false
-		for _, as := range trc.TRC.CoreASes {
-			if as == b.app.IA().AS() {
-				named = true
-			}
-		}
-		if !named {
-			t.Errorf("%s successor names no core beside the founder", name)
+		if !trust.Onboarded(trc.TRC, b.app.IA()) {
+			t.Errorf("%s successor does not carry the joiner as a core with its root", name)
 		}
 	}
+
+	// The joiner's chain comes to issue under its own root: its newest
+	// chain's CA certificate names the joiner.
+	Poll(t, "the joining core's chain to issue under its own root", func() bool {
+		chain := newestChain(t, b)
+		return chain != nil && issuedBy(t, chain) == b.app.IA()
+	})
 
 	// The third node discovers the successor from the founder's signed
 	// messages — the cited TRC the verifier reports — and enumerates two
@@ -140,20 +137,32 @@ func TestCoreJoinsBySensitiveUpdate(t *testing.T) {
 			len(newest.TRC.CoreASes), newest.TRC.ID)
 	}
 
-	// The node below the joiner enrolls through the founder's endpoint: the
-	// issuer set the core route selects skips the joiner, which issues
-	// nothing, and lands on the founder.
+	// A node neighboring the joining core alone, booted once the joiner
+	// issues: its enrollment, a first issuance, routes past the joiner to
+	// the founder.
+	d := bootAssembly(t, func(cfg *services.NodeConfig) {
+		cfg.State = t.TempDir()
+		cfg.Internal = PinnedUDPAddrOn(t, ipD)
+		cfg.Control = FreeUDPAddrOn(t, ipD)
+		cfg.Neighbors = []string{b.Rendezvous()}
+		cfg.RootCAs = wpki.Pool
+	})
 	Poll(t, "the node below the joining core enrolled", func() bool {
 		return holdsAssemblyChain(t, d, d.app.IA())
 	})
+	if got := issuedBy(t, newestChain(t, d)); got != a.app.IA() {
+		t.Errorf("the node below the joining core enrolled at %v, want the founder %v",
+			got, a.app.IA())
+	}
 }
 
 // TestCoreJoinsThroughAnAuthoritative checks the onboarding's route when a
-// joining core's one neighbor is an onboarded authoritative core: the
-// joiner holds both cores' beacons from before its pin, and its submission
-// reaches the founder past the authoritative. The founder alone hosts the
-// voting application, and a submission the authoritative refused would stop
-// the joiner.
+// joining core's one neighbor is an onboarded authoritative core, an issuer
+// whose root the TRC carries: the joiner holds both cores' beacons from
+// before its pin, and its enrollment and its submission reach the founder
+// past the authoritative. The founder alone serves the bootstrap channel and
+// hosts the voting application, and a submission the authoritative refused
+// would stop the joiner.
 func TestCoreJoinsThroughAnAuthoritative(t *testing.T) {
 	t.Parallel()
 	wpki := webpkitest.New(t)
@@ -179,17 +188,13 @@ func TestCoreJoinsThroughAnAuthoritative(t *testing.T) {
 	})
 	ctx := t.Context()
 	// onboarded reports whether the node's newest pinned TRC names it a
-	// core.
+	// core and carries its root.
 	onboarded := func(n *Node) bool {
-		trc, err := n.app.TrustDB().SignedTRC(ctx, cppki.TRCID{
-			ISD:    n.app.IA().ISD(),
-			Base:   scrypto.LatestVer,
-			Serial: scrypto.LatestVer,
-		})
+		trc, err := n.app.TrustDB().SignedTRC(ctx, trust.NewestTRCID(n.app.IA().ISD()))
 		if err != nil {
 			t.Fatal(err)
 		}
-		return !trc.IsZero() && trust.CoreNamed(trc.TRC, n.app.IA())
+		return trust.Onboarded(trc.TRC, n.app.IA())
 	}
 	Poll(t, "the authoritative onboarded", func() bool { return onboarded(b) })
 

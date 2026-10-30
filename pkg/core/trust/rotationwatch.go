@@ -17,10 +17,11 @@ import (
 // RotationConfig configures the rotation watch of a core: the loop beside
 // the enrollment loop that rolls the trust material the node itself holds —
 // the founder's sensitive and regular voting certificates and its root
-// certificate, an authoritative core's regular one — before the earliest
-// expiry among them crosses the threshold, or the moment the live keys and
-// the newest TRC's certificates disagree, whatever the calendar says. The
-// Roll carries what the holder adds to the watch.
+// certificate, an authoritative core's regular voting certificate and root
+// certificate — before the earliest expiry among them crosses the
+// threshold, or the moment the live keys and the newest TRC's certificates
+// disagree, whatever the calendar says. The Roll carries what the holder
+// adds to the watch.
 type RotationConfig struct {
 	// IA is the core's ISD-AS.
 	IA addr.IA
@@ -132,7 +133,7 @@ func (r founderRoll) roll(ctx context.Context, cfg RotationConfig) error {
 		// issues under the fresh root. A promotion that fails here
 		// completes at the next pass.
 		r.decider.Sensitive = keys.Sensitive
-		if err := r.issuer.Rekey(keys, completed); err != nil {
+		if err := r.issuer.Rekey(keys.IssuerKeys, completed); err != nil {
 			return err
 		}
 		_, err = PromoteStaged(cfg.State, cfg.IA, completed.TRC)
@@ -140,28 +141,38 @@ func (r founderRoll) roll(ctx context.Context, cfg RotationConfig) error {
 	})
 }
 
-// AuthoritativeRoll is the authoritative core's roll: its regular voting
-// key checked, and the roll submitted through the caster to the founder's
-// voting application, the channel its join used, the founder's newest TRC
-// resolved through the remote.
-func AuthoritativeRoll(remote Remote, caster TRCCaster) Roll {
-	return authoritativeRoll{remote: remote, caster: caster}
+// AuthoritativeRoll is the authoritative core's roll: its regular voting and
+// root keys checked, and the roll submitted through the caster to the
+// founder's voting application, the channel its join used, the founder's
+// newest TRC resolved through the remote; once it pins, the issuer issues
+// under the fresh root.
+func AuthoritativeRoll(remote Remote, caster TRCCaster, issuer *Issuer) Roll {
+	return authoritativeRoll{remote: remote, caster: caster, issuer: issuer}
 }
 
 type authoritativeRoll struct {
 	remote Remote
 	caster TRCCaster
+	issuer *Issuer
 }
 
 func (authoritativeRoll) check(cfg RotationConfig, owned []*x509.Certificate) (bool, bool, error) {
-	key, err := LoadOrCreateVotingKey(cfg.State)
+	voting, err := LoadOrCreateVotingKey(cfg.State)
+	if err != nil {
+		return false, false, err
+	}
+	issuer, err := LoadOrCreateIssuerKeys(cfg.State)
 	if err != nil {
 		return false, false, err
 	}
 	for _, cert := range owned {
-		if ct, err := cppki.ValidateCert(cert); err == nil && ct == cppki.Regular &&
-			!KeyMatchesCert(key, cert) {
-
+		ct, err := cppki.ValidateCert(cert)
+		if err != nil {
+			return false, false, err
+		}
+		switch {
+		case ct == cppki.Regular && !KeyMatchesCert(voting, cert),
+			ct == cppki.Root && !KeyMatchesCert(issuer.Root, cert):
 			return true, false, nil
 		}
 	}
@@ -169,7 +180,7 @@ func (authoritativeRoll) check(cfg RotationConfig, owned []*x509.Certificate) (b
 }
 
 func (r authoritativeRoll) roll(ctx context.Context, cfg RotationConfig) error {
-	return RollVotingKey(ctx, cfg.DB, r.remote, r.caster, cfg.IA, cfg.State)
+	return RollCoreMaterial(ctx, cfg.DB, r.remote, r.caster, cfg.IA, cfg.State, r.issuer)
 }
 
 // RunRotation runs the rotation watch of a core: a calm inspection interval
@@ -197,9 +208,10 @@ func (cfg RotationConfig) rotationPass(ctx context.Context) time.Duration {
 		slog.Error("Reading the newest pinned TRC", "isd_as", cfg.IA, "err", err)
 		return cfg.interval(cfg.RetryInterval, EnrollmentRetryInterval)
 	}
-	if newest.IsZero() || !CoreNamed(newest.TRC, cfg.IA) {
-		// Nothing to roll yet: the founder always names itself, and a joining
-		// core's onboarding cast is the enrollment loop's until it lands.
+	if newest.IsZero() || !Onboarded(newest.TRC, cfg.IA) {
+		// Nothing to roll yet: the founder's TRC always carries it, and a
+		// joining core's onboarding cast is the enrollment loop's until it
+		// lands whole.
 		return cfg.interval(cfg.InspectInterval, ChainInspectInterval)
 	}
 	// A roll that pinned and failed to promote its staged material completes

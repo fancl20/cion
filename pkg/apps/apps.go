@@ -75,7 +75,8 @@ type Environment struct {
 	Engine *trust.Engine
 	Paths  Paths
 	// IssuedChains lists the certificate chains valid now that the node's
-	// trust database holds — on the founding core, every chain it issued.
+	// trust database holds — on the founding core, every chain it issued
+	// and every chain it fetched to verify a message.
 	IssuedChains func(ctx context.Context) ([][]*x509.Certificate, error)
 	// NewConn binds the node's sending conn on an ephemeral port: the
 	// socket the application's own services ride.
@@ -107,10 +108,10 @@ type Environment struct {
 	// core's HTTPS server, beside the ACME challenge, at a pattern no other
 	// application mounts — a pattern mounted twice refuses the boot.
 	MountHTTPS func(pattern string, handler http.Handler)
-	// CoreRoute resolves the route to the founding core the directory's
+	// FounderRoute resolves the route to the founding core the directory's
 	// publish and fetch ride on every other node; the founding core needs
 	// none, serving the directory itself.
-	CoreRoute func() *scion.Addr
+	FounderRoute func() *scion.Addr
 	// Relay carries the relay derivation's inputs: the production form
 	// derives from the domain, and the harness's placement — its loopback
 	// address and pinned certificate — stands in for the domain and the

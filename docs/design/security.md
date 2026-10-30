@@ -75,12 +75,15 @@ Untrusted:
 
 ## Accepted residual risk
 
-*   The founding core is a single point of trust: a compromised core speaks
-    for the network's trust, and only its sensitive key votes on the TRC
-    updates that change roots or membership. Losing the core halts
-    enrollment and every TRC update; losing its sensitive key halts the
-    updates that need its vote, the core's own roll among them. Recovery
-    from either is a redeploy.
+*   The founding core is a single point of trust: a compromised founder
+    speaks for the network's trust, and only its sensitive key votes on the
+    TRC updates that change roots or membership. Losing the founder halts
+    enrollment and every TRC update, while every core keeps renewing chains;
+    losing its sensitive key halts the updates that need its vote, the
+    founder's own roll among them. Recovery from either is a redeploy.
+*   Every core holds its CA key online, and nothing limits the names a core
+    issues for: a compromised core can issue a chain for any ISD-AS, and
+    only expiration retires it.
 *   The founder's sensitive vote on a core's TRC submission rests on the
     admission plugin's answer alone, whatever the submission changes. An
     address-based policy lends that vote to every enrolled core inside its

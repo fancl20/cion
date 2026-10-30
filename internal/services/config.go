@@ -153,6 +153,7 @@ type NodePacing struct {
 	LinkSetPoll       time.Duration // the file provider's link-set poll
 	BFD               time.Duration // BFD transmission interval
 	RotationThreshold time.Duration // remaining validity below which the rotation watch rolls
+	RenewalThreshold  time.Duration // remaining validity below which the enrollment loop renews
 }
 
 // resolvedConfig is the run arguments resolved once at boot: the NodeConfig

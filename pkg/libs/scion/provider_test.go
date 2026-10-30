@@ -500,7 +500,7 @@ func TestProviderFilterCountsTraversedHopsOnly(t *testing.T) {
 
 // TestProviderBootstrapRoute checks the enrollment fallback: before any up
 // segment is verified, the reversed unverified beacon — the node's own hop
-// already extended — serves the core route in both resolution variants,
+// already extended — serves the founder route in both resolution variants,
 // LocalPath's with no fetch, and a verified up segment takes over the moment
 // one exists.
 func TestProviderBootstrapRoute(t *testing.T) {

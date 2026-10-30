@@ -16,21 +16,25 @@ import (
 	"time"
 
 	"github.com/google/go-cmp/cmp"
+	"github.com/scionproto/scion/pkg/addr"
 	"github.com/scionproto/scion/pkg/scrypto/cppki"
 
 	"github.com/fancl20/cion/pkg/core/trust"
 	"github.com/fancl20/cion/pkg/core/trust/trusttest"
+	"github.com/fancl20/cion/pkg/modules/enrollauth"
+	"github.com/fancl20/cion/pkg/modules/enrollauth/impl/authtest"
 	"github.com/fancl20/cion/pkg/modules/trustdb"
 )
 
 // fakeCore implements trust.Remote: it serves the TRC and issues chains
-// through the issuer.
+// through the issuer, recording the chain each renewal rests on.
 type fakeCore struct {
 	issuer *trust.Issuer
 	trc    cppki.SignedTRC
 
 	mtx     sync.Mutex
 	renewed int
+	restsOn [][]*x509.Certificate
 }
 
 var errFakeCoreUnavailable = errors.New("core unavailable")
@@ -50,7 +54,7 @@ func (c *fakeCore) Chains(
 
 func (c *fakeCore) RenewChain(
 	ctx context.Context, csr *x509.CertificateRequest,
-	key crypto.Signer) ([]*x509.Certificate, error) {
+	key crypto.Signer, chain []*x509.Certificate) ([]*x509.Certificate, error) {
 
 	c.mtx.Lock()
 	defer c.mtx.Unlock()
@@ -58,6 +62,7 @@ func (c *fakeCore) RenewChain(
 		return nil, errFakeCoreUnavailable
 	}
 	c.renewed++
+	c.restsOn = append(c.restsOn, chain)
 	return c.issuer.IssueChain(csr)
 }
 
@@ -91,10 +96,48 @@ func newLifecycleFixture(t *testing.T, f *trusttest.Founder) *lifecycleFixture {
 		IA:            nodeIATest,
 		DB:            db,
 		Key:           key,
-		Renewal:       trust.NormalRenewal(lf.core),
+		Renewal:       trust.NormalRenewal(lf.core, lf.core),
 		RetryInterval: time.Millisecond,
 	}
 	return lf
+}
+
+// authoritativeMaterial returns a joining core's voting and root material
+// in a fresh state directory, and its issuer over the founder's TRC, which
+// carries no root of the core: unanchored.
+func authoritativeMaterial(
+	t *testing.T,
+	f *trusttest.Founder,
+	ia addr.IA,
+) (voting, root trust.KeyCert, issuer *trust.Issuer) {
+
+	t.Helper()
+	state := t.TempDir()
+	votingKey, err := trust.LoadOrCreateVotingKey(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	votingCert, err := trust.LoadOrCreateVotingCert(state, ia, votingKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keys, err := trust.LoadOrCreateIssuerKeys(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rootCert, err := trust.LoadOrCreateRootCert(state, ia, keys.Root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	issuer, err = trust.NewIssuer(ia, keys, f.TRC)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if issuer.Anchored() {
+		t.Fatal("the joining core's issuer is anchored in a TRC that carries no root of it")
+	}
+	return trust.KeyCert{Key: votingKey, Cert: votingCert},
+		trust.KeyCert{Key: keys.Root, Cert: rootCert}, issuer
 }
 
 // enroll issues the node's first chain directly.
@@ -141,17 +184,10 @@ func TestEnrollmentStopsWithoutVotingApp(t *testing.T) {
 		f := newFounder(t)
 		lf := newLifecycleFixture(t, f)
 		lf.enroll(t)
-		state := t.TempDir()
-		key, err := trust.LoadOrCreateVotingKey(state)
-		if err != nil {
-			t.Fatal(err)
-		}
-		cert, err := trust.LoadOrCreateVotingCert(state, nodeIATest, key)
-		if err != nil {
-			t.Fatal(err)
-		}
+		voting, root, issuer := authoritativeMaterial(t, f, nodeIATest)
 		cfg := lf.cfg
-		cfg.Renewal = trust.AuthoritativeRenewal(lf.core, absentVoting{}, key, cert)
+		cfg.Renewal = trust.AuthoritativeRenewal(lf.core, lf.core, absentVoting{}, voting, root,
+			issuer)
 
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
@@ -476,23 +512,16 @@ func TestEnrollmentPassReportsTRCValidity(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		f := newFounder(t)
 		ctx := context.Background()
-		state := t.TempDir()
-		votingKey, err := trust.LoadOrCreateVotingKey(state)
-		if err != nil {
-			t.Fatal(err)
-		}
-		votingCert, err := trust.LoadOrCreateVotingCert(state, nodeIATest, votingKey)
-		if err != nil {
-			t.Fatal(err)
-		}
+		voting, root, issuer := authoritativeMaterial(t, f, nodeIATest)
 		core := &fakeCore{issuer: f.Issuer, trc: f.TRC}
 		roles := []struct {
 			name    string
 			renewal trust.Renewal
 		}{
 			{"founder", trust.FounderRenewal(f.Issuer)},
-			{"authoritative core", trust.AuthoritativeRenewal(core, absentVoting{}, votingKey, votingCert)},
-			{"normal node", trust.NormalRenewal(core)},
+			{"authoritative core", trust.AuthoritativeRenewal(core, core, absentVoting{}, voting,
+				root, issuer)},
+			{"normal node", trust.NormalRenewal(core, core)},
 		}
 		// passes runs one pass of each role on a database holding the TRC
 		// and no chain, and fails the test unless each logs the message.
@@ -548,7 +577,7 @@ func TestEnrollmentPassReanchors(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := f.Issuer.Rekey(keys, rolled); err != nil {
+		if err := f.Issuer.Rekey(keys.IssuerKeys, rolled); err != nil {
 			t.Fatal(err)
 		}
 		node.core.trc = rolled
@@ -585,5 +614,95 @@ func TestEnrollmentPassReanchors(t *testing.T) {
 
 		enrollPassOf(t, ctx, founderCfg)
 		anchored(founder.db, "founder")
+	})
+}
+
+// TestRenewalRestsOnTheChain checks where a node's renewal goes: holding no
+// chain, it enrolls through the founder's remote on nothing; holding a valid
+// one, it renews through the issuers' remote on that chain.
+func TestRenewalRestsOnTheChain(t *testing.T) {
+	f := newFounder(t)
+	lf := newLifecycleFixture(t, f)
+	ctx := context.Background()
+	founder := &fakeCore{issuer: f.Issuer, trc: f.TRC}
+	issuers := &fakeCore{issuer: f.Issuer, trc: f.TRC}
+	lf.cfg.Renewal = trust.NormalRenewal(founder, issuers)
+
+	enrollPassOf(t, ctx, lf.cfg)
+	if founder.renewals() != 1 || issuers.renewals() != 0 {
+		t.Fatalf("enrollments = %d at the founder and %d at the issuers, want one at the founder",
+			founder.renewals(), issuers.renewals())
+	}
+	if founder.restsOn[0] != nil {
+		t.Error("the enrollment rested on a chain")
+	}
+
+	// Every pass renews once the threshold exceeds the chain's validity.
+	held, err := trust.NewestChain(ctx, lf.db, nodeIATest, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	lf.cfg.RenewalThreshold = trust.ASValidity + time.Hour
+	enrollPassOf(t, ctx, lf.cfg)
+	if founder.renewals() != 1 || issuers.renewals() != 1 {
+		t.Fatalf("renewals = %d at the founder and %d at the issuers, want one at the issuers",
+			founder.renewals()-1, issuers.renewals())
+	}
+	if diff := cmp.Diff(held, issuers.restsOn[0]); diff != "" {
+		t.Errorf("the renewal rested on another chain than the node's (-held +rested):\n%s", diff)
+	}
+}
+
+// TestAuthoritativeRenewalSelfIssuesOnceAnchored checks the authoritative
+// core's own renewal: it enrolls at the founder, owes the onboarding until
+// the newest pinned TRC carries its root, anchors its issuer in that TRC,
+// and from then on self-issues, its chain under its own root and the
+// founder asked nothing more.
+func TestAuthoritativeRenewalSelfIssuesOnceAnchored(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		f := newFounder(t)
+		lf := newLifecycleFixture(t, f)
+		ctx := context.Background()
+		voting, root, issuer := authoritativeMaterial(t, f, nodeIATest)
+		founder := &fakeCore{issuer: f.Issuer, trc: f.TRC}
+		decider := &trust.TRCDecider{DB: f.DB, IA: coreIATest, Sensitive: f.Keys.Sensitive,
+			Authorizer: &authtest.Recorder{Verdict: enrollauth.AdmissionAllow}}
+		lf.cfg.Renewal = trust.AuthoritativeRenewal(founder, founder,
+			deciderCaster{decider: decider, presenter: nodeIATest}, voting, root, issuer)
+
+		// The enrollment, the onboarding's cast, and the anchoring: one pass
+		// each.
+		for range 3 {
+			enrollPassOf(t, ctx, lf.cfg)
+		}
+		if !issuer.Anchored() {
+			t.Fatal("the issuer is not anchored once the onboarding landed")
+		}
+		newest, err := lf.db.SignedTRC(ctx, trust.NewestTRCID(nodeIATest.ISD()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !trust.Onboarded(newest.TRC, nodeIATest) {
+			t.Fatal("the core's newest pinned TRC does not carry it with its root")
+		}
+
+		// A second on, the self-issued chain's whole-second expiry follows
+		// the enrolled chain's, so the newest chain is the self-issued one.
+		time.Sleep(time.Second)
+		lf.cfg.RenewalThreshold = trust.ASValidity + time.Hour
+		enrollPassOf(t, ctx, lf.cfg)
+		if founder.renewals() != 1 {
+			t.Errorf("the founder renewed %d times, want the one enrollment", founder.renewals())
+		}
+		chain, err := trust.NewestChain(ctx, lf.db, nodeIATest, time.Now())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if issuerIA, err := cppki.ExtractIA(chain[1].Subject); err != nil || !issuerIA.Equal(nodeIATest) {
+			t.Errorf("the newest chain's CA certificate names %v, want the core's own", issuerIA)
+		}
+		if err := cppki.VerifyChain(chain, cppki.VerifyOptions{TRC: []*cppki.TRC{&newest.TRC}}); err != nil {
+			t.Errorf("the self-issued chain does not verify against the TRC carrying its root: %v", err)
+		}
 	})
 }

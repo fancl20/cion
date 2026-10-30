@@ -3,7 +3,7 @@ package trust
 import (
 	"crypto"
 	"crypto/x509"
-	"fmt"
+	"errors"
 	"sync"
 	"time"
 
@@ -12,37 +12,49 @@ import (
 	"github.com/scionproto/scion/pkg/scrypto/cppki"
 )
 
-// Issuer issues AS certificate chains with the founding core's CP CA key.
-// The chains are two-certificate chains [AS certificate, CP CA certificate]
-// verified against the root pool extracted from the TRC (PKI draft,
-// Section 4.2.2; enforced by cppki.ValidateChain).
+// ErrUnanchored reports an issuer whose root certificate no TRC it holds
+// carries: it issues nothing until its root lands.
+var ErrUnanchored = errors.New("the issuer's root certificate is in no TRC it holds")
+
+// Issuer issues AS certificate chains with a core's CP CA key, under the
+// core's own root certificate among the TRC's roots. The chains are
+// two-certificate chains [AS certificate, CP CA certificate] verified
+// against the root pool extracted from the TRC (PKI draft, Section 4.2.2;
+// enforced by cppki.ValidateChain). An issuer whose TRC carries no root of
+// its own is unanchored: it issues nothing until Anchor hands it a TRC that
+// does.
 type Issuer struct {
 	// IA is the core's ISD-AS.
 	IA addr.IA
-	// RootKey signs CP CA certificates; its certificate is in the TRC.
-	RootKey crypto.Signer
-	// CAKey signs AS certificates; its certificate is never in the TRC.
-	CAKey crypto.Signer
-	// TRC is the base TRC anchoring the issued chains.
-	TRC cppki.SignedTRC
 
-	mtx    sync.Mutex
+	// mtx guards the CA material, which an anchoring or a rekey swaps as a
+	// set.
+	mtx sync.Mutex
+	// keys sign the CA certificates and the AS certificates.
+	keys IssuerKeys
+	// trc anchors the issued chains, and root is the issuer's own root
+	// certificate in it; both are zero while the issuer is unanchored.
+	trc    cppki.SignedTRC
+	root   *x509.Certificate
 	caCert *x509.Certificate
 }
 
-// NewIssuer returns an issuer anchored in the given TRC. The allowlist is
-// handled by the caller, so issuance here is only about correct certificates.
-func NewIssuer(ia addr.IA, keys CoreKeys, trc cppki.SignedTRC) (*Issuer, error) {
-	rootCert, err := rootCertificate(trc)
+// NewIssuer returns an issuer of the keys, anchored in the TRC when the TRC
+// carries the root certificate the root key covers, and unanchored
+// otherwise. The allowlist is handled by the caller, so issuance here is
+// only about correct certificates.
+func NewIssuer(ia addr.IA, keys IssuerKeys, trc cppki.SignedTRC) (*Issuer, error) {
+	i := &Issuer{IA: ia, keys: keys}
+	root, err := ownRoot(trc, keys.Root)
 	if err != nil {
 		return nil, err
 	}
-	i := &Issuer{IA: ia, RootKey: keys.Root, CAKey: keys.CA, TRC: trc}
-	caCert, err := createCACert(ia, keys.CA, rootCert, keys.Root, signingTime())
-	if err != nil {
+	if root == nil {
+		return i, nil
+	}
+	if err := i.anchorLocked(keys, trc, root); err != nil {
 		return nil, err
 	}
-	i.caCert = caCert
 	return i, nil
 }
 
@@ -51,6 +63,42 @@ func NewIssuer(ia addr.IA, keys CoreKeys, trc cppki.SignedTRC) (*Issuer, error) 
 // certificates and their containers line up exactly.
 func signingTime() time.Time {
 	return time.Now().UTC().Add(signingBackdate).Truncate(time.Second)
+}
+
+// Anchor anchors the issuer in the TRC, which must carry the root
+// certificate the issuer's root key covers, and mints the CA certificate
+// under it: the chains issue under that root from here on.
+func (i *Issuer) Anchor(trc cppki.SignedTRC) error {
+	i.mtx.Lock()
+	defer i.mtx.Unlock()
+	root, err := ownRoot(trc, i.keys.Root)
+	if err != nil {
+		return err
+	}
+	if root == nil {
+		return serrors.New("the TRC carries no root certificate of the issuer",
+			"trc", trc.TRC.ID)
+	}
+	return i.anchorLocked(i.keys, trc, root)
+}
+
+// Anchored reports whether the issuer holds a TRC carrying its root, and so
+// issues.
+func (i *Issuer) Anchored() bool {
+	i.mtx.Lock()
+	defer i.mtx.Unlock()
+	return i.root != nil
+}
+
+// anchorLocked takes the keys, the TRC, and the root certificate in it as
+// the issuer's set, the CA certificate minted afresh under the root.
+func (i *Issuer) anchorLocked(keys IssuerKeys, trc cppki.SignedTRC, root *x509.Certificate) error {
+	caCert, err := createCACert(i.IA, keys.CA, root, keys.Root, signingTime())
+	if err != nil {
+		return err
+	}
+	i.keys, i.trc, i.root, i.caCert = keys, trc, root, caCert
+	return nil
 }
 
 // IssueChain creates a certificate chain for the subject of the CSR from the
@@ -74,16 +122,20 @@ type CA struct {
 	trc  cppki.SignedTRC
 }
 
-// CA snapshots the issuer's current CA material under the mutex — the
-// rotation's rekey swaps all three as a set.
+// CA snapshots the issuer's current CA material under the mutex — an
+// anchoring or a rekey swaps all three as a set. An unanchored issuer
+// answers ErrUnanchored.
 func (i *Issuer) CA() (*CA, error) {
 	i.mtx.Lock()
 	defer i.mtx.Unlock()
+	if i.root == nil {
+		return nil, ErrUnanchored
+	}
 	caCert, err := i.ensureCACertLocked()
 	if err != nil {
 		return nil, err
 	}
-	return &CA{ia: i.IA, cert: caCert, key: i.CAKey, trc: i.TRC}, nil
+	return &CA{ia: i.IA, cert: caCert, key: i.keys.CA, trc: i.trc}, nil
 }
 
 // IssueChain creates a certificate chain for the subject of the CSR. The CSR
@@ -133,27 +185,23 @@ func (c *CA) SignResponse(msg []byte) ([]byte, error) {
 
 // ensureCACert returns a CP CA certificate whose validity covers a full AS
 // certificate validity. The CA certificate is reissued from the root key —
-// which is anchored in the TRC and valid for a year — whenever the current
-// one gets too close to its end. Without renewal workflows this keeps
-// enrollment working for the lifetime of the base TRC; nodes simply see a
-// new CA certificate in each chain they obtain.
+// whose certificate is anchored in the TRC and valid for a year — whenever
+// the current one gets too close to its end, so nodes simply see a new CA
+// certificate in each chain they obtain.
 func (i *Issuer) ensureCACert() (*x509.Certificate, error) {
 	i.mtx.Lock()
 	defer i.mtx.Unlock()
 	return i.ensureCACertLocked()
 }
 
-// ensureCACertLocked is ensureCACert under a held mutex.
+// ensureCACertLocked is ensureCACert under a held mutex, on an anchored
+// issuer.
 func (i *Issuer) ensureCACertLocked() (*x509.Certificate, error) {
 	minExpiration := time.Now().Add(ASValidity)
 	if i.caCert.NotAfter.After(minExpiration) {
 		return i.caCert, nil
 	}
-	rootCert, err := rootCertificate(i.TRC)
-	if err != nil {
-		return nil, err
-	}
-	caCert, err := createCACert(i.IA, i.CAKey, rootCert, i.RootKey, signingTime())
+	caCert, err := createCACert(i.IA, i.keys.CA, i.root, i.keys.Root, signingTime())
 	if err != nil {
 		return nil, err
 	}
@@ -161,36 +209,40 @@ func (i *Issuer) ensureCACertLocked() (*x509.Certificate, error) {
 	return caCert, nil
 }
 
-// Rekey rekeys the issuer under the successor a rotation pinned: the staged
-// root and CA keys taking the place of the ones it held, the CA certificate
-// minted afresh under the successor's root certificate, the chains issuing
-// under it from the pin on. The successor is already verified and pinned; the
-// live key files catch up when the staged keys are promoted.
-func (i *Issuer) Rekey(keys CoreKeys, trc cppki.SignedTRC) error {
+// Rekey rekeys the issuer under the successor a roll pinned: the staged root
+// and CA keys taking the place of the ones it held, the CA certificate
+// minted afresh under the successor's root certificate the staged root key
+// covers, the chains issuing under it from the pin on. The successor is
+// already verified and pinned; the live key files catch up when the staged
+// keys are promoted.
+func (i *Issuer) Rekey(keys IssuerKeys, trc cppki.SignedTRC) error {
 	i.mtx.Lock()
 	defer i.mtx.Unlock()
-	rootCert, err := rootCertificate(trc)
+	root, err := ownRoot(trc, keys.Root)
 	if err != nil {
 		return err
 	}
-	caCert, err := createCACert(i.IA, keys.CA, rootCert, keys.Root, signingTime())
-	if err != nil {
-		return err
+	if root == nil {
+		return serrors.New("the successor carries no root certificate of the staged root key",
+			"trc", trc.TRC.ID)
 	}
-	i.RootKey, i.CAKey, i.TRC, i.caCert = keys.Root, keys.CA, trc, caCert
-	return nil
+	return i.anchorLocked(keys, trc, root)
 }
 
-// rootCertificate extracts the CP root certificate from the TRC, which must
-// contain exactly one.
-func rootCertificate(trc cppki.SignedTRC) (*x509.Certificate, error) {
+// ownRoot returns the root certificate among the TRC's that the root key
+// covers, nil when the TRC — the zero one included — carries none.
+func ownRoot(trc cppki.SignedTRC, key crypto.Signer) (*x509.Certificate, error) {
+	if trc.IsZero() {
+		return nil, nil
+	}
 	roots, err := trc.TRC.RootCerts()
 	if err != nil {
 		return nil, err
 	}
-	if len(roots) != 1 {
-		return nil, fmt.Errorf("TRC must contain exactly one CP root certificate, has %d",
-			len(roots))
+	for _, root := range roots {
+		if KeyMatchesCert(key, root) {
+			return root, nil
+		}
 	}
-	return roots[0], nil
+	return nil, nil
 }

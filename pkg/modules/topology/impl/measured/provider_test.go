@@ -144,10 +144,10 @@ func TestZeroconfMounts(t *testing.T) {
 	joined := func(t *testing.T, host string, core bool) []string {
 		t.Helper()
 		z, err := New(Config{
-			Core:        core,
-			ControlHost: netip.MustParseAddr(host),
-			NewConn:     func() (*scion.Conn, error) { return nil, nil },
-			CoreRoute:   func() *scion.Addr { return nil },
+			Core:         core,
+			ControlHost:  netip.MustParseAddr(host),
+			NewConn:      func() (*scion.Conn, error) { return nil, nil },
+			FounderRoute: func() *scion.Addr { return nil },
 		})
 		if err != nil {
 			t.Fatal(err)
@@ -202,7 +202,7 @@ func TestProviderRunReturnsAndCloseReleases(t *testing.T) {
 			}
 			return conn, err
 		},
-		CoreRoute: func() *scion.Addr { return nil },
+		FounderRoute: func() *scion.Addr { return nil },
 	})
 	if err != nil {
 		t.Fatal(err)

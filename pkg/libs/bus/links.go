@@ -61,7 +61,7 @@ func (s LinkState) Table() map[uint16]addr.IA {
 // interface ID. The data plane refuses a down link's egress, and forwards a
 // one-hop packet onto it without that check, so no signal tells the sender:
 // every route out of the node — a composed path's first hop, the bootstrap
-// route, a one-hop write, the core route's shortcut — resolves over these
+// route, a one-hop write, a one-hop route to a core — resolves over these
 // links alone, and fails at once where none serves. The zero LinkState
 // returns nil, which filters nothing.
 func (s LinkState) Usable() map[uint16]addr.IA {

@@ -27,21 +27,24 @@ type Fetcher interface {
 	Chains(ctx context.Context, q trustdb.ChainQuery) ([][]*x509.Certificate, error)
 }
 
-// Remote resolves trust material over the network, typically from the core's
-// control endpoint, and renews the node's chain there.
+// Remote resolves trust material over the network from a core's control
+// endpoint, and renews the node's chain there.
 type Remote interface {
 	Fetcher
-	// RenewChain requests a certificate chain for the CSR, proving possession
-	// of the subject key with the given signer. It returns the chain carried
-	// by the verified renewal response.
+	// RenewChain requests a certificate chain for the CSR, the request
+	// signed with key: under chain, the node's current one a renewal rests
+	// on, or, with a nil chain, as the subject key's own proof of
+	// possession. It returns the chain carried by the verified renewal
+	// response.
 	RenewChain(ctx context.Context, csr *x509.CertificateRequest,
-		key crypto.Signer) ([]*x509.Certificate, error)
+		key crypto.Signer, chain []*x509.Certificate) ([]*x509.Certificate, error)
 }
 
 // NetworkProvider is a DB-first trust.Provider: lookups go to the local
 // database and fall back on a miss to the network, caching the result. The
-// founding core runs without a Remote — its DB holds every chain it issued —
-// and a nil Remote resolves to "not found", never a panic.
+// founding core runs without a Remote — the bootstrap channel a Remote rides
+// is its own, and what its DB lacks comes from the messages' senders — and
+// a nil Remote resolves to "not found", never a panic.
 type NetworkProvider struct {
 	// DB is the local trust database.
 	DB trustdb.DB
@@ -213,16 +216,19 @@ func (p *NetworkProvider) NotifyTRC(ctx context.Context, id cppki.TRCID, opts ..
 	return err
 }
 
-// RenewChain requests a fresh chain for the node's key from the core and
-// stores it, whatever chains the DB holds: the enrollment loop calls it when
-// the node holds no valid chain, when the chain nears its expiry, and when
-// the chain no longer anchors in the newest pinned TRC.
+// RenewChain requests a fresh chain for the node's key from the remote's
+// core and stores it, whatever chains the DB holds: the enrollment loop
+// calls it when the node holds no valid chain, when the chain nears its
+// expiry, and when the chain no longer anchors in the newest pinned TRC.
+// chain is the node's current one, which the request rests on, or nil for a
+// first issuance.
 func RenewChain(
 	ctx context.Context,
 	db trustdb.DB,
 	remote Remote,
 	ia addr.IA,
 	key crypto.Signer,
+	chain []*x509.Certificate,
 ) ([]*x509.Certificate, error) {
 
 	if err := validateISD(ia); err != nil {
@@ -246,23 +252,30 @@ func RenewChain(
 	if err != nil {
 		return nil, fmt.Errorf("creating CSR: %w", err)
 	}
-	chain, err := remote.RenewChain(ctx, csr, key)
+	issued, err := remote.RenewChain(ctx, csr, key, chain)
 	if err != nil {
 		return nil, serrors.Wrap("requesting chain", err)
 	}
-	if len(chain) != 2 {
-		return nil, serrors.New("chain must contain two certificates", "len", len(chain))
+	if len(issued) != 2 {
+		return nil, serrors.New("chain must contain two certificates", "len", len(issued))
 	}
-	if certIA, err := cppki.ExtractIA(chain[0].Subject); err != nil || !certIA.Equal(ia) {
+	if certIA, err := cppki.ExtractIA(issued[0].Subject); err != nil || !certIA.Equal(ia) {
 		return nil, serrors.New("issued chain is for another ISD-AS", "expected", ia)
 	}
-	if err := cppki.VerifyChain(chain, cppki.VerifyOptions{TRC: pool}); err != nil {
+	if err := cppki.VerifyChain(issued, cppki.VerifyOptions{TRC: pool}); err != nil {
 		return nil, serrors.Wrap("issued chain does not verify against TRC", err)
 	}
-	if _, err := db.InsertChain(ctx, chain); err != nil {
+	if _, err := db.InsertChain(ctx, issued); err != nil {
 		return nil, fmt.Errorf("storing chain: %w", err)
 	}
-	return chain, nil
+	return issued, nil
+}
+
+// PinnedPool returns the active TRCs pinned in the DB that anchor chain
+// verification, as activePool reads them, fetching nothing: an ISD with no
+// TRC pinned yields the zero TRC alone, which verifies no chain.
+func PinnedPool(ctx context.Context, db trustdb.DB, isd addr.ISD) ([]*cppki.TRC, error) {
+	return anchorPool(ctx, db, nil, isd)
 }
 
 // anchorPool resolves the active TRCs that anchor chain verification, as

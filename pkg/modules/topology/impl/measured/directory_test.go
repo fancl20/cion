@@ -144,8 +144,8 @@ func TestDirectoryClientReleasesTheReplacedEndpoint(t *testing.T) {
 	atDistance := &scion.Addr{IA: core, Service: addr.SvcCS}
 	route := oneHop
 	rpc := &rpcDirectoryClient{
-		coreRoute: func() *scion.Addr { return route },
-		hclt:      &http.Client{Transport: transport},
+		founderRoute: func() *scion.Addr { return route },
+		hclt:         &http.Client{Transport: transport},
 	}
 
 	ctx := t.Context()

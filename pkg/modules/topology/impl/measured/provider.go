@@ -70,9 +70,9 @@ type Config struct {
 	// directory's publish and fetch ride on non-core nodes, the selection
 	// probe's socket, and the punch requests' socket.
 	NewConn func() (*scion.Conn, error)
-	// CoreRoute resolves the core's endpoint, which the directory's client
-	// rides on non-core nodes.
-	CoreRoute func() *scion.Addr
+	// FounderRoute resolves the founding core's endpoint, which the
+	// directory's client rides on non-core nodes.
+	FounderRoute func() *scion.Addr
 	// Sockets is the socket source the acceptor's bind, the dials, and the
 	// band probes construct through, and the founding core's domain
 	// resolves through; the zero value is the kernel's.
@@ -484,7 +484,7 @@ func (z *Provider) assemble() error {
 		}
 		z.directoryConn = conn
 		directoryCfg.Conn = conn
-		directoryCfg.CoreRoute = z.cfg.CoreRoute
+		directoryCfg.FounderRoute = z.cfg.FounderRoute
 	}
 	z.directory = NewNodeDirectory(directoryCfg)
 	if z.cfg.NewConn != nil {

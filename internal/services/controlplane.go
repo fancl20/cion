@@ -1,12 +1,15 @@
 package services
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"net/netip"
 	"path/filepath"
+	"slices"
 	"time"
 
 	"github.com/scionproto/scion/pkg/addr"
@@ -141,12 +144,13 @@ func (n *node) setupTrustRole(ctx context.Context) error {
 // genesis, or the newest pinned — the issuer anchored in it, the decision
 // on submitted TRC updates the voting application hands each submission
 // to, its first chain by self-enrollment — the chain lifecycle's first
-// pass — and its WebPKI identity, prepared whatever the applications: the
-// node's HTTPS server, assembled after they mount, serves it and answers
-// the ACME TLS-ALPN challenge on it, so no TLS path branches on an
-// application's presence. Its loops renew by self-issue, roll by local
-// cast, manage an ACME-managed certificate, and run the selected
-// authorizer's own loops when the method has them.
+// pass — the bindings of the names it issued to their keys, and its WebPKI
+// identity, prepared whatever the applications: the node's HTTPS server,
+// assembled after they mount, serves it and answers the ACME TLS-ALPN
+// challenge on it, so no TLS path branches on an application's presence.
+// Its loops renew by self-issue, roll by local cast, manage an ACME-managed
+// certificate, and run the selected authorizer's own loops when the method
+// has them.
 func (n *node) setupFounder(ctx context.Context) error {
 	newest, err := n.promoteStaged(ctx)
 	if err != nil {
@@ -166,7 +170,7 @@ func (n *node) setupFounder(ctx context.Context) error {
 	if !newest.IsZero() {
 		trc = newest
 	}
-	issuer, err := trust.NewIssuer(n.ident.ia, keys, trc)
+	issuer, err := trust.NewIssuer(n.ident.ia, keys.IssuerKeys, trc)
 	if err != nil {
 		return fmt.Errorf("creating issuer: %w", err)
 	}
@@ -178,6 +182,9 @@ func (n *node) setupFounder(ctx context.Context) error {
 	}
 	if err := trust.SelfIssue(ctx, n.trustDB, issuer, n.ident.ia, n.asKey); err != nil {
 		return fmt.Errorf("self-enrolling core: %w", err)
+	}
+	if err := trust.BindHeldNames(ctx, n.trustDB); err != nil {
+		return fmt.Errorf("binding the held names: %w", err)
 	}
 	manager, err := webpki.PrepareTLSCert(webpki.TLSCertConfig{
 		Domain:   n.cfg.Domain,
@@ -226,13 +233,17 @@ func (n *node) setupFounder(ctx context.Context) error {
 }
 
 // setupAuthoritative builds the authoritative core's parts: its voting
-// material — the regular voting key alone, and the self-signed certificate
-// over it naming the completed ISD-AS — and the core client. Its loops
-// renew remotely and cast the onboarding update, and roll by submission,
+// material — the regular voting key, and the self-signed certificate over it
+// naming the completed ISD-AS — its issuing material — the root and CA keys,
+// and the self-signed root certificate the same way — the issuer, anchored
+// in the newest pinned TRC once that carries the root, and the core client.
+// Its loops renew — remotely until the issuer is anchored, by self-issue
+// from then on — and cast the onboarding update, and roll by submission,
 // both submitting to the founder's voting application over the verified
 // peer channel, the submission identified by the node's chain.
 func (n *node) setupAuthoritative(ctx context.Context) error {
-	if _, err := n.promoteStaged(ctx); err != nil {
+	newest, err := n.promoteStaged(ctx)
+	if err != nil {
 		return err
 	}
 	votingKey, err := trust.LoadOrCreateVotingKey(n.cfg.State)
@@ -243,24 +254,39 @@ func (n *node) setupAuthoritative(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("loading voting certificate: %w", err)
 	}
+	issuerKeys, err := trust.LoadOrCreateIssuerKeys(n.cfg.State)
+	if err != nil {
+		return fmt.Errorf("loading issuer keys: %w", err)
+	}
+	rootCert, err := trust.LoadOrCreateRootCert(n.cfg.State, n.ident.ia, issuerKeys.Root)
+	if err != nil {
+		return fmt.Errorf("loading root certificate: %w", err)
+	}
+	issuer, err := trust.NewIssuer(n.ident.ia, issuerKeys, newest)
+	if err != nil {
+		return fmt.Errorf("creating issuer: %w", err)
+	}
 	coreClt, err := n.coreClient()
 	if err != nil {
 		return err
 	}
+	n.issuer = issuer
 	n.remote = coreClt
+	voting := trust.KeyCert{Key: votingKey, Cert: votingCert}
+	root := trust.KeyCert{Key: issuerKeys.Root, Cert: rootCert}
 	n.roleLoops = []roleLoop{
 		// The onboarding's failure is terminal: the loop returns it, and the
 		// node stops with it as the cause.
 		{"enrollment", supervise.Fatal, func(ctx context.Context) error {
-			return trust.RunEnrollment(ctx, n.enrollment(
-				trust.AuthoritativeRenewal(coreClt, n.submitter(), votingKey, votingCert)))
+			return trust.RunEnrollment(ctx, n.enrollment(trust.AuthoritativeRenewal(
+				coreClt, n.issuers(), n.submitter(), voting, root, issuer)))
 		}},
-		// The authoritative core's rotation watch: its certificate rolls
+		// The authoritative core's rotation watch: its certificates roll
 		// through the same channel its join used, by a regular update its
-		// current key votes on.
+		// current keys sign.
 		{"rotation watch", supervise.Fatal, func(ctx context.Context) error {
 			trust.RunRotation(ctx,
-				n.rotation(trust.AuthoritativeRoll(coreClt, n.submitter())))
+				n.rotation(trust.AuthoritativeRoll(coreClt, n.submitter(), issuer)))
 			return nil
 		}},
 	}
@@ -268,7 +294,7 @@ func (n *node) setupAuthoritative(ctx context.Context) error {
 }
 
 // setupNormal builds the normal node's one part, the core client. Its loop
-// renews remotely.
+// renews at the issuers, and enrolls through the core client.
 func (n *node) setupNormal() error {
 	coreClt, err := n.coreClient()
 	if err != nil {
@@ -278,14 +304,14 @@ func (n *node) setupNormal() error {
 	n.roleLoops = []roleLoop{
 		{"enrollment", supervise.Fatal, func(ctx context.Context) error {
 			return trust.RunEnrollment(ctx,
-				n.enrollment(trust.NormalRenewal(coreClt)))
+				n.enrollment(trust.NormalRenewal(coreClt, n.issuers())))
 		}},
 	}
 	return nil
 }
 
-// coreClient builds the client every role but the founder enrolls with its
-// core through, over the WebPKI-verified channel, the core's control
+// coreClient builds the client every role but the founder enrolls with the
+// founder through, over the WebPKI-verified channel, the founder's control
 // service resolved through the drafts' exchange when the dial wants an
 // underlay address.
 func (n *node) coreClient() (*webpki.CoreClient, error) {
@@ -308,7 +334,7 @@ func (n *node) coreClient() (*webpki.CoreClient, error) {
 		Domain:  n.cfg.Domain,
 		Conn:    conn,
 		RootCAs: n.cfg.RootCAs,
-		Locator: n.coreRoute,
+		Locator: n.founderRoute,
 		ResolveService: func(ctx context.Context, peer *scion.Addr) (netip.AddrPort, error) {
 			return scionrpc.ResolveService(ctx, resolutionConn, peer)
 		},
@@ -326,18 +352,26 @@ func (n *node) coreClient() (*webpki.CoreClient, error) {
 // the node's verified peer channel. The channel is the messenger phase's,
 // built after the role's, so the loops build their submitter as they start.
 func (n *node) submitter() *voting.Submitter {
-	return voting.NewSubmitter(n.peerClt.VerifiedClient(), n.coreRoute)
+	return voting.NewSubmitter(n.peerClt.VerifiedClient(), n.founderRoute)
+}
+
+// issuers returns the remote that renews the node's chain at the issuers
+// over the node's verified peer channel, built as the loops start as the
+// submitter is.
+func (n *node) issuers() trust.Remote {
+	return n.peerClt.Issuers(n.issuerRoutes)
 }
 
 // enrollment configures the node's chain lifecycle with the role's renewal.
 func (n *node) enrollment(renewal trust.Renewal) trust.EnrollmentConfig {
 	return trust.EnrollmentConfig{
-		IA:              n.ident.ia,
-		DB:              n.trustDB,
-		Key:             n.asKey,
-		Renewal:         renewal,
-		RetryInterval:   n.cfg.Pacing.Enrollment,
-		InspectInterval: n.cfg.Pacing.EnrollmentInspect,
+		IA:               n.ident.ia,
+		DB:               n.trustDB,
+		Key:              n.asKey,
+		Renewal:          renewal,
+		RetryInterval:    n.cfg.Pacing.Enrollment,
+		InspectInterval:  n.cfg.Pacing.EnrollmentInspect,
+		RenewalThreshold: n.cfg.Pacing.RenewalThreshold,
 	}
 }
 
@@ -372,9 +406,9 @@ func (n *node) promoteStaged(ctx context.Context) (cppki.SignedTRC, error) {
 func (n *node) buildMessenger() error {
 	// The provider behind the engine is DB-first: a received beacon's
 	// missing material comes from its sender through the peer client; the
-	// rest, and what a sender cannot serve, comes from the core's endpoint
-	// through the core client over the SCION-native transport, on every role
-	// but the founder, whose DB holds every chain it issued.
+	// rest, and what a sender cannot serve, comes from the founder's
+	// endpoint through the core client over the SCION-native transport, on
+	// every role but the founder itself.
 	provider := &trust.NetworkProvider{DB: n.trustDB, Remote: n.remote}
 	n.engine = trust.NewEngine(n.ident.ia, n.asKey, provider)
 
@@ -542,6 +576,7 @@ func (n *node) assembleEndpoint() error {
 		TrustService: &controlplane.TrustService{
 			DB:          n.trustDB,
 			Issuer:      n.issuer,
+			Enrolls:     n.cfg.role == trust.ASTypeCore,
 			Authorizer:  n.cfg.enrollAuth,
 			MinInterval: n.cfg.Pacing.RendezvousRate,
 		},
@@ -575,31 +610,48 @@ func (n *node) scionConn(port uint16) (*scion.Conn, error) {
 	})
 }
 
-// coreRoute returns the route to the core this node enrolls with — the drafts'
-// own way of reaching one, routed to the issuers: the one-hop path when a
-// core whose root certificate the newest TRC carries is a direct neighbor
-// with its verdict up, addressed to the core's control service; else the
-// reversed freshest up segment — or, before any is verified, the bootstrap
-// beacon's route — addressed to the core's control service the same way. A
-// core named by the TRC that holds no root certificate — the on-boarded
-// authoritative, which issues nothing — is skipped: a renewal landing there
-// would answer Unimplemented, so the route falls through to a core that
-// serves it. The endpoint address is resolved, not remembered: the drafts'
-// service resolution answers it at dial time. Local state only: resolving a
-// route inside a dial must not spawn RPCs over the transport being dialed.
-func (n *node) coreRoute() *scion.Addr {
-	// The one-hop shortcut: an issuer core a usable link reaches directly —
-	// a link the monitor marked down falls through to the composed route.
-	state := n.bus.Links().Latest()
-	for ifID, neighborIA := range state.Usable() {
-		if !neighborIA.IsZero() && n.issuerASes()[neighborIA] {
-			return &scion.Addr{IA: neighborIA, Service: addr.SvcCS, IfID: ifID}
+// founderRoute returns the route to the founding core — the core this node
+// enrolls with, the one whose voting application decides its submissions
+// and whose directories serve it — the drafts' own way of reaching a core:
+// the one-hop path when the founder is a direct neighbor with its verdict
+// up, addressed to its control service; else the reversed freshest up
+// segment from the founder — or, before any is verified, the bootstrap
+// beacon's route — addressed to the control service the same way. The
+// founder is the core the newest pinned TRC's sensitive voting certificate
+// names; before any TRC is pinned, the bootstrap route takes turns among
+// the beacons' origins. The endpoint address is resolved, not remembered:
+// the drafts' service resolution answers it at dial time. Local state only:
+// resolving a route inside a dial must not spawn RPCs over the transport
+// being dialed.
+func (n *node) founderRoute() *scion.Addr {
+	founder, err := n.engine.FounderAS(n.ident.ia.ISD())
+	if err != nil {
+		slog.Error("Reading the founding core", "err", err)
+		return nil
+	}
+	if !founder.IsZero() {
+		// The one-hop shortcut: a usable link reaches the founder directly
+		// — a link the monitor marked down falls through to the composed
+		// route.
+		for ifID, neighborIA := range n.bus.Links().Latest().Usable() {
+			if neighborIA.Equal(founder) {
+				return &scion.Addr{IA: founder, Service: addr.SvcCS, IfID: ifID}
+			}
 		}
 	}
-	// At distance: the issuer the node's own beaconing stands behind — the
-	// freshest up segment's origin, or the bootstrap beacon's before any is
-	// verified — over the reversed segment.
-	for _, core := range []func() addr.IA{n.freshestUpCore, n.beaconer.BootstrapCore} {
+	// At distance: the founder's freshest up segment, or the bootstrap
+	// beacon's before any is verified, reversed.
+	freshest := func() addr.IA {
+		if founder.IsZero() {
+			return 0
+		}
+		cores := n.freshestUpCores(map[addr.IA]bool{founder: true})
+		if len(cores) == 0 {
+			return 0
+		}
+		return cores[0]
+	}
+	for _, core := range []func() addr.IA{freshest, n.beaconer.BootstrapCore} {
 		if coreIA := core(); !coreIA.IsZero() {
 			if path, err := n.pathProvider.LocalPath(coreIA); err == nil {
 				return &scion.Addr{IA: coreIA, Service: addr.SvcCS, Path: path}
@@ -607,6 +659,46 @@ func (n *node) coreRoute() *scion.Addr {
 		}
 	}
 	return nil
+}
+
+// issuerRoutes returns the routes to the issuers — the cores whose root
+// certificate the newest pinned TRC carries — in the order a renewal asks
+// them. Local state only, as the founder route.
+func (n *node) issuerRoutes() []*scion.Addr {
+	issuers := n.issuerASes()
+	return orderIssuerRoutes(issuers, n.bus.Links().Latest().Usable(),
+		n.freshestUpCores(issuers), n.pathProvider.LocalPath)
+}
+
+// orderIssuerRoutes orders the routes to the issuers: those a usable link
+// reaches, by ISD-AS, over the one-hop path, then the others in the order
+// freshest lists them — the freshest up segment's origin first — over the
+// path localPath composes to each.
+func orderIssuerRoutes(
+	issuers map[addr.IA]bool,
+	usable map[uint16]addr.IA,
+	freshest []addr.IA,
+	localPath func(addr.IA) (*spath.Decoded, error),
+) []*scion.Addr {
+
+	var routes []*scion.Addr
+	linked := make(map[addr.IA]bool)
+	for ifID, neighborIA := range usable {
+		if issuers[neighborIA] && !linked[neighborIA] {
+			linked[neighborIA] = true
+			routes = append(routes, &scion.Addr{IA: neighborIA, Service: addr.SvcCS, IfID: ifID})
+		}
+	}
+	slices.SortFunc(routes, func(a, b *scion.Addr) int { return cmp.Compare(a.IA, b.IA) })
+	for _, core := range freshest {
+		if linked[core] {
+			continue
+		}
+		if path, err := localPath(core); err == nil {
+			routes = append(routes, &scion.Addr{IA: core, Service: addr.SvcCS, Path: path})
+		}
+	}
+	return routes
 }
 
 // issuerASes returns the cores whose root certificate the newest pinned TRC
@@ -625,26 +717,29 @@ func (n *node) issuerASes() map[addr.IA]bool {
 	return set
 }
 
-// freshestUpCore returns the origin of the freshest up segment the node has
-// verified that ends at an issuer — the core its own termination stands
-// behind, among the cores that can serve a renewal; zero when none is
-// stored.
-func (n *node) freshestUpCore() addr.IA {
+// freshestUpCores returns the cores among the given ones that originated an
+// up segment the node has verified, the one whose freshest segment is
+// freshest first: the cores its own termination stands behind. Empty when
+// none is stored.
+func (n *node) freshestUpCores(cores map[addr.IA]bool) []addr.IA {
 	segs, err := n.pathDB.Get(context.Background(), pathdb.Query{Type: pathdb.SegmentTypeUp})
 	if err != nil {
 		slog.Error("Reading the path database", "err", err)
-		return 0
+		return nil
 	}
-	issuers := n.issuerASes()
-	var core addr.IA
-	var best time.Time
+	freshest := make(map[addr.IA]time.Time)
 	for _, seg := range segs {
-		if !issuers[seg.FirstIA()] {
+		origin := seg.FirstIA()
+		if !cores[origin] {
 			continue
 		}
-		if core.IsZero() || seg.PCB.Timestamp().After(best) {
-			core, best = seg.FirstIA(), seg.PCB.Timestamp()
+		if ts := seg.PCB.Timestamp(); ts.After(freshest[origin]) {
+			freshest[origin] = ts
 		}
 	}
-	return core
+	ordered := slices.Collect(maps.Keys(freshest))
+	slices.SortFunc(ordered, func(a, b addr.IA) int {
+		return freshest[b].Compare(freshest[a])
+	})
+	return ordered
 }
