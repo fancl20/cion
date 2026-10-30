@@ -75,8 +75,9 @@ type Environment struct {
 	Engine *trust.Engine
 	Paths  Paths
 	// IssuedChains lists the certificate chains valid now that the node's
-	// trust database holds — on the founding core, every chain it issued
-	// and every chain it fetched to verify a message.
+	// trust database holds — on the founding core, every chain it issued,
+	// fetched to verify a message, or recorded from a verified peer's
+	// handshake.
 	IssuedChains func(ctx context.Context) ([][]*x509.Certificate, error)
 	// NewConn binds the node's sending conn on an ephemeral port: the
 	// socket the application's own services ride.

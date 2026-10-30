@@ -3,8 +3,10 @@ package trust
 import (
 	"context"
 	"crypto"
+	"crypto/sha256"
 	"crypto/x509"
 	"fmt"
+	"log/slog"
 	"net"
 	"time"
 
@@ -47,7 +49,15 @@ type Engine struct {
 	// deduplicate their TRC reports.
 	chains   *expiring.Map[string, [][]*x509.Certificate]
 	notifies *expiring.Map[string, struct{}]
+	// recorded remembers the peers' chains recorded within
+	// recordedChainTTL, by digest, so a handshake writes only a chain new
+	// to the engine.
+	recorded *expiring.Map[[sha256.Size]byte, struct{}]
 }
+
+// recordedChainTTL is how long the engine remembers a peer's chain it
+// recorded.
+const recordedChainTTL = time.Hour
 
 // NewEngine returns an engine for the node's IA, AS key, and provider.
 func NewEngine(ia addr.IA, key crypto.Signer, provider Provider) *Engine {
@@ -57,6 +67,7 @@ func NewEngine(ia addr.IA, key crypto.Signer, provider Provider) *Engine {
 		Provider: provider,
 		chains:   expiring.New[string, [][]*x509.Certificate](),
 		notifies: expiring.New[string, struct{}](),
+		recorded: expiring.New[[sha256.Size]byte, struct{}](),
 	}
 }
 
@@ -202,6 +213,36 @@ func (e *Engine) AnchorPool() ([]*cppki.TRC, error) {
 type DBProvider interface {
 	LocalTRC(id cppki.TRCID) (cppki.SignedTRC, error)
 	LocalChains(ctx context.Context, q trustdb.ChainQuery) ([][]*x509.Certificate, error)
+	// StoreChain stores a chain in the local database.
+	StoreChain(ctx context.Context, chain []*x509.Certificate) error
+}
+
+// RecordChain stores the chain a peer presented in a handshake, once it
+// verified against the anchor pool, in the trust database, as the provider
+// stores a chain it fetched: a later verification of the peer's signed
+// messages finds it there, and the founder's database comes to hold the
+// current chain of every node that talks to it, whichever core issued it.
+// A chain recorded within recordedChainTTL is not written again. A failed
+// store is logged: the chain verified, and recording it is a cache.
+func (e *Engine) RecordChain(chain []*x509.Certificate) {
+	db, ok := e.Provider.(DBProvider)
+	if !ok {
+		return
+	}
+	digest := sha256.New()
+	for _, cert := range chain {
+		digest.Write(cert.Raw)
+	}
+	var key [sha256.Size]byte
+	digest.Sum(key[:0])
+	if _, ok := e.recorded.Get(key); ok {
+		return
+	}
+	if err := db.StoreChain(context.Background(), chain); err != nil {
+		slog.Warn("Recording a peer's chain", "subject", chain[0].Subject, "err", err)
+		return
+	}
+	e.recorded.Set(key, struct{}{}, time.Now().Add(recordedChainTTL))
 }
 
 // newestTRC resolves the ISD's newest TRC through the provider: the newest

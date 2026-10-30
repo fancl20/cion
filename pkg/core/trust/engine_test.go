@@ -8,6 +8,7 @@ import (
 	"crypto/x509"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -544,5 +545,45 @@ func TestEngineIssuerASes(t *testing.T) {
 	}
 	if founder, err := engine.FounderAS(iaCore.ISD()); err != nil || !founder.IsZero() {
 		t.Errorf("founder AS without a pinned TRC = %v (%v), want none", founder, err)
+	}
+}
+
+// insertCountingDB counts the chain inserts that reach the trust database
+// beneath it.
+type insertCountingDB struct {
+	trustdb.DB
+	inserts atomic.Int32
+}
+
+func (d *insertCountingDB) InsertChain(ctx context.Context, chain []*x509.Certificate) (bool, error) {
+	d.inserts.Add(1)
+	return d.DB.InsertChain(ctx, chain)
+}
+
+// TestEngineRecordsAPeersChain checks the engine's recording of a peer's
+// chain: the chain lands in the trust database, and the same chain recorded
+// again writes nothing.
+func TestEngineRecordsAPeersChain(t *testing.T) {
+	f := newEngineFixture(t)
+	ctx := context.Background()
+	fresh, err := bbolt.New(filepath.Join(t.TempDir(), "trust.db"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = fresh.Close() })
+	db := &insertCountingDB{DB: fresh}
+	engine := trust.NewEngine(iaCore, f.asKey, &trust.NetworkProvider{DB: db})
+
+	engine.RecordChain(f.chain)
+	engine.RecordChain(f.chain)
+	if got := db.inserts.Load(); got != 1 {
+		t.Errorf("chain inserts = %d, want the one", got)
+	}
+	recorded, err := fresh.Chains(ctx, trustdb.ChainQuery{IA: iaNode})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(recorded) != 1 || !recorded[0][0].Equal(f.chain[0]) || !recorded[0][1].Equal(f.chain[1]) {
+		t.Errorf("recorded chains = %d, want the peer's one", len(recorded))
 	}
 }

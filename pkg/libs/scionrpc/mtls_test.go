@@ -6,8 +6,11 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/tls"
+	"crypto/x509"
 	"net"
 	"net/netip"
+	"slices"
+	"sync"
 	"testing"
 
 	"github.com/scionproto/scion/pkg/addr"
@@ -270,4 +273,100 @@ func TestNativeCertFromEngine(t *testing.T) {
 	if ia, err := cppki.ExtractIA(chain[0].Subject); err != nil || !ia.Equal(nodeIATest) {
 		t.Errorf("certificate subject = %v, want %v", ia, nodeIATest)
 	}
+}
+
+// recordingCredentials records the chains the verification hands its
+// credentials to record.
+type recordingCredentials struct {
+	Credentials
+
+	mtx      sync.Mutex
+	recorded [][]*x509.Certificate
+}
+
+func (c *recordingCredentials) RecordChain(chain []*x509.Certificate) {
+	c.mtx.Lock()
+	defer c.mtx.Unlock()
+	c.recorded = append(c.recorded, chain)
+}
+
+// recordedIAs returns the ISD-ASes the recorded chains name, in the order
+// recorded.
+func (c *recordingCredentials) recordedIAs(t *testing.T) []addr.IA {
+	t.Helper()
+	c.mtx.Lock()
+	defer c.mtx.Unlock()
+	ias := make([]addr.IA, 0, len(c.recorded))
+	for _, chain := range c.recorded {
+		ia, err := cppki.ExtractIA(chain[0].Subject)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ias = append(ias, ia)
+	}
+	return ias
+}
+
+// TestNativeTLSRecordsTheVerifiedChain checks the hand-off to the
+// credentials: a chain that verifies is recorded, whether or not the
+// verification names the peer, while a chain naming another ISD-AS, a chain
+// the pinned TRC does not anchor, and a certificate the bootstrap window
+// accepts are not.
+func TestNativeTLSRecordsTheVerifiedChain(t *testing.T) {
+	f := newMTLSFixture(t)
+	for name, expected := range map[string]*addr.IA{"unnamed": nil, "named": &iaLineC} {
+		t.Run(name, func(t *testing.T) {
+			creds := &recordingCredentials{Credentials: f.engine}
+			if err := verifyChainAgainstTRC(creds, expected)(peerChains(f), nil); err != nil {
+				t.Fatal(err)
+			}
+			if got := creds.recordedIAs(t); !slices.Equal(got, []addr.IA{iaLineC}) {
+				t.Errorf("recorded chains of %v, want the peer's", got)
+			}
+		})
+	}
+
+	foreignIA := addr.MustIAFrom(21, 0xff0000000001)
+	csr, _ := trusttest.NewCSR(t, foreignIA)
+	foreign, err := newFounderOf(t, foreignIA).Issuer.IssueChain(csr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	other := coreIATest
+	for name, tc := range map[string]struct {
+		raw      [][]byte
+		expected *addr.IA
+	}{
+		"another ISD-AS": {peerChains(f), &other},
+		"unanchored":     {[][]byte{foreign[0].Raw, foreign[1].Raw}, nil},
+	} {
+		t.Run(name, func(t *testing.T) {
+			creds := &recordingCredentials{Credentials: f.engine}
+			if err := verifyChainAgainstTRC(creds, tc.expected)(tc.raw, nil); err == nil {
+				t.Fatal("the chain verified")
+			}
+			if got := creds.recordedIAs(t); len(got) != 0 {
+				t.Errorf("recorded chains of %v, want none", got)
+			}
+		})
+	}
+
+	t.Run("bootstrap window", func(t *testing.T) {
+		key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+		if err != nil {
+			t.Fatal(err)
+		}
+		creds := &recordingCredentials{Credentials: trust.NewEngine(nodeIATest, key,
+			&trust.NetworkProvider{DB: openTrustDB(t, t.TempDir())})}
+		self, err := ephemeralCert()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := verifyChainAgainstTRC(creds, nil)([][]byte{self.Certificate[0]}, nil); err != nil {
+			t.Fatal(err)
+		}
+		if got := creds.recordedIAs(t); len(got) != 0 {
+			t.Errorf("recorded chains of %v, want none", got)
+		}
+	})
 }

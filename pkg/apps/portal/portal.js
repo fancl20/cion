@@ -523,7 +523,7 @@ function renderNodes(list) {
   const query = $("#nodes-filter").value;
   const nodes = (list?.nodes ?? []).filter(node =>
     matches(query, [node.ia, node.key, node.overlay, node.endpoint, ...tags(node).map(([label]) => label)]));
-  fillTable($("#nodes-rows"), nodes.map(nodeRow), emptyText(list, query, "No node holds a chain from this core yet."));
+  fillTable($("#nodes-rows"), nodes.map(nodeRow), emptyText(list, query, "No node holds a chain yet."));
 }
 
 // A node's tags: its role, then the observed tag when peers cannot dial it.

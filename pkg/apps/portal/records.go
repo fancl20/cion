@@ -87,7 +87,7 @@ type Host struct {
 
 // Records is the network's records as the console reads them, and the one
 // write the console makes: releasing a host's address. The application's
-// entry adapts them from the founder's issued chains, the directory, and
+// entry adapts them from the chains the founder holds, the directory, and
 // the coordination application.
 type Records interface {
 	// Nodes lists the nodes holding a chain valid now, newest per ISD-AS.

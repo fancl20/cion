@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"slices"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -133,5 +134,74 @@ func TestSCIONClientRedialsOnceChained(t *testing.T) {
 	}
 	if got := dials.Load(); got != 2 {
 		t.Errorf("dials = %d, want 2: the chained request dialed anew", got)
+	}
+}
+
+// TestSCIONChannelRecordsThePresentedChains checks the recording over a real
+// handshake: after one request on the SCION-native channel, the endpoint
+// has recorded the chain the client presented, and the client the
+// endpoint's.
+func TestSCIONChannelRecordsThePresentedChains(t *testing.T) {
+	f := newMTLSFixture(t)
+	extA, extB := freeUDPAddr(t), freeUDPAddr(t)
+	core := startTestNode(t, nodeIATest, iaLineC, extA, extB)
+	peer := startTestNode(t, iaLineC, nodeIATest, extB, extA)
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+
+	serverCreds := &recordingCredentials{Credentials: f.engine}
+	endpoint := core.newConn(t, 0)
+	served := make(chan error, 1)
+	t.Cleanup(func() {
+		select {
+		case err := <-served:
+			if !errors.Is(err, net.ErrClosed) {
+				t.Errorf("ServeHTTP3 returned (%v), want the closed socket's error", err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Error("the endpoint did not stop with the test's context")
+		}
+	})
+	go func() {
+		served <- ServeHTTP3(t.Context(), endpoint,
+			http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(http.StatusNoContent)
+			}),
+			EndpointTLS(EndpointTLSConfig{Credentials: serverCreds, Key: f.engine.Key}))
+	}()
+
+	clientCreds := &recordingCredentials{Credentials: f.peer}
+	conn := peer.newConn(t, 0)
+	qclt := &quic.Transport{Conn: conn}
+	t.Cleanup(func() { _ = qclt.Close() })
+	hclt := NewSCIONClient(PeerClientConfig{
+		Credentials: clientCreds,
+		Key:         f.peer.Key,
+		Conn:        conn,
+		PathTo: func(addr.IA) *spath.Decoded {
+			p, err := pathToCore(peer.MACKey, time.Now())
+			if err != nil {
+				t.Error(err)
+				return nil
+			}
+			return p
+		},
+	}, qclt, true)
+	server := &scion.Addr{IA: nodeIATest, Addr: netip.AddrPortFrom(core.ControlIP, endpoint.LocalPort())}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://"+PeerAuthority(server), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := hclt.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+
+	if got := serverCreds.recordedIAs(t); !slices.Equal(got, []addr.IA{iaLineC}) {
+		t.Errorf("the endpoint recorded chains of %v, want the client's", got)
+	}
+	if got := clientCreds.recordedIAs(t); !slices.Equal(got, []addr.IA{nodeIATest}) {
+		t.Errorf("the client recorded chains of %v, want the endpoint's", got)
 	}
 }

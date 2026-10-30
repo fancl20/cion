@@ -124,8 +124,9 @@ func nativeClientTLS(
 // that the presented chain verifies against the anchor pool — the pinned
 // newest TRC's roots, the predecessor's beside them while the newest is
 // within its grace period — and, when expected is non-nil, that its subject
-// names the expected IA. Without a pinned TRC every chain is accepted — the
-// bootstrap window.
+// names the expected IA. A chain that passes is handed to the credentials
+// to record. Without a pinned TRC every chain is accepted — the bootstrap
+// window — and none is recorded.
 func verifyChainAgainstTRC(creds Credentials, expected *addr.IA) func([][]byte, [][]*x509.Certificate) error {
 	return func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
 		if len(rawCerts) == 0 {
@@ -163,6 +164,7 @@ func verifyChainAgainstTRC(creds Credentials, expected *addr.IA) func([][]byte, 
 					"expected", *expected, "actual", ia)
 			}
 		}
+		creds.RecordChain(chain)
 		return nil
 	}
 }

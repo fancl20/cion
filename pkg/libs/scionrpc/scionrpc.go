@@ -40,10 +40,10 @@ type Mount struct {
 }
 
 // Credentials are the node's side of the channel's mutual authentication:
-// the chain it presents and the TRC anchors peers' chains verify against.
-// A handshake asks for both, so they read local state only. The trust
-// engine provides them, and the AS key behind the chain travels beside
-// them.
+// the chain it presents, the TRC anchors peers' chains verify against, and
+// the recording of a peer's chain that verified. A handshake asks for each,
+// so they touch local state only. The trust engine provides them, and the
+// AS key behind the chain travels beside them.
 type Credentials interface {
 	// Chain returns the node's newest chain valid now, empty on a node not
 	// enrolled yet.
@@ -52,6 +52,9 @@ type Credentials interface {
 	// pinned TRC and, inside its grace period, its predecessor. It is empty
 	// on a node that has not pinned a TRC yet.
 	AnchorPool() ([]*cppki.TRC, error)
+	// RecordChain records the chain a peer presented in a handshake, once it
+	// verified against the anchor pool.
+	RecordChain(chain []*x509.Certificate)
 }
 
 // RemoteAddr returns the SCION address a request's connection carries — the

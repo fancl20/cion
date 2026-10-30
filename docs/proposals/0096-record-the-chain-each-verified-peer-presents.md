@@ -124,3 +124,9 @@ No lab checks the founder's records: a node presents a renewed chain at its
 next connection, up to ten minutes on, past a lab's span.
 
 ## Implementation history
+
+*   Landed as proposed: the hand-off ([mtls.go](/pkg/libs/scionrpc/mtls.go),
+    [scionrpc.go](/pkg/libs/scionrpc/scionrpc.go)) and the engine's store
+    through its provider's local database
+    ([engine.go](/pkg/core/trust/engine.go),
+    [network.go](/pkg/core/trust/network.go)).

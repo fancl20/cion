@@ -76,6 +76,12 @@ func (p *NetworkProvider) LocalChains(
 	return p.DB.Chains(ctx, q)
 }
 
+// StoreChain stores a chain in the local database.
+func (p *NetworkProvider) StoreChain(ctx context.Context, chain []*x509.Certificate) error {
+	_, err := p.DB.InsertChain(ctx, chain)
+	return err
+}
+
 // GetSignedTRC returns the TRC with the given ID, fetching and validating it
 // from the network if it is not in the DB. A base TRC is verified with its
 // own voting certificates; an update is verified against its pinned

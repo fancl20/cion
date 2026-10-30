@@ -63,8 +63,9 @@ func newPortal(env *Environment, loaded []Loaded) (Application, error) {
 }
 
 // portalRecords is the console's view of the founder's records: the chains
-// it issued, the TRC's cores, the node directory's reports, the WireGuard
-// directory, and the coordination application's registry and presence.
+// its trust database holds, the TRC's cores, the node directory's reports,
+// the WireGuard directory, and the coordination application's registry and
+// presence.
 type portalRecords struct {
 	chains  func(context.Context) ([][]*x509.Certificate, error)
 	cores   func(addr.ISD) ([]addr.IA, error)
