@@ -228,14 +228,17 @@ func allNodes(n *network) []int {
 	return which
 }
 
-// reports maps each node's index to the reach the founder's view of the
-// directory reports of it.
+// reports maps each node's index to the reach the founder's views report of
+// its first address, by the node's latest entry.
 func reports(n *network) map[int]bus.Reach {
 	directory := n.nodes[0].App().Bus().Directory().Latest()
 	got := make(map[int]bus.Reach, len(n.nodes))
 	for i, node := range n.nodes {
-		e, _ := directory.Entry(node.App().IA())
-		got[i] = e.Reach
+		if e, ok := directory.Latest(node.App().IA()); ok && len(e.Addresses) != 0 {
+			got[i] = e.Addresses[0].Reach
+		} else {
+			got[i] = bus.Reach{}
+		}
 	}
 	return got
 }

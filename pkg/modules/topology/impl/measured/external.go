@@ -6,22 +6,11 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
-	"os"
-	"path/filepath"
-	"strings"
-	"sync"
 	"syscall"
 	"time"
 
-	"github.com/fancl20/cion/pkg/libs/statefile"
 	"github.com/fancl20/cion/pkg/libs/underlay"
 )
-
-// ExternalHostFile holds the learned external host in the state directory's
-// root, beside the identity. The rendezvous dial is the host's only carrier,
-// and a node whose neighbors are all established sends none, so the host
-// persists for a restart to republish.
-const ExternalHostFile = "external-host"
 
 // The founding core's domain lookups: the next comes domainSuccessTTL after
 // an answer and domainFailureTTL after a failure.
@@ -31,64 +20,6 @@ const (
 	// domainLookupTimeout bounds one lookup.
 	domainLookupTimeout = 2 * time.Second
 )
-
-// loadExternalHost returns the learned external host a previous run
-// persisted, the zero one when none is persisted yet.
-func loadExternalHost(stateDir string) (netip.Addr, error) {
-	if stateDir == "" {
-		return netip.Addr{}, nil
-	}
-	raw, err := os.ReadFile(filepath.Join(stateDir, ExternalHostFile))
-	if errors.Is(err, os.ErrNotExist) {
-		return netip.Addr{}, nil
-	}
-	if err != nil {
-		return netip.Addr{}, err
-	}
-	host, err := netip.ParseAddr(strings.TrimSpace(string(raw)))
-	if err != nil {
-		return netip.Addr{}, fmt.Errorf("parsing %s: %w", ExternalHostFile, err)
-	}
-	return host, nil
-}
-
-// externalHost is the node's learned external host: what the network
-// observed its dials leave from, latest observation winning, persisted on
-// change beside the identity. An empty path keeps the host in memory alone.
-type externalHost struct {
-	path string
-
-	mtx sync.Mutex
-	// current is the latest observation, zero when none landed yet.
-	current netip.Addr
-}
-
-// observe records an observation, persisting it when it changes the host.
-// An invalid address — a reply that echoes none — observes nothing.
-func (h *externalHost) observe(host netip.Addr) error {
-	if !host.IsValid() {
-		return nil
-	}
-	h.mtx.Lock()
-	defer h.mtx.Unlock()
-	if h.current == host {
-		return nil
-	}
-	if h.path != "" {
-		if err := statefile.Write(h.path, []byte(host.String()+"\n")); err != nil {
-			return err
-		}
-	}
-	h.current = host
-	return nil
-}
-
-// host returns the learned host, zero when none is recorded.
-func (h *externalHost) host() netip.Addr {
-	h.mtx.Lock()
-	defer h.mtx.Unlock()
-	return h.current
-}
 
 // holds reports whether the host is one of the node's own addresses: one a
 // socket of the source binds. A bind refused with EADDRNOTAVAIL names a host

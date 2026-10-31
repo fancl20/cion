@@ -112,17 +112,17 @@ func ParseRendezvousRequest(b []byte) (RendezvousRequest, error) {
 
 // RendezvousReply echoes the nonce and carries the acceptor's link address,
 // interface ID, and ISD-AS — its ISD is the network's, what a joiner's
-// identity completes with — beside the requester's reflexive address, the
-// one fact a NAT cannot hide: the dialer keeps its host as its learned
-// external host. A binding reply names no link address and no interface.
+// identity completes with. A binding reply carries the requester's
+// reflexive address, the one fact a NAT cannot hide, in place of the link
+// address and the interface.
 type RendezvousReply struct {
 	Nonce    [16]byte
 	LinkAddr netip.AddrPort
 	IfID     uint16
 	IA       addr.IA
-	// Reflexive is the requester's reflexive address: the source the
-	// acceptor observed the request arrive from, the address it already
-	// replies to. Zero when the reply does not echo one.
+	// Reflexive is a binding reply's requester's reflexive address: the
+	// source the acceptor observed the request arrive from, the address it
+	// already replies to. Zero in a link reply.
 	Reflexive netip.AddrPort
 }
 
@@ -360,11 +360,10 @@ func (r *Rendezvous) handle(ctx context.Context, raw []byte, src *net.UDPAddr) (
 		return nil, err
 	}
 	reply := RendezvousReply{
-		Nonce:     req.Nonce,
-		LinkAddr:  entry.Local,
-		IfID:      entry.IfID,
-		IA:        r.cfg.IA,
-		Reflexive: observedAddr(src),
+		Nonce:    req.Nonce,
+		LinkAddr: entry.Local,
+		IfID:     entry.IfID,
+		IA:       r.cfg.IA,
 	}
 	return reply.Marshal()
 }

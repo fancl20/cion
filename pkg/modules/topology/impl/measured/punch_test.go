@@ -70,12 +70,15 @@ func punchService(t *testing.T, mutate func(*LinkService)) *LinkService {
 	t.Helper()
 	reflector := newRendezvousFixture(t, nil)
 	return newLinkService(t, func(s *LinkService) {
-		s.Reflector = func(context.Context) (netip.AddrPort, error) { return reflector.addr, nil }
+		s.Reflector = func(context.Context, bus.DirectoryID) (netip.AddrPort, error) { return reflector.addr, nil }
 		if mutate != nil {
 			mutate(s)
 		}
 	})
 }
+
+// punchDirectory is the directory the tests' punch requests name.
+var punchDirectory = bus.DirectoryID{9}
 
 // authenticated returns a context carrying the peer the middleware
 // authenticated.
@@ -92,6 +95,7 @@ func linkPunch(
 		ReflexiveAddr: reflexive.String(),
 		Nonce:         nonce[:],
 		IfId:          ifID,
+		Directory:     punchDirectory[:],
 	})
 }
 
@@ -121,6 +125,7 @@ func openProbe(svc *LinkService, peer addr.IA, reflexive netip.AddrPort, nonce [
 		p.done <- svc.punchProbe(ctx, &nodev1.PunchProbeRequest{
 			ReflexiveAddr: reflexive.String(),
 			Nonce:         nonce[:],
+			Directory:     punchDirectory[:],
 		}, func(r *nodev1.PunchProbeReply) error {
 			sent <- r
 			return nil
@@ -268,7 +273,9 @@ func TestPunchLinkAdoptsTheUnfinishedEntry(t *testing.T) {
 func TestPunchRefusals(t *testing.T) {
 	reflexive := netip.MustParseAddrPort("127.0.0.1:4242").String()
 	valid := func() *nodev1.PunchRequest {
-		return &nodev1.PunchRequest{ReflexiveAddr: reflexive, Nonce: make([]byte, 16), IfId: 3}
+		return &nodev1.PunchRequest{
+			ReflexiveAddr: reflexive, Nonce: make([]byte, 16), IfId: 3, Directory: punchDirectory[:],
+		}
 	}
 	tests := []struct {
 		name   string
@@ -317,6 +324,24 @@ func TestPunchRefusals(t *testing.T) {
 		},
 		want: connect.CodeInvalidArgument,
 	}, {
+		name: "a malformed directory",
+		peer: linkIA,
+		req: func() *nodev1.PunchRequest {
+			r := valid()
+			r.Directory = []byte{1, 2, 3}
+			return r
+		},
+		want: connect.CodeInvalidArgument,
+	}, {
+		name: "no directory",
+		peer: linkIA,
+		req: func() *nodev1.PunchRequest {
+			r := valid()
+			r.Directory = nil
+			return r
+		},
+		want: connect.CodeInvalidArgument,
+	}, {
 		name:   "a node that punches nothing",
 		mutate: func(s *LinkService) { s.Reflector = nil },
 		peer:   linkIA,
@@ -325,7 +350,7 @@ func TestPunchRefusals(t *testing.T) {
 	}, {
 		name: "no reflector answering",
 		mutate: func(s *LinkService) {
-			s.Reflector = func(context.Context) (netip.AddrPort, error) {
+			s.Reflector = func(context.Context, bus.DirectoryID) (netip.AddrPort, error) {
 				return netip.AddrPort{}, errNoReflector
 			}
 		},
@@ -419,25 +444,29 @@ type stubPuncher struct {
 	reflexive netip.AddrPort
 	ifID      uint16
 
-	mtx         sync.Mutex
-	probed      []addr.IA
-	established []addr.IA
+	mtx           sync.Mutex
+	probed        []addr.IA
+	established   []addr.IA
+	probedIn      []bus.DirectoryID
+	establishedIn []bus.DirectoryID
 }
 
-func (p *stubPuncher) Probe(_ context.Context, peer addr.IA) (time.Duration, error) {
+func (p *stubPuncher) Probe(_ context.Context, peer addr.IA, id bus.DirectoryID) (time.Duration, error) {
 	p.mtx.Lock()
 	defer p.mtx.Unlock()
 	p.probed = append(p.probed, peer)
+	p.probedIn = append(p.probedIn, id)
 	return p.rtt, nil
 }
 
 func (p *stubPuncher) Establish(
-	_ context.Context, peer addr.IA, _ *links.Link,
+	_ context.Context, peer addr.IA, id bus.DirectoryID, _ *links.Link,
 ) (netip.AddrPort, uint16, error) {
 
 	p.mtx.Lock()
 	defer p.mtx.Unlock()
 	p.established = append(p.established, peer)
+	p.establishedIn = append(p.establishedIn, id)
 	if !p.reflexive.IsValid() {
 		return netip.AddrPort{}, 0, errors.New("no reflexive address")
 	}
@@ -445,8 +474,8 @@ func (p *stubPuncher) Establish(
 }
 
 // TestProbePunchesUnansweredCandidates checks the probe's carrier for a
-// candidate whose own report says its published rendezvous address answers
-// nothing: the punch measures it.
+// candidate whose own report says its rendezvous address answers nothing:
+// the punch measures it, in the directory that names the address.
 func TestProbePunchesUnansweredCandidates(t *testing.T) {
 	punch := &stubPuncher{rtt: 7 * time.Millisecond}
 	s := &selection{cfg: SelectionConfig{
@@ -457,24 +486,26 @@ func TestProbePunchesUnansweredCandidates(t *testing.T) {
 			Lookup: func(context.Context, addr.IA) []*pathdb.Segment { return nil },
 		},
 	}}
-	e := bus.DirectoryEntry{
-		IA:             selPeer,
+	e := target{IA: selPeer, Scope: bus.DirectoryID{7},
 		RendezvousAddr: netip.MustParseAddrPort("192.0.2.9:30043"),
-		Reach:          bus.Reach{RendezvousUnanswered: true},
-	}
+		Reach:          bus.Reach{RendezvousUnanswered: true}}
 	if sm := s.probe(context.Background(), e, nil); sm.m.direct != punch.rtt {
 		t.Errorf("direct sample = %v, want the punch's %v", sm.m.direct, punch.rtt)
 	}
 	if want := []addr.IA{selPeer}; !slices.Equal(punch.probed, want) {
 		t.Errorf("the punch probed %v, want %v", punch.probed, want)
 	}
+	if want := []bus.DirectoryID{{7}}; !slices.Equal(punch.probedIn, want) {
+		t.Errorf("the punch probed in %v, want the address's directory %v", punch.probedIn, want)
+	}
 }
 
 // TestEstablishmentPunchesUnansweredCandidates checks a promotion of a
-// candidate whose published rendezvous address answers nothing: the punch
-// seeds the entry with the peer's reflexive address and interface, and the
-// confirm establishes it on the address its link observes — not the link
-// address the peer claims behind its NAT.
+// candidate whose rendezvous address answers nothing: the punch, in the
+// directory that names the address, seeds the entry with the peer's
+// reflexive address and interface, and the confirm establishes it on the
+// address its link observes — not the link address the peer claims behind
+// its NAT.
 func TestEstablishmentPunchesUnansweredCandidates(t *testing.T) {
 	store := memory.New()
 	reflexive := netip.MustParseAddrPort("192.0.2.9:26001")
@@ -490,7 +521,8 @@ func TestEstablishmentPunchesUnansweredCandidates(t *testing.T) {
 			Punch:    punch,
 			Links:    state,
 			Link: linkRequester(func(_ context.Context, _ *scion.Addr,
-				_ netip.AddrPort, ifID uint16) (*nodev1.LinkReply, error) {
+				l *links.Link) (*nodev1.LinkReply, error) {
+				ifID := l.IfID
 				dialedIfID = ifID
 				// The reply arrives over the link, which observes the
 				// peer at its reflexive address.
@@ -499,17 +531,18 @@ func TestEstablishmentPunchesUnansweredCandidates(t *testing.T) {
 				return &nodev1.LinkReply{LocalAddr: "10.0.0.9:31001", IfId: 4}, nil
 			}),
 		}}
-	e := bus.DirectoryEntry{
-		IA:             selB,
+	e := target{IA: selB, Scope: bus.DirectoryID{7},
 		ControlAddr:    netip.MustParseAddrPort("192.0.2.9:30042"),
 		RendezvousAddr: netip.MustParseAddrPort("192.0.2.9:30043"),
-		Reach:          bus.Reach{BehindNAT: true, RendezvousUnanswered: true},
-	}
+		Reach:          bus.Reach{BehindNAT: true, RendezvousUnanswered: true}}
 	if !s.establishLink(context.Background(), e, "the test") {
 		t.Fatal("the establishment failed")
 	}
 	if want := []addr.IA{selB}; !slices.Equal(punch.established, want) {
 		t.Errorf("the punch established %v, want %v", punch.established, want)
+	}
+	if want := []bus.DirectoryID{{7}}; !slices.Equal(punch.establishedIn, want) {
+		t.Errorf("the punch established in %v, want the address's directory %v", punch.establishedIn, want)
 	}
 	entry, err := store.ByNeighbor(context.Background(), selB)
 	if err != nil || entry == nil {
@@ -532,5 +565,29 @@ func TestEstablishmentPunchesUnansweredCandidates(t *testing.T) {
 	if l, err := store.ByNeighbor(context.Background(), selA); err != nil || l == nil ||
 		l.Remote.IsValid() {
 		t.Errorf("the failed punch's entry = %+v (%v), want a candidate naming no locator", l, err)
+	}
+}
+
+// TestPunchAsksTheNamedDirectory checks the target's reflector: a punch
+// request asks it in the directory the request names, so the target learns
+// its reflexive address as that directory's peers see it.
+func TestPunchAsksTheNamedDirectory(t *testing.T) {
+	var asked []bus.DirectoryID
+	svc := punchService(t, func(s *LinkService) {
+		next := s.Reflector
+		s.Reflector = func(ctx context.Context, id bus.DirectoryID) (netip.AddrPort, error) {
+			asked = append(asked, id)
+			return next(ctx, id)
+		}
+	})
+	p := openProbe(svc, linkIA, netip.MustParseAddrPort("127.0.0.1:4242"), [16]byte{})
+	if p.err != nil {
+		t.Fatal(p.err)
+	}
+	if err := p.close(); err != nil {
+		t.Fatal(err)
+	}
+	if want := []bus.DirectoryID{punchDirectory}; !slices.Equal(asked, want) {
+		t.Errorf("the reflector was asked in %v, want %v", asked, want)
 	}
 }

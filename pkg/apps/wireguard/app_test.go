@@ -304,16 +304,17 @@ func TestWireguardPublishesOnceEnrolled(t *testing.T) {
 
 // TestWireguardEntryFollowsPublishedHost checks the entry's host-facing
 // endpoint: it prefers the host of the node's own state at each publication
-// — the learned host once one is recorded — falls back to the bind host a
-// concrete bind names when the state names none, and holds the publication
-// under a wildcard bind that names neither, the cadence retrying.
+// — the host the node's peers see it at once one is named — falls back to
+// the bind host a concrete bind names when the state names none, and holds
+// the publication under a wildcard bind that names neither, the cadence
+// retrying.
 func TestWireguardEntryFollowsPublishedHost(t *testing.T) {
 	ia := addr.MustIAFrom(20, 0xff0000000213)
 	db := &flippableTrustDB{}
 	db.enroll([]*x509.Certificate{iaSubjectCert(t, ia)})
 	self := new(bus.Topic[bus.SelfState])
 	store := func(host netip.Addr) { self.Publish(bus.SelfState{Host: host}) }
-	store(netip.Addr{}) // nothing learned, the founding core's name unresolved
+	store(netip.Addr{}) // no peer sees the node yet, the founding core's name unresolved
 
 	// A concrete bind publishes itself while the state names none.
 	a, directory := newTestWireguard(t, ia, db, func(c *Config) {
@@ -333,20 +334,20 @@ func TestWireguardEntryFollowsPublishedHost(t *testing.T) {
 		t.Fatal("the bind host never published")
 	}
 
-	// The learned host outranks the bind at the next publication.
-	learned := netip.MustParseAddr("203.0.113.7")
-	store(learned)
+	// The state's host outranks the bind at the next publication.
+	seen := netip.MustParseAddr("203.0.113.7")
+	store(seen)
 	if err := a.publish(context.Background()); err != nil {
-		t.Fatalf("publishing the learned host: %v", err)
+		t.Fatalf("publishing the state's host: %v", err)
 	}
 	select {
 	case entry := <-directory.published:
-		if want := netip.AddrPortFrom(learned, a.HostPort()); entry.HostEndpoint != want {
-			t.Errorf("the entry's endpoint = %v, want the learned host at the shared port %v",
+		if want := netip.AddrPortFrom(seen, a.HostPort()); entry.HostEndpoint != want {
+			t.Errorf("the entry's endpoint = %v, want the state's host at the shared port %v",
 				entry.HostEndpoint, want)
 		}
 	default:
-		t.Fatal("the learned host never published")
+		t.Fatal("the state's host never published")
 	}
 
 	// A wildcard bind naming neither holds the publication.
@@ -381,11 +382,11 @@ func TestWireguardPublishesOnSelfEvents(t *testing.T) {
 		t.Fatal("the first publication never happened")
 	}
 
-	learned := netip.MustParseAddr("203.0.113.9")
-	a.cfg.Self.Publish(bus.SelfState{Host: learned})
+	seen := netip.MustParseAddr("203.0.113.9")
+	a.cfg.Self.Publish(bus.SelfState{Host: seen})
 	select {
 	case entry := <-directory.published:
-		if want := netip.AddrPortFrom(learned, a.HostPort()); entry.HostEndpoint != want {
+		if want := netip.AddrPortFrom(seen, a.HostPort()); entry.HostEndpoint != want {
 			t.Errorf("the republished endpoint = %v, want %v", entry.HostEndpoint, want)
 		}
 	case <-time.After(5 * time.Second):

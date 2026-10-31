@@ -296,3 +296,86 @@ Beside the decisions:
     address nor changes a site node's host.
 
 ## Implementation history
+
+*   Landed as proposed: the entry's addresses and the punch requests'
+    directory ([directory.proto](/proto/node/v1/directory.proto),
+    [link.proto](/proto/node/v1/link.proto)), the views by directory ID
+    ([directory.go](/pkg/libs/bus/directory.go)), the attachments, the
+    scoped directories, and their entries
+    ([directory.go](/pkg/modules/topology/impl/measured/directory.go)), the
+    node's own host and the scoped reflector
+    ([provider.go](/pkg/modules/topology/impl/measured/provider.go)), the
+    scoped punch ([punch.go](/pkg/modules/topology/impl/measured/punch.go))
+    and re-punch
+    ([upkeep.go](/pkg/modules/topology/impl/measured/upkeep.go)), the
+    selection's addresses
+    ([selection.go](/pkg/modules/topology/impl/measured/selection.go)), the
+    wildcard bind's routing toward a link
+    ([wildcardhost.go](/internal/services/wildcardhost.go)), the console's
+    records ([portal.go](/pkg/apps/portal.go)), the scopes lab
+    ([directory_test.go](/internal/testnetwork/directory_test.go)), and the
+    site lab's third way
+    ([site_test.go](/internal/testnetwork/behavior/site_test.go)). Beside
+    the plan:
+    *   The observations and the echoes ride the link request and its
+        reply rather than a directory `Attach`, which keeps the directory
+        free of rendezvous facts. Each tells the other end how its sender
+        sees that end on the link and whether that end's rendezvous port
+        answered there
+        ([linkservice.go](/pkg/modules/topology/impl/measured/linkservice.go)).
+        The provider attaches the link at the host its peer reports, keeps
+        each host's echo, and composes each directory's addresses for the
+        directory to sign. The directory IDs ride `Sync`, whose two ends
+        keep the lesser.
+    *   The link request is the confirm, so the joiner's dial loop now
+        sends one for each seed it lands, retried until it answers. A seed
+        inside a site otherwise waited on a promotion that only the site's
+        directory, formed by that very exchange, could make.
+    *   The confirm pass, whose confirms now start a node's directories,
+        starts once the node holds a chain and retries from five seconds
+        rather than from a selection window. An echo answers with the
+        outcome the node last saw at that address, renewed behind the
+        answer once five minutes old, so only an address never echoed holds
+        up a confirm.
+    *   A merge wakes the catch-up, which syncs every link at once: the IDs
+        travel only in `Sync`, so a merge otherwise reached the next node a
+        summary period later.
+    *   The rendezvous link reply no longer echoes the requester's
+        reflexive address, which only the learned host read. The binding
+        reply keeps it for the punch and the echo.
+    *   The selection probes ahead only a peer with several addresses, and
+        of those only the ones whose report says they answer. A peer none
+        of those answers is punched in the scope of its first address whose
+        report says it answers nothing.
+    *   A node with no link holds no directory and signs no entry, so a
+        lone founding core shows none. The wildcard lab checks the node's
+        host instead of its entry.
+    *   Joined inside, 5 and 6 name only the other node of their island and
+        hold one link each, below the floor of two. The labs' settling caps
+        the floor at the peers a node's directories name, and so does the
+        selection's warning of an unmet floor.
+    *   The benchmarks, five runs each against the node before this
+        proposal:
+        *   Joined both ways, 6 of 6 site pairs link inside in every run,
+            the worst pair at 1.35–1.75, and the network settles in 5–8.5
+            minutes.
+        *   Joined inside, the two islands' pairs link inside, against 3 to
+            5 of 6 pairs. 5 and 6 reach each other only outside, so the
+            worst pair is 29.5 against 4.5–26. The network settles in
+            1.3–2 minutes against 3.7–5.5.
+        *   Joined outside, no pair links inside, the worst pair is 22.5,
+            and the network settles in 1.8–2.2 minutes against 1.8–3.3.
+        *   In every way, no read of the founder's view holds an inside
+            address and no site node's host changes, against up to 4 reads
+            and 2 changes joined inside. Joined inside, 5 and 6 never enter
+            the founder's view.
+        *   The NAT network settles in 2.8–3.3 minutes against 2.7–3.2, its
+            topology optimal in every run. A rebind recovers in 14.5 s
+            against 16.5. A restart (12.9 s) and the founder-down network
+            (survival 0.73 s, return 186–276 s against 177–273) hold. The
+            symmetric join takes 53.5–54 s, with one run at 108 s, a mode
+            seen before this proposal as well.
+        *   The regions, over ten runs, settle in 3.8–7.2 minutes against
+            5.8–8.7, after 10 to 16 link changes against 14 to 22, their
+            worst pair at 1.13–1.23 against 1.20–1.23. The stranded
+            network's worst pair is 1.00–1.15 against 1.15–1.30.

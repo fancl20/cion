@@ -49,11 +49,13 @@ var (
 
 // DirectoryServiceClient is a client for the node.v1.DirectoryService service.
 type DirectoryServiceClient interface {
-	// Push hands the receiver entries; it keeps the greater ones and floods
-	// them on.
+	// Push hands the receiver entries of the link's directory; it keeps the
+	// greater ones and floods them on.
 	Push(context.Context, *v1.PushRequest) (*v1.PushResponse, error)
-	// Sync hands the receiver the caller's summary; it answers with the
-	// entries the caller lacks, and names the ones it lacks itself.
+	// Sync hands the receiver the ID and the summary of the caller's
+	// directory for the link: the receiver keeps the lesser ID, answers with
+	// its own and the entries the caller lacks, and names the ones it lacks
+	// itself.
 	Sync(context.Context, *v1.SyncRequest) (*v1.SyncResponse, error)
 }
 
@@ -65,11 +67,13 @@ func NewDirectoryServiceClient(client *connect.Client) DirectoryServiceClient {
 
 // DirectoryServiceHandler is an implementation of the node.v1.DirectoryService service.
 type DirectoryServiceHandler interface {
-	// Push hands the receiver entries; it keeps the greater ones and floods
-	// them on.
+	// Push hands the receiver entries of the link's directory; it keeps the
+	// greater ones and floods them on.
 	Push(context.Context, *v1.PushRequest) (*v1.PushResponse, error)
-	// Sync hands the receiver the caller's summary; it answers with the
-	// entries the caller lacks, and names the ones it lacks itself.
+	// Sync hands the receiver the ID and the summary of the caller's
+	// directory for the link: the receiver keeps the lesser ID, answers with
+	// its own and the entries the caller lacks, and names the ones it lacks
+	// itself.
 	Sync(context.Context, *v1.SyncRequest) (*v1.SyncResponse, error)
 }
 

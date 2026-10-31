@@ -203,17 +203,17 @@ func TestConnWildcardSource(t *testing.T) {
 		t.Cleanup(func() { _ = conn.Close() })
 		return conn
 	}
-	learned := netip.Addr{}
-	connA := newWildConn(a, func() netip.Addr { return learned })
+	resolved := netip.Addr{}
+	connA := newWildConn(a, func() netip.Addr { return resolved })
 	connB := newWildConn(b, func() netip.Addr { return b.ControlIP })
 
 	// The dial names the peer by the host it names for itself, as a
 	// deployment does.
 	peerB := &Addr{IA: iaB, Addr: netip.AddrPortFrom(b.ControlIP, connB.LocalPort())}
 	if _, err := connA.WriteTo([]byte("hello"), peerB); err == nil {
-		t.Error("a wildcard conn without a learned host sent a packet")
+		t.Error("a wildcard conn without a resolved host sent a packet")
 	}
-	learned = a.ControlIP
+	resolved = a.ControlIP
 	if _, err := connA.WriteTo([]byte("hello"), peerB); err != nil {
 		t.Fatal(err)
 	}

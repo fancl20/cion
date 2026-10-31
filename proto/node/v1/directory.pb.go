@@ -22,33 +22,22 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
-// Entry is one node's statement in the node directory: everything the
-// selection loop needs to probe the node as a candidate neighbor, and the
-// node's report of how its peers reach it. It travels as the body of a SCION
-// signed message its node signed, as a beacon's AS entry does: the header
-// names the signer's ISD-AS, its subject key, the TRC its chain verifies
-// under, and the signing time. An entry naming no address withdraws its
-// signer.
+// Entry is one node's statement in one of the directories it holds: the
+// addresses that directory's peers reach it at, and its report of how they
+// reach each. It travels as the body of a SCION signed message its node
+// signed, as a beacon's AS entry does: the header names the signer's
+// ISD-AS, its subject key, the TRC its chain verifies under, and the signing
+// time. An entry naming no address withdraws its signer from the directory.
 type Entry struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// isd_as is the signer's ISD-AS; a receiver refuses an entry whose signer
 	// is another.
 	IsdAs uint64 `protobuf:"varint,1,opt,name=isd_as,json=isdAs,proto3" json:"isd_as,omitempty"`
-	// control_addr is the underlay "host:port" address of the signer's control
-	// service, the endpoint port on the published host.
-	ControlAddr string `protobuf:"bytes,2,opt,name=control_addr,json=controlAddr,proto3" json:"control_addr,omitempty"`
-	// rendezvous_addr is the underlay "host:port" address the signer's
-	// rendezvous acceptor listens on for first contact, the fixed rendezvous
-	// port on the published host.
-	RendezvousAddr string `protobuf:"bytes,3,opt,name=rendezvous_addr,json=rendezvousAddr,proto3" json:"rendezvous_addr,omitempty"`
-	// behind_nat reports that the published host is not an address of the
-	// signer's own: a NAT stands between it and its peers.
-	BehindNat bool `protobuf:"varint,4,opt,name=behind_nat,json=behindNat,proto3" json:"behind_nat,omitempty"`
-	// rendezvous_unanswered reports that the acceptor of the signer's latest
-	// link request got no answer at the published rendezvous address.
-	RendezvousUnanswered bool `protobuf:"varint,5,opt,name=rendezvous_unanswered,json=rendezvousUnanswered,proto3" json:"rendezvous_unanswered,omitempty"`
-	unknownFields        protoimpl.UnknownFields
-	sizeCache            protoimpl.SizeCache
+	// addresses are the signer's addresses, one per host the directory's
+	// peers see it at, ordered by host.
+	Addresses     []*Address `protobuf:"bytes,2,rep,name=addresses,proto3" json:"addresses,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *Entry) Reset() {
@@ -88,28 +77,86 @@ func (x *Entry) GetIsdAs() uint64 {
 	return 0
 }
 
-func (x *Entry) GetControlAddr() string {
+func (x *Entry) GetAddresses() []*Address {
+	if x != nil {
+		return x.Addresses
+	}
+	return nil
+}
+
+// Address is one host a directory's peers see a node at, and the node's
+// report of how they reach it there.
+type Address struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// control_addr is the underlay "host:port" address of the node's control
+	// service, the endpoint port on the host.
+	ControlAddr string `protobuf:"bytes,1,opt,name=control_addr,json=controlAddr,proto3" json:"control_addr,omitempty"`
+	// rendezvous_addr is the underlay "host:port" address the node's
+	// rendezvous acceptor listens on for first contact, the fixed rendezvous
+	// port on the host.
+	RendezvousAddr string `protobuf:"bytes,2,opt,name=rendezvous_addr,json=rendezvousAddr,proto3" json:"rendezvous_addr,omitempty"`
+	// behind_nat reports that the host is not an address of the node's own:
+	// a NAT stands between it and the directory's peers.
+	BehindNat bool `protobuf:"varint,3,opt,name=behind_nat,json=behindNat,proto3" json:"behind_nat,omitempty"`
+	// rendezvous_unanswered reports that a linked peer that sees the node at
+	// the host got no answer at its rendezvous address.
+	RendezvousUnanswered bool `protobuf:"varint,4,opt,name=rendezvous_unanswered,json=rendezvousUnanswered,proto3" json:"rendezvous_unanswered,omitempty"`
+	unknownFields        protoimpl.UnknownFields
+	sizeCache            protoimpl.SizeCache
+}
+
+func (x *Address) Reset() {
+	*x = Address{}
+	mi := &file_proto_node_v1_directory_proto_msgTypes[1]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Address) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Address) ProtoMessage() {}
+
+func (x *Address) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_node_v1_directory_proto_msgTypes[1]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Address.ProtoReflect.Descriptor instead.
+func (*Address) Descriptor() ([]byte, []int) {
+	return file_proto_node_v1_directory_proto_rawDescGZIP(), []int{1}
+}
+
+func (x *Address) GetControlAddr() string {
 	if x != nil {
 		return x.ControlAddr
 	}
 	return ""
 }
 
-func (x *Entry) GetRendezvousAddr() string {
+func (x *Address) GetRendezvousAddr() string {
 	if x != nil {
 		return x.RendezvousAddr
 	}
 	return ""
 }
 
-func (x *Entry) GetBehindNat() bool {
+func (x *Address) GetBehindNat() bool {
 	if x != nil {
 		return x.BehindNat
 	}
 	return false
 }
 
-func (x *Entry) GetRendezvousUnanswered() bool {
+func (x *Address) GetRendezvousUnanswered() bool {
 	if x != nil {
 		return x.RendezvousUnanswered
 	}
@@ -135,7 +182,7 @@ type Summary struct {
 
 func (x *Summary) Reset() {
 	*x = Summary{}
-	mi := &file_proto_node_v1_directory_proto_msgTypes[1]
+	mi := &file_proto_node_v1_directory_proto_msgTypes[2]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -147,7 +194,7 @@ func (x *Summary) String() string {
 func (*Summary) ProtoMessage() {}
 
 func (x *Summary) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_node_v1_directory_proto_msgTypes[1]
+	mi := &file_proto_node_v1_directory_proto_msgTypes[2]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -160,7 +207,7 @@ func (x *Summary) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Summary.ProtoReflect.Descriptor instead.
 func (*Summary) Descriptor() ([]byte, []int) {
-	return file_proto_node_v1_directory_proto_rawDescGZIP(), []int{1}
+	return file_proto_node_v1_directory_proto_rawDescGZIP(), []int{2}
 }
 
 func (x *Summary) GetIsdAs() uint64 {
@@ -209,7 +256,7 @@ type PushRequest struct {
 
 func (x *PushRequest) Reset() {
 	*x = PushRequest{}
-	mi := &file_proto_node_v1_directory_proto_msgTypes[2]
+	mi := &file_proto_node_v1_directory_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -221,7 +268,7 @@ func (x *PushRequest) String() string {
 func (*PushRequest) ProtoMessage() {}
 
 func (x *PushRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_node_v1_directory_proto_msgTypes[2]
+	mi := &file_proto_node_v1_directory_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -234,7 +281,7 @@ func (x *PushRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PushRequest.ProtoReflect.Descriptor instead.
 func (*PushRequest) Descriptor() ([]byte, []int) {
-	return file_proto_node_v1_directory_proto_rawDescGZIP(), []int{2}
+	return file_proto_node_v1_directory_proto_rawDescGZIP(), []int{3}
 }
 
 func (x *PushRequest) GetEntries() []*crypto.SignedMessage {
@@ -252,7 +299,7 @@ type PushResponse struct {
 
 func (x *PushResponse) Reset() {
 	*x = PushResponse{}
-	mi := &file_proto_node_v1_directory_proto_msgTypes[3]
+	mi := &file_proto_node_v1_directory_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -264,7 +311,7 @@ func (x *PushResponse) String() string {
 func (*PushResponse) ProtoMessage() {}
 
 func (x *PushResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_node_v1_directory_proto_msgTypes[3]
+	mi := &file_proto_node_v1_directory_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -277,20 +324,23 @@ func (x *PushResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PushResponse.ProtoReflect.Descriptor instead.
 func (*PushResponse) Descriptor() ([]byte, []int) {
-	return file_proto_node_v1_directory_proto_rawDescGZIP(), []int{3}
+	return file_proto_node_v1_directory_proto_rawDescGZIP(), []int{4}
 }
 
 type SyncRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// summaries names each signer's greatest entry the caller holds.
-	Summaries     []*Summary `protobuf:"bytes,1,rep,name=summaries,proto3" json:"summaries,omitempty"`
+	// directory is the 16-byte ID of the directory the caller's end of the
+	// link joins.
+	Directory []byte `protobuf:"bytes,1,opt,name=directory,proto3" json:"directory,omitempty"`
+	// summaries names each signer's greatest entry the caller holds there.
+	Summaries     []*Summary `protobuf:"bytes,2,rep,name=summaries,proto3" json:"summaries,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *SyncRequest) Reset() {
 	*x = SyncRequest{}
-	mi := &file_proto_node_v1_directory_proto_msgTypes[4]
+	mi := &file_proto_node_v1_directory_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -302,7 +352,7 @@ func (x *SyncRequest) String() string {
 func (*SyncRequest) ProtoMessage() {}
 
 func (x *SyncRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_node_v1_directory_proto_msgTypes[4]
+	mi := &file_proto_node_v1_directory_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -315,7 +365,14 @@ func (x *SyncRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SyncRequest.ProtoReflect.Descriptor instead.
 func (*SyncRequest) Descriptor() ([]byte, []int) {
-	return file_proto_node_v1_directory_proto_rawDescGZIP(), []int{4}
+	return file_proto_node_v1_directory_proto_rawDescGZIP(), []int{5}
+}
+
+func (x *SyncRequest) GetDirectory() []byte {
+	if x != nil {
+		return x.Directory
+	}
+	return nil
 }
 
 func (x *SyncRequest) GetSummaries() []*Summary {
@@ -327,19 +384,22 @@ func (x *SyncRequest) GetSummaries() []*Summary {
 
 type SyncResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
+	// directory is the 16-byte ID of the directory the receiver's end of the
+	// link joins, once it kept the lesser of the two ends' IDs.
+	Directory []byte `protobuf:"bytes,1,opt,name=directory,proto3" json:"directory,omitempty"`
 	// entries holds the entries the caller lacks or holds a lesser one of,
 	// each a signed message whose body is an Entry.
-	Entries []*crypto.SignedMessage `protobuf:"bytes,1,rep,name=entries,proto3" json:"entries,omitempty"`
+	Entries []*crypto.SignedMessage `protobuf:"bytes,2,rep,name=entries,proto3" json:"entries,omitempty"`
 	// wanted names the signers whose entries the receiver lacks or holds a
 	// lesser one of; the caller pushes them.
-	Wanted        []uint64 `protobuf:"varint,2,rep,packed,name=wanted,proto3" json:"wanted,omitempty"`
+	Wanted        []uint64 `protobuf:"varint,3,rep,packed,name=wanted,proto3" json:"wanted,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *SyncResponse) Reset() {
 	*x = SyncResponse{}
-	mi := &file_proto_node_v1_directory_proto_msgTypes[5]
+	mi := &file_proto_node_v1_directory_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -351,7 +411,7 @@ func (x *SyncResponse) String() string {
 func (*SyncResponse) ProtoMessage() {}
 
 func (x *SyncResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_node_v1_directory_proto_msgTypes[5]
+	mi := &file_proto_node_v1_directory_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -364,7 +424,14 @@ func (x *SyncResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SyncResponse.ProtoReflect.Descriptor instead.
 func (*SyncResponse) Descriptor() ([]byte, []int) {
-	return file_proto_node_v1_directory_proto_rawDescGZIP(), []int{5}
+	return file_proto_node_v1_directory_proto_rawDescGZIP(), []int{6}
+}
+
+func (x *SyncResponse) GetDirectory() []byte {
+	if x != nil {
+		return x.Directory
+	}
+	return nil
 }
 
 func (x *SyncResponse) GetEntries() []*crypto.SignedMessage {
@@ -385,14 +452,16 @@ var File_proto_node_v1_directory_proto protoreflect.FileDescriptor
 
 const file_proto_node_v1_directory_proto_rawDesc = "" +
 	"\n" +
-	"\x1dproto/node/v1/directory.proto\x12\anode.v1\x1a\x1cproto/crypto/v1/signed.proto\"\xbe\x01\n" +
+	"\x1dproto/node/v1/directory.proto\x12\anode.v1\x1a\x1cproto/crypto/v1/signed.proto\"N\n" +
 	"\x05Entry\x12\x15\n" +
-	"\x06isd_as\x18\x01 \x01(\x04R\x05isdAs\x12!\n" +
-	"\fcontrol_addr\x18\x02 \x01(\tR\vcontrolAddr\x12'\n" +
-	"\x0frendezvous_addr\x18\x03 \x01(\tR\x0erendezvousAddr\x12\x1d\n" +
+	"\x06isd_as\x18\x01 \x01(\x04R\x05isdAs\x12.\n" +
+	"\taddresses\x18\x02 \x03(\v2\x10.node.v1.AddressR\taddresses\"\xa9\x01\n" +
+	"\aAddress\x12!\n" +
+	"\fcontrol_addr\x18\x01 \x01(\tR\vcontrolAddr\x12'\n" +
+	"\x0frendezvous_addr\x18\x02 \x01(\tR\x0erendezvousAddr\x12\x1d\n" +
 	"\n" +
-	"behind_nat\x18\x04 \x01(\bR\tbehindNat\x123\n" +
-	"\x15rendezvous_unanswered\x18\x05 \x01(\bR\x14rendezvousUnanswered\"\x8f\x01\n" +
+	"behind_nat\x18\x03 \x01(\bR\tbehindNat\x123\n" +
+	"\x15rendezvous_unanswered\x18\x04 \x01(\bR\x14rendezvousUnanswered\"\x8f\x01\n" +
 	"\aSummary\x12\x15\n" +
 	"\x06isd_as\x18\x01 \x01(\x04R\x05isdAs\x12\x19\n" +
 	"\btrc_base\x18\x02 \x01(\x04R\atrcBase\x12\x1d\n" +
@@ -402,12 +471,14 @@ const file_proto_node_v1_directory_proto_rawDesc = "" +
 	"\x06digest\x18\x05 \x01(\fR\x06digest\"G\n" +
 	"\vPushRequest\x128\n" +
 	"\aentries\x18\x01 \x03(\v2\x1e.proto.crypto.v1.SignedMessageR\aentries\"\x0e\n" +
-	"\fPushResponse\"=\n" +
-	"\vSyncRequest\x12.\n" +
-	"\tsummaries\x18\x01 \x03(\v2\x10.node.v1.SummaryR\tsummaries\"`\n" +
-	"\fSyncResponse\x128\n" +
-	"\aentries\x18\x01 \x03(\v2\x1e.proto.crypto.v1.SignedMessageR\aentries\x12\x16\n" +
-	"\x06wanted\x18\x02 \x03(\x04R\x06wanted2|\n" +
+	"\fPushResponse\"[\n" +
+	"\vSyncRequest\x12\x1c\n" +
+	"\tdirectory\x18\x01 \x01(\fR\tdirectory\x12.\n" +
+	"\tsummaries\x18\x02 \x03(\v2\x10.node.v1.SummaryR\tsummaries\"~\n" +
+	"\fSyncResponse\x12\x1c\n" +
+	"\tdirectory\x18\x01 \x01(\fR\tdirectory\x128\n" +
+	"\aentries\x18\x02 \x03(\v2\x1e.proto.crypto.v1.SignedMessageR\aentries\x12\x16\n" +
+	"\x06wanted\x18\x03 \x03(\x04R\x06wanted2|\n" +
 	"\x10DirectoryService\x123\n" +
 	"\x04Push\x12\x14.node.v1.PushRequest\x1a\x15.node.v1.PushResponse\x123\n" +
 	"\x04Sync\x12\x14.node.v1.SyncRequest\x1a\x15.node.v1.SyncResponseB.Z,github.com/fancl20/cion/proto/node/v1;nodev1b\x06proto3"
@@ -424,29 +495,31 @@ func file_proto_node_v1_directory_proto_rawDescGZIP() []byte {
 	return file_proto_node_v1_directory_proto_rawDescData
 }
 
-var file_proto_node_v1_directory_proto_msgTypes = make([]protoimpl.MessageInfo, 6)
+var file_proto_node_v1_directory_proto_msgTypes = make([]protoimpl.MessageInfo, 7)
 var file_proto_node_v1_directory_proto_goTypes = []any{
 	(*Entry)(nil),                // 0: node.v1.Entry
-	(*Summary)(nil),              // 1: node.v1.Summary
-	(*PushRequest)(nil),          // 2: node.v1.PushRequest
-	(*PushResponse)(nil),         // 3: node.v1.PushResponse
-	(*SyncRequest)(nil),          // 4: node.v1.SyncRequest
-	(*SyncResponse)(nil),         // 5: node.v1.SyncResponse
-	(*crypto.SignedMessage)(nil), // 6: proto.crypto.v1.SignedMessage
+	(*Address)(nil),              // 1: node.v1.Address
+	(*Summary)(nil),              // 2: node.v1.Summary
+	(*PushRequest)(nil),          // 3: node.v1.PushRequest
+	(*PushResponse)(nil),         // 4: node.v1.PushResponse
+	(*SyncRequest)(nil),          // 5: node.v1.SyncRequest
+	(*SyncResponse)(nil),         // 6: node.v1.SyncResponse
+	(*crypto.SignedMessage)(nil), // 7: proto.crypto.v1.SignedMessage
 }
 var file_proto_node_v1_directory_proto_depIdxs = []int32{
-	6, // 0: node.v1.PushRequest.entries:type_name -> proto.crypto.v1.SignedMessage
-	1, // 1: node.v1.SyncRequest.summaries:type_name -> node.v1.Summary
-	6, // 2: node.v1.SyncResponse.entries:type_name -> proto.crypto.v1.SignedMessage
-	2, // 3: node.v1.DirectoryService.Push:input_type -> node.v1.PushRequest
-	4, // 4: node.v1.DirectoryService.Sync:input_type -> node.v1.SyncRequest
-	3, // 5: node.v1.DirectoryService.Push:output_type -> node.v1.PushResponse
-	5, // 6: node.v1.DirectoryService.Sync:output_type -> node.v1.SyncResponse
-	5, // [5:7] is the sub-list for method output_type
-	3, // [3:5] is the sub-list for method input_type
-	3, // [3:3] is the sub-list for extension type_name
-	3, // [3:3] is the sub-list for extension extendee
-	0, // [0:3] is the sub-list for field type_name
+	1, // 0: node.v1.Entry.addresses:type_name -> node.v1.Address
+	7, // 1: node.v1.PushRequest.entries:type_name -> proto.crypto.v1.SignedMessage
+	2, // 2: node.v1.SyncRequest.summaries:type_name -> node.v1.Summary
+	7, // 3: node.v1.SyncResponse.entries:type_name -> proto.crypto.v1.SignedMessage
+	3, // 4: node.v1.DirectoryService.Push:input_type -> node.v1.PushRequest
+	5, // 5: node.v1.DirectoryService.Sync:input_type -> node.v1.SyncRequest
+	4, // 6: node.v1.DirectoryService.Push:output_type -> node.v1.PushResponse
+	6, // 7: node.v1.DirectoryService.Sync:output_type -> node.v1.SyncResponse
+	6, // [6:8] is the sub-list for method output_type
+	4, // [4:6] is the sub-list for method input_type
+	4, // [4:4] is the sub-list for extension type_name
+	4, // [4:4] is the sub-list for extension extendee
+	0, // [0:4] is the sub-list for field type_name
 }
 
 func init() { file_proto_node_v1_directory_proto_init() }
@@ -460,7 +533,7 @@ func file_proto_node_v1_directory_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_proto_node_v1_directory_proto_rawDesc), len(file_proto_node_v1_directory_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   6,
+			NumMessages:   7,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

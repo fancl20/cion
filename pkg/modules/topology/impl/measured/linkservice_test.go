@@ -9,7 +9,6 @@ import (
 	"testing/synctest"
 	"time"
 
-	"github.com/google/go-cmp/cmp"
 	"github.com/quic-go/quic-go/http3"
 	"github.com/scionproto/scion/pkg/addr"
 
@@ -26,7 +25,11 @@ var (
 	linkIA2 = addr.MustIAFrom(20, 0xfd0000000032)
 )
 
-// newLinkService builds a link service over a memory store.
+// acceptorSeen is where the tests' requesters see the acceptor.
+const acceptorSeen = "198.51.100.1:31000"
+
+// newLinkService builds a link service over a memory store, whose echoes
+// answer and which records nothing of what requests report.
 func newLinkService(t *testing.T, mutate func(*LinkService)) *LinkService {
 	t.Helper()
 	svc := &LinkService{
@@ -34,6 +37,8 @@ func newLinkService(t *testing.T, mutate func(*LinkService)) *LinkService {
 		MaxLinks:    8,
 		LinkHost:    netip.MustParseAddr("127.0.0.1"),
 		MinInterval: time.Second,
+		Echo:        func(context.Context, netip.AddrPort) bool { return true },
+		Seen:        func(uint16, netip.AddrPort, bool) {},
 	}
 	if mutate != nil {
 		mutate(svc)
@@ -54,6 +59,7 @@ func linkRequest(
 	reply, err := svc.Request(sctx, &nodev1.LinkRequest{
 		LocalAddr: local,
 		IfId:      ifID,
+		Observed:  acceptorSeen,
 	})
 	if err != nil {
 		return nil, err
@@ -272,6 +278,54 @@ func TestLinkServiceRefusals(t *testing.T) {
 	if _, err := linkRequest(context.Background(), svc, linkIA, "127.0.0.1:4242", 1<<20); err == nil {
 		t.Error("a request with an out-of-range interface ID was admitted")
 	}
+	sctx := context.WithValue(context.Background(), peeria.AuthenticatedIAContextKey(), linkIA)
+	if _, err := svc.Request(sctx, &nodev1.LinkRequest{
+		LocalAddr: "127.0.0.1:4242", IfId: 1, Observed: "nowhere",
+	}); err == nil {
+		t.Error("a request with a malformed observation was admitted")
+	}
+}
+
+// TestLinkServiceExchangesWhatEachEndSees checks the exchange's reports:
+// the node records the host the requester sees it at and the requester's
+// echo there, on the entry's interface; and the reply names the entry's
+// locator — the requester as the node sees it — with whether the
+// requester's rendezvous port answered the node's echo at that host.
+func TestLinkServiceExchangesWhatEachEndSees(t *testing.T) {
+	type report struct {
+		ifID     uint16
+		observed netip.AddrPort
+		answered bool
+	}
+	var reports []report
+	var echoed []netip.AddrPort
+	svc := newLinkService(t, func(s *LinkService) {
+		s.Echo = func(_ context.Context, target netip.AddrPort) bool {
+			echoed = append(echoed, target)
+			return false
+		}
+		s.Seen = func(ifID uint16, observed netip.AddrPort, answered bool) {
+			reports = append(reports, report{ifID, observed, answered})
+		}
+	})
+	sctx := context.WithValue(context.Background(), peeria.AuthenticatedIAContextKey(), linkIA)
+	reply, err := svc.Request(sctx, &nodev1.LinkRequest{
+		LocalAddr: "192.0.2.7:4242", IfId: 9, Observed: acceptorSeen, RendezvousAnswered: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry := linkEntry(t, svc, linkIA)
+	if want := []report{{entry.IfID, netip.MustParseAddrPort(acceptorSeen), true}}; !slices.Equal(reports, want) {
+		t.Errorf("recorded %v, want %v", reports, want)
+	}
+	if reply.Observed != entry.Remote.String() || reply.RendezvousAnswered {
+		t.Errorf("the reply reports %q (answered %t), want the entry's locator %v unanswered",
+			reply.Observed, reply.RendezvousAnswered, entry.Remote)
+	}
+	if want := []netip.AddrPort{netip.AddrPortFrom(entry.Remote.Addr(), RendezvousPort)}; !slices.Equal(echoed, want) {
+		t.Errorf("echoed %v, want %v", echoed, want)
+	}
 }
 
 // TestLinkServiceRateCap checks the peer rate cap: a burst of requests from
@@ -300,6 +354,7 @@ func arriving(
 	reply, err := svc.Request(sctx, &nodev1.LinkRequest{
 		LocalAddr: local,
 		IfId:      ifID,
+		Observed:  acceptorSeen,
 	})
 	if err != nil {
 		return nil, err
@@ -411,56 +466,4 @@ func TestLinkServiceConfirmInstallsObservation(t *testing.T) {
 				entry.Remote, observed)
 		}
 	})
-}
-
-// TestLinkServiceReportsTheEcho checks the reply's report of the echo at the
-// requester's published rendezvous address: an answered echo reports true, a
-// silent one false, and a requester the directory names no address for — or
-// a service that echoes nothing — leaves the report unset. The echo is asked
-// of the authenticated requester.
-func TestLinkServiceReportsTheEcho(t *testing.T) {
-	cases := []struct {
-		name string
-		echo func(ctx context.Context, peer addr.IA) (answered, ok bool)
-		want *bool
-	}{
-		{
-			name: "an answered echo",
-			echo: func(context.Context, addr.IA) (bool, bool) { return true, true },
-			want: new(true),
-		},
-		{
-			name: "a silent echo",
-			echo: func(context.Context, addr.IA) (bool, bool) { return false, true },
-			want: new(false),
-		},
-		{
-			name: "no published address",
-			echo: func(context.Context, addr.IA) (bool, bool) { return false, false },
-		},
-		{name: "no echo"},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			var asked []addr.IA
-			svc := newLinkService(t, func(s *LinkService) {
-				if tc.echo != nil {
-					s.Echo = func(ctx context.Context, peer addr.IA) (bool, bool) {
-						asked = append(asked, peer)
-						return tc.echo(ctx, peer)
-					}
-				}
-			})
-			reply, err := linkRequest(context.Background(), svc, linkIA, "127.0.0.1:4242", 9)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if diff := cmp.Diff(tc.want, reply.RendezvousAnswered); diff != "" {
-				t.Errorf("the reply's report mismatch (-want +got):\n%s", diff)
-			}
-			if tc.echo != nil && !slices.Equal(asked, []addr.IA{linkIA}) {
-				t.Errorf("echoes asked of %v, want the requester %v alone", asked, linkIA)
-			}
-		})
-	}
 }

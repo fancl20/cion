@@ -12,7 +12,6 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
-	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -41,9 +40,17 @@ const (
 	joinDialRetryMax = 30 * time.Second
 )
 
-// confirmPassWindows caps the wait between an unanswered entry's confirms in
-// the confirm pass, in selection windows.
-const confirmPassWindows = 4
+// The confirm pass's pace: the pass starts within confirmPassChainPoll of
+// the node's chain, which every peer's channel asks of it, and an
+// unanswered entry's confirm retries from confirmPassRetry, its waits
+// doubling up to confirmPassWindows selection windows. The pass's confirms
+// tell each end the host the other sees it at, which starts the node's
+// directories.
+const (
+	confirmPassChainPoll = time.Second
+	confirmPassRetry     = 5 * time.Second
+	confirmPassWindows   = 4
+)
 
 // Config configures the measured provider with the pieces the node's
 // identity completion and run arguments own; Wire delivers the rest, the
@@ -56,13 +63,10 @@ type Config struct {
 	// non-core's first start needs at least one, later starts seed
 	// additional entries, idempotent by remote address.
 	Neighbors []string
-	// Domain is the founding core's own identity — a domain the published
-	// host resolves from, an address the published host is; the non-cores
-	// learn theirs from the rendezvous exchange instead.
+	// Domain is the founding core's own identity — a domain its host
+	// resolves from, or an address its host is; the non-cores take theirs
+	// from their directories instead.
 	Domain string
-	// StateDir persists the learned external host beside the identity;
-	// empty keeps it in memory alone.
-	StateDir string
 	// ControlHost is the control address's host: every socket binds it,
 	// the rendezvous port and the probes' among them.
 	ControlHost netip.Addr
@@ -98,11 +102,8 @@ type Provider struct {
 	linkState      *bus.Topic[bus.LinkState]
 	directoryState *bus.Topic[bus.Directory]
 
-	// external is the learned external host, persisted beside the identity
-	// so a restart republishes it; domain looks up the founding core's own
-	// published host from its identity.
-	external externalHost
-	domain   *domainHost
+	// domain looks up the founding core's own host from its identity.
+	domain *domainHost
 	// self is the topic of the node's own state on the environment's bus;
 	// selfMtx serializes the provider's updates of it, each published only
 	// when it changes the state.
@@ -124,6 +125,12 @@ type Provider struct {
 	// owns it.
 	joinDials loops.Attempts[uint16]
 
+	// reach holds, by host, whether the node's rendezvous port answered the
+	// latest echo of a peer that sees the node at the host; reachMtx guards
+	// it.
+	reachMtx sync.Mutex
+	reach    map[netip.Addr]bool
+
 	// mtx guards the one-time assembly of the serving machinery.
 	mtx sync.Mutex
 	// rendezvous, links, linker, puncher, directory, and the two conns
@@ -139,64 +146,15 @@ type Provider struct {
 	assembled  bool
 }
 
-// New builds the measured provider, loading the learned external host a
-// previous run persisted.
+// New builds the measured provider.
 func New(cfg Config) (*Provider, error) {
-	host, err := loadExternalHost(cfg.StateDir)
-	if err != nil {
-		return nil, err
-	}
 	return &Provider{
-		cfg: cfg,
-		external: externalHost{
-			path:    externalHostPath(cfg.StateDir),
-			current: host,
-		},
+		cfg:    cfg,
 		domain: newDomainHost(cfg.Domain, cfg.ControlHost, cfg.Sockets.Lookup),
 		joinDials: loops.Attempts[uint16]{
 			Backoff: loops.Backoff{Base: joinDialInterval, Max: joinDialRetryMax},
 		},
 	}, nil
-}
-
-// externalHostPath returns the learned external host's file, empty for a
-// stateless provider.
-func externalHostPath(stateDir string) string {
-	if stateDir == "" {
-		return ""
-	}
-	return filepath.Join(stateDir, ExternalHostFile)
-}
-
-// learn records the external host a rendezvous reply observed for the node,
-// logging a persistence failure — the loops that learn have no error to
-// return — and publishes it once the provider is wired. The founding core
-// publishes its domain's address alone.
-func (z *Provider) learn(host netip.Addr) {
-	if err := z.external.observe(host); err != nil {
-		slog.Error("Persisting the learned external host", "err", err)
-	}
-	if z.self != nil && !z.cfg.Core {
-		z.updateSelf(func(s *bus.SelfState) { s.Host = z.knownHost() })
-	}
-}
-
-// knownHost returns the host the node's publications carry as far as it is
-// known without a lookup: the founding core's domain when the domain is an
-// address, zero while a lookup answers for a name; a joiner's learned host,
-// else the control host when it names one — under the wildcard bind the zero
-// address, which publishes nothing until a host is learned.
-func (z *Provider) knownHost() netip.Addr {
-	if z.cfg.Core {
-		return z.domain.literal
-	}
-	if host := z.external.host(); host.IsValid() {
-		return host
-	}
-	if z.cfg.ControlHost.IsUnspecified() {
-		return netip.Addr{}
-	}
-	return z.cfg.ControlHost
 }
 
 // updateSelf applies f to the node's own state and publishes the result when
@@ -229,31 +187,174 @@ func (z *Provider) runDomain(ctx context.Context) {
 	}
 }
 
+// holdsChain reports whether the node holds a chain valid now, the one every
+// peer's channel asks of it; a provider with no trust engine shows none and
+// waits on none.
+func (z *Provider) holdsChain(ctx context.Context) bool {
+	if z.env.Engine == nil {
+		return true
+	}
+	chain, err := z.env.Engine.Chain(ctx)
+	return err == nil && chain != nil
+}
+
 // behindNAT reports whether a NAT stands between the node and its peers at
-// the published host: the host is not one of the node's own addresses.
+// a host its entries name: the host is not one of the node's own addresses.
 func (z *Provider) behindNAT(host netip.Addr) (bool, error) {
 	held, err := holds(z.cfg.Sockets, host)
 	return !held, err
 }
 
-// recordAnswer publishes a link reply's report of the acceptor's echo at the
-// node's published rendezvous address, the latest report winning.
-func (z *Provider) recordAnswer(answered bool) {
-	z.updateSelf(func(s *bus.SelfState) { s.RendezvousUnanswered = !answered })
+// echo sends a binding request to a rendezvous address as the selection
+// loop's probe does — from an ephemeral port on the control host — and
+// reports whether it answered.
+func (z *Provider) echo(ctx context.Context, target netip.AddrPort) bool {
+	_, _, err := bindingEcho(ctx, z.cfg.Sockets, z.cfg.ControlHost, target)
+	return err == nil
 }
 
-// echoPublished sends a binding request to the peer's published rendezvous
-// address as the selection loop's probe does — from an ephemeral port on the
-// control host — and reports whether it answered; ok is false when the node
-// directory holds no entry for the peer. The echo checks the peer alone: its
-// answer teaches the node nothing of its own external host.
-func (z *Provider) echoPublished(ctx context.Context, peer addr.IA) (answered, ok bool) {
-	e, ok := z.directoryState.Latest().Entry(peer)
-	if !ok {
-		return false, false
+// echoTTL is how long an echo's outcome stands before the link exchange
+// that reads it echoes the address anew behind its back: an exchange waits
+// on an echo only for an address never echoed, and a host's reported reach
+// trails its latest echo by at most one exchange.
+const echoTTL = 5 * time.Minute
+
+// heldEchoes echoes rendezvous addresses, holding each one's latest
+// outcome.
+type heldEchoes struct {
+	echo func(ctx context.Context, target netip.AddrPort) bool
+
+	mtx  sync.Mutex
+	held map[netip.AddrPort]*heldEcho
+}
+
+// heldEcho is an address's latest echo outcome, when that echo ran, and
+// whether a fresh echo runs behind it.
+type heldEcho struct {
+	answered bool
+	at       time.Time
+	renewing bool
+}
+
+// at reports whether the rendezvous address answered: the latest outcome
+// held, an echo echoTTL old or more renewed behind the answer, else a fresh
+// echo's.
+func (h *heldEchoes) at(ctx context.Context, target netip.AddrPort) bool {
+	h.mtx.Lock()
+	if e, ok := h.held[target]; ok {
+		if !e.renewing && time.Since(e.at) >= echoTTL {
+			e.renewing = true
+			go h.renew(context.WithoutCancel(ctx), target)
+		}
+		answered := e.answered
+		h.mtx.Unlock()
+		return answered
 	}
-	_, _, err := bindingEcho(ctx, z.cfg.Sockets, z.cfg.ControlHost, e.RendezvousAddr)
-	return err == nil, true
+	h.mtx.Unlock()
+	h.renew(ctx, target)
+	h.mtx.Lock()
+	defer h.mtx.Unlock()
+	return h.held[target].answered
+}
+
+// renew echoes the address and holds the outcome.
+func (h *heldEchoes) renew(ctx context.Context, target netip.AddrPort) {
+	at := time.Now()
+	answered := h.echo(ctx, target)
+	h.mtx.Lock()
+	defer h.mtx.Unlock()
+	if h.held == nil {
+		h.held = make(map[netip.AddrPort]*heldEcho)
+	}
+	h.held[target] = &heldEcho{answered: answered, at: at}
+}
+
+// seen records what a link's peer reported in a link exchange: the host it
+// sees the node at, which the link's attachment follows, and whether the
+// node's rendezvous port answered its echo there. A changed answer re-signs
+// the node's entries.
+func (z *Provider) seen(ifID uint16, observed netip.AddrPort, answered bool) {
+	host := observed.Addr().Unmap()
+	z.reachMtx.Lock()
+	if z.reach == nil {
+		z.reach = make(map[netip.Addr]bool)
+	}
+	prev, known := z.reach[host]
+	z.reach[host] = answered
+	z.reachMtx.Unlock()
+	z.directory.attach(ifID, host)
+	if !known || prev != answered {
+		z.directory.resign()
+	}
+}
+
+// addresses returns the node's addresses at the hosts its peers see it at:
+// the endpoint and rendezvous ports on each, beside whether a NAT stands in
+// front of the host and whether the latest echo there went unanswered.
+func (z *Provider) addresses(hosts []netip.Addr) ([]*nodev1.Address, error) {
+	out := make([]*nodev1.Address, 0, len(hosts))
+	for _, host := range hosts {
+		behindNAT, err := z.behindNAT(host)
+		if err != nil {
+			return nil, err
+		}
+		z.reachMtx.Lock()
+		answered, known := z.reach[host]
+		z.reachMtx.Unlock()
+		out = append(out, &nodev1.Address{
+			ControlAddr:          netip.AddrPortFrom(host, scionrpc.EndpointPort).String(),
+			RendezvousAddr:       netip.AddrPortFrom(host, RendezvousPort).String(),
+			BehindNat:            behindNAT,
+			RendezvousUnanswered: known && !answered,
+		})
+	}
+	return out, nil
+}
+
+// runSelfHost keeps a joiner's own host on the host its peers see it at in
+// the scope that holds the founder's entry, else in its directory of the
+// least ID, as the node's own entries there name it: the first address of
+// each, whose hosts are ordered. A view naming neither keeps the host.
+func (z *Provider) runSelfHost(ctx context.Context) {
+	views := z.directoryState.Subscribe(ctx)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case v, ok := <-views:
+			if !ok {
+				return
+			}
+			var founder addr.IA
+			if z.env.Engine != nil {
+				founder, _ = z.env.Engine.FounderAS(z.env.IA.ISD())
+			}
+			if host, ok := selfHost(v, z.env.IA, founder); ok {
+				z.updateSelf(func(s *bus.SelfState) { s.Host = host })
+			}
+		}
+	}
+}
+
+// selfHost returns the host the view's entries of the node's own name it at
+// in the scope that also holds the founder's entry, else in the scope of the
+// least ID that holds one: the first address of that entry.
+func selfHost(v bus.Directory, self, founder addr.IA) (netip.Addr, bool) {
+	var fallback netip.Addr
+	for _, s := range v.Scopes() {
+		own, ok := s.Entry(self)
+		if !ok || len(own.Addresses) == 0 {
+			continue
+		}
+		host := own.Addresses[0].RendezvousAddr.Addr()
+		if _, ok := s.Entry(founder); ok && !founder.IsZero() {
+			return host, true
+		}
+		if !fallback.IsValid() {
+			fallback = host
+		}
+	}
+	return fallback, fallback.IsValid()
 }
 
 // bootstrapped is what a first-start joiner's rendezvous taught it: the
@@ -320,7 +421,6 @@ func (z *Provider) CompleteIdentity(ctx context.Context, ia addr.IA) (addr.IA, e
 		if err != nil {
 			return ia, fmt.Errorf("naming the bootstrap neighbor's entry: %w", err)
 		}
-		z.learn(reply.Reflexive.Addr())
 		z.bootstrap = &bootstrapped{
 			target: target,
 			reply:  reply,
@@ -334,13 +434,15 @@ func (z *Provider) CompleteIdentity(ctx context.Context, ia addr.IA) (addr.IA, e
 }
 
 // Wire stores the phases' products for the machinery's assembly, and
-// publishes the node's own state as the provider starts with it.
+// publishes the founding core's host when its identity is an address.
 func (z *Provider) Wire(env topology.Environment) {
 	z.env = env
 	z.linkState = env.Bus.Links()
 	z.directoryState = env.Bus.Directory()
 	z.self = env.Bus.Self()
-	z.self.Publish(bus.SelfState{Host: z.knownHost()})
+	if z.cfg.Core {
+		z.self.Publish(bus.SelfState{Host: z.domain.literal})
+	}
 }
 
 // Seed seeds the store with an entry per --topology.neighbor, aimed at
@@ -445,6 +547,8 @@ func (z *Provider) assemble() error {
 		sockets:   z.cfg.Sockets,
 		host:      z.cfg.ControlHost,
 	}
+	// Both ends of the link exchange echo through one memory of outcomes.
+	echoes := &heldEchoes{echo: z.echo}
 	z.links = &LinkService{
 		Store:       z.env.Store,
 		MaxLinks:    MaxNeighbors,
@@ -452,15 +556,15 @@ func (z *Provider) assemble() error {
 		MinInterval: z.cfg.Pacing.RendezvousRate,
 		Sockets:     z.cfg.Sockets,
 		Links:       z.linkState,
-		Echo:        z.echoPublished,
 		Reflector:   z.reflector,
 		Punching:    z.puncher.punching,
+		Echo:        echoes.at,
+		Seen:        z.seen,
 	}
-	z.linker = &linkClient{peer: z.env.Peer, answered: z.recordAnswer}
+	z.linker = &linkClient{peer: z.env.Peer, links: z.linkState, echo: echoes.at, seen: z.seen}
 	directoryCfg := NodeDirectoryConfig{
 		IA:            z.env.IA,
-		Self:          z.self,
-		BehindNAT:     z.behindNAT,
+		Addresses:     z.addresses,
 		Links:         z.linkState,
 		Peer:          z.env.Peer,
 		Directory:     z.directoryState,
@@ -511,11 +615,12 @@ func (z *Provider) Mounts() ([]scionrpc.Mount, error) {
 
 // Run owns the measured provider's loops until the context is canceled — the
 // rendezvous acceptor, the joiner's dials, the node directory's signing,
-// view, flooding, and catch-up, the selection sweep, the confirm pass over the entries the node
-// holds, the link upkeep keeping each link on its peer's current mapping, by
-// following its flow or punching it again, and the founding core's lookup of
-// its domain when the domain is a name — and returns once every one has
-// returned. Mounts assembled what the loops serve.
+// view, flooding, and catch-up, the selection sweep, the confirm pass over
+// the entries the node holds, the link upkeep keeping each link on its
+// peer's current mapping, by following its flow or punching it again, and
+// the node's own host: a joiner's from its directories, the founding core's
+// lookup of its domain when the domain is a name — and returns once every
+// one has returned. Mounts assembled what the loops serve.
 func (z *Provider) Run(ctx context.Context) {
 	var wg sync.WaitGroup
 	loops.Go(ctx, &wg, "rendezvous", z.rendezvous.Run)
@@ -526,47 +631,62 @@ func (z *Provider) Run(ctx context.Context) {
 	})
 	loops.Go(ctx, &wg, "confirm pass", z.runConfirmPass)
 	loops.Go(ctx, &wg, "link upkeep", z.runUpkeep)
-	if z.cfg.Core && z.cfg.Domain != "" && !z.domain.literal.IsValid() {
+	switch {
+	case !z.cfg.Core:
+		loops.Go(ctx, &wg, "own host", z.runSelfHost)
+	case z.cfg.Domain != "" && !z.domain.literal.IsValid():
 		loops.Go(ctx, &wg, "domain lookup", z.runDomain)
 	}
 	wg.Wait()
 }
 
-// errNoReflector reports that no neighbor whose link is up reports itself
-// dialable.
-var errNoReflector = errors.New("no neighbor whose link is up reports itself dialable")
+// errNoReflector reports that no neighbor whose link of the directory is up
+// reports itself dialable there.
+var errNoReflector = errors.New("no neighbor whose link of the directory is up reports itself dialable")
 
-// reflector returns the published rendezvous address of a neighbor whose
-// link is up and whose own report says it answers: a node outside the
-// node's NAT, whose acceptor echoes a socket's reflexive address.
-func (z *Provider) reflector(ctx context.Context) (netip.AddrPort, error) {
+// reflector returns a rendezvous address of a neighbor in the directory the
+// ID names whose link there is up and whose own report says it answers
+// there: a node the directory's peers reach as the punch's target does,
+// whose acceptor echoes a socket's reflexive address as those peers see it.
+func (z *Provider) reflector(ctx context.Context, id bus.DirectoryID) (netip.AddrPort, error) {
 	entries, err := z.env.Store.All(ctx)
 	if err != nil {
 		return netip.AddrPort{}, fmt.Errorf("reading the link store: %w", err)
 	}
 	state := z.linkState.Latest()
-	if ap, ok := pickReflector(entries, state.Up, z.directoryState.Latest().Entries()); ok {
+	if ap, ok := pickReflector(entries, state.Up, z.directoryState.Latest(), id); ok {
 		return ap, nil
 	}
 	return netip.AddrPort{}, errNoReflector
 }
 
-// pickReflector returns the published rendezvous address of the first
-// directory entry whose node reports its address answering and holds an
-// established link to this node whose verdict, as linkUp reports it, is up.
+// pickReflector returns the first answering rendezvous address of the first
+// entry in the directory the ID names whose node holds an established link
+// to this node that joins the directory and whose verdict, as linkUp
+// reports it, is up.
 func pickReflector(
-	entries []*links.Link, linkUp func(ifID uint16) bool, directory []bus.DirectoryEntry,
+	entries []*links.Link, linkUp func(ifID uint16) bool, view bus.Directory, id bus.DirectoryID,
 ) (netip.AddrPort, bool) {
 
+	s, ok := view.Scope(id)
+	if !ok {
+		return netip.AddrPort{}, false
+	}
 	up := make(map[addr.IA]bool, len(entries))
 	for _, l := range entries {
-		if l.State == links.StateEstablished && linkUp(l.IfID) {
+		if joins, ok := view.LinkScope(l.IfID); ok && joins == id &&
+			l.State == links.StateEstablished && linkUp(l.IfID) {
 			up[l.NeighborIA] = true
 		}
 	}
-	for _, e := range directory {
-		if up[e.IA] && !e.Reach.RendezvousUnanswered {
-			return e.RendezvousAddr, true
+	for _, e := range s.Entries() {
+		if !up[e.IA] {
+			continue
+		}
+		for _, a := range e.Addresses {
+			if !a.Reach.RendezvousUnanswered {
+				return a.RendezvousAddr, true
+			}
 		}
 	}
 	return netip.AddrPort{}, false
@@ -621,7 +741,6 @@ func (z *Provider) selectionConfig() SelectionConfig {
 		Sockets:     z.cfg.Sockets,
 		Link:        z.linker,
 		Punch:       z.puncher,
-		Learn:       z.learn,
 		Stranded:    &z.stranded,
 		Interval:    z.cfg.Pacing.Selection,
 		Window:      z.cfg.Pacing.CandidateWindow,
@@ -630,12 +749,24 @@ func (z *Provider) selectionConfig() SelectionConfig {
 
 // runJoinDials dials the rendezvous of every entry still aimed at one: the
 // reply retargets the entry to the acceptor's link address under the claim
-// rule, and the first generation serves it. Each entry a pass revives sends
-// its link request.
+// rule, and the first generation serves it. Each entry a pass lands — a
+// seed it retargeted, an entry it revived — sends its link request once the
+// node holds a chain, the confirm that establishes it and tells each end how
+// the other sees it, retried on its own backoff until one answers or the
+// entry is no longer a candidate.
 func (z *Provider) runJoinDials(ctx context.Context) {
+	retries := loops.Attempts[uint16]{
+		Backoff: loops.Backoff{Base: joinDialInterval, Max: joinDialRetryMax},
+	}
+	// landed holds the candidates a pass landed whose link request has not
+	// answered yet.
+	landed := make(map[uint16]bool)
 	for {
 		for _, l := range z.dialJoins(ctx) {
-			z.confirmLanded(ctx, l)
+			landed[l.IfID] = true
+		}
+		if len(landed) != 0 && z.holdsChain(ctx) {
+			z.confirmJoins(ctx, landed, &retries)
 		}
 		if !loops.Sleep(ctx, joinDialInterval) {
 			return
@@ -643,10 +774,44 @@ func (z *Provider) runJoinDials(ctx context.Context) {
 	}
 }
 
+// confirmJoins sends the link request of each landed candidate its backoff
+// makes due, and forgets those that answered and those that are no longer
+// candidates.
+func (z *Provider) confirmJoins(ctx context.Context, landed map[uint16]bool, retries *loops.Attempts[uint16]) {
+	entries, err := z.env.Store.All(ctx)
+	if err != nil {
+		slog.Error("Reading the link store", "err", err)
+		return
+	}
+	now := time.Now()
+	waiting := make(map[uint16]bool, len(landed))
+	for _, l := range entries {
+		if !landed[l.IfID] || l.State != links.StateCandidate || !l.Remote.IsValid() {
+			continue
+		}
+		waiting[l.IfID] = true
+		if !retries.Due(l.IfID, now) {
+			continue
+		}
+		if z.confirmLanded(ctx, l) {
+			delete(waiting, l.IfID)
+		} else {
+			retries.Tried(l.IfID, time.Now())
+		}
+	}
+	for ifID := range landed {
+		if !waiting[ifID] {
+			delete(landed, ifID)
+			retries.Forget(ifID)
+		}
+	}
+}
+
 // dialJoins runs one pass of the joiner's dials and returns the entries it
-// revived. The reply names the joiner's own entry — the acceptor's ISD-AS —
-// beside retargeting it, so both sides of the establishment are named
-// before the link serves. A stranded node — the selection loop's window
+// landed: each seed it retargeted, and each entry it revived. The reply
+// names the joiner's own entry — the acceptor's ISD-AS — beside retargeting
+// it, so both sides of the establishment are named before the link serves.
+// A stranded node — the selection loop's window
 // found it below the floor with no reachable candidate from the directory —
 // dials what it knows: each retired entry revivable admits re-dials its
 // peer's rendezvous socket too, and an answered re-dial revives the entry as
@@ -670,7 +835,7 @@ func (z *Provider) dialJoins(ctx context.Context) []*links.Link {
 		slog.Error("Reading the link store", "err", err)
 		return nil
 	}
-	var revived []*links.Link
+	var landed []*links.Link
 	stranded := z.stranded.Load()
 	now := time.Now()
 	dialed := make(map[uint16]bool)
@@ -711,7 +876,6 @@ func (z *Provider) dialJoins(ctx context.Context) []*links.Link {
 			continue
 		}
 		z.joinDials.Forget(l.IfID)
-		z.learn(reply.Reflexive.Addr())
 		if revival && liveNeighbor(entries, reply.IA) {
 			slog.Debug("Rendezvous revival answered by a live neighbor",
 				"rendezvous", target, "neighbor", reply.IA)
@@ -748,46 +912,52 @@ func (z *Provider) dialJoins(ctx context.Context) []*links.Link {
 		slog.Info("Joined a neighbor by rendezvous",
 			"neighbor", l.NeighborIA, "local", l.Local, "remote", l.Remote,
 			"interface", l.IfID)
-		if revival {
-			revived = append(revived, l)
-		}
+		landed = append(landed, l)
 	}
-	return revived
+	return landed
 }
 
 // confirmLanded sends the link request of an entry whose locator just
-// landed — a revived one, a punched-again one — once the generation serves
-// the entry, retrying inside EstablishTimeout as an establishment's confirm
-// does: the acceptor's side waits on it, and the confirm pass may have ended
-// before the locator landed.
-func (z *Provider) confirmLanded(ctx context.Context, l *links.Link) {
+// landed — a joined, a revived, or a punched-again one — once the
+// generation serves the entry, retrying inside EstablishTimeout as an
+// establishment's confirm does: the acceptor's side waits on it, and the
+// confirm pass may have ended before the locator landed. It reports whether
+// the request answered.
+func (z *Provider) confirmLanded(ctx context.Context, l *links.Link) bool {
 	ctx, cancel := context.WithTimeout(ctx, EstablishTimeout)
 	defer cancel()
 	for !z.confirmEntry(ctx, l) {
 		if !loops.Sleep(ctx, ConfirmRetryPause) {
 			slog.Warn("The landed entry's link request did not answer",
 				"neighbor", l.NeighborIA, "interface", l.IfID)
-			return
+			return false
 		}
 	}
+	return true
 }
 
 // runConfirmPass re-reaches the entries the node holds: a returning node's
 // start and a first start's identity completion confirm every entry over its
 // one-hop path, the dial the establishment already makes, and each answered
-// request leaves a confirm behind it — the far side polls nothing. Entries
-// the pass cannot yet reach retry until they answer or retire, each backing
-// off from the selection's cadence up to confirmPassWindows of it, and the
-// pass ends once every held entry has answered. The exchange's replies
+// request leaves a confirm behind it — the far side polls nothing. The pass
+// starts once the node holds a chain. Entries the pass cannot yet reach
+// retry until they answer or retire, each backing off from confirmPassRetry
+// up to confirmPassWindows selection windows, and the pass ends once every
+// held entry has answered. The exchange's replies
 // retarget the returning node's own entries on the way, as the join dials
 // already do, and the enrollment is never re-run.
 func (z *Provider) runConfirmPass(ctx context.Context) {
+	for !z.holdsChain(ctx) {
+		if !loops.Sleep(ctx, confirmPassChainPoll) {
+			return
+		}
+	}
 	interval := z.cfg.Pacing.Selection
 	if interval == 0 {
 		interval = SelectionInterval
 	}
 	retries := loops.Attempts[uint16]{
-		Backoff: loops.Backoff{Base: interval, Max: confirmPassWindows * interval},
+		Backoff: loops.Backoff{Base: confirmPassRetry, Max: confirmPassWindows * interval},
 	}
 	// started marks the pass's first run, when every held entry is confirmed;
 	// pending holds the interfaces whose confirm is still to land.
@@ -825,7 +995,7 @@ func (z *Provider) runConfirmPass(ctx context.Context) {
 			<-ctx.Done()
 			return
 		}
-		if !loops.Sleep(ctx, interval) {
+		if !loops.Sleep(ctx, confirmPassRetry) {
 			return
 		}
 	}
@@ -841,7 +1011,7 @@ func (z *Provider) confirmEntry(ctx context.Context, l *links.Link) bool {
 	rpcCtx, cancel := context.WithTimeout(ctx, EstablishTimeout)
 	defer cancel()
 	peer := &scion.Addr{IA: l.NeighborIA, Service: addr.SvcCS}
-	reply, err := z.linker.Link(rpcCtx, peer, l.Local, l.IfID)
+	reply, err := z.linker.Link(rpcCtx, peer, l)
 	if err != nil {
 		slog.Debug("The confirm pass did not answer", "neighbor", l.NeighborIA, "err", err)
 		return false
@@ -870,13 +1040,14 @@ func (z *Provider) confirmEntry(ctx context.Context, l *links.Link) bool {
 	return true
 }
 
-// repunch punches a down link again and records both ends' current
-// reflexive addresses on its entry. The punch leaves from a fresh link
-// address — the link's own socket stays bound until the entry lands — and
-// the entry keeps its interface ID, so the routes through the link carry
-// again once the confirm lands. A failed punch changes nothing: the link
-// stays down for the next attempt or the selection's retirement.
-func (z *Provider) repunch(ctx context.Context, punch Puncher, l *links.Link) {
+// repunch punches a down link again, within the directory the link joins,
+// and records both ends' current reflexive addresses on its entry. The
+// punch leaves from a fresh link address — the link's own socket stays
+// bound until the entry lands — and the entry keeps its interface ID, so the
+// routes through the link carry again once the confirm lands. A failed
+// punch changes nothing: the link stays down for the next attempt or the
+// selection's retirement.
+func (z *Provider) repunch(ctx context.Context, punch Puncher, l *links.Link, id bus.DirectoryID) {
 	entries, err := z.env.Store.All(ctx)
 	if err != nil {
 		slog.Error("Reading the link store", "err", err)
@@ -891,7 +1062,7 @@ func (z *Provider) repunch(ctx context.Context, punch Puncher, l *links.Link) {
 	fresh.Local = local
 	punchCtx, cancel := context.WithTimeout(ctx, EstablishTimeout)
 	defer cancel()
-	theirs, ifID, err := punch.Establish(punchCtx, l.NeighborIA, &fresh)
+	theirs, ifID, err := punch.Establish(punchCtx, l.NeighborIA, id, &fresh)
 	if err != nil {
 		slog.Warn("The re-punch failed", "neighbor", l.NeighborIA, "interface", l.IfID, "err", err)
 		return
@@ -973,12 +1144,17 @@ func localHeld(entries []*links.Link, l *links.Link) bool {
 // instrument that restores the locator a down verdict waits on, so gating
 // its egress on the verdict would deadlock the very recovery it serves —
 // and the underlay source the peer's link observes is the requester's link
-// socket and not a transit's address.
+// socket and not a transit's address. Each request tells the peer how the
+// node sees it on the link and whether its rendezvous port answered there,
+// and each reply tells the node the same of itself.
 type linkClient struct {
 	peer topology.PeerChannel
-	// answered receives each reply's report of the acceptor's echo at the
-	// node's published rendezvous address; nil discards the reports.
-	answered func(bool)
+	// links is the link state topic, whose observation of each link's peer
+	// the requests carry; echo checks a rendezvous address; seen records
+	// what each reply reports.
+	links *bus.Topic[bus.LinkState]
+	echo  func(ctx context.Context, target netip.AddrPort) bool
+	seen  func(ifID uint16, observed netip.AddrPort, answered bool)
 
 	mtx  sync.Mutex
 	clts map[string]nodev1connect.LinkServiceClient
@@ -986,21 +1162,27 @@ type linkClient struct {
 
 var _ LinkRequester = (*linkClient)(nil)
 
-// Link asks the peer to admit the link, offering the requester's link
-// address and interface ID, and answers the peer's side of it; a reply that
-// reports the acceptor's echo hands the report to answered.
+// Link asks the peer to admit the entry's link, offering the requester's
+// link address and interface ID beside how it sees the peer on the link —
+// the link's observation, else the entry's locator — and whether the
+// peer's rendezvous port answered at that host, and answers the peer's side
+// of it once it recorded what the reply reports of the node.
 func (c *linkClient) Link(
-	ctx context.Context,
-	peer *scion.Addr,
-	local netip.AddrPort,
-	ifID uint16,
+	ctx context.Context, peer *scion.Addr, l *links.Link,
 ) (*nodev1.LinkReply, error) {
 
+	theirs := c.links.Latest().Observed(l.IfID)
+	if !theirs.IsValid() {
+		theirs = l.Remote
+	}
+	if !theirs.IsValid() {
+		return nil, fmt.Errorf("the entry of %s names no address of its peer", l.NeighborIA)
+	}
 	authority := scionrpc.PeerAuthority(&scion.Addr{
 		IA:      peer.IA,
 		Addr:    peer.Addr,
 		Service: peer.Service,
-		IfID:    ifID,
+		IfID:    l.IfID,
 	})
 	c.mtx.Lock()
 	if c.clts == nil {
@@ -1014,14 +1196,18 @@ func (c *linkClient) Link(
 	}
 	c.mtx.Unlock()
 	reply, err := clt.Request(ctx, &nodev1.LinkRequest{
-		LocalAddr: local.String(),
-		IfId:      uint32(ifID),
+		LocalAddr:          l.Local.String(),
+		IfId:               uint32(l.IfID),
+		Observed:           theirs.String(),
+		RendezvousAnswered: c.echo(ctx, netip.AddrPortFrom(theirs.Addr(), RendezvousPort)),
 	})
 	if err != nil {
 		return nil, err
 	}
-	if reply.RendezvousAnswered != nil && c.answered != nil {
-		c.answered(*reply.RendezvousAnswered)
+	mine, err := netip.ParseAddrPort(reply.Observed)
+	if err != nil {
+		return nil, fmt.Errorf("reading the peer's observation of the node: %w", err)
 	}
+	c.seen(l.IfID, mine, reply.RendezvousAnswered)
 	return reply, nil
 }

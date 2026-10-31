@@ -106,10 +106,10 @@ func TestRendezvousRoundTrip(t *testing.T) {
 	if reply.IfID != entry.IfID {
 		t.Errorf("reply interface ID = %d, want the entry's %d", reply.IfID, entry.IfID)
 	}
-	// The reply echoes the request's observed source: the dialing socket's
-	// own address as the acceptor saw it, the host what it learns from.
-	if reply.Reflexive != local {
-		t.Errorf("observed source = %v, want the dial's bind %v", reply.Reflexive, local)
+	// A link reply names no reflexive address: a binding reply alone
+	// carries one.
+	if reply.Reflexive.IsValid() {
+		t.Errorf("link reply's reflexive address = %v, want none", reply.Reflexive)
 	}
 
 	// The dial held the address for the round trip alone: it binds again

@@ -29,11 +29,12 @@ const LinkMinInterval = time.Second
 // paths already reach asks over the control endpoint's authenticated
 // channel, the peer's chain identifying it. The acceptor applies its
 // admission policy, allocates its own interface ID and link address, records
-// the entry as established, and replies with them and with whether the
-// requester's published rendezvous address answered its echo. The request
-// is the confirm: possession establishes, and a request the entry's own link
-// observed re-aims the entry's locator at the observation. Served by the
-// measured provider, mounted behind the peer middleware.
+// the entry as established, and replies with them. The request is the
+// confirm: possession establishes, and a request the entry's own link
+// observed re-aims the entry's locator at the observation. Each end tells
+// the other how it sees the other on the link and whether the other's
+// rendezvous port answered there. Served by the measured provider, mounted
+// behind the peer middleware.
 type LinkService struct {
 	// Store is the neighbor table.
 	Store links.DB
@@ -55,18 +56,22 @@ type LinkService struct {
 	// verdict is down. A nil topic observes nothing, so no locator moves, and
 	// reports every link up.
 	Links *bus.Topic[bus.LinkState]
-	// Echo echoes the peer's published rendezvous address and reports
-	// whether it answered; ok is false when the directory names no address
-	// for the peer. Nil echoes nothing, and the reply reports nothing.
-	Echo func(ctx context.Context, peer addr.IA) (answered, ok bool)
-	// Reflector returns the rendezvous address of a node outside the
-	// node's NAT, whose acceptor answers the binding requests a punch
-	// learns its socket's reflexive address by, and fails when none
+	// Reflector returns the rendezvous address of a neighbor in the
+	// directory the ID names, whose acceptor answers the binding requests a
+	// punch learns its socket's reflexive address by, and fails when none
 	// answers. Nil punches nothing.
-	Reflector func(ctx context.Context) (netip.AddrPort, error)
+	Reflector func(ctx context.Context, id bus.DirectoryID) (netip.AddrPort, error)
 	// Punching reports whether the node's own link punch toward the peer is
 	// in flight; nil reports none.
 	Punching func(peer addr.IA) bool
+	// Echo sends a binding request to a rendezvous address and reports
+	// whether it answered: the check of the requester's rendezvous port at
+	// the host the node sees it at.
+	Echo func(ctx context.Context, target netip.AddrPort) bool
+	// Seen records what a request reports of the node on the link it
+	// confirms: the host the requester sees the node at, and whether the
+	// node's rendezvous port answered the requester's echo there.
+	Seen func(ifID uint16, observed netip.AddrPort, answered bool)
 
 	limiterOnce sync.Once
 	limiter     *ratelimit.Keyed[addr.IA]
@@ -97,7 +102,9 @@ var _ nodev1connect.LinkServiceHandler = (*LinkService)(nil)
 // request establishes — a candidate it lands on establishes, a live entry's
 // identity and the peer's interface ID refresh — and a request whose
 // arrival the entry's own link observed takes that observation as the
-// entry's locator. The reply carries the echo's outcome too.
+// entry's locator. The node records what the request reports of it, and the
+// reply tells the requester the entry's locator — how the node sees it —
+// and whether the requester's rendezvous port answered there.
 func (s *LinkService) Request(
 	ctx context.Context,
 	req *nodev1.LinkRequest,
@@ -124,6 +131,11 @@ func (s *LinkService) Request(
 		return nil, connect.NewError(connect.CodeInvalidArgument,
 			"interface ID out of range")
 	}
+	mine, err := netip.ParseAddrPort(req.Observed)
+	if err != nil {
+		return nil, connect.NewError(connect.CodeInvalidArgument,
+			"parsing the requester's observation").WithCause(err)
+	}
 	// The request's arrival link, the interface the channel names the
 	// request's connection by: nonzero exactly when the request rode a
 	// one-hop path — the direct hop of the link it confirms.
@@ -148,18 +160,15 @@ func (s *LinkService) Request(
 	}
 	slog.Info("Link established", "neighbor", peer, "local", entry.Local,
 		"remote", entry.Remote, "interface", entry.IfID)
-	reply := &nodev1.LinkReply{
-		LocalAddr: entry.Local.String(),
-		IfId:      uint32(entry.IfID),
-	}
-	// The echo runs outside the lock: an unanswered one spends the
-	// exchange's every attempt, which no other request waits on.
-	if s.Echo != nil {
-		if answered, ok := s.Echo(ctx, peer); ok {
-			reply.RendezvousAnswered = &answered
-		}
-	}
-	return reply, nil
+	s.Seen(entry.IfID, mine, req.RendezvousAnswered)
+	// The echo runs outside the lock: an unanswered one spends its whole
+	// timeout.
+	return &nodev1.LinkReply{
+		LocalAddr:          entry.Local.String(),
+		IfId:               uint32(entry.IfID),
+		Observed:           entry.Remote.String(),
+		RendezvousAnswered: s.Echo(ctx, netip.AddrPortFrom(entry.Remote.Addr(), RendezvousPort)),
+	}, nil
 }
 
 // record lands the peer's entry as established: a peer the table lacks is

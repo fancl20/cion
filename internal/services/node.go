@@ -50,8 +50,8 @@ type node struct {
 	// services on the endpoint, and runs its loops under start.
 	topology topology.Provider
 	// wildcardHost resolves the host the node's conns name for themselves
-	// under a wildcard bind: the local address routing toward the published
-	// host, which the node's own router delivers to.
+	// under a wildcard bind: the local address routing toward the node's own
+	// host or a link's peer, which the node's own router delivers to.
 	wildcardHost *wildcardHost
 
 	// Link state: the neighbor table as the one source of truth, wrapped so
@@ -175,8 +175,8 @@ func loadIdentity(cfg resolvedConfig) (identity, bool, error) {
 // provider completes a first start's identity before the phases
 // assemble, Wire delivers the phases' products to it, and Seed, Mounts,
 // and Run follow. The provider's core flag marks the founding tier alone:
-// a joining core takes the joiner's path — its neighbor's rendezvous, its
-// learned host — like any local node.
+// a joining core takes the joiner's path — its neighbor's rendezvous, the
+// host its peers see it at — like any local node.
 func (n *node) selectProvider() error {
 	founding := n.cfg.role == trust.ASTypeCore
 	if n.cfg.LinkSet != "" {
@@ -191,7 +191,6 @@ func (n *node) selectProvider() error {
 	cfg := measured.Config{
 		Core:        founding,
 		Neighbors:   n.cfg.Neighbors,
-		StateDir:    n.cfg.State,
 		ControlHost: n.cfg.controlAddr.Addr(),
 		NewConn: func() (*scion.Conn, error) {
 			return n.scionConn(0)
@@ -206,9 +205,9 @@ func (n *node) selectProvider() error {
 		},
 	}
 	if founding {
-		// The founding core's published host derives from its own domain; a
-		// joiner's — the joining core included — is what the rendezvous
-		// exchange teaches it.
+		// The founding core's host derives from its own domain; a joiner's —
+		// the joining core included — is the host its directories' peers see
+		// it at.
 		cfg.Domain = n.cfg.Domain
 	}
 	provider, err := measured.New(cfg)
@@ -251,7 +250,7 @@ func setupNode(
 	if err := n.selectProvider(); err != nil {
 		return nil, err
 	}
-	n.wildcardHost = newWildcardHost(n.bus.Self())
+	n.wildcardHost = newWildcardHost(n.bus.Self(), n.bus.Links())
 	if created {
 		// The one moment before the phases: the provider completes the
 		// provisional ISD draw — the measured provider's from a bootstrap

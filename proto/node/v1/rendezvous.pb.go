@@ -111,9 +111,9 @@ func (x *RendezvousRequest) GetPadding() []byte {
 	return nil
 }
 
-// RendezvousReply answers a request: the nonce, the acceptor's side of the
-// link, and the requester's reflexive address. A binding reply carries the
-// nonce, the acceptor's ISD-AS, and the reflexive address alone.
+// RendezvousReply answers a request: the nonce, the acceptor's ISD-AS, and
+// the acceptor's side of the link. A binding reply carries the nonce, the
+// acceptor's ISD-AS, and the requester's reflexive address alone.
 type RendezvousReply struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// nonce is the request's.
@@ -125,8 +125,8 @@ type RendezvousReply struct {
 	IfId uint32 `protobuf:"varint,3,opt,name=if_id,json=ifId,proto3" json:"if_id,omitempty"`
 	// isd_as is the acceptor's ISD-AS, whose ISD is the network's.
 	IsdAs uint64 `protobuf:"varint,4,opt,name=isd_as,json=isdAs,proto3" json:"isd_as,omitempty"`
-	// reflexive_addr is the source the acceptor observed the request arrive
-	// from, "host:port"; empty when the reply echoes none.
+	// reflexive_addr is the source the acceptor observed a binding request
+	// arrive from, "host:port"; empty in a link reply.
 	ReflexiveAddr string `protobuf:"bytes,5,opt,name=reflexive_addr,json=reflexiveAddr,proto3" json:"reflexive_addr,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache

@@ -2,14 +2,11 @@ package bus
 
 import "net/netip"
 
-// SelfState is the node's own state its publications carry: the host it is
-// published at and the answer its published rendezvous address got. The zero
+// SelfState is the node's own state its publications carry. The zero
 // SelfState names no host.
 type SelfState struct {
-	// Host is the host the node's publications carry; zero publishes
-	// nothing.
+	// Host is the host the topology source names the node at: the WireGuard
+	// entry's endpoint names it, and the wildcard bind routes toward it.
+	// Zero names none yet.
 	Host netip.Addr
-	// RendezvousUnanswered reports that the acceptor of the node's latest
-	// link request got no answer at the node's published rendezvous address.
-	RendezvousUnanswered bool
 }

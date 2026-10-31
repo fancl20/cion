@@ -38,11 +38,10 @@ const (
 
 // runUpkeep keeps each link on its peer's current mapping: it follows each
 // link's flow, and punches a punched link again once its verdict stays down.
-// It wakes on each link state event, each event of the node's own state,
-// and each change of the directory's view, when an entry's action ends, and
-// when the next retry or grace it waits on is due, never on a cadence of its
-// own. Each entry's action runs off the loop, one at a time; the loop
-// returns once every action has.
+// It wakes on each link state event and each change of the directories'
+// view, when an entry's action ends, and when the next retry or grace it
+// waits on is due, never on a cadence of its own. Each entry's action runs
+// off the loop, one at a time; the loop returns once every action has.
 func (z *Provider) runUpkeep(ctx context.Context) {
 	u := &upkeep{
 		z:         z,
@@ -53,7 +52,6 @@ func (z *Provider) runUpkeep(ctx context.Context) {
 	}
 	defer u.wg.Wait()
 	events := z.linkState.Subscribe(ctx)
-	selfEvents := z.self.Subscribe(ctx)
 	directoryEvents := z.directoryState.Subscribe(ctx)
 	wake := time.NewTimer(0)
 	wake.Stop()
@@ -66,11 +64,6 @@ func (z *Provider) runUpkeep(ctx context.Context) {
 				return
 			}
 			u.links = state
-		case self, ok := <-selfEvents:
-			if !ok {
-				return
-			}
-			u.self = self
 		case directory, ok := <-directoryEvents:
 			if !ok {
 				return
@@ -91,10 +84,9 @@ func (z *Provider) runUpkeep(ctx context.Context) {
 // upkeep is the link upkeep's memory.
 type upkeep struct {
 	z *Provider
-	// links, self, and directory are the latest events of the link state,
-	// the node's own state, and the node directory.
+	// links and directory are the latest events of the link state and the
+	// directories' view.
 	links     bus.LinkState
-	self      bus.SelfState
 	directory bus.Directory
 	// mismatched holds since when each established entry's link has
 	// observed its peer away from its locator; confirms paces their
@@ -189,29 +181,56 @@ func (u *upkeep) follow(ctx context.Context, entries []*links.Link, now time.Tim
 // remaps one end of a punched link leaves it down for good while the far
 // end's NAT filters by address: that NAT drops what the new mapping sends,
 // so no flow arrives to follow. It starts a re-punch of each punched link
-// due at now and returns when the next one waits to be due. A node whose own
-// published rendezvous address answers holds no punched link: its peers'
-// flows reach it, and following keeps its links.
+// due at now, in the link's directory, and returns when the next one waits
+// to be due.
 func (u *upkeep) repunch(ctx context.Context, entries []*links.Link, now time.Time) time.Time {
-	if !u.self.RendezvousUnanswered {
-		return time.Time{}
-	}
-	undialable := make(map[addr.IA]bool)
-	for _, e := range u.directory.Entries() {
-		if e.Reach.RendezvousUnanswered {
-			undialable[e.IA] = true
-		}
-	}
-	due, next := u.repunches.due(u.z.env.IA, entries, u.links.Up, undialable, now)
+	punched := punchedLinks(u.z.env.IA, entries, u.directory)
+	due, next := u.repunches.due(u.z.env.IA, entries, u.links.Up, punched, now)
 	for _, l := range due {
 		if u.busy[l.IfID] {
 			continue
 		}
 		u.repunches.attempts.Tried(l.IfID, now)
-		entry := *l
-		u.start(ctx, l.IfID, func(ctx context.Context) { u.z.repunch(ctx, u.z.puncher, &entry) })
+		entry, id := *l, punched[l.IfID]
+		u.start(ctx, l.IfID, func(ctx context.Context) { u.z.repunch(ctx, u.z.puncher, &entry, id) })
 	}
 	return next
+}
+
+// punchedLinks returns, by interface, the directory of each link whose two
+// ends report, in the directory the link joins, no rendezvous address
+// answering: neither's peers there dial it, so their flows cross both NATs
+// only as a punch opened them. A node with an answering address in a
+// directory holds no punched link there: its peers' flows reach it, and
+// following keeps its links.
+func punchedLinks(mine addr.IA, entries []*links.Link, view bus.Directory) map[uint16]bus.DirectoryID {
+	out := make(map[uint16]bus.DirectoryID)
+	for _, l := range entries {
+		id, ok := view.LinkScope(l.IfID)
+		if !ok {
+			continue
+		}
+		s, _ := view.Scope(id)
+		own, ok := s.Entry(mine)
+		if !ok || answers(own) {
+			continue
+		}
+		if peer, ok := s.Entry(l.NeighborIA); ok && !answers(peer) {
+			out[l.IfID] = id
+		}
+	}
+	return out
+}
+
+// answers reports whether one of the entry's addresses reports its
+// rendezvous answering.
+func answers(e bus.DirectoryEntry) bool {
+	for _, a := range e.Addresses {
+		if !a.Reach.RendezvousUnanswered {
+			return true
+		}
+	}
+	return false
 }
 
 // start runs one entry's action off the loop; the entry starts no other
@@ -257,22 +276,21 @@ func newRepunchState() *repunchState {
 // due returns the punched links due for a re-punch at now and when the next
 // one waits to be due, the zero time when none does, and advances the
 // memory; the caller records each re-punch it starts. A punched link is an
-// established, serving entry whose peer reports its published rendezvous
-// address unanswered. Of its two ends, the one with the lower ISD-AS punches
-// it again and the other's handler takes its own down entry, so the two
-// never punch toward each other at once. A link is due once its verdict has
+// established, serving entry the punched set holds. Of its two ends, the one
+// with the lower ISD-AS punches it again and the other's handler takes its
+// own down entry, so the two never punch toward each other at once. A link is due once its verdict has
 // stayed down for UpkeepGrace, then again on the backoff from RepunchRetry,
 // until the down period has taken RepunchAttempts. A link whose verdict came
 // back, as linkUp reports it, is forgotten.
 func (st *repunchState) due(
-	mine addr.IA, entries []*links.Link, linkUp func(ifID uint16) bool, undialable map[addr.IA]bool,
-	now time.Time,
+	mine addr.IA, entries []*links.Link, linkUp func(ifID uint16) bool,
+	punched map[uint16]bus.DirectoryID, now time.Time,
 ) (due []*links.Link, next time.Time) {
 
 	down := make(map[uint16]time.Time, len(st.downSince))
 	for _, l := range entries {
-		if linkUp(l.IfID) || l.State != links.StateEstablished ||
-			!l.Serving() || !undialable[l.NeighborIA] || mine >= l.NeighborIA {
+		if _, ok := punched[l.IfID]; !ok || linkUp(l.IfID) ||
+			l.State != links.StateEstablished || !l.Serving() || mine >= l.NeighborIA {
 			continue
 		}
 		since, ok := st.downSince[l.IfID]

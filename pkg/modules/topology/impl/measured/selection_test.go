@@ -1,15 +1,20 @@
 package measured
 
 import (
+	"bytes"
 	"context"
+	"errors"
+	"log/slog"
 	"net"
 	"net/netip"
 	"slices"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"testing/synctest"
 	"time"
 
+	"github.com/google/go-cmp/cmp"
 	"github.com/gopacket/gopacket"
 	"github.com/scionproto/scion/pkg/addr"
 	"github.com/scionproto/scion/pkg/proto/control_plane"
@@ -44,9 +49,10 @@ type selFixture struct {
 	// alive holds the candidates whose rendezvous socket answers the
 	// sweep's probe, keyed by neighbor ISD-AS.
 	alive map[addr.IA]bool
-	// probed holds the directory entries the last pass measured, the scope
-	// filter's own record.
-	probed map[addr.IA]bool
+	// probed holds the peers the last pass measured, and probedAt the
+	// address each was measured at.
+	probed   map[addr.IA]bool
+	probedAt map[addr.IA]netip.AddrPort
 	// echoes holds the excluded measurements' path echoes by route key; an
 	// unset route goes unanswered.
 	echoes      map[string]time.Duration
@@ -67,22 +73,22 @@ var (
 	selE    = addr.MustIAFrom(20, 0xfd0000000015)
 )
 
+// selScope is the directory the fixture's entries are published in.
+var selScope = bus.DirectoryID{1}
+
 func entryOf(ia addr.IA) bus.DirectoryEntry {
-	return bus.DirectoryEntry{
-		IA:             ia,
+	return bus.DirectoryEntry{IA: ia, Addresses: []bus.Address{{
 		ControlAddr:    netip.MustParseAddrPort("127.0.0.1:30042"),
 		RendezvousAddr: netip.MustParseAddrPort("127.0.0.1:30043"),
-	}
+	}}}
 }
 
-// scopedEntry builds a directory entry whose published rendezvous address
-// sits at the given scope's address.
-func scopedEntry(ia addr.IA, rendezvous string) bus.DirectoryEntry {
-	return bus.DirectoryEntry{
-		IA:             ia,
+// targetOf builds a target whose rendezvous address is the given one, in the
+// fixture's directory.
+func targetOf(ia addr.IA, rendezvous string) target {
+	return target{IA: ia, Scope: selScope,
 		ControlAddr:    netip.MustParseAddrPort("127.0.0.1:30042"),
-		RendezvousAddr: netip.MustParseAddrPort(rendezvous),
-	}
+		RendezvousAddr: netip.MustParseAddrPort(rendezvous)}
 }
 
 // neighborLink builds an entry of the neighbor with link addresses no other
@@ -91,7 +97,7 @@ func scopedEntry(ia addr.IA, rendezvous string) bus.DirectoryEntry {
 // a link the loop dialed does.
 func neighborLink(ia addr.IA, state links.State) *links.Link {
 	l := liveLink(ia, uint16(41000+2*(uint64(ia.AS())&0xff)))
-	l.Rendezvous = entryOf(ia).RendezvousAddr
+	l.Rendezvous = entryOf(ia).Addresses[0].RendezvousAddr
 	l.State = state
 	return l
 }
@@ -120,6 +126,7 @@ func newSelFixture(t *testing.T, neighbors ...addr.IA) *selFixture {
 		down:           make(map[addr.IA]bool),
 		alive:          make(map[addr.IA]bool),
 		probed:         make(map[addr.IA]bool),
+		probedAt:       make(map[addr.IA]netip.AddrPort),
 		echoes:         make(map[string]time.Duration),
 	}
 	for _, ia := range neighbors {
@@ -134,22 +141,21 @@ func newSelFixture(t *testing.T, neighbors ...addr.IA) *selFixture {
 	}
 	f.sel = &selection{
 		cfg: SelectionConfig{
-			IA:     selIA,
-			Store:  links.Notifying(f.store, func() { f.writes++ }),
-			Window: time.Hour, // the candidate sweep never retires in these
-			// The viewer sits on loopback, so the loopback entries below
-			// share its scope and pass the loop's filter.
+			IA:          selIA,
+			Store:       links.Notifying(f.store, func() { f.writes++ }),
+			Window:      time.Hour, // the candidate sweep never retires in these
 			ControlHost: netip.MustParseAddr("127.0.0.1"),
 		},
 		streaks: make(map[addr.IA]*peerStreak),
-		probeFn: func(_ context.Context, e bus.DirectoryEntry, _ *links.Link) sample {
+		probeFn: func(_ context.Context, e target, _ *links.Link) sample {
 			f.probed[e.IA] = true
+			f.probedAt[e.IA] = e.RendezvousAddr
 			return f.samples[e.IA]
 		},
 		pathEchoFn: func(_ addr.IA, c *scion.Candidate) time.Duration {
 			return f.echoes[routeKey(c)]
 		},
-		establishFn: func(_ context.Context, e bus.DirectoryEntry, _ string) bool {
+		establishFn: func(_ context.Context, e target, _ string) bool {
 			if err := f.store.Insert(context.Background(),
 				neighborLink(e.IA, links.StateEstablished)); err != nil {
 				t.Error(err)
@@ -169,7 +175,7 @@ func newSelFixture(t *testing.T, neighbors ...addr.IA) *selFixture {
 // refresh publishes the directory's entries, and the link state of the
 // established entries, the down ones' verdicts down.
 func (f *selFixture) refresh() {
-	f.directoryTopic.Publish(bus.NewDirectory(slices.Clone(f.directory)...))
+	f.directoryTopic.Publish(bus.NewDirectory(nil, bus.NewScope(selScope, slices.Clone(f.directory)...)))
 	entries, err := f.store.All(context.Background())
 	if err != nil {
 		return
@@ -324,6 +330,30 @@ func TestSelectionFloorPromotion(t *testing.T) {
 	f.pass(t)
 	if f.hasEntry(t, selB) || len(f.established) != 1 {
 		t.Error("an unreachable candidate was promoted above the floor")
+	}
+}
+
+// TestSelectionFloorWarning checks the floor's warning: a node below the
+// floor linked to every peer its views name reports no shortfall, and one
+// whose views name a peer it holds no link to, none of them answering,
+// does.
+func TestSelectionFloorWarning(t *testing.T) {
+	var logs bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	warned := func() bool { return strings.Contains(logs.String(), "Redundancy floor unmet") }
+
+	f := newSelFixture(t, selPeer)
+	f.pass(t)
+	if warned() {
+		t.Errorf("a node linked to every peer its views name warned: %s", logs.String())
+	}
+
+	f.candidate(selB, 0, 10*time.Millisecond) // unreachable
+	f.pass(t)
+	if !warned() {
+		t.Error("a node below the floor whose views name an unreachable candidate warned nothing")
 	}
 }
 
@@ -1020,7 +1050,7 @@ func TestSelectionStrandedFlag(t *testing.T) {
 	var stranded atomic.Bool
 	f.sel.cfg.Stranded = &stranded
 	// The establishments fail, so the windows below keep the table as set.
-	f.sel.establishFn = func(context.Context, bus.DirectoryEntry, string) bool { return false }
+	f.sel.establishFn = func(context.Context, target, string) bool { return false }
 
 	// At the floor, every directory peer a neighbor: no candidate answers,
 	// and still the node is not stranded.
@@ -1411,7 +1441,7 @@ func TestProbeSendsNothingOverAnUnusableLink(t *testing.T) {
 
 	start := time.Now()
 	sm := s.probe(context.Background(),
-		bus.DirectoryEntry{IA: selPeer, ControlAddr: netip.AddrPortFrom(host, 30042)},
+		target{IA: selPeer, ControlAddr: netip.AddrPortFrom(host, 30042)},
 		&links.Link{NeighborIA: selPeer, IfID: 1, State: links.StateEstablished})
 	if held := time.Since(start); held >= ProbeWait {
 		t.Errorf("the probe returned after %v, want under one ProbeWait", held)
@@ -1508,7 +1538,7 @@ func TestProbeEchoesTheHostThePeerResolves(t *testing.T) {
 	}}
 	external := netip.MustParseAddr("192.0.2.1")
 	sm := s.probe(t.Context(),
-		bus.DirectoryEntry{IA: selPeer, ControlAddr: netip.AddrPortFrom(external, 30042)},
+		target{IA: selPeer, ControlAddr: netip.AddrPortFrom(external, 30042)},
 		&links.Link{NeighborIA: selPeer, IfID: dataplanetest.IfID, State: links.StateEstablished})
 	if sm.m.direct <= 0 {
 		t.Errorf("direct sample = %v, want the round trip to the resolved host", sm.m.direct)
@@ -1518,60 +1548,92 @@ func TestProbeEchoesTheHostThePeerResolves(t *testing.T) {
 	}
 }
 
-// TestSelectionScopeFilter checks the candidate skip's scope filter: a
-// loopback viewer probes loopback and global entries and skips the private,
-// shared, and link-local ones; a global viewer probes the global entries
-// alone. Every entry carries an unreachable sample, so the filter is the
-// only thing that decides what the pass measures.
-func TestSelectionScopeFilter(t *testing.T) {
-	newDirectory := func() ([]addr.IA, map[addr.IA]string) {
-		return []addr.IA{selA, selB, selC, selD, selE}, map[addr.IA]string{
-			selA: "192.0.2.10:30043",  // global
-			selB: "127.0.0.5:30043",   // loopback
-			selC: "192.168.1.5:30043", // private
-			selD: "100.64.0.5:30043",  // the CGNAT shared range
-			selE: "169.254.0.5:30043", // link-local
+// TestSelectionDrawsEveryScope checks the candidates' source: every address
+// the entries of every directory name, a peer's addresses gathered across
+// the directories by directory ID, the peers ordered by ISD-AS, and an
+// entry naming no address naming no target.
+func TestSelectionDrawsEveryScope(t *testing.T) {
+	topic := new(bus.Topic[bus.Directory])
+	at := func(ia addr.IA, rendezvous ...string) bus.DirectoryEntry {
+		e := bus.DirectoryEntry{IA: ia}
+		for _, r := range rendezvous {
+			e.Addresses = append(e.Addresses, bus.Address{RendezvousAddr: netip.MustParseAddrPort(r)})
+		}
+		return e
+	}
+	inner, outer := bus.DirectoryID{1}, bus.DirectoryID{2}
+	topic.Publish(bus.NewDirectory(nil,
+		bus.NewScope(outer, at(selB, "203.0.113.1:30043", "203.0.113.2:30043"), at(selA, "203.0.113.3:30043")),
+		bus.NewScope(inner, at(selB, "10.0.0.2:30043"), at(selC))))
+	s := &selection{cfg: SelectionConfig{Directory: topic}}
+	type got struct {
+		IA    addr.IA
+		Scope bus.DirectoryID
+		Host  string
+	}
+	var peers []got
+	for _, p := range s.peers() {
+		for _, t := range p.targets {
+			peers = append(peers, got{p.IA, t.Scope, t.RendezvousAddr.String()})
 		}
 	}
+	want := []got{
+		{selA, outer, "203.0.113.3:30043"},
+		{selB, inner, "10.0.0.2:30043"},
+		{selB, outer, "203.0.113.1:30043"},
+		{selB, outer, "203.0.113.2:30043"},
+	}
+	if diff := cmp.Diff(want, peers); diff != "" {
+		t.Errorf("the peers' targets (-want +got):\n%s", diff)
+	}
+}
 
-	// The loopback viewer: loopback shares its scope, global is always
-	// probeable, the rest skip.
-	f := newSelFixture(t)
-	ias, rendezvous := newDirectory()
-	for _, ia := range ias {
-		f.directory = append(f.directory, scopedEntry(ia, rendezvous[ia]))
-		f.samples[ia] = sm(0, 10*time.Millisecond)
+// TestSelectionChoosesTheAddress checks the address a candidate is measured
+// at: its only one unprobed; of those whose report says they answer, the
+// one whose binding request answers fastest, the unanswering ones never
+// asked; else the first that reports itself unanswered, which the punch
+// reaches; else the first.
+func TestSelectionChoosesTheAddress(t *testing.T) {
+	at := func(rendezvous string, unanswered bool) target {
+		return target{IA: selB, Scope: selScope,
+			RendezvousAddr: netip.MustParseAddrPort(rendezvous),
+			Reach:          bus.Reach{RendezvousUnanswered: unanswered}}
 	}
-	f.pass(t)
-	for _, ia := range []addr.IA{selA, selB} {
-		if !f.probed[ia] {
-			t.Errorf("the loopback viewer skipped %v at %s, want it probed", ia,
-				rendezvous[ia])
+	slow, fast := at("192.0.2.1:30043", false), at("10.0.0.2:30043", false)
+	silent, gateway := at("192.0.2.9:30043", false), at("203.0.113.1:30043", true)
+	rtts := map[netip.AddrPort]time.Duration{
+		slow.RendezvousAddr: 20 * time.Millisecond, fast.RendezvousAddr: 2 * time.Millisecond,
+	}
+	var asked []netip.AddrPort
+	s := &selection{rendezvousFn: func(_ context.Context, socket netip.AddrPort) (time.Duration, error) {
+		asked = append(asked, socket)
+		if rtt, ok := rtts[socket]; ok {
+			return rtt, nil
 		}
-	}
-	for _, ia := range []addr.IA{selC, selD, selE} {
-		if f.probed[ia] {
-			t.Errorf("the loopback viewer probed %v at %s, want it skipped", ia,
-				rendezvous[ia])
+		return 0, errors.New("no answer")
+	}}
+	for _, tc := range []struct {
+		name    string
+		punch   bool
+		targets []target
+		want    target
+		asked   int
+	}{
+		{"the only address", false, []target{gateway}, gateway, 0},
+		{"the fastest answering", false, []target{slow, gateway, fast}, fast, 2},
+		{"the punched one when none answers", true, []target{silent, gateway}, gateway, 1},
+		{"the first with no punch", false, []target{silent, gateway}, silent, 1},
+	} {
+		asked = nil
+		s.cfg.Punch = nil
+		if tc.punch {
+			s.cfg.Punch = &stubPuncher{}
 		}
-	}
-
-	// The global viewer: the global entries alone.
-	f = newSelFixture(t)
-	f.sel.cfg.ControlHost = netip.MustParseAddr("203.0.113.7")
-	ias, rendezvous = newDirectory()
-	for _, ia := range ias {
-		f.directory = append(f.directory, scopedEntry(ia, rendezvous[ia]))
-		f.samples[ia] = sm(0, 10*time.Millisecond)
-	}
-	f.pass(t)
-	if !f.probed[selA] {
-		t.Error("the global viewer skipped the global entry")
-	}
-	for _, ia := range []addr.IA{selB, selC, selD, selE} {
-		if f.probed[ia] {
-			t.Errorf("the global viewer probed %v at %s, want it skipped", ia,
-				rendezvous[ia])
+		if got := s.choose(t.Context(), peer{IA: selB, targets: tc.targets}); got != tc.want {
+			t.Errorf("%s: chose %v, want %v", tc.name, got.RendezvousAddr, tc.want.RendezvousAddr)
+		}
+		if len(asked) != tc.asked {
+			t.Errorf("%s: asked %v, want %d binding requests", tc.name, asked, tc.asked)
 		}
 	}
 }
@@ -1579,34 +1641,28 @@ func TestSelectionScopeFilter(t *testing.T) {
 // TestProbeRendezvousRecordsNothing checks the round trips that ask a
 // candidate's rendezvous socket whether it answers: the window's probe
 // measures the candidate's direct round trip and the sweep finds it alive,
-// each over a binding request that teaches the node its external host, while
-// the candidate's acceptor records nothing.
+// each over a binding request, while the candidate's acceptor records
+// nothing.
 func TestProbeRendezvousRecordsNothing(t *testing.T) {
 	f := newRendezvousFixture(t, func(cfg *RendezvousConfig) {
 		cfg.IA = selB
 	})
-	loopback := netip.MustParseAddr("127.0.0.1")
-	var learned []netip.Addr
 	s := &selection{cfg: SelectionConfig{
-		ControlHost: loopback,
+		ControlHost: netip.MustParseAddr("127.0.0.1"),
 		Paths: &scion.PathProvider{
 			IA:     selIA,
 			DB:     emptyPathDB{},
 			Lookup: func(context.Context, addr.IA) []*pathdb.Segment { return nil },
 		},
-		Learn: func(host netip.Addr) { learned = append(learned, host) },
 	}}
 
-	sm := s.probe(t.Context(), bus.DirectoryEntry{IA: selB, RendezvousAddr: f.addr}, nil)
+	sm := s.probe(t.Context(), targetOf(selB, f.addr.String()), nil)
 	if sm.m.direct <= 0 {
 		t.Errorf("direct sample = %v, want the binding request's round trip", sm.m.direct)
 	}
 	candidate := &links.Link{NeighborIA: selB, Rendezvous: f.addr, State: links.StateCandidate}
 	if !s.candidateAlive(t.Context(), candidate) {
 		t.Error("the sweep found the answering candidate silent")
-	}
-	if want := []netip.Addr{loopback, loopback}; !slices.Equal(learned, want) {
-		t.Errorf("learned hosts = %v, want the reflexive host of each answer %v", learned, want)
 	}
 	entries, err := f.store.All(t.Context())
 	if err != nil {
@@ -1618,19 +1674,17 @@ func TestProbeRendezvousRecordsNothing(t *testing.T) {
 }
 
 // TestSelectionRendezvousGuard checks the rendezvous establishment's guard:
-// a reply naming the entry's ISD-AS records the link, one naming another
+// a reply naming the entry's ISD-AS records the link, and one naming another
 // ISD-AS — the answer of a colliding subnet's real peer at the published
-// address — is refused, and the dial learns the reply's observed host.
+// address — is refused.
 func TestSelectionRendezvousGuard(t *testing.T) {
 	f := newRendezvousFixture(t, func(cfg *RendezvousConfig) {
 		cfg.IA = rendezvousIA
 	})
-	var learned []netip.Addr
 	s := &selection{
 		cfg: SelectionConfig{
 			Store:    memory.New(),
 			LinkHost: netip.MustParseAddr("127.0.0.1"),
-			Learn:    func(host netip.Addr) { learned = append(learned, host) },
 		},
 	}
 	// Each entry takes its own local address: the store refuses two live
@@ -1652,7 +1706,7 @@ func TestSelectionRendezvousGuard(t *testing.T) {
 
 	// The matching reply records the link's remote side.
 	l := entry(t, rendezvousIA)
-	e := scopedEntry(rendezvousIA, f.addr.String())
+	e := targetOf(rendezvousIA, f.addr.String())
 	if !s.establishByRendezvous(context.Background(), e, l) {
 		t.Fatal("the guarded establishment of the matching reply failed")
 	}
@@ -1664,13 +1718,10 @@ func TestSelectionRendezvousGuard(t *testing.T) {
 		t.Errorf("recorded remote = %v, interface %d, want the reply's side",
 			updated.Remote, updated.RemoteIfID)
 	}
-	if len(learned) != 1 || learned[0] != netip.MustParseAddr("127.0.0.1") {
-		t.Errorf("learned hosts = %v, want the dial's observed 127.0.0.1", learned)
-	}
 
 	// A reply naming another ISD-AS is refused: the entry keeps its side.
 	l = entry(t, strangerKeyIA)
-	e = scopedEntry(strangerKeyIA, f.addr.String())
+	e = targetOf(strangerKeyIA, f.addr.String())
 	if s.establishByRendezvous(context.Background(), e, l) {
 		t.Error("an establishment whose reply named another ISD-AS recorded")
 	}
@@ -1684,12 +1735,12 @@ func TestSelectionRendezvousGuard(t *testing.T) {
 }
 
 // linkRequester adapts a function to the establishment's client seam.
-type linkRequester func(context.Context, *scion.Addr, netip.AddrPort, uint16) (*nodev1.LinkReply, error)
+type linkRequester func(context.Context, *scion.Addr, *links.Link) (*nodev1.LinkReply, error)
 
 func (f linkRequester) Link(
-	ctx context.Context, peer *scion.Addr, local netip.AddrPort, ifID uint16,
+	ctx context.Context, peer *scion.Addr, l *links.Link,
 ) (*nodev1.LinkReply, error) {
-	return f(ctx, peer, local, ifID)
+	return f(ctx, peer, l)
 }
 
 // TestEstablishmentSeedsAndConfirms checks the establishment's flip: the
@@ -1715,18 +1766,16 @@ func TestEstablishmentSeedsAndConfirms(t *testing.T) {
 			Store:    store,
 			LinkHost: netip.MustParseAddr("127.0.0.1"),
 			Link: linkRequester(func(_ context.Context, peer *scion.Addr,
-				_ netip.AddrPort, ifID uint16) (*nodev1.LinkReply, error) {
+				l *links.Link) (*nodev1.LinkReply, error) {
 				dialed = peer
-				dialedIfID = ifID
+				dialedIfID = l.IfID
 				return &nodev1.LinkReply{LocalAddr: claimed, IfId: 9}, nil
 			}),
 		}}
 	published := netip.MustParseAddr("198.51.100.7")
-	e := bus.DirectoryEntry{
-		IA:             selB,
+	e := target{IA: selB, Scope: selScope,
 		ControlAddr:    netip.AddrPortFrom(published, 30042),
-		RendezvousAddr: netip.AddrPortFrom(netip.MustParseAddr("127.0.0.1"), f.addr.Port()),
-	}
+		RendezvousAddr: netip.AddrPortFrom(netip.MustParseAddr("127.0.0.1"), f.addr.Port())}
 	if !s.establishLink(context.Background(), e, "the test") {
 		t.Fatal("the establishment failed")
 	}
@@ -1807,7 +1856,7 @@ func TestSelectionLosesRecordRace(t *testing.T) {
 		t.Fatal(err)
 	}
 	store.armed.Store(true)
-	entry, err := s.ownEntry(context.Background(), entryOf(selA))
+	entry, err := s.ownEntry(context.Background(), targetOf(selA, "127.0.0.1:30043"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1833,7 +1882,7 @@ func TestSelectionLosesPortRace(t *testing.T) {
 		LinkHost: netip.MustParseAddr("127.0.0.1"),
 	}}
 	store.armed.Store(true)
-	entry, err := s.ownEntry(context.Background(), entryOf(selA))
+	entry, err := s.ownEntry(context.Background(), targetOf(selA, "127.0.0.1:30043"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1889,7 +1938,7 @@ func TestSelectionRejoinTakesRetiredLocal(t *testing.T) {
 		}
 		return s
 	}
-	e := scopedEntry(rendezvousIA, peer.addr.String())
+	e := targetOf(rendezvousIA, peer.addr.String())
 
 	s := newSelection(t)
 	entry, err := s.ownEntry(ctx, e)

@@ -16,20 +16,22 @@ import (
 
 // The site network: the founder 0, the authoritative core 1, and the public
 // node 2, 10ms apart, and the site's nodes 3 to 6 behind one port-restricted
-// NAT, 2ms apart and 20ms from every public node. Each node joins
-// through its parent alone, in one of the site's two ways of joining.
+// NAT, 2ms apart and 20ms from every public node. Each node joins through the
+// neighbors one of the site's three ways of joining gives it.
 var (
 	siteOrder   = []int{1, 2, 3, 4, 5, 6}
 	siteMembers = []int{3, 4, 5, 6}
 	// siteJoins are the ways the site's nodes join: every one through a
-	// public parent, or 5 through 3 and 6 through 4, each at its parent's
-	// inside address.
+	// public parent; 5 through 3 and 6 through 4, each at its parent's
+	// inside address; or each after the first through a public parent and a
+	// site node already joined, at its inside address.
 	siteJoins = []struct {
 		name    string
-		parents map[int]int
+		parents map[int][]int
 	}{
-		{name: "outside", parents: map[int]int{1: 0, 2: 0, 3: 1, 4: 2, 5: 0, 6: 2}},
-		{name: "inside", parents: map[int]int{1: 0, 2: 0, 3: 1, 4: 2, 5: 3, 6: 4}},
+		{name: "outside", parents: map[int][]int{1: {0}, 2: {0}, 3: {1}, 4: {2}, 5: {0}, 6: {2}}},
+		{name: "inside", parents: map[int][]int{1: {0}, 2: {0}, 3: {1}, 4: {2}, 5: {3}, 6: {4}}},
+		{name: "both", parents: map[int][]int{1: {0}, 2: {0}, 3: {1}, 4: {2, 3}, 5: {0, 3}, 6: {2, 4}}},
 	}
 )
 
@@ -37,12 +39,12 @@ var (
 // settling.
 const siteWatch = 10 * time.Minute
 
-// bootSite boots the site network, each node joining through its parent,
+// bootSite boots the site network, each node joining through its parents,
 // and returns it with the site's NAT. The one-way delays are the
 // NAT network's: a pair of public nodes, a pair of site nodes, and a
 // pair across.
 func bootSite(
-	t *testing.T, fab *fabric.Fabric, wpki *webpkitest.CA, parents map[int]int,
+	t *testing.T, fab *fabric.Fabric, wpki *webpkitest.CA, parents map[int][]int,
 ) (*network, *fabric.NAT) {
 
 	t.Helper()
@@ -61,9 +63,12 @@ func bootSite(
 		cfg.EnrollAuth = "cidrs=127.0.0.0/8"
 	})
 	for _, i := range siteOrder {
-		parent := n.nodes[parents[i]]
+		var neighbors []string
+		for _, parent := range parents[i] {
+			neighbors = append(neighbors, rendezvous(n.nodes[parent]))
+		}
 		n.nodes[i] = testnetwork.BootInBubble(t, fab, n.hosts[i], func(cfg *services.NodeConfig) {
-			cfg.Neighbors = []string{rendezvous(parent)}
+			cfg.Neighbors = neighbors
 			cfg.RootCAs = wpki.Pool
 			cfg.Core = i == 1
 		})
@@ -91,7 +96,9 @@ func insideLinks(t *testing.T, n *network) int {
 // TestSiteNetworkReaches checks what the site network serves, in each way
 // of joining: it settles, and every ordered pair reaches over its chosen
 // path and answers a ping — the site's nodes over their inside links or
-// through a public node.
+// through a public node. The founder's views hold no site node's inside
+// address in any way; joined both ways, the site's nodes share a directory
+// the founder does not hold, where each names its inside address.
 func TestSiteNetworkReaches(t *testing.T) {
 	for _, joins := range siteJoins {
 		t.Run(joins.name, func(t *testing.T) {
@@ -101,9 +108,68 @@ func TestSiteNetworkReaches(t *testing.T) {
 				awaitSettled(t, n.nodes, settleQuiet, natBudget)
 				awaitReach(t, n, reachBudget)
 				awaitPings(t, n, allNodes(n), reachBudget)
+				if inside := foundersInsideHosts(n); len(inside) != 0 {
+					t.Errorf("the founder's views hold the inside addresses of %v", inside)
+				}
+				if joins.name == "both" && !siteScoped(n) {
+					t.Error("the site's nodes share no directory of their inside addresses " +
+						"the founder does not hold")
+				}
 			})
 		})
 	}
+}
+
+// foundersInsideHosts returns the site nodes whose inside address an entry
+// the founder's views show names.
+func foundersInsideHosts(n *network) []int {
+	view := n.nodes[0].App().Bus().Directory().Latest()
+	var out []int
+	for _, i := range siteMembers {
+		for _, s := range view.Scopes() {
+			e, ok := s.Entry(n.nodes[i].App().IA())
+			if !ok {
+				continue
+			}
+			for _, a := range e.Addresses {
+				if a.RendezvousAddr.Addr() == n.hosts[i] {
+					out = append(out, i)
+				}
+			}
+		}
+	}
+	return out
+}
+
+// siteScoped reports whether the site's nodes hold a directory the founder
+// does not, whose view at every site node shows each site node's entry
+// naming its inside address.
+func siteScoped(n *network) bool {
+	founder := n.nodes[0].App().Bus().Directory().Latest()
+	first := n.nodes[siteMembers[0]].App().Bus().Directory().Latest()
+	for _, candidate := range first.Scopes() {
+		if _, ok := founder.Scope(candidate.ID()); ok {
+			continue
+		}
+		shared := true
+		for _, i := range siteMembers {
+			s, ok := n.nodes[i].App().Bus().Directory().Latest().Scope(candidate.ID())
+			if !ok {
+				shared = false
+				break
+			}
+			for _, j := range siteMembers {
+				e, ok := s.Entry(n.nodes[j].App().IA())
+				if !ok || len(e.Addresses) == 0 || e.Addresses[0].RendezvousAddr.Addr() != n.hosts[j] {
+					shared = false
+				}
+			}
+		}
+		if shared {
+			return true
+		}
+	}
+	return false
 }
 
 // TestBenchSiteSettled benchmarks the site network once it settles, in each
@@ -135,10 +201,10 @@ func reportLinks(t *testing.T, name string, n *network) {
 	)
 }
 
-// siteReads records the founder's view of the directory read by read: for
-// each site node, the host its entry publishes — its inside address or the
-// site's gateway — and the tag its report earns, counting the changes of
-// each, those after the network settled, and the reads that found the
+// siteReads records the founder's views read by read: for each site node,
+// the host its latest entry names first — its inside address or the site's
+// gateway — and the tag that address's report earns, counting the changes
+// of each, those after the network settled, and the reads that found the
 // inside address.
 type siteReads struct {
 	n       *network
@@ -165,23 +231,23 @@ func newSiteReads(n *network, gateway netip.Addr) *siteReads {
 	return r
 }
 
-// read records one read of the founder's view of the directory; a node the
-// view holds no entry of records nothing.
+// read records one read of the founder's views; a node the views hold no
+// entry naming an address of records nothing.
 func (r *siteReads) read() {
 	directory := r.n.nodes[0].App().Bus().Directory().Latest()
 	for _, i := range siteMembers {
-		e, ok := directory.Entry(r.n.nodes[i].App().IA())
-		if !ok {
+		e, ok := directory.Latest(r.n.nodes[i].App().IA())
+		if !ok || len(e.Addresses) == 0 {
 			continue
 		}
 		host := "other"
-		switch e.RendezvousAddr.Addr() {
+		switch e.Addresses[0].RendezvousAddr.Addr() {
 		case r.n.hosts[i]:
 			host = "inside"
 		case r.gateway:
 			host = "gateway"
 		}
-		tag := tagOf(e.Reach)
+		tag := tagOf(e.Addresses[0].Reach)
 		nr := r.nodes[i]
 		if host == "inside" {
 			nr.insideReads++
@@ -217,7 +283,7 @@ func tagOf(r bus.Reach) string {
 }
 
 // TestBenchSiteHosts benchmarks the hosts the site's nodes publish and the
-// tags their reports earn, as the founder's view of the directory holds them,
+// tags their reports earn, as the founder's views hold them,
 // in each way of joining: read each settleSample from the boot until the
 // network settles and siteWatch beyond, beside the site's pairs linked at
 // their inside addresses at the end.

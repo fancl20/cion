@@ -12,7 +12,6 @@ import (
 	"github.com/fancl20/cion/internal/services"
 	"github.com/fancl20/cion/pkg/apps"
 	"github.com/fancl20/cion/pkg/core/webpki/webpkitest"
-	"github.com/fancl20/cion/pkg/libs/bus"
 	"github.com/fancl20/cion/pkg/libs/underlay"
 	"github.com/fancl20/cion/pkg/modules/topology/impl/measured"
 )
@@ -23,9 +22,9 @@ import (
 // of the family. The rendezvous acceptor answers a wildcard-bound dial
 // through the loopback and records the wildcard claim's port on the observed
 // host, the founder's HTTPS serves the coordination surfaces at the port,
-// and the founder's entry reports its published host — its domain's
-// address, the loopback the namespace holds — as its own: the check binds
-// the published host, never the wildcard. The lab owns a network namespace
+// and the founder's own state names its domain's address, the loopback the
+// namespace holds, which its wildcard-bound conns route toward. The lab
+// owns a network namespace
 // of its own, for a wildcard bind holds the fixed ports against every node
 // of the process — the same host cannot serve two of them, which is why the
 // observed-address link between two wildcard assemblies stays proven at the
@@ -35,7 +34,7 @@ func TestWildcardControlBoots(t *testing.T) {
 		return
 	}
 	wpki := webpkitest.New(t)
-	// The founder's domain resolves to the loopback, so its entry publishes.
+	// The founder's domain resolves to the loopback, its own host.
 	loopback := netip.MustParseAddr("127.0.0.1")
 	resolver := underlay.Sockets{
 		LookupNetIP: func(context.Context, string, string) ([]netip.Addr, error) {
@@ -100,13 +99,8 @@ func TestWildcardControlBoots(t *testing.T) {
 		return false
 	})
 
-	// The founder's entry publishes the loopback the namespace holds, and
-	// its report names it neither behind a NAT nor unanswered.
-	Poll(t, "the founder's entry to publish", func() bool {
-		_, ok := n.app.Bus().Directory().Latest().Entry(n.app.IA())
-		return ok
+	// The founder's own state names its domain's address.
+	Poll(t, "the founder's own state to name its domain's address", func() bool {
+		return n.app.Bus().Self().Latest().Host == loopback
 	})
-	if e, _ := n.app.Bus().Directory().Latest().Entry(n.app.IA()); e.Reach != (bus.Reach{}) {
-		t.Errorf("the founder's report = %+v, want its published host its own", e.Reach)
-	}
 }

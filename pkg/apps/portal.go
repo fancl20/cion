@@ -118,17 +118,21 @@ func (r *portalRecords) Nodes(ctx context.Context) ([]portal.Node, error) {
 	for ia := range newest {
 		listed[ia] = true
 	}
-	for _, e := range view.Entries() {
-		listed[e.IA] = true
+	for _, s := range view.Scopes() {
+		for _, e := range s.Entries() {
+			listed[e.IA] = true
+		}
 	}
 	nodes := make([]portal.Node, 0, len(listed))
 	for ia := range listed {
-		report, _ := view.Entry(ia)
+		report, _ := view.Latest(ia)
 		node := portal.Node{
 			IA:       ia,
 			Reported: report.Published,
 			Role:     portal.RoleNormal,
-			Reach:    reachTag(report.Reach),
+		}
+		if len(report.Addresses) != 0 {
+			node.Reach = reachTag(report.Addresses[0].Reach)
 		}
 		if chain, ok := newest[ia]; ok {
 			node.Key = hex.EncodeToString(chain[0].SubjectKeyId)

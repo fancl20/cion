@@ -234,11 +234,12 @@ func awaitReach(t *testing.T, n *network, budget time.Duration) {
 }
 
 // settled reports whether every one of the nodes holds at least the floor
-// of up links and the up links established at both ends among them connect
+// of up links — a link to each peer its directories name, where they name
+// fewer — and the up links established at both ends among them connect
 // them all.
 func settled(ctx context.Context, nodes []*testnetwork.Node) bool {
 	for _, n := range nodes {
-		if upLinks(ctx, n) < measured.NeighborFloor {
+		if upLinks(ctx, n) < min(measured.NeighborFloor, namedPeers(n)) {
 			return false
 		}
 	}
@@ -313,6 +314,20 @@ func upLinks(ctx context.Context, n *testnetwork.Node) int {
 		}
 	}
 	return up
+}
+
+// namedPeers counts the peers the node's directories name.
+func namedPeers(n *testnetwork.Node) int {
+	self := n.App().IA()
+	named := make(map[addr.IA]bool)
+	for _, s := range n.App().Bus().Directory().Latest().Scopes() {
+		for _, e := range s.Entries() {
+			if !e.IA.Equal(self) {
+				named[e.IA] = true
+			}
+		}
+	}
+	return len(named)
 }
 
 // rendezvousWatch hears each node's rendezvous socket on the fabric, from

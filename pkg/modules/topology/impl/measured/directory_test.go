@@ -6,7 +6,9 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/x509"
+	"encoding/binary"
 	"errors"
+	"fmt"
 	"maps"
 	mrand "math/rand/v2"
 	"net"
@@ -16,7 +18,9 @@ import (
 	"path"
 	"path/filepath"
 	"slices"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -53,6 +57,9 @@ var (
 	// trcPrev and trcN are two successive TRCs of the entries' ISD.
 	trcPrev = cppki.TRCID{ISD: 20, Base: 1, Serial: 1}
 	trcN    = cppki.TRCID{ISD: 20, Base: 1, Serial: 2}
+	// linkHost is the host a link's peer sees the node at where a test
+	// attaches a link by hand.
+	linkHost = netip.MustParseAddr("192.0.2.200")
 )
 
 // openTrustDB opens a trust database in a fresh directory, closed when the
@@ -67,14 +74,27 @@ func openTrustDB(t *testing.T) trustdb.DB {
 	return db
 }
 
-// bodyAt returns the entry of the ISD-AS naming the host.
-func bodyAt(ia addr.IA, host string) *nodev1.Entry {
-	h := netip.MustParseAddr(host)
-	return &nodev1.Entry{
-		IsdAs:          uint64(ia),
-		ControlAddr:    netip.AddrPortFrom(h, scionrpc.EndpointPort).String(),
-		RendezvousAddr: netip.AddrPortFrom(h, RendezvousPort).String(),
+// bodyAt returns the entry of the ISD-AS naming the hosts, in order; one
+// naming none is a withdrawal.
+func bodyAt(ia addr.IA, hosts ...string) *nodev1.Entry {
+	body := &nodev1.Entry{IsdAs: uint64(ia)}
+	for _, host := range hosts {
+		h := netip.MustParseAddr(host)
+		body.Addresses = append(body.Addresses, &nodev1.Address{
+			ControlAddr:    netip.AddrPortFrom(h, scionrpc.EndpointPort).String(),
+			RendezvousAddr: netip.AddrPortFrom(h, RendezvousPort).String(),
+		})
 	}
+	return body
+}
+
+// hostsOf returns the hosts an entry's addresses name, in order.
+func hostsOf(e bus.DirectoryEntry) []netip.Addr {
+	var out []netip.Addr
+	for _, a := range e.Addresses {
+		out = append(out, a.RendezvousAddr.Addr())
+	}
+	return out
 }
 
 // signEntry signs the body with the engine, as a node signs its entry.
@@ -174,16 +194,64 @@ func asNeighbor(ctx context.Context, neighbor addr.IA, ifID uint16) context.Cont
 		&scion.Addr{IA: neighbor, Service: addr.SvcCS, IfID: ifID})
 }
 
-// heldTimes returns the signing times of the entries the directory holds,
-// by signer.
+// attachLink attaches the link on the interface at linkHost, and returns
+// the directory it joins.
+func attachLink(d *NodeDirectory, ifID uint16) bus.DirectoryID {
+	return d.attach(ifID, linkHost)
+}
+
+// plainAddresses returns the node's addresses at the hosts with nothing to
+// report of its reach: the endpoint and rendezvous ports on each, no NAT,
+// and no echo unanswered.
+func plainAddresses(hosts []netip.Addr) ([]*nodev1.Address, error) {
+	out := make([]*nodev1.Address, 0, len(hosts))
+	for _, h := range hosts {
+		out = append(out, &nodev1.Address{
+			ControlAddr:    netip.AddrPortFrom(h, scionrpc.EndpointPort).String(),
+			RendezvousAddr: netip.AddrPortFrom(h, RendezvousPort).String(),
+		})
+	}
+	return out, nil
+}
+
+// heldTimes returns the signing times of the entries the node's
+// directories hold, by signer: each signer's latest across them.
 func heldTimes(d *NodeDirectory) map[addr.IA]time.Time {
 	d.mtx.Lock()
 	defer d.mtx.Unlock()
-	out := make(map[addr.IA]time.Time, len(d.entries))
-	for signer, e := range d.entries {
-		out[signer] = e.key.signedAt
+	out := make(map[addr.IA]time.Time)
+	for _, s := range d.scopes {
+		for signer, e := range s.entries {
+			if at, ok := out[signer]; !ok || e.key.signedAt.After(at) {
+				out[signer] = e.key.signedAt
+			}
+		}
 	}
 	return out
+}
+
+// heldIn returns the entries the directory the ID names holds, by signer;
+// nil when the node holds no such directory.
+func heldIn(d *NodeDirectory, id bus.DirectoryID) map[addr.IA]*signedEntry {
+	d.mtx.Lock()
+	defer d.mtx.Unlock()
+	s, ok := d.scopes[id]
+	if !ok {
+		return nil
+	}
+	return maps.Clone(s.entries)
+}
+
+// counterIDs returns a mint of ascending IDs whose first byte is first:
+// above every ID a test names with a smaller first byte.
+func counterIDs(first byte) func() bus.DirectoryID {
+	var n uint32
+	return func() bus.DirectoryID {
+		n++
+		id := bus.DirectoryID{first}
+		binary.BigEndian.PutUint32(id[12:], n)
+		return id
+	}
 }
 
 // TestEntryOrder checks the order of a signer's entries: the TRC named,
@@ -227,45 +295,51 @@ func TestEntryOrder(t *testing.T) {
 	}
 }
 
+// generatedEntries returns n entries of random signers, TRCs, signing
+// times, and signed bytes.
+func generatedEntries(rng *mrand.Rand, n int) []*signedEntry {
+	signers := []addr.IA{directoryIA, founderIA, addr.MustIAFrom(20, 0xfd0000000042)}
+	base := time.Unix(1_700_000_000, 0)
+	out := make([]*signedEntry, 0, n)
+	for range n {
+		out = append(out, &signedEntry{
+			signer: signers[rng.IntN(len(signers))],
+			key: entryKey{
+				trc:      cppki.TRCID{ISD: 20, Base: 1, Serial: scrypto.Version(1 + rng.IntN(2))},
+				signedAt: base.Add(time.Duration(rng.IntN(4)) * time.Second),
+				signed:   []byte{byte(rng.IntN(3))},
+			},
+		})
+	}
+	return out
+}
+
+// keysEqual compares entry keys by the order.
+var keysEqual = cmp.Comparer(func(a, b entryKey) bool { return a.compare(b) == 0 })
+
 // TestDirectoryJoinIsASemilattice checks the join over generated entry
 // sets: merging them in any order, grouping, and repetition leaves every
 // directory holding the same entries — each signer's greatest.
 func TestDirectoryJoinIsASemilattice(t *testing.T) {
 	rng := mrand.New(mrand.NewPCG(1, 2))
-	signers := []addr.IA{directoryIA, founderIA, addr.MustIAFrom(20, 0xfd0000000042)}
-	base := time.Unix(1_700_000_000, 0)
-	generate := func(n int) []*signedEntry {
-		out := make([]*signedEntry, 0, n)
-		for range n {
-			out = append(out, &signedEntry{
-				signer: signers[rng.IntN(len(signers))],
-				key: entryKey{
-					trc:      cppki.TRCID{ISD: 20, Base: 1, Serial: scrypto.Version(1 + rng.IntN(2))},
-					signedAt: base.Add(time.Duration(rng.IntN(4)) * time.Second),
-					signed:   []byte{byte(rng.IntN(3))},
-				},
-			})
-		}
-		return out
-	}
 	join := func(sets ...[]*signedEntry) map[addr.IA]entryKey {
-		d := NewNodeDirectory(NodeDirectoryConfig{IA: directoryIA})
+		s := newScope()
 		for _, set := range sets {
 			for _, e := range set {
-				d.merge(e)
+				s.merge(e)
 			}
 		}
-		out := make(map[addr.IA]entryKey, len(d.entries))
-		for signer, e := range d.entries {
+		out := make(map[addr.IA]entryKey, len(s.entries))
+		for signer, e := range s.entries {
 			out[signer] = e.key
 		}
 		return out
 	}
-	opts := cmp.Comparer(func(a, b entryKey) bool { return a.compare(b) == 0 })
 	for i := range 200 {
-		a, b, c := generate(rng.IntN(6)), generate(rng.IntN(6)), generate(rng.IntN(6))
+		a, b, c := generatedEntries(rng, rng.IntN(6)), generatedEntries(rng, rng.IntN(6)),
+			generatedEntries(rng, rng.IntN(6))
 		ab := join(a, b)
-		if diff := cmp.Diff(ab, join(b, a), opts); diff != "" {
+		if diff := cmp.Diff(ab, join(b, a), keysEqual); diff != "" {
 			t.Fatalf("round %d: the join is not commutative (-a,b +b,a):\n%s", i, diff)
 		}
 		shuffled := slices.Concat(a, b, c)
@@ -273,10 +347,10 @@ func TestDirectoryJoinIsASemilattice(t *testing.T) {
 			shuffled[i], shuffled[j] = shuffled[j], shuffled[i]
 		})
 		abc := join(a, b, c)
-		if diff := cmp.Diff(abc, join(shuffled), opts); diff != "" {
+		if diff := cmp.Diff(abc, join(shuffled), keysEqual); diff != "" {
 			t.Fatalf("round %d: the join is not associative (-in order +shuffled):\n%s", i, diff)
 		}
-		if diff := cmp.Diff(abc, join(a, b, c, c, a, b), opts); diff != "" {
+		if diff := cmp.Diff(abc, join(a, b, c, c, a, b), keysEqual); diff != "" {
 			t.Fatalf("round %d: the join is not idempotent (-once +repeated):\n%s", i, diff)
 		}
 		for signer, k := range abc {
@@ -289,22 +363,165 @@ func TestDirectoryJoinIsASemilattice(t *testing.T) {
 	}
 }
 
+// TestDirectoryMergesInAnyOrder checks the IDs and the directories together
+// over generated networks: whatever the order of the links' reports, the
+// syncs, and the entries' arrival, once every link is reported and synced
+// the attachments fall into the same scopes, and each scope's directory
+// holds the same entries.
+func TestDirectoryMergesInAnyOrder(t *testing.T) {
+	rng := mrand.New(mrand.NewPCG(3, 4))
+	hosts := []string{"192.0.2.1", "192.0.2.2", "192.0.2.3", "192.0.2.4"}
+	signers := []addr.IA{directoryIA, founderIA, addr.MustIAFrom(20, 0xfd0000000042)}
+	base := time.Unix(1_700_000_000, 0)
+	// spec is one link: b sees a at aSeen, a sees b at bSeen.
+	type spec struct {
+		a, b         int
+		aSeen, bSeen string
+	}
+	// op is one step: the report of the host the neighbor sees the node at,
+	// a sync, or an entry's arrival, at the node's end of its link to the
+	// neighbor.
+	type op struct {
+		kind           int
+		node, neighbor int
+		msg            *cryptopb.SignedMessage
+	}
+	const reportOp, syncOp, deliverOp = 0, 1, 2
+	type outcome struct {
+		Scopes  [][]string
+		Entries map[string]map[addr.IA]entryKey
+	}
+	run := func(specs []spec, ops []op) outcome {
+		f := newFabric()
+		nodes := make([]*fabricNode, len(hosts))
+		for i, h := range hosts {
+			nodes[i] = f.addTrusting(addr.MustIAFrom(20, addr.AS(0xfd0000000700+uint64(i))), &fakeTrust{}, h)
+		}
+		for _, sp := range specs {
+			f.connect(nodes[sp.a], nodes[sp.b], netip.MustParseAddr(sp.aSeen), netip.MustParseAddr(sp.bSeen))
+		}
+		do := func(o op) {
+			n, other := nodes[o.node], nodes[o.neighbor]
+			ifID := n.ifIDs[other.ia]
+			switch o.kind {
+			case reportOp:
+				f.report(n, other.ia)
+			case syncOp:
+				_ = n.dir.syncWith(t.Context(), ifID, other.ia)
+			case deliverOp:
+				n.dir.accept(t.Context(), []*cryptopb.SignedMessage{o.msg}, other.ia, ifID)
+			}
+		}
+		for _, o := range ops {
+			do(o)
+		}
+		// Settle: every link is reported and synced at both ends, and every
+		// entry arrives again, until each change has crossed the network.
+		for range 2 * len(hosts) {
+			for _, kind := range []int{reportOp, syncOp} {
+				for _, sp := range specs {
+					do(op{kind: kind, node: sp.a, neighbor: sp.b})
+					do(op{kind: kind, node: sp.b, neighbor: sp.a})
+				}
+			}
+			for _, o := range ops {
+				if o.kind == deliverOp {
+					do(o)
+				}
+			}
+		}
+		groups := make(map[bus.DirectoryID][]string)
+		for i, n := range nodes {
+			for host, a := range n.dir.attachments {
+				groups[a.id] = append(groups[a.id], fmt.Sprintf("%d@%v", i, host))
+			}
+		}
+		out := outcome{Entries: make(map[string]map[addr.IA]entryKey)}
+		for id, members := range groups {
+			slices.Sort(members)
+			out.Scopes = append(out.Scopes, members)
+			keys := make(map[addr.IA]entryKey)
+			for _, n := range nodes {
+				for signer, e := range heldIn(n.dir, id) {
+					if held, ok := keys[signer]; !ok || e.key.compare(held) > 0 {
+						keys[signer] = e.key
+					}
+				}
+			}
+			out.Entries[strings.Join(members, ",")] = keys
+		}
+		slices.SortFunc(out.Scopes, func(a, b []string) int { return strings.Compare(a[0], b[0]) })
+		return out
+	}
+	for i := range 30 {
+		var specs []spec
+		for a := range hosts {
+			for b := a + 1; b < len(hosts); b++ {
+				if rng.IntN(2) == 0 {
+					continue
+				}
+				sp := spec{a: a, b: b, aSeen: hosts[a], bSeen: hosts[b]}
+				if rng.IntN(3) == 0 {
+					sp.aSeen = "203.0.113.1"
+				}
+				specs = append(specs, sp)
+			}
+		}
+		if len(specs) == 0 {
+			continue
+		}
+		var ops []op
+		for range rng.IntN(16) {
+			sp := specs[rng.IntN(len(specs))]
+			o := op{kind: rng.IntN(3), node: sp.a, neighbor: sp.b}
+			if rng.IntN(2) == 0 {
+				o.node, o.neighbor = sp.b, sp.a
+			}
+			if o.kind == deliverOp {
+				signer := signers[rng.IntN(len(signers))]
+				trc := cppki.TRCID{ISD: 20, Base: 1, Serial: scrypto.Version(1 + rng.IntN(2))}
+				o.msg = fakeEntry(t, signer, trc, base.Add(time.Duration(rng.IntN(4))*time.Second),
+					bodyAt(signer, fmt.Sprintf("198.51.100.%d", 1+rng.IntN(3))))
+			}
+			ops = append(ops, o)
+		}
+		want := run(specs, ops)
+		shuffled := slices.Clone(ops)
+		rng.Shuffle(len(shuffled), func(i, j int) {
+			shuffled[i], shuffled[j] = shuffled[j], shuffled[i]
+		})
+		if diff := cmp.Diff(want, run(specs, shuffled), keysEqual); diff != "" {
+			t.Fatalf("round %d: the order changed the outcome (-in order +shuffled):\n%s", i, diff)
+		}
+		if diff := cmp.Diff(want, run(specs, slices.Concat(ops, ops)), keysEqual); diff != "" {
+			t.Fatalf("round %d: repetition changed the outcome (-once +twice):\n%s", i, diff)
+		}
+	}
+}
+
 // TestDirectoryNeverVerifiesALoser checks acceptance's order: an entry
 // greater than the one held is verified and merged, while one equal to it
-// or lesser is passed over before any verification.
+// or lesser is passed over before any verification, and an entry over a
+// link that joins no directory is never verified.
 func TestDirectoryNeverVerifiesALoser(t *testing.T) {
 	signer := founderIA
 	now := time.Now()
 	ft := &fakeTrust{}
 	d := NewNodeDirectory(NodeDirectoryConfig{IA: directoryIA, Trust: ft})
+	attachLink(d, 1)
 	greater := fakeEntry(t, signer, trcN, now, bodyAt(signer, "192.0.2.1"))
 	lesser := fakeEntry(t, signer, trcN, now.Add(-time.Minute), bodyAt(signer, "192.0.2.2"))
 	ctx := t.Context()
-	if n := d.accept(ctx, []*cryptopb.SignedMessage{greater}, directoryIA, nil); n != 1 {
+	if n := d.accept(ctx, []*cryptopb.SignedMessage{greater}, directoryIA, 1); n != 1 {
 		t.Fatalf("the greater entry merged %d, want 1", n)
 	}
-	if n := d.accept(ctx, []*cryptopb.SignedMessage{greater, lesser}, directoryIA, nil); n != 0 {
+	if n := d.accept(ctx, []*cryptopb.SignedMessage{greater, lesser}, directoryIA, 1); n != 0 {
 		t.Errorf("the held and the lesser entries merged %d, want none", n)
+	}
+	unattached := fakeEntry(t, addr.MustIAFrom(20, 0xfd0000000042), trcN, now,
+		bodyAt(addr.MustIAFrom(20, 0xfd0000000042), "192.0.2.3"))
+	if n := d.accept(ctx, []*cryptopb.SignedMessage{unattached}, directoryIA, 9); n != 0 {
+		t.Errorf("an entry over a link that joins no directory merged %d, want none", n)
 	}
 	if got := ft.verifications(); got != 1 {
 		t.Errorf("verifications = %d, want the greater entry's alone", got)
@@ -318,16 +535,16 @@ func TestDirectoryNeverVerifiesALoser(t *testing.T) {
 func TestDirectoryView(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0)
 	signer := func(n uint64) addr.IA { return addr.MustIAFrom(20, addr.AS(0xfd0000000100+n)) }
-	withdrawal := &nodev1.Entry{IsdAs: uint64(signer(5))}
 	pbs := []*cryptopb.SignedMessage{
 		fakeEntry(t, signer(1), trcN, now.Add(-time.Minute), bodyAt(signer(1), "192.0.2.1")),
 		fakeEntry(t, signer(2), trcPrev, now.Add(-time.Minute), bodyAt(signer(2), "192.0.2.2")),
 		fakeEntry(t, signer(3), trcN, now.Add(-EntryLifetime), bodyAt(signer(3), "192.0.2.3")),
 		fakeEntry(t, signer(4), trcN, now.Add(entryFutureBound+time.Second),
 			bodyAt(signer(4), "192.0.2.4")),
-		fakeEntry(t, signer(5), trcN, now.Add(-time.Minute), withdrawal),
+		fakeEntry(t, signer(5), trcN, now.Add(-time.Minute), bodyAt(signer(5))),
 	}
 	d := NewNodeDirectory(NodeDirectoryConfig{IA: directoryIA, Trust: &fakeTrust{}})
+	id := attachLink(d, 1)
 	for _, pb := range pbs {
 		e, err := parseEntry(pb)
 		if err != nil {
@@ -336,26 +553,29 @@ func TestDirectoryView(t *testing.T) {
 		if err := d.verify(t.Context(), e, nil); err != nil {
 			t.Fatal(err)
 		}
-		d.merge(e)
+		d.mergeOver(1, e)
 	}
 	held := heldTimes(d)
 
 	d.mtx.Lock()
-	view, next := d.viewLocked(now)
+	v, next := d.viewLocked(now)
 	d.mtx.Unlock()
-	got := slices.Sorted(maps.Keys(view))
+	got := slices.Sorted(maps.Keys(v.scopes[id]))
 	if want := []addr.IA{signer(1), signer(2)}; !slices.Equal(got, want) {
 		t.Errorf("the view = %v, want %v", got, want)
 	}
 	if want := now.Add(time.Second); !next.Equal(want) {
 		t.Errorf("the view changes next at %v, want the future entry's entering at %v", next, want)
 	}
+	if v.links[1] != id {
+		t.Errorf("the view attaches the link to %v, want %v", v.links[1], id)
+	}
 	if diff := cmp.Diff(held, heldTimes(d)); diff != "" {
 		t.Errorf("the view changed the directory (-before +after):\n%s", diff)
 	}
 }
 
-// TestDirectoryViewFollowsTheClock checks the view's publication with no
+// TestDirectoryViewFollowsTheClock checks the views' publication with no
 // entry arriving: an entry signed past the future bound is published once
 // the clock reaches the bound, and an entry leaves the published view once
 // it leaves the window.
@@ -366,21 +586,23 @@ func TestDirectoryViewFollowsTheClock(t *testing.T) {
 		d := NewNodeDirectory(NodeDirectoryConfig{
 			IA: directoryIA, Trust: &fakeTrust{}, Directory: topic,
 		})
+		id := attachLink(d, 1)
 		now := time.Now()
 		msgs := []*cryptopb.SignedMessage{
 			fakeEntry(t, signer(1), trcN, now, bodyAt(signer(1), "192.0.2.1")),
 			fakeEntry(t, signer(2), trcN, now.Add(entryFutureBound+time.Minute),
 				bodyAt(signer(2), "192.0.2.2")),
 		}
-		if n := d.accept(t.Context(), msgs, founderIA, nil); n != len(msgs) {
+		if n := d.accept(t.Context(), msgs, founderIA, 1); n != len(msgs) {
 			t.Fatalf("merged %d, want all %d", n, len(msgs))
 		}
 		ctx, cancel := context.WithCancel(t.Context())
 		defer cancel()
 		go d.runView(ctx)
 		published := func() []addr.IA {
+			s, _ := topic.Latest().Scope(id)
 			var out []addr.IA
-			for _, e := range topic.Latest().Entries() {
+			for _, e := range s.Entries() {
 				out = append(out, e.IA)
 			}
 			return out
@@ -411,15 +633,15 @@ func TestDirectoryDiscards(t *testing.T) {
 	signer := func(n uint64) addr.IA { return addr.MustIAFrom(20, addr.AS(0xfd0000000200+n)) }
 	ft := &fakeTrust{}
 	d := NewNodeDirectory(NodeDirectoryConfig{IA: directoryIA, Trust: ft})
-	withdrawal := &nodev1.Entry{IsdAs: uint64(signer(4))}
+	attachLink(d, 1)
 	pbs := []*cryptopb.SignedMessage{
 		fakeEntry(t, signer(1), trcN, now.Add(-EntryLifetime-time.Minute),
 			bodyAt(signer(1), "192.0.2.1")),
 		fakeEntry(t, signer(2), trcPrev, now.Add(-time.Minute), bodyAt(signer(2), "192.0.2.2")),
 		fakeEntry(t, signer(3), trcN, now.Add(time.Hour), bodyAt(signer(3), "192.0.2.3")),
-		fakeEntry(t, signer(4), trcN, now.Add(-time.Minute), withdrawal),
+		fakeEntry(t, signer(4), trcN, now.Add(-time.Minute), bodyAt(signer(4))),
 	}
-	if n := d.accept(t.Context(), pbs, founderIA, nil); n != len(pbs) {
+	if n := d.accept(t.Context(), pbs, founderIA, 1); n != len(pbs) {
 		t.Fatalf("merged %d, want all %d", n, len(pbs))
 	}
 	d.pass(now.Add(EntryLifetime))
@@ -431,7 +653,7 @@ func TestDirectoryDiscards(t *testing.T) {
 	verified := ft.verifications()
 	ancient := fakeEntry(t, signer(5), trcN, now.Add(-2*EntryLifetime),
 		bodyAt(signer(5), "192.0.2.5"))
-	if n := d.accept(t.Context(), []*cryptopb.SignedMessage{ancient}, founderIA, nil); n != 0 {
+	if n := d.accept(t.Context(), []*cryptopb.SignedMessage{ancient}, founderIA, 1); n != 0 {
 		t.Errorf("merged %d of the ancient entry, want none", n)
 	}
 	if ft.verifications() != verified {
@@ -440,34 +662,38 @@ func TestDirectoryDiscards(t *testing.T) {
 }
 
 // TestDirectoryEntryAddresses checks what an entry names: one naming no
-// address is a withdrawal, which the view leaves out, while one naming a
-// single address, or a malformed one, is refused.
+// address is a withdrawal, which the view leaves out; one naming two hosts
+// carries both, in order; and one naming an address without its rendezvous
+// address, or a malformed one, is refused.
 func TestDirectoryEntryAddresses(t *testing.T) {
 	now := time.Now()
 	signer := func(n uint64) addr.IA { return addr.MustIAFrom(20, addr.AS(0xfd0000000400+n)) }
 	half := bodyAt(signer(2), "192.0.2.2")
-	half.RendezvousAddr = ""
+	half.Addresses[0].RendezvousAddr = ""
 	malformed := bodyAt(signer(3), "192.0.2.3")
-	malformed.ControlAddr = "nope"
+	malformed.Addresses[0].ControlAddr = "nope"
 	msgs := []*cryptopb.SignedMessage{
-		fakeEntry(t, signer(1), trcN, now, &nodev1.Entry{IsdAs: uint64(signer(1))}),
+		fakeEntry(t, signer(1), trcN, now, bodyAt(signer(1))),
 		fakeEntry(t, signer(2), trcN, now, half),
 		fakeEntry(t, signer(3), trcN, now, malformed),
+		fakeEntry(t, signer(4), trcN, now, bodyAt(signer(4), "192.0.2.41", "192.0.2.42")),
 	}
-	d := NewNodeDirectory(NodeDirectoryConfig{
-		IA: directoryIA, Trust: &fakeTrust{},
-	})
-	if n := d.accept(t.Context(), msgs, founderIA, nil); n != 1 {
-		t.Fatalf("merged %d, want the entry naming no address alone", n)
+	d := NewNodeDirectory(NodeDirectoryConfig{IA: directoryIA, Trust: &fakeTrust{}})
+	id := attachLink(d, 1)
+	if n := d.accept(t.Context(), msgs, founderIA, 1); n != 2 {
+		t.Fatalf("merged %d, want the withdrawal and the two-host entry", n)
 	}
-	d.mtx.Lock()
-	e := d.entries[signer(1)]
-	d.mtx.Unlock()
-	if e == nil || !e.withdrawn {
+	held := heldIn(d, id)
+	if e := held[signer(1)]; e == nil || !e.withdrawn {
 		t.Errorf("the entry naming no address is no withdrawal: %+v", e)
 	}
-	if view, _ := d.pass(now); len(view) != 0 {
-		t.Errorf("the view shows %d entries, want none", len(view))
+	want := []netip.Addr{netip.MustParseAddr("192.0.2.41"), netip.MustParseAddr("192.0.2.42")}
+	if e := held[signer(4)]; e == nil || !slices.Equal(hostsOf(e.entry), want) {
+		t.Errorf("the two-host entry names %v, want %v", held[signer(4)], want)
+	}
+	v, _ := d.pass(now)
+	if got := slices.Sorted(maps.Keys(v.scopes[id])); !slices.Equal(got, []addr.IA{signer(4)}) {
+		t.Errorf("the view shows %v, want the two-host entry alone", got)
 	}
 }
 
@@ -476,36 +702,36 @@ func TestDirectoryEntryAddresses(t *testing.T) {
 // runaway one signed far ahead of the clock.
 func TestDirectoryOutranking(t *testing.T) {
 	now := time.Now()
-	ft := &fakeTrust{}
-	d := NewNodeDirectory(NodeDirectoryConfig{IA: directoryIA, Trust: ft})
+	d := NewNodeDirectory(NodeDirectoryConfig{IA: directoryIA, Trust: &fakeTrust{}})
+	id := attachLink(d, 1)
 	ctx := t.Context()
 	signer := founderIA
 	entry := fakeEntry(t, signer, trcN, now.Add(-time.Minute), bodyAt(signer, "192.0.2.1"))
-	withdrawal := fakeEntry(t, signer, trcN, now,
-		&nodev1.Entry{IsdAs: uint64(signer)})
-	if n := d.accept(ctx, []*cryptopb.SignedMessage{entry, withdrawal}, directoryIA, nil); n != 2 {
+	withdrawal := fakeEntry(t, signer, trcN, now, bodyAt(signer))
+	if n := d.accept(ctx, []*cryptopb.SignedMessage{entry, withdrawal}, directoryIA, 1); n != 2 {
 		t.Fatalf("merged %d, want the entry and the withdrawal", n)
 	}
-	if n := d.accept(ctx, []*cryptopb.SignedMessage{entry}, directoryIA, nil); n != 0 {
+	if n := d.accept(ctx, []*cryptopb.SignedMessage{entry}, directoryIA, 1); n != 0 {
 		t.Errorf("an earlier entry outranked the withdrawal")
 	}
-	if view, _ := d.pass(now); len(view) != 0 {
-		t.Errorf("the view shows %d entries past the withdrawal, want none", len(view))
+	if v, _ := d.pass(now); len(v.scopes[id]) != 0 {
+		t.Errorf("the view shows %d entries past the withdrawal, want none", len(v.scopes[id]))
 	}
 
 	runaway := addr.MustIAFrom(20, 0xfd0000000042)
 	ahead := fakeEntry(t, runaway, trcPrev, now.Add(24*time.Hour), bodyAt(runaway, "192.0.2.2"))
 	current := fakeEntry(t, runaway, trcPrev, now, bodyAt(runaway, "192.0.2.3"))
 	renewed := fakeEntry(t, runaway, trcN, now, bodyAt(runaway, "192.0.2.4"))
-	if n := d.accept(ctx, []*cryptopb.SignedMessage{ahead, current}, directoryIA, nil); n != 1 {
+	if n := d.accept(ctx, []*cryptopb.SignedMessage{ahead, current}, directoryIA, 1); n != 1 {
 		t.Fatalf("merged %d, want the runaway entry alone", n)
 	}
-	if n := d.accept(ctx, []*cryptopb.SignedMessage{renewed}, directoryIA, nil); n != 1 {
+	if n := d.accept(ctx, []*cryptopb.SignedMessage{renewed}, directoryIA, 1); n != 1 {
 		t.Fatalf("the entry under the newer TRC did not outrank the runaway one")
 	}
-	view, _ := d.pass(now)
-	if e, ok := view[runaway]; !ok || e.entry.RendezvousAddr.Addr() != netip.MustParseAddr("192.0.2.4") {
-		t.Errorf("the view holds %v for the runaway signer, want the renewed entry", view[runaway])
+	v, _ := d.pass(now)
+	if e, ok := v.scopes[id][runaway]; !ok ||
+		!slices.Equal(hostsOf(e.entry), []netip.Addr{netip.MustParseAddr("192.0.2.4")}) {
+		t.Errorf("the view holds %v for the runaway signer, want the renewed entry", v.scopes[id][runaway])
 	}
 }
 
@@ -535,9 +761,9 @@ func (f *recordingFetcher) Chains(
 
 // TestDirectoryAcceptance checks acceptance against real chains: an entry
 // verifies against the chain valid at its signing time, the chain fetched
-// from the neighbor that sent it, while an altered entry, one whose body
-// names another ISD-AS, and one no chain of its signer verifies are
-// refused.
+// from the neighbor that sent it over the link it arrived on, while an
+// altered entry, one whose body names another ISD-AS, and one no chain of
+// its signer verifies are refused.
 func TestDirectoryAcceptance(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		founder := trusttest.NewFounder(t, openTrustDB(t), founderIA)
@@ -565,6 +791,7 @@ func TestDirectoryAcceptance(t *testing.T) {
 		})
 		d := NewNodeDirectory(NodeDirectoryConfig{IA: directoryIA, Trust: engine})
 		const arrival = 7
+		id := attachLink(d, arrival)
 		ctx := asNeighbor(t.Context(), signer, arrival)
 
 		// Signed a minute before the chain expires, pushed a minute after.
@@ -582,18 +809,18 @@ func TestDirectoryAcceptance(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		if len(d.entries) != 0 {
-			t.Fatalf("held %d entries after the altered and the impostor, want none",
-				len(d.entries))
+		if held := heldIn(d, id); len(held) != 0 {
+			t.Fatalf("held %d entries after the altered and the impostor, want none", len(held))
 		}
 		if _, err := d.Push(ctx, &nodev1.PushRequest{
 			Entries: []*cryptopb.SignedMessage{entry},
 		}); err != nil {
 			t.Fatal(err)
 		}
-		view, _ := d.pass(time.Now())
-		if e, ok := view[signer]; !ok || e.entry.RendezvousAddr.Addr() != netip.MustParseAddr("192.0.2.1") {
-			t.Fatalf("the view holds %v for the signer, want the entry", view[signer])
+		v, _ := d.pass(time.Now())
+		if e, ok := v.scopes[id][signer]; !ok ||
+			!slices.Equal(hostsOf(e.entry), []netip.Addr{netip.MustParseAddr("192.0.2.1")}) {
+			t.Fatalf("the view holds %v for the signer, want the entry", v.scopes[id][signer])
 		}
 		if len(fetcher.asked) == 0 {
 			t.Fatal("no chain was asked of the sender")
@@ -614,15 +841,16 @@ func TestDirectoryAcceptance(t *testing.T) {
 		}); err != nil {
 			t.Fatal(err)
 		}
-		if _, ok := d.entries[stranger]; ok {
+		if _, ok := heldIn(d, id)[stranger]; ok {
 			t.Error("an entry no chain verifies was held")
 		}
 	})
 }
 
 // TestDirectoryHandlersRefuse checks the service's gates: a request with no
-// authenticated ISD-AS is refused, and so is a call past the per-call
-// bound.
+// authenticated ISD-AS, or that arrived over no link, is refused; so is a
+// call past the per-call bound, a sync naming no directory or a malformed
+// one, and a sync over a link that joins no directory yet.
 func TestDirectoryHandlersRefuse(t *testing.T) {
 	d := NewNodeDirectory(NodeDirectoryConfig{IA: directoryIA, Trust: &fakeTrust{}})
 	if _, err := d.Push(t.Context(), &nodev1.PushRequest{}); connect.CodeOf(err) != connect.CodePermissionDenied {
@@ -630,6 +858,10 @@ func TestDirectoryHandlersRefuse(t *testing.T) {
 	}
 	if _, err := d.Sync(t.Context(), &nodev1.SyncRequest{}); connect.CodeOf(err) != connect.CodePermissionDenied {
 		t.Errorf("an unauthenticated sync = %v, want permission denied", err)
+	}
+	linkless := context.WithValue(t.Context(), peeria.AuthenticatedIAContextKey(), founderIA)
+	if _, err := d.Push(linkless, &nodev1.PushRequest{}); connect.CodeOf(err) != connect.CodePermissionDenied {
+		t.Errorf("a push over no link = %v, want permission denied", err)
 	}
 	ctx := asNeighbor(t.Context(), founderIA, 1)
 	if _, err := d.Push(ctx, &nodev1.PushRequest{
@@ -642,18 +874,216 @@ func TestDirectoryHandlersRefuse(t *testing.T) {
 	}); connect.CodeOf(err) != connect.CodeResourceExhausted {
 		t.Errorf("an oversized sync = %v, want resource exhaustion", err)
 	}
+	if _, err := d.Sync(ctx, &nodev1.SyncRequest{}); connect.CodeOf(err) != connect.CodeInvalidArgument {
+		t.Errorf("a sync naming no directory = %v, want an invalid argument", err)
+	}
+	if _, err := d.Sync(ctx, &nodev1.SyncRequest{Directory: []byte{1, 2, 3}}); connect.CodeOf(err) != connect.CodeInvalidArgument {
+		t.Errorf("a sync naming a 3-byte directory = %v, want an invalid argument", err)
+	}
+	named := bus.DirectoryID{1}
+	if _, err := d.Sync(ctx, &nodev1.SyncRequest{Directory: named[:]}); connect.CodeOf(err) != connect.CodeFailedPrecondition {
+		t.Errorf("a sync over an unattached link = %v, want a failed precondition", err)
+	}
+}
+
+// TestDirectorySyncKeepsTheLesserID checks the sync's handler: the link's
+// attachment takes the request's directory ID when it is the lesser and
+// keeps its own otherwise, and the reply names the ID it keeps.
+func TestDirectorySyncKeepsTheLesserID(t *testing.T) {
+	d := NewNodeDirectory(NodeDirectoryConfig{IA: directoryIA, Trust: &fakeTrust{}})
+	d.mint = counterIDs(0xf0)
+	d.attach(3, netip.MustParseAddr("203.0.113.9"))
+	ctx := asNeighbor(t.Context(), founderIA, 3)
+	lesser := bus.DirectoryID{1}
+	resp, err := d.Sync(ctx, &nodev1.SyncRequest{Directory: lesser[:]})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := parseDirectoryID(resp.Directory); got != lesser {
+		t.Errorf("the reply names directory %v, want the request's lesser %v", got, lesser)
+	}
+	if id, ok := d.linkID(3); !ok || id != lesser {
+		t.Errorf("the link joins %v (%t), want %v", id, ok, lesser)
+	}
+
+	greater := bus.DirectoryID{0xfe}
+	resp, err = d.Sync(ctx, &nodev1.SyncRequest{Directory: greater[:]})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := parseDirectoryID(resp.Directory); got != lesser {
+		t.Errorf("after a greater ID the reply names %v, want %v kept", got, lesser)
+	}
+}
+
+// TestDirectorySyncWithKeepsTheLesserID checks the sync's caller: its
+// request names its end's directory ID, which the callee takes when it is
+// the lesser, and it takes the ID the reply names when that one is.
+func TestDirectorySyncWithKeepsTheLesserID(t *testing.T) {
+	f := newFabric()
+	a := f.addTrusting(addr.MustIAFrom(20, 0xfd0000000071), &fakeTrust{}, "192.0.2.71")
+	b := f.addTrusting(addr.MustIAFrom(20, 0xfd0000000072), &fakeTrust{}, "192.0.2.72")
+	c := f.addTrusting(addr.MustIAFrom(20, 0xfd0000000073), &fakeTrust{}, "192.0.2.73")
+	a.dir.mint, b.dir.mint, c.dir.mint = counterIDs(0x10), counterIDs(0x20), counterIDs(0x30)
+	f.link(a, b)
+	f.link(b, c)
+	attached := func(n *fabricNode, neighbor addr.IA) bus.DirectoryID {
+		t.Helper()
+		id, ok := n.dir.linkID(n.ifIDs[neighbor])
+		if !ok {
+			t.Fatalf("%v's link to %v joins no directory", n.ia, neighbor)
+		}
+		return id
+	}
+
+	if err := b.dir.syncWith(t.Context(), b.ifIDs[a.ia], a.ia); err != nil {
+		t.Fatal(err)
+	}
+	lesser := attached(a, b.ia)
+	if got := attached(b, a.ia); got != lesser {
+		t.Errorf("the caller's link joins %v, want the callee's lesser %v", got, lesser)
+	}
+	if err := b.dir.syncWith(t.Context(), b.ifIDs[c.ia], c.ia); err != nil {
+		t.Fatal(err)
+	}
+	if got := attached(c, b.ia); got != lesser {
+		t.Errorf("the callee's link joins %v, want the caller's lesser %v", got, lesser)
+	}
+}
+
+// TestDirectoryAttachments checks the attachments' lifetime: links group by
+// the host their peers report, each host's attachment naming a directory of
+// its own; an attachment whose links have all gone stays while its
+// directory holds an entry, named in no entry of the node's own, and goes,
+// with the directory, once that entry does.
+func TestDirectoryAttachments(t *testing.T) {
+	now := time.Now()
+	state := new(bus.Topic[bus.LinkState])
+	live := func(ifIDs ...uint16) {
+		var ls []bus.Link
+		for _, ifID := range ifIDs {
+			ls = append(ls, bus.Link{Entry: links.Link{
+				IfID: ifID, NeighborIA: addr.MustIAFrom(20, addr.AS(0xfd0000000600+uint64(ifID))),
+				State: links.StateEstablished,
+			}})
+		}
+		state.Publish(bus.NewLinkState(ls...))
+	}
+	live(1, 2, 3)
+	d := NewNodeDirectory(NodeDirectoryConfig{
+		IA: directoryIA, Trust: &fakeTrust{}, Links: state, Addresses: plainAddresses,
+	})
+	d.mint = counterIDs(0xf0)
+	hostA, hostB := netip.MustParseAddr("192.0.2.1"), netip.MustParseAddr("198.51.100.1")
+	idA := d.attach(1, hostA)
+	if got := d.attach(2, hostA); got != idA {
+		t.Errorf("a second link at the host joins %v, want the host's %v", got, idA)
+	}
+	idB := d.attach(3, hostB)
+	if idB == idA {
+		t.Fatalf("two hosts' attachments name one directory, %v", idA)
+	}
+	if got := d.attach(2, hostB); got != idB {
+		t.Errorf("the moved link joins %v, want the new host's %v", got, idB)
+	}
+
+	signer := addr.MustIAFrom(20, 0xfd0000000042)
+	if n := d.accept(t.Context(), []*cryptopb.SignedMessage{
+		fakeEntry(t, signer, trcN, now, bodyAt(signer, "192.0.2.9")),
+	}, signer, 1); n != 1 {
+		t.Fatalf("merged %d, want 1", n)
+	}
+	live(2, 3)
+	d.pass(now)
+	if _, ok := d.attachments[hostA]; !ok || heldIn(d, idA) == nil {
+		t.Fatal("the attachment whose links went is gone while its directory holds an entry")
+	}
+	if _, ok := d.linkID(1); ok {
+		t.Error("the gone link still joins a directory")
+	}
+	bodies, err := d.ownBodies()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if body, ok := bodies[idB]; len(bodies) != 1 || !ok || len(body.Addresses) != 1 ||
+		body.Addresses[0].RendezvousAddr != netip.AddrPortFrom(hostB, RendezvousPort).String() {
+		t.Errorf("the node's entries = %v, want one in %v naming its linked host alone", bodies, idB)
+	}
+	d.pass(now.Add(2 * EntryLifetime))
+	if _, ok := d.attachments[hostA]; ok || heldIn(d, idA) != nil {
+		t.Error("the attachment with no link and no entry stays")
+	}
+	if _, ok := d.attachments[hostB]; !ok {
+		t.Error("the attachment holding links went")
+	}
+}
+
+// TestDirectoryMergeJoinsDirectories checks a merge at one node: when one
+// attachment's directory ID gives way to another attachment's lesser one,
+// the greater ID's directory joins the lesser's signer by signer, the merge
+// wakes the catch-up of every link, and the node signs one entry there
+// naming both hosts, ordered.
+func TestDirectoryMergeJoinsDirectories(t *testing.T) {
+	founder := newFounded(t)
+	d := NewNodeDirectory(NodeDirectoryConfig{
+		IA: directoryIA, Trust: founder.Engine(t, directoryIA), Addresses: plainAddresses,
+	})
+	d.mint = counterIDs(0xf0)
+	hostA, hostB := netip.MustParseAddr("198.51.100.2"), netip.MustParseAddr("198.51.100.1")
+	idA := d.attach(1, hostA)
+	idB := d.attach(2, hostB)
+	s, u := addr.MustIAFrom(20, 0xfd0000000042), addr.MustIAFrom(20, 0xfd0000000043)
+	at := time.Now()
+	entry := func(signer addr.IA, at time.Time) *signedEntry {
+		return &signedEntry{signer: signer, key: entryKey{trc: trcN, signedAt: at, signed: []byte{1}}}
+	}
+	older, newer, only := entry(s, at), entry(s, at.Add(time.Second)), entry(u, at)
+	d.mergeOver(1, older)
+	d.mergeOver(1, only)
+	d.mergeOver(2, newer)
+	select {
+	case <-d.catchUp:
+	default:
+	}
+
+	if got, _ := d.adopt(2, idA); got != idA {
+		t.Fatalf("the link whose peer names %v joins %v", idA, got)
+	}
+	held := heldIn(d, idA)
+	if held[s] != newer || held[u] != only {
+		t.Errorf("the joined directory holds %v and %v, want each signer's greatest", held[s], held[u])
+	}
+	if heldIn(d, idB) != nil {
+		t.Error("the greater ID still names a directory")
+	}
+	select {
+	case <-d.catchUp:
+	default:
+		t.Error("the merge woke no catch-up")
+	}
+	if _, err := d.signScopes(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	own := heldIn(d, idA)[directoryIA]
+	if own == nil || !slices.Equal(hostsOf(own.entry), []netip.Addr{hostB, hostA}) {
+		t.Errorf("the node's entry = %v, want both hosts in order", own)
+	}
 }
 
 // fabric is an in-process one-hop channel between directories: a node's
 // client reaches the neighbor its link names, each request carrying the
 // caller as its authenticated ISD-AS and the link's far interface as its
-// arrival.
+// arrival, and each node's link state observes each neighbor at the host
+// the node sees it at.
 type fabric struct {
 	mtx   sync.Mutex
 	nodes map[addr.IA]*fabricNode
 	calls []call
 	// cut holds the pairs whose calls fail.
 	cut map[[2]addr.IA]bool
+	// seen holds the host each node sees each neighbor at, by observer and
+	// observed.
+	seen map[[2]addr.IA]netip.Addr
 }
 
 // call is one request the fabric carried.
@@ -665,40 +1095,51 @@ type call struct {
 // fabricNode is one node of the fabric.
 type fabricNode struct {
 	ia      addr.IA
+	host    netip.Addr
 	engine  *trust.Engine
 	dir     *NodeDirectory
-	self    *bus.Topic[bus.SelfState]
 	links   *bus.Topic[bus.LinkState]
 	view    *bus.Topic[bus.Directory]
 	handler http.Handler
-	// ifIDs holds the interface of the link reaching each neighbor.
-	ifIDs map[addr.IA]uint16
+	// ifIDs holds the interface of the link reaching each neighbor, and
+	// lastIfID the interface the node allocated last.
+	ifIDs    map[addr.IA]uint16
+	lastIfID uint16
 }
 
 func newFabric() *fabric {
-	return &fabric{nodes: make(map[addr.IA]*fabricNode), cut: make(map[[2]addr.IA]bool)}
+	return &fabric{
+		nodes: make(map[addr.IA]*fabricNode),
+		cut:   make(map[[2]addr.IA]bool),
+		seen:  make(map[[2]addr.IA]netip.Addr),
+	}
 }
 
 // add builds a node signing with the engine, at the host.
 func (f *fabric) add(ia addr.IA, engine *trust.Engine, host string) *fabricNode {
+	n := f.addTrusting(ia, engine, host)
+	n.engine = engine
+	return n
+}
+
+// addTrusting builds a node of the trust given, at the host.
+func (f *fabric) addTrusting(ia addr.IA, trust DirectoryTrust, host string) *fabricNode {
 	n := &fabricNode{
 		ia:    ia,
-		self:  new(bus.Topic[bus.SelfState]),
+		host:  netip.MustParseAddr(host),
 		links: new(bus.Topic[bus.LinkState]),
 		view:  new(bus.Topic[bus.Directory]),
 		ifIDs: make(map[addr.IA]uint16),
 	}
-	n.self.Publish(bus.SelfState{Host: netip.MustParseAddr(host)})
 	n.links.Publish(bus.NewLinkState())
 	n.dir = NewNodeDirectory(NodeDirectoryConfig{
 		IA:        ia,
-		Self:      n.self,
-		Trust:     engine,
+		Addresses: plainAddresses,
+		Trust:     trust,
 		Links:     n.links,
 		Peer:      fabricPeer{f: f, from: ia},
 		Directory: n.view,
 	})
-	n.engine = engine
 	server := connect.NewServer()
 	nodev1connect.RegisterDirectoryServiceHandler(server, n.dir)
 	mux := http.NewServeMux()
@@ -718,17 +1159,46 @@ func (f *fabric) addEnrolled(t *testing.T, founder *trusttest.Founder, n byte) *
 	return f.add(ia, founder.Engine(t, ia), netip.AddrFrom4([4]byte{192, 0, 2, n}).String())
 }
 
-// link links the two nodes and publishes both ends' link state.
+// link links the two nodes, each seeing the other at its own host.
 func (f *fabric) link(a, b *fabricNode) {
+	f.linkVia(a, b, a.host, b.host)
+}
+
+// linkVia links the two nodes, b seeing a at aSeen and a seeing b at bSeen,
+// and reports each end the host the other sees it at, as the link's
+// exchange does.
+func (f *fabric) linkVia(a, b *fabricNode, aSeen, bSeen netip.Addr) {
+	f.connect(a, b, aSeen, bSeen)
+	f.report(a, b.ia)
+	f.report(b, a.ia)
+}
+
+// report tells the node the host the neighbor sees it at on their link, as
+// the link's exchange does.
+func (f *fabric) report(n *fabricNode, neighbor addr.IA) {
 	f.mtx.Lock()
-	a.ifIDs[b.ia] = uint16(len(a.ifIDs) + 1)
-	b.ifIDs[a.ia] = uint16(len(b.ifIDs) + 1)
+	ifID, seen := n.ifIDs[neighbor], f.seen[[2]addr.IA{neighbor, n.ia}]
+	f.mtx.Unlock()
+	n.dir.attach(ifID, seen)
+}
+
+// connect links the two nodes, b seeing a at aSeen and a seeing b at
+// bSeen, and publishes both ends' link state; neither end hears what the
+// other sees.
+func (f *fabric) connect(a, b *fabricNode, aSeen, bSeen netip.Addr) {
+	f.mtx.Lock()
+	a.lastIfID++
+	b.lastIfID++
+	a.ifIDs[b.ia] = a.lastIfID
+	b.ifIDs[a.ia] = b.lastIfID
+	f.seen[[2]addr.IA{b.ia, a.ia}] = aSeen
+	f.seen[[2]addr.IA{a.ia, b.ia}] = bSeen
 	f.mtx.Unlock()
 	f.publishLinks(a)
 	f.publishLinks(b)
 }
 
-// unlink takes the link between the two nodes down at both ends.
+// unlink takes the link between the two nodes away at both ends.
 func (f *fabric) unlink(a, b *fabricNode) {
 	f.mtx.Lock()
 	delete(a.ifIDs, b.ia)
@@ -738,16 +1208,70 @@ func (f *fabric) unlink(a, b *fabricNode) {
 	f.publishLinks(b)
 }
 
+// move moves the node to the host: each neighbor that saw it at its old
+// host sees it at the new one, and reports it.
+func (f *fabric) move(n *fabricNode, host string) {
+	f.mtx.Lock()
+	old := n.host
+	n.host = netip.MustParseAddr(host)
+	var neighbors []*fabricNode
+	for neighbor := range n.ifIDs {
+		if key := [2]addr.IA{neighbor, n.ia}; f.seen[key] == old {
+			f.seen[key] = n.host
+		}
+		neighbors = append(neighbors, f.nodes[neighbor])
+	}
+	f.mtx.Unlock()
+	for _, neighbor := range neighbors {
+		f.publishLinks(neighbor)
+		f.report(n, neighbor.ia)
+	}
+}
+
 func (f *fabric) publishLinks(n *fabricNode) {
 	f.mtx.Lock()
 	var ls []bus.Link
 	for neighbor, ifID := range n.ifIDs {
-		ls = append(ls, bus.Link{Entry: links.Link{
-			IfID: ifID, NeighborIA: neighbor, State: links.StateEstablished,
-		}})
+		ls = append(ls, bus.Link{
+			Entry: links.Link{IfID: ifID, NeighborIA: neighbor, State: links.StateEstablished},
+			// The port is the far end's link socket; the attachments read the
+			// host alone.
+			Observed: netip.AddrPortFrom(f.seen[[2]addr.IA{n.ia, neighbor}], 40000+ifID),
+		})
 	}
 	f.mtx.Unlock()
 	n.links.Publish(bus.NewLinkState(ls...))
+}
+
+// settleIDs has each end of every link keep the lesser of the two ends'
+// directory IDs, as their syncs do, until no ID changes.
+func (f *fabric) settleIDs(t *testing.T) {
+	t.Helper()
+	type end struct {
+		n, neighbor *fabricNode
+	}
+	f.mtx.Lock()
+	var ends []end
+	for _, ia := range slices.Sorted(maps.Keys(f.nodes)) {
+		n := f.nodes[ia]
+		for _, neighbor := range slices.Sorted(maps.Keys(n.ifIDs)) {
+			ends = append(ends, end{n: n, neighbor: f.nodes[neighbor]})
+		}
+	}
+	f.mtx.Unlock()
+	for changed := true; changed; {
+		changed = false
+		for _, e := range ends {
+			theirs, ok := e.neighbor.dir.linkID(e.neighbor.ifIDs[e.n.ia])
+			if !ok {
+				t.Fatalf("%v's link to %v joins no directory", e.neighbor.ia, e.n.ia)
+			}
+			before, _ := e.n.dir.linkID(e.n.ifIDs[e.neighbor.ia])
+			if after, _ := e.n.dir.adopt(e.n.ifIDs[e.neighbor.ia], theirs); after != before {
+				changed = true
+			}
+		}
+	}
 }
 
 // pushes returns the pushes the fabric carried from one node to another.
@@ -819,13 +1343,35 @@ func (n *fabricNode) run(t *testing.T) {
 	})
 }
 
-// shown returns the hosts the node's view names, by ISD-AS.
+// shown returns the host each node's entry names first in the node's views,
+// by ISD-AS, the view of the least directory ID that shows one winning.
 func (n *fabricNode) shown() map[addr.IA]netip.Addr {
 	out := make(map[addr.IA]netip.Addr)
-	for _, e := range n.view.Latest().Entries() {
-		out[e.IA] = e.RendezvousAddr.Addr()
+	for _, s := range n.view.Latest().Scopes() {
+		for _, e := range s.Entries() {
+			if _, ok := out[e.IA]; !ok && len(e.Addresses) != 0 {
+				out[e.IA] = e.Addresses[0].RendezvousAddr.Addr()
+			}
+		}
 	}
 	return out
+}
+
+// shownIn returns the hosts each node's entry names in the node's view of
+// the directory, by ISD-AS.
+func (n *fabricNode) shownIn(id bus.DirectoryID) map[addr.IA][]netip.Addr {
+	out := make(map[addr.IA][]netip.Addr)
+	s, _ := n.view.Latest().Scope(id)
+	for _, e := range s.Entries() {
+		out[e.IA] = hostsOf(e)
+	}
+	return out
+}
+
+// scopeOf returns the directory the node's link to the neighbor joins.
+func (n *fabricNode) scopeOf(neighbor addr.IA) bus.DirectoryID {
+	id, _ := n.view.Latest().LinkScope(n.ifIDs[neighbor])
+	return id
 }
 
 // newFounded founds an ISD over a fresh trust database.
@@ -835,7 +1381,8 @@ func newFounded(t *testing.T) *trusttest.Founder {
 }
 
 // TestDirectoryFloods checks the flooding: an accepted greater entry is
-// pushed to every neighbor but its sender, and a lesser one to none.
+// pushed to every neighbor of its directory but its sender, and a lesser
+// one to none.
 func TestDirectoryFloods(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		founder := newFounded(t)
@@ -845,6 +1392,7 @@ func TestDirectoryFloods(t *testing.T) {
 		f.link(a, b)
 		f.link(b, c)
 		f.link(b, d)
+		f.settleIDs(t)
 		ctx, cancel := context.WithCancel(t.Context())
 		defer cancel()
 		go b.dir.runForward(ctx)
@@ -896,6 +1444,7 @@ func TestDirectoryForwardingBound(t *testing.T) {
 			f.addEnrolled(t, founder, 0xc1)
 		f.link(a, b)
 		f.link(b, c)
+		f.settleIDs(t)
 		ctx, cancel := context.WithCancel(t.Context())
 		defer cancel()
 		go b.dir.runForward(ctx)
@@ -927,15 +1476,15 @@ func TestDirectoryForwardingBound(t *testing.T) {
 	})
 }
 
-// TestDirectorySync checks the sync: each side ends holding what
-// the other held greater, a tie of TRC and signing time resolved by the
-// signed bytes.
+// TestDirectorySync checks the sync: each side ends holding what the other
+// held greater, a tie of TRC and signing time resolved by the signed bytes.
 func TestDirectorySync(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		founder := newFounded(t)
 		f := newFabric()
 		x, y := f.addEnrolled(t, founder, 0xa1), f.addEnrolled(t, founder, 0xb1)
 		f.link(x, y)
+		f.settleIDs(t)
 		s1, s2, s3, s4 := addr.MustIAFrom(20, 0xfd0000000301), addr.MustIAFrom(20, 0xfd0000000302),
 			addr.MustIAFrom(20, 0xfd0000000303), addr.MustIAFrom(20, 0xfd0000000304)
 		engines := map[addr.IA]*trust.Engine{}
@@ -951,14 +1500,14 @@ func TestDirectorySync(t *testing.T) {
 		newer1 := signEntry(t, engines[s1], bodyAt(s1, "192.0.2.12"))
 		e2 := signEntry(t, engines[s2], bodyAt(s2, "192.0.2.21"))
 		e3 := signEntry(t, engines[s3], bodyAt(s3, "192.0.2.31"))
-		merge := func(n *fabricNode, entries ...*cryptopb.SignedMessage) {
+		merge := func(n *fabricNode, neighbor addr.IA, entries ...*cryptopb.SignedMessage) {
 			t.Helper()
-			if n.dir.accept(t.Context(), entries, founderIA, nil) != len(entries) {
+			if n.dir.accept(t.Context(), entries, neighbor, n.ifIDs[neighbor]) != len(entries) {
 				t.Fatalf("%v did not merge every entry", n.ia)
 			}
 		}
-		merge(x, newer1, e2, tieA)
-		merge(y, older1, e3, tieB)
+		merge(x, y.ia, newer1, e2, tieA)
+		merge(y, x.ia, older1, e3, tieB)
 
 		if err := x.dir.syncWith(t.Context(), x.ifIDs[y.ia], y.ia); err != nil {
 			t.Fatal(err)
@@ -970,19 +1519,18 @@ func TestDirectorySync(t *testing.T) {
 		if len(want) != 4 {
 			t.Errorf("the sides hold %d signers, want 4", len(want))
 		}
-		for _, n := range []*fabricNode{x, y} {
-			n.dir.mtx.Lock()
-			got1 := n.dir.entries[s1].entry.RendezvousAddr.Addr()
-			got4 := n.dir.entries[s4].key.signed
-			n.dir.mtx.Unlock()
-			if got1 != netip.MustParseAddr("192.0.2.12") {
-				t.Errorf("%v holds %v of the first signer, want the newer entry", n.ia, got1)
+		for _, ends := range [][2]*fabricNode{{x, y}, {y, x}} {
+			n, other := ends[0], ends[1]
+			id, _ := n.dir.linkID(n.ifIDs[other.ia])
+			held := heldIn(n.dir, id)
+			if got := hostsOf(held[s1].entry); !slices.Equal(got, []netip.Addr{netip.MustParseAddr("192.0.2.12")}) {
+				t.Errorf("%v holds %v of the first signer, want the newer entry", n.ia, got)
 			}
 			greater := tieA.HeaderAndBody
 			if string(tieB.HeaderAndBody) > string(greater) {
 				greater = tieB.HeaderAndBody
 			}
-			if string(got4) != string(greater) {
+			if string(held[s4].key.signed) != string(greater) {
 				t.Errorf("%v holds the lesser of the tied entries", n.ia)
 			}
 		}
@@ -993,9 +1541,10 @@ func TestDirectorySync(t *testing.T) {
 var addrs = cmpopts.EquateComparable(netip.Addr{})
 
 // TestDirectoryReplicatesAlongLinks checks the directory over running
-// nodes in a line: every node's view holds every node's entry; a node's
-// changed host reaches the far end; a node that comes back with an empty
-// directory holds every entry once its link is up; and a node that stops on
+// nodes in a line: every node's view holds every node's entry; a node whose
+// neighbor sees it at another host names that host at the far end; a node
+// that comes back with an empty directory, holding no entry before its
+// link, holds every entry once its link is up; and a node that stops on
 // purpose leaves every view.
 func TestDirectoryReplicatesAlongLinks(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
@@ -1024,7 +1573,7 @@ func TestDirectoryReplicatesAlongLinks(t *testing.T) {
 		// Past the forwarding bound of the entries the links' first sync
 		// delivered.
 		time.Sleep(EntryForwardBound)
-		c.self.Publish(bus.SelfState{Host: netip.MustParseAddr("203.0.113.3")})
+		f.move(c, "203.0.113.3")
 		synctest.Wait()
 		if got := a.shown()[c.ia]; got != netip.MustParseAddr("203.0.113.3") {
 			t.Errorf("the far end shows %v for the moved node, want its new host", got)
@@ -1035,8 +1584,8 @@ func TestDirectoryReplicatesAlongLinks(t *testing.T) {
 		fresh := f.add(c.ia, c.engine, "203.0.113.3")
 		fresh.run(t)
 		synctest.Wait()
-		if got := len(fresh.shown()); got != 1 {
-			t.Errorf("the returning node shows %d entries before its link, want its own", got)
+		if got := len(fresh.shown()); got != 0 {
+			t.Errorf("the returning node shows %d entries before its link, want none", got)
 		}
 		f.link(b, fresh)
 		synctest.Wait()
@@ -1048,7 +1597,7 @@ func TestDirectoryReplicatesAlongLinks(t *testing.T) {
 		// A change just before the withdrawal holds the node's forwards for
 		// a bound; the withdrawal reaches its neighbor past it, at once.
 		time.Sleep(EntryForwardBound)
-		a.self.Publish(bus.SelfState{Host: netip.MustParseAddr("203.0.113.1")})
+		f.move(a, "203.0.113.1")
 		synctest.Wait()
 		ctx, cancel := context.WithTimeout(t.Context(), time.Second)
 		defer cancel()
@@ -1073,38 +1622,256 @@ func TestDirectoryReplicatesAlongLinks(t *testing.T) {
 	})
 }
 
-// TestDirectorySignsItsOwnEntry checks the node's own signing: it signs once
-// its state and its chain are ready, again when its state changes — at the
-// instant of the last signing, once its clock passed it — and again every
-// refresh interval with no change.
+// TestDirectoryScopes checks scopes over running nodes: two nodes behind
+// one translator, linked to each other and to a node outside that sees both
+// at the translator's address. Each of the two holds an outside directory,
+// whose ID it shares with the outside node, and a site directory, shared
+// between them alone; the site directory names their inside addresses, and
+// no directory the outside node holds ever names one. A withdrawal reaches
+// every directory of its signer.
+func TestDirectoryScopes(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		founder := newFounded(t)
+		f := newFabric()
+		gateway := netip.MustParseAddr("203.0.113.1")
+		insideA, insideB := netip.MustParseAddr("10.0.0.1"), netip.MustParseAddr("10.0.0.2")
+		o := f.addEnrolled(t, founder, 0x10)
+		aIA, bIA := addr.MustIAFrom(20, 0xfd00000000a1), addr.MustIAFrom(20, 0xfd00000000b1)
+		a := f.add(aIA, founder.Engine(t, aIA), insideA.String())
+		b := f.add(bIA, founder.Engine(t, bIA), insideB.String())
+		for _, n := range []*fabricNode{o, a, b} {
+			n.run(t)
+		}
+		f.linkVia(o, a, o.host, gateway)
+		f.linkVia(o, b, o.host, gateway)
+		f.link(a, b)
+		synctest.Wait()
+
+		outside := o.scopeOf(a.ia)
+		if got := o.view.Latest().Scopes(); len(got) != 1 {
+			t.Errorf("the outside node holds %d directories, want 1", len(got))
+		}
+		want := map[addr.IA][]netip.Addr{o.ia: {o.host}, a.ia: {gateway}, b.ia: {gateway}}
+		if diff := cmp.Diff(want, o.shownIn(outside), addrs); diff != "" {
+			t.Errorf("the outside view (-want +got):\n%s", diff)
+		}
+		site := a.scopeOf(b.ia)
+		if site == outside {
+			t.Fatalf("the site's directory is the outside one, %v", site)
+		}
+		for _, n := range []*fabricNode{a, b} {
+			if got := n.scopeOf(o.ia); got != outside {
+				t.Errorf("%v's outside link joins %v, want %v", n.ia, got, outside)
+			}
+			if diff := cmp.Diff(want, n.shownIn(outside), addrs); diff != "" {
+				t.Errorf("%v's outside view (-want +got):\n%s", n.ia, diff)
+			}
+		}
+		if got := b.scopeOf(a.ia); got != site {
+			t.Errorf("the two inside ends join %v and %v", site, got)
+		}
+		wantSite := map[addr.IA][]netip.Addr{a.ia: {insideA}, b.ia: {insideB}}
+		for _, n := range []*fabricNode{a, b} {
+			if diff := cmp.Diff(wantSite, n.shownIn(site), addrs); diff != "" {
+				t.Errorf("%v's site view (-want +got):\n%s", n.ia, diff)
+			}
+		}
+		o.dir.mtx.Lock()
+		for id, s := range o.dir.scopes {
+			for _, e := range s.entries {
+				for _, host := range hostsOf(e.entry) {
+					if host == insideA || host == insideB {
+						t.Errorf("the outside node holds %v's inside address in %v", e.signer, id)
+					}
+				}
+			}
+		}
+		o.dir.mtx.Unlock()
+
+		ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+		defer cancel()
+		a.dir.Withdraw(ctx)
+		synctest.Wait()
+		if _, ok := o.shownIn(outside)[a.ia]; ok {
+			t.Error("the outside node shows the withdrawn node")
+		}
+		// The outside node forwards the withdrawal past the bound its
+		// forward of the node's entry started.
+		time.Sleep(EntryForwardBound)
+		synctest.Wait()
+		for _, id := range []bus.DirectoryID{outside, site} {
+			if _, ok := b.shownIn(id)[a.ia]; ok {
+				t.Errorf("the inside neighbor shows the withdrawn node in %v", id)
+			}
+		}
+	})
+}
+
+// TestDirectorySyncsALinkOnceAttached checks the catch-up's wake on an
+// attachment: a link whose syncs failed while its ends knew no host syncs
+// as soon as its ends attach, rather than at the retry, and its two ends
+// keep one ID.
+func TestDirectorySyncsALinkOnceAttached(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		f := newFabric()
+		a := f.addTrusting(addr.MustIAFrom(20, 0xfd0000000081), &fakeTrust{}, "192.0.2.81")
+		b := f.addTrusting(addr.MustIAFrom(20, 0xfd0000000082), &fakeTrust{}, "192.0.2.82")
+		a.run(t)
+		b.run(t)
+		f.connect(a, b, a.host, b.host)
+		synctest.Wait()
+		f.report(a, b.ia)
+		f.report(b, a.ia)
+		synctest.Wait()
+		ida, _ := a.dir.linkID(a.ifIDs[b.ia])
+		idb, _ := b.dir.linkID(b.ifIDs[a.ia])
+		if ida != idb {
+			t.Errorf("the link's ends name %v and %v, want one ID before any retry", ida, idb)
+		}
+	})
+}
+
+// TestDirectoryNamesEveryHostOfAScope checks a node one network sees at two
+// hosts: its two attachments' IDs merge through that network, and its one
+// entry there names both hosts.
+func TestDirectoryNamesEveryHostOfAScope(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		founder := newFounded(t)
+		f := newFabric()
+		first, second := netip.MustParseAddr("203.0.113.11"), netip.MustParseAddr("203.0.113.12")
+		q1, q2 := f.addEnrolled(t, founder, 0x21), f.addEnrolled(t, founder, 0x22)
+		pIA := addr.MustIAFrom(20, 0xfd00000000a5)
+		p := f.add(pIA, founder.Engine(t, pIA), "10.0.0.5")
+		for _, n := range []*fabricNode{q1, q2, p} {
+			n.run(t)
+		}
+		f.link(q1, q2)
+		f.linkVia(q1, p, q1.host, first)
+		f.linkVia(q2, p, q2.host, second)
+		// The node signs anew once its clock passes its entry's signing, and
+		// its forward waits out the bound its first entry's forward started.
+		time.Sleep(EntryForwardBound)
+		synctest.Wait()
+
+		if got := p.view.Latest().Scopes(); len(got) != 1 {
+			t.Errorf("the node seen at two hosts holds %d directories, want 1", len(got))
+		}
+		if got := q1.shownIn(q1.scopeOf(p.ia))[p.ia]; !slices.Equal(got, []netip.Addr{first, second}) {
+			t.Errorf("the network's view names %v for the node, want both hosts", got)
+		}
+	})
+}
+
+// TestDirectoryIDsConverge checks the IDs along a line of links: the syncs,
+// run in any order, leave every attachment naming the least ID minted; and
+// a node that comes back with a fresh directory adopts that ID, which
+// stays.
+func TestDirectoryIDsConverge(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		founder := newFounded(t)
+		f := newFabric()
+		nodes := []*fabricNode{f.addEnrolled(t, founder, 0xa1), f.addEnrolled(t, founder, 0xb1),
+			f.addEnrolled(t, founder, 0xc1), f.addEnrolled(t, founder, 0xd1)}
+		for i := 1; i < len(nodes); i++ {
+			f.link(nodes[i-1], nodes[i])
+		}
+		rng := mrand.New(mrand.NewPCG(5, 6))
+		syncRandomly := func(nodes []*fabricNode) {
+			t.Helper()
+			for range 60 {
+				i := rng.IntN(len(nodes) - 1)
+				from, to := nodes[i], nodes[i+1]
+				if rng.IntN(2) == 0 {
+					from, to = to, from
+				}
+				if err := from.dir.syncWith(t.Context(), from.ifIDs[to.ia], to.ia); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
+		ids := func(nodes []*fabricNode) map[addr.IA]bus.DirectoryID {
+			out := make(map[addr.IA]bus.DirectoryID)
+			for _, n := range nodes {
+				n.dir.mtx.Lock()
+				for _, a := range n.dir.attachments {
+					out[n.ia] = a.id
+				}
+				n.dir.mtx.Unlock()
+			}
+			return out
+		}
+		syncRandomly(nodes)
+		got := ids(nodes)
+		least := slices.MinFunc(slices.Collect(maps.Values(got)), bus.DirectoryID.Compare)
+		for ia, id := range got {
+			if id != least {
+				t.Errorf("%v's attachment names %v, want the least %v", ia, id, least)
+			}
+		}
+
+		f.unlink(nodes[1], nodes[2])
+		f.unlink(nodes[2], nodes[3])
+		fresh := f.add(nodes[2].ia, nodes[2].engine, nodes[2].host.String())
+		f.link(nodes[1], fresh)
+		f.link(fresh, nodes[3])
+		line := []*fabricNode{nodes[0], nodes[1], fresh, nodes[3]}
+		syncRandomly(line)
+		for ia, id := range ids(line) {
+			if id != least {
+				t.Errorf("after the return %v's attachment names %v, want %v", ia, id, least)
+			}
+		}
+	})
+}
+
+// TestDirectorySignsItsOwnEntry checks the node's own signing: it signs in
+// the directory its link attaches to once it holds a chain, naming the host
+// the link's peer reports; again when that host changes — at the instant of
+// the last signing, once its clock passed it — and when its addresses' report
+// changes; one entry naming both hosts once a second link attaches at
+// another host of the directory; again every refresh interval with no
+// change; and, holding an entry of its own signed ahead of its clock, once
+// the clock passes it.
 func TestDirectorySignsItsOwnEntry(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		founder := newFounded(t)
-		self := new(bus.Topic[bus.SelfState])
 		key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 		if err != nil {
 			t.Fatal(err)
 		}
 		engine := trust.NewEngine(directoryIA, key, &trust.NetworkProvider{DB: founder.DB})
-		d := NewNodeDirectory(NodeDirectoryConfig{IA: directoryIA, Self: self, Trust: engine})
+		// silent is the host whose echo went unanswered, if any.
+		var silent atomic.Pointer[netip.Addr]
+		d := NewNodeDirectory(NodeDirectoryConfig{
+			IA: directoryIA, Trust: engine,
+			Addresses: func(hosts []netip.Addr) ([]*nodev1.Address, error) {
+				out, err := plainAddresses(hosts)
+				for i, h := range hosts {
+					if s := silent.Load(); s != nil && *s == h {
+						out[i].RendezvousUnanswered = true
+					}
+				}
+				return out, err
+			},
+		})
+		d.mint = counterIDs(0xf0)
 		ctx, cancel := context.WithCancel(t.Context())
 		defer cancel()
 		go d.runSign(ctx)
-		own := func() (time.Time, netip.Addr) {
-			d.mtx.Lock()
-			defer d.mtx.Unlock()
-			e, ok := d.entries[directoryIA]
+		// The link's peer names a directory older than any the node mints.
+		id := bus.DirectoryID{1}
+		own := func() (time.Time, bus.DirectoryEntry) {
+			e, ok := heldIn(d, id)[directoryIA]
 			if !ok {
-				return time.Time{}, netip.Addr{}
+				return time.Time{}, bus.DirectoryEntry{}
 			}
-			return e.key.signedAt, e.entry.RendezvousAddr.Addr()
+			return e.key.signedAt, e.entry
 		}
+		hostOne, hostTwo := netip.MustParseAddr("192.0.2.1"), netip.MustParseAddr("192.0.2.2")
 
 		synctest.Wait()
-		if at, _ := own(); !at.IsZero() {
-			t.Fatal("the node signed with no host")
-		}
-		self.Publish(bus.SelfState{Host: netip.MustParseAddr("192.0.2.1")})
+		d.attach(1, hostOne)
+		d.adopt(1, id)
 		synctest.Wait()
 		if at, _ := own(); !at.IsZero() {
 			t.Fatal("the node signed with no chain")
@@ -1122,20 +1889,36 @@ func TestDirectorySignsItsOwnEntry(t *testing.T) {
 		}
 		time.Sleep(EntryRetry)
 		synctest.Wait()
-		first, host := own()
-		if first.IsZero() || host != netip.MustParseAddr("192.0.2.1") {
-			t.Fatalf("the enrolled node's entry = %v at %v, want its host", host, first)
+		first, e := own()
+		if first.IsZero() || !slices.Equal(hostsOf(e), []netip.Addr{hostOne}) {
+			t.Fatalf("the enrolled node's entry = %v at %v, want its host", hostsOf(e), first)
 		}
 
 		// A change at the instant of the last signing waits the clock past
 		// it, and its entry outranks the last.
-		self.Publish(bus.SelfState{Host: netip.MustParseAddr("192.0.2.2")})
+		d.attach(1, hostTwo)
+		d.adopt(1, id)
 		time.Sleep(time.Nanosecond)
 		synctest.Wait()
-		moved, host := own()
-		if !moved.After(first) || host != netip.MustParseAddr("192.0.2.2") {
-			t.Errorf("after the state changed: %v at %v, want the new host after %v",
-				host, moved, first)
+		moved, e := own()
+		if !moved.After(first) || !slices.Equal(hostsOf(e), []netip.Addr{hostTwo}) {
+			t.Errorf("after the host changed: %v at %v, want the new host after %v",
+				hostsOf(e), moved, first)
+		}
+
+		silent.Store(&hostTwo)
+		d.resign()
+		time.Sleep(time.Nanosecond)
+		synctest.Wait()
+		if _, e := own(); len(e.Addresses) != 1 || !e.Addresses[0].Reach.RendezvousUnanswered {
+			t.Errorf("after the echo went unanswered the entry = %+v, want its report", e)
+		}
+
+		d.attach(2, hostOne)
+		time.Sleep(time.Nanosecond)
+		synctest.Wait()
+		if _, e := own(); !slices.Equal(hostsOf(e), []netip.Addr{hostOne, hostTwo}) {
+			t.Errorf("with a second host the entry names %v, want both in order", hostsOf(e))
 		}
 
 		time.Sleep(EntryRefreshInterval)
@@ -1143,14 +1926,42 @@ func TestDirectorySignsItsOwnEntry(t *testing.T) {
 		if refreshed, _ := own(); !refreshed.Equal(time.Now()) {
 			t.Errorf("the refresh signed at %v, want %v", refreshed, time.Now())
 		}
+
+		// An entry of the node's own signed an hour ahead — its clock
+		// stepped back — outranks the next change's signing, which retries
+		// once the clock passes it.
+		ahead := time.Now().Add(time.Hour)
+		body := bodyAt(directoryIA, "192.0.2.9")
+		stepped, err := parseEntry(fakeEntry(t, directoryIA, heldIn(d, id)[directoryIA].key.trc, ahead, body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := stepped.read(body); err != nil {
+			t.Fatal(err)
+		}
+		d.mergeOver(1, stepped)
+		hostThree := netip.MustParseAddr("192.0.2.3")
+		d.attach(3, hostThree)
+		d.adopt(3, id)
+		synctest.Wait()
+		if at, _ := own(); !at.Equal(ahead) {
+			t.Fatalf("the entry signed ahead lost to one at %v", at)
+		}
+		time.Sleep(time.Hour + time.Nanosecond)
+		synctest.Wait()
+		if at, e := own(); !at.After(ahead) ||
+			!slices.Equal(hostsOf(e), []netip.Addr{hostOne, hostTwo, hostThree}) {
+			t.Errorf("once the clock passed the entry signed ahead: %v at %v, want the three hosts after %v",
+				hostsOf(e), at, ahead)
+		}
 	})
 }
 
-// TestDirectoryCatchesUpAtTheFirstSigning checks the catch-up at the
-// node's first signing: a node whose link came up before its chain, its
-// syncs failing meanwhile, syncs at the instant it signs, rather than at its
-// syncs' next retry.
-func TestDirectoryCatchesUpAtTheFirstSigning(t *testing.T) {
+// TestDirectoryCatchesUpAtTheFirstChain checks the catch-up once the node
+// first holds its chain: a node whose link came up before its chain, its
+// catch-ups failing meanwhile, syncs at the signing that finds the chain,
+// rather than at its catch-ups' next retry.
+func TestDirectoryCatchesUpAtTheFirstChain(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		founder := newFounded(t)
 		f := newFabric()
@@ -1171,7 +1982,7 @@ func TestDirectoryCatchesUpAtTheFirstSigning(t *testing.T) {
 		f.cut[[2]addr.IA{b.ia, x.ia}] = true
 		f.mtx.Unlock()
 		f.link(x, b)
-		// Long enough for the failed syncs' retries to back off to the
+		// Long enough for the failed catch-ups' retries to back off to the
 		// summary period.
 		time.Sleep(10 * time.Minute)
 		synctest.Wait()
@@ -1190,12 +2001,11 @@ func TestDirectoryCatchesUpAtTheFirstSigning(t *testing.T) {
 		f.mtx.Lock()
 		clear(f.cut)
 		f.mtx.Unlock()
-		// An event of the node's own state wakes its first signing at once,
-		// so the check reads what that signing brought, at its instant.
-		x.self.Publish(bus.SelfState{Host: netip.MustParseAddr("192.0.2.161")})
+		// The signing retries within the retry interval and finds the chain.
+		time.Sleep(EntryRetry)
 		synctest.Wait()
 		if _, ok := x.shown()[b.ia]; !ok {
-			t.Error("the node holds no entry of its neighbor at its first signing")
+			t.Error("the node holds no entry of its neighbor at the signing that found its chain")
 		}
 	})
 }

@@ -23,15 +23,24 @@ const (
 
 // LinkRequest asks the peer to admit a direct link between the two nodes,
 // riding the control endpoint's authenticated channel: the requester is
-// named by its verified certificate chain, never by a claim.
+// named by its verified certificate chain, never by a claim. It tells the
+// acceptor how the requester sees it on the link, and whether the
+// acceptor's rendezvous port answered there.
 type LinkRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// local_addr is the requester's link local underlay address, "host:port".
 	LocalAddr string `protobuf:"bytes,1,opt,name=local_addr,json=localAddr,proto3" json:"local_addr,omitempty"`
 	// if_id is the requester's interface ID of the link.
-	IfId          uint32 `protobuf:"varint,2,opt,name=if_id,json=ifId,proto3" json:"if_id,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	IfId uint32 `protobuf:"varint,2,opt,name=if_id,json=ifId,proto3" json:"if_id,omitempty"`
+	// observed is the source the requester's end of the link last observed
+	// the acceptor at, else the address it sends the acceptor to,
+	// "host:port": the acceptor as the requester sees it.
+	Observed string `protobuf:"bytes,3,opt,name=observed,proto3" json:"observed,omitempty"`
+	// rendezvous_answered reports whether the acceptor's rendezvous port
+	// answered the requester's binding request at the observed host.
+	RendezvousAnswered bool `protobuf:"varint,4,opt,name=rendezvous_answered,json=rendezvousAnswered,proto3" json:"rendezvous_answered,omitempty"`
+	unknownFields      protoimpl.UnknownFields
+	sizeCache          protoimpl.SizeCache
 }
 
 func (x *LinkRequest) Reset() {
@@ -78,19 +87,37 @@ func (x *LinkRequest) GetIfId() uint32 {
 	return 0
 }
 
+func (x *LinkRequest) GetObserved() string {
+	if x != nil {
+		return x.Observed
+	}
+	return ""
+}
+
+func (x *LinkRequest) GetRendezvousAnswered() bool {
+	if x != nil {
+		return x.RendezvousAnswered
+	}
+	return false
+}
+
 // LinkReply carries the acceptor's side of the link — the address and
-// interface ID the requester sends to — beside whether the requester's
-// published rendezvous address answered the acceptor's echo.
+// interface ID the requester sends to — and tells the requester how the
+// acceptor sees it on the link, and whether the requester's rendezvous port
+// answered there.
 type LinkReply struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// local_addr is the acceptor's link local underlay address, "host:port".
 	LocalAddr string `protobuf:"bytes,1,opt,name=local_addr,json=localAddr,proto3" json:"local_addr,omitempty"`
 	// if_id is the acceptor's interface ID of the link.
 	IfId uint32 `protobuf:"varint,2,opt,name=if_id,json=ifId,proto3" json:"if_id,omitempty"`
-	// rendezvous_answered reports whether the requester's published
-	// rendezvous address answered the acceptor's echo; unset when the
-	// acceptor's directory names no address for the requester.
-	RendezvousAnswered *bool `protobuf:"varint,3,opt,name=rendezvous_answered,json=rendezvousAnswered,proto3,oneof" json:"rendezvous_answered,omitempty"`
+	// observed is the source the acceptor's end of the link last observed
+	// the requester at, else the address it sends the requester to,
+	// "host:port": the requester as the acceptor sees it.
+	Observed string `protobuf:"bytes,3,opt,name=observed,proto3" json:"observed,omitempty"`
+	// rendezvous_answered reports whether the requester's rendezvous port
+	// answered the acceptor's binding request at the observed host.
+	RendezvousAnswered bool `protobuf:"varint,4,opt,name=rendezvous_answered,json=rendezvousAnswered,proto3" json:"rendezvous_answered,omitempty"`
 	unknownFields      protoimpl.UnknownFields
 	sizeCache          protoimpl.SizeCache
 }
@@ -139,9 +166,16 @@ func (x *LinkReply) GetIfId() uint32 {
 	return 0
 }
 
+func (x *LinkReply) GetObserved() string {
+	if x != nil {
+		return x.Observed
+	}
+	return ""
+}
+
 func (x *LinkReply) GetRendezvousAnswered() bool {
-	if x != nil && x.RendezvousAnswered != nil {
-		return *x.RendezvousAnswered
+	if x != nil {
+		return x.RendezvousAnswered
 	}
 	return false
 }
@@ -159,7 +193,10 @@ type PunchRequest struct {
 	// nonce marks the punch's packets, 16 bytes.
 	Nonce []byte `protobuf:"bytes,2,opt,name=nonce,proto3" json:"nonce,omitempty"`
 	// if_id is the requester's interface ID of the link.
-	IfId          uint32 `protobuf:"varint,3,opt,name=if_id,json=ifId,proto3" json:"if_id,omitempty"`
+	IfId uint32 `protobuf:"varint,3,opt,name=if_id,json=ifId,proto3" json:"if_id,omitempty"`
+	// directory is the 16-byte directory ID whose peers the punch reaches
+	// across: each side learns its reflexive address from a reflector in it.
+	Directory     []byte `protobuf:"bytes,4,opt,name=directory,proto3" json:"directory,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -213,6 +250,13 @@ func (x *PunchRequest) GetIfId() uint32 {
 		return x.IfId
 	}
 	return 0
+}
+
+func (x *PunchRequest) GetDirectory() []byte {
+	if x != nil {
+		return x.Directory
+	}
+	return nil
 }
 
 // PunchReply carries the peer's side of the link's punch.
@@ -281,7 +325,10 @@ type PunchProbeRequest struct {
 	// NAT observes it, "host:port".
 	ReflexiveAddr string `protobuf:"bytes,1,opt,name=reflexive_addr,json=reflexiveAddr,proto3" json:"reflexive_addr,omitempty"`
 	// nonce marks the probe's packets, 16 bytes.
-	Nonce         []byte `protobuf:"bytes,2,opt,name=nonce,proto3" json:"nonce,omitempty"`
+	Nonce []byte `protobuf:"bytes,2,opt,name=nonce,proto3" json:"nonce,omitempty"`
+	// directory is the 16-byte directory ID whose peers the probe reaches
+	// across: each side learns its reflexive address from a reflector in it.
+	Directory     []byte `protobuf:"bytes,3,opt,name=directory,proto3" json:"directory,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -326,6 +373,13 @@ func (x *PunchProbeRequest) GetReflexiveAddr() string {
 func (x *PunchProbeRequest) GetNonce() []byte {
 	if x != nil {
 		return x.Nonce
+	}
+	return nil
+}
+
+func (x *PunchProbeRequest) GetDirectory() []byte {
+	if x != nil {
+		return x.Directory
 	}
 	return nil
 }
@@ -381,28 +435,32 @@ var File_proto_node_v1_link_proto protoreflect.FileDescriptor
 
 const file_proto_node_v1_link_proto_rawDesc = "" +
 	"\n" +
-	"\x18proto/node/v1/link.proto\x12\anode.v1\"A\n" +
+	"\x18proto/node/v1/link.proto\x12\anode.v1\"\x8e\x01\n" +
 	"\vLinkRequest\x12\x1d\n" +
 	"\n" +
 	"local_addr\x18\x01 \x01(\tR\tlocalAddr\x12\x13\n" +
-	"\x05if_id\x18\x02 \x01(\rR\x04ifId\"\x8d\x01\n" +
+	"\x05if_id\x18\x02 \x01(\rR\x04ifId\x12\x1a\n" +
+	"\bobserved\x18\x03 \x01(\tR\bobserved\x12/\n" +
+	"\x13rendezvous_answered\x18\x04 \x01(\bR\x12rendezvousAnswered\"\x8c\x01\n" +
 	"\tLinkReply\x12\x1d\n" +
 	"\n" +
 	"local_addr\x18\x01 \x01(\tR\tlocalAddr\x12\x13\n" +
-	"\x05if_id\x18\x02 \x01(\rR\x04ifId\x124\n" +
-	"\x13rendezvous_answered\x18\x03 \x01(\bH\x00R\x12rendezvousAnswered\x88\x01\x01B\x16\n" +
-	"\x14_rendezvous_answered\"`\n" +
+	"\x05if_id\x18\x02 \x01(\rR\x04ifId\x12\x1a\n" +
+	"\bobserved\x18\x03 \x01(\tR\bobserved\x12/\n" +
+	"\x13rendezvous_answered\x18\x04 \x01(\bR\x12rendezvousAnswered\"~\n" +
 	"\fPunchRequest\x12%\n" +
 	"\x0ereflexive_addr\x18\x01 \x01(\tR\rreflexiveAddr\x12\x14\n" +
 	"\x05nonce\x18\x02 \x01(\fR\x05nonce\x12\x13\n" +
-	"\x05if_id\x18\x03 \x01(\rR\x04ifId\"H\n" +
+	"\x05if_id\x18\x03 \x01(\rR\x04ifId\x12\x1c\n" +
+	"\tdirectory\x18\x04 \x01(\fR\tdirectory\"H\n" +
 	"\n" +
 	"PunchReply\x12%\n" +
 	"\x0ereflexive_addr\x18\x01 \x01(\tR\rreflexiveAddr\x12\x13\n" +
-	"\x05if_id\x18\x02 \x01(\rR\x04ifId\"P\n" +
+	"\x05if_id\x18\x02 \x01(\rR\x04ifId\"n\n" +
 	"\x11PunchProbeRequest\x12%\n" +
 	"\x0ereflexive_addr\x18\x01 \x01(\tR\rreflexiveAddr\x12\x14\n" +
-	"\x05nonce\x18\x02 \x01(\fR\x05nonce\"8\n" +
+	"\x05nonce\x18\x02 \x01(\fR\x05nonce\x12\x1c\n" +
+	"\tdirectory\x18\x03 \x01(\fR\tdirectory\"8\n" +
 	"\x0fPunchProbeReply\x12%\n" +
 	"\x0ereflexive_addr\x18\x01 \x01(\tR\rreflexiveAddr2\xbd\x01\n" +
 	"\vLinkService\x123\n" +
@@ -451,7 +509,6 @@ func file_proto_node_v1_link_proto_init() {
 	if File_proto_node_v1_link_proto != nil {
 		return
 	}
-	file_proto_node_v1_link_proto_msgTypes[1].OneofWrappers = []any{}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{

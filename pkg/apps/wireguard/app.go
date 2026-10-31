@@ -72,10 +72,11 @@ type Config struct {
 	// internet clients with a single endpoint to reach.
 	ListenPort uint16
 	// Self is the topic of the node's own state, whose host the entry's
-	// host-facing endpoint prefers at each publication: the learned host,
-	// the founding core's identity. A host that names none leaves the bind
-	// host — a wildcard bind naming neither holds the publication for the
-	// cadence's retry — and each event publishes the entry anew.
+	// host-facing endpoint prefers at each publication: the host the node's
+	// peers see it at, the founding core's domain address. A state that
+	// names none leaves the bind host — a wildcard bind naming neither holds
+	// the publication for the cadence's retry — and each event publishes the
+	// entry anew.
 	Self *bus.Topic[bus.SelfState]
 	// DERP is the relay presence the node holds: received datagrams feed
 	// the shared host port and sends carry the replies, so a host on a

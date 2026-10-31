@@ -54,16 +54,15 @@ func (b *Bus) Latencies() *Topic[LinkLatencies] {
 }
 
 // Self returns the topic of the node's own state. The topology provider
-// publishes on it whenever the host the node's publications carry or the
-// node's rendezvous answer changes; the node directory, the link upkeep, the
-// WireGuard application, and the wildcard-bound conns read it.
+// publishes on it whenever the host it names the node at changes; the
+// WireGuard application and the wildcard-bound conns read it.
 func (b *Bus) Self() *Topic[SelfState] {
 	return &b.self
 }
 
 // Directory returns the node directory topic. The topology provider
-// publishes its view of the directory on it whenever the view changes; the
-// topology provider's own loops and the portal read it.
+// publishes its view of the directories the node holds on it whenever the
+// view changes; the topology provider's own loops and the portal read it.
 func (b *Bus) Directory() *Topic[Directory] {
 	return &b.directory
 }

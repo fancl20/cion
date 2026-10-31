@@ -270,9 +270,9 @@ func (a *App) publish(ctx context.Context) error {
 
 // selfEntry is the node's own publication: the claim without a slice — the
 // store assigns it — the endpoint naming the published host at the shared
-// port: the host of the node's own state — the learned host, the founding
-// core's identity — else the bind host when it names one, read anew at each
-// publication.
+// port: the host of the node's own state — the host the node's peers see it
+// at, the founding core's domain address — else the bind host when it names
+// one, read anew at each publication.
 func (a *App) selfEntry() (Entry, error) {
 	host := a.cfg.Self.Latest().Host
 	if !host.IsValid() || host.IsUnspecified() {

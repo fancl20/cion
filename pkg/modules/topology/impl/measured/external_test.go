@@ -6,63 +6,11 @@ import (
 	"net"
 	"net/netip"
 	"os"
-	"path/filepath"
 	"syscall"
 	"testing"
 
 	"github.com/fancl20/cion/pkg/libs/underlay"
 )
-
-// TestExternalHostPersistsAcrossRestart checks the learned external host's
-// persistence: an observation persists on change, a later load returns it —
-// a restart republishes it — and the latest observation wins. An address
-// that echoes none observes nothing.
-func TestExternalHostPersistsAcrossRestart(t *testing.T) {
-	dir := t.TempDir()
-	h := &externalHost{path: externalHostPath(dir)}
-
-	first := netip.MustParseAddr("203.0.113.7")
-	if err := h.observe(first); err != nil {
-		t.Fatal(err)
-	}
-	if got := h.host(); got != first {
-		t.Errorf("learned host = %v, want %v", got, first)
-	}
-	loaded, err := loadExternalHost(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if loaded != first {
-		t.Errorf("persisted host = %v, want %v", loaded, first)
-	}
-
-	// The latest observation wins and persists; an invalid one — a reply
-	// that echoes no source — observes nothing.
-	second := netip.MustParseAddr("198.51.100.9")
-	if err := h.observe(second); err != nil {
-		t.Fatal(err)
-	}
-	if err := h.observe(netip.Addr{}); err != nil {
-		t.Fatal(err)
-	}
-	loaded, err = loadExternalHost(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if loaded != second {
-		t.Errorf("persisted host after the second observation = %v, want %v",
-			loaded, second)
-	}
-
-	// A malformed persistence fails the load, not silently discards it.
-	if err := os.WriteFile(filepath.Join(dir, ExternalHostFile),
-		[]byte("not-an-address\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := loadExternalHost(dir); err == nil {
-		t.Error("a malformed external-host file loaded")
-	}
-}
 
 // TestDomainHostParsesTheLiteral checks the founding core's identity under
 // an address: the literal is the host itself, parsed with no lookup, the

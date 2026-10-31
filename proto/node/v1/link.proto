@@ -6,26 +6,39 @@ option go_package = "github.com/fancl20/cion/proto/node/v1;nodev1";
 
 // LinkRequest asks the peer to admit a direct link between the two nodes,
 // riding the control endpoint's authenticated channel: the requester is
-// named by its verified certificate chain, never by a claim.
+// named by its verified certificate chain, never by a claim. It tells the
+// acceptor how the requester sees it on the link, and whether the
+// acceptor's rendezvous port answered there.
 message LinkRequest {
   // local_addr is the requester's link local underlay address, "host:port".
   string local_addr = 1;
   // if_id is the requester's interface ID of the link.
   uint32 if_id = 2;
+  // observed is the source the requester's end of the link last observed
+  // the acceptor at, else the address it sends the acceptor to,
+  // "host:port": the acceptor as the requester sees it.
+  string observed = 3;
+  // rendezvous_answered reports whether the acceptor's rendezvous port
+  // answered the requester's binding request at the observed host.
+  bool rendezvous_answered = 4;
 }
 
 // LinkReply carries the acceptor's side of the link — the address and
-// interface ID the requester sends to — beside whether the requester's
-// published rendezvous address answered the acceptor's echo.
+// interface ID the requester sends to — and tells the requester how the
+// acceptor sees it on the link, and whether the requester's rendezvous port
+// answered there.
 message LinkReply {
   // local_addr is the acceptor's link local underlay address, "host:port".
   string local_addr = 1;
   // if_id is the acceptor's interface ID of the link.
   uint32 if_id = 2;
-  // rendezvous_answered reports whether the requester's published
-  // rendezvous address answered the acceptor's echo; unset when the
-  // acceptor's directory names no address for the requester.
-  optional bool rendezvous_answered = 3;
+  // observed is the source the acceptor's end of the link last observed
+  // the requester at, else the address it sends the requester to,
+  // "host:port": the requester as the acceptor sees it.
+  string observed = 3;
+  // rendezvous_answered reports whether the requester's rendezvous port
+  // answered the acceptor's binding request at the observed host.
+  bool rendezvous_answered = 4;
 }
 
 // PunchRequest asks the peer to open its NAT toward the requester for the
@@ -41,6 +54,9 @@ message PunchRequest {
   bytes nonce = 2;
   // if_id is the requester's interface ID of the link.
   uint32 if_id = 3;
+  // directory is the 16-byte directory ID whose peers the punch reaches
+  // across: each side learns its reflexive address from a reflector in it.
+  bytes directory = 4;
 }
 
 // PunchReply carries the peer's side of the link's punch.
@@ -62,6 +78,9 @@ message PunchProbeRequest {
   string reflexive_addr = 1;
   // nonce marks the probe's packets, 16 bytes.
   bytes nonce = 2;
+  // directory is the 16-byte directory ID whose peers the probe reaches
+  // across: each side learns its reflexive address from a reflector in it.
+  bytes directory = 3;
 }
 
 // PunchProbeReply carries the peer's probe socket.
@@ -74,9 +93,10 @@ message PunchProbeReply {
 // LinkService establishes links bilaterally between nodes that composed
 // paths already reach. The acceptor applies its admission policy — the
 // allowlist, the link-count cap, and the rate cap — records the link on its
-// side, echoes the requester's published rendezvous address, and answers
-// with its own addresses and the echo's outcome. A punch opens both sides'
-// NATs first, for a link neither side's published address admits.
+// side, and answers with its own addresses. Each end tells the other the
+// host it sees the other at on the link and whether the other's rendezvous
+// port answered there. A punch opens both sides' NATs first, for a link
+// neither side's published address admits.
 service LinkService {
   // Request admits the caller's link and answers the acceptor's side of it.
   rpc Request(LinkRequest) returns (LinkReply);

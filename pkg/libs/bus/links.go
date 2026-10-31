@@ -79,3 +79,9 @@ func (s LinkState) Up(ifID uint16) bool {
 func (s LinkState) Observed(ifID uint16) netip.AddrPort {
 	return s.links[ifID].Observed
 }
+
+// Remote returns the peer's address the interface's entry records; zero
+// when the state holds no entry for it or the entry records none.
+func (s LinkState) Remote(ifID uint16) netip.AddrPort {
+	return s.links[ifID].Entry.Remote
+}

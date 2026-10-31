@@ -2,7 +2,11 @@ package measured
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"errors"
+	"maps"
 	"net"
 	"net/netip"
 	"slices"
@@ -11,10 +15,13 @@ import (
 	"testing/synctest"
 	"time"
 
+	"github.com/google/go-cmp/cmp"
 	"github.com/scionproto/scion/pkg/addr"
 	spath "github.com/scionproto/scion/pkg/slayers/path/scion"
 
+	"github.com/fancl20/cion/pkg/core/trust"
 	"github.com/fancl20/cion/pkg/libs/bus"
+	"github.com/fancl20/cion/pkg/libs/loops"
 	"github.com/fancl20/cion/pkg/libs/scion"
 	"github.com/fancl20/cion/pkg/libs/scionrpc"
 	"github.com/fancl20/cion/pkg/libs/underlay"
@@ -284,50 +291,63 @@ func wiredSelf(z *Provider) *bus.Topic[bus.SelfState] {
 	return b.Self()
 }
 
-// TestSelfFollowsLearning checks the host the node's own state carries: a
-// non-core's follows the learned external host — a restart publishes the
-// persisted one at wiring — the wildcard fallback naming none until one is
-// learned; the founding core's literal domain publishes at wiring, and a name
-// publishes the lookup's answer of the family the control host binds — the
-// wildcard's first answer, which names no family to filter by — nothing
+// TestSelfHost checks the host the node's own state carries: a joiner's
+// names none at wiring and follows its directories' views — the host its
+// own entry names first in the scope that holds the founder's entry, else
+// in the scope of the least ID that holds one, a view naming neither
+// keeping it; the founding core's literal domain publishes at wiring, and a
+// name publishes the lookup's answer of the family the control host binds —
+// the wildcard's first answer, which names no family to filter by — nothing
 // before an answer lands, and the last answer held through a failed lookup.
-func TestSelfFollowsLearning(t *testing.T) {
+func TestSelfHost(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		control := netip.MustParseAddr("10.0.0.7")
-		z, err := New(Config{ControlHost: control, StateDir: t.TempDir()})
+		z, err := New(Config{ControlHost: control})
 		if err != nil {
 			t.Fatal(err)
 		}
-		self := wiredSelf(z)
-		if got := self.Latest().Host; got != control {
-			t.Errorf("unlearned host = %v, want the control host %v", got, control)
+		b := bus.New()
+		z.Wire(topology.Environment{IA: linkIA, Bus: b})
+		if got := b.Self().Latest().Host; got.IsValid() {
+			t.Errorf("a joiner's host at wiring = %v, want none", got)
 		}
-		learned := netip.MustParseAddr("203.0.113.7")
-		z.learn(learned)
-		if got := self.Latest().Host; got != learned {
-			t.Errorf("learned host = %v, want %v", got, learned)
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		go z.runSelfHost(ctx)
+		inside, outside := netip.MustParseAddr("10.0.0.7"), netip.MustParseAddr("203.0.113.7")
+		own := func(hosts ...string) bus.DirectoryEntry {
+			e := bus.DirectoryEntry{IA: linkIA}
+			for _, h := range hosts {
+				e.Addresses = append(e.Addresses, bus.Address{
+					RendezvousAddr: netip.AddrPortFrom(netip.MustParseAddr(h), RendezvousPort),
+				})
+			}
+			return e
+		}
+		b.Directory().Publish(bus.NewDirectory(nil,
+			bus.NewScope(bus.DirectoryID{2}, own(outside.String())),
+			bus.NewScope(bus.DirectoryID{1}, own(inside.String()))))
+		synctest.Wait()
+		if got := b.Self().Latest().Host; got != inside {
+			t.Errorf("with no engine to name the founder the host = %v, want the least ID's %v", got, inside)
+		}
+		b.Directory().Publish(bus.NewDirectory(nil, bus.NewScope(bus.DirectoryID{3})))
+		synctest.Wait()
+		if got := b.Self().Latest().Host; got != inside {
+			t.Errorf("a view naming no host of its own moved the host to %v, want %v kept", got, inside)
 		}
 
-		restarted, err := New(Config{ControlHost: control, StateDir: z.cfg.StateDir})
-		if err != nil {
-			t.Fatal(err)
+		// The founder's scope wins over the least ID.
+		v := bus.NewDirectory(nil,
+			bus.NewScope(bus.DirectoryID{2}, own(outside.String(), "203.0.113.8"),
+				bus.DirectoryEntry{IA: founderIA}),
+			bus.NewScope(bus.DirectoryID{1}, own(inside.String())))
+		if got, ok := selfHost(v, linkIA, founderIA); !ok || got != outside {
+			t.Errorf("selfHost = %v (%t), want the founder's scope's first host %v", got, ok, outside)
 		}
-		if got := wiredSelf(restarted).Latest().Host; got != learned {
-			t.Errorf("restarted host = %v, want the persisted %v", got, learned)
-		}
-
-		// The wildcard fallback names nothing until a host is learned.
-		wild, err := New(Config{ControlHost: netip.MustParseAddr("0.0.0.0"), StateDir: t.TempDir()})
-		if err != nil {
-			t.Fatal(err)
-		}
-		wildSelf := wiredSelf(wild)
-		if got := wildSelf.Latest().Host; got.IsValid() {
-			t.Errorf("the unlearned wildcard host = %v, want the zero address", got)
-		}
-		wild.learn(learned)
-		if got := wildSelf.Latest().Host; got != learned {
-			t.Errorf("the learned wildcard host = %v, want %v", got, learned)
+		if _, ok := selfHost(bus.NewDirectory(nil, bus.NewScope(bus.DirectoryID{1},
+			bus.DirectoryEntry{IA: founderIA})), linkIA, founderIA); ok {
+			t.Error("selfHost named a host of a view holding no entry of the node's own")
 		}
 
 		// The core's literal domain is its host from the start.
@@ -488,6 +508,108 @@ func TestStrandedRevivalConfirms(t *testing.T) {
 	if got := fake.requests.Load(); got != 1 {
 		t.Errorf("the revival sent %d link requests, want one", got)
 	}
+}
+
+// TestConfirmPassRetriesSoon checks the confirm pass's first retry: an
+// entry whose confirm found no answer is confirmed again confirmPassRetry
+// later, well inside a selection window.
+func TestConfirmPassRetriesSoon(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		held := liveLink(rendezvousIA, 40041)
+		z, _ := wiredProvider(t, zeroconfDraw, held)
+		fake := &fakeLinkServiceClient{err: errors.New("the node holds no chain yet")}
+		z.linker = linkClientOf(map[*links.Link]*fakeLinkServiceClient{held: fake})
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		go z.runConfirmPass(ctx)
+		synctest.Wait()
+		first := fake.requests.Load()
+		time.Sleep(confirmPassRetry)
+		synctest.Wait()
+		if got := fake.requests.Load(); got <= first {
+			t.Errorf("%d confirms %v after the first %d, want a retry", got-first, confirmPassRetry, first)
+		}
+	})
+}
+
+// TestConfirmPassWaitsForTheChain checks the confirm pass's start: a node
+// holding no chain confirms nothing, for no peer's channel admits it, and
+// confirms its entries within a poll of its chain's arrival.
+func TestConfirmPassWaitsForTheChain(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		founder := newFounded(t)
+		key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+		if err != nil {
+			t.Fatal(err)
+		}
+		held := liveLink(rendezvousIA, 40051)
+		z, _ := wiredProvider(t, directoryIA, held)
+		z.env.Engine = trust.NewEngine(directoryIA, key, &trust.NetworkProvider{DB: founder.DB})
+		fake := &fakeLinkServiceClient{reply: &nodev1.LinkReply{LocalAddr: "127.0.0.1:4242", IfId: 9}}
+		z.linker = linkClientOf(map[*links.Link]*fakeLinkServiceClient{held: fake})
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		go z.runConfirmPass(ctx)
+		time.Sleep(time.Minute)
+		synctest.Wait()
+		if got := fake.requests.Load(); got != 0 {
+			t.Fatalf("%d confirms without a chain, want none", got)
+		}
+
+		csr, err := trust.CreateCSR(directoryIA, key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		chain, err := founder.Issuer.IssueChain(csr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := founder.DB.InsertChain(t.Context(), chain); err != nil {
+			t.Fatal(err)
+		}
+		time.Sleep(confirmPassChainPoll)
+		synctest.Wait()
+		if got := fake.requests.Load(); got != 1 {
+			t.Errorf("%d confirms a poll after the chain, want one", got)
+		}
+	})
+}
+
+// TestJoinDialsConfirmTheLanded checks the join loop's confirms: a landed
+// seed's link request is retried on its backoff while the peer refuses it,
+// until one answers and establishes the seed, which is then forgotten.
+func TestJoinDialsConfirmTheLanded(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		seed := liveLink(rendezvousIA, 40031)
+		seed.State = links.StateCandidate
+		z, store := wiredProvider(t, zeroconfDraw, seed)
+		fake := &fakeLinkServiceClient{err: errors.New("the peer holds no chain yet")}
+		z.linker = linkClientOf(map[*links.Link]*fakeLinkServiceClient{seed: fake})
+		retries := loops.Attempts[uint16]{
+			Backoff: loops.Backoff{Base: joinDialInterval, Max: joinDialRetryMax},
+		}
+		landed := map[uint16]bool{seed.IfID: true}
+		z.confirmJoins(t.Context(), landed, &retries)
+		refused := fake.requests.Load()
+		if !landed[seed.IfID] || refused == 0 {
+			t.Fatalf("after %d refused requests the seed is landed %t, want it kept", refused, landed[seed.IfID])
+		}
+		z.confirmJoins(t.Context(), landed, &retries)
+		if got := fake.requests.Load(); got != refused {
+			t.Errorf("%d requests inside the backoff, want none", got-refused)
+		}
+
+		fake.err = nil
+		fake.reply = &nodev1.LinkReply{LocalAddr: "127.0.0.1:4242", IfId: 9}
+		time.Sleep(joinDialInterval)
+		z.confirmJoins(t.Context(), landed, &retries)
+		if entry := entryByIfID(t, store, seed.IfID); entry.State != links.StateEstablished {
+			t.Errorf("the answered seed's state = %v, want established", entry.State)
+		}
+		if landed[seed.IfID] {
+			t.Error("the established seed is still landed")
+		}
+	})
 }
 
 // liveLink returns an established entry of the neighbor, retargeted
@@ -712,22 +834,29 @@ func TestStrandedRedialFreshAddress(t *testing.T) {
 	})
 }
 
-// fakeLinkServiceClient answers every link request with the reply it holds,
-// or fails it with err, counting the requests.
+// fakeSeen is where the fake link service's acceptor sees its requesters.
+const fakeSeen = "203.0.113.200:40000"
+
+// fakeLinkServiceClient answers every link request with the side the reply
+// it holds names, seeing the requester at fakeSeen with its echo
+// unanswered, or fails it with err, counting the requests and keeping the
+// last.
 type fakeLinkServiceClient struct {
 	reply    *nodev1.LinkReply
 	err      error
 	requests atomic.Int32
+	last     atomic.Pointer[nodev1.LinkRequest]
 }
 
 func (c *fakeLinkServiceClient) Request(
-	context.Context, *nodev1.LinkRequest,
+	_ context.Context, req *nodev1.LinkRequest,
 ) (*nodev1.LinkReply, error) {
 	c.requests.Add(1)
+	c.last.Store(req)
 	if c.err != nil {
 		return nil, c.err
 	}
-	return c.reply, nil
+	return &nodev1.LinkReply{LocalAddr: c.reply.LocalAddr, IfId: c.reply.IfId, Observed: fakeSeen}, nil
 }
 
 func (c *fakeLinkServiceClient) Punch(
@@ -742,149 +871,88 @@ func (c *fakeLinkServiceClient) PunchProbe(
 	return nodev1connect.LinkServicePunchProbeClientStream{}, errors.New("the fake probes nothing")
 }
 
-// TestProviderReportsReach checks the reported reach: the link client
-// publishes the latest reply's report of the acceptor's echo in the node's
-// own state — a reply without one keeps the last, and an unchanged report
-// publishes nothing — and a host the node does not hold stands behind a NAT.
-func TestProviderReportsReach(t *testing.T) {
-	z := &Provider{cfg: Config{ControlHost: netip.MustParseAddr("127.0.0.1")}}
-	self := wiredSelf(z)
-	published := 0
-	sub := self.Subscribe(t.Context())
-	<-sub // the state at wiring
-	peer := &scion.Addr{IA: linkIA, Service: addr.SvcCS}
-	const ifID = 3
-	fake := &fakeLinkServiceClient{}
-	c := &linkClient{
-		answered: z.recordAnswer,
-		clts: map[string]nodev1connect.LinkServiceClient{
-			scionrpc.PeerAuthority(&scion.Addr{IA: peer.IA, Service: peer.Service, IfID: ifID}): fake,
-		},
-	}
-	steps := []struct {
-		answered       *bool
-		wantUnanswered bool
-		wantPublished  int
-	}{
-		{},
-		{answered: new(false), wantUnanswered: true, wantPublished: 1},
-		{wantUnanswered: true, wantPublished: 1},
-		{answered: new(false), wantUnanswered: true, wantPublished: 1},
-		{answered: new(true), wantPublished: 2},
-	}
-	for i, step := range steps {
-		fake.reply = &nodev1.LinkReply{
-			LocalAddr: "127.0.0.1:4242", IfId: 7, RendezvousAnswered: step.answered,
-		}
-		if _, err := c.Link(t.Context(), peer, netip.MustParseAddrPort("127.0.0.1:4243"), ifID); err != nil {
-			t.Fatal(err)
-		}
-		select {
-		case <-sub:
-			published++
-		default:
-		}
-		if got := self.Latest().RendezvousUnanswered; got != step.wantUnanswered {
-			t.Errorf("after reply %d: unanswered = %v, want %v", i, got, step.wantUnanswered)
-		}
-		if published != step.wantPublished {
-			t.Errorf("after reply %d: %d publishes, want %d", i, published, step.wantPublished)
-		}
-	}
-
-	if behind, err := z.behindNAT(netip.MustParseAddr("127.0.0.1")); err != nil || behind {
-		t.Errorf("behindNAT(127.0.0.1) = %v, %v, want held", behind, err)
-	}
-	// Documentation space no interface holds stands for a NAT's host.
-	if behind, err := z.behindNAT(netip.MustParseAddr("192.0.2.1")); err != nil || !behind {
-		t.Errorf("behindNAT(192.0.2.1) = %v, %v, want behind a NAT", behind, err)
-	}
-}
-
-// TestEchoPublishedReportsTheAnswer checks the acceptor's echo: a peer whose
-// published rendezvous address answers is answered, one whose address is
-// silent is not, and a peer the directory lacks is not echoed. No answer
-// teaches the node its own external host, and the answering peer records
-// nothing.
-func TestEchoPublishedReportsTheAnswer(t *testing.T) {
+// TestProviderEchoes checks the provider's echo, a link exchange's check of
+// the other end's rendezvous port: an answering address answers and a silent
+// one does not, and the answering peer records nothing.
+func TestProviderEchoes(t *testing.T) {
 	acceptor := newRendezvousFixture(t, nil)
-	silent := addr.MustIAFrom(20, 0xfd0000000052)
-	directory := new(bus.Topic[bus.Directory])
-	directory.Publish(bus.NewDirectory(
-		bus.DirectoryEntry{IA: linkIA, RendezvousAddr: acceptor.addr},
-		bus.DirectoryEntry{IA: silent, RendezvousAddr: netip.MustParseAddrPort("127.0.0.1:1")},
-	))
-	z := &Provider{
-		cfg:            Config{ControlHost: netip.MustParseAddr("127.0.0.1")},
-		directoryState: directory,
+	z := &Provider{cfg: Config{ControlHost: netip.MustParseAddr("127.0.0.1")}}
+	if !z.echo(t.Context(), acceptor.addr) {
+		t.Error("the answering address did not answer")
 	}
-	cases := []struct {
-		name         string
-		peer         addr.IA
-		answered, ok bool
-	}{
-		{name: "an answering address", peer: linkIA, answered: true, ok: true},
-		{name: "a silent address", peer: silent, ok: true},
-		{name: "no entry", peer: linkIA2},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			answered, ok := z.echoPublished(t.Context(), tc.peer)
-			if answered != tc.answered || ok != tc.ok {
-				t.Errorf("echoPublished(%v) = %v, %v, want %v, %v",
-					tc.peer, answered, ok, tc.answered, tc.ok)
-			}
-		})
-	}
-	if got := z.external.host(); got.IsValid() {
-		t.Errorf("the echoes taught the node the external host %v, want none", got)
+	if z.echo(t.Context(), netip.MustParseAddrPort("127.0.0.1:1")) {
+		t.Error("the silent address answered")
 	}
 	if entries, err := acceptor.store.All(t.Context()); err != nil || len(entries) != 0 {
 		t.Errorf("the answering peer recorded %v (%v), want nothing", entries, err)
 	}
 }
 
-// TestReachUnderTheWildcardBind checks the report under the default bind,
-// on the kernel's sockets: a wildcard-bound node signs nothing until it
-// learns a host, then checks the learned host its entry names — never the
-// wildcard — so the loopback, which the machine holds, reports no NAT, and
-// documentation space no interface holds, behind a NAT.
-func TestReachUnderTheWildcardBind(t *testing.T) {
+// TestProviderAddresses checks the node's addresses as its entries name
+// them, under the default bind on the kernel's sockets: the endpoint and
+// rendezvous ports on each host; the loopback, which the machine holds,
+// behind no NAT, and documentation space no interface holds behind one; and
+// each host's latest echo, a host no peer echoed reporting nothing
+// unanswered. A peer's report attaches its link at the host it names, and a
+// changed answer re-signs the node's entries.
+func TestProviderAddresses(t *testing.T) {
 	z, err := New(Config{ControlHost: netip.MustParseAddr("0.0.0.0")})
 	if err != nil {
 		t.Fatal(err)
 	}
-	self := wiredSelf(z)
-	d := NewNodeDirectory(NodeDirectoryConfig{
-		IA:        directoryIA,
-		Self:      self,
-		BehindNAT: z.behindNAT,
-	})
-	if err := d.signOwn(t.Context()); !errors.Is(err, errNotReady) {
-		t.Fatalf("signing under the unlearned wildcard = %v, want it waiting on the host", err)
+	z.directory = NewNodeDirectory(NodeDirectoryConfig{IA: directoryIA})
+	held, translated := netip.MustParseAddr("127.0.0.1"), netip.MustParseAddr("192.0.2.1")
+	z.seen(1, netip.AddrPortFrom(translated, 40001), false)
+	if got := z.directory.links[1]; got != translated {
+		t.Errorf("the reported link joins the attachment at %v, want %v", got, translated)
 	}
-	for _, tc := range []struct {
-		learned   netip.Addr
-		behindNAT bool
-	}{
-		{learned: netip.MustParseAddr("127.0.0.1")},
-		{learned: netip.MustParseAddr("192.0.2.1"), behindNAT: true},
-	} {
-		z.learn(tc.learned)
-		body, err := d.ownBody(self.Latest())
-		if err != nil {
-			t.Fatal(err)
+	addresses, err := z.addresses([]netip.Addr{held, translated})
+	if err != nil {
+		t.Fatal(err)
+	}
+	type address struct {
+		Control, Rendezvous   string
+		BehindNAT, Unanswered bool
+	}
+	var got []address
+	for _, a := range addresses {
+		got = append(got, address{a.ControlAddr, a.RendezvousAddr, a.BehindNat, a.RendezvousUnanswered})
+	}
+	want := []address{
+		{Control: "127.0.0.1:30042", Rendezvous: "127.0.0.1:30043"},
+		{Control: "192.0.2.1:30042", Rendezvous: "192.0.2.1:30043", BehindNAT: true, Unanswered: true},
+	}
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("the addresses (-want +got):\n%s", diff)
+	}
+
+	// A changed answer wakes the signing, and an unchanged report does not.
+	resigned := func() bool {
+		select {
+		case <-z.directory.signWake:
+			return true
+		default:
+			return false
 		}
-		rendezvous := netip.MustParseAddrPort(body.RendezvousAddr)
-		if rendezvous.Addr() != tc.learned || body.BehindNat != tc.behindNAT {
-			t.Errorf("learning %v named %v behind a NAT %t, want the learned host, %t",
-				tc.learned, rendezvous, body.BehindNat, tc.behindNAT)
-		}
+	}
+	resigned()
+	z.seen(1, netip.AddrPortFrom(translated, 40001), true)
+	if !resigned() {
+		t.Error("a changed answer woke no signing")
+	}
+	z.seen(1, netip.AddrPortFrom(translated, 40001), true)
+	if resigned() {
+		t.Error("an unchanged report woke the signing")
+	}
+	if addresses, err := z.addresses([]netip.Addr{translated}); err != nil ||
+		addresses[0].RendezvousUnanswered {
+		t.Errorf("after an answered echo the address = %v (%v), want it answering", addresses, err)
 	}
 }
 
 // linkClientOf returns a link client whose request over each entry's own
-// interface the entry's fake answers.
+// interface the entry's fake answers, whose echoes answer, and which
+// records nothing of what the replies report.
 func linkClientOf(fakes map[*links.Link]*fakeLinkServiceClient) *linkClient {
 	clts := make(map[string]nodev1connect.LinkServiceClient, len(fakes))
 	for l, fake := range fakes {
@@ -892,7 +960,90 @@ func linkClientOf(fakes map[*links.Link]*fakeLinkServiceClient) *linkClient {
 			IA: l.NeighborIA, Service: addr.SvcCS, IfID: l.IfID,
 		})] = fake
 	}
-	return &linkClient{clts: clts}
+	return &linkClient{
+		clts: clts,
+		echo: func(context.Context, netip.AddrPort) bool { return true },
+		seen: func(uint16, netip.AddrPort, bool) {},
+	}
+}
+
+// TestLinkClientExchangesWhatEachEndSees checks the exchange's reports from
+// the requester's side: the request names how the node sees the peer — the
+// link's observation, else the entry's locator — and whether the peer's
+// rendezvous port answered there; and the node records what the reply
+// reports of it, on the entry's interface.
+func TestLinkClientExchangesWhatEachEndSees(t *testing.T) {
+	l := liveLink(linkIA, 40091)
+	fake := &fakeLinkServiceClient{reply: &nodev1.LinkReply{LocalAddr: "127.0.0.1:4242", IfId: 9}}
+	c := linkClientOf(map[*links.Link]*fakeLinkServiceClient{l: fake})
+	var echoed []netip.AddrPort
+	c.echo = func(_ context.Context, target netip.AddrPort) bool {
+		echoed = append(echoed, target)
+		return false
+	}
+	type report struct {
+		ifID     uint16
+		observed netip.AddrPort
+		answered bool
+	}
+	var reports []report
+	c.seen = func(ifID uint16, observed netip.AddrPort, answered bool) {
+		reports = append(reports, report{ifID, observed, answered})
+	}
+	peer := &scion.Addr{IA: linkIA, Service: addr.SvcCS}
+	if _, err := c.Link(t.Context(), peer, l); err != nil {
+		t.Fatal(err)
+	}
+	if req := fake.last.Load(); req.Observed != l.Remote.String() || req.RendezvousAnswered {
+		t.Errorf("the request reports %q (answered %t), want the locator %v unanswered",
+			req.Observed, req.RendezvousAnswered, l.Remote)
+	}
+	if want := []report{{l.IfID, netip.MustParseAddrPort(fakeSeen), false}}; !slices.Equal(reports, want) {
+		t.Errorf("recorded %v, want %v", reports, want)
+	}
+
+	observed := netip.MustParseAddrPort("192.0.2.77:31077")
+	c.links = new(bus.Topic[bus.LinkState])
+	c.links.Publish(bus.NewLinkState(bus.Link{Entry: *l, Observed: observed}))
+	if _, err := c.Link(t.Context(), peer, l); err != nil {
+		t.Fatal(err)
+	}
+	if req := fake.last.Load(); req.Observed != observed.String() {
+		t.Errorf("the request reports %q, want the link's observation %v", req.Observed, observed)
+	}
+	want := []netip.AddrPort{
+		netip.AddrPortFrom(l.Remote.Addr(), RendezvousPort),
+		netip.AddrPortFrom(observed.Addr(), RendezvousPort),
+	}
+	if !slices.Equal(echoed, want) {
+		t.Errorf("echoed %v, want %v", echoed, want)
+	}
+}
+
+// TestHeldEchoesReuseAnOutcome checks the exchange's memory of echoes: an
+// address answers as its latest echo did, echoed only the first time; once
+// echoTTL passes it still answers so at once, while a fresh echo behind it
+// sets what it answers next.
+func TestHeldEchoesReuseAnOutcome(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		var echoes atomic.Int32
+		h := &heldEchoes{echo: func(context.Context, netip.AddrPort) bool {
+			return echoes.Add(1) == 1
+		}}
+		target := netip.MustParseAddrPort("192.0.2.9:30043")
+		first, again := h.at(t.Context(), target), h.at(t.Context(), target)
+		if !first || !again || echoes.Load() != 1 {
+			t.Errorf("within the hold: %d echoes, want one answered", echoes.Load())
+		}
+		time.Sleep(echoTTL)
+		if !h.at(t.Context(), target) {
+			t.Error("past the hold the address no longer answers as its latest echo did")
+		}
+		synctest.Wait()
+		if h.at(t.Context(), target) || echoes.Load() != 2 {
+			t.Errorf("after the renewal: %d echoes, want a second, unanswered", echoes.Load())
+		}
+	})
 }
 
 // entryByIfID returns the store's entry on the interface.
@@ -967,10 +1118,6 @@ func TestFollowKeepsTheLocatorOnTheFlow(t *testing.T) {
 		b := bus.New()
 		z := &Provider{}
 		z.Wire(topology.Environment{Store: store, Bus: b})
-		// The node's own rendezvous address goes unanswered, so each pass
-		// weighs re-punches too: no peer reports itself undialable, and
-		// none is due.
-		z.recordAnswer(false)
 		entry := func(ia addr.IA, port uint16, state links.State) *links.Link {
 			l := &links.Link{
 				NeighborIA: ia,
@@ -1051,17 +1198,17 @@ func TestFollowKeepsTheLocatorOnTheFlow(t *testing.T) {
 }
 
 // TestRepunchDue checks which punched links the upkeep punches again, and
-// when it wakes for the next: an established link to a peer that reports
-// itself undialable, down for UpkeepGrace, again on the backoff from
-// RepunchRetry — each wait within its band — RepunchAttempts in all, and only
-// at the end with the lower ISD-AS; a link whose verdict comes back is
-// forgotten, its next down period counted afresh.
+// when it wakes for the next: an established link the punched set holds,
+// down for UpkeepGrace, again on the backoff from RepunchRetry — each wait
+// within its band — RepunchAttempts in all, and only at the end with the
+// lower ISD-AS; a link whose verdict comes back is forgotten, its next down
+// period counted afresh.
 func TestRepunchDue(t *testing.T) {
 	punched := liveLink(linkIA, 40041)
 	punched.IfID = 4
 	entries := []*links.Link{punched}
 	down := map[uint16]bool{4: false}
-	undialable := map[addr.IA]bool{linkIA: true}
+	set := map[uint16]bus.DirectoryID{4: {1}}
 	t0 := time.Unix(1000, 0)
 	st := newRepunchState()
 	// Each retry is taken at its wait's upper bound, the earliest step past
@@ -1090,7 +1237,7 @@ func TestRepunchDue(t *testing.T) {
 		{later.Add(2*time.Second + UpkeepGrace), down, 1, [2]time.Time{}},
 	}
 	for _, step := range steps {
-		due, next := st.due(rendezvousIA, entries, verdictState(step.verdicts).Up, undialable, step.at)
+		due, next := st.due(rendezvousIA, entries, verdictState(step.verdicts).Up, set, step.at)
 		if len(due) != step.want {
 			t.Errorf("at %v: %d links due, want %d", step.at.Sub(t0), len(due), step.want)
 		}
@@ -1104,30 +1251,30 @@ func TestRepunchDue(t *testing.T) {
 	}
 
 	never := []struct {
-		name       string
-		mine       addr.IA
-		entry      func() *links.Link
-		verdicts   map[uint16]bool
-		undialable map[addr.IA]bool
+		name     string
+		mine     addr.IA
+		entry    func() *links.Link
+		verdicts map[uint16]bool
+		set      map[uint16]bus.DirectoryID
 	}{
-		{"the end with the higher ISD-AS", linkIA2, func() *links.Link { return punched }, down, undialable},
-		{"a dialable peer", rendezvousIA, func() *links.Link { return punched }, down, nil},
-		{"no verdict", rendezvousIA, func() *links.Link { return punched }, nil, undialable},
+		{"the end with the higher ISD-AS", linkIA2, func() *links.Link { return punched }, down, set},
+		{"a link the set lacks", rendezvousIA, func() *links.Link { return punched }, down, nil},
+		{"no verdict", rendezvousIA, func() *links.Link { return punched }, nil, set},
 		{"a candidate", rendezvousIA, func() *links.Link {
 			l := *punched
 			l.State = links.StateCandidate
 			return &l
-		}, down, undialable},
+		}, down, set},
 		{"an entry naming no locator", rendezvousIA, func() *links.Link {
 			l := *punched
 			l.Remote = netip.AddrPort{}
 			return &l
-		}, down, undialable},
+		}, down, set},
 	}
 	for _, tt := range never {
 		st := newRepunchState()
 		for _, after := range []time.Duration{0, UpkeepGrace, UpkeepGrace + RepunchRetry} {
-			if due, next := st.due(tt.mine, []*links.Link{tt.entry()}, verdictState(tt.verdicts).Up, tt.undialable,
+			if due, next := st.due(tt.mine, []*links.Link{tt.entry()}, verdictState(tt.verdicts).Up, tt.set,
 				t0.Add(after)); len(due) != 0 || !next.IsZero() {
 				t.Errorf("%s: due %d at %v, the next wake at %v", tt.name, len(due), after, next)
 			}
@@ -1135,9 +1282,10 @@ func TestRepunchDue(t *testing.T) {
 	}
 }
 
-// TestRepunchMovesTheLink checks a re-punch: the entry keeps its interface
-// ID, moves to a fresh link address aimed at the peer's reflexive address,
-// and its link request lands; a failed punch leaves the entry as it was.
+// TestRepunchMovesTheLink checks a re-punch: it punches in the link's
+// directory, the entry keeps its interface ID, moves to a fresh link address
+// aimed at the peer's reflexive address, and its link request lands; a
+// failed punch leaves the entry as it was.
 func TestRepunchMovesTheLink(t *testing.T) {
 	standing := liveLink(linkIA, 40051)
 	z, store := wiredProvider(t, rendezvousIA, standing)
@@ -1145,14 +1293,15 @@ func TestRepunchMovesTheLink(t *testing.T) {
 	fake := &fakeLinkServiceClient{reply: &nodev1.LinkReply{LocalAddr: theirs.String(), IfId: 8}}
 	z.linker = linkClientOf(map[*links.Link]*fakeLinkServiceClient{standing: fake})
 
-	z.repunch(context.Background(), &stubPuncher{}, standing)
+	id := bus.DirectoryID{5}
+	z.repunch(context.Background(), &stubPuncher{}, standing, id)
 	if entry := entryByIfID(t, store, standing.IfID); entry.Local != standing.Local ||
 		entry.Remote != standing.Remote {
 		t.Errorf("a failed re-punch left %+v, want the entry unchanged", entry)
 	}
 
 	punch := &stubPuncher{reflexive: theirs, ifID: 8}
-	z.repunch(context.Background(), punch, standing)
+	z.repunch(context.Background(), punch, standing, id)
 	entry := entryByIfID(t, store, standing.IfID)
 	if entry.Local == standing.Local || entry.Remote != theirs || entry.RemoteIfID != 8 ||
 		entry.State != links.StateEstablished {
@@ -1161,6 +1310,9 @@ func TestRepunchMovesTheLink(t *testing.T) {
 	}
 	if want := []addr.IA{linkIA}; !slices.Equal(punch.established, want) {
 		t.Errorf("the re-punch punched %v, want %v", punch.established, want)
+	}
+	if want := []bus.DirectoryID{id}; !slices.Equal(punch.establishedIn, want) {
+		t.Errorf("the re-punch punched in %v, want the link's directory %v", punch.establishedIn, want)
 	}
 	if got := fake.requests.Load(); got != 1 {
 		t.Errorf("the re-punch sent %d link requests, want one", got)
@@ -1175,90 +1327,121 @@ func (p *failingPunchPaths) Path(context.Context, addr.IA) (*spath.Decoded, erro
 	return nil, errors.New("no route")
 }
 
-// TestUpkeepRepunchesOnTheAnswersFlip checks the upkeep's wake on the
-// node's own state: a punched link that went down while the node's
-// rendezvous address counted as answered is punched again once a link reply
-// reports it unanswered, UpkeepGrace later, with no link state event
-// between.
-func TestUpkeepRepunchesOnTheAnswersFlip(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		standing := liveLink(linkIA, 40071)
-		z, _ := wiredProvider(t, rendezvousIA, standing)
-		z.directoryState.Publish(bus.NewDirectory(
-			bus.DirectoryEntry{IA: linkIA, Reach: bus.Reach{RendezvousUnanswered: true}}))
-		paths := &failingPunchPaths{}
-		z.puncher = &puncher{paths: paths}
-		z.linkState.Publish(bus.NewLinkState(bus.Link{Entry: *standing, Down: true}))
-		ctx, cancel := context.WithCancel(t.Context())
-		defer cancel()
-		go z.runUpkeep(ctx)
-		time.Sleep(2 * UpkeepGrace)
-		synctest.Wait()
-		if n := paths.calls.Load(); n != 0 {
-			t.Fatalf("punched %d times while the node's address answered, want none", n)
-		}
-
-		z.recordAnswer(false)
-		time.Sleep(UpkeepGrace + time.Millisecond)
-		synctest.Wait()
-		if n := paths.calls.Load(); n != 1 {
-			t.Errorf("punched %d times after the answer flipped, want 1", n)
-		}
-	})
+// reported returns an entry of the ISD-AS naming one address whose report
+// says its rendezvous answers, or not.
+func reported(ia addr.IA, rendezvous string, unanswered bool) bus.DirectoryEntry {
+	return bus.DirectoryEntry{IA: ia, Addresses: []bus.Address{{
+		RendezvousAddr: netip.MustParseAddrPort(rendezvous),
+		Reach:          bus.Reach{BehindNAT: unanswered, RendezvousUnanswered: unanswered},
+	}}}
 }
 
-// TestUpkeepRepunchesOnTheDirectorysReport checks the upkeep's wake on the
-// node directory: a punched link that went down while its peer reported its
-// own rendezvous address answered is punched again once a fetch brings the
-// peer's report of it unanswered, UpkeepGrace later, with no link state
-// event between.
-func TestUpkeepRepunchesOnTheDirectorysReport(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		standing := liveLink(linkIA, 40072)
-		z, _ := wiredProvider(t, rendezvousIA, standing)
-		z.recordAnswer(false)
-		z.directoryState.Publish(bus.NewDirectory(bus.DirectoryEntry{IA: linkIA}))
-		paths := &failingPunchPaths{}
-		z.puncher = &puncher{paths: paths}
-		z.linkState.Publish(bus.NewLinkState(bus.Link{Entry: *standing, Down: true}))
-		ctx, cancel := context.WithCancel(t.Context())
-		defer cancel()
-		go z.runUpkeep(ctx)
-		time.Sleep(2 * UpkeepGrace)
-		synctest.Wait()
-		if n := paths.calls.Load(); n != 0 {
-			t.Fatalf("punched %d times while the peer's address answered, want none", n)
-		}
-
-		z.directoryState.Publish(bus.NewDirectory(
-			bus.DirectoryEntry{IA: linkIA, Reach: bus.Reach{RendezvousUnanswered: true}}))
-		time.Sleep(UpkeepGrace + time.Millisecond)
-		synctest.Wait()
-		if n := paths.calls.Load(); n != 1 {
-			t.Errorf("punched %d times after the peer's report arrived, want 1", n)
-		}
-	})
+// linkScoped returns a view of one directory holding the entries, each of
+// the interfaces' links joining it.
+func linkScoped(id bus.DirectoryID, ifIDs []uint16, entries ...bus.DirectoryEntry) bus.Directory {
+	joins := make(map[uint16]bus.DirectoryID, len(ifIDs))
+	for _, ifID := range ifIDs {
+		joins[ifID] = id
+	}
+	return bus.NewDirectory(joins, bus.NewScope(id, entries...))
 }
 
-// TestPickReflector checks the reflector's choice: a neighbor whose own
-// report says its address answers and whose established link is up, never
-// one whose link is down, nor a candidate, nor a node that reports itself
-// undialable.
+// TestUpkeepRepunchesOnTheViews checks the upkeep's wake on the views: a
+// punched link that went down while the node's own entry in the link's
+// directory reported an answering address is punched again once its entry
+// reports none, and one that went down while the peer's entry there
+// reported an answering address once the peer's reports none, UpkeepGrace
+// later, with no link state event between.
+func TestUpkeepRepunchesOnTheViews(t *testing.T) {
+	for _, tc := range []struct {
+		name                      string
+		ownAnswered, peerAnswered bool
+	}{
+		{name: "the node's own report", ownAnswered: true},
+		{name: "the peer's report", peerAnswered: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				standing := liveLink(linkIA, 40071)
+				z, _ := wiredProvider(t, rendezvousIA, standing)
+				id := bus.DirectoryID{5}
+				view := func(ownUnanswered, peerUnanswered bool) bus.Directory {
+					return linkScoped(id, []uint16{standing.IfID},
+						reported(rendezvousIA, "192.0.2.1:30043", ownUnanswered),
+						reported(linkIA, "192.0.2.2:30043", peerUnanswered))
+				}
+				z.directoryState.Publish(view(!tc.ownAnswered, !tc.peerAnswered))
+				paths := &failingPunchPaths{}
+				z.puncher = &puncher{paths: paths}
+				z.linkState.Publish(bus.NewLinkState(bus.Link{Entry: *standing, Down: true}))
+				ctx, cancel := context.WithCancel(t.Context())
+				defer cancel()
+				go z.runUpkeep(ctx)
+				time.Sleep(2 * UpkeepGrace)
+				synctest.Wait()
+				if n := paths.calls.Load(); n != 0 {
+					t.Fatalf("punched %d times while an end's address answered, want none", n)
+				}
+
+				z.directoryState.Publish(view(true, true))
+				time.Sleep(UpkeepGrace + time.Millisecond)
+				synctest.Wait()
+				if n := paths.calls.Load(); n != 1 {
+					t.Errorf("punched %d times after the report flipped, want 1", n)
+				}
+			})
+		})
+	}
+}
+
+// TestPunchedLinks checks which links count as punched: those whose
+// directory holds the node's own entry and the peer's, neither naming an
+// answering address; never one whose own end answers there, whose peer
+// answers there, or that joins no directory.
+func TestPunchedLinks(t *testing.T) {
+	entry := func(ia addr.IA, ifID uint16) *links.Link {
+		l := liveLink(ia, 40080+ifID)
+		l.IfID = ifID
+		return l
+	}
+	entries := []*links.Link{entry(linkIA, 1), entry(linkIA2, 2), entry(addr.MustIAFrom(20, 0xfd0000000036), 3)}
+	id := bus.DirectoryID{5}
+	view := bus.NewDirectory(map[uint16]bus.DirectoryID{1: id, 2: id},
+		bus.NewScope(id,
+			reported(rendezvousIA, "192.0.2.1:30043", true),
+			reported(linkIA, "192.0.2.2:30043", true),
+			reported(linkIA2, "192.0.2.3:30043", false)))
+	if got := punchedLinks(rendezvousIA, entries, view); !maps.Equal(got, map[uint16]bus.DirectoryID{1: id}) {
+		t.Errorf("punched = %v, want the link to the unanswered peer alone", got)
+	}
+	answering := bus.NewDirectory(map[uint16]bus.DirectoryID{1: id},
+		bus.NewScope(id,
+			reported(rendezvousIA, "192.0.2.1:30043", false),
+			reported(linkIA, "192.0.2.2:30043", true)))
+	if got := punchedLinks(rendezvousIA, entries, answering); len(got) != 0 {
+		t.Errorf("punched where the node's own address answers = %v, want none", got)
+	}
+}
+
+// TestPickReflector checks the reflector's choice: a neighbor in the named
+// directory whose own report there says an address answers and whose
+// established link joining the directory is up, never one whose link is
+// down, nor a candidate, nor a node that reports itself undialable, nor a
+// neighbor whose link joins another directory.
 func TestPickReflector(t *testing.T) {
 	entry := func(ia addr.IA, ifID uint16, state links.State) *links.Link {
 		l := liveLink(ia, 40060+ifID)
 		l.IfID, l.State = ifID, state
 		return l
 	}
-	dialable := func(ia addr.IA, rendezvous string) bus.DirectoryEntry {
-		return bus.DirectoryEntry{IA: ia, RendezvousAddr: netip.MustParseAddrPort(rendezvous)}
-	}
-	directory := []bus.DirectoryEntry{
-		dialable(linkIA, "192.0.2.1:30043"),
-		dialable(linkIA2, "192.0.2.2:30043"),
-		{IA: rendezvousIA, RendezvousAddr: netip.MustParseAddrPort("192.0.2.3:30043"),
-			Reach: bus.Reach{BehindNAT: true, RendezvousUnanswered: true}},
-	}
+	id, other := bus.DirectoryID{5}, bus.DirectoryID{6}
+	view := bus.NewDirectory(map[uint16]bus.DirectoryID{1: id, 2: id, 3: id, 4: other},
+		bus.NewScope(id,
+			reported(linkIA, "192.0.2.1:30043", false),
+			reported(linkIA2, "192.0.2.2:30043", false),
+			reported(rendezvousIA, "192.0.2.3:30043", true),
+			reported(selPeer, "192.0.2.4:30043", false)),
+		bus.NewScope(other, reported(selPeer, "198.51.100.4:30043", false)))
 	tests := []struct {
 		name     string
 		entries  []*links.Link
@@ -1272,11 +1455,12 @@ func TestPickReflector(t *testing.T) {
 		{"past a candidate", []*links.Link{entry(linkIA, 1, links.StateCandidate),
 			entry(linkIA2, 2, links.StateEstablished)}, nil, "192.0.2.2:30043"},
 		{"none dialable", []*links.Link{entry(rendezvousIA, 3, links.StateEstablished)}, nil, ""},
+		{"a link of another directory", []*links.Link{entry(selPeer, 4, links.StateEstablished)}, nil, ""},
 		{"none up", []*links.Link{entry(linkIA, 1, links.StateEstablished)},
 			map[uint16]bool{1: false}, ""},
 	}
 	for _, tt := range tests {
-		got, ok := pickReflector(tt.entries, verdictState(tt.verdicts).Up, directory)
+		got, ok := pickReflector(tt.entries, verdictState(tt.verdicts).Up, view, id)
 		if want := tt.want != ""; ok != want || want && got != netip.MustParseAddrPort(tt.want) {
 			t.Errorf("%s: picked %v (%t), want %q", tt.name, got, ok, tt.want)
 		}

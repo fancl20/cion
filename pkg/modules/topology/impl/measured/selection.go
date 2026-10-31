@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"log/slog"
+	"maps"
 	"net/netip"
 	"slices"
 	"sort"
@@ -75,12 +76,12 @@ const (
 )
 
 // LinkRequester establishes a link over the control endpoint's authenticated
-// channel; PeerClient satisfies it.
+// channel.
 type LinkRequester interface {
-	// Link asks the peer to admit the link, offering the requester's link
-	// address and interface ID, and answers the peer's side of it.
-	Link(ctx context.Context, peer *scion.Addr,
-		local netip.AddrPort, ifID uint16) (*nodev1.LinkReply, error)
+	// Link asks the peer to admit the entry's link, offering the
+	// requester's link address and interface ID, and answers the peer's
+	// side of it.
+	Link(ctx context.Context, peer *scion.Addr, l *links.Link) (*nodev1.LinkReply, error)
 }
 
 // SelectionPaths is the path resolution the selection loop calls: the
@@ -97,8 +98,9 @@ type SelectionConfig struct {
 	IA addr.IA
 	// Store is the neighbor table — the loop's decisions land in it.
 	Store links.DB
-	// Directory is the node directory topic, whose last event's entries
-	// each window draws its candidates from; nil draws none.
+	// Directory is the node directory topic, whose last event's views each
+	// window draws its candidates from, every address the entries of every
+	// directory name; nil draws none.
 	Directory *bus.Topic[bus.Directory]
 	// Links is the node's link state topic. An established neighbor whose
 	// verdict is down counts as infinitely slow for the window whatever its
@@ -122,7 +124,7 @@ type SelectionConfig struct {
 	// through; the zero value is the kernel's.
 	Sockets underlay.Sockets
 	// ControlHost is the control address's host: the host the loop's
-	// probes leave from, and the viewer's half of the scope filter.
+	// probes leave from.
 	ControlHost netip.Addr
 	// LinkHost is the host link addresses are allocated on.
 	LinkHost netip.Addr
@@ -131,9 +133,6 @@ type SelectionConfig struct {
 	// Punch reaches the candidates whose published rendezvous address
 	// answers nothing, by probe and by establishment; nil reaches none.
 	Punch Puncher
-	// Learn records the external host a rendezvous reply's observed source
-	// names for the node, latest observation winning; nil discards it.
-	Learn func(netip.Addr)
 	// Stranded, when set, records the window's finding that the node holds
 	// fewer up links than the floor and no directory candidate answered its
 	// probe — the flag the joiner's dial loop reads to re-dial the
@@ -195,13 +194,32 @@ type selection struct {
 	// hosts are the hosts the peers' own resolution named this window, the
 	// ones their echoes address; each window asks anew.
 	hosts map[addr.IA]netip.Addr
-	// probeFn, pathEchoFn, aliveFn, and establishFn override the
-	// measurement, the excluded measurement's echo, the candidate-grace
-	// probe, and the establishment in tests; nil uses the real ones.
-	probeFn     func(context.Context, bus.DirectoryEntry, *links.Link) sample
-	pathEchoFn  func(addr.IA, *scion.Candidate) time.Duration
-	aliveFn     func(*links.Link) bool
-	establishFn func(context.Context, bus.DirectoryEntry, string) bool
+	// probeFn, pathEchoFn, aliveFn, establishFn, and rendezvousFn override
+	// the measurement, the excluded measurement's echo, the candidate-grace
+	// probe, the establishment, and the binding request to a rendezvous
+	// socket in tests; nil uses the real ones.
+	probeFn      func(context.Context, target, *links.Link) sample
+	pathEchoFn   func(addr.IA, *scion.Candidate) time.Duration
+	aliveFn      func(*links.Link) bool
+	establishFn  func(context.Context, target, string) bool
+	rendezvousFn func(context.Context, netip.AddrPort) (time.Duration, error)
+}
+
+// target is a peer as the window probes and dials it: its ISD-AS, and one
+// of the addresses its entries name, beside the directory whose entry names
+// it.
+type target struct {
+	IA addr.IA
+	// Scope is the directory whose entry names the address.
+	Scope bus.DirectoryID
+	bus.Address
+}
+
+// peer is one peer the views name: its ISD-AS, and each address its entries
+// name.
+type peer struct {
+	IA      addr.IA
+	targets []target
 }
 
 // peerStreak counts a peer's consecutive windows of evidence, one count per
@@ -251,26 +269,25 @@ func (s *selection) pass(ctx context.Context) {
 	s.sweep(ctx, entries)
 
 	neighbors := s.neighbors(entries) // established, by IA
-	directory := s.directory()
+	peers := s.peers()
 
-	// Probe every peer the directory names — neighbor and candidate alike (the
+	// Probe every peer the views name — neighbor and candidate alike (the
 	// comparator never stops at admission) — each by its own carrier: the
-	// neighbor's direct side over the one-hop path, the candidate's by rendezvous
-	// echo. The scope filter skips what the viewer cannot dial, whoever
-	// published it.
+	// neighbor's direct side over the one-hop path, the candidate's by
+	// rendezvous echo at the address chosen among the ones its entries name.
 	samples := make(map[addr.IA]sample)
-	candidates := make([]bus.DirectoryEntry, 0, len(directory))
-	for _, e := range directory {
-		if e.IA.Equal(s.cfg.IA) ||
-			!probeable(s.cfg.ControlHost, e.RendezvousAddr.Addr()) {
+	candidates := make([]target, 0, len(peers))
+	for _, p := range peers {
+		if p.IA.Equal(s.cfg.IA) {
 			continue
 		}
-		if l, ok := neighbors[e.IA]; ok {
-			samples[e.IA] = s.measure(ctx, e, l)
+		if l, ok := neighbors[p.IA]; ok {
+			samples[p.IA] = s.measure(ctx, p.targets[0], l)
 			continue
 		}
-		candidates = append(candidates, e)
-		samples[e.IA] = s.measure(ctx, e, nil)
+		t := s.choose(ctx, p)
+		candidates = append(candidates, t)
+		samples[p.IA] = s.measure(ctx, t, nil)
 	}
 	ts := s.windowTiers(ctx, neighbors, samples)
 	if ctx.Err() != nil {
@@ -370,34 +387,15 @@ func rendezvousTarget(l *links.Link) netip.AddrPort {
 	return netip.AddrPort{}
 }
 
-// echo dials one rendezvous exchange from the entry's own link address,
-// recording the external host the reply's reflexive address names for the
-// node — every dial teaches the dialer its external host — and returning the
-// reply's source beside the reply, the observation an unspecified answer
-// records under.
-func (s *selection) echo(
-	ctx context.Context,
-	bind netip.AddrPort,
-	target netip.AddrPort,
-	ia addr.IA,
-	linkAddr netip.AddrPort,
-) (RendezvousReply, netip.AddrPort, time.Duration, error) {
-	reply, observed, rtt, err := RendezvousEcho(ctx, s.cfg.Sockets, bind, target, ia, linkAddr)
-	if err == nil && s.cfg.Learn != nil {
-		s.cfg.Learn(reply.Reflexive.Addr())
-	}
-	return reply, observed, rtt, err
-}
-
 // probeRendezvous sends a binding request to a peer's rendezvous socket from
-// an ephemeral port on the control host and returns the round trip,
-// recording the external host the reply's reflexive address names for the
-// node: the acceptor answers it as it answers a dial, and records nothing.
-func (s *selection) probeRendezvous(ctx context.Context, target netip.AddrPort) (time.Duration, error) {
-	reply, rtt, err := bindingEcho(ctx, s.cfg.Sockets, s.cfg.ControlHost, target)
-	if err == nil && s.cfg.Learn != nil {
-		s.cfg.Learn(reply.Reflexive.Addr())
+// an ephemeral port on the control host and returns the round trip, through
+// the test seam when set: the acceptor answers it as it answers a dial, and
+// records nothing.
+func (s *selection) probeRendezvous(ctx context.Context, socket netip.AddrPort) (time.Duration, error) {
+	if s.rendezvousFn != nil {
+		return s.rendezvousFn(ctx, socket)
 	}
+	_, rtt, err := bindingEcho(ctx, s.cfg.Sockets, s.cfg.ControlHost, socket)
 	return rtt, err
 }
 
@@ -458,63 +456,67 @@ func (s *selection) linkUp(ifID uint16) bool {
 	return s.cfg.Links.Latest().Up(ifID)
 }
 
-// directory returns the entries of the node directory's view.
-func (s *selection) directory() []bus.DirectoryEntry {
-	return s.cfg.Directory.Latest().Entries()
-}
-
-// addrScope is an address's reachability scope: what can route to it.
-type addrScope uint8
-
-const (
-	scopeGlobal    addrScope = iota // globally routable
-	scopeLoopback                   // the host's own addresses
-	scopePrivate                    // RFC 1918 and IPv6 unique-local
-	scopeShared                     // the CGNAT shared range, RFC 6598
-	scopeLinkLocal                  // one link alone
-	// scopeNone marks addresses no dial routes to: invalid, unspecified,
-	// and multicast ones, which share no viewer's scope.
-	scopeNone
-)
-
-// cgnat is the shared address range RFC 6598 allocates — carrier-grade
-// NAT, reachable from inside whatever deployment claimed it.
-var cgnat = netip.MustParsePrefix("100.64.0.0/10")
-
-// scopeOf classifies an address by its reachability scope.
-func scopeOf(a netip.Addr) addrScope {
-	switch {
-	case !a.IsValid() || a.IsUnspecified() || a.IsMulticast():
-		return scopeNone
-	case a.IsLoopback():
-		return scopeLoopback
-	case a.IsLinkLocalUnicast():
-		return scopeLinkLocal
-	case a.Is4() && cgnat.Contains(a):
-		return scopeShared
-	case a.IsPrivate():
-		return scopePrivate
-	default:
-		return scopeGlobal
+// peers returns each peer the directories' views name, ordered by ISD-AS,
+// each with every address its entries name, ordered by directory ID and
+// then as its entry orders them. A node holds only the addresses its
+// directories' peers observed, so every one is the scope's to dial.
+func (s *selection) peers() []peer {
+	byIA := make(map[addr.IA]*peer)
+	for _, sc := range s.cfg.Directory.Latest().Scopes() {
+		for _, e := range sc.Entries() {
+			for _, a := range e.Addresses {
+				p, ok := byIA[e.IA]
+				if !ok {
+					p = &peer{IA: e.IA}
+					byIA[e.IA] = p
+				}
+				p.targets = append(p.targets, target{IA: e.IA, Scope: sc.ID(), Address: a})
+			}
+		}
 	}
+	out := make([]peer, 0, len(byIA))
+	for _, ia := range slices.Sorted(maps.Keys(byIA)) {
+		out = append(out, *byIA[ia])
+	}
+	return out
 }
 
-// probeable reports whether a dial from the viewer can route to the entry:
-// a globally routable address always, and whatever shares the viewer's own
-// scope beside it — the loopback pairing the integration labs run on, one
-// host routing its own addresses. Private, shared, and link-local scopes
-// answer no dial from a global viewer, whoever published them; both of an
-// entry's published addresses sit on the one host, so the rendezvous
-// address's test covers the control address beside it.
-func probeable(viewer, entry netip.Addr) bool {
-	es := scopeOf(entry)
-	return es == scopeGlobal || (es != scopeNone && es == scopeOf(viewer))
+// choose returns the address the window measures a candidate at: its only
+// one; else, of those whose report says their rendezvous answers, the one
+// whose binding request answers fastest; else the first whose report says
+// it answers nothing, which the punch reaches; else the first.
+func (s *selection) choose(ctx context.Context, p peer) target {
+	if len(p.targets) == 1 {
+		return p.targets[0]
+	}
+	var best target
+	var bestRTT time.Duration
+	found := false
+	for _, t := range p.targets {
+		if t.Reach.RendezvousUnanswered {
+			continue
+		}
+		if rtt, err := s.probeRendezvous(ctx, t.RendezvousAddr); err == nil && (!found || rtt < bestRTT) {
+			best, bestRTT, found = t, rtt, true
+		}
+	}
+	if found {
+		return best
+	}
+	if s.cfg.Punch != nil {
+		for _, t := range p.targets {
+			if t.Reach.RendezvousUnanswered {
+				return t
+			}
+		}
+	}
+	return p.targets[0]
 }
 
 // measure runs the window's probe of one peer — a nil neighbor entry means
 // a candidate — through the test seam when set.
 func (s *selection) measure(
-	ctx context.Context, e bus.DirectoryEntry, l *links.Link,
+	ctx context.Context, e target, l *links.Link,
 ) sample {
 	if s.probeFn != nil {
 		return s.probeFn(ctx, e, l)
@@ -523,7 +525,7 @@ func (s *selection) measure(
 }
 
 // establish lands a promotion, through the test seam when set.
-func (s *selection) establish(ctx context.Context, e bus.DirectoryEntry, why string) bool {
+func (s *selection) establish(ctx context.Context, e target, why string) bool {
 	if s.establishFn != nil {
 		return s.establishFn(ctx, e, why)
 	}
@@ -547,13 +549,13 @@ func (s *selection) establish(ctx context.Context, e bus.DirectoryEntry, why str
 // measured over a route the network would not serve. The binding request
 // records nothing at the candidate. Both SCMP echoes address the host the
 // peer's own resolution names.
-func (s *selection) probe(ctx context.Context, e bus.DirectoryEntry, l *links.Link) sample {
+func (s *selection) probe(ctx context.Context, e target, l *links.Link) sample {
 	var m measurement
 	switch {
 	case l != nil:
 		m.direct = s.peerEcho(ctx, e.IA, nil)
 	case s.punched(e):
-		if rtt, err := s.cfg.Punch.Probe(ctx, e.IA); err == nil {
+		if rtt, err := s.cfg.Punch.Probe(ctx, e.IA, e.Scope); err == nil {
 			m.direct = rtt
 		} else {
 			slog.Debug("The punch probe did not answer", "peer", e.IA, "err", err)
@@ -699,14 +701,14 @@ func (s *selection) promote(
 	ctx context.Context,
 	entries []*links.Link,
 	neighbors map[addr.IA]*links.Link,
-	candidates []bus.DirectoryEntry,
+	candidates []target,
 	samples map[addr.IA]sample,
 	ts []tier,
 ) {
 
 	live := s.upCount(neighbors)
 	// Rank the reachable candidates: fastest first.
-	var reachable []bus.DirectoryEntry
+	var reachable []target
 	for _, e := range candidates {
 		if samples[e.IA].m.direct > 0 {
 			reachable = append(reachable, e)
@@ -718,10 +720,14 @@ func (s *selection) promote(
 
 	if live < NeighborFloor {
 		// Below the floor, reachability outranks latency: any reachable
-		// candidate will do, the fastest first.
+		// candidate will do, the fastest first. With none, the shortfall is
+		// reported against the floor capped at the peers the views name, one
+		// sample each: a node linked to every peer they name has none.
 		if len(reachable) == 0 {
-			slog.Warn("Redundancy floor unmet; no reachable candidate",
-				"neighbors", live, "floor", NeighborFloor)
+			if live < min(NeighborFloor, len(samples)) {
+				slog.Warn("Redundancy floor unmet; no reachable candidate",
+					"neighbors", live, "floor", NeighborFloor, "named", len(samples))
+			}
 			return
 		}
 		s.admit(ctx, entries, neighbors, ts, samples, reachable[0], "the redundancy floor")
@@ -731,7 +737,7 @@ func (s *selection) promote(
 	// A stranded tier: its fastest reachable member, at once. The fastest
 	// candidate overall that a stranded tier holds is that member, for the
 	// ranking is global.
-	var rescue *bus.DirectoryEntry
+	var rescue *target
 	for i, e := range reachable {
 		if t := tierOf(ts, e.IA); t != nil && t.stranded {
 			rescue = &reachable[i]
@@ -791,7 +797,7 @@ func (s *selection) admit(
 	neighbors map[addr.IA]*links.Link,
 	ts []tier,
 	samples map[addr.IA]sample,
-	e bus.DirectoryEntry,
+	e target,
 	why string,
 ) {
 
@@ -999,7 +1005,7 @@ func (s *selection) retire(ctx context.Context, l *links.Link, why string) bool 
 // request lands and this one when the reply answers. An entry already holding
 // its remote — seeded by an earlier window or the joiner's own dial — skips
 // the exchange: the seed taught both sides already.
-func (s *selection) establishLink(ctx context.Context, e bus.DirectoryEntry, why string) bool {
+func (s *selection) establishLink(ctx context.Context, e target, why string) bool {
 	entry, err := s.ownEntry(ctx, e)
 	if err != nil {
 		slog.Error("Recording the local side of a promoted candidate",
@@ -1027,16 +1033,17 @@ func (s *selection) establishLink(ctx context.Context, e bus.DirectoryEntry, why
 // the establishment a joiner with no paths uses, whose dial leaves from the
 // entry's own link address so the mapping the acceptor observes is the
 // socket that will serve. The reply must name the entry's ISD-AS: the
-// published address can be a learned public host, and an answer arriving
+// published address can be a NAT's public host, and an answer arriving
 // from a different node — a colliding subnet's real peer — must not seed an
 // entry naming one ISD-AS at another's address. The reply's link address
 // records under the claim rule, its port on the reply's observed source
 // host when the answer names none; the entry stays the candidate the
 // confirm waits on.
 func (s *selection) establishByRendezvous(
-	ctx context.Context, e bus.DirectoryEntry, entry *links.Link,
+	ctx context.Context, e target, entry *links.Link,
 ) bool {
-	reply, observed, _, err := s.echo(ctx, entry.Local, e.RendezvousAddr, s.cfg.IA, entry.Local)
+	reply, observed, _, err := RendezvousEcho(ctx, s.cfg.Sockets, entry.Local, e.RendezvousAddr,
+		s.cfg.IA, entry.Local)
 	if err != nil {
 		slog.Warn("The rendezvous establishment failed", "neighbor", e.IA, "err", err)
 		return false
@@ -1059,8 +1066,8 @@ func (s *selection) establishByRendezvous(
 // the entry's own link address, released before the entry records the peer's
 // reflexive address, so the mapping each NAT opened is the one the link
 // keeps. The entry stays the candidate the confirm waits on.
-func (s *selection) establishByPunch(ctx context.Context, e bus.DirectoryEntry, entry *links.Link) bool {
-	theirs, ifID, err := s.cfg.Punch.Establish(ctx, e.IA, entry)
+func (s *selection) establishByPunch(ctx context.Context, e target, entry *links.Link) bool {
+	theirs, ifID, err := s.cfg.Punch.Establish(ctx, e.IA, e.Scope, entry)
 	if err != nil {
 		slog.Warn("The punch establishment failed", "neighbor", e.IA, "err", err)
 		return false
@@ -1076,7 +1083,7 @@ func (s *selection) establishByPunch(ctx context.Context, e bus.DirectoryEntry, 
 
 // punched reports whether the loop reaches the candidate by punch: its own
 // report says its published rendezvous address answers nothing.
-func (s *selection) punched(e bus.DirectoryEntry) bool {
+func (s *selection) punched(e target) bool {
 	return s.cfg.Punch != nil && e.Reach.RendezvousUnanswered
 }
 
@@ -1093,14 +1100,14 @@ func (s *selection) punched(e bus.DirectoryEntry) bool {
 // confirm that never lands leaves the candidate to the window, the next
 // window's promotion re-running it.
 func (s *selection) confirm(
-	ctx context.Context, e bus.DirectoryEntry, entry *links.Link, why string,
+	ctx context.Context, e target, entry *links.Link, why string,
 ) bool {
 
 	rpcCtx, cancel := context.WithTimeout(ctx, EstablishTimeout)
 	defer cancel()
 	peer := &scion.Addr{IA: e.IA, Service: addr.SvcCS}
 	for {
-		reply, err := s.cfg.Link.Link(rpcCtx, peer, entry.Local, entry.IfID)
+		reply, err := s.cfg.Link.Link(rpcCtx, peer, entry)
 		if err == nil {
 			return s.landConfirm(rpcCtx, e.IA, entry, reply, e.ControlAddr.Addr(), why)
 		}
@@ -1152,7 +1159,7 @@ func (s *selection) landConfirm(
 // live entry and a second live entry on one local address, and a promotion
 // that loses either race looks again: it proceeds on the winner's entry, or
 // records its own on a fresh address.
-func (s *selection) ownEntry(ctx context.Context, e bus.DirectoryEntry) (*links.Link, error) {
+func (s *selection) ownEntry(ctx context.Context, e target) (*links.Link, error) {
 	entry, err := s.recordEntry(ctx, e)
 	if errors.Is(err, links.ErrDuplicateNeighbor) || errors.Is(err, links.ErrDuplicateLocal) {
 		entry, err = s.recordEntry(ctx, e)
@@ -1167,7 +1174,7 @@ func (s *selection) ownEntry(ctx context.Context, e bus.DirectoryEntry) (*links.
 // established until the neighbor's own verdict retires it, its socket
 // still aimed at that address, and its acceptor answers a rendezvous claim
 // with that side unchanged.
-func (s *selection) recordEntry(ctx context.Context, e bus.DirectoryEntry) (*links.Link, error) {
+func (s *selection) recordEntry(ctx context.Context, e target) (*links.Link, error) {
 	entry, err := s.cfg.Store.ByNeighbor(ctx, e.IA)
 	if err != nil {
 		return nil, err

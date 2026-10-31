@@ -18,6 +18,7 @@ import (
 	spath "github.com/scionproto/scion/pkg/slayers/path/scion"
 
 	"github.com/fancl20/cion/pkg/core/trust"
+	"github.com/fancl20/cion/pkg/libs/bus"
 	"github.com/fancl20/cion/pkg/libs/loops"
 	"github.com/fancl20/cion/pkg/libs/peeria"
 	"github.com/fancl20/cion/pkg/libs/ratelimit"
@@ -201,8 +202,8 @@ func (s *LinkService) punchLimiter() *ratelimit.Keyed[punchKey] {
 }
 
 // punchCall is an admitted punch request: the authenticated caller, its
-// reflexive address, the punch's nonce, and the reflector the node learns
-// its own reflexive address from.
+// reflexive address, the punch's nonce, and the reflector, in the directory
+// the request names, the node learns its own reflexive address from.
 type punchCall struct {
 	peer      addr.IA
 	theirs    netip.AddrPort
@@ -211,9 +212,12 @@ type punchCall struct {
 }
 
 // admitPunch admits a punch request of the kind: an authenticated caller
-// within the rate cap, its reflexive address and nonce, and a reflector the
-// node holds.
-func (s *LinkService) admitPunch(ctx context.Context, link bool, reflexive string, nonce []byte) (punchCall, error) {
+// within the rate cap, its reflexive address and nonce, the directory it
+// names, and a reflector the node holds there.
+func (s *LinkService) admitPunch(
+	ctx context.Context, link bool, reflexive string, nonce, directory []byte,
+) (punchCall, error) {
+
 	call := punchCall{peer: peeria.AuthenticatedIA(ctx)}
 	if call.peer.IsZero() {
 		return punchCall{}, connect.NewError(connect.CodePermissionDenied,
@@ -233,10 +237,17 @@ func (s *LinkService) admitPunch(ctx context.Context, link bool, reflexive strin
 		return punchCall{}, connect.NewError(connect.CodeInvalidArgument, "a nonce of 16 bytes")
 	}
 	copy(call.nonce[:], nonce)
+	id, err := parseDirectoryID(directory)
+	if err != nil {
+		return punchCall{}, connect.NewError(connect.CodeInvalidArgument, err.Error())
+	}
+	if id.IsZero() {
+		return punchCall{}, connect.NewError(connect.CodeInvalidArgument, "the request names no directory")
+	}
 	if s.Reflector == nil {
 		return punchCall{}, connect.NewError(connect.CodeUnimplemented, "the node punches nothing")
 	}
-	if call.reflector, err = s.Reflector(ctx); err != nil {
+	if call.reflector, err = s.Reflector(ctx, id); err != nil {
 		return punchCall{}, connect.NewError(connect.CodeUnavailable,
 			"no reflector answers the node").WithCause(err)
 	}
@@ -262,7 +273,7 @@ func (s *LinkService) punchProbe(
 	send func(*nodev1.PunchProbeReply) error,
 ) error {
 
-	call, err := s.admitPunch(ctx, false, req.ReflexiveAddr, req.Nonce)
+	call, err := s.admitPunch(ctx, false, req.ReflexiveAddr, req.Nonce, req.Directory)
 	if err != nil {
 		return err
 	}
@@ -291,7 +302,7 @@ func (s *LinkService) punchProbe(
 // a fresh link address — binds its link address, sends toward the caller's
 // reflexive address, and records it as the entry's locator.
 func (s *LinkService) Punch(ctx context.Context, req *nodev1.PunchRequest) (*nodev1.PunchReply, error) {
-	call, err := s.admitPunch(ctx, true, req.ReflexiveAddr, req.Nonce)
+	call, err := s.admitPunch(ctx, true, req.ReflexiveAddr, req.Nonce, req.Directory)
 	if err != nil {
 		return nil, err
 	}
@@ -386,12 +397,16 @@ func (s *LinkService) punchEntry(ctx context.Context, peer addr.IA, remoteIfID u
 // nothing; the measured provider's puncher satisfies it.
 type Puncher interface {
 	// Probe measures the round trip to the peer over a punched pair of
-	// ephemeral sockets.
-	Probe(ctx context.Context, peer addr.IA) (time.Duration, error)
-	// Establish punches from the entry's own link address and answers the
-	// peer's reflexive address and interface ID, the entry's side to
-	// record.
-	Establish(ctx context.Context, peer addr.IA, entry *links.Link) (netip.AddrPort, uint16, error)
+	// ephemeral sockets, each side's reflexive address as the peers of the
+	// directory the ID names see it.
+	Probe(ctx context.Context, peer addr.IA, id bus.DirectoryID) (time.Duration, error)
+	// Establish punches from the entry's own link address, each side's
+	// reflexive address as the peers of the directory the ID names see it,
+	// and answers the peer's reflexive address and interface ID, the
+	// entry's side to record.
+	Establish(
+		ctx context.Context, peer addr.IA, id bus.DirectoryID, entry *links.Link,
+	) (netip.AddrPort, uint16, error)
 }
 
 // punchPaths resolves the route a punch request rides, segment lookups
@@ -411,9 +426,10 @@ type puncher struct {
 	conn   *scion.Conn
 	engine *trust.Engine
 	paths  punchPaths
-	// reflector returns the rendezvous address of a node outside the NAT,
-	// whose acceptor echoes a socket's reflexive address.
-	reflector func(ctx context.Context) (netip.AddrPort, error)
+	// reflector returns the rendezvous address of a neighbor in the
+	// directory the ID names, whose acceptor echoes a socket's reflexive
+	// address.
+	reflector func(ctx context.Context, id bus.DirectoryID) (netip.AddrPort, error)
 	sockets   underlay.Sockets
 	// host is the control host, which the probe socket binds.
 	host netip.Addr
@@ -462,10 +478,13 @@ func (p *puncher) Close() error {
 	return p.qclt.Close()
 }
 
-// learn returns the socket's reflexive address, from the reflector the node
-// holds.
-func (p *puncher) learn(ctx context.Context, conn underlay.UDPConn) (netip.AddrPort, error) {
-	reflector, err := p.reflector(ctx)
+// learn returns the socket's reflexive address as the directory's peers see
+// it, from a reflector the node holds in the directory.
+func (p *puncher) learn(
+	ctx context.Context, conn underlay.UDPConn, id bus.DirectoryID,
+) (netip.AddrPort, error) {
+
+	reflector, err := p.reflector(ctx, id)
 	if err != nil {
 		return netip.AddrPort{}, err
 	}
@@ -474,8 +493,9 @@ func (p *puncher) learn(ctx context.Context, conn underlay.UDPConn) (netip.AddrP
 
 // Probe measures the round trip to the peer over a punched pair of
 // ephemeral sockets, the peer's answering for as long as the probe's
-// stream stays open.
-func (p *puncher) Probe(ctx context.Context, peer addr.IA) (time.Duration, error) {
+// stream stays open, each side's reflexive address as the directory's peers
+// see it.
+func (p *puncher) Probe(ctx context.Context, peer addr.IA, id bus.DirectoryID) (time.Duration, error) {
 	clt, release, err := p.client(ctx, peer)
 	if err != nil {
 		return 0, err
@@ -487,7 +507,7 @@ func (p *puncher) Probe(ctx context.Context, peer addr.IA) (time.Duration, error
 		return 0, fmt.Errorf("binding the probe socket: %w", err)
 	}
 	defer func() { _ = conn.Close() }()
-	mine, err := p.learn(ctx, conn)
+	mine, err := p.learn(ctx, conn, id)
 	if err != nil {
 		return 0, err
 	}
@@ -500,6 +520,7 @@ func (p *puncher) Probe(ctx context.Context, peer addr.IA) (time.Duration, error
 	stream, err := clt.PunchProbe(ctx, &nodev1.PunchProbeRequest{
 		ReflexiveAddr: mine.String(),
 		Nonce:         nonce[:],
+		Directory:     id[:],
 	})
 	if err != nil {
 		return 0, err
@@ -517,10 +538,11 @@ func (p *puncher) Probe(ctx context.Context, peer addr.IA) (time.Duration, error
 }
 
 // Establish punches from the entry's own link address, released before it
-// returns, and answers the peer's reflexive address and interface ID. Its
-// bind fails while the peer's own punch toward the node holds the address.
+// returns, each side's reflexive address as the directory's peers see it,
+// and answers the peer's reflexive address and interface ID. Its bind fails
+// while the peer's own punch toward the node holds the address.
 func (p *puncher) Establish(
-	ctx context.Context, peer addr.IA, entry *links.Link,
+	ctx context.Context, peer addr.IA, id bus.DirectoryID, entry *links.Link,
 ) (netip.AddrPort, uint16, error) {
 
 	p.mtx.Lock()
@@ -544,7 +566,7 @@ func (p *puncher) Establish(
 		return netip.AddrPort{}, 0, fmt.Errorf("binding the link address: %w", err)
 	}
 	defer func() { _ = conn.Close() }()
-	mine, err := p.learn(ctx, conn)
+	mine, err := p.learn(ctx, conn, id)
 	if err != nil {
 		return netip.AddrPort{}, 0, err
 	}
@@ -556,6 +578,7 @@ func (p *puncher) Establish(
 		ReflexiveAddr: mine.String(),
 		Nonce:         nonce[:],
 		IfId:          uint32(entry.IfID),
+		Directory:     id[:],
 	})
 	if err != nil {
 		return netip.AddrPort{}, 0, err

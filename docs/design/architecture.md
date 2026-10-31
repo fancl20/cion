@@ -108,10 +108,10 @@ run no loops of their own and hold no policy.
         ten seconds.
     *   The per-link one-way delay estimates the selection loop measures,
         which the beacons declare.
-    *   The node's own state: the host its publications carry and whether
-        its published rendezvous address went unanswered.
-    *   The node directory as the node holds it: each node's signed entry
-        its view shows.
+    *   The node's own state: the host its peers see it at, which its
+        publications carry.
+    *   The view of each directory the node holds, by directory ID: each
+        node's signed entry the view shows.
 
 ### Modules
 
@@ -205,14 +205,16 @@ applications reach it through the SCION library's socket.
 
 The topology source meets candidate peers at the rendezvous exchange — first
 contact, admission probe, and a joiner's establishment in one — and learns
-of them from the node directory every node holds: each node signs its own
-entry, and linked nodes flood new entries to each other and exchange
-summaries to catch up
+of them from the directory of each scope the node is in: a node groups its
+links by the host each peer sees it at, and the groups that links join form
+a scope. Each node signs its own entry in each of its directories; linked
+nodes flood new entries to each other and exchange summaries to catch up,
+each entry only over the links of its scope
 ([ADR-0032](/docs/adrs/0032-replicate-the-node-directory-on-every-node.md)).
 It reaches a candidate that reports itself undialable, such as a node behind
 a NAT, by punch instead: over a request both chains authenticate, each side
-learns its socket's reflexive address from a dialable neighbor and sends
-toward the other's.
+learns its socket's reflexive address from a dialable neighbor in the
+scope and sends toward the other's.
 Admitted links enter the neighbor table; the selection loop then measures
 every peer and keeps a link for what it adds into the region beyond its peer
 — a cheaper route or an independent one, judged by the end that dialed the

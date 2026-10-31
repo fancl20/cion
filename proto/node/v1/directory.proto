@@ -6,30 +6,37 @@ import "proto/crypto/v1/signed.proto";
 
 option go_package = "github.com/fancl20/cion/proto/node/v1;nodev1";
 
-// Entry is one node's statement in the node directory: everything the
-// selection loop needs to probe the node as a candidate neighbor, and the
-// node's report of how its peers reach it. It travels as the body of a SCION
-// signed message its node signed, as a beacon's AS entry does: the header
-// names the signer's ISD-AS, its subject key, the TRC its chain verifies
-// under, and the signing time. An entry naming no address withdraws its
-// signer.
+// Entry is one node's statement in one of the directories it holds: the
+// addresses that directory's peers reach it at, and its report of how they
+// reach each. It travels as the body of a SCION signed message its node
+// signed, as a beacon's AS entry does: the header names the signer's
+// ISD-AS, its subject key, the TRC its chain verifies under, and the signing
+// time. An entry naming no address withdraws its signer from the directory.
 message Entry {
   // isd_as is the signer's ISD-AS; a receiver refuses an entry whose signer
   // is another.
   uint64 isd_as = 1;
-  // control_addr is the underlay "host:port" address of the signer's control
-  // service, the endpoint port on the published host.
-  string control_addr = 2;
-  // rendezvous_addr is the underlay "host:port" address the signer's
+  // addresses are the signer's addresses, one per host the directory's
+  // peers see it at, ordered by host.
+  repeated Address addresses = 2;
+}
+
+// Address is one host a directory's peers see a node at, and the node's
+// report of how they reach it there.
+message Address {
+  // control_addr is the underlay "host:port" address of the node's control
+  // service, the endpoint port on the host.
+  string control_addr = 1;
+  // rendezvous_addr is the underlay "host:port" address the node's
   // rendezvous acceptor listens on for first contact, the fixed rendezvous
-  // port on the published host.
-  string rendezvous_addr = 3;
-  // behind_nat reports that the published host is not an address of the
-  // signer's own: a NAT stands between it and its peers.
-  bool behind_nat = 4;
-  // rendezvous_unanswered reports that the acceptor of the signer's latest
-  // link request got no answer at the published rendezvous address.
-  bool rendezvous_unanswered = 5;
+  // port on the host.
+  string rendezvous_addr = 2;
+  // behind_nat reports that the host is not an address of the node's own:
+  // a NAT stands between it and the directory's peers.
+  bool behind_nat = 3;
+  // rendezvous_unanswered reports that a linked peer that sees the node at
+  // the host got no answer at its rendezvous address.
+  bool rendezvous_unanswered = 4;
 }
 
 // Summary names a signer's greatest entry by what orders it: the TRC the
@@ -55,27 +62,36 @@ message PushRequest {
 message PushResponse {}
 
 message SyncRequest {
-  // summaries names each signer's greatest entry the caller holds.
-  repeated Summary summaries = 1;
+  // directory is the 16-byte ID of the directory the caller's end of the
+  // link joins.
+  bytes directory = 1;
+  // summaries names each signer's greatest entry the caller holds there.
+  repeated Summary summaries = 2;
 }
 
 message SyncResponse {
+  // directory is the 16-byte ID of the directory the receiver's end of the
+  // link joins, once it kept the lesser of the two ends' IDs.
+  bytes directory = 1;
   // entries holds the entries the caller lacks or holds a lesser one of,
   // each a signed message whose body is an Entry.
-  repeated proto.crypto.v1.SignedMessage entries = 1;
+  repeated proto.crypto.v1.SignedMessage entries = 2;
   // wanted names the signers whose entries the receiver lacks or holds a
   // lesser one of; the caller pushes them.
-  repeated uint64 wanted = 2;
+  repeated uint64 wanted = 3;
 }
 
-// DirectoryService replicates the node directory between linked nodes over
-// the one-hop channel, both ends authenticated by their chains: every node
-// holds each node's greatest signed entry and merges what it receives.
+// DirectoryService replicates the node's directories between linked nodes
+// over the one-hop channel, both ends authenticated by their chains: each
+// link joins one directory at each end, and every node holds each signer's
+// greatest signed entry of each directory it holds.
 service DirectoryService {
-  // Push hands the receiver entries; it keeps the greater ones and floods
-  // them on.
+  // Push hands the receiver entries of the link's directory; it keeps the
+  // greater ones and floods them on.
   rpc Push(PushRequest) returns (PushResponse);
-  // Sync hands the receiver the caller's summary; it answers with the
-  // entries the caller lacks, and names the ones it lacks itself.
+  // Sync hands the receiver the ID and the summary of the caller's
+  // directory for the link: the receiver keeps the lesser ID, answers with
+  // its own and the entries the caller lacks, and names the ones it lacks
+  // itself.
   rpc Sync(SyncRequest) returns (SyncResponse);
 }
