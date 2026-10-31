@@ -61,10 +61,12 @@ var (
 // maps them; the first-contact dials to the gateway's forwarded port are
 // carried to the upstream's; packets from outside to a drawn port the
 // behavior admits are reverse-translated to the mapping's inside socket;
-// every other packet to the gateway or to an inside host is dropped, the
-// silence a real NAT gives. The rewrite renews the IP and UDP checksums; the
-// reverse-translated delivery back to the inside socket is the proof it
-// renewed them right.
+// every other packet from outside to the band or to an inside host is
+// dropped, the silence a real NAT gives. A packet to the gateway from
+// inside, or from outside beyond the band, is the gateway's own: the
+// router's, where a node runs on it, and silence where none does. The
+// rewrite renews the IP and UDP checksums; the reverse-translated delivery
+// back to the inside socket is the proof it renewed them right.
 type NAT struct {
 	f        *Fabric
 	behavior Behavior
@@ -98,7 +100,7 @@ type mapping struct {
 }
 
 // ForwardingNAT draws a full-cone NAT on the fabric: the gateway address
-// it owns — a host no node may hold, for the NAT answers it — the
+// it owns — a host only its router may hold — the
 // upstream host the first-contact port forwards to at the same port, and
 // the inside hosts whose packets it carries. Every host beyond the inside
 // set and the gateway is outside.
@@ -157,10 +159,46 @@ func (f *Fabric) newNAT(
 // Gateway returns the address the NAT's crossings leave from.
 func (b *NAT) Gateway() netip.Addr { return b.gateway }
 
+// Router boots the stack of the NAT's own box, the router a node runs on:
+// the gateway, its own host, beside the inside host given, one of the NAT's
+// inside hosts. A socket bound to the wildcard sends to the NAT's inside
+// hosts from the inside host, crossing nothing, and to every other host
+// from the gateway, untranslated; it receives at both. The stack's
+// ephemeral ports lie above the mapping band, whose ports at the gateway
+// are the NAT's.
+func (b *NAT) Router(inside netip.Addr) *Node {
+	f := b.f
+	f.t.Helper()
+	if !b.inside[inside] {
+		f.t.Fatalf("the router's inside host %v is none of the NAT's inside hosts", inside)
+	}
+	f.mtx.Lock()
+	defer f.mtx.Unlock()
+	for _, host := range []netip.Addr{b.gateway, inside} {
+		if _, ok := f.hosts[host]; ok {
+			f.t.Fatalf("a node already holds the router's host %v", host)
+		}
+	}
+	routes := []tcpip.Route{{
+		Destination: anyHost(), NIC: 1, SourceHint: tcpip.AddrFrom4(b.gateway.As4()),
+	}}
+	for host := range b.inside {
+		routes = append(routes, tcpip.Route{
+			Destination: oneHost(host), NIC: 1, SourceHint: tcpip.AddrFrom4(inside.As4()),
+		})
+	}
+	n := f.bootLocked([]netip.Addr{b.gateway, inside}, routes)
+	if err := n.stack.SetPortRange(mappingPortBase+mappingPortSpan, math.MaxUint16); err != nil {
+		f.t.Fatalf("lifting the router's ephemeral ports above the mapping band: %v", err)
+	}
+	return n
+}
+
 // egress applies the NAT's rules to a packet leaving one of its inside
 // hosts: the rewritten packet and whether the NAT claimed it — nil
 // packet for one it dropped. A packet between two inside hosts crosses
-// nothing and is not claimed.
+// nothing and is not claimed, nor is one to the gateway, the gateway's own:
+// no mapping answers an inside host, for the NAT hairpins nothing.
 func (b *NAT) egress(pkt []byte) ([]byte, bool) {
 	ip := header.IPv4(pkt)
 	src := toNetip(ip.SourceAddress())
@@ -179,11 +217,7 @@ func (b *NAT) egress(pkt []byte) ([]byte, bool) {
 		to := netip.AddrPortFrom(b.upstream, b.firstContact)
 		port := b.mappingFor(netip.AddrPortFrom(src, udp.SourcePort()), to)
 		return rewriteDatagram(pkt, b.gateway, port, b.upstream, b.firstContact), true
-	case dst == b.gateway:
-		// The gateway answers nothing else: the silence a real NAT
-		// gives.
-		return nil, true
-	case !isUDP:
+	case dst == b.gateway || !isUDP:
 		return nil, false
 	default:
 		// Inside to outside: the source becomes the gateway under the
@@ -196,16 +230,18 @@ func (b *NAT) egress(pkt []byte) ([]byte, bool) {
 }
 
 // ingress applies the NAT's rules to a packet arriving from outside:
-// one addressed to the gateway is reverse-translated to the inside socket
-// of the mapping its port spells, when the behavior admits its source, and
-// dropped otherwise; one addressed to an inside host directly is dropped,
-// for every crossing is named for the gateway. A packet from an inside host
-// is not the NAT's to admit.
+// one addressed to the gateway's mapping band is reverse-translated to the
+// inside socket of the mapping its port spells, when the behavior admits
+// its source, and dropped otherwise; one addressed to an inside host
+// directly is dropped, for every crossing is named for the gateway. A
+// packet from an inside host is not the NAT's to admit, nor is one from
+// the gateway itself, the router's own, or one to the gateway beyond the
+// band.
 func (b *NAT) ingress(pkt []byte) ([]byte, bool) {
 	ip := header.IPv4(pkt)
 	src := toNetip(ip.SourceAddress())
 	dst := toNetip(ip.DestinationAddress())
-	if b.inside[src] {
+	if b.inside[src] || src == b.gateway {
 		return nil, false
 	}
 	if b.inside[dst] {
@@ -213,12 +249,10 @@ func (b *NAT) ingress(pkt []byte) ([]byte, bool) {
 		// observations spell.
 		return nil, true
 	}
-	if dst != b.gateway {
+	if dst != b.gateway || ip.TransportProtocol() != header.UDPProtocolNumber ||
+		len(pkt) < int(ip.HeaderLength())+header.UDPMinimumSize ||
+		!inMappingBand(udpOf(pkt).DestinationPort()) {
 		return nil, false
-	}
-	if ip.TransportProtocol() != header.UDPProtocolNumber ||
-		len(pkt) < int(ip.HeaderLength())+header.UDPMinimumSize {
-		return nil, true
 	}
 	udp := udpOf(pkt)
 	m := b.admit(udp.DestinationPort(), netip.AddrPortFrom(src, udp.SourcePort()))
@@ -328,7 +362,12 @@ func (b *NAT) Mappings() []netip.AddrPort {
 // MappingPort reports whether an address's port lies in the NAT's
 // drawn mapping band.
 func MappingPort(ap netip.AddrPort) bool {
-	return ap.Port() >= mappingPortBase && ap.Port() < mappingPortBase+mappingPortSpan
+	return inMappingBand(ap.Port())
+}
+
+// inMappingBand reports whether the port lies in the mapping band.
+func inMappingBand(port uint16) bool {
+	return port >= mappingPortBase && port < mappingPortBase+mappingPortSpan
 }
 
 // rewriteDatagram rewrites the packet's UDP datagram — its source and

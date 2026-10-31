@@ -2,12 +2,13 @@
 // netstack per node — the SOCKS application's own recipe — connected by a
 // forwarder the harness owns, so a lab's nodes hold no kernel port at all
 // and the network's behaviors are taps the lab draws: delay, loss,
-// blackhole, cut, and the NAT. The hosts the labs draw
-// from the loopback pool become plain names, each stack routing its own, so
-// two fabrics may draw the same host and two labs may overlap freely; the
-// host names a lab draws resolve through every node's socket source, and no
-// lookup reaches the system resolver. Every stack and every tap's scheduler
-// read one clock, the seam a deterministic network later builds on.
+// blackhole, cut, and the NAT, on whose router a node may run. The hosts
+// the labs draw from the loopback pool become plain names, each stack
+// routing its own, so two fabrics may draw the same host and two labs may
+// overlap freely; the host names a lab draws resolve through every node's
+// socket source, and no lookup reaches the system resolver. Every stack and
+// every tap's scheduler read one clock, the seam a deterministic network
+// later builds on.
 package fabric
 
 import (
@@ -157,7 +158,8 @@ func (f *Fabric) stop() {
 // interface carries the host; each stack routes its own; the host's stack
 // stands for the fabric's life, so a node's restart rebinds on it — the
 // stack's immediate release making the ports free again. A second draw of
-// one host names the one stack that holds it.
+// one host names the one stack that holds it. A NAT's gateway is its
+// router's alone.
 func (f *Fabric) Node(host netip.Addr) *Node {
 	f.t.Helper()
 	if host.IsUnspecified() || !host.Is4() {
@@ -168,6 +170,21 @@ func (f *Fabric) Node(host netip.Addr) *Node {
 	if n, ok := f.hosts[host]; ok {
 		return n
 	}
+	for _, b := range f.nats {
+		if b.gateway == host {
+			f.t.Fatalf("the host %v is a NAT's gateway, which its router alone holds", host)
+		}
+	}
+	// Everything the node sends leaves through the one NIC: the fabric's
+	// hosts are one hop apart by construction.
+	return f.bootLocked([]netip.Addr{host}, []tcpip.Route{{Destination: anyHost(), NIC: 1}})
+}
+
+// bootLocked boots a stack holding the hosts, the first its own, every one
+// on its one NIC, sending by the routes given; the caller holds the
+// fabric's lock and has checked no stack holds the hosts.
+func (f *Fabric) bootLocked(hosts []netip.Addr, routes []tcpip.Route) *Node {
+	f.t.Helper()
 	transports := []stack.TransportProtocolFactory{tcp.NewProtocol, udp.NewProtocol}
 	if f.udpOnly {
 		transports = []stack.TransportProtocolFactory{udp.NewProtocol}
@@ -185,42 +202,50 @@ func (f *Fabric) Node(host netip.Addr) *Node {
 	})
 	n := &Node{
 		f:     f,
-		host:  host,
+		host:  hosts[0],
 		stack: s,
 		link:  channel.New(queueDepth, underlay.BufferSize, ""),
 	}
 	if err := s.CreateNIC(1, n.link); err != nil {
-		f.t.Fatalf("creating %v's NIC: %v", host, err)
+		f.t.Fatalf("creating %v's NIC: %v", hosts[0], err)
 	}
-	if err := s.AddProtocolAddress(1, tcpip.ProtocolAddress{
-		Protocol: header.IPv4ProtocolNumber,
-		AddressWithPrefix: tcpip.AddressWithPrefix{
-			Address:   tcpip.AddrFrom4(host.As4()),
-			PrefixLen: 32,
-		},
-	}, stack.AddressProperties{}); err != nil {
-		f.t.Fatalf("adding %v's address: %v", host, err)
+	for _, host := range hosts {
+		if err := s.AddProtocolAddress(1, tcpip.ProtocolAddress{
+			Protocol: header.IPv4ProtocolNumber,
+			AddressWithPrefix: tcpip.AddressWithPrefix{
+				Address:   tcpip.AddrFrom4(host.As4()),
+				PrefixLen: 32,
+			},
+		}, stack.AddressProperties{}); err != nil {
+			f.t.Fatalf("adding %v's address: %v", host, err)
+		}
+		f.hosts[host] = n
 	}
-	// Everything the node sends leaves through the one NIC: the fabric's
-	// hosts are one hop apart by construction. The loopback pool's hosts
-	// need no route at all — the stack carries loopback destinations out
-	// its interfaces by itself — and the table's default covers whatever
-	// else a lab names.
-	subnet, err := tcpip.NewSubnet(
-		tcpip.AddrFrom4([4]byte{}), tcpip.MaskFromBytes([]byte{0, 0, 0, 0}))
-	if err != nil {
-		f.t.Fatalf("building the default route: %v", err)
-	}
-	s.SetRouteTable([]tcpip.Route{{Destination: subnet, NIC: 1}})
-	f.hosts[host] = n
+	// A socket bound to a host sends from it; one bound to the wildcard
+	// sends from the host its route toward the destination hints, the
+	// stack's own where the route hints none.
+	s.SetRouteTable(routes)
 	f.wg.Add(1)
 	go f.forward(n)
 	return n
 }
 
-// Node is one host's stack on the fabric.
+// anyHost is the default route's destination: every IPv4 host.
+func anyHost() tcpip.Subnet {
+	return tcpip.AddressWithPrefix{Address: tcpip.AddrFrom4([4]byte{})}.Subnet()
+}
+
+// oneHost is a route's destination of the host alone.
+func oneHost(host netip.Addr) tcpip.Subnet {
+	return tcpip.AddressWithPrefix{Address: tcpip.AddrFrom4(host.As4()), PrefixLen: 32}.Subnet()
+}
+
+// Node is one host's stack on the fabric — or a router's, holding the
+// NAT's gateway beside an inside host.
 type Node struct {
-	f     *Fabric
+	f *Fabric
+	// host is the stack's own host: the one it was booted for, a router's
+	// gateway.
 	host  netip.Addr
 	stack *stack.Stack
 	link  *channel.Endpoint
@@ -245,21 +270,40 @@ func (n *Node) DrawPort() uint16 {
 
 // Sockets is the socket source that binds on the node's stack: the seam the
 // node's sites construct through, its ports the stack's alone and their
-// release immediate, its names the ones the lab drew on the fabric.
+// release immediate, its routes the stack's, its names the ones the lab
+// drew on the fabric.
 func (n *Node) Sockets() underlay.Sockets {
 	return underlay.Sockets{
 		ListenUDP:   n.listenUDP,
 		ListenTCP:   n.listenTCP,
 		LookupNetIP: n.f.lookup,
+		RouteSource: n.routeSource,
 	}
 }
 
+// routeSource returns the host the stack's routes send from toward dst — a
+// router's inside host toward the NAT's inside hosts, the stack's own host
+// otherwise — as the kernel's routing table answers it.
+func (n *Node) routeSource(dst netip.Addr) (netip.Addr, error) {
+	if !dst.Unmap().Is4() {
+		return netip.Addr{}, fmt.Errorf("the fabric routes IPv4 alone, not %v", dst)
+	}
+	r, err := n.stack.FindRoute(0, tcpip.Address{}, tcpip.AddrFrom4(dst.Unmap().As4()),
+		header.IPv4ProtocolNumber, false)
+	if err != nil {
+		return netip.Addr{}, fmt.Errorf("routing toward %v: %v", dst, err)
+	}
+	defer r.Release()
+	return toNetip(r.LocalAddress()), nil
+}
+
 // listenUDP binds an unconnected UDP socket on the node's stack at the
-// concrete address given — per-family ports and immediate release are the
-// stack's own facts, so the remote hint names nothing to select. The stack
-// draws the port where the address names none. The bind names no NIC, so
-// the stack checks the address against the one its NIC holds: an IPv4 bind
+// address given — per-family ports and immediate release are the stack's
+// own facts, so the remote hint names nothing to select. The stack draws
+// the port where the address names none. A host's bind names no NIC, so
+// the stack checks the host against the ones its NIC holds: an IPv4 bind
 // naming the NIC skips that check, and would bind a host the node lacks.
+// The wildcard's bind receives at every host the stack holds.
 func (n *Node) listenUDP(
 	listen *net.UDPAddr, _ netip.AddrPort,
 ) (underlay.UDPConn, error) {
@@ -273,9 +317,11 @@ func (n *Node) listenUDP(
 	if tcpErr != nil {
 		return nil, fmt.Errorf("creating the UDP endpoint: %v", tcpErr)
 	}
-	if tcpErr := ep.Bind(tcpip.FullAddress{
-		Addr: tcpip.AddrFrom4(ap.Addr().As4()), Port: ap.Port(),
-	}); tcpErr != nil {
+	bind := tcpip.FullAddress{Port: ap.Port()}
+	if !ap.Addr().IsUnspecified() {
+		bind.Addr = tcpip.AddrFrom4(ap.Addr().As4())
+	}
+	if tcpErr := ep.Bind(bind); tcpErr != nil {
 		ep.Close()
 		return nil, bindError(tcpErr)
 	}
@@ -304,12 +350,11 @@ func (n *Node) listenTCP(addr string) (net.Listener, error) {
 	return ln, nil
 }
 
-// listenAddr resolves the address a UDP bind names, refusing the wildcard:
-// the fabric binds the concrete address it is given. A v4-mapped form names
-// the plain address beneath it.
+// listenAddr resolves the address a UDP bind names: a host, or the IPv4
+// wildcard. A v4-mapped form names the plain address beneath it.
 func listenAddr(listen *net.UDPAddr) (netip.AddrPort, error) {
-	if listen == nil || listen.IP == nil || listen.IP.IsUnspecified() {
-		return netip.AddrPort{}, fmt.Errorf("the fabric binds a concrete address, not %v", listen)
+	if listen == nil || listen.IP == nil {
+		return netip.AddrPort{}, fmt.Errorf("the fabric binds an address, not %v", listen)
 	}
 	ip, ok := netip.AddrFromSlice(listen.IP)
 	if !ok || !ip.Unmap().Is4() {
@@ -492,8 +537,14 @@ func (c *fabricConn) SetWriteDeadline(t time.Time) error {
 	return c.conn.SetWriteDeadline(t)
 }
 
+// LocalAddr returns the bound address, the wildcard's spelled as the
+// kernel spells it: 0.0.0.0 beside the port.
 func (c *fabricConn) LocalAddr() *net.UDPAddr {
-	return c.conn.LocalAddr().(*net.UDPAddr)
+	a := c.conn.LocalAddr().(*net.UDPAddr)
+	if len(a.IP) == 0 {
+		a.IP = net.IPv4zero.To4()
+	}
+	return a
 }
 
 // SetReadBuffer and SetWriteBuffer size nothing: the stack's buffers are

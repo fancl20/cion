@@ -250,7 +250,7 @@ func setupNode(
 	if err := n.selectProvider(); err != nil {
 		return nil, err
 	}
-	n.wildcardHost = newWildcardHost(n.bus.Self(), n.bus.Links())
+	n.wildcardHost = newWildcardHost(n.bus.Self(), n.bus.Links(), n.sockets)
 	if created {
 		// The one moment before the phases: the provider completes the
 		// provisional ISD draw — the measured provider's from a bootstrap

@@ -292,3 +292,96 @@ func TestNATsChain(t *testing.T) {
 		}
 	})
 }
+
+// routerInside is the router's inside host the router proofs draw.
+var routerInside = netip.MustParseAddr("127.0.1.17")
+
+// TestRouterSendsFromEachSide checks the stack on a NAT's router: its
+// ephemeral ports lie above the mapping band, and its routes answer its
+// inside host toward the NAT's inside hosts and the gateway toward every
+// other host; a wildcard-bound socket on it, spelled 0.0.0.0, reaches an
+// inside host from the inside host, crossing nothing, and an outside host
+// from the gateway under its own port, untranslated; the outside host's
+// reply to the gateway and the inside host's datagram to either of the
+// router's hosts reach it, as a gateway-bound socket's datagram reaches the
+// inside host. The NAT keeps the gateway's mapping band: an outside
+// datagram to an undrawn port of it falls, and an inside host's crossing
+// still leaves translated. A second draw of the gateway names the router's
+// stack.
+func TestRouterSendsFromEachSide(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		f := New(t, UDPOnly())
+		inside, outside := f.Node(insideAddr), f.Node(upstreamAddr)
+		b := f.NAT(PortRestricted, gatewayAddr, insideAddr, routerInside)
+		router := b.Router(routerInside)
+		if again := f.Node(gatewayAddr); again != router {
+			t.Fatal("a second draw of the gateway named another stack than the router's")
+		}
+		if first, _ := router.stack.PortRange(); first < mappingPortBase+mappingPortSpan {
+			t.Errorf("the router's ephemeral ports start at %d, inside or below the mapping band", first)
+		}
+		for dst, want := range map[netip.Addr]netip.Addr{
+			insideAddr: routerInside, routerInside: routerInside,
+			upstreamAddr: gatewayAddr, gatewayAddr: gatewayAddr,
+		} {
+			if got, err := router.Sockets().Source(dst); err != nil || got != want {
+				t.Errorf("the router's route toward %v sends from %v, %v; want %v", dst, got, err, want)
+			}
+		}
+
+		cr, err := router.Sockets().NewUDP(&net.UDPAddr{IP: net.IPv4zero}, netip.AddrPort{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = cr.Close() }()
+		bound := cr.LocalAddr().AddrPort()
+		if bound.Addr() != netip.IPv4Unspecified() {
+			t.Fatalf("the router's wildcard socket is bound at %v, want 0.0.0.0", bound)
+		}
+		ci, ia := listen(t, inside)
+		co, oa := listen(t, outside)
+
+		send(t, cr, ia, "to the inside")
+		if got, from := recv(t, ci, testWait); got != "to the inside" ||
+			from != netip.AddrPortFrom(routerInside, bound.Port()) {
+			t.Errorf("the inside host received %q from %v, want the datagram from the router's inside host",
+				got, from)
+		}
+		send(t, cr, oa, "to the outside")
+		atGateway := netip.AddrPortFrom(gatewayAddr, bound.Port())
+		if got, from := recv(t, co, testWait); got != "to the outside" || from != atGateway {
+			t.Errorf("the outside host received %q from %v, want the datagram from %v", got, from, atGateway)
+		}
+		send(t, co, atGateway, "the outside reply")
+		if got, from := recv(t, cr, testWait); got != "the outside reply" || from != oa {
+			t.Errorf("the router received %q from %v, want the outside reply from %v", got, from, oa)
+		}
+		for _, to := range []netip.AddrPort{atGateway, netip.AddrPortFrom(routerInside, bound.Port())} {
+			send(t, ci, to, "the inside datagram")
+			if got, from := recv(t, cr, testWait); got != "the inside datagram" || from != ia {
+				t.Errorf("the router received %q from %v at %v, want the inside datagram from %v",
+					got, from, to, ia)
+			}
+		}
+		cg, err := router.Sockets().NewUDP(&net.UDPAddr{IP: gatewayAddr.AsSlice()}, netip.AddrPort{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = cg.Close() }()
+		send(t, cg, ia, "from the gateway")
+		if got, from := recv(t, ci, testWait); got != "from the gateway" || from != cg.LocalAddr().AddrPort() {
+			t.Errorf("the inside host received %q from %v, want the datagram from the router's gateway socket",
+				got, from)
+		}
+
+		undrawn := netip.AddrPortFrom(gatewayAddr, mappingPortBase+mappingPortSpan-1)
+		send(t, co, undrawn, "the guess")
+		if got, _ := recv(t, cr, dropWait); got != "" {
+			t.Errorf("a datagram to the mapping band reached the router as %q", got)
+		}
+		send(t, ci, oa, "the crossing")
+		if _, from := recv(t, co, testWait); from.Addr() != gatewayAddr || !mappingPort(from.Port()) {
+			t.Errorf("the inside host's crossing arrived from %v, want the gateway under a drawn port", from)
+		}
+	})
+}

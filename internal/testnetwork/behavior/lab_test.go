@@ -26,6 +26,16 @@ func rendezvous(n *testnetwork.Node) string {
 	return netip.AddrPortFrom(n.Host(), measured.RendezvousPort).String()
 }
 
+// rendezvousFrom returns the parent's rendezvous address as the node
+// reaches it: a router's inside host from behind its NAT, the parent's
+// advertised address otherwise.
+func (n *network) rendezvousFrom(node, parent int) string {
+	if inside, ok := n.inside[parent]; ok && n.wire[node] == n.hosts[parent] {
+		return netip.AddrPortFrom(inside, measured.RendezvousPort).String()
+	}
+	return rendezvous(n.nodes[parent])
+}
+
 const (
 	// settleQuiet is how long a link set must hold unchanged to count as
 	// settled: twenty selection windows at the daemon's pacing.
@@ -35,14 +45,18 @@ const (
 )
 
 // network is a lab's booted network: its nodes, the founding core first,
-// on the fabric's hosts — some behind NATs, where a lab draws them —
+// on the fabric's hosts — some behind NATs, where a lab draws them, and
+// some on a NAT's router —
 // the one-way delay the fabric holds between each pair, and the pairs cut.
 type network struct {
 	fab   *fabric.Fabric
 	hosts []netip.Addr
 	// wire holds each node's address on the wire, where its peers' packets
 	// go: its host, or the gateway of the NAT it sits behind.
-	wire   []netip.Addr
+	wire []netip.Addr
+	// inside holds each router's inside host, by node: where the nodes
+	// behind its NAT reach it.
+	inside map[int]netip.Addr
 	nodes  []*testnetwork.Node
 	oneWay [][]time.Duration
 	taps   map[[2]int]func()
@@ -56,6 +70,7 @@ func newNetwork(t *testing.T, fab *fabric.Fabric, size int) *network {
 		fab:    fab,
 		hosts:  make([]netip.Addr, size),
 		wire:   make([]netip.Addr, size),
+		inside: map[int]netip.Addr{},
 		nodes:  make([]*testnetwork.Node, size),
 		oneWay: make([][]time.Duration, size),
 		taps:   map[[2]int]func(){},
@@ -101,20 +116,71 @@ func (n *network) site(t *testing.T, behavior fabric.Behavior, members ...int) *
 	return b
 }
 
+// routedSite places the members behind one NAT of the behavior given,
+// whose router the router node runs on: the router's host is the NAT's
+// gateway, and an inside host drawn for it is where the members reach it.
+// The router's packets to the members leave from its inside host and cross
+// nothing, its packets to every other node leave from the gateway, and the
+// members' packets to every other node leave from the gateway translated.
+// A lab places a routed site before it boots the router or draws delays.
+func (n *network) routedSite(
+	t *testing.T, behavior fabric.Behavior, router int, members ...int,
+) *fabric.NAT {
+
+	t.Helper()
+	n.inside[router] = testnetwork.HostSlot(t)
+	inside := []netip.Addr{n.inside[router]}
+	for _, i := range members {
+		inside = append(inside, n.hosts[i])
+	}
+	b := n.fab.NAT(behavior, n.hosts[router], inside...)
+	b.Router(n.inside[router])
+	for _, i := range members {
+		n.wire[i] = b.Gateway()
+	}
+	return b
+}
+
 // drawPair draws a tap for each direction the pair's packets take: from
 // each node's host — the fabric shapes a packet before any NAT
 // translates it — to the other's address on the wire. One tap covers both
 // directions of a pair whose packets go host to host: two public
-// nodes, or two behind one NAT.
+// nodes, two behind one NAT, or a router and a node behind its NAT, at the
+// router's inside host. A pair across a router's NAT draws one direction
+// alone, from the node behind it: the other's packets go to the gateway,
+// which the router's own pair with the other node shapes.
 func (n *network) drawPair(i, j int, draw func(a, b netip.Addr) func()) func() {
+	if inside, ok := n.inside[i]; ok && n.wire[j] == n.hosts[i] {
+		return draw(inside, n.hosts[j])
+	}
+	if inside, ok := n.inside[j]; ok && n.wire[i] == n.hosts[j] {
+		return draw(n.hosts[i], inside)
+	}
 	if n.wire[i] == n.wire[j] || n.wire[i] == n.hosts[i] && n.wire[j] == n.hosts[j] {
 		return draw(n.hosts[i], n.hosts[j])
+	}
+	if n.routed(n.wire[i]) {
+		return draw(n.hosts[i], n.wire[j])
+	}
+	if n.routed(n.wire[j]) {
+		return draw(n.hosts[j], n.wire[i])
 	}
 	there, back := draw(n.hosts[i], n.wire[j]), draw(n.hosts[j], n.wire[i])
 	return func() {
 		there()
 		back()
 	}
+}
+
+// routed reports whether a router holds the address: a gateway one of the
+// network's nodes runs on.
+func (n *network) routed(addr netip.Addr) bool {
+	for router := range n.inside {
+		if n.hosts[router] == addr {
+			return true
+		}
+	}
+	return false
 }
 
 // pair names an unordered pair of the network's nodes.
@@ -314,6 +380,32 @@ func upLinks(ctx context.Context, n *testnetwork.Node) int {
 		}
 	}
 	return up
+}
+
+// linkDelays returns, by peer, the one-way delay node i's selection last
+// measured on each of its established links to the network's nodes, and
+// the delay the network drew for the pair.
+func linkDelays(t *testing.T, n *network, i int) (measured, drawn map[int]time.Duration) {
+	t.Helper()
+	index := make(map[addr.IA]int, len(n.nodes))
+	for j, node := range n.nodes {
+		index[node.App().IA()] = j
+	}
+	entries, err := n.nodes[i].App().Links().All(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	latencies := n.nodes[i].App().Bus().Latencies().Latest()
+	measured, drawn = map[int]time.Duration{}, map[int]time.Duration{}
+	for _, l := range entries {
+		j, ok := index[l.NeighborIA]
+		if !ok || l.State != links.StateEstablished {
+			continue
+		}
+		measured[j] = latencies.Of(l.IfID)
+		drawn[j], _ = n.delay(i, j)
+	}
+	return measured, drawn
 }
 
 // namedPeers counts the peers the node's directories name.

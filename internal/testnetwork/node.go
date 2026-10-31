@@ -47,8 +47,8 @@ type Node struct {
 // App returns the node's assembly.
 func (n *Node) App() *services.App { return n.app }
 
-// Host returns the control address's host: the address the labs name the
-// node by.
+// Host returns the address the labs name the node by: the control
+// address's host, or the fabric's host it booted on under a wildcard bind.
 func (n *Node) Host() netip.Addr { return n.host }
 
 // StateDir returns the node's state directory: a node booted on it again
@@ -108,7 +108,8 @@ func bootOn(
 // the node's stack and every port drawn there, no kernel port held or
 // probed. A founding core's domain names its host on the fabric, so the
 // founder publishes the host its peers reach and stands in the directory,
-// as a production founder does.
+// as a production founder does. A node bound to the wildcard is named by
+// the host.
 func bootOnFabric(
 	t *testing.T, f *fabric.Fabric, host netip.Addr,
 	mutate func(*services.NodeConfig),
@@ -116,7 +117,7 @@ func bootOnFabric(
 
 	t.Helper()
 	stack := f.Node(host)
-	return bootOn(t, stack.Sockets(), func(cfg *services.NodeConfig) {
+	n := bootOn(t, stack.Sockets(), func(cfg *services.NodeConfig) {
 		if cfg.Internal == "" {
 			cfg.Internal = netip.AddrPortFrom(host, stack.DrawPort()).String()
 		}
@@ -130,6 +131,16 @@ func bootOnFabric(
 			f.Name(cfg.Domain, host)
 		}
 	})
+	if n.host.IsUnspecified() {
+		n.host = host
+	}
+	return n
+}
+
+// Wildcard returns the address's port on the IPv4 wildcard: the bind that
+// receives at every host the node's stack holds, the daemon's default.
+func Wildcard(addr string) string {
+	return netip.AddrPortFrom(netip.IPv4Unspecified(), netip.MustParseAddrPort(addr).Port()).String()
 }
 
 // InBubble runs a lab's body inside a synctest bubble, on virtual time: the

@@ -36,7 +36,7 @@ type wildcardHost struct {
 	self  *bus.Topic[bus.SelfState]
 	links *bus.Topic[bus.LinkState]
 	// route asks the routing table for the local address toward a
-	// destination; the field is the tests' seam.
+	// destination: the socket source's.
 	route func(netip.Addr) (netip.Addr, error)
 
 	mtx sync.Mutex
@@ -48,10 +48,13 @@ type wildcardHost struct {
 }
 
 // newWildcardHost builds the resolution over the node's own host, its
-// links, and the kernel's routing table, the one a wildcard bind's sockets
+// links, and the routing table the socket source's wildcard-bound sockets
 // send by.
-func newWildcardHost(self *bus.Topic[bus.SelfState], links *bus.Topic[bus.LinkState]) *wildcardHost {
-	return &wildcardHost{self: self, links: links, route: underlay.RouteSource}
+func newWildcardHost(
+	self *bus.Topic[bus.SelfState], links *bus.Topic[bus.LinkState], sockets underlay.Sockets,
+) *wildcardHost {
+
+	return &wildcardHost{self: self, links: links, route: sockets.Source}
 }
 
 // resolve returns the host: the memoized answer while the destination

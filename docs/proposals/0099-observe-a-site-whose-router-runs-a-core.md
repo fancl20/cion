@@ -150,3 +150,14 @@ it before. The site and NAT networks keep their nodes and taps.
 *   **The benchmark** runs and reports, five runs.
 
 ## Implementation history
+
+*   Landed as proposed: the router, the wildcard bind, and the stacks'
+    routes ([nat.go](/internal/testnetwork/fabric/nat.go),
+    [fabric.go](/internal/testnetwork/fabric/fabric.go)), the routing table
+    in the socket source ([sockets.go](/pkg/libs/underlay/sockets.go),
+    [wildcardhost.go](/internal/services/wildcardhost.go)), and the gateway
+    site network with its lab and benchmark
+    ([site_test.go](/internal/testnetwork/behavior/site_test.go),
+    [lab_test.go](/internal/testnetwork/behavior/lab_test.go)). The
+    Summary's figures are the benchmark's five runs; the site network's,
+    rerun on this change, hold.

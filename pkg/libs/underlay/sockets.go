@@ -43,10 +43,11 @@ type UDPConn interface {
 }
 
 // Sockets is the node's socket source: the seam the packages that bind
-// underlay sockets or resolve names construct through, so the whole node
-// can boot on one network. The zero value is the kernel source — the
-// sockets and the resolver the sites used before the seam — so a caller
-// that names no network gets the kernel's own semantics.
+// underlay sockets, resolve names, or ask the routes construct through, so
+// the whole node can boot on one network. The zero value is the kernel
+// source — the sockets, the resolver, and the routing table the sites used
+// before the seam — so a caller that names no network gets the kernel's
+// own semantics.
 type Sockets struct {
 	// ListenUDP binds an unconnected UDP socket on listen. A valid
 	// remoteHint names the family a wildcard listen host binds under —
@@ -60,10 +61,14 @@ type Sockets struct {
 	// "ip", "ip4", or "ip6" — as net.Resolver's method of the name does:
 	// the founding core's resolution of its own domain.
 	LookupNetIP func(ctx context.Context, network, host string) ([]netip.Addr, error)
+	// RouteSource returns the local address the routes send from toward a
+	// destination, as RouteSource does on the kernel's table: the host a
+	// wildcard-bound socket's packets toward it leave from.
+	RouteSource func(dst netip.Addr) (netip.Addr, error)
 }
 
-// Kernel is the kernel socket source: the sockets and the resolver the sites
-// used before the seam.
+// Kernel is the kernel socket source: the sockets, the resolver, and the
+// routing table the sites used before the seam.
 var Kernel = Sockets{}
 
 // NewUDP binds an unconnected UDP socket through the source, the kernel's
@@ -91,6 +96,15 @@ func (s Sockets) Lookup(ctx context.Context, network, host string) ([]netip.Addr
 		return s.LookupNetIP(ctx, network, host)
 	}
 	return net.DefaultResolver.LookupNetIP(ctx, network, host)
+}
+
+// Source returns the local address the source's routes send from toward
+// dst, the kernel's routing table's where the source names none.
+func (s Sockets) Source(dst netip.Addr) (netip.Addr, error) {
+	if s.RouteSource != nil {
+		return s.RouteSource(dst)
+	}
+	return RouteSource(dst)
 }
 
 // kernelConn is the kernel's UDP socket: a net.UDPConn beside the batch

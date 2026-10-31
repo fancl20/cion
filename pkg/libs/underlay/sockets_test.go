@@ -35,6 +35,27 @@ func TestLookupThroughTheSource(t *testing.T) {
 	}
 }
 
+// TestSourceThroughTheSource checks the source's routes: a source naming
+// them answers through them, and the kernel source through the kernel's
+// routing table, which sends toward a host an interface carries from the
+// host itself.
+func TestSourceThroughTheSource(t *testing.T) {
+	dst, want := netip.MustParseAddr("192.0.2.7"), netip.MustParseAddr("10.0.0.2")
+	s := Sockets{RouteSource: func(toward netip.Addr) (netip.Addr, error) {
+		if toward != dst {
+			return netip.Addr{}, fmt.Errorf("routing toward %v", toward)
+		}
+		return want, nil
+	}}
+	if got, err := s.Source(dst); err != nil || got != want {
+		t.Errorf("the source's route sends from %v, %v; want %v", got, err, want)
+	}
+	loopback := netip.MustParseAddr("127.0.0.1")
+	if got, err := Kernel.Source(loopback); err != nil || got != loopback {
+		t.Errorf("the kernel's route sends from %v, %v; want %v", got, err, loopback)
+	}
+}
+
 // TestNewUDPConnWildcardFamily checks the kernel socket's family pairing:
 // the remote hint names the family, and a wildcard listen host of the other
 // family — the wildcard-bound link's recorded local address, whose port
