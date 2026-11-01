@@ -1,6 +1,6 @@
 # Verify Each Chain's Membership and Remove Cores at Once
 
-*   Status: proposed
+*   Status: accepted
 *   Date: 2026-10-31
 
 [TOC]

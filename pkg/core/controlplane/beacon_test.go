@@ -17,6 +17,7 @@ import (
 	"testing/synctest"
 	"time"
 
+	"connectrpc.com/connect"
 	"github.com/google/go-cmp/cmp"
 	"github.com/scionproto/scion/pkg/addr"
 	cppb "github.com/scionproto/scion/pkg/proto/control_plane"
@@ -44,7 +45,7 @@ func macFactory() func() hash.Hash {
 }
 
 // fakeSender records the beacon and registration RPCs the beaconer sends; a
-// peer in failFor answers with a dial's failure, and an RPC to a peer in
+// peer in failFor answers every RPC with its error, and an RPC to a peer in
 // dark waits until the peer's channel closes or the RPC's deadline passes —
 // a peer gone silent. attempts counts every RPC per peer, the waiting ones
 // included.
@@ -73,6 +74,9 @@ func (s *fakeSender) Beacon(ctx context.Context, peer *scion.Addr, pcb *cppb.Pat
 	}
 	s.mtx.Lock()
 	defer s.mtx.Unlock()
+	if err := s.failFor[peer.IA]; err != nil {
+		return err
+	}
 	s.beacons = append(s.beacons, sentBeacon{peer: peer, pcb: pcb})
 	return nil
 }
@@ -1102,6 +1106,51 @@ func TestPropagateOnceSkipsNeighborsTheBeaconCrosses(t *testing.T) {
 	}
 	if diff := cmp.Diff(want, propagatedHops(t, f)); diff != "" {
 		t.Errorf("propagated hops by peer (-want +got):\n%s", diff)
+	}
+}
+
+// TestPropagateOnceEndsARoundAtAFailedCall checks a neighbor's round: B —
+// under the core A on link 1, beside C on link 2 and D on link 4 — holds [A]
+// and [A, D], both bound for C. A call to C that fails short of C's answer,
+// a refused dial, ends C's round at its first beacon, while a beacon C
+// rejects as invalid leaves the other to go; D gets its beacon either way.
+func TestPropagateOnceEndsARoundAtAFailedCall(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		code  connect.Code
+		calls int
+	}{
+		{"a refused dial", connect.CodeUnavailable, 1},
+		{"a rejected beacon", connect.CodeInvalidArgument, 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newBeaconFixture(t)
+			ctx := context.Background()
+			b := beaconerOver(t, f, tableTopic(map[uint16]addr.IA{1: coreIATest, 2: iaLineC, 4: iaLineD}))
+			now := time.Now()
+			if err := b.HandleBeacon(ctx, lineBeacon(t, f, now), 1); err != nil {
+				t.Fatal(err)
+			}
+			if err := b.HandleBeacon(ctx, crossingBeacon(t, f, now, coreIATest, iaLineD), 4); err != nil {
+				t.Fatal(err)
+			}
+			f.sender.mtx.Lock()
+			f.sender.failFor = map[addr.IA]error{iaLineC: connect.NewError(tc.code, errors.New("refused"))}
+			f.sender.mtx.Unlock()
+			b.propagateOnce(ctx)
+			b.sends.Wait()
+
+			f.sender.mtx.Lock()
+			calls := f.sender.attempts[iaLineC]
+			f.sender.mtx.Unlock()
+			if calls != tc.calls {
+				t.Errorf("calls to C = %d, want %d", calls, tc.calls)
+			}
+			want := map[addr.IA][][]addr.IA{iaLineD: {{coreIATest, nodeIATest}}}
+			if diff := cmp.Diff(want, propagatedHops(t, f)); diff != "" {
+				t.Errorf("propagated hops by peer (-want +got):\n%s", diff)
+			}
+		})
 	}
 }
 

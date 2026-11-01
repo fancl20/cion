@@ -29,6 +29,7 @@ import (
 
 	"github.com/fancl20/cion/pkg/core/trust"
 	"github.com/fancl20/cion/pkg/libs/loops"
+	"github.com/fancl20/cion/pkg/libs/ratelimit"
 	"github.com/fancl20/cion/pkg/modules/membership"
 	"github.com/fancl20/cion/pkg/modules/trustdb"
 )
@@ -37,10 +38,30 @@ import (
 // node renews within a minute of the founder's return.
 const RetryCap = time.Minute
 
+// RefusalLogInterval is how often a refusal is logged for one ISD-AS and
+// key: a refused peer retries its handshakes and renewals, and a line an
+// hour tells the operator what a line per attempt does.
+const RefusalLogInterval = time.Hour
+
 // Method is the founder method.
 type Method struct {
 	env   membership.Env
 	retry loops.Backoff
+	// refusals admits a refusal's log line once per RefusalLogInterval for
+	// each ISD-AS and key.
+	refusals *ratelimit.Keyed[refusal]
+}
+
+// refusal keys a refusal's log line: the refused chain's ISD-AS and the
+// public key its AS certificate certifies, whatever key ID it claims.
+type refusal struct {
+	ia  addr.IA
+	key string
+}
+
+// refusalOf keys the refusal of the chain for ia.
+func refusalOf(ia addr.IA, chain []*x509.Certificate) refusal {
+	return refusal{ia: ia, key: string(chain[0].RawSubjectPublicKeyInfo)}
 }
 
 var _ membership.Method = (*Method)(nil)
@@ -48,8 +69,9 @@ var _ membership.Method = (*Method)(nil)
 // New returns the founder method over env.
 func New(env membership.Env) *Method {
 	return &Method{
-		env:   env,
-		retry: loops.Backoff{Base: or(env.Pacing.Retry, trust.EnrollmentRetryInterval), Max: RetryCap},
+		env:      env,
+		retry:    loops.Backoff{Base: or(env.Pacing.Retry, trust.EnrollmentRetryInterval), Max: RetryCap},
+		refusals: ratelimit.NewKeyed[refusal](RefusalLogInterval),
 	}
 }
 
@@ -80,7 +102,7 @@ func (m *Method) Admit(ctx context.Context, f membership.Facts) error {
 			return nil
 		}
 	}
-	return refuse(ia, f.Chain)
+	return m.refuse(ia, f.Chain)
 }
 
 // Present returns the node's own membership where the founder did not issue
@@ -208,7 +230,8 @@ func (m *Method) current(ctx context.Context) bool {
 }
 
 // bound admits a renewal at the founding core when the requester's key is
-// the one its ISD-AS is bound to.
+// the one its ISD-AS is bound to, and logs a refusal once per
+// RefusalLogInterval for its ISD-AS and key.
 func (m *Method) bound(ctx context.Context, ia addr.IA, chain []*x509.Certificate) error {
 	held, err := m.env.DB.BoundKey(ctx, ia)
 	if err != nil {
@@ -219,8 +242,10 @@ func (m *Method) bound(ctx context.Context, ia addr.IA, chain []*x509.Certificat
 		return fmt.Errorf("computing the requester's key ID: %w", err)
 	}
 	if held == nil || !bytes.Equal(held, skid) {
-		slog.Warn("Refusing a renewal its ISD-AS is not bound to",
-			"isd_as", ia, "key", hex.EncodeToString(skid))
+		if m.refusals.Admit(refusalOf(ia, chain)) {
+			slog.Warn("Refusing a renewal its ISD-AS is not bound to",
+				"isd_as", ia, "key", hex.EncodeToString(skid))
+		}
 		return serrors.New("the requester's key is not the one its ISD-AS is bound to",
 			"isd_as", ia)
 	}
@@ -349,13 +374,15 @@ func (m *Method) keep(c []*x509.Certificate) {
 	}
 }
 
-// refuse logs a chain no counting membership backs, with the core whose CA
-// certificate signed it — the evidence of the key that issued it — and
-// returns the refusal.
-func refuse(ia addr.IA, chain []*x509.Certificate) error {
+// refuse returns the refusal of a chain no counting membership backs, and
+// logs it with the core whose CA certificate signed it — the evidence of the
+// key that issued it — once per RefusalLogInterval for its ISD-AS and key.
+func (m *Method) refuse(ia addr.IA, chain []*x509.Certificate) error {
 	issuer, _ := cppki.ExtractIA(chain[1].Subject)
-	slog.Warn("Refusing a chain no membership backs", "isd_as", ia, "issuer", issuer,
-		"key", hex.EncodeToString(chain[0].SubjectKeyId))
+	if m.refusals.Admit(refusalOf(ia, chain)) {
+		slog.Warn("Refusing a chain no membership backs", "isd_as", ia, "issuer", issuer,
+			"key", hex.EncodeToString(chain[0].SubjectKeyId))
+	}
 	return serrors.New("no membership backs the chain", "isd_as", ia, "issuer", issuer)
 }
 

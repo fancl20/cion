@@ -84,3 +84,8 @@ Nothing changes on the wire or in what a node admits.
     every beacon.
 
 ## Implementation history
+
+*   Landed as proposed: the refusal log's limit
+    ([founder.go](/pkg/modules/membership/impl/founder/founder.go)) and the
+    beacon round's end ([beacon.go](/pkg/core/controlplane/beacon.go)).
+    ADR-0034 is accepted.

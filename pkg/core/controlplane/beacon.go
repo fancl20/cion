@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"connectrpc.com/connect"
 	"github.com/scionproto/scion/pkg/addr"
 	"github.com/scionproto/scion/pkg/private/serrors"
 	"github.com/scionproto/scion/pkg/proto/control_plane"
@@ -605,7 +606,10 @@ func (b *Beaconer) originateOnce(ctx context.Context) {
 // non-cores, which carry beacons both ways, any neighbor it passed on its way
 // here. The propagation targets are the neighbors' control services as
 // service destinations on the one-hop paths. Each neighbor's beacons go out
-// off the loop in candidate order; a neighbor whose previous beacons are
+// off the loop in candidate order, until a call fails short of the
+// neighbor's answer — a refused or failed dial, which every further call
+// would repeat — while a beacon the neighbor rejects as invalid leaves the
+// rest to go; the next round retries. A neighbor whose previous beacons are
 // still in flight gets none this round.
 func (b *Beaconer) propagateOnce(ctx context.Context) {
 	cores, err := b.coreASes()
@@ -656,8 +660,13 @@ func (b *Beaconer) propagateOnce(ctx context.Context) {
 		peer := &scion.Addr{IA: neighborIA, Service: addr.SvcCS}
 		b.goSend(target, func() {
 			for _, pb := range beacons {
-				if err := b.sendBeacon(ctx, peer, pb); err != nil {
-					slog.Warn("Propagating beacon", "interface", egress, "err", err)
+				err := b.sendBeacon(ctx, peer, pb)
+				if err == nil {
+					continue
+				}
+				slog.Warn("Propagating beacon", "interface", egress, "err", err)
+				if connect.CodeOf(err) != connect.CodeInvalidArgument {
+					return
 				}
 			}
 		})

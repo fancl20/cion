@@ -8,6 +8,7 @@ import (
 	"crypto/rand"
 	"crypto/x509"
 	"errors"
+	"log/slog"
 	"math/big"
 	"path/filepath"
 	"slices"
@@ -115,6 +116,96 @@ func handshake(chain []*x509.Certificate, presented ...[]*x509.Certificate) memb
 		f.Presented = presented[0]
 	}
 	return f
+}
+
+// logRecorder counts the records the default logger receives, by message.
+type logRecorder struct {
+	mtx    sync.Mutex
+	counts map[string]int
+}
+
+func (r *logRecorder) Enabled(context.Context, slog.Level) bool { return true }
+
+func (r *logRecorder) Handle(_ context.Context, rec slog.Record) error {
+	r.mtx.Lock()
+	defer r.mtx.Unlock()
+	r.counts[rec.Message]++
+	return nil
+}
+
+func (r *logRecorder) WithAttrs([]slog.Attr) slog.Handler { return r }
+
+func (r *logRecorder) WithGroup(string) slog.Handler { return r }
+
+// count returns how many records carried the message.
+func (r *logRecorder) count(msg string) int {
+	r.mtx.Lock()
+	defer r.mtx.Unlock()
+	return r.counts[msg]
+}
+
+// recordLogs routes the default logger to a recorder until the test ends.
+func recordLogs(t *testing.T) *logRecorder {
+	t.Helper()
+	rec := &logRecorder{counts: make(map[string]int)}
+	previous := slog.Default()
+	slog.SetDefault(slog.New(rec))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+	return rec
+}
+
+// TestRefusalLogsOnceAnHour checks the refusal log's limit: refusing one
+// unbacked chain again within the interval still refuses and logs nothing
+// more, a chain for another key logs at once, and the first chain logs again
+// once the interval passed; the founding core's refusals of an unbound name
+// log alike.
+func TestRefusalLogsOnceAnHour(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		x := newFixture(t)
+		x.founder.Enroll(t, checkerIA)
+		logs := recordLogs(t)
+		ctx := t.Context()
+		const unbacked = "Refusing a chain no membership backs"
+		m := founder.New(membershiptest.Env(x.founder.DB, checkerIA, false))
+		chain := issue(t, x.other.Issuer, unadmitted, newKey(t))
+		refuse := func(m *founder.Method, f membership.Facts) {
+			t.Helper()
+			if err := m.Admit(ctx, f); err == nil {
+				t.Fatal("admitted a chain no membership backs")
+			}
+		}
+
+		for range 3 {
+			refuse(m, handshake(chain))
+		}
+		if n := logs.count(unbacked); n != 1 {
+			t.Errorf("logged %d refusals of one chain within the interval, want one", n)
+		}
+		refuse(m, handshake(issue(t, x.other.Issuer, unadmitted, newKey(t))))
+		if n := logs.count(unbacked); n != 2 {
+			t.Errorf("logged %d refusals with a chain for another key, want it logged at once", n)
+		}
+		time.Sleep(founder.RefusalLogInterval)
+		refuse(m, handshake(chain))
+		if n := logs.count(unbacked); n != 3 {
+			t.Errorf("logged %d refusals once the interval passed, want the first chain's again", n)
+		}
+
+		const unbound = "Refusing a renewal its ISD-AS is not bound to"
+		renewal := membership.Facts{Boundary: membership.BoundaryRenewal, Chain: chain}
+		f := founder.New(membershiptest.Env(x.founder.DB, founderIA, true))
+		for range 3 {
+			refuse(f, renewal)
+		}
+		if n := logs.count(unbound); n != 1 {
+			t.Errorf("logged %d refusals of one unbound renewal within the interval, want one", n)
+		}
+		time.Sleep(founder.RefusalLogInterval)
+		refuse(f, renewal)
+		if n := logs.count(unbound); n != 2 {
+			t.Errorf("logged %d unbound renewals once the interval passed, want it again", n)
+		}
+	})
 }
 
 // TestAdmitsOnlyWhereAMembershipBacks checks the decision on another core's
