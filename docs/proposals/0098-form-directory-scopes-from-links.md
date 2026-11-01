@@ -379,3 +379,9 @@ Beside the decisions:
             5.8–8.7, after 10 to 16 link changes against 14 to 22, their
             worst pair at 1.13–1.23 against 1.20–1.23. The stranded
             network's worst pair is 1.00–1.15 against 1.15–1.30.
+*   Fix: the view's pass read the link state before it took the
+    directory's lock, so a link attached between the read and the lock read
+    as gone and was forgotten until its next link exchange; every sync over
+    the link failed and every push over it was dropped, and the directory
+    split at that link. The pass reads the link state under the lock
+    ([directory.go](/pkg/modules/topology/impl/measured/directory.go)).

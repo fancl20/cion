@@ -912,15 +912,14 @@ func (d *NodeDirectory) runView(ctx context.Context) {
 // pass forgets the links no live entry holds any more, discards the entries
 // the views never show again at now, the attachments that hold no link and
 // whose directory holds no entry, and the directories no attachment names,
-// and returns the view at now and when the clock alone changes it next.
+// and returns the view at now and when the clock alone changes it next. The
+// link state is read under the directory's lock: a link is live before it
+// is attached, so the read sees every attached link that is still live.
 func (d *NodeDirectory) pass(now time.Time) (view, time.Time) {
-	var live map[uint16]addr.IA
-	if d.cfg.Links != nil {
-		live = d.cfg.Links.Latest().Table()
-	}
 	d.mtx.Lock()
 	defer d.mtx.Unlock()
 	if d.cfg.Links != nil {
+		live := d.cfg.Links.Latest().Table()
 		for ifID := range d.links {
 			if _, ok := live[ifID]; !ok {
 				delete(d.links, ifID)
