@@ -32,6 +32,13 @@ A leaked core is also removed slowly. A sensitive TRC update removes it,
 but CION's updates keep the predecessor active for the AS certificate
 validity, three days, so the leaked root keeps anchoring chains that long.
 
+Removing a core is not the founder's alone either. With a quorum of one, a
+core's own regular voting key votes a regular update, and a node pins the
+first update of a serial it meets, so a core racing the founder's update
+keeps its root wherever its own update arrives first. The founder's vote on
+a core's submission asks the admission policy alone, whatever the submission
+changes.
+
 Nor does a node ever stop being a member. Any core renews it on its current
 chain, so a node keeps its place for as long as the TRC is valid, whether
 it is decommissioned or its key leaked; the SCION PKI draft instead lets an
@@ -134,19 +141,26 @@ ADR-0033's accepted risk:
     membership, itself a chain the founder issued: it verifies in the
     removed chain's place and authorizes their next renewal at another
     core. The founder is live when it removes a core, so their memberships
-    are current.
+    are current. The core's node leaves with it (decision 9), and the core
+    never returns. No core casts a TRC update alone: a node pins an update
+    only once the founder signed it, and the founder signs a core's
+    submission only where it changes nothing but the core's own
+    certificates and entries, so no core forks the TRC or blocks its own
+    removal.
 8.  **What the core signed expires.** No node purges it. Once a node pins
-    the removal, the core's new entries and beacons no longer verify there:
-    its held directory entries leave the views within the entry lifetime,
-    and the paths that cross it stop being refreshed, read stale within
-    five minutes, and lose to any fresh path. They expire with their hop
-    fields. Transit is trusted to forward and nothing else, so a path
-    through the core exposes nothing a path through any other node does
-    not.
+    the removal, nothing signed under the core's removed root verifies
+    there, and the beacons the core originates fail as a non-core's: the
+    paths it originated stop being refreshed, read stale within five
+    minutes, and lose to any fresh path. They expire with their hop fields.
+    Its node signs under its other chains until they expire, as any removed
+    node does; once it stops, its directory entries leave the views within
+    the entry lifetime. Transit is trusted to forward and nothing else, so
+    a path through the core exposes nothing a path through any other node
+    does not.
 9.  **The founder ends a membership by not renewing it.** A node the
-    operator removes is refused its next renewal, and its chains stop
-    verifying at a node once that node's own membership is more than three
-    days newer than the removed node's last.
+    operator removes is refused its next renewal, and its handshakes and
+    renewals are refused at a node once that node's own membership is more
+    than three days newer than the removed node's last.
 10. **A network may go without memberships.** Its operators decide for the
     whole network, alike on every node: a node that checks memberships
     refuses a peer that carries none. Without memberships, the network is
@@ -168,6 +182,10 @@ ADR-0033's accepted risk:
 *   A removed core anchors no chain once the update reaches a node, and
     its removal costs honest nodes nothing: their memberships stand in for
     the chains it issued.
+*   No core casts a TRC update alone: one the founder never signed pins
+    nowhere, and the founder signs nothing of a core's but its own
+    material, so a compromised core neither forks the TRC nor blocks its
+    removal.
 *   The operator removes a node by a decision at the founder alone; while
     the founder is live, the node is out within about five days.
 *   The founder issues every membership, so it knows each node's latest,
@@ -201,10 +219,14 @@ ADR-0033's accepted risk:
     handshake carries two more certificates.
 *   A removal acts at a node only once the update arrives there; until
     then, the node accepts the core's chains.
-*   After the removal, the core's directory entries linger up to the entry
-    lifetime, fifteen minutes, and a path through it still serves, for up
-    to its hop fields' six hours, where no fresh path reaches the
-    destination.
+*   After the removal, the core's node signs messages that verify until
+    its other chains expire, its directory entries linger up to the entry
+    lifetime, fifteen minutes, once it stops, and a path through it still
+    serves, for up to its hop fields' six hours, where no fresh path
+    reaches the destination.
+*   A node pins only the TRC updates the founder signed, a rule the
+    draft's update validation does not have: every update waits on the
+    founder, a core's regular roll included.
 
 ## Pros and cons of the options
 
