@@ -171,7 +171,8 @@ load refuses the boot with the fix named
 *   **Portal** — the operator's passkey console, which the founding core
     serves beneath `/admin/` beside the portal admission method it pairs
     with: it decides the method's node and vote asks, mints its auth keys,
-    each naming a node, lists the nodes and hosts, and releases hosts
+    each naming a node, lists the nodes and hosts, releases hosts, and
+    removes nodes and cores
     ([ADR-0022](/docs/adrs/0022-serve-the-operators-console-as-a-passkey-portal.md)).
 *   **Ping** — the network's probe, and the selection loop's measuring
     instrument.
@@ -190,7 +191,7 @@ exchange; enrollment at the founding core then issues the chain that
 authenticates everything the node says thereafter. First issuance is the
 admission gate, where enrollment policy — if a deployment selects one —
 decides on the verified facts of the exchange, and it binds the node's
-ISD-AS to its key for good. Every core's root is in the TRC, and renewal is
+ISD-AS to its key. Every core's root is in the TRC, and renewal is
 automatic at any of them: a node renews on its current chain over the
 authenticated channel, and a core renews its own chain itself
 ([ADR-0033](/docs/adrs/0033-renew-chains-at-every-core.md)). A peer's
@@ -198,6 +199,10 @@ chain passes a handshake only where a membership binds its ISD-AS to its
 key: a chain the founder issued, which each node renews at the founder and
 presents beside any other chain it holds
 ([ADR-0034](/docs/adrs/0034-verify-each-chains-membership-and-remove-cores-at-once.md)).
+Removing a node frees its name, so its membership lapses; removing a core
+also drops it from the TRC by the founder's vote alone, and the nodes
+holding its chains fall back on their memberships. A node pins a TRC update
+only once the founder signed it.
 
 ### Path discovery
 

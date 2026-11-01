@@ -267,3 +267,50 @@ start afresh, as none is in production.
     *   The console removes a node and lists it as removed.
 
 ## Implementation history
+
+*   Landed as proposed: the removal and its cast
+    ([removal.go](/pkg/core/trust/removal.go)), the founder's signature on
+    every pin ([update.go](/pkg/core/trust/update.go),
+    [network.go](/pkg/core/trust/network.go)), the own-material gate
+    ([trccast.go](/pkg/core/trust/trccast.go)), the anchored chain
+    ([engine.go](/pkg/core/trust/engine.go),
+    [lifecycle.go](/pkg/core/trust/lifecycle.go)), the membership method's
+    removal, grace period, and re-anchoring
+    ([membership.go](/pkg/modules/membership/membership.go),
+    [founder.go](/pkg/modules/membership/impl/founder/founder.go),
+    [none.go](/pkg/modules/membership/impl/none/none.go)), the freed
+    name ([trustdb.go](/pkg/modules/trustdb/trustdb.go),
+    [db.go](/pkg/modules/trustdb/impl/bbolt/db.go)), the lookup's cores
+    ([lookup.go](/pkg/core/controlplane/lookup.go)), the assembly
+    ([membership.go](/internal/services/membership.go),
+    [app.go](/internal/services/app.go)), the console
+    ([api.go](/pkg/apps/portal/api.go),
+    [records.go](/pkg/apps/portal/records.go),
+    [portal.js](/pkg/apps/portal/portal.js),
+    [portal.go](/pkg/apps/portal.go)), and the labs
+    ([removal_test.go](/internal/testnetwork/removal_test.go),
+    [portal_test.go](/internal/testnetwork/portal_test.go)). Beside the
+    plan:
+    *   The removed core does not stop at its removal, and the founder
+        decides its submissions, and a removed node's, as any other's: its
+        vote is the admission policy's, and the membership enforces nothing
+        stricter than the policy allows. The removed core renews its chain
+        as a normal node does, its issuer self-issuing only while the newest
+        TRC carries it, and its membership lapses as any removed node's
+        does. The core labs stop the core before removing it, for the labs'
+        admission policy would admit it back. ADR-0034's decision 7 no
+        longer says the core never returns.
+    *   Removing a node frees its name rather than recording the removal
+        beside the binding: a renewal at the founder finds the name bound to
+        no key and is refused as any unbound name's, and a re-enrollment is
+        a first issuance the admission policy decides. The console marks no
+        removed node; its membership shows its expiry until it lapses.
+    *   No lab removes a running normal node: under the labs' address
+        policy, a removed node enrolls again as a newcomer once its chain
+        expires, racing any check that its handshakes fail once its
+        membership lapses. The console lab removes a stopped node and finds
+        its name free, and the founder's refusal of a removed node's
+        renewals is unit-tested.
+    *   The gate's test raises the quorum beside a sensitive voting
+        certificate of the presenter's: with one sensitive voter, a raised
+        quorum alone does not encode.

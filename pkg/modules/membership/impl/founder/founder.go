@@ -8,7 +8,10 @@
 // chain itself when the founder issued it, else the membership the peer
 // presented beside it, or the one the node holds. Each node renews its
 // membership at the founder, and the founder renews a bound key on the
-// binding alone.
+// binding alone. Removing a node frees its name, so the founder renews it no
+// more and its membership lapses. Every node holds a membership that stands
+// in for the chains a removed core issued, so a core's removal keeps no
+// grace period.
 package founder
 
 import (
@@ -133,9 +136,23 @@ func (m *Method) List(ctx context.Context) ([]membership.Membership, error) {
 	return list, nil
 }
 
+// Remove frees the node's name at the founding core: a renewal finds the
+// name bound to no key and is refused, and a re-enrollment is a first
+// issuance the admission policy decides.
+func (m *Method) Remove(ctx context.Context, ia addr.IA) error {
+	return m.env.DB.Unbind(ctx, ia)
+}
+
+// RemovalGrace is zero: every node's membership stands in for the chains a
+// removed core issued.
+func (m *Method) RemovalGrace() time.Duration {
+	return 0
+}
+
 // Run keeps the node's own membership current: each pass keeps a newer chain
-// the founder issued the node, and below the renewal threshold renews at the
-// founder, retrying on the retry schedule until it succeeds.
+// the founder issued the node, and renews at the founder below the renewal
+// threshold or once the newest TRC alone does not anchor the membership,
+// retrying on the retry schedule until it succeeds.
 func (m *Method) Run(ctx context.Context) {
 	for {
 		for range m.retry.Tries(ctx) {
@@ -150,10 +167,17 @@ func (m *Method) Run(ctx context.Context) {
 }
 
 // current brings the node's own membership current and reports whether it
-// is. The founding core's own chains are its memberships, kept as it
+// is: above the renewal threshold and verifying through a founder root of
+// the newest TRC, so a removal that closes a roll's grace period strands
+// none. The founding core's own chains are its memberships, kept as it
 // self-issues them.
 func (m *Method) current(ctx context.Context) bool {
-	roots, err := m.roots(ctx)
+	pool, err := trust.PinnedPool(ctx, m.env.DB, m.env.IA.ISD())
+	if err != nil {
+		slog.Error("Reading the pinned TRCs", "isd_as", m.env.IA, "err", err)
+		return false
+	}
+	roots, err := founderRoots(pool)
 	if err != nil {
 		slog.Error("Reading the founder's roots", "isd_as", m.env.IA, "err", err)
 		return false
@@ -162,8 +186,13 @@ func (m *Method) current(ctx context.Context) bool {
 	if m.env.Founding {
 		return true
 	}
+	newestRoots, err := founderRoots(pool[:1])
+	if err != nil {
+		slog.Error("Reading the founder's roots", "isd_as", m.env.IA, "err", err)
+		return false
+	}
 	threshold := or(m.env.Pacing.RenewalThreshold, trust.ChainRenewalThreshold)
-	if own != nil && time.Until(own[0].NotAfter) >= threshold {
+	if own != nil && time.Until(own[0].NotAfter) >= threshold && issuedBy(own, newestRoots) {
 		return true
 	}
 	attemptCtx, cancel := context.WithTimeout(ctx, trust.EnrollmentTimeout)
@@ -238,20 +267,25 @@ func (v view) backs(c []*x509.Certificate, ia addr.IA, chain []*x509.Certificate
 	return err == nil && certIA.Equal(ia) && v.counts(c)
 }
 
-// roots returns the founder's root certificates in the node's anchor pool:
-// the root certificates whose subject names the founder, the AS the newest
-// pinned TRC's sensitive voting certificate names. The pool is empty while
-// the node pins no TRC.
+// roots returns the founder's root certificates in the node's anchor pool.
 func (m *Method) roots(ctx context.Context) (*x509.CertPool, error) {
 	pool, err := trust.PinnedPool(ctx, m.env.DB, m.env.IA.ISD())
 	if err != nil {
 		return nil, fmt.Errorf("reading the pinned TRCs: %w", err)
 	}
+	return founderRoots(pool)
+}
+
+// founderRoots returns the founder's root certificates in the TRCs: the root
+// certificates whose subject names the founder, the AS the first TRC's
+// sensitive voting certificate names. The pool is empty while the first TRC
+// is the zero TRC, nothing pinned.
+func founderRoots(trcs []*cppki.TRC) (*x509.CertPool, error) {
 	roots := x509.NewCertPool()
-	if pool[0].IsZero() {
+	if trcs[0].IsZero() {
 		return roots, nil
 	}
-	sensitive, err := trust.SignerCert(*pool[0], cppki.Sensitive)
+	sensitive, err := trust.SignerCert(*trcs[0], cppki.Sensitive)
 	if err != nil {
 		return nil, fmt.Errorf("reading the founder from the TRC: %w", err)
 	}
@@ -259,7 +293,7 @@ func (m *Method) roots(ctx context.Context) (*x509.CertPool, error) {
 	if err != nil {
 		return nil, fmt.Errorf("reading the founder from the TRC: %w", err)
 	}
-	for _, trc := range pool {
+	for _, trc := range trcs {
 		certs, err := trc.RootCerts()
 		if err != nil {
 			return nil, fmt.Errorf("reading the TRC's root certificates: %w", err)

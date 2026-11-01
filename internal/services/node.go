@@ -96,13 +96,14 @@ type node struct {
 	// The trust role's products for the later phases, each held as the type
 	// its consumer takes and nil where the role offers none: the engine's
 	// remote — the core client, every role's but the founder's — and the
-	// founder's issuer, TRC decision, and WebPKI identity. roleLoops are
-	// the role's own loops, built with its parts; start hands them to the
-	// group.
+	// founder's issuer, TRC decision, removal of a node, and WebPKI
+	// identity. roleLoops are the role's own loops, built with its parts;
+	// start hands them to the group.
 	remote      trust.Remote
 	coreClt     *webpki.CoreClient
 	issuer      *trust.Issuer
 	trcDecision voting.Decider
+	removeNode  func(ctx context.Context, ia addr.IA) error
 	certMgr     *webpki.CertManager
 	webPKI      *tls.Config
 	roleLoops   []roleLoop

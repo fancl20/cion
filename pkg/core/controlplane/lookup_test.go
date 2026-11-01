@@ -896,6 +896,17 @@ func TestLookupAnswersInCoresOrder(t *testing.T) {
 	}
 }
 
+// TestLookupAsksNoRemovedCore checks the core expansion's source set against
+// the TRC: up segments from a core the pinned TRC no longer names — a core
+// the founder removed — leave it out, and the cores the TRC names stay.
+func TestLookupAsksNoRemovedCore(t *testing.T) {
+	fx := newLookupFixture(t)
+	fx.reachCore2(t)
+	if got, want := fx.lookup.reachableCores(), []addr.IA{coreIATest}; !slices.Equal(got, want) {
+		t.Errorf("reachable cores = %v, want %v", got, want)
+	}
+}
+
 // TestLookupSourceCoreSegments checks that the source handler's core
 // segments follow the down lookup's rules: the first request returns with
 // the first answer, waiting on no silent core; the silent core's answer

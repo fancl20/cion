@@ -67,6 +67,7 @@ func (a *App) routes() http.Handler {
 	api.HandleFunc("POST /admin/api/login/finish", a.limited("login/finish", a.handleLoginFinish))
 	api.HandleFunc("POST /admin/api/logout", a.signedIn(a.handleLogout))
 	api.HandleFunc("GET /admin/api/nodes", a.signedIn(a.handleNodes))
+	api.HandleFunc("DELETE /admin/api/nodes/{ia}", a.signedIn(a.handleRemoveNode))
 	api.HandleFunc("GET /admin/api/hosts", a.signedIn(a.handleHosts))
 	api.HandleFunc("DELETE /admin/api/hosts/{key}", a.signedIn(a.handleRemoveHost))
 	api.HandleFunc("POST /admin/api/asks/{id}/approve", a.signedIn(a.handleDecide(true)))
@@ -209,15 +210,16 @@ func (a *App) handleLogout(w http.ResponseWriter, r *http.Request) {
 
 // nodeView is one node as the API answers it.
 type nodeView struct {
-	IA       string    `json:"ia"`
-	Key      string    `json:"key"`
-	Expires  time.Time `json:"expires,omitzero"`
-	Role     Role      `json:"role"`
-	Reach    Reach     `json:"reach,omitempty"`
-	Overlay  string    `json:"overlay,omitempty"`
-	Endpoint string    `json:"endpoint,omitempty"`
-	Issued   int       `json:"issued"`
-	Capacity int       `json:"capacity"`
+	IA        string    `json:"ia"`
+	Key       string    `json:"key"`
+	Expires   time.Time `json:"expires,omitzero"`
+	Removable bool      `json:"removable,omitempty"`
+	Role      Role      `json:"role"`
+	Reach     Reach     `json:"reach,omitempty"`
+	Overlay   string    `json:"overlay,omitempty"`
+	Endpoint  string    `json:"endpoint,omitempty"`
+	Issued    int       `json:"issued"`
+	Capacity  int       `json:"capacity"`
 }
 
 // handleNodes lists the nodes beside the node and vote asks.
@@ -231,13 +233,14 @@ func (a *App) handleNodes(w http.ResponseWriter, r *http.Request) {
 	views := make([]nodeView, 0, len(nodes))
 	for _, n := range nodes {
 		v := nodeView{
-			IA:       n.IA.String(),
-			Key:      n.Key,
-			Expires:  n.Expires,
-			Role:     n.Role,
-			Reach:    n.Reach,
-			Issued:   n.Issued,
-			Capacity: capacityOf(n.Overlay),
+			IA:        n.IA.String(),
+			Key:       n.Key,
+			Expires:   n.Expires,
+			Removable: removable(n),
+			Role:      n.Role,
+			Reach:     n.Reach,
+			Issued:    n.Issued,
+			Capacity:  capacityOf(n.Overlay),
 		}
 		if n.Overlay.IsValid() {
 			v.Overlay = n.Overlay.String()
@@ -261,6 +264,38 @@ func capacityOf(overlay netip.Prefix) int {
 		return 0
 	}
 	return 1<<(32-overlay.Bits()) - 3
+}
+
+// handleRemoveNode removes the node the path's ISD-AS names, once the
+// records list it as one the operator can remove.
+func (a *App) handleRemoveNode(w http.ResponseWriter, r *http.Request) {
+	ia, err := addr.ParseIA(r.PathValue("ia"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "malformed ISD-AS")
+		return
+	}
+	nodes, err := a.records.Nodes(r.Context())
+	if err != nil {
+		slog.Error("Listing the nodes for the portal", "err", err)
+		writeError(w, http.StatusInternalServerError, "the records are unavailable")
+		return
+	}
+	i := slices.IndexFunc(nodes, func(n Node) bool { return n.IA.Equal(ia) })
+	switch {
+	case i < 0:
+		writeError(w, http.StatusNotFound, "no node holds that ISD-AS")
+		return
+	case !removable(nodes[i]):
+		writeError(w, http.StatusConflict, "the node cannot be removed")
+		return
+	}
+	if err := a.records.RemoveNode(r.Context(), ia); err != nil {
+		slog.Error("Removing a node from the portal", "isd_as", ia, "err", err)
+		writeError(w, http.StatusInternalServerError, "the removal failed")
+		return
+	}
+	slog.Info("The portal removed a node", "isd_as", ia, "role", nodes[i].Role)
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // hostView is one host as the API answers it.

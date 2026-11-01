@@ -14,6 +14,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/scionproto/scion/pkg/addr"
+
 	"github.com/fancl20/cion/internal/passkeytest"
 	"github.com/fancl20/cion/pkg/modules/enrollauth"
 )
@@ -185,14 +187,15 @@ func decodeJSON[T any](t *testing.T, rec *httptest.ResponseRecorder) T {
 }
 
 // fakeRecords is the records a test console reads: the nodes and hosts it
-// holds, the coordination application's absence, and the releases it was
-// asked.
+// holds, the coordination application's absence, and the releases and
+// removals it was asked.
 type fakeRecords struct {
 	mtx            sync.Mutex
 	nodes          []Node
 	hosts          []Host
 	noCoordination bool
 	released       []string
+	removed        []addr.IA
 }
 
 func (f *fakeRecords) Nodes(context.Context) ([]Node, error) {
@@ -217,6 +220,13 @@ func (f *fakeRecords) RemoveHost(_ context.Context, nodeKey string) error {
 		return ErrNoCoordination
 	}
 	f.released = append(f.released, nodeKey)
+	return nil
+}
+
+func (f *fakeRecords) RemoveNode(_ context.Context, ia addr.IA) error {
+	f.mtx.Lock()
+	defer f.mtx.Unlock()
+	f.removed = append(f.removed, ia)
 	return nil
 }
 

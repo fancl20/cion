@@ -90,16 +90,9 @@ func AssembleOnboarding(
 		return cppki.TRC{}, serrors.New("the TRC already carries the joiner as a core with its root",
 			"joiner", joiner, "trc", pred.TRC.ID)
 	}
-	sensitiveIdx := -1
-	for i, cert := range pred.TRC.Certificates {
-		if ct, err := cppki.ValidateCert(cert); err == nil && ct == cppki.Sensitive {
-			sensitiveIdx = i
-			break
-		}
-	}
-	if sensitiveIdx < 0 {
-		return cppki.TRC{}, serrors.New("the predecessor holds no sensitive voting certificate",
-			"trc", pred.TRC.ID)
+	sensitiveIdx, err := sensitiveIndex(pred.TRC)
+	if err != nil {
+		return cppki.TRC{}, err
 	}
 	certs := slices.Clone(pred.TRC.Certificates)
 	coreASes := slices.Clone(pred.TRC.CoreASes)
@@ -218,8 +211,7 @@ func JoinCore(
 
 // castSuccessor completes the signed successor — the submission's answer, or
 // the founder's vote cast locally — and pins the completion once it verifies
-// against the predecessor: the verification classifies the update and
-// demands every signature it requires.
+// against the predecessor.
 func castSuccessor(
 	ctx context.Context,
 	db trustdb.DB,
@@ -232,14 +224,39 @@ func castSuccessor(
 	if err != nil {
 		return cppki.SignedTRC{}, err
 	}
-	if err := completed.Verify(&pred.TRC); err != nil {
-		return cppki.SignedTRC{}, serrors.Wrap("verifying the completed TRC", err,
+	if err := pinSuccessor(ctx, db, pred, completed); err != nil {
+		return cppki.SignedTRC{}, err
+	}
+	return completed, nil
+}
+
+// pinSuccessor pins the completed successor once verifySuccessor accepts it
+// against the predecessor.
+func pinSuccessor(ctx context.Context, db trustdb.DB, pred, completed cppki.SignedTRC) error {
+	if err := verifySuccessor(completed, pred); err != nil {
+		return serrors.Wrap("verifying the completed TRC", err,
 			"id", completed.TRC.ID, "predecessor", pred.TRC.ID)
 	}
 	if _, err := db.InsertTRC(ctx, completed); err != nil {
-		return cppki.SignedTRC{}, fmt.Errorf("pinning the completed TRC: %w", err)
+		return fmt.Errorf("pinning the completed TRC: %w", err)
 	}
-	return completed, nil
+	return nil
+}
+
+// verifySuccessor verifies a TRC update against its predecessor: the update
+// classifies, carries every signature cppki requires of its type, and
+// carries a signature of a sensitive voting certificate of the predecessor —
+// the founder's — beside them, so no update a core cast alone pins.
+func verifySuccessor(trc, pred cppki.SignedTRC) error {
+	if err := trc.Verify(&pred.TRC); err != nil {
+		return err
+	}
+	for _, cert := range pred.TRC.Certificates {
+		if ct, err := cppki.ValidateCert(cert); err == nil && ct == cppki.Sensitive && signedBy(trc, cert) {
+			return nil
+		}
+	}
+	return serrors.New("the founder did not sign the update", "id", trc.TRC.ID)
 }
 
 // CoreNamed reports whether the TRC's core list names the ISD-AS.

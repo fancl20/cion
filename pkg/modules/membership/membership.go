@@ -68,6 +68,14 @@ type Method interface {
 	List(ctx context.Context) ([]Membership, error)
 	// Run keeps the node's own membership current until ctx ends.
 	Run(ctx context.Context)
+	// Remove ends the node's membership at the founding core by the
+	// method's rule: the founder renews it no more, and it lapses as any
+	// unrenewed membership does.
+	Remove(ctx context.Context, ia addr.IA) error
+	// RemovalGrace is the grace period a core's removal leaves the removed
+	// root: zero where every node holds a membership that stands in for
+	// the chains the removed core issued.
+	RemovalGrace() time.Duration
 }
 
 // Membership is one node's membership as a listing shows it.

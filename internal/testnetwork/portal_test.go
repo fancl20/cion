@@ -100,10 +100,11 @@ type portalAsk struct {
 }
 
 type portalNode struct {
-	IA       string `json:"ia"`
-	Key      string `json:"key"`
-	Expires  string `json:"expires"`
-	Endpoint string `json:"endpoint"`
+	IA        string `json:"ia"`
+	Key       string `json:"key"`
+	Expires   string `json:"expires"`
+	Endpoint  string `json:"endpoint"`
+	Removable bool   `json:"removable"`
 }
 
 type portalHost struct {
@@ -156,8 +157,10 @@ func programsHost(n *Node, ip netip.Addr) bool {
 // approval; a host joins unattended with an auth key the console minted
 // naming the leaf, landing on the leaf and listed with the key's note, the
 // leaf's host endpoint, and its presence; its release closes its tunnel,
-// the leaf dropping the peer; and the leaf, listed by its membership while
-// it runs, stays listed by it once it stops, until the membership lapses.
+// the leaf dropping the peer; the leaf, listed by its membership while it
+// runs, stays listed by it once it stops, until the membership lapses; and
+// removed from the console, the leaf's name is bound to no key, while the
+// founder's own row refuses a removal.
 func TestPortalConsole(t *testing.T) {
 	t.Parallel()
 	wpki := packageWebPKI
@@ -280,4 +283,15 @@ func TestPortalConsole(t *testing.T) {
 	if n := leafNode(); n != listedLeaf {
 		t.Errorf("the stopped leaf is listed as %+v, want its membership %+v", n, listedLeaf)
 	}
+
+	// The operator removes the leaf: the founder binds its name to no key,
+	// while the founder's own row refuses a removal.
+	if !listedLeaf.Removable {
+		t.Errorf("the leaf is listed as %+v, want one the operator can remove", listedLeaf)
+	}
+	console.expect(http.StatusNoContent, http.MethodDelete, "/admin/api/nodes/"+leaf, nil)
+	if bound, err := a.app.TrustDB().BoundKey(t.Context(), b.app.IA()); err != nil || bound != nil {
+		t.Errorf("the founder binds the removed leaf's name to %x (%v), want no key", bound, err)
+	}
+	console.expect(http.StatusConflict, http.MethodDelete, "/admin/api/nodes/"+a.app.IA().String(), nil)
 }

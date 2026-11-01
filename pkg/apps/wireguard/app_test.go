@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net"
 	"net/netip"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -14,13 +15,13 @@ import (
 	"github.com/fancl20/cion/pkg/core/trust/trusttest"
 
 	"github.com/scionproto/scion/pkg/addr"
-	"github.com/scionproto/scion/pkg/scrypto/cppki"
 
 	"github.com/fancl20/cion/pkg/core/trust"
 	"github.com/fancl20/cion/pkg/libs/bus"
 	"github.com/fancl20/cion/pkg/libs/scion"
 	"github.com/fancl20/cion/pkg/modules/links"
 	"github.com/fancl20/cion/pkg/modules/trustdb"
+	"github.com/fancl20/cion/pkg/modules/trustdb/impl/bbolt"
 )
 
 // recordingDirectory records publications and serves a directory it holds,
@@ -98,11 +99,29 @@ func (d *stallingDirectory) Close() error {
 	return nil
 }
 
-// flippableTrustDB serves no chains until it serves one; the publish loop
-// reads it while the test flips it.
+// flippableTrustDB serves no chains until it serves one: a founded ISD's
+// trust database, its TRC pinned, whose chains of the node the publish loop
+// reads while the test flips them.
 type flippableTrustDB struct {
+	trustdb.DB
+	founder *trusttest.Founder
+	ia      addr.IA
+
 	mtx   sync.Mutex
 	chain [][]*x509.Certificate
+}
+
+// newFlippableTrustDB founds ia's ISD in a fresh trust database that serves
+// no chain yet.
+func newFlippableTrustDB(t *testing.T, ia addr.IA) *flippableTrustDB {
+	t.Helper()
+	db, err := bbolt.New(filepath.Join(t.TempDir(), "trust.db"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	founder := trusttest.NewFounder(t, db, addr.MustIAFrom(ia.ISD(), 0xff0000000001))
+	return &flippableTrustDB{DB: db, founder: founder, ia: ia}
 }
 
 func (d *flippableTrustDB) Chains(context.Context, trustdb.ChainQuery) ([][]*x509.Certificate, error) {
@@ -111,31 +130,14 @@ func (d *flippableTrustDB) Chains(context.Context, trustdb.ChainQuery) ([][]*x50
 	return d.chain, nil
 }
 
-// enroll produces the node's chain.
-func (d *flippableTrustDB) enroll(chain []*x509.Certificate) {
+// enroll produces the node's chain: one the founder issued.
+func (d *flippableTrustDB) enroll(t *testing.T) {
+	t.Helper()
+	_, chain := d.founder.Enroll(t, d.ia)
 	d.mtx.Lock()
 	defer d.mtx.Unlock()
 	d.chain = [][]*x509.Certificate{chain}
 }
-func (d *flippableTrustDB) InsertChain(context.Context, []*x509.Certificate) (bool, error) {
-	return false, nil
-}
-func (d *flippableTrustDB) DeleteExpiredChains(context.Context, time.Time) (int, error) {
-	return 0, nil
-}
-func (d *flippableTrustDB) SignedTRC(context.Context, cppki.TRCID) (cppki.SignedTRC, error) {
-	return cppki.SignedTRC{}, nil
-}
-func (d *flippableTrustDB) InsertTRC(context.Context, cppki.SignedTRC) (bool, error) {
-	return false, nil
-}
-func (d *flippableTrustDB) BoundKey(context.Context, addr.IA) ([]byte, error) {
-	return nil, nil
-}
-func (d *flippableTrustDB) BindKey(context.Context, addr.IA, []byte) error {
-	return nil
-}
-func (d *flippableTrustDB) Close() error { return nil }
 
 // recordingRegs records the service registrations the application makes.
 type recordingRegs struct {
@@ -263,7 +265,7 @@ func newTestWireguard(
 // — claiming no slice — and holds the answered assignment as the node's.
 func TestWireguardPublishesOnceEnrolled(t *testing.T) {
 	ia := addr.MustIAFrom(20, 0xff0000000211)
-	db := &flippableTrustDB{}
+	db := newFlippableTrustDB(t, ia)
 	a, directory := newTestWireguard(t, ia, db)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -277,7 +279,7 @@ func TestWireguardPublishesOnceEnrolled(t *testing.T) {
 	}
 
 	// Enrollment produces the node's chain; the retrying loop publishes.
-	db.enroll([]*x509.Certificate{iaSubjectCert(t, ia)})
+	db.enroll(t)
 	select {
 	case entry := <-directory.published:
 		if !entry.IA.Equal(ia) {
@@ -312,8 +314,8 @@ func TestWireguardPublishesOnceEnrolled(t *testing.T) {
 // retrying.
 func TestWireguardEntryFollowsPublishedHost(t *testing.T) {
 	ia := addr.MustIAFrom(20, 0xff0000000213)
-	db := &flippableTrustDB{}
-	db.enroll([]*x509.Certificate{iaSubjectCert(t, ia)})
+	db := newFlippableTrustDB(t, ia)
+	db.enroll(t)
 	self := new(bus.Topic[bus.SelfState])
 	store := func(host netip.Addr) { self.Publish(bus.SelfState{Host: host}) }
 	store(netip.Addr{}) // no peer sees the node yet, the founding core's name unresolved
@@ -373,8 +375,8 @@ func TestWireguardEntryFollowsPublishedHost(t *testing.T) {
 // cadence notwithstanding, with the state's new host.
 func TestWireguardPublishesOnSelfEvents(t *testing.T) {
 	ia := addr.MustIAFrom(20, 0xff0000000214)
-	db := &flippableTrustDB{}
-	db.enroll([]*x509.Certificate{iaSubjectCert(t, ia)})
+	db := newFlippableTrustDB(t, ia)
+	db.enroll(t)
 	a, directory := newTestWireguard(t, ia, db)
 	ctx := t.Context()
 	go a.runPublish(ctx)
@@ -402,10 +404,10 @@ func TestWireguardPublishesOnSelfEvents(t *testing.T) {
 // seam nearest it.
 func TestWireguardRefusesBadAssignment(t *testing.T) {
 	ia := addr.MustIAFrom(20, 0xff0000000212)
-	db := &flippableTrustDB{}
+	db := newFlippableTrustDB(t, ia)
 	a, directory := newTestWireguard(t, ia, db)
 	directory.answer = netip.MustParsePrefix("10.0.0.0/24")
-	db.enroll([]*x509.Certificate{iaSubjectCert(t, ia)})
+	db.enroll(t)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -424,7 +426,7 @@ func TestWireguardAppliesDirectoryDiff(t *testing.T) {
 	ia := addr.MustIAFrom(20, 0xff0000000221)
 	peer1 := addr.MustIAFrom(20, 0xff0000000231)
 	peer2 := addr.MustIAFrom(20, 0xff0000000232)
-	a, _ := newTestWireguard(t, ia, &flippableTrustDB{})
+	a, _ := newTestWireguard(t, ia, newFlippableTrustDB(t, ia))
 
 	entry := func(peer addr.IA, subnet string) Entry {
 		return Entry{
@@ -471,7 +473,7 @@ func TestWireguardAppliesDirectoryDiff(t *testing.T) {
 func TestWireguardAppliesHostEntries(t *testing.T) {
 	ia := addr.MustIAFrom(20, 0xff0000000221)
 	other := addr.MustIAFrom(20, 0xff0000000233)
-	a, _ := newTestWireguard(t, ia, &flippableTrustDB{})
+	a, _ := newTestWireguard(t, ia, newFlippableTrustDB(t, ia))
 
 	owned := func(key byte, addr string) HostEntry {
 		return HostEntry{
@@ -531,8 +533,8 @@ func TestWireguardAppliesHostEntries(t *testing.T) {
 // port, which binds again at once.
 func TestWireguardRunJoinsItsLoops(t *testing.T) {
 	ia := addr.MustIAFrom(20, 0xff0000000251)
-	db := &flippableTrustDB{}
-	db.enroll([]*x509.Certificate{iaSubjectCert(t, ia)})
+	db := newFlippableTrustDB(t, ia)
+	db.enroll(t)
 	store := &stallingDirectory{arrived: make(chan struct{}), release: make(chan struct{})}
 	release := sync.OnceFunc(func() { close(store.release) })
 	relay := newSilentRelay(t)
@@ -623,11 +625,11 @@ func TestWireguardRunJoinsItsLoops(t *testing.T) {
 // directory client: Close closes the SCION conn beneath its transport, Run
 // or no Run.
 func TestWireguardClosesTheDirectoryClientConn(t *testing.T) {
-	a, _ := newTestWireguard(t, addr.MustIAFrom(20, 0xff0000000253),
-		&flippableTrustDB{}, func(cfg *Config) {
-			cfg.Store = nil
-			cfg.FounderRoute = func() *scion.Addr { return nil }
-		})
+	ia := addr.MustIAFrom(20, 0xff0000000253)
+	a, _ := newTestWireguard(t, ia, newFlippableTrustDB(t, ia), func(cfg *Config) {
+		cfg.Store = nil
+		cfg.FounderRoute = func() *scion.Addr { return nil }
+	})
 	a.Close()
 	assertReadsClosed(t, "the directory client's conn after Close", a.dirConn.conn)
 }

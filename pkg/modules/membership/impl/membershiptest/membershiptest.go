@@ -2,8 +2,8 @@
 // every method keeps. A chain the founder issued is admitted at every
 // boundary, what a node presents beside its chain passes a peer of its
 // method, the method keeps what it admits and what the founding core issues
-// and lists them, and its loop returns once its context ends. Each method's
-// refusals are its own tests'.
+// and lists them, a removal lapses no membership at once, and its loop
+// returns once its context ends. Each method's refusals are its own tests'.
 // The suite opens no trust database itself: the caller passes the opener,
 // for no library imports a module's implementation.
 package membershiptest
@@ -115,6 +115,28 @@ func Run(t *testing.T, newMethod NewMethod, openDB OpenDB) {
 		}
 		if held := env.Store.Get(peerIA); held == nil || !held[0].Equal(peer[0]) {
 			t.Error("the store holds no membership of the admitted peer")
+		}
+	})
+
+	t.Run("a removal lapses no membership at once", func(t *testing.T) {
+		f := trusttest.NewFounder(t, openDB(t), founderIA)
+		_, issued := f.Enroll(t, nodeIA)
+		m := newMethod(Env(f.DB, founderIA, true))
+		if err := m.Issued(t.Context(), issued); err != nil {
+			t.Fatal(err)
+		}
+		if err := m.Remove(t.Context(), nodeIA); err != nil {
+			t.Fatalf("removing the node: %v", err)
+		}
+		list, err := m.List(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !listed(list, nodeIA, issued[0].SubjectKeyId) {
+			t.Errorf("the listing %v drops the removed node's membership at once", list)
+		}
+		if grace := m.RemovalGrace(); grace < 0 {
+			t.Errorf("the removal grace period = %v, want none or more", grace)
 		}
 	})
 

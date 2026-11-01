@@ -258,6 +258,13 @@ func (b *bboltDB) BindKey(ctx context.Context, ia addr.IA, skid []byte) error {
 	})
 }
 
+// Unbind deletes the ISD-AS's binding.
+func (b *bboltDB) Unbind(ctx context.Context, ia addr.IA) error {
+	return b.db.Update(func(tx *bbolt.Tx) error {
+		return tx.Bucket([]byte("bindings")).Delete([]byte(ia.String()))
+	})
+}
+
 func (b *bboltDB) Close() error {
 	return b.db.Close()
 }

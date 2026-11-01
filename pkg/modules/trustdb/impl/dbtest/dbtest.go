@@ -102,6 +102,7 @@ func Run(t *testing.T, db TestableDB, cfg Config) {
 		"test chain":       testChain,
 		"test chain sweep": testChainSweep,
 		"test key binding": testKeyBinding,
+		"test unbind":      testUnbind,
 	}
 	// Run test suite on DB directly.
 	for name, test := range tests {
@@ -635,6 +636,37 @@ func testKeyBinding(t *testing.T, db trustdb.DB, _ Config) {
 	}
 	if bound, err := db.BoundKey(ctx, bern); err != nil || string(bound) != string(key) {
 		t.Errorf("BoundKey after a sweep = (%q, %v), want (%q, nil)", bound, err, key)
+	}
+}
+
+// testUnbind checks freeing a name: an unbound name reads no key and binds
+// another, a name extending it keeps its binding, and unbinding a free name
+// changes nothing.
+func testUnbind(t *testing.T, db trustdb.DB, _ Config) {
+	ctx, cancelF := context.WithTimeout(context.Background(), DefaultTimeout)
+	defer cancelF()
+	bern := addr.MustParseIA("1-ff00:0:110")
+	extending := addr.MustParseIA("1-ff00:0:1100")
+	key, other := []byte("bern's key"), []byte("another key")
+
+	for _, ia := range []addr.IA{bern, extending} {
+		if err := db.BindKey(ctx, ia, key); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for range 2 {
+		if err := db.Unbind(ctx, bern); err != nil {
+			t.Fatalf("Unbind: %v", err)
+		}
+		if bound, err := db.BoundKey(ctx, bern); err != nil || bound != nil {
+			t.Errorf("BoundKey of the unbound name = (%q, %v), want (nil, nil)", bound, err)
+		}
+	}
+	if bound, err := db.BoundKey(ctx, extending); err != nil || string(bound) != string(key) {
+		t.Errorf("BoundKey of the extending name = (%q, %v), want (%q, nil)", bound, err, key)
+	}
+	if err := db.BindKey(ctx, bern, other); err != nil {
+		t.Errorf("BindKey of the unbound name to another key: %v", err)
 	}
 }
 

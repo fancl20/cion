@@ -2,7 +2,8 @@
 // goes without memberships. Every chain stands as its own membership,
 // whichever core issued it, so the chains the TRC verifies are admitted as
 // they are, and nothing is presented beside them. A membership never
-// lapses, and the store keeps the newest chain of every ISD-AS the node
+// lapses, so no node leaves, and a removed core's root keeps the roll's
+// grace period. The store keeps the newest chain of every ISD-AS the node
 // admits, issues, or presents as its own: on the founding core, every node
 // from its first chain on.
 package none
@@ -12,9 +13,12 @@ import (
 	"crypto/x509"
 	"fmt"
 	"log/slog"
+	"time"
 
+	"github.com/scionproto/scion/pkg/addr"
 	"github.com/scionproto/scion/pkg/scrypto/cppki"
 
+	"github.com/fancl20/cion/pkg/core/trust"
 	"github.com/fancl20/cion/pkg/modules/membership"
 )
 
@@ -67,6 +71,18 @@ func (m *Method) List(context.Context) ([]membership.Membership, error) {
 // ends.
 func (m *Method) Run(ctx context.Context) {
 	<-ctx.Done()
+}
+
+// Remove removes nothing: without memberships no node leaves.
+func (m *Method) Remove(context.Context, addr.IA) error {
+	return nil
+}
+
+// RemovalGrace is the roll's grace period, the AS certificate validity: no
+// membership stands in for the chains a removed core issued, so they verify
+// until the nodes holding them renew at another core.
+func (m *Method) RemovalGrace() time.Duration {
+	return trust.ASValidity
 }
 
 // keep stores the chain as its ISD-AS's membership once it is the newest; a

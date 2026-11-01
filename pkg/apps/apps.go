@@ -99,6 +99,11 @@ type Environment struct {
 	// voting application loads on; the application refuses to load
 	// without it.
 	TRCDecision voting.Decider
+	// RemoveNode removes a node from the network: from the TRC at once
+	// where it names the node a core, then its membership by the
+	// membership method's rule. Nil on every node but the founding core,
+	// the one role the portal loads on.
+	RemoveNode func(ctx context.Context, ia addr.IA) error
 	// MountControlEndpoint mounts one of the application's handlers on the
 	// node's control endpoint, behind the peer-identity middleware, beside
 	// the drafts' services.

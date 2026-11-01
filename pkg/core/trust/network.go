@@ -382,9 +382,9 @@ func pullNewestTRC(
 }
 
 // verifyAndPinTRC verifies the TRC — a base TRC with its own voting
-// certificates, an update against the resolved predecessor — and pins it in
-// the DB. The posture is fail-closed: a TRC no pinned predecessor vouches
-// for never enters the database.
+// certificates, an update by verifySuccessor against the resolved
+// predecessor — and pins it in the DB. The posture is fail-closed: a TRC no
+// pinned predecessor vouches for never enters the database.
 func verifyAndPinTRC(
 	ctx context.Context,
 	db trustdb.DB,
@@ -401,7 +401,7 @@ func verifyAndPinTRC(
 		if err != nil {
 			return cppki.SignedTRC{}, err
 		}
-		if err := trc.Verify(&pred.TRC); err != nil {
+		if err := verifySuccessor(trc, pred); err != nil {
 			return cppki.SignedTRC{}, serrors.Wrap("verifying fetched TRC against its predecessor",
 				err, "id", trc.TRC.ID, "predecessor", pred.TRC.ID)
 		}

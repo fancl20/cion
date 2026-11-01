@@ -10,6 +10,7 @@ import (
 	"errors"
 	"math/big"
 	"path/filepath"
+	"slices"
 	"sync"
 	"testing"
 	"testing/synctest"
@@ -290,6 +291,124 @@ func TestRenewalAtTheFounderRestsOnTheBinding(t *testing.T) {
 	if err := issuer.Admit(ctx, renewal(renewed)); err != nil {
 		t.Errorf("another issuer refused a chain the kept membership backs: %v", err)
 	}
+}
+
+// TestRemovedNodeIsRenewedNoMore checks the founding core's removal of a
+// node: it frees the node's name, so the founder refuses the key's renewal
+// from then on, while another issuer still renews where the kept membership
+// backs the chain; the founder's listing keeps the membership until it
+// lapses; and a core's removal under the method keeps no grace period.
+func TestRemovedNodeIsRenewedNoMore(t *testing.T) {
+	x := newFixture(t)
+	ctx := t.Context()
+	key, member := x.founder.Enroll(t, nodeIA)
+	skid, err := cppki.SubjectKeyID(key.Public())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := x.founder.DB.BindKey(ctx, nodeIA, skid); err != nil {
+		t.Fatal(err)
+	}
+	env := membershiptest.Env(x.founder.DB, founderIA, true)
+	if _, err := env.Store.Put(member); err != nil {
+		t.Fatal(err)
+	}
+	m := founder.New(env)
+	if err := m.Remove(ctx, nodeIA); err != nil {
+		t.Fatal(err)
+	}
+	if bound, err := x.founder.DB.BoundKey(ctx, nodeIA); err != nil || bound != nil {
+		t.Errorf("the removed node's name is bound to %x (%v), want no key", bound, err)
+	}
+	renewal := membership.Facts{Boundary: membership.BoundaryRenewal,
+		Chain: issue(t, x.other.Issuer, nodeIA, key)}
+	if err := m.Admit(ctx, renewal); err == nil {
+		t.Error("the founder renewed a removed node")
+	}
+	issuerEnv := membershiptest.Env(x.founder.DB, otherIA, false)
+	if _, err := issuerEnv.Store.Put(member); err != nil {
+		t.Fatal(err)
+	}
+	if err := founder.New(issuerEnv).Admit(ctx, renewal); err != nil {
+		t.Errorf("another issuer refused the removed node while its membership counts: %v", err)
+	}
+	list, err := m.List(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.ContainsFunc(list, func(listed membership.Membership) bool {
+		return listed.IA.Equal(nodeIA)
+	}) {
+		t.Errorf("the listing %v drops the removed node's membership at once", list)
+	}
+	if grace := m.RemovalGrace(); grace != 0 {
+		t.Errorf("the removal grace period = %v, want none", grace)
+	}
+}
+
+// TestRunReanchorsTheMembership checks the renewal loop past a founder
+// roll: the membership under the root the roll replaces, still counting in
+// the roll's grace period and far from its threshold, renews at the next
+// pass, and the membership under the fresh root renews no more.
+func TestRunReanchorsTheMembership(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		x := newFixture(t)
+		key, _ := x.founder.Enroll(t, nodeIA)
+		var mtx sync.Mutex
+		issuer, renewals := x.founder.Issuer, 0
+		env := membershiptest.Env(x.founder.DB, nodeIA, false)
+		env.Pacing = membership.Pacing{Inspect: time.Hour, Retry: time.Second}
+		env.Renew = func(context.Context) ([]*x509.Certificate, error) {
+			mtx.Lock()
+			defer mtx.Unlock()
+			renewals++
+			chain := issue(t, issuer, nodeIA, key)
+			if _, err := x.founder.DB.InsertChain(t.Context(), chain); err != nil {
+				t.Error(err)
+			}
+			return chain, nil
+		}
+		ctx, cancel := context.WithCancel(t.Context())
+		done := make(chan struct{})
+		go func() {
+			founder.New(env).Run(ctx)
+			close(done)
+		}()
+		count := func() int {
+			mtx.Lock()
+			defer mtx.Unlock()
+			return renewals
+		}
+
+		synctest.Wait()
+		if n := count(); n != 0 {
+			t.Fatalf("renewed %d times under the newest root above the threshold, want none", n)
+		}
+		fresh, rolled, err := trust.RotateCoreKeys(t.Context(), x.founder.DB, x.founder.Dir,
+			founderIA, x.founder.TRC)
+		if err != nil {
+			t.Fatal(err)
+		}
+		rolledIssuer, err := trust.NewIssuer(founderIA, fresh.IssuerKeys, rolled)
+		if err != nil {
+			t.Fatal(err)
+		}
+		mtx.Lock()
+		issuer = rolledIssuer
+		mtx.Unlock()
+		time.Sleep(time.Hour)
+		synctest.Wait()
+		if n := count(); n != 1 {
+			t.Errorf("renewed %d times under the replaced root, want once", n)
+		}
+		time.Sleep(time.Hour)
+		synctest.Wait()
+		if n := count(); n != 1 {
+			t.Errorf("renewed %d times under the fresh root, want no more", n)
+		}
+		cancel()
+		<-done
+	})
 }
 
 // TestPresentsTheOwnMembership checks what a node presents beside its chain:

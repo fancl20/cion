@@ -284,9 +284,9 @@ func TestSignUpdateAndCompletion(t *testing.T) {
 
 // fakeCaster stands in for the founder's voting application the JoinCore
 // and RollCoreMaterial tests submit to: it decides each submission the control
-// plane's own shape — one that verifies as submitted pinned as it is, a
-// classifying one voted and pinned — with the holds flag refusing
-// everything, the submission that never lands.
+// plane's own shape — one that verifies as submitted pinned with the
+// founder's signature beside, a classifying one voted and pinned — with the
+// holds flag refusing everything, the submission that never lands.
 type fakeCaster struct {
 	keys  CoreKeys
 	db    trustdb.DB
@@ -299,7 +299,8 @@ type fakeCaster struct {
 	served cppki.SignedTRC
 
 	submissions int
-	// votes counts the submissions the founder's sensitive key co-signed.
+	// votes counts the submissions the founder's sensitive key voted on:
+	// the sensitive updates short of its vote.
 	votes int
 }
 
@@ -322,14 +323,11 @@ func (c *fakeCaster) SubmitTRC(
 	if newest.IsZero() {
 		return cppki.SignedTRC{}, errors.New("the founder pinned no TRC")
 	}
-	if err := trc.Verify(&newest.TRC); err == nil {
-		if _, err := c.db.InsertTRC(ctx, trc); err != nil {
+	asSubmitted := trc.Verify(&newest.TRC) == nil
+	if !asSubmitted {
+		if _, err := trc.TRC.ValidateUpdate(&newest.TRC); err != nil {
 			return cppki.SignedTRC{}, err
 		}
-		return c.answer(trc)
-	}
-	if _, err := trc.TRC.ValidateUpdate(&newest.TRC); err != nil {
-		return cppki.SignedTRC{}, err
 	}
 	sensitiveCert, err := signerCert(newest.TRC, cppki.Sensitive)
 	if err != nil {
@@ -345,7 +343,9 @@ func (c *fakeCaster) SubmitTRC(
 	if _, err := c.db.InsertTRC(ctx, completed); err != nil {
 		return cppki.SignedTRC{}, err
 	}
-	c.votes++
+	if !asSubmitted {
+		c.votes++
+	}
 	return c.answer(completed)
 }
 
@@ -407,6 +407,85 @@ func newJoinFixture(
 		t.Fatal(err)
 	}
 	return f, joiner, founder, &fakeCaster{keys: f.founder.keys, db: founder}
+}
+
+// TestPresentersOwnHoldsOneOfAClass checks the gate's bound on what a core
+// holds: the presenter's own certificates pass it as the predecessor carries
+// them, and a submission holding the presenter's root certificate twice
+// holds two of one class and is refused.
+func TestPresentersOwnHoldsOneOfAClass(t *testing.T) {
+	f := newCastFixture(t)
+	_, _, onboarded := f.successor(t)
+	if err := presentersOwn(onboarded, onboarded.TRC, joinerIA); err != nil {
+		t.Errorf("the presenter's own certificates failed the gate: %v", err)
+	}
+	twice := onboarded
+	twice.TRC.Certificates = append(slices.Clone(onboarded.TRC.Certificates), f.joiner.root.Cert)
+	if err := presentersOwn(twice, onboarded.TRC, joinerIA); err == nil {
+		t.Error("a submission holding the presenter's root certificate twice passed the gate")
+	}
+}
+
+// TestUpdatesWantTheFounder checks the founder's signature every pin
+// demands: the joiner's routine roll, a regular update its own keys sign in
+// full as the draft requires, pins nowhere without the founder's signature
+// beside them, neither completed nor fetched, and pins both ways once the
+// founder signed it.
+func TestUpdatesWantTheFounder(t *testing.T) {
+	f := newCastFixture(t)
+	ctx := context.Background()
+	base, _, onboarded := f.successor(t)
+	freshVoting, freshRoot := newJoinerMaterialOf(t, joinerIA)
+	rolled, err := AssembleRotation(onboarded, f.joiner.voting.Cert,
+		[]*x509.Certificate{freshVoting.Cert, freshRoot.Cert})
+	if err != nil {
+		t.Fatal(err)
+	}
+	roll, err := SignUpdate(rolled, freshVoting, f.joiner.voting, freshRoot, f.joiner.root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := roll.Verify(&onboarded.TRC); err != nil {
+		t.Fatalf("the roll does not verify by the draft's rules: %v", err)
+	}
+	signed := f.vote(t, onboarded, roll)
+	pinned := func(db trustdb.DB) bool {
+		t.Helper()
+		trc, err := db.SignedTRC(ctx, rolled.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return !trc.IsZero()
+	}
+
+	founder := newTestDB(t)
+	for _, trc := range []cppki.SignedTRC{base, onboarded} {
+		if _, err := founder.InsertTRC(ctx, trc); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := pinSuccessor(ctx, founder, onboarded, roll); err == nil || pinned(founder) {
+		t.Error("the completed roll without the founder's signature pinned")
+	}
+	if err := pinSuccessor(ctx, founder, onboarded, signed); err != nil || !pinned(founder) {
+		t.Errorf("the completed roll the founder signed did not pin: %v", err)
+	}
+
+	node := newTestDB(t)
+	if _, err := node.InsertTRC(ctx, base); err != nil {
+		t.Fatal(err)
+	}
+	remote := &fakeRemote{byID: map[cppki.TRCID]cppki.SignedTRC{
+		onboarded.TRC.ID: onboarded,
+		rolled.ID:        roll,
+	}}
+	if _, err := fetchTRC(ctx, node, remote, rolled.ID); err == nil || pinned(node) {
+		t.Error("the fetched roll without the founder's signature pinned")
+	}
+	remote.byID[rolled.ID] = signed
+	if _, err := fetchTRC(ctx, node, remote, rolled.ID); err != nil || !pinned(node) {
+		t.Errorf("the fetched roll the founder signed did not pin: %v", err)
+	}
 }
 
 // TestJoinCore checks the onboarding dance end to end against the fake

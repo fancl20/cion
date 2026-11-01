@@ -452,8 +452,8 @@ func (c *rollFixture) roll(
 // TestTRCDeciderRolls checks the decision on a routine roll: the regular
 // update the presenter's live voting key voted on, its live root key
 // acknowledging the root it replaces and both fresh keys proving possession,
-// verifies as submitted and pins exactly as submitted — the founder signing
-// nothing and asking no policy, not even one that would deny — and its
+// verifies as submitted and pins with the founder's signature beside the
+// presenter's — asking no policy, not even one that would deny — and its
 // re-presentation is answered with the pin, casting nothing.
 func TestTRCDeciderRolls(t *testing.T) {
 	c := newRollFixture(t)
@@ -467,8 +467,19 @@ func TestTRCDeciderRolls(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(pinned.Raw) != string(submitted.Raw) {
-		t.Error("the decided roll is not the submission as submitted")
+	if string(pinned.TRC.Raw) != string(submitted.TRC.Raw) {
+		t.Error("the decided roll is not the submitted successor")
+	}
+	if got, want := len(pinned.SignerInfos), len(submitted.SignerInfos)+1; got != want {
+		t.Errorf("the decided roll carries %d signer infos, want the presenter's %d and "+
+			"the founder's", got, len(submitted.SignerInfos))
+	}
+	sensitive, err := trust.SignerCert(c.rolled.TRC, cppki.Sensitive)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !trust.SignedBy(pinned, sensitive) {
+		t.Error("the founder's sensitive voting certificate did not sign the decided roll")
 	}
 	update, err := pinned.TRC.ValidateUpdate(&c.rolled.TRC)
 	if err != nil {
@@ -486,8 +497,8 @@ func TestTRCDeciderRolls(t *testing.T) {
 		t.Errorf("the authorizer was asked %d times, want none behind a routine roll",
 			len(c.auth.Asked))
 	}
-	if stored := pinnedAt(t, c.db, 3); string(stored.Raw) != string(submitted.Raw) {
-		t.Error("the decided roll did not pin as submitted")
+	if stored := pinnedAt(t, c.db, 3); string(stored.Raw) != string(pinned.Raw) {
+		t.Error("the decided roll did not pin as decided")
 	}
 
 	// The re-presentation of the landed roll is answered with the pin.
@@ -495,7 +506,7 @@ func TestTRCDeciderRolls(t *testing.T) {
 	if err != nil {
 		t.Fatalf("the re-presented roll was refused: %v", err)
 	}
-	if string(again.Raw) != string(submitted.Raw) {
+	if string(again.Raw) != string(pinned.Raw) {
 		t.Errorf("the re-presented roll returned %v, want the pinned TRC unchanged",
 			again.TRC.ID)
 	}

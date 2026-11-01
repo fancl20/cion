@@ -472,9 +472,10 @@ func TestRollCoreMaterial(t *testing.T) {
 
 		t.Errorf("root acknowledgments = %v, want the replaced root's", update.RootAcknowledgments)
 	}
-	if len(pinned.SignerInfos) != 4 {
+	if len(pinned.SignerInfos) != 5 {
 		t.Errorf("the routine roll carries %d signer infos, want the vote, the "+
-			"acknowledgment, and the two possession proofs", len(pinned.SignerInfos))
+			"acknowledgment, the two possession proofs, and the founder's signature",
+			len(pinned.SignerInfos))
 	}
 	if caster.votes != 0 {
 		t.Errorf("the founder voted %d times on the routine roll, want none", caster.votes)

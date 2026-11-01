@@ -117,6 +117,23 @@ func TestPortalRecordsNodes(t *testing.T) {
 	}
 }
 
+// TestPortalRecordsRemoveNode checks that the console's removal of a node
+// reaches the founder's removal with the node's ISD-AS.
+func TestPortalRecordsRemoveNode(t *testing.T) {
+	var removed []addr.IA
+	r := &portalRecords{removeNode: func(_ context.Context, ia addr.IA) error {
+		removed = append(removed, ia)
+		return nil
+	}}
+	node := addr.MustParseIA("1-ff00:0:3")
+	if err := r.RemoveNode(t.Context(), node); err != nil {
+		t.Fatal(err)
+	}
+	if diff := cmp.Diff([]addr.IA{node}, removed); diff != "" {
+		t.Errorf("the founder's removal was asked (-want +got):\n%s", diff)
+	}
+}
+
 // TestPortalRecordsHosts checks the console's view of the hosts: the
 // registry's entries sorted by address, each beside its node's host
 // endpoint, with the claims their admission recorded and a legacy record's

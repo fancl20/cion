@@ -35,14 +35,15 @@ var portalEntry = Entry{
 // newPortal adapts the environment into the console's configuration: the
 // selected method's operator surface — the pairing has already made any
 // other method a refused selection — and the records over the memberships,
-// the node directory's reports, and whichever of the registry's owners
-// loaded before it.
+// the node directory's reports, the founder's removal of a node, and
+// whichever of the registry's owners loaded before it.
 func newPortal(env *Environment, loaded []Loaded) (Application, error) {
 	records := &portalRecords{
 		memberships:   env.Memberships,
 		cores:         env.Engine.CoreASes,
 		founder:       env.IA,
 		nodeDirectory: env.Bus.Directory(),
+		removeNode:    env.RemoveNode,
 	}
 	if wg, ok := AppOf(loaded, "wireguard").(*wireguard.App); ok {
 		records.registry = wg.Registry()
@@ -63,7 +64,8 @@ func newPortal(env *Environment, loaded []Loaded) (Application, error) {
 // portalRecords is the console's view of the founder's records: the
 // memberships its membership method holds, the TRC's cores, the node
 // directory's view, the WireGuard directory, and the coordination
-// application's registry and presence.
+// application's registry and presence, beside the founder's removal of a
+// node.
 type portalRecords struct {
 	memberships func(context.Context) ([]membership.Membership, error)
 	cores       func(addr.ISD) ([]addr.IA, error)
@@ -72,6 +74,8 @@ type portalRecords struct {
 	// founder's view, whose entries carry each node's report of how its
 	// peers reach it, none where the measured provider did not load.
 	nodeDirectory *bus.Topic[bus.Directory]
+	// removeNode is the founder's removal of a node.
+	removeNode func(context.Context, addr.IA) error
 	// registry is the WireGuard application's directory; nil where it did
 	// not load.
 	registry wireguard.Registry
@@ -205,4 +209,9 @@ func (r *portalRecords) RemoveHost(ctx context.Context, nodeKey string) error {
 		return err
 	}
 	return r.coord.RemoveHost(ctx, key)
+}
+
+// RemoveNode removes the node through the founder's removal.
+func (r *portalRecords) RemoveNode(ctx context.Context, ia addr.IA) error {
+	return r.removeNode(ctx, ia)
 }

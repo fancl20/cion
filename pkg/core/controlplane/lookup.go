@@ -192,13 +192,15 @@ func (s *LookupService) sourceLookup(ctx context.Context, src, dst addr.IA) []ty
 	return out
 }
 
-// reachableCores returns the core ASes this node has up segments to.
+// reachableCores returns the core ASes the pinned TRC names that this node
+// has up segments to: a core the TRC removed is asked nothing, whatever up
+// segments of it the node still holds.
 func (s *LookupService) reachableCores() []addr.IA {
 	ups := s.DBGet(pathdb.Query{Type: pathdb.SegmentTypeUp})
 	var cores []addr.IA
 	seen := make(map[addr.IA]bool)
 	for _, seg := range ups {
-		if core := seg.FirstIA(); !seen[core] {
+		if core := seg.FirstIA(); !seen[core] && s.isCore(core) {
 			seen[core] = true
 			cores = append(cores, core)
 		}

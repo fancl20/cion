@@ -86,10 +86,10 @@ type Host struct {
 	LastSeen  time.Time
 }
 
-// Records is the network's records as the console reads them, and the one
-// write the console makes: releasing a host's address. The application's
-// entry adapts them from the founder's memberships, the directory, and the
-// coordination application.
+// Records is the network's records as the console reads them, and the two
+// writes the console makes: releasing a host's address and removing a node.
+// The application's entry adapts them from the founder's memberships, the
+// directory, the coordination application, and the founder's removal.
 type Records interface {
 	// Nodes lists the nodes holding a membership that has not lapsed.
 	Nodes(ctx context.Context) ([]Node, error)
@@ -99,4 +99,13 @@ type Records interface {
 	// RemoveHost releases the host whose hex node key it names, or answers
 	// ErrNoCoordination.
 	RemoveHost(ctx context.Context, nodeKey string) error
+	// RemoveNode removes the node from the network: from the TRC at once
+	// where it is a core, then its membership by the founder's rule.
+	RemoveNode(ctx context.Context, ia addr.IA) error
+}
+
+// removable reports whether the operator can remove the node: every core,
+// and every other node whose membership lapses, never the founder.
+func removable(n Node) bool {
+	return n.Role != RoleFounder && (n.Role == RoleCore || !n.Expires.IsZero())
 }

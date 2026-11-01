@@ -72,9 +72,13 @@ Untrusted:
     the checker's own, so a founder outage lapses none. A network may go
     without memberships, alike on every node, back at the TRC's checks
     alone.
-*   **Bounds rather than revocation.** No revocation exists: admission rate
-    caps bound strangers at the doors, expiration retires stale trust, and
-    liveness is the node's own probe.
+*   **The founder removes alone.** Removing a node frees its name, so its
+    membership lapses; removing a core also drops it from the TRC by the
+    founder's vote alone. A node pins a TRC update only once the founder
+    signed it, and the founder signs only a core's own material.
+*   **Bounds rather than revocation.** No chain is revoked: admission rate
+    caps bound strangers at the doors, expiration retires stale trust and
+    removed nodes alike, and liveness is the node's own probe.
 *   **Protection is end to end.** The network authenticates forwarding
     state, not traffic; hosts protect their own traffic with keys the path
     never sees.
@@ -93,17 +97,22 @@ Untrusted:
 *   Every core holds its CA key online. A compromised core's chains for a
     name or key the founder never bound pass no handshake wherever
     memberships load, but a member holding the key signs messages under
-    them that verify against the TRC alone, and the core stays a member
-    until a TRC update removes it. Without memberships, a compromised core
-    can issue a chain for any ISD-AS, and only expiration retires it.
+    them that verify against the TRC alone, and the core anchors chains
+    until the founder removes it. Without memberships, a compromised core
+    can issue a chain for any ISD-AS, its removal keeps the roll's grace
+    period, and only expiration retires what it issued.
+*   A removal acts at a node only once the update reaches it. A removed
+    node is refused only once its membership lapses, about five days while
+    the founder is live, and its chains sign verifiable messages until they
+    expire. The admission policy decides its return as a newcomer's.
 *   A membership counts by its distance from the checker's own: after a
     founder outage longer than the membership window, a node that has
     renewed refuses its peers that have not, until they renew, and a node
     that cannot reach the founder accepts what its renewed peers refuse.
-*   The founder's sensitive vote on a core's TRC submission rests on the
-    admission plugin's answer alone, whatever the submission changes. An
-    address-based policy lends that vote to every enrolled core inside its
-    prefixes.
+*   The founder's sensitive vote on a core's onboarding or roll rests on
+    the admission plugin's answer alone: an address-based policy lends it
+    to every enrolled core inside its prefixes, for that core's own
+    material.
 *   Admission policy decides on addressing, not identity: a location is
     self-claimed and weakened by NATs. A fabricated location still
     completes no enrollment, but address-based admission is a policy about

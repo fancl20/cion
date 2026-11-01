@@ -194,23 +194,33 @@ func (e *Engine) VerifyBoundAt(
 	return v.Verify(ctx, signedMsg, associatedData...)
 }
 
-// Chain returns the node's newest chain valid now, for the SCION-native TLS
-// channel's certificates. It reads local state only: a TLS handshake must
-// not spawn trust fetches, and an un-enrolled node simply has none.
+// Chain returns the node's anchored chain, for the SCION-native TLS
+// channel's certificates: the newest of its chains valid now that verifies
+// against its anchor pool, so a chain whose root left the TRC gives way to
+// another, the membership the founder issued among them. It reads local
+// state only: a TLS handshake must not spawn trust fetches, and an
+// un-enrolled node simply has none.
 func (e *Engine) Chain(ctx context.Context) ([]*x509.Certificate, error) {
 	now := time.Now()
 	q := trustdb.ChainQuery{IA: e.IA, Validity: cppki.Validity{NotBefore: now, NotAfter: now}}
-	var chains [][]*x509.Certificate
-	var err error
-	if db, ok := e.Provider.(DBProvider); ok {
-		chains, err = db.LocalChains(ctx, q)
-	} else {
-		chains, err = e.Provider.GetChains(ctx, q)
+	db, ok := e.Provider.(DBProvider)
+	if !ok {
+		chains, err := e.Provider.GetChains(ctx, q)
+		if err != nil {
+			return nil, serrors.Wrap("querying own chains", err)
+		}
+		return newest(chains, now)
 	}
+	chains, err := db.LocalChains(ctx, q)
 	if err != nil {
 		return nil, serrors.Wrap("querying own chains", err)
 	}
-	return newest(chains, now)
+	pool, err := e.AnchorPool()
+	if err != nil {
+		return nil, serrors.Wrap("reading the anchor pool", err)
+	}
+	verified, _ := verifiedChains(chains, cppki.VerifyOptions{TRC: pool, CurrentTime: now})
+	return newest(verified, now)
 }
 
 // Beside returns the certificates the node presents beside chain, its own
@@ -410,6 +420,32 @@ func NewestChain(
 		return nil, fmt.Errorf("querying chains: %w", err)
 	}
 	return newest(chains, now)
+}
+
+// AnchoredChain returns the chain for ia with the latest expiration among the
+// chains valid at now that verify against the anchor pool pinned in the DB,
+// or nil when none does: the chain a node presents and rests its renewals
+// on, which passes over a chain whose root left the TRC.
+func AnchoredChain(
+	ctx context.Context,
+	db trustdb.DB,
+	ia addr.IA,
+	now time.Time,
+) ([]*x509.Certificate, error) {
+
+	chains, err := db.Chains(ctx, trustdb.ChainQuery{
+		IA:       ia,
+		Validity: cppki.Validity{NotBefore: now, NotAfter: now},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("querying chains: %w", err)
+	}
+	pool, err := PinnedPool(ctx, db, ia.ISD())
+	if err != nil {
+		return nil, err
+	}
+	verified, _ := verifiedChains(chains, cppki.VerifyOptions{TRC: pool, CurrentTime: now})
+	return newest(verified, now)
 }
 
 // newest picks the valid chain with the latest expiration.

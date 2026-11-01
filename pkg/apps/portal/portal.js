@@ -532,7 +532,7 @@ function tags(node) {
 }
 
 // One node: its ISD-AS and tags, key, overlay, endpoint, issued addresses,
-// and membership.
+// and membership, with its menu where the operator can remove it.
 function nodeRow(node) {
   return h("tr", null,
     h("td", null, h("div", { class: "id" }, node.ia), h("div", { class: "below tags" }, tags(node).map(tag => badge(...tag)))),
@@ -540,7 +540,15 @@ function nodeRow(node) {
     h("td", null, node.overlay ? mono(node.overlay) : dash()),
     h("td", null, node.endpoint ? mono(node.endpoint) : dash()),
     h("td", null, node.overlay ? `${node.issued} / ${node.capacity}` : dash()),
-    h("td", null, membership(node.expires)));
+    h("td", null, membership(node.expires)),
+    h("td", { class: "cell-action" }, node.removable && h("button", {
+      class: "icon-btn",
+      "aria-label": `Actions for ${node.ia}`,
+      "aria-haspopup": "menu",
+      "aria-expanded": "false",
+      "data-key": `menu:${node.ia}`,
+      onclick: event => toggleMenu(event.currentTarget, [{ label: "Remove…", danger: true, action: () => removeNode(node) }]),
+    }, "⋯")));
 }
 
 // The membership's expiry, flagged once the node is past renewing it; a
@@ -553,6 +561,24 @@ function membership(expires) {
   return h("div", { class: "cert" },
     timeEl(expires, left < 0 ? "expired " : "expires "),
     left < NOT_RENEWING && badge("Not renewing", "amber"));
+}
+
+// Removes a node once the operator confirms: a core leaves the TRC, and a
+// membership that lapses is renewed no more.
+function removeNode(node) {
+  confirmAction({
+    title: `Remove ${node.ia}?`,
+    message: [
+      node.role === "core" && "The core leaves the TRC.",
+      node.expires && "The founder renews the membership no more; the node drops off once it lapses, " +
+        "and joins again only as the admission policy allows.",
+    ].filter(Boolean).join(" "),
+    label: "Remove",
+    run: async () => {
+      await del(`/admin/api/nodes/${encodeURIComponent(node.ia)}`);
+      return `Removed: ${node.ia}`;
+    },
+  });
 }
 
 // ---- Hosts ----

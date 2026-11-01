@@ -205,6 +205,7 @@ func (n *node) setupFounder(ctx context.Context) error {
 	n.group.Own("certificate manager", manager.Close)
 	n.issuer = issuer
 	n.trcDecision = decider
+	n.removeNode = n.nodeRemoval(decider)
 	n.certMgr = manager
 	n.webPKI = manager.TLSConfig()
 	n.roleLoops = []roleLoop{

@@ -3,19 +3,12 @@ package wireguard
 import (
 	"context"
 
-	"crypto/ecdsa"
-	"crypto/elliptic"
-	"crypto/rand"
-	"crypto/x509"
-	"crypto/x509/pkix"
-	"math/big"
 	"net/netip"
 	"slices"
 	"testing"
 
 	"connectrpc.com/connect/v2"
 	"github.com/scionproto/scion/pkg/addr"
-	"github.com/scionproto/scion/pkg/scrypto/cppki"
 
 	"github.com/fancl20/cion/pkg/libs/peeria"
 	wireguardv1 "github.com/fancl20/cion/proto/wireguard/v1"
@@ -187,31 +180,4 @@ func TestDirectoryListServesEntries(t *testing.T) {
 	if gotHost != wantHost {
 		t.Errorf("host entry = %+v, want %+v", gotHost, wantHost)
 	}
-}
-
-// iaSubjectCert builds a certificate whose subject names the ISD-AS the way
-// SCION chains do: the IA in the subject's dedicated RDN.
-func iaSubjectCert(t *testing.T, ia addr.IA) *x509.Certificate {
-	t.Helper()
-	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-	tmpl := &x509.Certificate{
-		SerialNumber: big.NewInt(1),
-		Subject: pkix.Name{
-			// Marshaling writes ExtraNames; Names is only populated on
-			// parsing.
-			ExtraNames: []pkix.AttributeTypeAndValue{{Type: cppki.OIDNameIA, Value: ia.String()}},
-		},
-	}
-	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, key.Public(), key)
-	if err != nil {
-		t.Fatal(err)
-	}
-	cert, err := x509.ParseCertificate(der)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return cert
 }

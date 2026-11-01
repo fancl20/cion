@@ -63,6 +63,7 @@ func (n *node) appEnvironment() *apps.Environment {
 		UnregisterSvc:   n.unregisterSvc,
 		Authorizer:      n.cfg.enrollAuth,
 		TRCDecision:     n.trcDecision,
+		RemoveNode:      n.removeNode,
 		FounderRoute:    n.founderRoute,
 		DirectoryPacing: n.cfg.Pacing.Directory,
 		MountControlEndpoint: func(pattern string, handler http.Handler) {

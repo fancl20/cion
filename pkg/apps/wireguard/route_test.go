@@ -784,7 +784,7 @@ func TestWireguardWarmMeshPaths(t *testing.T) {
 	leaf := addr.MustIAFrom(20, 0xff0000000361)
 	core := addr.MustIAFrom(20, 0xff0000000362)
 	dest := addr.MustIAFrom(20, 0xff0000000363)
-	a, _ := newTestWireguard(t, leaf, &flippableTrustDB{})
+	a, _ := newTestWireguard(t, leaf, newFlippableTrustDB(t, leaf))
 	now := time.Now()
 	up := declaredSeg(t, pathdb.SegmentTypeUp, now, core, leaf, 34, 35, 4*time.Millisecond)
 	down := declaredSeg(t, pathdb.SegmentTypeDown, now, core, dest, 31, 32, 6*time.Millisecond)

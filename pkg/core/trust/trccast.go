@@ -21,11 +21,13 @@ import (
 
 // TRCDecider is the control plane's decision on a submitted TRC update, with
 // no network of its own: the voting application hands each submission over,
-// and the decision is made here. A submission that verifies against the
-// newest pinned TRC as submitted pins as it is, and a sensitive update short
-// of the founder's vote gets the vote only on the admission policy's allow,
-// the completed artifact verified against the newest pinned TRC before it
-// pins. The founder's own casts run through CastLocal instead.
+// and the decision is made here. A submission that changes the presenter's
+// own material alone, and verifies against the newest pinned TRC as
+// submitted, pins with the founder's signature beside the presenter's; a
+// sensitive update short of the founder's vote gets the vote only on the
+// admission policy's allow. The completed artifact verifies against the
+// newest pinned TRC before it pins. The founder's own casts run through
+// CastLocal and RemoveCore instead.
 type TRCDecider struct {
 	// DB serves and pins the founder's TRCs.
 	DB trustdb.DB
@@ -54,11 +56,10 @@ type TRCDecider struct {
 // the update must classify against the newest pinned TRC, the presenter must
 // be the channel's verified peer — the channel admits a chain only if it
 // verifies against the founder's pinned TRC, whichever core issued it — and
-// what the submission adds must be the presenter's. Past those gates a
-// submission that verifies as submitted pins as it is, the founder signing
-// nothing; a sensitive update that does not verify yet gets the founder's
-// vote on the admission policy's allow; anything else is refused. What
-// refuses pins nothing.
+// the submission must change nothing but the presenter's own material. Past
+// those gates a submission that verifies as submitted, or a sensitive update
+// the admission policy allows the founder's vote, pins with the founder's
+// signature added; anything else is refused. What refuses pins nothing.
 func (c *TRCDecider) DecideTRC(
 	ctx context.Context,
 	presenter addr.IA,
@@ -94,25 +95,17 @@ func (c *TRCDecider) DecideTRC(
 		return cppki.SignedTRC{}, err
 	}
 	// A submission carrying every signature its update requires — a regular
-	// update its voters signed — pins as submitted.
-	verifyErr := trc.Verify(&newest.TRC)
-	if verifyErr == nil {
-		if _, err := c.DB.InsertTRC(ctx, trc); err != nil {
-			return cppki.SignedTRC{}, serrors.Wrap("pinning the submitted update", err,
-				"id", trc.TRC.ID)
+	// update its voters signed — takes the founder's signature alone; a
+	// sensitive update short of a vote asks for the founder's, the policy's
+	// allow its only gate.
+	if verifyErr := trc.Verify(&newest.TRC); verifyErr != nil {
+		if update.Type != cppki.SensitiveUpdate {
+			return cppki.SignedTRC{}, serrors.Wrap("the submitted update does not verify "+
+				"against the newest pinned TRC", verifyErr, "id", trc.TRC.ID)
 		}
-		slog.Info("Pinned a core's TRC update", "presenter", presenter,
-			"type", update.Type, "trc", trc.TRC.ID, "predecessor", newest.TRC.ID)
-		return trc, nil
-	}
-	if update.Type != cppki.SensitiveUpdate {
-		return cppki.SignedTRC{}, serrors.Wrap("the submitted update does not verify "+
-			"against the newest pinned TRC", verifyErr, "id", trc.TRC.ID)
-	}
-	// A sensitive update short of a vote asks for the founder's: the
-	// policy's allow is its only gate.
-	if err := c.authorizeVoting(ctx, presenter, source, novelCerts(trc.TRC, newest.TRC)); err != nil {
-		return cppki.SignedTRC{}, err
+		if err := c.authorizeVoting(ctx, presenter, source, novelCerts(trc.TRC, newest.TRC)); err != nil {
+			return cppki.SignedTRC{}, err
+		}
 	}
 	sensitiveCert, err := SignerCert(newest.TRC, cppki.Sensitive)
 	if err != nil {
@@ -120,18 +113,13 @@ func (c *TRCDecider) DecideTRC(
 	}
 	completed, err := CoSign(trc, c.Sensitive, sensitiveCert)
 	if err != nil {
-		return cppki.SignedTRC{}, serrors.Wrap("casting the founder's vote", err, "id", trc.TRC.ID)
+		return cppki.SignedTRC{}, serrors.Wrap("signing as the founder", err, "id", trc.TRC.ID)
 	}
-	if err := completed.Verify(&newest.TRC); err != nil {
-		return cppki.SignedTRC{}, serrors.Wrap("the completed update does not verify "+
-			"against the newest pinned TRC", err, "id", completed.TRC.ID)
+	if err := pinSuccessor(ctx, c.DB, newest, completed); err != nil {
+		return cppki.SignedTRC{}, err
 	}
-	if _, err := c.DB.InsertTRC(ctx, completed); err != nil {
-		return cppki.SignedTRC{}, serrors.Wrap("pinning the completed update", err,
-			"id", completed.TRC.ID)
-	}
-	slog.Info("Cast the founder's vote on a core's sensitive update", "presenter", presenter,
-		"trc", completed.TRC.ID, "predecessor", newest.TRC.ID)
+	slog.Info("Pinned a core's TRC update with the founder's signature", "presenter", presenter,
+		"type", update.Type, "trc", completed.TRC.ID, "predecessor", newest.TRC.ID)
 	return completed, nil
 }
 
@@ -152,24 +140,62 @@ func landed(sub, newest cppki.TRC) bool {
 	return true
 }
 
-// presentersOwn checks that what the submission adds is its presenter's:
-// every certificate the successor adds names the presenter, and every root
-// certificate it adds signed the submission, its proof of possession (PKI
-// draft, Section 3.5.6) — cppki checks a new voter's alone.
+// presentersOwn checks that the submission changes nothing but its
+// presenter's own material: its certificates and its AS entries. Every
+// certificate of another holder stands as the predecessor carries it, so the
+// founder's sensitive voting certificate stays the one, and the quorum cppki
+// bounds by it stays. The presenter holds at most a regular voting and a root
+// certificate — an onboarding adds them, a roll replaces them, and nothing
+// drops one — and every root certificate it adds signed the submission, its
+// proof of possession (PKI draft, Section 3.5.6), for cppki checks a new
+// voter's alone. Each AS list stands, or appends the presenter's AS to a list
+// that lacks it.
 func presentersOwn(sub cppki.SignedTRC, pred cppki.TRC, presenter addr.IA) error {
-	for _, cert := range novelCerts(sub.TRC, pred) {
-		if certIA, err := cppki.ExtractIA(cert.Subject); err != nil || !certIA.Equal(presenter) {
-			return serrors.New("the submission adds a certificate of another ISD-AS",
-				"presenter", presenter, "subject", cert.Subject)
+	refuse := func(what string) error {
+		return serrors.New("the submission "+what, "presenter", presenter, "submitted", sub.TRC.ID)
+	}
+	others := func(trc cppki.TRC) []*x509.Certificate {
+		return slices.DeleteFunc(slices.Clone(trc.Certificates), func(cert *x509.Certificate) bool {
+			certIA, err := cppki.ExtractIA(cert.Subject)
+			return err == nil && certIA.Equal(presenter)
+		})
+	}
+	if !slices.EqualFunc(others(sub.TRC), others(pred), (*x509.Certificate).Equal) {
+		return refuse("changes a certificate of another ISD-AS")
+	}
+	held := map[cppki.CertType]int{}
+	for _, cert := range CertsOf(sub.TRC, presenter) {
+		ct, err := cppki.ValidateCert(cert)
+		if err != nil || (ct != cppki.Regular && ct != cppki.Root) {
+			return refuse("adds a certificate of a class a core does not hold")
 		}
-		if ct, err := cppki.ValidateCert(cert); err == nil && ct == cppki.Root &&
+		if held[ct]++; held[ct] > 1 {
+			return refuse("holds two certificates of one class for the presenter")
+		}
+		if ct == cppki.Root && !slices.ContainsFunc(pred.Certificates, cert.Equal) &&
 			!signedBy(sub, cert) {
 
-			return serrors.New("the submission adds a root certificate that did not sign it",
-				"presenter", presenter, "subject", cert.Subject)
+			return refuse("adds a root certificate that did not sign it")
 		}
 	}
+	for _, cert := range CertsOf(pred, presenter) {
+		if ct, err := cppki.ValidateCert(cert); err != nil || held[ct] == 0 {
+			return refuse("drops a certificate of the presenter")
+		}
+	}
+	if !ownEntries(pred.CoreASes, sub.TRC.CoreASes, presenter.AS()) ||
+		!ownEntries(pred.AuthoritativeASes, sub.TRC.AuthoritativeASes, presenter.AS()) {
+
+		return refuse("changes an AS list beyond the presenter's entry")
+	}
 	return nil
+}
+
+// ownEntries reports whether the submitted AS list stands as the
+// predecessor's, or appends as to a predecessor's list that lacks it.
+func ownEntries(pred, sub []addr.AS, as addr.AS) bool {
+	return slices.Equal(pred, sub) ||
+		!slices.Contains(pred, as) && slices.Equal(append(slices.Clone(pred), as), sub)
 }
 
 // signedBy reports whether a signature over the signed TRC verifies under

@@ -141,12 +141,11 @@ ADR-0033's accepted risk:
     membership, itself a chain the founder issued: it verifies in the
     removed chain's place and authorizes their next renewal at another
     core. The founder is live when it removes a core, so their memberships
-    are current. The core's node leaves with it (decision 9), and the core
-    never returns. No core casts a TRC update alone: a node pins an update
-    only once the founder signed it, and the founder signs a core's
-    submission only where it changes nothing but the core's own
-    certificates and entries, so no core forks the TRC or blocks its own
-    removal.
+    are current. The core's node leaves with it (decision 9). No core casts
+    a TRC update alone: a node pins an update only once the founder signed
+    it, and the founder signs a core's submission only where it changes
+    nothing but the core's own certificates and entries, so no core forks
+    the TRC or blocks its own removal.
 8.  **What the core signed expires.** No node purges it. Once a node pins
     the removal, nothing signed under the core's removed root verifies
     there, and the beacons the core originates fail as a non-core's: the

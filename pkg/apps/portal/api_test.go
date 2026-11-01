@@ -82,6 +82,7 @@ func TestSurfaceGuards(t *testing.T) {
 
 		for _, route := range []struct{ method, path string }{
 			{http.MethodGet, "/admin/api/nodes"},
+			{http.MethodDelete, "/admin/api/nodes/1-ff00:0:112"},
 			{http.MethodGet, "/admin/api/hosts"},
 			{http.MethodDelete, "/admin/api/hosts/" + strings.Repeat("ab", 32)},
 			{http.MethodPost, "/admin/api/asks/00/approve"},
@@ -243,6 +244,54 @@ func TestRecordsAPI(t *testing.T) {
 		t.Errorf("without coordination the hosts read %+v, want none available", hosts)
 	}
 	c.expect(http.StatusConflict, http.MethodDelete, "/admin/api/hosts/"+strings.Repeat("ab", 32), nil)
+}
+
+// TestRemoveNodeAPI checks the removal of a node over the API: the node
+// list marks each node the operator can remove — every core, and every other
+// node whose membership lapses; a removal of a removable node reaches the
+// records, and one of the founder or of a node whose membership never lapses
+// is refused, as are a malformed ISD-AS and one no node holds, none reaching
+// the records.
+func TestRemoveNodeAPI(t *testing.T) {
+	f, c, _ := signedIn(t)
+	expires := time.Date(2030, 1, 2, 3, 4, 5, 0, time.UTC)
+	f.records.nodes = []Node{
+		{IA: mustIA("1-ff00:0:110"), Expires: expires, Role: RoleFounder},
+		{IA: mustIA("1-ff00:0:111"), Role: RoleCore},
+		{IA: mustIA("1-ff00:0:112"), Expires: expires, Role: RoleNormal},
+		{IA: mustIA("1-ff00:0:113"), Role: RoleNormal},
+	}
+
+	nodes := decodeJSON[struct {
+		Nodes []nodeView `json:"nodes"`
+	}](t, c.expect(http.StatusOK, http.MethodGet, "/admin/api/nodes", nil))
+	got := make(map[string]bool, len(nodes.Nodes))
+	for _, n := range nodes.Nodes {
+		got[n.IA] = n.Removable
+	}
+	want := map[string]bool{
+		"1-ff00:0:110": false,
+		"1-ff00:0:111": true,
+		"1-ff00:0:112": true,
+		"1-ff00:0:113": false,
+	}
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("the nodes' removability (-want +got):\n%s", diff)
+	}
+
+	c.expect(http.StatusBadRequest, http.MethodDelete, "/admin/api/nodes/node", nil)
+	c.expect(http.StatusNotFound, http.MethodDelete, "/admin/api/nodes/1-ff00:0:119", nil)
+	for _, ia := range []string{"1-ff00:0:110", "1-ff00:0:113"} {
+		c.expect(http.StatusConflict, http.MethodDelete, "/admin/api/nodes/"+ia, nil)
+	}
+	for _, ia := range []string{"1-ff00:0:111", "1-ff00:0:112"} {
+		c.expect(http.StatusNoContent, http.MethodDelete, "/admin/api/nodes/"+ia, nil)
+	}
+	if diff := cmp.Diff([]addr.IA{mustIA("1-ff00:0:111"), mustIA("1-ff00:0:112")},
+		f.records.removed); diff != "" {
+
+		t.Errorf("the records were asked to remove (-want +got):\n%s", diff)
+	}
 }
 
 // TestDecideAPI checks the asks' decisions over the API: a rejection and an

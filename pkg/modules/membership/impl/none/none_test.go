@@ -6,6 +6,7 @@ import (
 
 	"github.com/scionproto/scion/pkg/addr"
 
+	"github.com/fancl20/cion/pkg/core/trust"
 	"github.com/fancl20/cion/pkg/core/trust/trusttest"
 	"github.com/fancl20/cion/pkg/modules/membership"
 	"github.com/fancl20/cion/pkg/modules/membership/impl/membershiptest"
@@ -71,5 +72,37 @@ func TestAdmitsEveryChain(t *testing.T) {
 
 		t.Errorf("listing %v, want the node's own and the admitted chain's memberships, "+
 			"neither with an expiry", list)
+	}
+}
+
+// TestRemovesNoNode checks the none method's removals: removing a node
+// leaves its name bound and its membership listed, and a core's removal
+// keeps the roll's grace period, the AS certificate validity.
+func TestRemovesNoNode(t *testing.T) {
+	f := trusttest.NewFounder(t, openDB(t), addr.MustIAFrom(20, 0xff0000000001))
+	node := addr.MustIAFrom(20, 0xff0000000011)
+	_, chain := f.Enroll(t, node)
+	if err := f.DB.BindKey(t.Context(), node, chain[0].SubjectKeyId); err != nil {
+		t.Fatal(err)
+	}
+	m := none.New(membershiptest.Env(f.DB, f.IA, true))
+	if err := m.Issued(t.Context(), chain); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Remove(t.Context(), node); err != nil {
+		t.Fatal(err)
+	}
+	if bound, err := f.DB.BoundKey(t.Context(), node); err != nil || bound == nil {
+		t.Errorf("the removal freed the node's name (%v), want it bound", err)
+	}
+	list, err := m.List(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list) != 1 || !list[0].IA.Equal(node) {
+		t.Errorf("listing %v, want the node's membership", list)
+	}
+	if grace := m.RemovalGrace(); grace != trust.ASValidity {
+		t.Errorf("the removal grace period = %v, want the AS validity %v", grace, trust.ASValidity)
 	}
 }

@@ -160,6 +160,13 @@ func (a *App) Memberships(ctx context.Context) ([]membership.Membership, error) 
 	return a.node.members.List(ctx)
 }
 
+// RemoveNode removes the node from the network: from the TRC at once where
+// it names the node a core, then its membership by the membership method's
+// rule. The founding core alone removes.
+func (a *App) RemoveNode(ctx context.Context, ia addr.IA) error {
+	return a.node.removeNode(ctx, ia)
+}
+
 // PeerClient returns the node's verified peer channel: the client its
 // beacons, registrations, and segment fetches ride.
 func (a *App) PeerClient() *controlplane.PeerClient { return a.node.peerClt }
