@@ -84,8 +84,8 @@ func bootStaticNode(t *testing.T, wpki *webpkitest.CA, ip netip.Addr, core bool,
 // core A, the middle B, and C below — paired by link-set files only: the
 // two links' underlay addresses picked up front, the files' entries
 // completing as each node's name turns final, the founding core started
-// first.
-func bootStaticLine(t *testing.T, wpki *webpkitest.CA,
+// first. mutate, when set, takes every node's run arguments last.
+func bootStaticLine(t *testing.T, wpki *webpkitest.CA, mutate func(*services.NodeConfig),
 	ipA, ipB, ipC netip.Addr) (a, b, c *staticNode) {
 
 	t.Helper()
@@ -96,13 +96,13 @@ func bootStaticLine(t *testing.T, wpki *webpkitest.CA,
 	// the ISD the other files' entries complete with. B's file names the
 	// core — final already — before B's first start; C's names B, final
 	// once B's first start completed from A's entry.
-	a = bootStaticNode(t, wpki, ipA, true, t.TempDir(), newStaticSet(t), nil)
+	a = bootStaticNode(t, wpki, ipA, true, t.TempDir(), newStaticSet(t), mutate)
 	bFile := newStaticSet(t)
 	writeStaticSet(t, bFile, staticLink{IA: a.app.IA().String(), Local: abB, Remote: abA})
-	b = bootStaticNode(t, wpki, ipB, false, t.TempDir(), bFile, nil)
+	b = bootStaticNode(t, wpki, ipB, false, t.TempDir(), bFile, mutate)
 	cFile := newStaticSet(t)
 	writeStaticSet(t, cFile, staticLink{IA: b.app.IA().String(), Local: bcC, Remote: bcB})
-	c = bootStaticNode(t, wpki, ipC, false, t.TempDir(), cFile, nil)
+	c = bootStaticNode(t, wpki, ipC, false, t.TempDir(), cFile, mutate)
 
 	// The core's file gains B's entry — B's name is final now, and the
 	// entry's interface ID names one — and B's gains C's, the
@@ -186,7 +186,7 @@ func bootTopology(t *testing.T, wpki *webpkitest.CA, topo staticTopology) map[ad
 func TestStaticLabByLinkSet(t *testing.T) {
 	t.Parallel()
 	wpki := webpkitest.New(t)
-	a, b, c := bootStaticLine(t, wpki, HostSlot(t), HostSlot(t), HostSlot(t))
+	a, b, c := bootStaticLine(t, wpki, nil, HostSlot(t), HostSlot(t), HostSlot(t))
 
 	// The identity completed from the files: one ISD, each AS its own draw.
 	for _, n := range []*staticNode{b, c} {
@@ -235,6 +235,37 @@ func TestStaticLabByLinkSet(t *testing.T) {
 	})
 	Poll(t, "A and B still answer each other", func() bool {
 		return pingFrom(ctx, a.Node, b.app.IA(), b.host)
+	})
+}
+
+// TestStaticLineWithoutMemberships is the none method's proof: the static
+// lab's line, every node run without memberships, enrolls and answers echo
+// end to end, and the founder lists every node by its chain, none with an
+// expiry.
+func TestStaticLineWithoutMemberships(t *testing.T) {
+	t.Parallel()
+	wpki := webpkitest.New(t)
+	a, b, c := bootStaticLine(t, wpki, func(cfg *services.NodeConfig) {
+		cfg.Membership = "none"
+	}, HostSlot(t), HostSlot(t), HostSlot(t))
+
+	ctx := t.Context()
+	Poll(t, "B enrolled", func() bool { return pingFrom(ctx, b.Node, a.app.IA(), a.host) })
+	Poll(t, "C enrolled", func() bool { return pingFrom(ctx, c.Node, a.app.IA(), a.host) })
+	Poll(t, "the core reaches C", func() bool { return pingFrom(ctx, a.Node, c.app.IA(), c.host) })
+	Poll(t, "the founder to list every node without an expiry", func() bool {
+		list, err := a.app.Memberships(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		listed := make(map[addr.IA]bool, len(list))
+		for _, m := range list {
+			if !m.Expires.IsZero() {
+				t.Fatalf("the founder lists %v with an expiry", m.IA)
+			}
+			listed[m.IA] = true
+		}
+		return listed[a.app.IA()] && listed[b.app.IA()] && listed[c.app.IA()]
 	})
 }
 

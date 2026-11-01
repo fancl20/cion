@@ -23,8 +23,9 @@ overview](/docs/design/architecture.md) names the components involved.
     unauthenticated: a matched nonce proves return routability and nothing
     more, bounded by admission limits.
 *   **Node to node, established.** Every control exchange is mutually
-    authenticated with TRC-anchored chains, and a forwarded packet's path is
-    verified hop by hop under each AS's own key.
+    authenticated with TRC-anchored chains, each backed by the membership
+    the founder issued its node, and a forwarded packet's path is verified
+    hop by hop under each AS's own key.
 *   **In transit.** Other operators' nodes are trusted to forward and
     nothing else: they see the traffic they carry, because protection is end
     to end, not on the path.
@@ -63,6 +64,14 @@ Untrusted:
     default — the founding core does not start without a plugin — and a
     gate that cannot reach its signal denies. The approving plugin's note
     is recorded with the entry — the registry's own audit.
+*   **Membership binds a name to its key.** A peer's chain passes a
+    handshake only where a membership the founder issued binds its ISD-AS
+    to its key, so a core's key links no identity the founder never
+    admitted. Each node presents its membership beside its chain and
+    renews it at the founder, and a membership counts by its distance from
+    the checker's own, so a founder outage lapses none. A network may go
+    without memberships, alike on every node, back at the TRC's checks
+    alone.
 *   **Bounds rather than revocation.** No revocation exists: admission rate
     caps bound strangers at the doors, expiration retires stale trust, and
     liveness is the node's own probe.
@@ -81,9 +90,16 @@ Untrusted:
     enrollment and every TRC update, while every core keeps renewing chains;
     losing its sensitive key halts the updates that need its vote, the
     founder's own roll among them. Recovery from either is a redeploy.
-*   Every core holds its CA key online, and nothing limits the names a core
-    issues for: a compromised core can issue a chain for any ISD-AS, and
-    only expiration retires it.
+*   Every core holds its CA key online. A compromised core's chains for a
+    name or key the founder never bound pass no handshake wherever
+    memberships load, but a member holding the key signs messages under
+    them that verify against the TRC alone, and the core stays a member
+    until a TRC update removes it. Without memberships, a compromised core
+    can issue a chain for any ISD-AS, and only expiration retires it.
+*   A membership counts by its distance from the checker's own: after a
+    founder outage longer than the membership window, a node that has
+    renewed refuses its peers that have not, until they renew, and a node
+    that cannot reach the founder accepts what its renewed peers refuse.
 *   The founder's sensitive vote on a core's TRC submission rests on the
     admission plugin's answer alone, whatever the submission changes. An
     address-based policy lends that vote to every enrolled core inside its

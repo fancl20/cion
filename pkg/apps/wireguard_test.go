@@ -4,6 +4,8 @@ import (
 	"net/netip"
 	"testing"
 
+	"github.com/fancl20/cion/pkg/core/trust/trusttest"
+
 	"github.com/scionproto/scion/pkg/addr"
 
 	"github.com/fancl20/cion/pkg/core/trust"
@@ -23,7 +25,7 @@ func wireguardEnvironment(t *testing.T, core bool) *Environment {
 		StateRoot:   t.TempDir(),
 		ControlHost: "127.0.0.1:30042",
 		Domain:      "core.example.org",
-		Engine:      trust.NewEngine(ia, nil, nil),
+		Engine:      trust.NewEngine(ia, nil, nil, trusttest.Unchecked{}),
 		Paths:       &scion.PathProvider{},
 		Bus:         bus.New(),
 	}

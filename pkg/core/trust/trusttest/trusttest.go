@@ -7,6 +7,7 @@
 package trusttest
 
 import (
+	"context"
 	"crypto"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -18,6 +19,7 @@ import (
 	"github.com/scionproto/scion/pkg/scrypto/cppki"
 
 	"github.com/fancl20/cion/pkg/core/trust"
+	"github.com/fancl20/cion/pkg/modules/membership"
 	"github.com/fancl20/cion/pkg/modules/trustdb"
 )
 
@@ -75,12 +77,29 @@ func (f *Founder) Enroll(t testing.TB, ia addr.IA) (*ecdsa.PrivateKey, []*x509.C
 	return key, chain
 }
 
-// Engine enrolls ia and returns its engine over the founder's database.
+// Engine enrolls ia and returns its engine over the founder's database,
+// its membership Unchecked.
 func (f *Founder) Engine(t testing.TB, ia addr.IA) *trust.Engine {
 	t.Helper()
 	key, _ := f.Enroll(t, ia)
-	return trust.NewEngine(ia, key, &trust.NetworkProvider{DB: f.DB})
+	return trust.NewEngine(ia, key, &trust.NetworkProvider{DB: f.DB}, Unchecked{})
 }
+
+// Unchecked is the membership seam's double for tests whose subject is not
+// the membership: it admits every chain the TRC verified, presents nothing
+// beside the node's own, and keeps no chain the node issues.
+type Unchecked struct{}
+
+// Admit admits the chain.
+func (Unchecked) Admit(context.Context, membership.Facts) error { return nil }
+
+// Present presents nothing.
+func (Unchecked) Present(context.Context, []*x509.Certificate) ([]*x509.Certificate, error) {
+	return nil, nil
+}
+
+// Issued keeps nothing.
+func (Unchecked) Issued(context.Context, []*x509.Certificate) error { return nil }
 
 // NewCSR returns a CSR for a freshly generated AS key of ia.
 func NewCSR(t *testing.T, ia addr.IA) (*x509.CertificateRequest, crypto.Signer) {

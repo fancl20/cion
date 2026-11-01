@@ -26,11 +26,13 @@ import (
 // with id-kp-serverAuth and id-kp-clientAuth (PKI draft, Section 2.7.4) —
 // mutually authenticated by verifying the chain against the pinned TRC's root
 // pool instead of WebPKI roots, with the peer's IA extracted from the
-// certificate subject. A node that has not pinned the TRC yet cannot
-// authenticate anyone: its handshakes degrade to encryption without
-// authentication, the window in which a fresh node receives the unverified
-// beacons that route its enrollment fetch. Beacons carry the authoritative
-// signature; this layer authenticates the transport.
+// certificate subject. Whatever a peer presents after its chain — its
+// membership — goes beside the chain to the credentials, which decide it. A
+// node that has not pinned the TRC yet cannot authenticate anyone: its
+// handshakes degrade to encryption without authentication, the window in
+// which a fresh node receives the unverified beacons that route its
+// enrollment fetch. Beacons carry the authoritative signature; this layer
+// authenticates the transport.
 
 // EndpointTLSConfig configures the endpoint's two channels.
 type EndpointTLSConfig struct {
@@ -121,25 +123,27 @@ func nativeClientTLS(
 }
 
 // verifyChainAgainstTRC returns a VerifyPeerCertificate callback checking
-// that the presented chain verifies against the anchor pool — the pinned
-// newest TRC's roots, the predecessor's beside them while the newest is
-// within its grace period — and, when expected is non-nil, that its subject
-// names the expected IA. A chain that passes is handed to the credentials
-// to record. Without a pinned TRC every chain is accepted — the bootstrap
-// window — and none is recorded.
+// that the presented chain — the first two certificates the peer presented
+// — verifies against the anchor pool — the pinned newest TRC's roots, the
+// predecessor's beside them while the newest is within its grace period —
+// and, when expected is non-nil, that its subject names the expected IA. A
+// chain that passes is handed to the credentials to decide, beside the
+// certificates the peer presented after it. Without a pinned TRC every
+// chain is accepted — the bootstrap window — and none is decided.
 func verifyChainAgainstTRC(creds Credentials, expected *addr.IA) func([][]byte, [][]*x509.Certificate) error {
 	return func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
 		if len(rawCerts) == 0 {
 			return errors.New("peer presented no certificate")
 		}
-		chain := make([]*x509.Certificate, len(rawCerts))
+		certs := make([]*x509.Certificate, len(rawCerts))
 		for i, raw := range rawCerts {
 			cert, err := x509.ParseCertificate(raw)
 			if err != nil {
 				return fmt.Errorf("parsing certificate: %w", err)
 			}
-			chain[i] = cert
+			certs[i] = cert
 		}
+		chain, presented := certs[:min(2, len(certs))], certs[min(2, len(certs)):]
 		pool, err := creds.AnchorPool()
 		if err != nil {
 			return err
@@ -164,25 +168,40 @@ func verifyChainAgainstTRC(creds Credentials, expected *addr.IA) func([][]byte, 
 					"expected", *expected, "actual", ia)
 			}
 		}
-		creds.RecordChain(chain)
+		if err := creds.AcceptChain(chain, presented); err != nil {
+			return fmt.Errorf("chain refused: %w", err)
+		}
 		return nil
 	}
 }
 
-// nativeCert returns the node's AS chain as a TLS certificate. A node without
-// a valid chain gets an ephemeral self-signed one: it can then receive
-// beacons — whose signatures it cannot verify yet anyway — but not send
-// anything whose authentication would matter.
+// nativeCert returns the node's AS chain as a TLS certificate, the
+// certificates its credentials present beside the chain after it. A node
+// without a valid chain gets an ephemeral self-signed one: it can then
+// receive beacons — whose signatures it cannot verify yet anyway — but not
+// send anything whose authentication would matter.
 func nativeCert(creds Credentials, key crypto.Signer) (*tls.Certificate, error) {
-	chain, err := creds.Chain(context.Background())
+	ctx := context.Background()
+	chain, err := creds.Chain(ctx)
 	if err != nil {
 		return nil, err
 	}
 	if len(chain) == 0 {
 		return ephemeralCert()
 	}
+	beside, err := creds.Beside(ctx, chain)
+	if err != nil {
+		return nil, err
+	}
+	raw := make([][]byte, 0, len(chain)+len(beside))
+	for _, cert := range chain {
+		raw = append(raw, cert.Raw)
+	}
+	for _, cert := range beside {
+		raw = append(raw, cert.Raw)
+	}
 	return &tls.Certificate{
-		Certificate: [][]byte{chain[0].Raw, chain[1].Raw},
+		Certificate: raw,
 		PrivateKey:  key,
 		Leaf:        chain[0],
 	}, nil

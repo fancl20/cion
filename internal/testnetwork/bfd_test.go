@@ -143,7 +143,7 @@ func TestBFDStaticLabEpisode(t *testing.T) {
 	t.Parallel()
 	wpki := webpkitest.New(t)
 	ipB := HostSlot(t)
-	a, b, c := bootStaticLine(t, wpki, HostSlot(t), ipB, HostSlot(t))
+	a, b, c := bootStaticLine(t, wpki, nil, HostSlot(t), ipB, HostSlot(t))
 	// The interface the core's file named its link to B.
 	ifID := uint16(1)
 

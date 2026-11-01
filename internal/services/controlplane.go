@@ -28,6 +28,7 @@ import (
 	"github.com/fancl20/cion/pkg/libs/scionrpc"
 	"github.com/fancl20/cion/pkg/modules/links"
 	linkbbolt "github.com/fancl20/cion/pkg/modules/links/impl/bbolt"
+	"github.com/fancl20/cion/pkg/modules/membership"
 	"github.com/fancl20/cion/pkg/modules/pathdb"
 	pathdbbbolt "github.com/fancl20/cion/pkg/modules/pathdb/impl/bbolt"
 	"github.com/fancl20/cion/pkg/modules/topology"
@@ -50,6 +51,7 @@ func (n *node) setupControlPlane(ctx context.Context) error {
 	if err := n.setupTrustRole(ctx); err != nil {
 		return err
 	}
+	n.setupMembership()
 	if err := n.buildMessenger(); err != nil {
 		return err
 	}
@@ -71,8 +73,8 @@ func (n *node) setupControlPlane(ctx context.Context) error {
 // another process serving from the same state directory.
 const storeLockTimeout = time.Second
 
-// openState opens the trust, path, and link databases and the AS key under
-// the state directory. A node may start with zero links: the store is empty
+// openState opens the trust, membership, path, and link databases and the AS
+// key under the state directory. A node may start with zero links: the store is empty
 // until a neighbor joins, the selection loop promotes one, or the loaded
 // provider seeds it — the first-start neighbor requirement being the
 // provider's to satisfy, by a --topology.neighbor or a non-empty link-set.
@@ -83,6 +85,12 @@ func (n *node) openState(ctx context.Context) error {
 	}
 	n.group.Own("trust database", trustDB.Close)
 	n.trustDB = trustDB
+	memberStore, err := openStore(n.cfg.State, "membership.db", membership.OpenStore)
+	if err != nil {
+		return fmt.Errorf("opening membership store: %w", err)
+	}
+	n.group.Own("membership store", memberStore.Close)
+	n.memberStore = memberStore
 	asKey, err := trust.LoadOrCreateASKey(n.cfg.State)
 	if err != nil {
 		return fmt.Errorf("loading AS key: %w", err)
@@ -144,10 +152,10 @@ func (n *node) setupTrustRole(ctx context.Context) error {
 // genesis, or the newest pinned — the issuer anchored in it, the decision
 // on submitted TRC updates the voting application hands each submission
 // to, its first chain by self-enrollment — the chain lifecycle's first
-// pass — the bindings of the names it issued to their keys, and its WebPKI
-// identity, prepared whatever the applications: the node's HTTPS server,
-// assembled after they mount, serves it and answers the ACME TLS-ALPN
-// challenge on it, so no TLS path branches on an application's presence.
+// pass — and its WebPKI identity, prepared whatever the applications: the
+// node's HTTPS server, assembled after they mount, serves it and answers
+// the ACME TLS-ALPN challenge on it, so no TLS path branches on an
+// application's presence.
 // Its loops renew by self-issue, roll by local cast, manage an ACME-managed
 // certificate, and run the selected authorizer's own loops when the method
 // has them.
@@ -174,6 +182,7 @@ func (n *node) setupFounder(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("creating issuer: %w", err)
 	}
+	issuer.ChainValidity = n.cfg.Pacing.ChainValidity
 	decider := &trust.TRCDecider{
 		DB:         n.trustDB,
 		IA:         n.ident.ia,
@@ -182,9 +191,6 @@ func (n *node) setupFounder(ctx context.Context) error {
 	}
 	if err := trust.SelfIssue(ctx, n.trustDB, issuer, n.ident.ia, n.asKey); err != nil {
 		return fmt.Errorf("self-enrolling core: %w", err)
-	}
-	if err := trust.BindHeldNames(ctx, n.trustDB); err != nil {
-		return fmt.Errorf("binding the held names: %w", err)
 	}
 	manager, err := webpki.PrepareTLSCert(webpki.TLSCertConfig{
 		Domain:   n.cfg.Domain,
@@ -266,6 +272,7 @@ func (n *node) setupAuthoritative(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("creating issuer: %w", err)
 	}
+	issuer.ChainValidity = n.cfg.Pacing.ChainValidity
 	coreClt, err := n.coreClient()
 	if err != nil {
 		return err
@@ -345,6 +352,7 @@ func (n *node) coreClient() (*webpki.CoreClient, error) {
 	// The client's Close closes its QUIC transport alone; registered after
 	// its conns, it releases first.
 	n.group.Own("core client", coreClt.Close)
+	n.coreClt = coreClt
 	return coreClt, nil
 }
 
@@ -410,7 +418,7 @@ func (n *node) buildMessenger() error {
 	// endpoint through the core client over the SCION-native transport, on
 	// every role but the founder itself.
 	provider := &trust.NetworkProvider{DB: n.trustDB, Remote: n.remote}
-	n.engine = trust.NewEngine(n.ident.ia, n.asKey, provider)
+	n.engine = trust.NewEngine(n.ident.ia, n.asKey, provider, n.members)
 
 	peerConn, err := n.scionConn(0)
 	if err != nil {
@@ -578,6 +586,7 @@ func (n *node) assembleEndpoint() error {
 			Issuer:      n.issuer,
 			Enrolls:     n.cfg.role == trust.ASTypeCore,
 			Authorizer:  n.cfg.enrollAuth,
+			Membership:  n.members,
 			MinInterval: n.cfg.Pacing.RendezvousRate,
 		},
 		SegmentService: &controlplane.SegmentService{

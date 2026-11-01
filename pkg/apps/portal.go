@@ -1,9 +1,7 @@
 package apps
 
 import (
-	"cmp"
 	"context"
-	"crypto/x509"
 	"encoding/hex"
 	"fmt"
 	"net/netip"
@@ -11,20 +9,20 @@ import (
 	"slices"
 
 	"github.com/scionproto/scion/pkg/addr"
-	"github.com/scionproto/scion/pkg/scrypto/cppki"
 
 	"github.com/fancl20/cion/pkg/apps/coordination"
 	"github.com/fancl20/cion/pkg/apps/portal"
 	"github.com/fancl20/cion/pkg/apps/wireguard"
 	"github.com/fancl20/cion/pkg/libs/bus"
 	"github.com/fancl20/cion/pkg/modules/enrollauth"
+	"github.com/fancl20/cion/pkg/modules/membership"
 )
 
 // portalEntry is the portal application: the operator's passkey console,
 // served beneath /admin/ on the founding core's HTTPS server. It pairs with
 // the portal admission method, whose asks it decides and whose auth keys it
-// mints, and it lists the network's records: the nodes from the issued
-// chains, the hosts from the WireGuard registry and the coordination
+// mints, and it lists the network's records: the nodes from their
+// memberships, the hosts from the WireGuard registry and the coordination
 // application, which it borrows where they load — a core serving no hosts
 // still decides its nodes.
 var portalEntry = Entry{
@@ -36,12 +34,12 @@ var portalEntry = Entry{
 
 // newPortal adapts the environment into the console's configuration: the
 // selected method's operator surface — the pairing has already made any
-// other method a refused selection — and the records over the issued
-// chains, the node directory's reports, and whichever of the registry's
-// owners loaded before it.
+// other method a refused selection — and the records over the memberships,
+// the node directory's reports, and whichever of the registry's owners
+// loaded before it.
 func newPortal(env *Environment, loaded []Loaded) (Application, error) {
 	records := &portalRecords{
-		chains:        env.IssuedChains,
+		memberships:   env.Memberships,
 		cores:         env.Engine.CoreASes,
 		founder:       env.IA,
 		nodeDirectory: env.Bus.Directory(),
@@ -62,18 +60,17 @@ func newPortal(env *Environment, loaded []Loaded) (Application, error) {
 	})
 }
 
-// portalRecords is the console's view of the founder's records: the chains
-// its trust database holds, the TRC's cores, the node directory's view, the
-// WireGuard directory, and the coordination application's registry and
-// presence.
+// portalRecords is the console's view of the founder's records: the
+// memberships its membership method holds, the TRC's cores, the node
+// directory's view, the WireGuard directory, and the coordination
+// application's registry and presence.
 type portalRecords struct {
-	chains  func(context.Context) ([][]*x509.Certificate, error)
-	cores   func(addr.ISD) ([]addr.IA, error)
-	founder addr.IA
+	memberships func(context.Context) ([]membership.Membership, error)
+	cores       func(addr.ISD) ([]addr.IA, error)
+	founder     addr.IA
 	// nodeDirectory is the node directory topic: its last event is the
-	// founder's view, whose entries carry each node's signing time and its
-	// report of how its peers reach it, none where the measured provider did
-	// not load.
+	// founder's view, whose entries carry each node's report of how its
+	// peers reach it, none where the measured provider did not load.
 	nodeDirectory *bus.Topic[bus.Directory]
 	// registry is the WireGuard application's directory; nil where it did
 	// not load.
@@ -84,24 +81,14 @@ type portalRecords struct {
 
 var _ portal.Records = (*portalRecords)(nil)
 
-// Nodes lists every node holding a chain valid now, the newest chain per
-// ISD-AS, beside every node the node directory's view holds, each with its
-// last report and the tag the report earns it, and the node's WireGuard
-// directory entry where the registry holds one.
+// Nodes lists every node holding a membership that has not lapsed, in
+// ISD-AS order, each with the key and expiry of its membership, the tag its
+// last directory report earns it where the node directory's view holds one,
+// and its WireGuard directory entry where the registry holds one.
 func (r *portalRecords) Nodes(ctx context.Context) ([]portal.Node, error) {
-	chains, err := r.chains(ctx)
+	memberships, err := r.memberships(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("reading the chains: %w", err)
-	}
-	newest := make(map[addr.IA][]*x509.Certificate)
-	for _, chain := range chains {
-		ia, err := cppki.ExtractIA(chain[0].Subject)
-		if err != nil {
-			return nil, fmt.Errorf("reading a stored chain's ISD-AS: %w", err)
-		}
-		if held, ok := newest[ia]; !ok || chain[0].NotAfter.After(held[0].NotAfter) {
-			newest[ia] = chain
-		}
+		return nil, fmt.Errorf("reading the memberships: %w", err)
 	}
 	cores, err := r.cores(r.founder.ISD())
 	if err != nil {
@@ -114,28 +101,17 @@ func (r *portalRecords) Nodes(ctx context.Context) ([]portal.Node, error) {
 		}
 	}
 	view := r.nodeDirectory.Latest()
-	listed := make(map[addr.IA]bool, len(newest))
-	for ia := range newest {
-		listed[ia] = true
-	}
-	for _, s := range view.Scopes() {
-		for _, e := range s.Entries() {
-			listed[e.IA] = true
-		}
-	}
-	nodes := make([]portal.Node, 0, len(listed))
-	for ia := range listed {
-		report, _ := view.Latest(ia)
+	nodes := make([]portal.Node, 0, len(memberships))
+	for _, m := range memberships {
+		ia := m.IA
 		node := portal.Node{
-			IA:       ia,
-			Reported: report.Published,
-			Role:     portal.RoleNormal,
+			IA:      ia,
+			Key:     hex.EncodeToString(m.Key),
+			Expires: m.Expires,
+			Role:    portal.RoleNormal,
 		}
-		if len(report.Addresses) != 0 {
+		if report, _ := view.Latest(ia); len(report.Addresses) != 0 {
 			node.Reach = reachTag(report.Addresses[0].Reach)
-		}
-		if chain, ok := newest[ia]; ok {
-			node.Key = hex.EncodeToString(chain[0].SubjectKeyId)
 		}
 		switch {
 		case ia.Equal(r.founder):
@@ -155,9 +131,6 @@ func (r *portalRecords) Nodes(ctx context.Context) ([]portal.Node, error) {
 		}
 		nodes = append(nodes, node)
 	}
-	slices.SortFunc(nodes, func(a, b portal.Node) int {
-		return cmp.Compare(uint64(a.IA), uint64(b.IA))
-	})
 	return nodes, nil
 }
 

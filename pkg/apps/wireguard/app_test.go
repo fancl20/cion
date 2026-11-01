@@ -11,6 +11,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/fancl20/cion/pkg/core/trust/trusttest"
+
 	"github.com/scionproto/scion/pkg/addr"
 	"github.com/scionproto/scion/pkg/scrypto/cppki"
 
@@ -213,7 +215,7 @@ func newTestWireguard(
 		Self:       self,
 		StateDir:   t.TempDir(),
 		Paths:      provider,
-		Engine:     trust.NewEngine(ia, nil, &trust.NetworkProvider{DB: db}),
+		Engine:     trust.NewEngine(ia, nil, &trust.NetworkProvider{DB: db}, trusttest.Unchecked{}),
 		Store:      directory,
 		NewConn: func() (*scion.Conn, error) {
 			return scion.NewConn(scion.ConnConfig{

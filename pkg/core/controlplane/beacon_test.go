@@ -303,9 +303,10 @@ func TestHandleBeaconAsksTheSender(t *testing.T) {
 		if _, err := provider.DB.InsertTRC(ctx, trc); err != nil {
 			t.Fatal(err)
 		}
+		engine := trust.NewEngine(nodeIATest, f.engines[nodeIATest].Key, provider, trusttest.Unchecked{})
 		b, err := NewBeaconer(BeaconerConfig{
 			IA:     nodeIATest,
-			Engine: trust.NewEngine(nodeIATest, f.engines[nodeIATest].Key, provider),
+			Engine: engine,
 			MACKey: []byte(testMACKey),
 			Store:  NewBeaconStore(),
 			DB:     f.pathDB,
@@ -569,7 +570,8 @@ func TestHandleBeaconNonCoreOriginWaivedWithoutTRC(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	fresh := trust.NewEngine(nodeIATest, key, &trust.NetworkProvider{DB: freshDB})
+	fresh := trust.NewEngine(nodeIATest, key, &trust.NetworkProvider{DB: freshDB},
+		trusttest.Unchecked{})
 	beaconer, err := NewBeaconer(BeaconerConfig{
 		IA:     nodeIATest,
 		Engine: fresh,
@@ -694,7 +696,8 @@ func TestHandleBeaconWithoutTRC(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	fresh := trust.NewEngine(nodeIATest, key, &trust.NetworkProvider{DB: freshDB})
+	fresh := trust.NewEngine(nodeIATest, key, &trust.NetworkProvider{DB: freshDB},
+		trusttest.Unchecked{})
 	links := tableTopic(map[uint16]addr.IA{1: coreIATest})
 	beaconer, err := NewBeaconer(BeaconerConfig{
 		IA:     nodeIATest,
@@ -758,7 +761,8 @@ func TestBootstrapAlternatesOrigins(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	fresh := trust.NewEngine(nodeIATest, key, &trust.NetworkProvider{DB: freshDB})
+	fresh := trust.NewEngine(nodeIATest, key, &trust.NetworkProvider{DB: freshDB},
+		trusttest.Unchecked{})
 	beaconer, err := NewBeaconer(BeaconerConfig{
 		IA:     nodeIATest,
 		Engine: fresh,
@@ -830,7 +834,8 @@ func TestBootstrapRouteFollowsVerifiedBeacons(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	fresh := trust.NewEngine(nodeIATest, key, &trust.NetworkProvider{DB: freshDB})
+	fresh := trust.NewEngine(nodeIATest, key, &trust.NetworkProvider{DB: freshDB},
+		trusttest.Unchecked{})
 	beaconer, err := NewBeaconer(BeaconerConfig{
 		IA:     nodeIATest,
 		Engine: fresh,
@@ -1809,9 +1814,10 @@ func TestHandleRegistrationAsksTheRegistrant(t *testing.T) {
 			*asked = append(*asked, server)
 			return dbFetcher{db: serving}
 		}}
+		engine := trust.NewEngine(coreIATest, f.engines[coreIATest].Key, provider, trusttest.Unchecked{})
 		b, err := NewBeaconer(BeaconerConfig{
 			IA:     coreIATest,
-			Engine: trust.NewEngine(coreIATest, f.engines[coreIATest].Key, provider),
+			Engine: engine,
 			MACKey: []byte(testMACKey),
 			Store:  NewBeaconStore(),
 			DB:     pathDB,

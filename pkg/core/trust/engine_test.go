@@ -6,8 +6,11 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/x509"
+	"errors"
 	"path/filepath"
+	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"testing/synctest"
@@ -21,6 +24,7 @@ import (
 
 	"github.com/fancl20/cion/pkg/core/trust"
 	"github.com/fancl20/cion/pkg/core/trust/trusttest"
+	"github.com/fancl20/cion/pkg/modules/membership"
 	"github.com/fancl20/cion/pkg/modules/trustdb"
 	"github.com/fancl20/cion/pkg/modules/trustdb/impl/bbolt"
 )
@@ -51,9 +55,10 @@ func newEngineFixture(t *testing.T) *engineFixture {
 	t.Cleanup(func() { _ = db.Close() })
 	founder := trusttest.NewFounder(t, db, iaCore)
 	asKey, chain := founder.Enroll(t, iaNode)
+	engine := trust.NewEngine(iaNode, asKey, &trust.NetworkProvider{DB: db}, trusttest.Unchecked{})
 	return &engineFixture{
 		db: db, keys: founder.Keys, issuer: founder.Issuer, trc: founder.TRC,
-		engine: trust.NewEngine(iaNode, asKey, &trust.NetworkProvider{DB: db}),
+		engine: engine,
 		asKey:  asKey, chain: chain,
 	}
 }
@@ -163,7 +168,8 @@ func TestEngineVerifyForeignSignature(t *testing.T) {
 	if _, err := f.db.InsertChain(ctx, foreignChain); err != nil {
 		t.Fatal(err)
 	}
-	foreign := trust.NewEngine(iaCore, foreignKey, &trust.NetworkProvider{DB: f.db})
+	foreign := trust.NewEngine(iaCore, foreignKey, &trust.NetworkProvider{DB: f.db},
+		trusttest.Unchecked{})
 	signedMsg, err := foreign.Sign(ctx, []byte("foreign"))
 	if err != nil {
 		t.Fatal(err)
@@ -201,7 +207,8 @@ func TestEngineVerifyBound(t *testing.T) {
 	if _, err := f.db.InsertChain(ctx, foreignChain); err != nil {
 		t.Fatal(err)
 	}
-	foreign := trust.NewEngine(iaCore, foreignKey, &trust.NetworkProvider{DB: f.db})
+	foreign := trust.NewEngine(iaCore, foreignKey, &trust.NetworkProvider{DB: f.db},
+		trusttest.Unchecked{})
 	signedMsg, err := foreign.Sign(ctx, []byte("foreign"))
 	if err != nil {
 		t.Fatal(err)
@@ -246,7 +253,8 @@ func TestEngineSignerIgnoresExtendingName(t *testing.T) {
 	if _, err := f.engine.Signer(ctx); err != nil {
 		t.Errorf("the node's own signer disturbed: %v", err)
 	}
-	core := trust.NewEngine(iaCore, f.asKey, &trust.NetworkProvider{DB: f.db})
+	core := trust.NewEngine(iaCore, f.asKey, &trust.NetworkProvider{DB: f.db},
+		trusttest.Unchecked{})
 	if _, err := core.Signer(ctx); err == nil {
 		t.Error("signer built from a chain held under an extending name")
 	}
@@ -282,7 +290,7 @@ func TestEngineChainWithoutEnrollment(t *testing.T) {
 		t.Fatal(err)
 	}
 	fresh := trust.NewEngine(addr.MustIAFrom(20, 0xff0000000007), key,
-		&trust.NetworkProvider{DB: f.db})
+		&trust.NetworkProvider{DB: f.db}, trusttest.Unchecked{})
 	if _, err := fresh.Signer(context.Background()); err == nil {
 		t.Error("signer built without enrollment")
 	}
@@ -348,7 +356,7 @@ func TestEngineVerifyCaches(t *testing.T) {
 	f := newEngineFixture(t)
 	ctx := context.Background()
 	provider := &countingProvider{Provider: &trust.NetworkProvider{DB: f.db}}
-	engine := trust.NewEngine(iaNode, f.asKey, provider)
+	engine := trust.NewEngine(iaNode, f.asKey, provider, trusttest.Unchecked{})
 
 	signedMsg, err := f.engine.Sign(ctx, []byte("ping"))
 	if err != nil {
@@ -566,7 +574,8 @@ func TestEngineIssuerASes(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = fresh.Close() })
-	engine := trust.NewEngine(iaNode, f.asKey, &trust.NetworkProvider{DB: fresh})
+	engine := trust.NewEngine(iaNode, f.asKey, &trust.NetworkProvider{DB: fresh},
+		trusttest.Unchecked{})
 	if issuers, err := engine.IssuerASes(iaCore.ISD()); err != nil || len(issuers) != 0 {
 		t.Errorf("issuer ASes without a pinned TRC = %v (%v), want none", issuers, err)
 	}
@@ -599,7 +608,8 @@ func TestEngineRecordsAPeersChain(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = fresh.Close() })
 	db := &insertCountingDB{DB: fresh}
-	engine := trust.NewEngine(iaCore, f.asKey, &trust.NetworkProvider{DB: db})
+	engine := trust.NewEngine(iaCore, f.asKey, &trust.NetworkProvider{DB: db},
+		trusttest.Unchecked{})
 
 	engine.RecordChain(f.chain)
 	engine.RecordChain(f.chain)
@@ -612,5 +622,91 @@ func TestEngineRecordsAPeersChain(t *testing.T) {
 	}
 	if len(recorded) != 1 || !recorded[0][0].Equal(f.chain[0]) || !recorded[0][1].Equal(f.chain[1]) {
 		t.Errorf("recorded chains = %d, want the peer's one", len(recorded))
+	}
+}
+
+// judging is a membership double: it records the facts each decision read
+// and what Present was asked, refuses every chain with refuse when it is
+// set, and presents beside.
+type judging struct {
+	refuse error
+	beside []*x509.Certificate
+
+	mtx   sync.Mutex
+	facts []membership.Facts
+}
+
+func (j *judging) Admit(_ context.Context, f membership.Facts) error {
+	j.mtx.Lock()
+	defer j.mtx.Unlock()
+	j.facts = append(j.facts, f)
+	return j.refuse
+}
+
+func (j *judging) Present(context.Context, []*x509.Certificate) ([]*x509.Certificate, error) {
+	return j.beside, nil
+}
+
+// decided returns the facts of every decision so far.
+func (j *judging) decided() []membership.Facts {
+	j.mtx.Lock()
+	defer j.mtx.Unlock()
+	return slices.Clone(j.facts)
+}
+
+// TestEngineAcceptChainAsksTheMembership checks the handshake's decision: the
+// membership decides the peer's chain at the handshake boundary with what
+// the peer presented beside it, an admitted chain is recorded, and a refused
+// one is not.
+func TestEngineAcceptChainAsksTheMembership(t *testing.T) {
+	f := newEngineFixture(t)
+	presented := []*x509.Certificate{f.chain[0], f.chain[1]}
+	for _, tc := range []struct {
+		name     string
+		refuse   error
+		recorded int
+	}{{"admitted", nil, 1}, {"refused", errors.New("refused"), 0}} {
+		t.Run(tc.name, func(t *testing.T) {
+			db, err := bbolt.New(filepath.Join(t.TempDir(), "trust.db"), nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = db.Close() })
+			members := &judging{refuse: tc.refuse}
+			engine := trust.NewEngine(iaCore, f.asKey, &trust.NetworkProvider{DB: db}, members)
+
+			if err := engine.AcceptChain(f.chain, presented); (err != nil) != (tc.refuse != nil) {
+				t.Errorf("AcceptChain = %v, want the membership's decision", err)
+			}
+			facts := members.decided()
+			if len(facts) != 1 || facts[0].Boundary != membership.BoundaryHandshake ||
+				!facts[0].Chain[0].Equal(f.chain[0]) || len(facts[0].Presented) != 2 {
+
+				t.Errorf("the membership decided %+v, want the handshake's chain beside what "+
+					"the peer presented", facts)
+			}
+			recorded, err := db.Chains(t.Context(), trustdb.ChainQuery{IA: iaNode})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(recorded) != tc.recorded {
+				t.Errorf("recorded %d chains, want %d", len(recorded), tc.recorded)
+			}
+		})
+	}
+}
+
+// TestEngineBesideIsTheMembershipsPresent checks that the engine presents
+// beside its chain what the membership presents.
+func TestEngineBesideIsTheMembershipsPresent(t *testing.T) {
+	f := newEngineFixture(t)
+	engine := trust.NewEngine(iaNode, f.asKey, &trust.NetworkProvider{DB: f.db},
+		&judging{beside: f.chain})
+	got, err := engine.Beside(t.Context(), f.chain)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || !got[0].Equal(f.chain[0]) {
+		t.Error("the engine presents another beside its chain than the membership")
 	}
 }

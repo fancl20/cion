@@ -14,6 +14,9 @@ import (
 	"github.com/fancl20/cion/pkg/libs/scionrpc"
 	"github.com/fancl20/cion/pkg/libs/underlay"
 	"github.com/fancl20/cion/pkg/modules/enrollauth"
+	"github.com/fancl20/cion/pkg/modules/membership"
+	"github.com/fancl20/cion/pkg/modules/membership/impl/founder"
+	"github.com/fancl20/cion/pkg/modules/membership/impl/none"
 	measured "github.com/fancl20/cion/pkg/modules/topology/impl/measured"
 )
 
@@ -81,6 +84,12 @@ type NodeConfig struct {
 	// telegram method of EnrollAuth; empty uses the public one. The
 	// integration tests point it at their local double.
 	TelegramAPI string
+	// Membership selects the membership method, the same on every node of
+	// a network: "founder", under which a node's membership is the newest
+	// chain the founder issued for its key — the default, which empty
+	// selects too — or "none", under which every chain stands as its own
+	// membership.
+	Membership string
 	// Applications selects the resident applications by name: nil keeps the
 	// inference — an application loads when its role bounds hold, its
 	// requirements load, and its required arguments are present; the empty
@@ -155,6 +164,7 @@ type NodePacing struct {
 	BFD               time.Duration // BFD transmission interval
 	RotationThreshold time.Duration // remaining validity below which the rotation watch rolls
 	RenewalThreshold  time.Duration // remaining validity below which the enrollment loop renews
+	ChainValidity     time.Duration // validity of the chains a core issues; the membership window
 }
 
 // resolvedConfig is the run arguments resolved once at boot: the NodeConfig
@@ -179,6 +189,9 @@ type resolvedConfig struct {
 	// sweep — nil when the method has none.
 	enrollAuth enrollauth.AdmissionAuthorizer
 	enrollRun  func(context.Context)
+	// newMembership builds the membership method Membership names over the
+	// environment the assembly lends it.
+	newMembership func(membership.Env) membership.Method
 	// apps is the selected resident applications, in table order.
 	apps []apps.Entry
 }
@@ -248,11 +261,28 @@ func (c NodeConfig) resolve() (resolvedConfig, error) {
 			return resolvedConfig{}, fmt.Errorf("parsing --trust.enroll-auth: %w", err)
 		}
 	}
+	if r.newMembership, err = membershipMethod(c.Membership); err != nil {
+		return resolvedConfig{}, fmt.Errorf("parsing --trust.membership: %w", err)
+	}
 	if r.apps, err = apps.Select(c.Applications, founding, c.AppArguments,
 		admissionMethod(c.EnrollAuth)); err != nil {
 		return resolvedConfig{}, err
 	}
 	return r, nil
+}
+
+// membershipMethod returns the constructor of the membership method the
+// name names: the founder method for "founder" and for the empty name, the
+// none method for "none".
+func membershipMethod(name string) (func(membership.Env) membership.Method, error) {
+	switch name {
+	case "", "founder":
+		return func(env membership.Env) membership.Method { return founder.New(env) }, nil
+	case "none":
+		return func(env membership.Env) membership.Method { return none.New(env) }, nil
+	default:
+		return nil, fmt.Errorf("unknown membership method %q: founder or none", name)
+	}
 }
 
 // httpsOrigin is the origin the founding core's HTTPS server answers on:

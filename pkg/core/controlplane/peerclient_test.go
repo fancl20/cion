@@ -7,6 +7,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/fancl20/cion/pkg/core/trust/trusttest"
+
 	"github.com/scionproto/scion/pkg/addr"
 	spath "github.com/scionproto/scion/pkg/slayers/path/scion"
 
@@ -57,7 +59,7 @@ func TestPeerFetcherRidesTheServersPath(t *testing.T) {
 	// The registrant's endpoint serves the chains its database holds and
 	// records where each request arrived from.
 	arrivals := make(chan *scion.Addr, 4)
-	handler := NewServer(&TrustService{DB: f.DB}).Handler
+	handler := NewServer(&TrustService{DB: f.DB, Membership: trusttest.Unchecked{}}).Handler
 	recording := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		arrivals <- scionrpc.RemoteAddr(r.Context())
 		handler.ServeHTTP(w, r)
@@ -135,7 +137,8 @@ func TestIssuersMoveOnFromAFailingIssuer(t *testing.T) {
 	})
 	endpoint := core.newConn(t, scionrpc.EndpointPort)
 	go func() {
-		done <- scionrpc.ServeHTTP3(t.Context(), endpoint, NewServer(&TrustService{DB: f.DB}).Handler,
+		done <- scionrpc.ServeHTTP3(t.Context(), endpoint,
+			NewServer(&TrustService{DB: f.DB, Membership: trusttest.Unchecked{}}).Handler,
 			scionrpc.EndpointTLS(scionrpc.EndpointTLSConfig{
 				Credentials: coreEngine, Key: coreEngine.Key,
 			}))

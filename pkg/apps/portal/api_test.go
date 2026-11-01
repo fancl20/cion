@@ -121,9 +121,9 @@ func (c *console) doWith(method, path string, body any,
 }
 
 // TestRecordsAPI checks the console's views of the records: the nodes beside
-// the method's node and vote asks, each with its last report, omitted for a
-// silent node, its key, omitted for a node whose chain the founder does not
-// hold, its observed tag, and the slice's capacity counted; the hosts, each
+// the method's node and vote asks, each with its key, its membership's
+// expiry, omitted for a membership that never lapses, its observed tag, and
+// the slice's capacity counted; the hosts, each
 // beside its node's host endpoint and no asks beside them, none available
 // without the coordination application; and a release reaching the records,
 // a malformed key refused before it.
@@ -132,7 +132,7 @@ func TestRecordsAPI(t *testing.T) {
 	f.records.nodes = []Node{{
 		IA:       mustIA("1-ff00:0:110"),
 		Key:      "aa01",
-		Reported: time.Date(2030, 1, 2, 3, 4, 5, 0, time.UTC),
+		Expires:  time.Date(2030, 1, 2, 3, 4, 5, 0, time.UTC),
 		Role:     RoleFounder,
 		Reach:    ReachNAT,
 		Overlay:  netip.MustParsePrefix("100.64.0.0/24"),
@@ -140,6 +140,7 @@ func TestRecordsAPI(t *testing.T) {
 		Issued:   2,
 	}, {
 		IA:   mustIA("1-ff00:0:112"),
+		Key:  "cc03",
 		Role: RoleNormal,
 	}}
 	f.records.hosts = []Host{{
@@ -173,7 +174,7 @@ func TestRecordsAPI(t *testing.T) {
 	wantNodes := []nodeView{{
 		IA:       "1-ff00:0:110",
 		Key:      "aa01",
-		Reported: time.Date(2030, 1, 2, 3, 4, 5, 0, time.UTC),
+		Expires:  time.Date(2030, 1, 2, 3, 4, 5, 0, time.UTC),
 		Role:     RoleFounder,
 		Reach:    ReachNAT,
 		Overlay:  "100.64.0.0/24",
@@ -182,15 +183,15 @@ func TestRecordsAPI(t *testing.T) {
 		Capacity: 253,
 	}, {
 		IA:   "1-ff00:0:112",
+		Key:  "cc03",
 		Role: RoleNormal,
 	}}
 	if diff := cmp.Diff(wantNodes, nodes.Nodes); diff != "" {
 		t.Errorf("the nodes mismatch (-want +got):\n%s", diff)
 	}
-	for _, field := range []string{`"reported"`, `"key"`} {
-		if n := strings.Count(rec.Body.String(), field); n != 1 {
-			t.Errorf("the nodes carry %s %d times, want once: the silent node omits it", field, n)
-		}
+	if n := strings.Count(rec.Body.String(), `"expires"`); n != 1 {
+		t.Errorf("the nodes carry an expiry %d times, want once: the membership that "+
+			"never lapses omits it", n)
 	}
 	wantAsk := askView{
 		ID:        "e1",

@@ -2,13 +2,7 @@ package apps
 
 import (
 	"context"
-	"crypto/ecdsa"
-	"crypto/elliptic"
-	"crypto/rand"
-	"crypto/x509"
-	"crypto/x509/pkix"
 	"errors"
-	"math/big"
 	"net/http"
 	"net/netip"
 	"strings"
@@ -18,7 +12,6 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
 	"github.com/scionproto/scion/pkg/addr"
-	"github.com/scionproto/scion/pkg/scrypto/cppki"
 
 	"github.com/fancl20/cion/pkg/apps/coordination"
 	"github.com/fancl20/cion/pkg/apps/portal"
@@ -26,55 +19,16 @@ import (
 	"github.com/fancl20/cion/pkg/apps/wireguard/impl/dbtest"
 	"github.com/fancl20/cion/pkg/core/webpki/webpkitest"
 	"github.com/fancl20/cion/pkg/libs/bus"
+	"github.com/fancl20/cion/pkg/modules/membership"
 )
 
-// chainFor builds a two-certificate chain whose AS certificate names the
-// ISD-AS, carries the subject key ID, and expires at notAfter; the second
-// certificate stands in for the CA's.
-func chainFor(t *testing.T, ia addr.IA, skid byte, notAfter time.Time) []*x509.Certificate {
-	t.Helper()
-	cert := func(subject pkix.Name, id []byte) *x509.Certificate {
-		key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-		if err != nil {
-			t.Fatal(err)
-		}
-		serial, err := rand.Int(rand.Reader, big.NewInt(1<<62))
-		if err != nil {
-			t.Fatal(err)
-		}
-		tmpl := &x509.Certificate{
-			SerialNumber: serial,
-			Subject:      subject,
-			SubjectKeyId: id,
-			NotBefore:    notAfter.Add(-72 * time.Hour),
-			NotAfter:     notAfter,
-		}
-		der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, key.Public(), key)
-		if err != nil {
-			t.Fatal(err)
-		}
-		parsed, err := x509.ParseCertificate(der)
-		if err != nil {
-			t.Fatal(err)
-		}
-		return parsed
-	}
-	return []*x509.Certificate{
-		cert(pkix.Name{ExtraNames: []pkix.AttributeTypeAndValue{
-			{Type: cppki.OIDNameIA, Value: ia.String()},
-		}}, []byte{skid, skid}),
-		cert(pkix.Name{CommonName: "CA"}, []byte{0xca}),
-	}
-}
-
 // TestPortalRecordsNodes checks the console's view of the nodes: one per
-// ISD-AS holding a chain, with its newest chain's key, beside one per node
-// any of the views holds, a node whose chain the founder does not hold among
-// them; each node's last report, the signing time of its latest entry across
-// the views, none for a silent node; the roles from the founder's ISD-AS and
-// the TRC's cores; the tag each node's report earns — NAT when behind a NAT
-// and unanswered, Degraded when unanswered alone, none for a node behind a
-// NAT peers dial or a node without a report; and the WireGuard directory's
+// membership, in the listing's ISD-AS order, with its key and expiry — a
+// node in no view the founder holds among them, and a node the views hold
+// without a membership left out; the roles from the founder's ISD-AS and the
+// TRC's cores; the tag each node's latest report earns — NAT when behind a
+// NAT and unanswered, Degraded when unanswered alone, none for a node behind
+// a NAT peers dial or a node without a report; and the WireGuard directory's
 // slice, endpoint, and issued count beside each.
 func TestPortalRecordsNodes(t *testing.T) {
 	ctx := t.Context()
@@ -83,12 +37,12 @@ func TestPortalRecordsNodes(t *testing.T) {
 	roamer, inside := addr.MustParseIA("1-ff00:0:5"), addr.MustParseIA("1-ff00:0:6")
 	now := time.Now().UTC().Truncate(time.Second)
 	reported := func(minutes int) time.Time { return now.Add(-time.Duration(minutes) * time.Minute) }
-	chains := [][]*x509.Certificate{
-		chainFor(t, founder, 0x01, now.Add(72*time.Hour)),
-		chainFor(t, core, 0x02, now.Add(60*time.Hour)),
-		chainFor(t, node, 0x03, now.Add(24*time.Hour)),
-		chainFor(t, node, 0x03, now.Add(48*time.Hour)),
-		chainFor(t, cloud, 0x04, now.Add(36*time.Hour)),
+	memberships := []membership.Membership{
+		{IA: founder, Key: []byte{0x01, 0x01}, Expires: now.Add(72 * time.Hour)},
+		{IA: core, Key: []byte{0x02, 0x02}, Expires: now.Add(60 * time.Hour)},
+		{IA: node, Key: []byte{0x03, 0x03}, Expires: now.Add(48 * time.Hour)},
+		{IA: cloud, Key: []byte{0x04, 0x04}, Expires: now.Add(36 * time.Hour)},
+		{IA: inside, Key: []byte{0x06, 0x06}},
 	}
 	registry := &dbtest.MemStore{}
 	registry.Seed(wireguard.Entry{
@@ -117,16 +71,16 @@ func TestPortalRecordsNodes(t *testing.T) {
 				Addresses: reach(bus.Reach{BehindNAT: true})},
 			bus.DirectoryEntry{IA: roamer, Published: reported(4)},
 		),
-		// A node another directory holds too reports by its latest entry,
-		// and one only another directory holds is listed as well.
+		// A node another directory holds too is tagged by its latest entry.
 		bus.NewScope(bus.DirectoryID{2},
 			bus.DirectoryEntry{IA: node, Published: reported(9),
 				Addresses: reach(bus.Reach{BehindNAT: true, RendezvousUnanswered: true})},
-			bus.DirectoryEntry{IA: inside, Published: reported(5)},
 		),
 	))
 	r := &portalRecords{
-		chains:        func(context.Context) ([][]*x509.Certificate, error) { return chains, nil },
+		memberships: func(context.Context) ([]membership.Membership, error) {
+			return memberships, nil
+		},
 		cores:         func(addr.ISD) ([]addr.IA, error) { return []addr.IA{founder, core}, nil },
 		founder:       founder,
 		nodeDirectory: b.Directory(),
@@ -140,22 +94,22 @@ func TestPortalRecordsNodes(t *testing.T) {
 		{
 			IA:       founder,
 			Key:      "0101",
+			Expires:  now.Add(72 * time.Hour),
 			Role:     portal.RoleFounder,
 			Overlay:  netip.MustParsePrefix("100.64.0.0/24"),
 			Endpoint: netip.MustParseAddrPort("198.51.100.10:41641"),
 			Issued:   2,
 		},
 		{
-			IA: core, Key: "0202", Reported: reported(1),
+			IA: core, Key: "0202", Expires: now.Add(60 * time.Hour),
 			Role: portal.RoleCore, Reach: portal.ReachNAT,
 		},
 		{
-			IA: node, Key: "0303", Reported: reported(2),
+			IA: node, Key: "0303", Expires: now.Add(48 * time.Hour),
 			Role: portal.RoleNormal, Reach: portal.ReachDegraded,
 		},
-		{IA: cloud, Key: "0404", Reported: reported(3), Role: portal.RoleNormal},
-		{IA: roamer, Reported: reported(4), Role: portal.RoleNormal},
-		{IA: inside, Reported: reported(5), Role: portal.RoleNormal},
+		{IA: cloud, Key: "0404", Expires: now.Add(36 * time.Hour), Role: portal.RoleNormal},
+		{IA: inside, Key: "0606", Role: portal.RoleNormal},
 	}
 	if diff := cmp.Diff(want, nodes,
 		cmpopts.EquateComparable(netip.Prefix{}, netip.AddrPort{})); diff != "" {

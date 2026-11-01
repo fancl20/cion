@@ -26,6 +26,9 @@ var ErrUnanchored = errors.New("the issuer's root certificate is in no TRC it ho
 type Issuer struct {
 	// IA is the core's ISD-AS.
 	IA addr.IA
+	// ChainValidity is the validity of the chains the issuer issues, set
+	// before it issues; zero keeps ASValidity.
+	ChainValidity time.Duration
 
 	// mtx guards the CA material, which an anchoring or a rekey swaps as a
 	// set.
@@ -116,10 +119,11 @@ func (i *Issuer) IssueChain(csr *x509.CertificateRequest) ([]*x509.Certificate, 
 // renewal issues its chain and signs its response from one snapshot, for
 // the client requires the response signed by the chain's CA certificate.
 type CA struct {
-	ia   addr.IA
-	cert *x509.Certificate
-	key  crypto.Signer
-	trc  cppki.SignedTRC
+	ia       addr.IA
+	cert     *x509.Certificate
+	key      crypto.Signer
+	trc      cppki.SignedTRC
+	validity time.Duration
 }
 
 // CA snapshots the issuer's current CA material under the mutex — an
@@ -135,7 +139,8 @@ func (i *Issuer) CA() (*CA, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &CA{ia: i.IA, cert: caCert, key: i.keys.CA, trc: i.trc}, nil
+	return &CA{ia: i.IA, cert: caCert, key: i.keys.CA, trc: i.trc,
+		validity: i.chainValidity()}, nil
 }
 
 // IssueChain creates a certificate chain for the subject of the CSR. The CSR
@@ -157,7 +162,7 @@ func (c *CA) IssueChain(csr *x509.CertificateRequest) ([]*x509.Certificate, erro
 		return nil, err
 	}
 	policy := cppki.CAPolicy{
-		Validity:    ASValidity,
+		Validity:    c.validity,
 		Certificate: c.cert,
 		Signer:      c.key,
 		CurrentTime: signingTime(),
@@ -183,8 +188,8 @@ func (c *CA) SignResponse(msg []byte) ([]byte, error) {
 	return SignCMS(msg, []*x509.Certificate{c.cert}, c.key)
 }
 
-// ensureCACert returns a CP CA certificate whose validity covers a full AS
-// certificate validity. The CA certificate is reissued from the root key —
+// ensureCACert returns a CP CA certificate whose validity covers a full
+// validity of the chains the issuer issues. The CA certificate is reissued from the root key —
 // whose certificate is anchored in the TRC and valid for a year — whenever
 // the current one gets too close to its end, so nodes simply see a new CA
 // certificate in each chain they obtain.
@@ -197,7 +202,7 @@ func (i *Issuer) ensureCACert() (*x509.Certificate, error) {
 // ensureCACertLocked is ensureCACert under a held mutex, on an anchored
 // issuer.
 func (i *Issuer) ensureCACertLocked() (*x509.Certificate, error) {
-	minExpiration := time.Now().Add(ASValidity)
+	minExpiration := time.Now().Add(i.chainValidity())
 	if i.caCert.NotAfter.After(minExpiration) {
 		return i.caCert, nil
 	}
@@ -207,6 +212,14 @@ func (i *Issuer) ensureCACertLocked() (*x509.Certificate, error) {
 	}
 	i.caCert = caCert
 	return caCert, nil
+}
+
+// chainValidity returns the validity of the chains the issuer issues.
+func (i *Issuer) chainValidity() time.Duration {
+	if i.ChainValidity == 0 {
+		return ASValidity
+	}
+	return i.ChainValidity
 }
 
 // Rekey rekeys the issuer under the successor a roll pinned: the staged root

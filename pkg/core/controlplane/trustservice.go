@@ -24,6 +24,7 @@ import (
 	"github.com/fancl20/cion/pkg/libs/ratelimit"
 	"github.com/fancl20/cion/pkg/libs/scionrpc"
 	"github.com/fancl20/cion/pkg/modules/enrollauth"
+	"github.com/fancl20/cion/pkg/modules/membership"
 	"github.com/fancl20/cion/pkg/modules/trustdb"
 )
 
@@ -38,7 +39,8 @@ const EnrollmentMinInterval = time.Second
 // Admission is the provider's alone: enrollment is reachable only over paths,
 // paths exist only over established links, and the loaded provider admits
 // every link — the acceptor's policy is where the decision lives, and this
-// service's own check is the name's binding to its key.
+// service's own checks are the name's binding to its key at first issuance
+// and the membership at a renewal.
 type TrustService struct {
 	control_planeconnect.UnimplementedSegmentCreationServiceHandler
 	control_planeconnect.UnimplementedSegmentRegistrationServiceHandler
@@ -58,6 +60,9 @@ type TrustService struct {
 	// holder's re-enrollment. The same seam answers host registration on the
 	// coordination application. Nil is open admission — the zero-conf default.
 	Authorizer enrollauth.AdmissionAuthorizer
+	// Membership admits the chain a renewal rests on, and takes every chain
+	// the service issues.
+	Membership Membership
 	// MinInterval is the least pause between admissions of one source at the
 	// renewal door; zero uses the default.
 	MinInterval time.Duration
@@ -76,6 +81,15 @@ type TrustService struct {
 }
 
 var _ ControlPlane = (*TrustService)(nil)
+
+// Membership is the membership module's seam the trust service calls.
+type Membership interface {
+	// Admit decides a chain the TRC verified: nil admits it, an error
+	// refuses it.
+	Admit(ctx context.Context, facts membership.Facts) error
+	// Issued takes a chain the node issued.
+	Issued(ctx context.Context, chain []*x509.Certificate) error
+}
 
 // TRC serves a signed TRC. A request without base and serial numbers asks
 // for the latest TRC of the ISD, which in a base-TRC-only milestone is the
@@ -109,9 +123,9 @@ func (s *TrustService) TRC(
 
 // checkRenewal checks that the requester's chain authorizes the renewal (PKI
 // draft, Section 4.3), whichever issuer signed it: the chain verifies
-// against the pinned anchor pool now, and its AS certificate names the CSR's
-// ISD-AS and certifies the CSR's key. A renewal checks no binding and asks no
-// policy.
+// against the pinned anchor pool now, its AS certificate names the CSR's
+// ISD-AS and certifies the CSR's key, and the membership admits it. A
+// renewal asks no policy.
 func (s *TrustService) checkRenewal(
 	ctx context.Context,
 	ia addr.IA,
@@ -140,6 +154,13 @@ func (s *TrustService) checkRenewal(
 	if !bytes.Equal(chain[0].SubjectKeyId, skid) {
 		return connect.NewError(connect.CodeInvalidArgument,
 			serrors.New("the CSR certifies another key than the requester's chain", "isd_as", ia))
+	}
+	if err := s.Membership.Admit(ctx, membership.Facts{
+		Boundary: membership.BoundaryRenewal,
+		Chain:    chain,
+	}); err != nil {
+		return connect.NewError(connect.CodePermissionDenied,
+			serrors.Wrap("the requester's chain is refused", err))
 	}
 	return nil
 }
@@ -378,6 +399,10 @@ func (s *TrustService) ChainRenewal(
 	if _, err := s.DB.InsertChain(ctx, issued); err != nil {
 		return nil, connect.NewError(connect.CodeInternal,
 			serrors.Wrap("storing issued chain", err))
+	}
+	if err := s.Membership.Issued(ctx, issued); err != nil {
+		return nil, connect.NewError(connect.CodeInternal,
+			serrors.Wrap("keeping the issued chain's membership", err))
 	}
 	respBody, err := proto.Marshal(&cppb.ChainRenewalResponseBody{
 		Chain: &cppb.Chain{AsCert: issued[0].Raw, CaCert: issued[1].Raw},

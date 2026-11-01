@@ -739,7 +739,7 @@ func TestAnchorPoolRidesGrace(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		engine := NewEngine(coreIA, newTestASKey(t), &NetworkProvider{DB: f.db})
+		engine := NewEngine(coreIA, newTestASKey(t), &NetworkProvider{DB: f.db}, nil)
 		// anchors returns the anchor pool, failing the test unless the
 		// engine's local pool holds the same TRCs.
 		anchors := func() []*cppki.TRC {

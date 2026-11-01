@@ -60,7 +60,7 @@
         <div class="page-head">
           <div>
             <h1>Nodes</h1>
-            <p class="muted">CION nodes holding a valid chain or reporting to the node directory. A node asks once, at first issuance. One that stops reporting shows as silent and drops off when its chain expires.</p>
+            <p class="muted">CION nodes holding a membership. A node asks once, at first issuance; one that stops renewing drops off when its membership lapses.</p>
           </div>
         </div>
         <input id="nodes-filter" type="search" class="input search" placeholder="Search by ISD-AS, key, endpoint, or tag…" aria-label="Search nodes">
@@ -68,7 +68,7 @@
         <div class="card table-card">
           <table>
             <thead>
-              <tr><th>ISD-AS</th><th>Key</th><th>Overlay</th><th>Host endpoint</th><th>Host addresses</th><th>Last report</th></tr>
+              <tr><th>ISD-AS</th><th>Key</th><th>Overlay</th><th>Host endpoint</th><th>Host addresses</th><th>Membership</th></tr>
             </thead>
             <tbody id="nodes-rows"></tbody>
           </table>

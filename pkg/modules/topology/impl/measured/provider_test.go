@@ -15,6 +15,8 @@ import (
 	"testing/synctest"
 	"time"
 
+	"github.com/fancl20/cion/pkg/core/trust/trusttest"
+
 	"github.com/google/go-cmp/cmp"
 	"github.com/scionproto/scion/pkg/addr"
 	spath "github.com/scionproto/scion/pkg/slayers/path/scion"
@@ -544,7 +546,8 @@ func TestConfirmPassWaitsForTheChain(t *testing.T) {
 		}
 		held := liveLink(rendezvousIA, 40051)
 		z, _ := wiredProvider(t, directoryIA, held)
-		z.env.Engine = trust.NewEngine(directoryIA, key, &trust.NetworkProvider{DB: founder.DB})
+		z.env.Engine = trust.NewEngine(directoryIA, key, &trust.NetworkProvider{DB: founder.DB},
+			trusttest.Unchecked{})
 		fake := &fakeLinkServiceClient{reply: &nodev1.LinkReply{LocalAddr: "127.0.0.1:4242", IfId: 9}}
 		z.linker = linkClientOf(map[*links.Link]*fakeLinkServiceClient{held: fake})
 		ctx, cancel := context.WithCancel(t.Context())

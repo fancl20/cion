@@ -46,9 +46,9 @@ links: no directory reaches every node.
 
 ## Decision drivers
 
-*   **Joining takes the founder's approval:** a leaked core key forges no
-    identity, neither a name the founder never admitted nor another key
-    for an admitted one.
+*   **Joining takes the founder's approval:** a leaked core key links no
+    identity the founder did not admit, neither a name it never admitted
+    nor another key for an admitted one.
 *   **Founder outages stay survivable:** the network outlives a founder
     outage as long as ADR-0033 lets it, the TRC's validity.
 *   **Checks need no founder online:** a verifier checks an identity from
@@ -111,13 +111,16 @@ ADR-0033's accepted risk:
     counting, whatever the date. The check compares two times the founder
     stamped and reads no node's clock. No other core's root certifies a
     membership, and no past TRC is needed.
-4.  **Every chain is checked against a membership.** Wherever a chain
-    verifies against the TRC — a channel's handshake, a signed message's
-    chain, a renewal request — it is accepted only if a membership that
-    counts binds its ISD-AS to its key.
+4.  **Every peer's chain is checked against a membership.** The chain a
+    peer presents in a channel's handshake, and the chain a renewal
+    request rests on, are accepted only if a membership that counts binds
+    its ISD-AS to its key, so a forged identity links to no node. A signed
+    message's chain verifies against the TRC alone: the message reaches a
+    node only over a channel whose handshake checked the peer, and a
+    member signing under a forged identity is told apart no better than
+    one holding a stolen key.
 5.  **The node carries its membership.** A node presents its membership
-    wherever it presents its chain: in the handshake of the SCION-native
-    channel, and beside its chain where a verifier fetches it.
+    beside its chain in the handshake of the SCION-native channel.
 6.  **A forgery is reported.** A chain that verifies against the TRC but
     no membership backs is a forgery, and the root it anchors in names the
     core that issued it. The verifier refuses it and reports the evidence
@@ -155,8 +158,8 @@ ADR-0033's accepted risk:
 
 *   Joining takes the founder's approval, whatever core keys leak: a chain
     for an unadmitted name has no membership, and one for an admitted name
-    certifies another key. Every honest verifier refuses both, with the
-    founder down too.
+    certifies another key. Every honest node refuses both in its
+    handshakes, so neither links, with the founder down too.
 *   The network outlives a founder outage for as long as the TRC is valid,
     as under ADR-0033: no membership lapses while no node renews.
 *   A membership verifies against the TRCs a node already pins, and its
@@ -191,7 +194,10 @@ ADR-0033's accepted risk:
 *   While the founder is down, no node is removed and no core either.
 *   A compromised founder still forges any membership: its CA key is
     online.
-*   Each verifier keeps a membership for every name it has met, and the
+*   A member holding a leaked core key still signs messages under forged
+    identities, and every node verifies them against the TRC alone, as it
+    does the messages of a member whose own key leaked.
+*   Each node keeps a membership for every peer it has met, and the
     handshake carries two more certificates.
 *   A removal acts at a node only once the update arrives there; until
     then, the node accepts the core's chains.

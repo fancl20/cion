@@ -25,6 +25,7 @@ import (
 	"github.com/fancl20/cion/pkg/libs/scionrpc"
 	"github.com/fancl20/cion/pkg/libs/underlay"
 	"github.com/fancl20/cion/pkg/modules/links"
+	"github.com/fancl20/cion/pkg/modules/membership"
 	"github.com/fancl20/cion/pkg/modules/pathdb"
 	"github.com/fancl20/cion/pkg/modules/topology"
 	filesource "github.com/fancl20/cion/pkg/modules/topology/impl/file"
@@ -99,11 +100,18 @@ type node struct {
 	// the role's own loops, built with its parts; start hands them to the
 	// group.
 	remote      trust.Remote
+	coreClt     *webpki.CoreClient
 	issuer      *trust.Issuer
 	trcDecision voting.Decider
 	certMgr     *webpki.CertManager
 	webPKI      *tls.Config
 	roleLoops   []roleLoop
+
+	// memberStore keeps the memberships, and members is the membership
+	// method Membership selects: the engine's, the trust service's, and
+	// the console's seam, its loop run under start.
+	memberStore *membership.Store
+	members     membership.Method
 
 	// Assembled sockets and services, started by start.
 	endpointConn *scion.Conn
@@ -288,12 +296,12 @@ func setupNode(
 // core's — the data plane serving the generation boot built, the link state
 // publisher, the BFD health monitor, beaconing, the control endpoint, the
 // SCMP echo responder — and the HTTPS server under Fatal, a failure stopping
-// the node; the loaded topology provider's and the resident applications
-// under Degrade, a failure logged and the node serving on; and the role's own
-// loops under the policies its case in setupTrustRole gave them. The
-// topology provider's drain runs on a stop, while the loops still serve.
-// Nothing serves before start, so assembly and serving stay separate
-// lifecycles.
+// the node; the loaded topology provider's, the membership method's, and the
+// resident applications under Degrade, a failure logged and the node serving
+// on; and the role's own loops under the policies its case in setupTrustRole
+// gave them. The topology provider's drain runs on a stop, while the loops
+// still serve. Nothing serves before start, so assembly and serving stay
+// separate lifecycles.
 func (n *node) start(gen *generation) {
 	g := n.group
 	g.Go("data plane", supervise.Fatal, func(ctx context.Context) error {
@@ -326,6 +334,10 @@ func (n *node) start(gen *generation) {
 		return nil
 	})
 	g.Drain("topology provider", n.topology.Drain)
+	g.Go("membership", supervise.Degrade, func(ctx context.Context) error {
+		n.members.Run(ctx)
+		return nil
+	})
 	slog.Info("Serving control endpoint", "port", scionrpc.EndpointPort)
 	if n.httpsLn != nil {
 		// The node's HTTPS server: the listener is held from assembly, and the

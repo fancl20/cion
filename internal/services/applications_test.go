@@ -2,6 +2,8 @@ package services
 
 import (
 	"testing"
+
+	"github.com/fancl20/cion/pkg/modules/membership"
 )
 
 // TestAppEnvironmentFollowsFoundingTier checks the applications' core flag
@@ -26,7 +28,7 @@ func TestAppEnvironmentFollowsFoundingTier(t *testing.T) {
 		if err != nil {
 			t.Fatalf("resolving %s: %v", tc.name, err)
 		}
-		n := &node{cfg: rc}
+		n := &node{cfg: rc, members: rc.newMembership(membership.Env{})}
 		if got := n.appEnvironment().Core; got != tc.want {
 			t.Errorf("%s's environment Core = %v, want %v (role %v)",
 				tc.name, got, tc.want, rc.role)

@@ -135,6 +135,12 @@ composition root, policy and the source by the operator's run arguments.
     ([ADR-0022](/docs/adrs/0022-serve-the-operators-console-as-a-passkey-portal.md)),
     whose auth keys admit hosts, each key naming its host's node
     ([ADR-0023](/docs/adrs/0023-admit-every-host-by-a-key-that-names-its-node.md)).
+*   **Membership** — policy: how a node's admission binds it
+    network-wide; `--trust.membership` selects exactly one method, the same
+    on every node: the founder method by default, under which a node's
+    membership is the newest chain the founder issued for its key, or none,
+    under which every chain stands as its own membership
+    ([ADR-0034](/docs/adrs/0034-verify-each-chains-membership-and-remove-cores-at-once.md)).
 *   **Topology source** — source: where topology decisions come from; the
     measured provider by default — loading it is what makes a node
     zero-conf — the file provider when `--topology.link-set` names a
@@ -187,7 +193,11 @@ decides on the verified facts of the exchange, and it binds the node's
 ISD-AS to its key for good. Every core's root is in the TRC, and renewal is
 automatic at any of them: a node renews on its current chain over the
 authenticated channel, and a core renews its own chain itself
-([ADR-0033](/docs/adrs/0033-renew-chains-at-every-core.md)).
+([ADR-0033](/docs/adrs/0033-renew-chains-at-every-core.md)). A peer's
+chain passes a handshake only where a membership binds its ISD-AS to its
+key: a chain the founder issued, which each node renews at the founder and
+presents beside any other chain it holds
+([ADR-0034](/docs/adrs/0034-verify-each-chains-membership-and-remove-cores-at-once.md)).
 
 ### Path discovery
 

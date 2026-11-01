@@ -40,21 +40,26 @@ type Mount struct {
 }
 
 // Credentials are the node's side of the channel's mutual authentication:
-// the chain it presents, the TRC anchors peers' chains verify against, and
-// the recording of a peer's chain that verified. A handshake asks for each,
-// so they touch local state only. The trust engine provides them, and the
-// AS key behind the chain travels beside them.
+// the chain it presents and what stands beside it, the TRC anchors peers'
+// chains verify against, and the decision on a peer's chain that verified.
+// A handshake asks for each, so they touch local state only. The trust
+// engine provides them, and the AS key behind the chain travels beside them.
 type Credentials interface {
 	// Chain returns the node's newest chain valid now, empty on a node not
 	// enrolled yet.
 	Chain(ctx context.Context) ([]*x509.Certificate, error)
+	// Beside returns the certificates the node presents beside chain, its
+	// own newest: its membership, empty when the chain stands alone.
+	Beside(ctx context.Context, chain []*x509.Certificate) ([]*x509.Certificate, error)
 	// AnchorPool returns the TRCs peers' chains verify against: the newest
 	// pinned TRC and, inside its grace period, its predecessor. It is empty
 	// on a node that has not pinned a TRC yet.
 	AnchorPool() ([]*cppki.TRC, error)
-	// RecordChain records the chain a peer presented in a handshake, once it
-	// verified against the anchor pool.
-	RecordChain(chain []*x509.Certificate)
+	// AcceptChain decides the chain a peer presented in a handshake, once
+	// it verified against the anchor pool, presented carrying the
+	// certificates the peer presented beside it: an accepted chain is
+	// recorded, and a refused one fails the handshake.
+	AcceptChain(chain, presented []*x509.Certificate) error
 }
 
 // RemoteAddr returns the SCION address a request's connection carries — the

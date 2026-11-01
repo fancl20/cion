@@ -17,6 +17,7 @@ import (
 	"github.com/scionproto/scion/pkg/scrypto/signed"
 
 	"github.com/fancl20/cion/pkg/libs/expiring"
+	"github.com/fancl20/cion/pkg/modules/membership"
 	"github.com/fancl20/cion/pkg/modules/trustdb"
 )
 
@@ -44,6 +45,10 @@ type Engine struct {
 	// Provider resolves the node's chains and TRCs; DB-first, network-backed
 	// on the nodes that enroll.
 	Provider Provider
+	// Membership admits the chains peers present in the SCION-native
+	// channel's handshakes once the TRC verified them, and names what the
+	// node presents beside its own.
+	Membership Membership
 
 	// chains and notifies cache the verifiers' recently used chains and
 	// deduplicate their TRC reports.
@@ -55,19 +60,31 @@ type Engine struct {
 	recorded *expiring.Map[[sha256.Size]byte, struct{}]
 }
 
+// Membership is the membership module's seam the engine calls.
+type Membership interface {
+	// Admit decides a chain the TRC verified: nil admits it, an error
+	// refuses it.
+	Admit(ctx context.Context, facts membership.Facts) error
+	// Present returns the certificates the node presents beside chain, its
+	// own newest, empty when the chain stands alone.
+	Present(ctx context.Context, chain []*x509.Certificate) ([]*x509.Certificate, error)
+}
+
 // recordedChainTTL is how long the engine remembers a peer's chain it
 // recorded.
 const recordedChainTTL = time.Hour
 
-// NewEngine returns an engine for the node's IA, AS key, and provider.
-func NewEngine(ia addr.IA, key crypto.Signer, provider Provider) *Engine {
+// NewEngine returns an engine for the node's IA, AS key, provider, and
+// membership.
+func NewEngine(ia addr.IA, key crypto.Signer, provider Provider, members Membership) *Engine {
 	return &Engine{
-		IA:       ia,
-		Key:      key,
-		Provider: provider,
-		chains:   expiring.New[string, [][]*x509.Certificate](),
-		notifies: expiring.New[string, struct{}](),
-		recorded: expiring.New[[sha256.Size]byte, struct{}](),
+		IA:         ia,
+		Key:        key,
+		Provider:   provider,
+		Membership: members,
+		chains:     expiring.New[string, [][]*x509.Certificate](),
+		notifies:   expiring.New[string, struct{}](),
+		recorded:   expiring.New[[sha256.Size]byte, struct{}](),
 	}
 }
 
@@ -196,6 +213,29 @@ func (e *Engine) Chain(ctx context.Context) ([]*x509.Certificate, error) {
 	return newest(chains, now)
 }
 
+// Beside returns the certificates the node presents beside chain, its own
+// newest, in the SCION-native channel's handshakes: what its membership
+// adds, empty when the chain stands alone.
+func (e *Engine) Beside(ctx context.Context, chain []*x509.Certificate) ([]*x509.Certificate, error) {
+	return e.Membership.Present(ctx, chain)
+}
+
+// AcceptChain decides a peer's chain once it verified against the anchor
+// pool, presented carrying what the peer presented beside it: the
+// membership admits it on local state alone, and an admitted chain is
+// recorded.
+func (e *Engine) AcceptChain(chain, presented []*x509.Certificate) error {
+	if err := e.Membership.Admit(context.Background(), membership.Facts{
+		Boundary:  membership.BoundaryHandshake,
+		Chain:     chain,
+		Presented: presented,
+	}); err != nil {
+		return err
+	}
+	e.RecordChain(chain)
+	return nil
+}
+
 // BaseTRC returns the ISD's base TRC as pinned in the provider, without
 // fetching it over the network. The zero TRC means the node has not pinned
 // the TRC yet.
@@ -235,13 +275,13 @@ type DBProvider interface {
 	StoreChain(ctx context.Context, chain []*x509.Certificate) error
 }
 
-// RecordChain stores the chain a peer presented in a handshake, once it
-// verified against the anchor pool, in the trust database, as the provider
-// stores a chain it fetched: a later verification of the peer's signed
-// messages finds it there, and the founder's database comes to hold the
-// current chain of every node that talks to it, whichever core issued it.
-// A chain recorded within recordedChainTTL is not written again. A failed
-// store is logged: the chain verified, and recording it is a cache.
+// RecordChain stores the chain a peer presented in a handshake, once the
+// handshake accepted it, in the trust database, as the provider stores a
+// chain it fetched: a later verification of the peer's signed messages
+// finds it there, and the founder's database comes to hold the current
+// chain of every node that talks to it, whichever core issued it. A chain
+// recorded within recordedChainTTL is not written again. A failed store is
+// logged: the chain verified, and recording it is a cache.
 func (e *Engine) RecordChain(chain []*x509.Certificate) {
 	db, ok := e.Provider.(DBProvider)
 	if !ok {

@@ -102,7 +102,7 @@ type portalAsk struct {
 type portalNode struct {
 	IA       string `json:"ia"`
 	Key      string `json:"key"`
-	Reported string `json:"reported"`
+	Expires  string `json:"expires"`
 	Endpoint string `json:"endpoint"`
 }
 
@@ -156,8 +156,8 @@ func programsHost(n *Node, ip netip.Addr) bool {
 // approval; a host joins unattended with an auth key the console minted
 // naming the leaf, landing on the leaf and listed with the key's note, the
 // leaf's host endpoint, and its presence; its release closes its tunnel,
-// the leaf dropping the peer; and the leaf, listed with its last report
-// while it runs, is listed silent once it stops.
+// the leaf dropping the peer; and the leaf, listed by its membership while
+// it runs, stays listed by it once it stops, until the membership lapses.
 func TestPortalConsole(t *testing.T) {
 	t.Parallel()
 	wpki := packageWebPKI
@@ -260,8 +260,8 @@ func TestPortalConsole(t *testing.T) {
 		}
 	}
 
-	// The leaf reports through the node directory; stopped, it withdraws
-	// its entry, and the console lists it silent beside its chain.
+	// The leaf is listed by the membership it renews at the founder;
+	// stopped, it holds the membership until it lapses.
 	leafNode := func() portalNode {
 		nodes, _ := console.nodes()
 		for _, n := range nodes {
@@ -271,12 +271,13 @@ func TestPortalConsole(t *testing.T) {
 		}
 		return portalNode{}
 	}
-	Poll(t, "the leaf listed with its last report", func() bool {
-		return leafNode().Reported != ""
-	})
-	b.Stop(t)
-	Poll(t, "the stopped leaf listed silent", func() bool {
+	Poll(t, "the leaf listed by its membership", func() bool {
 		n := leafNode()
-		return n.IA == leaf && n.Key != "" && n.Reported == ""
+		return n.Key != "" && n.Expires != ""
 	})
+	listedLeaf := leafNode()
+	b.Stop(t)
+	if n := leafNode(); n != listedLeaf {
+		t.Errorf("the stopped leaf is listed as %+v, want its membership %+v", n, listedLeaf)
+	}
 }

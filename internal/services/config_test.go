@@ -3,6 +3,7 @@ package services
 import (
 	"context"
 	"net/netip"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -10,6 +11,9 @@ import (
 	"github.com/fancl20/cion/pkg/core/trust"
 	"github.com/fancl20/cion/pkg/core/webpki/webpkitest"
 	"github.com/fancl20/cion/pkg/modules/enrollauth"
+	"github.com/fancl20/cion/pkg/modules/membership"
+	"github.com/fancl20/cion/pkg/modules/membership/impl/founder"
+	"github.com/fancl20/cion/pkg/modules/membership/impl/none"
 )
 
 // nodeConfig builds a minimal valid run-argument set for the validation and
@@ -193,6 +197,32 @@ func TestNodeConfigAdmission(t *testing.T) {
 				t.Error("the harness's policy loaded, want refusal")
 			}
 		})
+	}
+}
+
+// TestNodeConfigMembership checks the membership method's selection: the
+// founder method for "founder" and for the unset argument, the none method
+// for "none", and any other name refused.
+func TestNodeConfigMembership(t *testing.T) {
+	for name, want := range map[string]membership.Method{
+		"":        &founder.Method{},
+		"founder": &founder.Method{},
+		"none":    &none.Method{},
+	} {
+		cfg := nodeConfig()
+		cfg.Membership = name
+		rc, err := cfg.resolve()
+		if err != nil {
+			t.Fatalf("resolving %q: %v", name, err)
+		}
+		if got := rc.newMembership(membership.Env{}); reflect.TypeOf(got) != reflect.TypeOf(want) {
+			t.Errorf("%q builds %T, want %T", name, got, want)
+		}
+	}
+	cfg := nodeConfig()
+	cfg.Membership = "quorum"
+	if _, err := cfg.resolve(); err == nil {
+		t.Error("an unknown membership method was accepted")
 	}
 }
 

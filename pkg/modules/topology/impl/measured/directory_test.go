@@ -769,7 +769,8 @@ func TestDirectoryAcceptance(t *testing.T) {
 		founder := trusttest.NewFounder(t, openTrustDB(t), founderIA)
 		signer := addr.MustIAFrom(20, 0xfd0000000042)
 		signerKey, chain := founder.Enroll(t, signer)
-		signerEngine := trust.NewEngine(signer, signerKey, &trust.NetworkProvider{DB: founder.DB})
+		signerEngine := trust.NewEngine(signer, signerKey, &trust.NetworkProvider{DB: founder.DB},
+			trusttest.Unchecked{})
 
 		db := openTrustDB(t)
 		if _, err := db.InsertTRC(t.Context(), founder.TRC); err != nil {
@@ -788,7 +789,7 @@ func TestDirectoryAcceptance(t *testing.T) {
 				fetcher.mtx.Unlock()
 				return fetcher
 			},
-		})
+		}, trusttest.Unchecked{})
 		d := NewNodeDirectory(NodeDirectoryConfig{IA: directoryIA, Trust: engine})
 		const arrival = 7
 		id := attachLink(d, arrival)
@@ -1839,7 +1840,8 @@ func TestDirectorySignsItsOwnEntry(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		engine := trust.NewEngine(directoryIA, key, &trust.NetworkProvider{DB: founder.DB})
+		engine := trust.NewEngine(directoryIA, key, &trust.NetworkProvider{DB: founder.DB},
+			trusttest.Unchecked{})
 		// silent is the host whose echo went unanswered, if any.
 		var silent atomic.Pointer[netip.Addr]
 		d := NewNodeDirectory(NodeDirectoryConfig{
@@ -1971,7 +1973,8 @@ func TestDirectoryCatchesUpAtTheFirstChain(t *testing.T) {
 			t.Fatal(err)
 		}
 		xIA := addr.MustIAFrom(20, 0xfd00000000a1)
-		x := f.add(xIA, trust.NewEngine(xIA, key, &trust.NetworkProvider{DB: founder.DB}),
+		x := f.add(xIA, trust.NewEngine(xIA, key, &trust.NetworkProvider{DB: founder.DB},
+			trusttest.Unchecked{}),
 			"192.0.2.161")
 		b.run(t)
 		x.run(t)

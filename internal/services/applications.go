@@ -1,19 +1,13 @@
 package services
 
 import (
-	"context"
-	"crypto/x509"
 	"fmt"
 	"net/http"
-	"time"
-
-	"github.com/scionproto/scion/pkg/scrypto/cppki"
 
 	"github.com/fancl20/cion/pkg/apps"
 	"github.com/fancl20/cion/pkg/core/trust"
 	"github.com/fancl20/cion/pkg/libs/scion"
 	"github.com/fancl20/cion/pkg/libs/scionrpc"
-	"github.com/fancl20/cion/pkg/modules/trustdb"
 )
 
 // setupApplications constructs the applications resolve selected, in table
@@ -40,16 +34,17 @@ func (n *node) setupApplications() error {
 
 // appEnvironment builds the node's facts the entries' constructors adapt: the
 // identity and role, the state root, the control host, the domain and the
-// HTTPS server's origin, the trust engine and path provider, the issued
-// chains, the sending conn, the node's bus, the service-socket registration,
-// the admission authorizer, the founder route the joiner's directory fetch
-// rides, the relay derivation's inputs with the harness's placement among
-// them, the directory pacing, the control plane's TRC decision the voting
-// application hands its submissions to, the control-endpoint mounting behind
-// the peer-identity middleware, and the HTTPS server's mounting. The
-// environment's core flag marks the founding tier alone: a joining core runs
-// the applications a local node runs, its WireGuard application publishing to
-// and fetching from the founder's directory.
+// HTTPS server's origin, the trust engine and path provider, the
+// memberships, the sending conn, the node's bus, the service-socket
+// registration, the admission authorizer, the founder route the joiner's
+// directory fetch rides, the relay derivation's inputs with the harness's
+// placement among them, the directory pacing, the control plane's TRC
+// decision the voting application hands its submissions to, the
+// control-endpoint mounting behind the peer-identity middleware, and the
+// HTTPS server's mounting. The environment's core flag marks the founding
+// tier alone: a joining core runs the applications a local node runs, its
+// WireGuard application publishing to and fetching from the founder's
+// directory.
 func (n *node) appEnvironment() *apps.Environment {
 	env := &apps.Environment{
 		Arguments:       n.cfg.AppArguments,
@@ -61,7 +56,7 @@ func (n *node) appEnvironment() *apps.Environment {
 		HTTPSOrigin:     n.cfg.httpsOrigin(),
 		Engine:          n.engine,
 		Paths:           n.pathProvider,
-		IssuedChains:    n.issuedChains,
+		Memberships:     n.members.List,
 		NewConn:         func() (*scion.Conn, error) { return n.scionConn(0) },
 		Bus:             n.bus,
 		RegisterSvc:     n.registerSvc,
@@ -87,12 +82,4 @@ func (n *node) appEnvironment() *apps.Environment {
 		}
 	}
 	return env
-}
-
-// issuedChains lists the chains valid now that the trust database holds.
-func (n *node) issuedChains(ctx context.Context) ([][]*x509.Certificate, error) {
-	now := time.Now()
-	return n.trustDB.Chains(ctx, trustdb.ChainQuery{
-		Validity: cppki.Validity{NotBefore: now, NotAfter: now},
-	})
 }

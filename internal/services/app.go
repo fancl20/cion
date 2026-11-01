@@ -22,6 +22,7 @@ import (
 	"github.com/fancl20/cion/pkg/libs/scion"
 	"github.com/fancl20/cion/pkg/libs/underlay"
 	"github.com/fancl20/cion/pkg/modules/links"
+	"github.com/fancl20/cion/pkg/modules/membership"
 	"github.com/fancl20/cion/pkg/modules/pathdb"
 	"github.com/fancl20/cion/pkg/modules/trustdb"
 )
@@ -145,6 +146,19 @@ func (a *App) Lookup() *controlplane.LookupService { return a.node.lookup }
 // Engine returns the node's trust engine: it signs the node's own beacon
 // entries and verifies each received entry bound to the identity it claims.
 func (a *App) Engine() *trust.Engine { return a.node.engine }
+
+// Issuer returns the node's issuer: a core's, nil on a normal node.
+func (a *App) Issuer() *trust.Issuer { return a.node.issuer }
+
+// MembershipStore returns the store the node's membership method keeps its
+// memberships in: the node's own, and those of the peers it met.
+func (a *App) MembershipStore() *membership.Store { return a.node.memberStore }
+
+// Memberships lists the memberships the node's method holds that have not
+// lapsed: the listing the founder's console reads.
+func (a *App) Memberships(ctx context.Context) ([]membership.Membership, error) {
+	return a.node.members.List(ctx)
+}
 
 // PeerClient returns the node's verified peer channel: the client its
 // beacons, registrations, and segment fetches ride.

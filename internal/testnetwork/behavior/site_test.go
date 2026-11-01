@@ -8,6 +8,8 @@ import (
 	"testing/synctest"
 	"time"
 
+	"github.com/scionproto/scion/pkg/addr"
+
 	"github.com/fancl20/cion/internal/services"
 	"github.com/fancl20/cion/internal/testnetwork"
 	"github.com/fancl20/cion/internal/testnetwork/fabric"
@@ -387,7 +389,8 @@ func bootGatewaySite(t *testing.T, fab *fabric.Fabric, wpki *webpkitest.CA) *net
 // names the gateway in the founder's directory, untagged, and its inside
 // host in the directory the site's nodes share, each naming its inside
 // address there, which the founder does not hold; the founder's views hold
-// no site node's inside address.
+// no site node's inside address; and the founder's membership listing — the
+// console's node list — holds every node, the site's included.
 func TestGatewaySiteReaches(t *testing.T) {
 	testnetwork.InBubble(t, func(t *testing.T, fab *fabric.Fabric, wpki *webpkitest.CA) {
 		n := bootGatewaySite(t, fab, wpki)
@@ -414,7 +417,31 @@ func TestGatewaySiteReaches(t *testing.T) {
 		if inside := foundersInsideHosts(n); len(inside) != 0 {
 			t.Errorf("the founder's views hold the inside addresses of %v", inside)
 		}
+		if unlisted := unlistedMembers(t, n); len(unlisted) != 0 {
+			t.Errorf("the founder lists no membership of %v", unlisted)
+		}
 	})
+}
+
+// unlistedMembers returns the nodes the founder's membership listing leaves
+// out.
+func unlistedMembers(t *testing.T, n *network) []addr.IA {
+	t.Helper()
+	list, err := n.nodes[0].App().Memberships(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	listed := make(map[addr.IA]bool, len(list))
+	for _, m := range list {
+		listed[m.IA] = true
+	}
+	var unlisted []addr.IA
+	for _, node := range n.nodes {
+		if ia := node.App().IA(); !listed[ia] {
+			unlisted = append(unlisted, ia)
+		}
+	}
+	return unlisted
 }
 
 // routerHosts returns the hosts core 1's views show its own entries naming

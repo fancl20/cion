@@ -7,12 +7,14 @@ import (
 	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
+	"errors"
 	"net"
 	"net/netip"
 	"slices"
 	"sync"
 	"testing"
 
+	"github.com/google/go-cmp/cmp"
 	"github.com/scionproto/scion/pkg/addr"
 	"github.com/scionproto/scion/pkg/scrypto/cppki"
 
@@ -92,7 +94,7 @@ func TestNativeTLSWithoutTRC(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	fresh := trust.NewEngine(nodeIATest, key, &trust.NetworkProvider{DB: db})
+	fresh := trust.NewEngine(nodeIATest, key, &trust.NetworkProvider{DB: db}, trusttest.Unchecked{})
 	verify := verifyChainAgainstTRC(fresh, &iaLineC)
 
 	// An entirely unanchored self-signed certificate passes the window.
@@ -276,18 +278,23 @@ func TestNativeCertFromEngine(t *testing.T) {
 }
 
 // recordingCredentials records the chains the verification hands its
-// credentials to record.
+// credentials to decide, beside what each peer presented after its chain,
+// and refuses every one with refuse when it is set.
 type recordingCredentials struct {
 	Credentials
+	refuse error
 
-	mtx      sync.Mutex
-	recorded [][]*x509.Certificate
+	mtx       sync.Mutex
+	recorded  [][]*x509.Certificate
+	presented [][]*x509.Certificate
 }
 
-func (c *recordingCredentials) RecordChain(chain []*x509.Certificate) {
+func (c *recordingCredentials) AcceptChain(chain, presented []*x509.Certificate) error {
 	c.mtx.Lock()
 	defer c.mtx.Unlock()
 	c.recorded = append(c.recorded, chain)
+	c.presented = append(c.presented, presented)
+	return c.refuse
 }
 
 // recordedIAs returns the ISD-ASes the recorded chains name, in the order
@@ -307,12 +314,12 @@ func (c *recordingCredentials) recordedIAs(t *testing.T) []addr.IA {
 	return ias
 }
 
-// TestNativeTLSRecordsTheVerifiedChain checks the hand-off to the
-// credentials: a chain that verifies is recorded, whether or not the
-// verification names the peer, while a chain naming another ISD-AS, a chain
-// the pinned TRC does not anchor, and a certificate the bootstrap window
-// accepts are not.
-func TestNativeTLSRecordsTheVerifiedChain(t *testing.T) {
+// TestNativeTLSHandsOverTheVerifiedChain checks the hand-off to the
+// credentials: a chain that verifies is handed over to decide, whether or
+// not the verification names the peer, while a chain naming another
+// ISD-AS, a chain the pinned TRC does not anchor, and a certificate the
+// bootstrap window accepts are not.
+func TestNativeTLSHandsOverTheVerifiedChain(t *testing.T) {
 	f := newMTLSFixture(t)
 	for name, expected := range map[string]*addr.IA{"unnamed": nil, "named": &iaLineC} {
 		t.Run(name, func(t *testing.T) {
@@ -357,7 +364,7 @@ func TestNativeTLSRecordsTheVerifiedChain(t *testing.T) {
 			t.Fatal(err)
 		}
 		creds := &recordingCredentials{Credentials: trust.NewEngine(nodeIATest, key,
-			&trust.NetworkProvider{DB: openTrustDB(t, t.TempDir())})}
+			&trust.NetworkProvider{DB: openTrustDB(t, t.TempDir())}, trusttest.Unchecked{})}
 		self, err := ephemeralCert()
 		if err != nil {
 			t.Fatal(err)
@@ -369,4 +376,75 @@ func TestNativeTLSRecordsTheVerifiedChain(t *testing.T) {
 			t.Errorf("recorded chains of %v, want none", got)
 		}
 	})
+}
+
+// TestNativeTLSHandsOverWhatStandsBeside checks a peer that presents more
+// than its chain: the first two certificates verify against the TRC as the
+// chain, and the rest go beside it to the credentials, whose refusal fails
+// the handshake.
+func TestNativeTLSHandsOverWhatStandsBeside(t *testing.T) {
+	f := newMTLSFixture(t)
+	peer, err := f.peer.Chain(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	beside, err := f.engine.Chain(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw := [][]byte{peer[0].Raw, peer[1].Raw, beside[0].Raw, beside[1].Raw}
+
+	creds := &recordingCredentials{Credentials: f.engine}
+	if err := verifyChainAgainstTRC(creds, &iaLineC)(raw, nil); err != nil {
+		t.Fatal(err)
+	}
+	if got := creds.recordedIAs(t); !slices.Equal(got, []addr.IA{iaLineC}) {
+		t.Errorf("handed over chains of %v, want the peer's", got)
+	}
+	if got := creds.presented; len(got) != 1 || len(got[0]) != 2 ||
+		!got[0][0].Equal(beside[0]) || !got[0][1].Equal(beside[1]) {
+
+		t.Errorf("handed over %v beside the chain, want the two certificates after it", got)
+	}
+
+	refusing := &recordingCredentials{Credentials: f.engine, refuse: errors.New("refused")}
+	if err := verifyChainAgainstTRC(refusing, &iaLineC)(raw, nil); err == nil {
+		t.Error("the handshake passed a chain the credentials refused")
+	}
+}
+
+// besideCredentials presents beside the node's chain what beside holds.
+type besideCredentials struct {
+	Credentials
+	beside []*x509.Certificate
+}
+
+func (c besideCredentials) Beside(context.Context, []*x509.Certificate) ([]*x509.Certificate, error) {
+	return c.beside, nil
+}
+
+// TestNativeCertPresentsWhatStandsBeside checks the certificate the endpoint
+// presents when the credentials put certificates beside the chain: the
+// chain first, the leaf its AS certificate, then the certificates beside it.
+func TestNativeCertPresentsWhatStandsBeside(t *testing.T) {
+	f := newMTLSFixture(t)
+	beside, err := f.peer.Chain(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cert, err := nativeCert(besideCredentials{Credentials: f.engine, beside: beside}, f.engine.Key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	chain, err := f.engine.Chain(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := [][]byte{chain[0].Raw, chain[1].Raw, beside[0].Raw, beside[1].Raw}
+	if diff := cmp.Diff(want, cert.Certificate); diff != "" {
+		t.Errorf("presented certificates mismatch (-want +got):\n%s", diff)
+	}
+	if !cert.Leaf.Equal(chain[0]) {
+		t.Error("the leaf is not the node's AS certificate")
+	}
 }

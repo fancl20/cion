@@ -36,7 +36,8 @@ func serveCore(t *testing.T, n *testNode, wpki *webpkitest.CA) *trusttest.Founde
 		t.Fatal(err)
 	}
 	tlsConf := certMgr.TLSConfig()
-	svc := &TrustService{DB: f.DB, Issuer: f.Issuer, Enrolls: true}
+	svc := &TrustService{DB: f.DB, Issuer: f.Issuer, Enrolls: true,
+		Membership: trusttest.Unchecked{}}
 	// The server outlives the test's own thread — it serves until the test's
 	// context ends, just before cleanup — so it reports through the package
 	// logger and its cleanup waits for the exit.

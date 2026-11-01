@@ -283,3 +283,38 @@ production. A network that sets `none` on every node keeps today's checks.
     across a founder restart.
 
 ## Implementation history
+
+*   Landed as proposed: the module, its store, and its two methods
+    ([membership.go](/pkg/modules/membership/membership.go),
+    [store.go](/pkg/modules/membership/store.go),
+    [founder.go](/pkg/modules/membership/impl/founder/founder.go),
+    [none.go](/pkg/modules/membership/impl/none/none.go)) with their
+    contract suite
+    ([membershiptest.go](/pkg/modules/membership/impl/membershiptest/membershiptest.go)),
+    the handshake's seam ([mtls.go](/pkg/libs/scionrpc/mtls.go),
+    [engine.go](/pkg/core/trust/engine.go)), the renewal check's and the
+    issuance's ([trustservice.go](/pkg/core/controlplane/trustservice.go)),
+    the run argument and the assembly
+    ([run.go](/cmd/cion/run.go),
+    [membership.go](/internal/services/membership.go)), the console's node
+    list ([portal.go](/pkg/apps/portal.go),
+    [portal.js](/pkg/apps/portal/portal.js)), and the labs
+    ([membership_test.go](/internal/testnetwork/membership_test.go),
+    [static_test.go](/internal/testnetwork/static_test.go),
+    [site_test.go](/internal/testnetwork/behavior/site_test.go)). Beside
+    the plan:
+    *   No check stands behind signed messages, and with it went the
+        membership service and its messages: ADR-0034's decision 4, amended,
+        checks the chains of peers alone — in the handshake and at renewal.
+        A message reaches a node only over a channel whose handshake checked
+        the peer, and a member signing under a forged identity is told apart
+        no better than one holding a stolen key. `NetworkProvider.GetChains`
+        and the verifier stay the draft's.
+    *   The handshake records a peer's chain only once the membership
+        admits it, so a refused chain never enters the trust database.
+    *   The none method keeps the node's own chain as it presents it, so
+        the founder lists itself.
+    *   The founder-down lab paces the chain validity, and with it the
+        membership window, to minutes: a pacing of the issuer's chain
+        validity ([issuer.go](/pkg/core/trust/issuer.go)) stands in for the
+        days the scenario names.

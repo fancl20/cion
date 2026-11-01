@@ -15,11 +15,11 @@ import (
 
 // addSharedNodeFlags registers the node arguments every assembling command
 // takes: the bare three that place the daemon, the static topology
-// provider's selection, and the composition's list — the arguments the
-// retiring configuration file carried, with defaults so a restart needs
-// none of them. The link-set and the list override working defaults — the
-// measured provider, the inference — so they hide from the help while
-// staying settable.
+// provider's selection, the membership method, and the composition's list —
+// the arguments the retiring configuration file carried, with defaults so a
+// restart needs none of them. The link-set, the membership method, and the
+// list override working defaults — the measured provider, the founder
+// method, the inference — so they hide from the help while staying settable.
 func addSharedNodeFlags(flags *pflag.FlagSet, opts *services.NodeConfig) {
 	flags.StringVar(&opts.State, "state", services.DefaultState,
 		"the state directory, where the first start generates the identity")
@@ -35,6 +35,12 @@ func addSharedNodeFlags(flags *pflag.FlagSet, opts *services.NodeConfig) {
 		"path to a JSON link-set file naming the static topology: "+
 			"neighbor ISD-ASes with each link's two underlay addresses")
 	_ = flags.MarkHidden("topology.link-set")
+	flags.StringVar(&opts.Membership, "trust.membership", "founder",
+		"the membership method, the same on every node of the network: founder, "+
+			"under which a node's membership is the newest chain the founder "+
+			"issued for its key, or none, under which every chain stands as its "+
+			"own membership")
+	_ = flags.MarkHidden("trust.membership")
 	flags.StringSliceVar(&opts.Applications, "applications", nil,
 		"the resident applications the node runs, comma-separated and "+
 			"repeatable: unset loads what the arguments imply, the empty value "+

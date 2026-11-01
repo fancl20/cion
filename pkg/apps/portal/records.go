@@ -37,18 +37,17 @@ const (
 	ReachDegraded Reach = "degraded"
 )
 
-// Node is one node as the founder's records hold it: a node holding a chain
-// valid now that the founder knows, or one the node directory's view holds.
+// Node is one node as the founder's records hold it: a node holding a
+// membership that has not lapsed.
 type Node struct {
 	// IA is the node's ISD-AS.
 	IA addr.IA
-	// Key is the newest chain's subject key fingerprint, hex encoded — the
-	// fingerprint the node's enrollment presented — empty while the founder
-	// holds no chain of the node valid now.
+	// Key is the membership's subject key fingerprint, hex encoded — the
+	// fingerprint the node's enrollment presented.
 	Key string
-	// Reported is when the node signed the entry the node directory's view
-	// holds of it, zero while the view holds none: the node is silent.
-	Reported time.Time
+	// Expires is the membership's expiry, zero for a membership that never
+	// lapses.
+	Expires time.Time
 	// Role is the node's place in the trust fabric.
 	Role Role
 	// Reach is the node's observed tag, the zero value while peers can dial
@@ -89,11 +88,10 @@ type Host struct {
 
 // Records is the network's records as the console reads them, and the one
 // write the console makes: releasing a host's address. The application's
-// entry adapts them from the chains the founder holds, the directory, and
-// the coordination application.
+// entry adapts them from the founder's memberships, the directory, and the
+// coordination application.
 type Records interface {
-	// Nodes lists the nodes holding a chain valid now, the newest chain per
-	// ISD-AS, beside the nodes the node directory's view holds.
+	// Nodes lists the nodes holding a membership that has not lapsed.
 	Nodes(ctx context.Context) ([]Node, error)
 	// Hosts lists the registry's hosts with their presence, or answers
 	// ErrNoCoordination.

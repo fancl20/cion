@@ -14,7 +14,6 @@ package apps
 
 import (
 	"context"
-	"crypto/x509"
 	"net/http"
 	"time"
 
@@ -26,6 +25,7 @@ import (
 	"github.com/fancl20/cion/pkg/libs/bus"
 	"github.com/fancl20/cion/pkg/libs/scion"
 	"github.com/fancl20/cion/pkg/modules/enrollauth"
+	"github.com/fancl20/cion/pkg/modules/membership"
 )
 
 // Application is the seam a resident application assembles through: Run
@@ -74,11 +74,9 @@ type Environment struct {
 	// resolves the paths the mesh datagrams ride.
 	Engine *trust.Engine
 	Paths  Paths
-	// IssuedChains lists the certificate chains valid now that the node's
-	// trust database holds — on the founding core, every chain it issued,
-	// fetched to verify a message, or recorded from a verified peer's
-	// handshake.
-	IssuedChains func(ctx context.Context) ([][]*x509.Certificate, error)
+	// Memberships lists the memberships the node's membership method holds
+	// that have not lapsed — on the founding core, every node's.
+	Memberships func(ctx context.Context) ([]membership.Membership, error)
 	// NewConn binds the node's sending conn on an ephemeral port: the
 	// socket the application's own services ride.
 	NewConn func() (*scion.Conn, error)
