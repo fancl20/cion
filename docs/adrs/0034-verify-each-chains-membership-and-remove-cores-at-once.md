@@ -128,10 +128,13 @@ ADR-0033's accepted risk:
     one holding a stolen key.
 5.  **The node carries its membership.** A node presents its membership
     beside its chain in the handshake of the SCION-native channel.
-6.  **A forgery is reported.** A chain that verifies against the TRC but
-    no membership backs is a forgery, and the root it anchors in names the
-    core that issued it. The verifier refuses it and reports the evidence
-    to the founder; the operator answers with that core's removal.
+6.  **A forgery is refused and logged.** A chain that verifies against the
+    TRC but no membership backs is a forgery, and the root it anchors in
+    names the core that issued it. The verifier refuses it and logs that
+    core, which the operator answers with the core's removal. No node
+    reports it to the founder: a chain issued before its node's removal
+    looks the same, so a report would let any member frame the core that
+    issued it.
 7.  **The founder removes a core at once.** A sensitive TRC update, cast by
     the founder's vote alone, removes the core's root certificate, its
     voting certificates, and its core and authoritative entries, with no
@@ -214,6 +217,8 @@ ADR-0033's accepted risk:
 *   A member holding a leaked core key still signs messages under forged
     identities, and every node verifies them against the TRC alone, as it
     does the messages of a member whose own key leaked.
+*   A forgery reaches the operator only through the logs of the nodes it
+    tried.
 *   Each node keeps a membership for every peer it has met, and the
     handshake carries two more certificates.
 *   A removal acts at a node only once the update arrives there; until
