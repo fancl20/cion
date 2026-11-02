@@ -75,6 +75,21 @@ func successorOf(t *testing.T, pred cppki.SignedTRC) cppki.TRC {
 	return trc
 }
 
+// coverCerts narrows the TRC's validity to the span every certificate it
+// carries covers, as its encoding asks: a certificate minted after the
+// predecessor's, even a second later, starts after the predecessor's
+// validity.
+func coverCerts(trc *cppki.TRC) {
+	for _, cert := range trc.Certificates {
+		if cert.NotBefore.After(trc.Validity.NotBefore) {
+			trc.Validity.NotBefore = cert.NotBefore
+		}
+		if cert.NotAfter.Before(trc.Validity.NotAfter) {
+			trc.Validity.NotAfter = cert.NotAfter
+		}
+	}
+}
+
 // TestRemoveCore checks the founder's removal of an onboarded core, without
 // a grace period and with the roll's: the successor drops the core's
 // certificates and both its AS entries and keeps the rest, starts its
@@ -241,9 +256,7 @@ func TestTRCDeciderRefusesChangesBeyondThePresenters(t *testing.T) {
 	}
 	sensitive := successorOf(t, newest)
 	sensitive.Certificates = append(sensitive.Certificates, sensitiveCert)
-	if sensitiveCert.NotAfter.Before(sensitive.Validity.NotAfter) {
-		sensitive.Validity.NotAfter = sensitiveCert.NotAfter
-	}
+	coverCerts(&sensitive)
 	appended := successorOf(t, newest)
 	appended.CoreASes = append(appended.CoreASes, other.AS()+1)
 	dropped := successorOf(t, newest)
@@ -258,6 +271,7 @@ func TestTRCDeciderRefusesChangesBeyondThePresenters(t *testing.T) {
 			rolledOther.Certificates[i] = freshOtherRoot.Cert
 		}
 	}
+	coverCerts(&rolledOther)
 
 	for name, sub := range map[string]struct {
 		trc     cppki.TRC

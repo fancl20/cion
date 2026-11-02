@@ -30,6 +30,11 @@ const (
 	// several-fold on a loaded runner under the race detector, where the
 	// fixed TestTimeout missed a pipeline still progressing.
 	RestartTimeout = 3 * TestTimeout
+	// OnboardTimeout budgets a core's onboarding the same way: its
+	// enrollment, the submission the founder decides, the pin, the issuer's
+	// anchoring, and the renewal that first issues under its own root run in
+	// series.
+	OnboardTimeout = 3 * TestTimeout
 )
 
 // FreeUDPAddrOn returns a free UDP address on the given host.

@@ -111,7 +111,7 @@ func TestCoreJoinsBySensitiveUpdate(t *testing.T) {
 
 	// The joiner's chain comes to issue under its own root: its newest
 	// chain's CA certificate names the joiner.
-	Poll(t, "the joining core's chain to issue under its own root", func() bool {
+	PollFor(t, OnboardTimeout, "the joining core's chain to issue under its own root", func() bool {
 		chain := newestChain(t, b)
 		return chain != nil && issuedBy(t, chain) == b.app.IA()
 	})
@@ -196,7 +196,7 @@ func TestCoreJoinsThroughAnAuthoritative(t *testing.T) {
 		}
 		return trust.Onboarded(trc.TRC, n.app.IA())
 	}
-	Poll(t, "the authoritative onboarded", func() bool { return onboarded(b) })
+	PollFor(t, OnboardTimeout, "the authoritative onboarded", func() bool { return onboarded(b) })
 
 	// The joining core, the authoritative its one neighbor.
 	e := bootAssembly(t, func(cfg *services.NodeConfig) {
@@ -209,7 +209,7 @@ func TestCoreJoinsThroughAnAuthoritative(t *testing.T) {
 	})
 	stopped := make(chan error, 1)
 	go func() { stopped <- e.app.Wait() }()
-	Poll(t, "the joining core onboarded through the authoritative", func() bool {
+	PollFor(t, OnboardTimeout, "the joining core onboarded through the authoritative", func() bool {
 		select {
 		case err := <-stopped:
 			t.Fatalf("the joining core stopped: %v", err)

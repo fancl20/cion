@@ -55,7 +55,7 @@ func TestChainsRenewWithTheFounderDown(t *testing.T) {
 		cfg.RootCAs = wpki.Pool
 		renewSoon(cfg)
 	})
-	Poll(t, "the authoritative core to issue its own chain", func() bool {
+	PollFor(t, OnboardTimeout, "the authoritative core to issue its own chain", func() bool {
 		chain := newestChain(t, a)
 		return chain != nil && issuedBy(t, chain) == a.app.IA()
 	})
@@ -118,4 +118,11 @@ func issuedBy(t *testing.T, chain []*x509.Certificate) addr.IA {
 		t.Fatal(err)
 	}
 	return ia
+}
+
+// issuedSince reports whether the certificate chain was issued at t or
+// later, to the second: its AS certificate's validity starts at its
+// issuance, truncated to the second and backdated a minute.
+func issuedSince(chain []*x509.Certificate, t time.Time) bool {
+	return !chain[0].NotBefore.Add(time.Minute).Before(t.Truncate(time.Second))
 }

@@ -50,7 +50,12 @@ func awaitAcceptance(t *testing.T, from *Node, dst addr.IA, creds scionrpc.Crede
 // the founder.
 func TestRemovedCoreAnchorsNothing(t *testing.T) {
 	t.Parallel()
-	_, f, a, n := coreTrio(t, func(*services.NodeConfig) {})
+	// Each pass inspects the chain at the retry pace, so the normal node
+	// renews as the removal pins rather than at its next inspection, a
+	// minute on.
+	_, f, a, n := coreTrio(t, func(cfg *services.NodeConfig) {
+		cfg.Pacing.EnrollmentInspect = EnrollRetry
+	})
 	ctx := t.Context()
 	key := n.app.Engine().Key
 	// A chain issued in the same second as the node's own expires no later
@@ -74,7 +79,7 @@ func TestRemovedCoreAnchorsNothing(t *testing.T) {
 	awaitHandshake(t, n, f.app.IA())
 	PollFor(t, RestartTimeout, "the normal node to renew at the founder", func() bool {
 		chain := newestChain(t, n)
-		return issuedBy(t, chain) == f.app.IA() && chain[0].NotBefore.Add(time.Minute).After(removed)
+		return issuedBy(t, chain) == f.app.IA() && issuedSince(chain, removed)
 	})
 
 	forgery, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)

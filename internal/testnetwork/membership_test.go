@@ -72,7 +72,7 @@ func coreTrio(t *testing.T, mutate func(*services.NodeConfig)) (bootFounder func
 		cfg.RootCAs = wpki.Pool
 		mutate(cfg)
 	})
-	Poll(t, "the authoritative core's issuer to anchor", func() bool {
+	PollFor(t, OnboardTimeout, "the authoritative core's issuer to anchor", func() bool {
 		return a.app.Issuer().Anchored()
 	})
 	n = bootAssembly(t, func(cfg *services.NodeConfig) {
@@ -232,7 +232,7 @@ func TestMembershipsOutliveTheFounder(t *testing.T) {
 			func() bool {
 				chain := newestChain(t, node)
 				return chain != nil && issuedBy(t, chain) == a.app.IA() &&
-					chain[0].NotBefore.Add(time.Minute).After(expired)
+					issuedSince(chain, expired)
 			})
 	}
 	awaitHandshake(t, n, a.app.IA())
@@ -248,7 +248,7 @@ func TestMembershipsOutliveTheFounder(t *testing.T) {
 		PollFor(t, founder.RetryCap+TestTimeout, "a membership renewed at the returned founder",
 			func() bool {
 				m := node.app.MembershipStore().Get(node.app.IA())
-				return m[0].NotBefore.Add(time.Minute).After(returned)
+				return issuedSince(m, returned)
 			})
 		t.Logf("%v renewed its membership %v after the founder's return",
 			node.app.IA(), time.Since(returned).Round(time.Second))
