@@ -303,10 +303,10 @@ func TestTRCDeciderRefusesChangesBeyondThePresenters(t *testing.T) {
 	}
 }
 
-// TestRemovedCoreRenewsAsANode checks the removed core's renewal: its newest
+// TestRemovedCoreRenewsAsANode checks the removed core's renewal: its own
 // chain, self-issued under the removed root, anchors in the removal no more,
-// so the pass renews at the issuers, resting on the chain the founder
-// issued, and self-issues nothing.
+// so the pass inspects the chain the founder issued and, that chain due,
+// renews at the issuers resting on it and self-issues nothing.
 func TestRemovedCoreRenewsAsANode(t *testing.T) {
 	c := newRollFixture(t)
 	ctx := context.Background()
@@ -334,10 +334,11 @@ func TestRemovedCoreRenewsAsANode(t *testing.T) {
 	cfg.IA = c.joiner.ia
 	cfg.Renewal = trust.AuthoritativeRenewal(lf.core, issuers, absentVoting{}, c.joiner.voting,
 		c.joiner.root, issuer)
+	cfg.RenewalThreshold = trust.ASValidity
 
 	enrollPassOf(t, ctx, cfg)
 	if issuers.renewals() != 1 {
-		t.Fatalf("the issuers renewed %d times, want one renewal off the removed chain",
+		t.Fatalf("the issuers renewed %d times, want one renewal of the founder's chain",
 			issuers.renewals())
 	}
 	if diff := cmp.Diff(member, issuers.restsOn[0]); diff != "" {
@@ -362,10 +363,13 @@ func TestRemovedCoreRenewsAsANode(t *testing.T) {
 }
 
 // TestNodeFallsBackOnItsMembership checks the node whose newest chain the
-// removed core issued: before the removal pins, the engine presents that
-// chain; once it pins, the engine presents the chain the founder issued and
-// the anchored chain reads the same, and the enrollment renews at the
-// issuers resting on it.
+// removed core issued, a chain that outlives every other the node gets:
+// before the removal pins, the engine presents that chain; once it pins, the
+// engine presents the chain the founder issued and the anchored chain reads
+// the same. The enrollment inspects the founder's chain and renews nothing
+// while it stands above the threshold; once it falls below, the enrollment
+// renews once at the issuers resting on it, and the renewed chain, though
+// the removed one outlives it too, stands.
 func TestNodeFallsBackOnItsMembership(t *testing.T) {
 	c := newRollFixture(t)
 	ctx := context.Background()
@@ -381,7 +385,7 @@ func TestNodeFallsBackOnItsMembership(t *testing.T) {
 		t.Fatal(err)
 	}
 	issuer := joinerIssuer(t, c)
-	issuer.ChainValidity = trust.ASValidity + time.Hour
+	issuer.ChainValidity = trust.ASValidity + 3*time.Hour
 	removed := issueFor(t, issuer, nodeIATest, lf.key)
 	if _, err := lf.db.InsertChain(ctx, removed); err != nil {
 		t.Fatal(err)
@@ -421,9 +425,18 @@ func TestNodeFallsBackOnItsMembership(t *testing.T) {
 	issuers := &fakeCore{issuer: c.tf.Issuer, trc: removal}
 	lf.cfg.Renewal = trust.NormalRenewal(lf.core, issuers)
 	enrollPassOf(t, ctx, lf.cfg)
-	if issuers.renewals() != 1 {
-		t.Fatalf("the issuers renewed %d times, want one renewal off the removed chain",
+	if issuers.renewals() != 0 {
+		t.Fatalf("the issuers renewed %d times, want none while the founder's chain stands",
 			issuers.renewals())
+	}
+	c.tf.Issuer.ChainValidity = trust.ASValidity + 2*time.Hour
+	lf.cfg.RenewalThreshold = trust.ASValidity + time.Hour
+	for range 2 {
+		enrollPassOf(t, ctx, lf.cfg)
+	}
+	if issuers.renewals() != 1 {
+		t.Fatalf("the issuers renewed %d times over two passes, want one renewal of the "+
+			"founder's chain", issuers.renewals())
 	}
 	if diff := cmp.Diff(member, issuers.restsOn[0]); diff != "" {
 		t.Errorf("the renewal rested on another chain than the founder's (-want +got):\n%s", diff)

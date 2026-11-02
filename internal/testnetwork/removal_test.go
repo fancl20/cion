@@ -44,18 +44,13 @@ func awaitAcceptance(t *testing.T, from *Node, dst addr.IA, creds scionrpc.Crede
 // network, its normal node holding a chain the authoritative core issued as
 // its newest. The founder removes that core, stopped first, for the labs'
 // admission policy would admit it back: every node pins the removal; the
-// normal node keeps completing handshakes with the founder, on its
-// membership, and renews at the founder; a chain the removed core issues
-// passes no handshake; and the removed core's name is bound to no key at
-// the founder.
+// normal node presents the chain the founder issued it and keeps completing
+// handshakes with the founder on it; a chain the removed core issues passes
+// no handshake; and the removed core's name is bound to no key at the
+// founder.
 func TestRemovedCoreAnchorsNothing(t *testing.T) {
 	t.Parallel()
-	// Each pass inspects the chain at the retry pace, so the normal node
-	// renews as the removal pins rather than at its next inspection, a
-	// minute on.
-	_, f, a, n := coreTrio(t, func(cfg *services.NodeConfig) {
-		cfg.Pacing.EnrollmentInspect = EnrollRetry
-	})
+	_, f, a, n := coreTrio(t, func(*services.NodeConfig) {})
 	ctx := t.Context()
 	key := n.app.Engine().Key
 	// A chain issued in the same second as the node's own expires no later
@@ -69,18 +64,20 @@ func TestRemovedCoreAnchorsNothing(t *testing.T) {
 	awaitHandshake(t, n, f.app.IA())
 	a.Stop(t)
 
-	removed := time.Now()
 	if err := f.app.RemoveNode(ctx, a.app.IA()); err != nil {
 		t.Fatal(err)
 	}
 	for _, node := range []*Node{f, n} {
 		awaitRemovalPinned(t, node, a.app.IA())
 	}
+	presented, err := n.app.Engine().Chain(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := issuedBy(t, presented); got != f.app.IA() {
+		t.Errorf("the normal node presents a chain %v issued, want one the founder issued", got)
+	}
 	awaitHandshake(t, n, f.app.IA())
-	PollFor(t, RestartTimeout, "the normal node to renew at the founder", func() bool {
-		chain := newestChain(t, n)
-		return issuedBy(t, chain) == f.app.IA() && issuedSince(chain, removed)
-	})
 
 	forgery, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {

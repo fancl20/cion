@@ -314,3 +314,13 @@ start afresh, as none is in production.
     *   The gate's test raises the quorum beside a sensitive voting
         certificate of the presenter's: with one sensitive voter, a raised
         quorum alone does not encode.
+*   Fix: the enrollment pass inspected the node's newest chain whatever
+    anchored it, so a chain the removed core issued that outlived every
+    renewal kept the pass renewing at each retry until it expired. The pass
+    inspects the newest chain the newest pinned TRC anchors and renews when
+    none does, so a node holding a chain the founder issued renews it at its
+    threshold rather than at the removal
+    ([lifecycle.go](/pkg/core/trust/lifecycle.go)). The core lab checks that
+    the normal node presents the founder's chain in place of a renewal, and
+    the rotation lab that each node holds a chain the newest TRC anchors:
+    its newest may tie with one under the replaced root.

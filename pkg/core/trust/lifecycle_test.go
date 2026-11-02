@@ -207,8 +207,8 @@ func TestEnrollmentStopsWithoutVotingApp(t *testing.T) {
 
 // TestEnrollmentPasses checks the lifecycle loop's decisions: a valid chain
 // with enough remaining validity only inspects; below the renewal threshold
-// it re-enrolls; past expiry it re-enrolls after logging an error. The
-// chain's validity is walked through in a fake-time bubble.
+// it re-enrolls; past expiry it re-enrolls too. The chain's validity is
+// walked through in a fake-time bubble.
 func TestEnrollmentPasses(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		f := newFounder(t)

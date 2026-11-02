@@ -442,8 +442,8 @@ func TestCoresRotateByTRCUpdate(t *testing.T) {
 
 	// The third node discovers the successors from the founder's signed
 	// messages — the cited TRC the verifier reports — and both it and the
-	// founder leave the replaced root: their own chains verify against their
-	// newest pinned TRC alone.
+	// founder leave the replaced root: each holds a chain that verifies
+	// against its newest pinned TRC alone.
 	pollDiscovered(t, c, founderIA.ISD(), base)
 	for _, n := range []struct {
 		name string
@@ -713,8 +713,10 @@ func chainUnder(t *testing.T, n *Node, trc cppki.SignedTRC) []*x509.Certificate 
 	return chain
 }
 
-// anchoredInNewest reports whether the node's newest chain verifies against
-// its newest pinned TRC alone, once that TRC is a successor of the base.
+// anchoredInNewest reports whether the node holds a valid chain that
+// verifies against its newest pinned TRC alone, once that TRC is a successor
+// of the base. A chain under the replaced root may expire no earlier: one
+// issued in the same second keeps it company.
 func anchoredInNewest(t *testing.T, n *Node, base cppki.SignedTRC) bool {
 	t.Helper()
 	ctx := t.Context()
@@ -727,13 +729,19 @@ func anchoredInNewest(t *testing.T, n *Node, base cppki.SignedTRC) bool {
 	if newest.TRC.ID.Serial <= base.TRC.ID.Serial {
 		return false
 	}
-	chain, err := trust.NewestChain(ctx, n.app.TrustDB(), n.app.IA(), time.Now())
+	now := time.Now()
+	chains, err := n.app.TrustDB().Chains(ctx, trustdb.ChainQuery{
+		IA:       n.app.IA(),
+		Validity: cppki.Validity{NotBefore: now, NotAfter: now},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	return chain != nil && cppki.VerifyChain(chain, cppki.VerifyOptions{
-		TRC: []*cppki.TRC{&newest.TRC}, CurrentTime: time.Now(),
-	}) == nil
+	return slices.ContainsFunc(chains, func(chain []*x509.Certificate) bool {
+		return cppki.VerifyChain(chain, cppki.VerifyOptions{
+			TRC: []*cppki.TRC{&newest.TRC}, CurrentTime: now,
+		}) == nil
+	})
 }
 
 // covers reports whether one of the core keys covers the certificate.

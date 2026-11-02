@@ -35,7 +35,7 @@ const (
 
 // EnrollmentConfig configures the lifetime chain lifecycle of a node: every
 // node keeps a valid chain — the founding core included — by re-enrolling
-// before expiry, with warnings as expiry approaches and errors once it passes.
+// before expiry, with warnings as expiry approaches and once it passes.
 // The Renewal carries what the node's role adds to the loop.
 type EnrollmentConfig struct {
 	// IA is the node's ISD-AS.
@@ -240,12 +240,13 @@ func (r authoritativeRenewal) owed(ctx context.Context, cfg EnrollmentConfig) (b
 	return true, nil
 }
 
-// RunEnrollment runs a node's chain lifecycle: each pass reads the newest
-// chain's remaining validity and reports the newest pinned TRC's. It renews
-// the Renewal's way when no valid chain exists, when the chain's validity
-// drops below the renewal threshold, or when the chain does not verify
-// against the newest pinned TRC alone — anchored in a root the TRC replaced
-// or removed — and with a valid chain does the work the role still owes. It
+// RunEnrollment runs a node's chain lifecycle: each pass reads the remaining
+// validity of the node's current chain — the newest of its valid chains the
+// newest pinned TRC anchors alone — and reports the newest pinned TRC's. It
+// renews the Renewal's way when no valid chain exists, when none the newest
+// pinned TRC anchors does — each anchored in a root the TRC replaced or
+// removed — or when the current chain's validity drops below the renewal
+// threshold, and with a current chain does the work the role still owes. It
 // also runs the trust database's expired-chain sweep on its own interval.
 // The founding core's synchronous startup self-enrollment is its first pass.
 // It returns nil once the context ends, and the owed work's terminal failure
@@ -271,38 +272,38 @@ func RunEnrollment(ctx context.Context, cfg EnrollmentConfig) error {
 
 // enrollPass runs one inspection: it returns how long to wait before the
 // next one — the fast retry cadence while unenrolled, renewing, doing owed
-// work, or failing to read the chain or the newest pinned TRC, the calm
-// inspection interval with a valid chain and nothing owed — or the owed
-// work's terminal failure. The inspection reads the newest chain, and a
-// renewal rests on the node's anchored chain, an older one once a removal
-// leaves the newest unanchored.
+// work, or failing to read the chains or the newest pinned TRC, the calm
+// inspection interval with a current chain and nothing owed — or the owed
+// work's terminal failure. A renewal rests on the node's anchored chain,
+// which the anchor pool verifies.
 func (cfg EnrollmentConfig) enrollPass(ctx context.Context) (time.Duration, error) {
-	chain, remaining, err := newestChain(ctx, cfg)
-	if err != nil {
-		slog.Error("Inspecting the chain", "isd_as", cfg.IA, "err", err)
-		return cfg.interval(cfg.RetryInterval, EnrollmentRetryInterval), nil
-	}
 	newest, err := cfg.DB.SignedTRC(ctx, NewestTRCID(cfg.IA.ISD()))
 	if err != nil {
 		slog.Error("Reading the newest pinned TRC", "isd_as", cfg.IA, "err", err)
 		return cfg.interval(cfg.RetryInterval, EnrollmentRetryInterval), nil
 	}
 	logTRCValidity(cfg.IA, newest)
+	now := time.Now()
+	chains, err := cfg.DB.Chains(ctx, trustdb.ChainQuery{
+		IA:       cfg.IA,
+		Validity: cppki.Validity{NotBefore: now, NotAfter: now},
+	})
+	if err != nil {
+		slog.Error("Inspecting the chain", "isd_as", cfg.IA, "err", err)
+		return cfg.interval(cfg.RetryInterval, EnrollmentRetryInterval), nil
+	}
+	current := currentChain(chains, newest)
 	switch {
-	case chain == nil:
+	case len(chains) == 0:
 		slog.Warn("No valid chain; enrolling", "isd_as", cfg.IA)
 		cfg.attemptRenewal(ctx, nil)
-	case remaining <= 0:
-		slog.Error("Last chain expired; re-enrolling",
-			"isd_as", cfg.IA, "expired_for", -remaining)
-		cfg.attemptRenewal(ctx, nil)
-	case remaining < cfg.interval(cfg.RenewalThreshold, ChainRenewalThreshold):
-		slog.Warn("Chain approaching expiry; renewing",
-			"isd_as", cfg.IA, "remaining", remaining)
-		cfg.attemptRenewal(ctx, cfg.anchoredChain(ctx))
-	case !newest.IsZero() && !anchoredIn(chain, newest):
-		slog.Warn("Chain does not anchor in the newest TRC; renewing",
+	case current == nil:
+		slog.Warn("No chain anchors in the newest TRC; renewing",
 			"isd_as", cfg.IA, "trc", newest.TRC.ID)
+		cfg.attemptRenewal(ctx, cfg.anchoredChain(ctx))
+	case current[0].NotAfter.Sub(now) < cfg.interval(cfg.RenewalThreshold, ChainRenewalThreshold):
+		slog.Warn("Chain approaching expiry; renewing",
+			"isd_as", cfg.IA, "remaining", current[0].NotAfter.Sub(now))
 		cfg.attemptRenewal(ctx, cfg.anchoredChain(ctx))
 	default:
 		owed, err := cfg.Renewal.owed(ctx, cfg)
@@ -314,6 +315,23 @@ func (cfg EnrollmentConfig) enrollPass(ctx context.Context) (time.Duration, erro
 		}
 	}
 	return cfg.interval(cfg.RetryInterval, EnrollmentRetryInterval), nil
+}
+
+// currentChain returns the chain a pass inspects among the node's valid
+// chains: the newest the TRC anchors alone, any while no TRC is pinned, and
+// nil when none does. A chain a replaced or removed root anchors is passed
+// over, however long it outlives the others.
+func currentChain(chains [][]*x509.Certificate, trc cppki.SignedTRC) []*x509.Certificate {
+	var current []*x509.Certificate
+	for _, chain := range chains {
+		if !trc.IsZero() && !anchoredIn(chain, trc) {
+			continue
+		}
+		if current == nil || chain[0].NotAfter.After(current[0].NotAfter) {
+			current = chain
+		}
+	}
+	return current
 }
 
 // anchoredIn reports whether the chain verifies against the TRC's roots
@@ -346,23 +364,6 @@ func (cfg EnrollmentConfig) attemptRenewal(ctx context.Context, chain []*x509.Ce
 		return
 	}
 	slog.Info("Renewed chain", "isd_as", cfg.IA)
-}
-
-// newestChain returns the node's newest chain and its remaining validity; a
-// nil chain means none is valid.
-func newestChain(
-	ctx context.Context,
-	cfg EnrollmentConfig,
-) ([]*x509.Certificate, time.Duration, error) {
-
-	chain, err := NewestChain(ctx, cfg.DB, cfg.IA, time.Now())
-	if err != nil {
-		return nil, 0, fmt.Errorf("reading the newest chain: %w", err)
-	}
-	if chain == nil {
-		return nil, 0, nil
-	}
-	return chain, time.Until(chain[0].NotAfter), nil
 }
 
 // logTRCValidity logs the newest pinned TRC's validity once it approaches
