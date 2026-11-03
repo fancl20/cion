@@ -76,7 +76,7 @@ type UDPProvider struct {
 // provider.
 type udpLink interface {
 	Link
-	start(ctx context.Context, procQs []chan *Packet, pool PacketPool)
+	start(ctx context.Context, procQs []chan *Packet, controlQ chan *Packet, pool PacketPool)
 	stop()
 	receive(size int, srcAddr *net.UDPAddr, p *Packet)
 	// egressAddr returns the underlay destination one packet queued on the
@@ -167,12 +167,14 @@ func (u *UDPProvider) DelSvc(svc addr.SVC, host addr.Host, port uint16) error {
 }
 
 // Start puts the provider in the running state. The queues to be used by the
-// receiver tasks are supplied at this point because they must be sized
-// according to the number of connections that will be started.
+// receiver tasks, the data processors' and the control class's, are supplied
+// at this point because they must be sized according to the number of
+// connections that will be started.
 func (u *UDPProvider) Start(
 	ctx context.Context,
 	pool PacketPool,
 	procQs []chan *Packet,
+	controlQ chan *Packet,
 ) {
 	u.mu.Lock()
 	connSnapshot := slices.Clone(u.allConnections)
@@ -185,7 +187,7 @@ func (u *UDPProvider) Start(
 	// Links MUST be started before connections. Given that this is an internal
 	// matter, we don't pay the price of checking at use time.
 	for _, l := range linkSnapshot {
-		l.start(ctx, procQs, pool)
+		l.start(ctx, procQs, controlQ, pool)
 	}
 	for _, c := range connSnapshot {
 		c.start(ctx, u.batchSize, pool)
@@ -261,21 +263,24 @@ func (u *UDPProvider) newExternalLink(
 		return nil, err
 	}
 	queue := make(chan *Packet, qSize)
+	controlQueue := make(chan *Packet, qSize)
 	el := &externalLink{
-		name:       remoteAddr.String(),
-		egressQ:    queue,
-		metrics:    metrics,
-		bfdSession: bfd,
-		raw:        c,
-		seed:       makeHashSeed(),
-		ifID:       ifID,
-		observed:   observed,
-		onObserved: u.onObserved,
+		name:           remoteAddr.String(),
+		egressQ:        queue,
+		egressControlQ: controlQueue,
+		metrics:        metrics,
+		bfdSession:     bfd,
+		bfdReader:      newBFDReader(),
+		raw:            c,
+		seed:           makeHashSeed(),
+		ifID:           ifID,
+		observed:       observed,
+		onObserved:     u.onObserved,
 	}
 	el.locator.Store(udpAddrPointer(remoteAddr))
 	if bfd != nil {
 		// The link hands the session its writer for prebuilt packets: a send
-		// beneath the egress queue and the validation above it. Every
+		// beneath the egress queues and the validation above them. Every
 		// generation re-attaches its own writer this way, the session's state
 		// and timers untouched across the swap.
 		bfd.SetRawWriter(el)
@@ -285,6 +290,7 @@ func (u *UDPProvider) newExternalLink(
 		name:         el.name,
 		link:         el,
 		queue:        queue,
+		controlQueue: controlQueue,
 		stopSend:     make(chan struct{}),
 		metrics:      metrics, // send() needs them.
 		receiverDone: make(chan struct{}),
@@ -353,17 +359,20 @@ func (u *UDPProvider) NewInternalLink(
 	}
 	u.internalHashSeed = makeHashSeed()
 	queue := make(chan *Packet, qSize)
+	controlQueue := make(chan *Packet, qSize)
 	il := &internalLink{
-		egressQ: queue,
-		metrics: metrics,
-		svc:     u.svc,
-		seed:    u.internalHashSeed,
+		egressQ:        queue,
+		egressControlQ: controlQueue,
+		metrics:        metrics,
+		svc:            u.svc,
+		seed:           u.internalHashSeed,
 	}
 	uc := &udpConnection{
 		conn:         c,
 		name:         "internal",
 		link:         il,
 		queue:        queue,
+		controlQueue: controlQueue,
 		stopSend:     make(chan struct{}),
 		metrics:      metrics, // send() needs them.
 		receiverDone: make(chan struct{}),
@@ -375,14 +384,16 @@ func (u *UDPProvider) NewInternalLink(
 	return il, nil
 }
 
-// udpConnection is essentially a batch socket with a sending queue and a
-// demultiplexer. The rest is about logs and metrics.
+// udpConnection is essentially a batch socket with two sending queues, the
+// control class's and data's, and a demultiplexer. The rest is about logs and
+// metrics.
 type udpConnection struct {
 	conn         underlay.UDPConn
 	name         string  // for logs. It's more informative than ifID.
 	link         udpLink // Link with exclusive use of the connection.
 	queue        chan *Packet
-	stopSend     chan struct{} // Closed by stop; unblocks the sender without closing the queue.
+	controlQueue chan *Packet
+	stopSend     chan struct{} // Closed by stop; unblocks the sender without closing the queues.
 	metrics      *InterfaceMetrics
 	receiverDone chan struct{}
 	senderDone   chan struct{}
@@ -434,10 +445,10 @@ func (u *udpConnection) stop() {
 	_ = u.conn.Close() // Also unblocks the receiver.
 
 	if wasRunning {
-		// The queue itself stays open: producers (the data plane processors
-		// and the links) may still be pushing packets, and a send on a
-		// closed channel would panic. The sender drains what made it in and
-		// returns the buffers to the pool.
+		// The queues themselves stay open: producers (the data plane
+		// processors and the links) may still be pushing packets, and a send
+		// on a closed channel would panic. The sender drains what made it in
+		// and returns the buffers to the pool.
 		close(u.stopSend)
 		<-u.receiverDone
 		<-u.senderDone
@@ -540,26 +551,31 @@ func (u *udpConnection) send(ctx context.Context, batchSize int, pool PacketPool
 	msgs := newReadMessages(batchSize)
 
 	queue := u.queue
+	controlQueue := u.controlQueue
 	conn := u.conn
 	metrics := u.metrics
 	toWrite := 0
 
 	// On the way out, whether by stop signal or by the running flag, the
-	// unsent packets and everything stranded on the queue go back to the
+	// unsent packets and everything stranded on the queues go back to the
 	// pool.
 	defer func() {
 		for _, p := range pkts[:toWrite] {
 			pool.Put(p)
 		}
+		u.drain(controlQueue, pool)
 		u.drain(queue, pool)
 	}()
 
 	for u.running.Load() {
 		// Top-up our batch. The blocking wait for the first packet of a
-		// batch also watches for the stop signal, so the queue never has to
-		// be closed to unblock us.
+		// batch also watches for the stop signal, so the queues never have
+		// to be closed to unblock us.
 		if toWrite == 0 {
 			select {
+			case p := <-controlQueue:
+				pkts[0] = p
+				toWrite = 1
 			case p := <-queue:
 				pkts[0] = p
 				toWrite = 1
@@ -567,7 +583,13 @@ func (u *udpConnection) send(ctx context.Context, batchSize int, pool PacketPool
 				return
 			}
 		}
+		// Control first, at most its share of the batch, then data, then
+		// control again in the room data left: while data waits, control
+		// fills at most its share.
+		toWrite += readUpTo(controlQueue, min(batchSize/controlShare, batchSize-toWrite), false,
+			pkts[toWrite:])
 		toWrite += readUpTo(queue, batchSize-toWrite, false, pkts[toWrite:])
+		toWrite += readUpTo(controlQueue, batchSize-toWrite, false, pkts[toWrite:])
 
 		// Turn the packets into underlay messages that WriteBatch can send.
 		// The connection's link names each packet's destination: the packet's
@@ -604,8 +626,8 @@ func (u *udpConnection) send(ctx context.Context, batchSize int, pool PacketPool
 	}
 }
 
-// drain returns the packets stranded on the stopped connection's queue to
-// the pool.
+// drain returns the packets stranded on one of the stopped connection's
+// queues to the pool.
 func (u *udpConnection) drain(queue <-chan *Packet, pool PacketPool) {
 	for {
 		select {
@@ -636,14 +658,22 @@ func (u *udpConnection) drain(queue <-chan *Packet, pool PacketPool) {
 // address. Transit carries the locator: the provider's record alone steers
 // the traffic that forwards through the node.
 type externalLink struct {
-	procQs     []chan *Packet
-	name       string // For logs
-	egressQ    chan<- *Packet
-	metrics    *InterfaceMetrics
-	pool       PacketPool
-	bfdSession Session
+	procQs []chan *Packet
+	// controlQ is the processor queue of the link's control arrivals.
+	controlQ chan *Packet
+	name     string // For logs
+	egressQ  chan<- *Packet
+	// egressControlQ is the egress queue of the control class, which the
+	// sender takes from first.
+	egressControlQ chan<- *Packet
+	metrics        *InterfaceMetrics
+	pool           PacketPool
+	bfdSession     Session
+	// bfdReader decodes the BFD arrivals the receive loop hands the session
+	// itself.
+	bfdReader *bfdReader
 	// raw is the link's own socket: the writer a BFD session sends its
-	// prebuilt control packets through, beneath the egress queue.
+	// prebuilt control packets through, beneath the egress queues.
 	raw underlay.UDPConn
 	// locator is the entry's current remote address: the destination transit
 	// carries, replaced in place by a re-aim.
@@ -661,12 +691,14 @@ type externalLink struct {
 func (l *externalLink) start(
 	ctx context.Context,
 	procQs []chan *Packet,
+	controlQ chan *Packet,
 	pool PacketPool,
 ) {
-	// procQs and pool are never known before all configured links have been
-	// instantiated. So we get them only now. We didn't need them earlier since
-	// the connections have not been started yet.
+	// The queues and pool are never known before all configured links have
+	// been instantiated. So we get them only now. We didn't need them earlier
+	// since the connections have not been started yet.
 	l.procQs = procQs
+	l.controlQ = controlQ
 	l.pool = pool
 }
 
@@ -718,7 +750,7 @@ func (l *externalLink) answerAddr() *net.UDPAddr {
 }
 
 // WriteRaw sends a prebuilt packet on the link's own socket, beneath the
-// forwarding queue — the BFD session's send path, which must keep
+// forwarding queues — the BFD session's send path, which must keep
 // transmitting while the link is down — aimed at the link's answer address,
 // for the prebuilt control packet carries no destination of its own: the
 // keepalive answers the peer's stream where its own packets came from.
@@ -732,17 +764,16 @@ func (l *externalLink) Resolve(p *Packet, host addr.Host, port uint16) error {
 	return errResolveOnExternalLink
 }
 
+// Send queues the packet on the egress queue of its class, discarding it if
+// that queue is full.
 func (l *externalLink) Send(p *Packet) bool {
-	select {
-	case l.egressQ <- p:
-	default:
-		return false
-	}
-	return true
+	return enqueue(egressQueue(p, l.egressQ, l.egressControlQ), p)
 }
 
+// SendBlocking queues the packet on the egress queue of its class, blocking
+// while that queue is full.
 func (l *externalLink) SendBlocking(p *Packet) {
-	l.egressQ <- p
+	egressQueue(p, l.egressQ, l.egressControlQ) <- p
 }
 
 func (l *externalLink) receive(size int, srcAddr *net.UDPAddr, p *Packet) {
@@ -763,29 +794,50 @@ func (l *externalLink) receive(size int, srcAddr *net.UDPAddr, p *Packet) {
 
 	p.Link = l
 
+	switch classOf(p.RawPacket, false) {
+	case classLink:
+		l.receiveBFD(sc, p)
+		return
+	case classControl:
+		p.control = true
+		queueArrival(l.controlQ, p, l.pool, metrics, sc)
+		return
+	}
 	procID, ok := computeProcID(p.RawPacket, len(l.procQs), l.seed)
 	if !ok {
 		l.pool.Put(p)
 		metrics[sc].DroppedPacketsInvalid.Add(context.Background(), 1)
 		return
 	}
-	select {
-	case l.procQs[procID] <- p:
-	default:
-		l.pool.Put(p)
-		metrics[sc].DroppedPacketsBusyProcessor.Add(context.Background(), 1)
+	queueArrival(l.procQs[procID], p, l.pool, metrics, sc)
+}
+
+// receiveBFD hands a BFD arrival to the link's session from the receive
+// loop, ahead of every queue, counting it processed as a processor would,
+// and returns its buffer to the pool.
+func (l *externalLink) receiveBFD(sc sizeClass, p *Packet) {
+	ctx := context.Background()
+	l.metrics[sc].ProcessedPackets.Add(ctx, 1)
+	if !l.bfdReader.read(p.RawPacket, l.bfdSession) {
+		l.metrics[sc].DroppedPacketsInvalid.Add(ctx, 1)
 	}
+	l.pool.Put(p)
 }
 
 // An internalLink addresses any host internal to the enclosing AS. Incoming
 // packets are dispatched to the processors if recognizable as SCION traffic;
 // all other traffic (e.g. STUN) is dropped.
 type internalLink struct {
-	procQ    chan *Packet
-	procQs   []chan *Packet
+	procQ  chan *Packet
+	procQs []chan *Packet
+	// controlQ is the processor queue of the link's control arrivals.
+	controlQ chan *Packet
 	egressQ  chan *Packet
-	procStop chan struct{}
-	procDone chan struct{}
+	// egressControlQ is the egress queue of the control class, which the
+	// sender takes from first.
+	egressControlQ chan *Packet
+	procStop       chan struct{}
+	procDone       chan struct{}
 	// lifeMtx guards the lifecycle fields below against a stop racing with
 	// a late start.
 	lifeMtx sync.Mutex
@@ -799,6 +851,7 @@ type internalLink struct {
 func (l *internalLink) start(
 	ctx context.Context,
 	procQs []chan *Packet,
+	controlQ chan *Packet,
 	pool PacketPool,
 ) {
 	maxCap := 0
@@ -815,10 +868,11 @@ func (l *internalLink) start(
 	l.procStop = make(chan struct{})
 	l.procDone = make(chan struct{})
 
-	// procQs and pool are never known before all configured links have been
-	// instantiated. So we get them only now. We didn't need them earlier since
-	// the connections have not been started yet.
+	// The queues and pool are never known before all configured links have
+	// been instantiated. So we get them only now. We didn't need them earlier
+	// since the connections have not been started yet.
 	l.procQs = procQs
+	l.controlQ = controlQ
 	l.pool = pool
 
 	go func() {
@@ -935,19 +989,18 @@ func (l *internalLink) egressAddr(p *Packet) *net.UDPAddr {
 	return (*net.UDPAddr)(p.RemoteAddr)
 }
 
-// The packet's destination is already in the packet's meta-data.
+// Send queues the packet on the egress queue of its class, discarding it if
+// that queue is full. The packet's destination is already in the packet's
+// meta-data.
 func (l *internalLink) Send(p *Packet) bool {
-	select {
-	case l.egressQ <- p:
-	default:
-		return false
-	}
-	return true
+	return enqueue(egressQueue(p, l.egressQ, l.egressControlQ), p)
 }
 
-// The packet's destination is already in the packet's meta-data.
+// SendBlocking queues the packet on the egress queue of its class, blocking
+// while that queue is full. The packet's destination is already in the
+// packet's meta-data.
 func (l *internalLink) SendBlocking(p *Packet) {
-	l.egressQ <- p
+	egressQueue(p, l.egressQ, l.egressControlQ) <- p
 }
 
 func (l *internalLink) receive(size int, srcAddr *net.UDPAddr, p *Packet) {
@@ -959,6 +1012,14 @@ func (l *internalLink) receive(size int, srcAddr *net.UDPAddr, p *Packet) {
 	// packet is turned around, e.g., by SCMP.
 	p.RemoteAddr = unsafe.Pointer(srcAddr)
 
+	// The node's own sockets are the internal link's only senders, so the
+	// control DSCP they mark counts here. No BFD session runs on the link:
+	// a BFD arrival is data, which the processor discards.
+	if classOf(p.RawPacket, true) == classControl {
+		p.control = true
+		queueArrival(l.controlQ, p, l.pool, metrics, sc)
+		return
+	}
 	var q chan *Packet
 	procID, ok := computeProcID(p.RawPacket, len(l.procQs), l.seed)
 	if ok {
@@ -966,12 +1027,7 @@ func (l *internalLink) receive(size int, srcAddr *net.UDPAddr, p *Packet) {
 	} else {
 		q = l.procQ
 	}
-	select {
-	case q <- p:
-	default:
-		l.pool.Put(p)
-		metrics[sc].DroppedPacketsBusyProcessor.Add(context.Background(), 1)
-	}
+	queueArrival(q, p, l.pool, metrics, sc)
 }
 
 // makeHashSeed creates a new random number to serve as hash seed. Each receive

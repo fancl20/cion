@@ -139,3 +139,21 @@ alone, so nothing changes in what a node forwards, answers, or admits.
     through the control processor unchanged.
 *   **Cost.** `BenchmarkForwardPipeline` and `BenchmarkProcessPkt` stay
     within noise of the baseline.
+
+## Implementation history
+
+*   Landed as proposed: the classes and the BFD reader
+    ([class.go](/pkg/core/dataplane/class.go)), the links' queues and the
+    sender's order ([udpip.go](/pkg/core/dataplane/udpip.go)), the control
+    processor, the slow path's class, and the pool
+    ([dataplane.go](/pkg/core/dataplane/dataplane.go)), the conn's mark
+    ([conn.go](/pkg/libs/scion/conn.go)), and the node's control conns
+    (`controlConn`, [controlplane.go](/internal/services/controlplane.go)).
+    The class the plan calls BFD is the link class in the code: the link's
+    own exchange, which only BFD is today. The classifier reads the next
+    header alone, so the paths BFD rides are checked where the receive loop
+    decodes it: a one-hop or an empty path's message reaches the session,
+    and a SCION path's does not. Interleaved runs of
+    `BenchmarkForwardPipeline`, twelve a case, put the change at 0.0% by
+    geometric mean, and `BenchmarkProcessPkt`, whose code it leaves alone,
+    stayed within noise.

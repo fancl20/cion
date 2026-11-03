@@ -1,8 +1,8 @@
 // Package underlay holds the facts of the UDP/IP network beneath SCION that the
 // data plane shares with the node's sockets: the end-host port, the largest
-// datagram, the underlay types, the resolution of underlay addresses, and the
-// socket source the node's sites bind through — the kernel's the default. A
-// shared library: no loops of its own, no policy.
+// datagram, the control DSCP, the underlay types, the resolution of underlay
+// addresses, and the socket source the node's sites bind through — the
+// kernel's the default. A shared library: no loops of its own, no policy.
 package underlay
 
 import (
@@ -15,6 +15,12 @@ import (
 // BufferSize is the largest datagram the underlay carries, a jumbo frame: the
 // data plane's packet buffers and the SCION sockets' reads are this size.
 const BufferSize = 9000
+
+// ControlDSCP is the DSCP that marks the node's own control-plane traffic in
+// the SCION header's traffic class: CS6, network control. The node's data
+// plane serves what the node's own sockets send with it before data; it reads
+// the mark on no other link.
+const ControlDSCP = 48
 
 // routeProbePort is the port RouteSource's socket connects to: routes name
 // hosts alone, so any port asks the same question.

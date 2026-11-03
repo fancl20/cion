@@ -121,9 +121,10 @@ type UnderlayProvider interface {
 	NewInternalLink(localAddr string, qSize int, metrics *InterfaceMetrics) (Link, error)
 
 	// Start puts the provider in the running state. In that state, the provider delivers
-	// incoming packets to the given processor queues and sends the packets queued on its
+	// incoming packets to the given processor queues — a data arrival to the queue its flow
+	// hashes to, a control arrival to the control queue — and sends the packets queued on its
 	// links. Only connections in existence at the time of calling Start are started.
-	Start(ctx context.Context, pool PacketPool, procQs []chan *Packet)
+	Start(ctx context.Context, pool PacketPool, procQs []chan *Packet, controlQ chan *Packet)
 
 	// Stop puts the provider in the stopped state. In that state, the provider no longer
 	// delivers incoming packets and ignores packets present on its input channels.

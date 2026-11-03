@@ -202,7 +202,7 @@ func (n *node) selectProvider() error {
 		Neighbors:   n.cfg.Neighbors,
 		ControlHost: n.cfg.controlAddr.Addr(),
 		NewConn: func() (*scion.Conn, error) {
-			return n.scionConn(0)
+			return n.controlConn(0)
 		},
 		Sockets: n.sockets,
 		Pacing: measured.Pacing{

@@ -19,7 +19,7 @@ import (
 // application into the core. SCMP echo's read and write stay in
 // pkg/libs/scion, the vocabulary the pinger and the responder share.
 func (n *node) assembleResponder() error {
-	conn, err := n.scionConn(underlay.EndhostPort)
+	conn, err := n.controlConn(underlay.EndhostPort)
 	if err != nil {
 		return fmt.Errorf("binding the echo responder (the control address's host must not share the internal link's port): %w", err)
 	}

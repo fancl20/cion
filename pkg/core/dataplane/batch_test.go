@@ -191,7 +191,7 @@ func TestProcessorQueueFullDrops(t *testing.T) {
 	pool := newTestPool(64, minHeadroom)
 	q := make(chan *Packet, 1)
 	el := n.if1.(*externalLink)
-	el.start(context.Background(), []chan *Packet{q}, pool)
+	el.start(context.Background(), []chan *Packet{q}, make(chan *Packet, 1), pool)
 
 	tmpl := serializeUDP(t, benchSrcAS, benchDstAS,
 		transitPath(t, n.key, util.TimeToSecs(time.Now())), benchFlow, benchPad)

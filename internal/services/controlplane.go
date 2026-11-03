@@ -328,12 +328,12 @@ func (n *node) coreClient() (*webpki.CoreClient, error) {
 	// exchange takes its own beside it: the exchange reads its conn for
 	// each reply's wait, and a conn the client's QUIC transport reads
 	// would share its packets with that loop.
-	conn, err := n.scionConn(0)
+	conn, err := n.controlConn(0)
 	if err != nil {
 		return nil, err
 	}
 	n.group.Own("core client conn", conn.Close)
-	resolutionConn, err := n.scionConn(0)
+	resolutionConn, err := n.controlConn(0)
 	if err != nil {
 		return nil, err
 	}
@@ -421,7 +421,7 @@ func (n *node) buildMessenger() error {
 	provider := &trust.NetworkProvider{DB: n.trustDB, Remote: n.remote}
 	n.engine = trust.NewEngine(n.ident.ia, n.asKey, provider, n.members)
 
-	peerConn, err := n.scionConn(0)
+	peerConn, err := n.controlConn(0)
 	if err != nil {
 		return err
 	}
@@ -559,7 +559,7 @@ func (n *node) assembleMonitor() error {
 // additionally serves the bootstrap channel, under the WebPKI identity its
 // role prepared, for clients offering its domain as the TLS server name.
 func (n *node) assembleEndpoint() error {
-	endpointConn, err := n.scionConn(scionrpc.EndpointPort)
+	endpointConn, err := n.controlConn(scionrpc.EndpointPort)
 	if err != nil {
 		return err
 	}
@@ -608,7 +608,23 @@ func (n *node) assembleEndpoint() error {
 // packets' source and its service-resolution answers' host: an address the
 // node's own router delivers to.
 func (n *node) scionConn(port uint16) (*scion.Conn, error) {
-	return scion.NewConn(scion.ConnConfig{
+	return scion.NewConn(n.connConfig(port))
+}
+
+// controlConn returns a SCION connection as scionConn does whose packets carry
+// the control DSCP, which the node's data plane serves before data: the conns
+// of the control plane, the bootstrap client, the echo responder, and the
+// topology source.
+func (n *node) controlConn(port uint16) (*scion.Conn, error) {
+	cfg := n.connConfig(port)
+	cfg.Control = true
+	return scion.NewConn(cfg)
+}
+
+// connConfig returns the configuration of the node's SCION conns, bound to the
+// control address's host with the given port.
+func (n *node) connConfig(port uint16) scion.ConnConfig {
+	return scion.ConnConfig{
 		IA:            n.ident.ia,
 		Bind:          netip.AddrPortFrom(n.cfg.controlAddr.Addr(), port).String(),
 		InternalAddr:  n.cfg.internalAddr.String(),
@@ -617,7 +633,7 @@ func (n *node) scionConn(port uint16) (*scion.Conn, error) {
 		InterfaceDown: n.bus.InterfaceDown(),
 		WildcardHost:  n.wildcardHost.resolve,
 		Sockets:       n.sockets,
-	})
+	}
 }
 
 // founderRoute returns the route to the founding core — the core this node

@@ -2,11 +2,14 @@ package scion
 
 import (
 	"context"
+	"net"
 	"net/netip"
 	"testing"
 	"time"
 
+	"github.com/gopacket/gopacket"
 	"github.com/scionproto/scion/pkg/addr"
+	"github.com/scionproto/scion/pkg/slayers"
 
 	"github.com/fancl20/cion/pkg/core/dataplane/dataplanetest"
 )
@@ -368,5 +371,68 @@ func TestAddrString(t *testing.T) {
 	service := &Addr{IA: ia, Service: addr.SVC(0x7ff1)}
 	if want := ia.String() + ",svc:7ff1"; service.String() != want {
 		t.Errorf("service string = %q, want %q", service.String(), want)
+	}
+}
+
+// TestControlConnMarksItsPackets checks the traffic class a conn's packets
+// carry to the router: CS6, network control, from a control conn, its
+// datagrams and echo requests alike, and nothing from another conn.
+func TestControlConnMarksItsPackets(t *testing.T) {
+	const cs6 = 48 << 2 // the DSCP above the two ECN bits
+	router, err := net.ListenUDP("udp4", net.UDPAddrFromAddrPort(netip.AddrPortFrom(testHost, 0)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = router.Close() }()
+	peer := &Addr{
+		IA:   addr.MustIAFrom(20, 0xff0000000042),
+		Addr: netip.AddrPortFrom(testHost, 40000),
+		IfID: testIfID,
+	}
+	tests := []struct {
+		name    string
+		control bool
+		want    uint8
+	}{
+		{"control conn", true, cs6},
+		{"other conn", false, 0},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			conn, err := NewConn(ConnConfig{
+				IA:           addr.MustIAFrom(20, 0xff0000000041),
+				Bind:         netip.AddrPortFrom(testHost, 0).String(),
+				InternalAddr: router.LocalAddr().String(),
+				MACKey:       testMACKeyBytes,
+				Control:      tc.control,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = conn.Close() }()
+			if _, err := conn.WriteTo([]byte("datagram"), peer); err != nil {
+				t.Fatal(err)
+			}
+			if err := conn.WriteEchoRequestTo(peer, 1, nil); err != nil {
+				t.Fatal(err)
+			}
+			for _, what := range []string{"datagram", "echo request"} {
+				if err := router.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+					t.Fatal(err)
+				}
+				buf := make([]byte, 2048)
+				n, _, err := router.ReadFromUDP(buf)
+				if err != nil {
+					t.Fatalf("reading the %s: %v", what, err)
+				}
+				var scn slayers.SCION
+				if err := scn.DecodeFromBytes(buf[:n], gopacket.NilDecodeFeedback); err != nil {
+					t.Fatalf("decoding the %s: %v", what, err)
+				}
+				if scn.TrafficClass != tc.want {
+					t.Errorf("the %s's traffic class = %#x, want %#x", what, scn.TrafficClass, tc.want)
+				}
+			}
+		})
 	}
 }

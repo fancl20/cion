@@ -59,10 +59,11 @@ The core is what the rest of the network depends on, whatever the node's own
 policy chooses.
 
 *   **Data plane** — forwards SCION packets over the underlay by the path
-    each packet carries. It is built with an immutable link set and serves
-    until retired. While it serves, a link's verdict, its locator, and the
-    source it observes its peer at change in place; the next generation
-    keeps that source for each established link that keeps its addresses.
+    each carries, control traffic first
+    ([ADR-0035](/docs/adrs/0035-choose-paths-by-measured-health.md)). Each
+    generation serves a fixed link set until retired; a link's verdict,
+    locator, and observed source change in place, and a link that keeps its
+    addresses keeps its observed source in the next generation.
 *   **Control endpoint** — speaks the control services to neighbor nodes
     over the SCION-native channel: beaconing, segment registration and
     lookup, trust material, and service resolution.

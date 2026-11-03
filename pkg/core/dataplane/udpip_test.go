@@ -99,7 +99,7 @@ func TestExternalLinkSendReceive(t *testing.T) {
 	ctx := context.Background()
 	pool := newTestPool(256, 512)
 	procQs := []chan *Packet{make(chan *Packet, 4), make(chan *Packet, 4)}
-	provider.Start(ctx, pool, procQs)
+	provider.Start(ctx, pool, procQs, make(chan *Packet, 4))
 	defer provider.Stop()
 
 	// Send: a packet queued on the link must arrive at the remote address.
@@ -157,7 +157,7 @@ func TestInternalLinkSendReceive(t *testing.T) {
 	ctx := context.Background()
 	pool := newTestPool(256, 512)
 	procQs := []chan *Packet{make(chan *Packet, 4), make(chan *Packet, 4)}
-	provider.Start(ctx, pool, procQs)
+	provider.Start(ctx, pool, procQs, make(chan *Packet, 4))
 	defer provider.Stop()
 
 	// Receive: a SCION-like datagram from a local host must be dispatched to
@@ -310,7 +310,7 @@ func TestExternalLinkReaimAndObserved(t *testing.T) {
 	ctx := context.Background()
 	pool := newTestPool(256, 512)
 	procQs := []chan *Packet{make(chan *Packet, 4)}
-	provider.Start(ctx, pool, procQs)
+	provider.Start(ctx, pool, procQs, make(chan *Packet, 4))
 	defer provider.Stop()
 
 	// An arrival from a source the entry does not name: dispatched — the
@@ -444,7 +444,7 @@ func TestExternalLinkContinuesItsObservation(t *testing.T) {
 		t.Fatal(err)
 	}
 	local := link.(*externalLink).raw.LocalAddr()
-	first.Start(ctx, pool, procQs)
+	first.Start(ctx, pool, procQs, make(chan *Packet, 4))
 	if _, err := moved.WriteToUDP(in, local); err != nil {
 		t.Fatal(err)
 	}
@@ -463,7 +463,7 @@ func TestExternalLinkContinuesItsObservation(t *testing.T) {
 		t.Fatal(err)
 	}
 	el := link.(*externalLink)
-	second.Start(ctx, pool, procQs)
+	second.Start(ctx, pool, procQs, make(chan *Packet, 4))
 	defer second.Stop()
 
 	// Before any arrival of its own, the link answers at the observation.

@@ -158,10 +158,10 @@ func (d *DataPlane) Serve(ctx context.Context) error {
 		d.RunConfig.BatchSize,
 	)
 	d.initPacketPool(processorQueueSize)
-	procQs, slowQs := d.initQueues(processorQueueSize)
+	procQs, slowQs, controlQ := d.initQueues(processorQueueSize)
 	d.setRunning()
 	for _, u := range d.underlays {
-		u.Start(ctx, d.packetPool, procQs)
+		u.Start(ctx, d.packetPool, procQs, controlQ)
 	}
 	// A slot's panic is unrecovered: the invariant breach crashes the process,
 	// the runtime's report names the cause, and the operator's process supervisor
@@ -174,6 +174,11 @@ func (d *DataPlane) Serve(ctx context.Context) error {
 			d.runProcessor(ctx, i, procQs[i], slowQs[i%d.RunConfig.NumSlowPathProcessors])
 		}(i)
 	}
+	// The control class's processor serves the control queue alone, beside
+	// the data processors, so no data backlog delays it.
+	d.processors.Go(func() {
+		d.runProcessor(ctx, d.RunConfig.NumProcessors, controlQ, slowQs[0])
+	})
 	for i := 0; i < d.RunConfig.NumSlowPathProcessors; i++ {
 		d.processors.Add(1)
 		go func(i int) {
@@ -224,12 +229,14 @@ func handlePanic() {
 }
 
 // initializePacketPool calculates the size of the packet pool based on the
-// current dataplane settings and allocates all the buffers
+// current dataplane settings and allocates all the buffers: a receive batch
+// per link, the processor queues (data, control, and slow path), and per link
+// the two egress queues and the sender's batch.
 func (d *DataPlane) initPacketPool(processorQueueSize int) {
 	// collect pool size and headroom reqs
 	poolSize := d.numInterfaces*d.RunConfig.BatchSize +
-		(d.RunConfig.NumProcessors+d.RunConfig.NumSlowPathProcessors)*(processorQueueSize+1) +
-		d.numInterfaces*2*d.RunConfig.BatchSize
+		(d.RunConfig.NumProcessors+1+d.RunConfig.NumSlowPathProcessors)*(processorQueueSize+1) +
+		d.numInterfaces*3*d.RunConfig.BatchSize
 	headroom := 0
 	for _, u := range d.underlays {
 		h := u.Headroom()
@@ -253,17 +260,20 @@ func (d *DataPlane) initPacketPool(processorQueueSize int) {
 	}
 }
 
-// initializes the processing routines and queues
-func (d *DataPlane) initQueues(processorQueueSize int) ([]chan *Packet, []chan *Packet) {
-	procQs := make([]chan *Packet, d.RunConfig.NumProcessors)
+// initializes the processing routines and queues: the data processors', the
+// slow path's, and the control class's one.
+func (d *DataPlane) initQueues(processorQueueSize int) (
+	procQs []chan *Packet, slowQs []chan *Packet, controlQ chan *Packet,
+) {
+	procQs = make([]chan *Packet, d.RunConfig.NumProcessors)
 	for i := 0; i < d.RunConfig.NumProcessors; i++ {
 		procQs[i] = make(chan *Packet, processorQueueSize)
 	}
-	slowQs := make([]chan *Packet, d.RunConfig.NumSlowPathProcessors)
+	slowQs = make([]chan *Packet, d.RunConfig.NumSlowPathProcessors)
 	for i := 0; i < d.RunConfig.NumSlowPathProcessors; i++ {
 		slowQs[i] = make(chan *Packet, processorQueueSize)
 	}
-	return procQs, slowQs
+	return procQs, slowQs, make(chan *Packet, processorQueueSize)
 }
 
 func (d *DataPlane) runProcessor(ctx context.Context, id int, q <-chan *Packet, slowQ chan<- *Packet) {
@@ -368,7 +378,8 @@ func (d *DataPlane) runSlowPathProcessor(ctx context.Context, id int, q <-chan *
 			continue
 		}
 		// All slowpath packets are responses to the sender. Therefore, the egress link is always
-		// the ingress link.
+		// the ingress link. Each is SCMP, so it leaves in the control class.
+		p.control = true
 		if !p.Link.Send(p) {
 			d.packetPool.Put(p)
 		}

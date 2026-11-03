@@ -82,10 +82,14 @@ type Packet struct {
 	// The egress on which this packet must leave. This is set by the processing routine.
 	egress uint16
 	// The type of traffic. This is used for metrics at the forwarding stage, but is most
-	// economically determined at the processing stage. So store it here. It's 2 bytes long.
+	// economically determined at the processing stage. So store it here. It's 1 byte long.
 	trafficType trafficType
-	// Pad to 64 bytes. For 64bit arch, add 1 byte. For 32bit arch, add 29 bytes.
-	_ [1 + is32bit*28]byte
+	// Pad to 64 bytes: nothing on a 64bit arch, 28 bytes on a 32bit one. The padding is not the
+	// last field, for a trailing zero-size field takes room of its own.
+	_ [is32bit * 28]byte
+	// control marks the control class: the packet leaves on its egress link's control queue.
+	// The ingest classification sets it, and the slow path for every answer it sends.
+	control bool
 }
 
 // Make sure that the packet structure has the size we expect.

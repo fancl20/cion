@@ -100,6 +100,8 @@ type Conn struct {
 	// wildcard bind; nil names nothing, and no packet leaves the bind until a
 	// host lands.
 	wildcardHost func(ctx context.Context) netip.Addr
+	// control marks every packet the conn sends with the control DSCP.
+	control bool
 
 	conn underlay.UDPConn
 
@@ -134,6 +136,10 @@ type ConnConfig struct {
 	// service-resolution replies' answer alike. Nil names nothing under the
 	// wildcard, and no packet leaves one until a host lands.
 	WildcardHost func(ctx context.Context) netip.Addr
+	// Control marks every packet the conn sends with the control DSCP in the
+	// traffic class, which the node's own data plane serves before data: set
+	// for the node's control-plane conns, unset for the applications'.
+	Control bool
 	// Sockets is the socket source the underlay bind constructs through;
 	// the zero value is the kernel's.
 	Sockets underlay.Sockets
@@ -175,6 +181,7 @@ func NewConn(cfg ConnConfig) (*Conn, error) {
 		links:        cfg.Links,
 		ifDown:       cfg.InterfaceDown,
 		wildcardHost: cfg.WildcardHost,
+		control:      cfg.Control,
 		conn:         conn,
 	}, nil
 }
@@ -365,8 +372,9 @@ func (c *Conn) resolveLink(neighborIA addr.IA) (uint16, error) {
 
 // scionHeader returns the SCION layer addressing the peer, over the peer's
 // supplied path or over a fresh one-hop path on the given interface, naming
-// srcHost as the source. It must be called with the mutex held: the one-hop
-// hop-field MAC uses the shared hasher.
+// srcHost as the source, the control DSCP in its traffic class on a control
+// conn. It must be called with the mutex held: the one-hop hop-field MAC uses
+// the shared hasher.
 func (c *Conn) scionHeader(
 	peer *Addr, ifID uint16, nextHdr slayers.L4ProtocolType, srcHost netip.Addr,
 ) (*slayers.SCION, error) {
@@ -374,6 +382,10 @@ func (c *Conn) scionHeader(
 		NextHdr: nextHdr,
 		SrcIA:   c.localIA,
 		DstIA:   peer.IA,
+	}
+	if c.control {
+		// The traffic class carries the DSCP above the two ECN bits.
+		scn.TrafficClass = underlay.ControlDSCP << 2
 	}
 	if peer.Path != nil {
 		scn.PathType = spath.PathType
