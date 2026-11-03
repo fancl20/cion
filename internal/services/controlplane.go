@@ -505,6 +505,8 @@ func (n *node) buildBeaconing() error {
 		Cores:         cores,
 		InterfaceDown: n.bus.InterfaceDown(),
 		Links:         n.bus.Links(),
+		Measurements:  n.bus.PathMeasurements(),
+		Requests:      n.bus.PathRequests(),
 	}
 	return nil
 }

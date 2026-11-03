@@ -731,7 +731,8 @@ func TestEnumerateFacts(t *testing.T) {
 
 // TestEnumerateTruncatedFacts checks truncation against the facts: entries
 // above the meeting on the up side and beyond it on the down side cross
-// nothing the candidate travels, and Fresh still reads the staler piece.
+// nothing the candidate travels, the meeting's core-ward interfaces no
+// packet, and Fresh still reads the staler piece.
 func TestEnumerateTruncatedFacts(t *testing.T) {
 	up := signedLine(t, time.Now(),
 		linkHop{ia: iaCore, eg: 11},
@@ -783,6 +784,17 @@ func TestEnumerateTruncatedFacts(t *testing.T) {
 	}
 	if !slices.Equal(c.Links, want) {
 		t.Errorf("candidate links = %v, want %v", c.Links, want)
+	}
+	// The pairs its packets cross, in travel order, leave out the meeting's
+	// core-ward interface on each side.
+	crossed := []segment.LinkID{
+		{IA: iaLeaf, IfID: 14},
+		{IA: iaMid, IfID: 13},
+		{IA: iaMid, IfID: 23},
+		{IA: iaDest, IfID: 24},
+	}
+	if !slices.Equal(c.Crossed, crossed) {
+		t.Errorf("candidate crossed pairs = %v, want %v", c.Crossed, crossed)
 	}
 	if !c.Fresh.Equal(down.Timestamp()) {
 		t.Errorf("candidate freshness = %v, want the staler down piece's %v",
@@ -1253,10 +1265,9 @@ func TestProviderEntriesTiebreak(t *testing.T) {
 		downShort.Entries[0], downShort.Entries[1])
 }
 
-// TestProviderLastResortFirstCrossing checks the last resort's own rule:
-// with nothing clean, the first crossing candidate in emission order
-// serves, not the best-ranked crossing one.
-func TestProviderLastResortFirstCrossing(t *testing.T) {
+// TestProviderLastResortRanks checks the last resort: with every candidate
+// crossing a held signal, the best-ranked one serves.
+func TestProviderLastResortRanks(t *testing.T) {
 	up := linePCB(t, time.Now(), iaCore, iaLeaf)
 	downLong := linePCB(t, time.Now(), iaCore, iaMid, iaDest)
 	downShort := linePCB(t, time.Now(), iaCore, iaDest)
@@ -1279,20 +1290,19 @@ func TestProviderLastResortFirstCrossing(t *testing.T) {
 		},
 	}
 	// Every join leaves through the signaled core interface, so every
-	// candidate crosses; the shorter join would win a rank the last resort
-	// never holds.
+	// candidate crosses, and the shorter join, emitted second, ranks first.
 	signal(p.InterfaceDown, iaCore, testIfID)
 
 	path, err := p.Path(context.Background(), iaDest)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(path.HopFields) != 5 {
-		t.Fatalf("last-resort path = %d hops, want the emitted-first join's 5",
+	if len(path.HopFields) != 4 {
+		t.Fatalf("last-resort path = %d hops, want the shorter join's 4",
 			len(path.HopFields))
 	}
 	checkHops(t, path, up.Entries[1], up.Entries[0],
-		downLong.Entries[0], downLong.Entries[1], downLong.Entries[2])
+		downShort.Entries[0], downShort.Entries[1])
 }
 
 // TestProviderChoose checks the choice Path makes as Choose returns it: on
@@ -1348,7 +1358,7 @@ func TestProviderChoose(t *testing.T) {
 		{"bootstrap route", bootstrapped, iaCore, nil},
 		{"meeting", provider(iaLeaf, []*segment.PCB{up}, []*segment.PCB{down}), iaDest, []*segment.PCB{up, down}},
 		{"down-only meeting", provider(iaMid, nil, []*segment.PCB{down}), iaDest, []*segment.PCB{down}},
-		{"crossing last resort", crossing, iaDest, []*segment.PCB{upShort, down}},
+		{"crossing last resort", crossing, iaDest, []*segment.PCB{upShort, downShort}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			c, err := tc.p.Choose(context.Background(), tc.dst)

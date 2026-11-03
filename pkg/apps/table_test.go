@@ -27,7 +27,7 @@ func TestSelectInfers(t *testing.T) {
 		t.Fatal(err)
 	}
 	if got, want := strings.Join(namesOf(core), ","),
-		"wireguard,coordination,egress,mihomo,voting"; got != want {
+		"wireguard,coordination,egress,mihomo,voting,ping"; got != want {
 		t.Errorf("the serving core's inference = %s, want %s", got, want)
 	}
 
@@ -36,7 +36,7 @@ func TestSelectInfers(t *testing.T) {
 		t.Fatal(err)
 	}
 	if got, want := strings.Join(namesOf(leaf), ","),
-		"wireguard,egress,mihomo"; got != want {
+		"wireguard,egress,mihomo,ping"; got != want {
 		t.Errorf("the serving leaf's inference = %s, want %s", got, want)
 	}
 
@@ -47,7 +47,7 @@ func TestSelectInfers(t *testing.T) {
 	// The refused host port refuses every application that needs it; the
 	// voting application needs none, so the core still infers it — the
 	// network onboards cores whatever it serves hosts.
-	if got, want := strings.Join(namesOf(refused), ","), "voting"; got != want {
+	if got, want := strings.Join(namesOf(refused), ","), "voting,ping"; got != want {
 		t.Errorf("the refused port's inference = %s, want %s alone", got, want)
 	}
 
@@ -57,9 +57,9 @@ func TestSelectInfers(t *testing.T) {
 		admission string
 		want      string
 	}{
-		{"the portal method", serving, "portal", "wireguard,coordination,egress,mihomo,voting,portal"},
-		{"the portal method serving no hosts", Arguments{}, "portal", "voting,portal"},
-		{"another method", serving, "cidrs", "wireguard,coordination,egress,mihomo,voting"},
+		{"the portal method", serving, "portal", "wireguard,coordination,egress,mihomo,voting,portal,ping"},
+		{"the portal method serving no hosts", Arguments{}, "portal", "voting,portal,ping"},
+		{"another method", serving, "cidrs", "wireguard,coordination,egress,mihomo,voting,ping"},
 	} {
 		selected, err := Select(nil, true, tc.args, tc.admission)
 		if err != nil {

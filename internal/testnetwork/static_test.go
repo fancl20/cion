@@ -131,6 +131,27 @@ type staticTopology struct {
 	mutate func(*services.NodeConfig)
 }
 
+// entries returns each node's link-set entries, each link's addresses drawn
+// by at from its two nodes, and each pinned interface named in the entry of
+// the node whose pin it is.
+func (topo staticTopology) entries(at func(addr.IA) string) map[addr.IA][]staticLink {
+	entry := func(local, neighbor addr.IA, atLocal, atNeighbor string) staticLink {
+		e := staticLink{IA: neighbor.String(), Local: atLocal, Remote: atNeighbor}
+		if ifID, ok := topo.pins[[2]addr.IA{local, neighbor}]; ok {
+			e.Interface = &ifID
+		}
+		return e
+	}
+	entries := make(map[addr.IA][]staticLink, len(topo.nodes))
+	for _, l := range topo.links {
+		x, y := l[0], l[1]
+		atX, atY := at(x), at(y)
+		entries[x] = append(entries[x], entry(x, y, atX, atY))
+		entries[y] = append(entries[y], entry(y, x, atY, atX))
+	}
+	return entries
+}
+
 // bootTopology boots a static topology through the node's own assembly.
 // Each node's ISD-AS is written to its state before any boot, so every
 // node's link set names its neighbors up front, each link's addresses drawn
@@ -144,20 +165,7 @@ func bootTopology(t *testing.T, wpki *webpkitest.CA, topo staticTopology) map[ad
 		states[ia] = t.TempDir()
 		persistIAFile(t, states[ia], ia)
 	}
-	entry := func(local, neighbor addr.IA, atLocal, atNeighbor string) staticLink {
-		e := staticLink{IA: neighbor.String(), Local: atLocal, Remote: atNeighbor}
-		if ifID, ok := topo.pins[[2]addr.IA{local, neighbor}]; ok {
-			e.Interface = &ifID
-		}
-		return e
-	}
-	entries := make(map[addr.IA][]staticLink, len(topo.nodes))
-	for _, l := range topo.links {
-		x, y := l[0], l[1]
-		atX, atY := PinnedUDPAddrOn(t, hosts[x]), PinnedUDPAddrOn(t, hosts[y])
-		entries[x] = append(entries[x], entry(x, y, atX, atY))
-		entries[y] = append(entries[y], entry(y, x, atY, atX))
-	}
+	entries := topo.entries(func(ia addr.IA) string { return PinnedUDPAddrOn(t, hosts[ia]) })
 	sets := make(map[addr.IA]string, len(topo.nodes))
 	for _, ia := range topo.nodes {
 		sets[ia] = linkSetPath(t)

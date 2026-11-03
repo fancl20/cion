@@ -63,6 +63,16 @@ func (s InterfaceDownState) Holds(link segment.LinkID, now time.Time) bool {
 	return ok && now.Before(lapse)
 }
 
+// Lapse returns when the signal the state holds on the link lapses, false
+// when no signal holds it at now.
+func (s InterfaceDownState) Lapse(link segment.LinkID, now time.Time) (time.Time, bool) {
+	lapse, ok := s.held[link]
+	if !ok || !now.Before(lapse) {
+		return time.Time{}, false
+	}
+	return lapse, true
+}
+
 // Seq counts the signals the state has taken, each state's count above its
 // predecessor's.
 func (s InterfaceDownState) Seq() uint64 {

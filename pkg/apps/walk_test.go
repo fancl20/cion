@@ -15,15 +15,10 @@ import (
 const (
 	moduleRoot = walktest.Module
 	roofPath   = moduleRoot + "/pkg/apps"
-	// nonresident is the one child of the roof that is no resident: the
-	// ping application, the ping command's own client — the application a
-	// process runs beside a node, not an application a node runs.
-	nonresident = "ping"
 )
 
-// TestWalk asserts the roof's shape: every child of the roof is a
-// resident with an entry in the table, or the ping application, the
-// command's own client; every entry has its package beneath the roof.
+// TestWalk asserts the roof's shape: every child of the roof is a resident
+// with an entry in the table; every entry has its package beneath the roof.
 // The walk reads the tree at run time, so a change elsewhere in the roof
 // can be served from go test's cache; the repo's -count discipline
 // (AGENTS.md) is what defeats it.
@@ -44,7 +39,7 @@ func walkRoof(t *testing.T, roof string, entries map[string]bool) []string {
 	var problems []string
 	for _, c := range walktest.ChildDirs(t, roof) {
 		name := filepath.Base(c)
-		if name == nonresident || !walktest.HasPackage(c) {
+		if !walktest.HasPackage(c) {
 			continue
 		}
 		if !entries[name] {
@@ -111,14 +106,6 @@ func TestWalkFixtures(t *testing.T) {
 				"wireguard": true, "egress": true,
 			},
 			problems: []string{"egress: holds an entry"},
-		},
-		{
-			name: "the ping application exempt by name",
-			files: map[string]string{
-				"wireguard/app.go": "package wireguard",
-				"ping/pinger.go":   "package ping",
-			},
-			entries: map[string]bool{"wireguard": true},
 		},
 	}
 	for _, tc := range cases {

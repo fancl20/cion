@@ -3,6 +3,7 @@ package scion
 import (
 	"context"
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/scionproto/scion/pkg/addr"
@@ -38,9 +39,9 @@ type PathProvider struct {
 	Cores func(isd addr.ISD) []addr.IA
 	// InterfaceDown is the node's interface-down topic. Composition reads it
 	// where it holds full knowledge — each segment's entries carry their
-	// ISD-ASes and interface IDs — and demotes a composed path that crosses
-	// a link a held signal names, keeping it only when nothing else exists.
-	// A nil topic composes without the filter.
+	// ISD-ASes and interface IDs — and flags a composed path that crosses a
+	// link a held signal names; the picks rank it suspect unless it answered
+	// since the signal. A nil topic composes without the filter.
 	InterfaceDown *bus.Topic[bus.InterfaceDownState]
 	// Links is the node's link state topic, whose usable links are the
 	// interfaces routes may leave the node through. A segment through an
@@ -52,6 +53,14 @@ type PathProvider struct {
 	// topic, or one nothing has been published on, composes without the
 	// filter.
 	Links *bus.Topic[bus.LinkState]
+	// Measurements is the node's path measurements topic, whose records give
+	// each candidate its health and measured cost. A nil topic, or one
+	// nothing has been published on, measures nothing.
+	Measurements *bus.Topic[bus.PathMeasurements]
+	// Requests is the node's path requests topic, on which each pick updates
+	// the paths its destination needs measured. A nil topic requests
+	// nothing.
+	Requests *bus.Topic[bus.PathRequests]
 }
 
 // LocalPath resolves a data-plane path from local state only: up segments
@@ -66,7 +75,8 @@ func (p *PathProvider) LocalPath(dst addr.IA) (*spath.Decoded, error) {
 	return c.Path, nil
 }
 
-// local resolves LocalPath's candidate. The bootstrap route is no
+// local resolves LocalPath's candidate, updating the destination's path
+// requests when an up segment contains it. The bootstrap route is no
 // composition: its candidate carries its path and hop count alone and joins
 // no segment.
 func (p *PathProvider) local(dst addr.IA) (*Candidate, error) {
@@ -78,8 +88,13 @@ func (p *PathProvider) local(dst addr.IA) (*Candidate, error) {
 	// a core at the segment's origin, an on-path AS mid-segment — and the
 	// containing segment whose truncated reversal ranks first is the route
 	// to it.
-	if c, err := p.containing(dst, v); err != nil || c != nil {
-		return c, err
+	candidates, err := p.containing(dst, v)
+	if err != nil {
+		return nil, err
+	}
+	if pick := bestOf(candidates); pick != nil {
+		p.request(dst, pick, candidates, v)
+		return pick, nil
 	}
 	// Before any up segment is verified — a fresh node that has not even
 	// pinned the TRC — the bootstrap beacon's reversed route serves the
@@ -111,39 +126,36 @@ func (p *PathProvider) Path(ctx context.Context, dst addr.IA) (*spath.Decoded, e
 	return c.Path, nil
 }
 
-// Choose returns the candidate Path takes to dst: the first clean candidate
-// Enumerate composes, ordered by Outranks — the containing branches among
-// them, ranked with the rest — else the first crossing one in emission
-// order, never the best-ranked one, else what LocalPath resolves: the
-// bootstrap route before any up segment is verified.
+// Choose returns the candidate Path takes to dst: the one Enumerate composes
+// that ranks above every other, by health, then cost, then Outranks — the
+// containing branches among them, ranked with the rest — else what LocalPath
+// resolves: the bootstrap route before any up segment is verified. It
+// updates the destination's path requests.
 func (p *PathProvider) Choose(ctx context.Context, dst addr.IA) (*Candidate, error) {
 	if dst.Equal(p.IA) {
 		return nil, serrors.New("destination is the local ISD-AS", "isd_as", dst)
 	}
-	candidates, err := p.Enumerate(ctx, dst)
+	v := p.view()
+	candidates, err := p.enumerate(ctx, dst, v)
 	if err != nil {
 		return nil, err
 	}
-	var best, crossing *Candidate
+	if pick := bestOf(candidates); pick != nil {
+		p.request(dst, pick, candidates, v)
+		return pick, nil
+	}
+	return p.local(dst)
+}
+
+// bestOf returns the candidate ranking above every other, nil for none.
+func bestOf(candidates []Candidate) *Candidate {
+	var best *Candidate
 	for i := range candidates {
-		c := &candidates[i]
-		if c.Crossing {
-			if crossing == nil {
-				crossing = c
-			}
-			continue
-		}
-		if best == nil || c.Outranks(best) {
+		if c := &candidates[i]; best == nil || ranksAbove(c, best) {
 			best = c
 		}
 	}
-	if best != nil {
-		return best, nil
-	}
-	if crossing != nil {
-		return crossing, nil
-	}
-	return p.local(dst)
+	return best
 }
 
 // StaleAfter is the age past which a candidate's staler piece reads stale.
@@ -184,12 +196,25 @@ type Candidate struct {
 	// up segment before the down segment of a meeting, the one segment of a
 	// containing branch or a down-only meeting.
 	Segments []*pathdb.Segment
+	// Crossed are the (ISD-AS, interface ID) pairs the path's packets cross,
+	// in travel order: Links less each part's turning entry's core-ward
+	// interface, which no packet crosses.
+	Crossed []segment.LinkID
+	// ID is the path's identity, its crossed pairs, which the segments'
+	// refreshes keep; empty for the bootstrap route.
+	ID bus.PathID
+	// Health is what the measurements and the held signals said of the path
+	// at composition.
+	Health Health
+	// Cost is the round trip the picks rank the path by: its measured cost,
+	// else twice its declared one-way sum; nil when it has neither.
+	Cost *time.Duration
 }
 
-// Outranks reports whether c outranks o by the rank Choose picks with: a
-// fresh candidate before a stale one, a declared sum before an undeclared
-// one — unknown is not free — a smaller declared sum before a larger one,
-// and every tie to Before.
+// Outranks reports whether c outranks o by the prior order, the one the picks
+// fall back on past health and cost: a fresh candidate before a stale one, a
+// declared sum before an undeclared one — unknown is not free — a smaller
+// declared sum before a larger one, and every tie to Before.
 func (c *Candidate) Outranks(o *Candidate) bool {
 	if c.Stale != o.Stale {
 		return !c.Stale
@@ -230,15 +255,20 @@ func (c *Candidate) Before(o *Candidate) bool {
 // containing branch's, which carry it once rather than once per segment of
 // the idle part. A candidate naming one of the node's own interfaces the
 // usable links lack never composes; a candidate crossing a signaled link
-// keeps its demote-to-last-resort semantics, a flagged candidate. The link
-// state and the interface-down state are read once per call.
+// keeps its demote-to-last-resort semantics, a flagged candidate. Each
+// candidate carries its health and cost. The link state, the interface-down
+// state, and the path measurements are read once per call.
 // The local ISD-AS is the one error, a caller mistake failed fast at entry;
 // an unreachable destination is the empty answer.
 func (p *PathProvider) Enumerate(ctx context.Context, dst addr.IA) ([]Candidate, error) {
+	return p.enumerate(ctx, dst, p.view())
+}
+
+// enumerate is Enumerate over a view the caller read.
+func (p *PathProvider) enumerate(ctx context.Context, dst addr.IA, v view) ([]Candidate, error) {
 	if dst.Equal(p.IA) {
 		return nil, serrors.New("destination is the local ISD-AS", "isd_as", dst)
 	}
-	v := p.view()
 	var downs []*pathdb.Segment
 	if p.Lookup != nil {
 		downs = p.Lookup(ctx, dst)
@@ -311,17 +341,19 @@ func (p *PathProvider) compose(
 	// destination carries no down part, the same arithmetic on the far end.
 	upTravel := up != nil && mUp < len(up.PCB.Entries)-1
 	downTravel := down != nil && mDown < len(down.PCB.Entries)-1
-	var links []segment.LinkID
+	var links, crossed []segment.LinkID
 	latency, known := time.Duration(0), true
 	if upTravel {
 		upLinks, sum, upKnown := stretch(up, mUp)
 		links = append(links, upLinks...)
+		crossed = append(crossed, crossedLinks(up, mUp, true)...)
 		latency += sum
 		known = known && upKnown
 	}
 	if downTravel {
 		downLinks, sum, downKnown := stretch(down, mDown)
 		links = append(links, downLinks...)
+		crossed = append(crossed, crossedLinks(down, mDown, false)...)
 		latency += sum
 		known = known && downKnown
 	}
@@ -377,11 +409,45 @@ func (p *PathProvider) compose(
 		Entries:  entries,
 		Crossing: crossing,
 		Segments: pieces,
+		Crossed:  crossed,
+		ID:       bus.PathIDOf(crossed),
 	}
 	if known {
 		c.Latency = &latency
 	}
+	v.assess(c)
 	return c, nil
+}
+
+// crossedLinks returns the (ISD-AS, interface ID) pairs a part's packets
+// cross in travel order: an up part's from the segment's end back to its
+// entry from, against construction; a down part's from its entry from to its
+// end. The turning entry's core-ward interface, which no packet crosses, is
+// left out.
+func crossedLinks(seg *pathdb.Segment, from int, against bool) []segment.LinkID {
+	entries := seg.PCB.Entries[from:]
+	var out []segment.LinkID
+	add := func(ia addr.IA, ifID uint16) {
+		if ifID != 0 {
+			out = append(out, segment.LinkID{IA: ia, IfID: ifID})
+		}
+	}
+	if against {
+		for i, e := range slices.Backward(entries) {
+			add(e.IA, e.Hop.ConsEgress)
+			if i > 0 {
+				add(e.IA, e.Hop.ConsIngress)
+			}
+		}
+		return out
+	}
+	for i, e := range entries {
+		if i > 0 {
+			add(e.IA, e.Hop.ConsIngress)
+		}
+		add(e.IA, e.Hop.ConsEgress)
+	}
+	return out
 }
 
 // stretch walks a segment's traversed stretch — the entries from index from
@@ -451,12 +517,10 @@ func (p *PathProvider) upSegments() []*pathdb.Segment {
 
 // containing composes the truncated reversal of every up segment whose
 // entries contain the given ISD-AS — a core at the origin, an on-path AS
-// mid-segment — and returns the one Outranks puts first among those crossing
-// no signaled interface, the first-ranked crossing one when nothing else
-// composes; nil when no up segment contains it. A segment the node
+// mid-segment; none when no up segment contains it. A segment the node
 // terminated on an interface the usable links lack composes nothing.
-func (p *PathProvider) containing(ia addr.IA, v view) (*Candidate, error) {
-	var clean, crossing *Candidate
+func (p *PathProvider) containing(ia addr.IA, v view) ([]Candidate, error) {
+	var out []Candidate
 	for _, seg := range p.upSegments() {
 		at := seg.PCB.IndexOfIA(ia)
 		if at < 0 {
@@ -466,33 +530,36 @@ func (p *PathProvider) containing(ia addr.IA, v view) (*Candidate, error) {
 		if err != nil {
 			return nil, err
 		}
-		switch {
-		case c == nil:
-		case c.Crossing:
-			if crossing == nil || c.Outranks(crossing) {
-				crossing = c
-			}
-		case clean == nil || c.Outranks(clean):
-			clean = c
+		if c != nil {
+			out = append(out, *c)
 		}
 	}
-	if clean != nil {
-		return clean, nil
-	}
-	return crossing, nil
+	return out, nil
 }
 
 // view is the state one call composes from, read once: the node's usable
-// links, and the interface-down signals that hold at now.
+// links, the interface-down signals that hold at now, the path measurements,
+// and the links the measured failed paths share.
 type view struct {
-	live map[uint16]addr.IA
-	down bus.InterfaceDownState
-	now  time.Time
+	live     map[uint16]addr.IA
+	down     bus.InterfaceDownState
+	measured bus.PathMeasurements
+	suspect  map[segment.LinkID]bool
+	now      time.Time
 }
 
-// view reads the link state and the interface-down state.
+// view reads the link state, the interface-down state, and the path
+// measurements.
 func (p *PathProvider) view() view {
-	return view{live: p.Links.Latest().Usable(), down: p.InterfaceDown.Latest(), now: time.Now()}
+	now := time.Now()
+	measured := p.Measurements.Latest()
+	return view{
+		live:     p.Links.Latest().Usable(),
+		down:     p.InterfaceDown.Latest(),
+		measured: measured,
+		suspect:  suspectLinks(measured, now),
+		now:      now,
+	}
 }
 
 // retired reports whether the usable links lack one of the node's own

@@ -181,3 +181,48 @@ changes.
 *   **The labs.** Every lab passes with the application loaded, and the
     regions cut benchmark reports its recovery against the 279 to 309
     seconds above.
+
+## Implementation history
+
+*   Landed with seven changes to the plan: the topics
+    ([paths.go](/pkg/libs/bus/paths.go)), the identity
+    ([provider.go](/pkg/libs/scion/provider.go)), health, the picks' order,
+    and the requests ([health.go](/pkg/libs/scion/health.go)), the resident
+    prober ([prober.go](/pkg/apps/ping/prober.go)), and the `ping` entry
+    ([ping.go](/pkg/apps/ping.go)).
+    *   Healthy and unknown paths share the first tier, ordered by cost, and
+        an unmeasured path's cost is its prior, twice its declared one-way
+        sum: ADR-0035's declared delays standing in until a path is
+        measured. Only requested paths are probed, so a tier of its own
+        would hold a better unmeasured path below a measured one.
+    *   Among suspect paths, one crossing no held signal ranks before one
+        crossing it, keeping today's order of a stale path before a
+        signaled one.
+    *   `Choose` falls back on the best-ranked crossing candidate, as
+        `LocalPath` did, rather than the first one composed; two provider
+        tests changed with it.
+    *   Each pick also requests its best suspect candidate besides the
+        standby whose prior order beats the pick's, as ADR-0035's decision 6
+        has it. It is probed as a standby, and a lost probe calls a burst,
+        so a verification decides it. Without it, a link that only failed
+        paths crossed held every path through it suspect for the outage:
+        the regions cut benchmark's picks reached 1.06 to 1.20 of the best
+        path over the formed links, against 1.00 to 1.01 before.
+    *   The first answer after a lost burst restarts the path's samples.
+        Otherwise the outage's lost probes inflate its cost for twenty
+        probes, twenty minutes for a standby, and keep it from returning at
+        its half-open probe.
+    *   A resolution tries the destination's requested paths in turn, those
+        that lost no burst first and the latest answer first, rather than
+        the path of the probe that needs it, which after a lost burst is the
+        likeliest dead.
+    *   A half-open probe is a burst, and takes the bursts' place in the
+        budget's order.
+
+    The lab ([paths_test.go](/internal/testnetwork/paths_test.go)) runs on
+    the fabric in virtual time. The pick left a cut link 3 to 5 seconds
+    after the cut, stayed off it past the hold, and returned 2 seconds after
+    the link came up; with `ping` left out, it returned to the cut link once
+    the hold lapsed. In three runs each on one machine, the regions network
+    recovered from its cut in 10 seconds, against 250 to 290 at the commit
+    before, its picks within 1.03 of the best path over the formed links.

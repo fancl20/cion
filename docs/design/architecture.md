@@ -82,37 +82,22 @@ policy chooses.
 Libraries carry the vocabulary both sides of the node's boundary speak; they
 run no loops of their own and hold no policy.
 
-*   **SCION library** — the application seam: the socket that carries
-    datagrams over SCION paths, and the path provider that composes
-    end-to-end paths from discovered segments.
+*   **SCION library** — the socket that carries datagrams over SCION paths,
+    and the path provider that composes paths from discovered segments.
 *   **SCION RPC** — the SCION-native channel: HTTP/3 over QUIC riding SCION
     paths, peers authenticated by their chains against the TRC, and the
-    drafts' service resolution. The control endpoint serves the drafts'
-    services over it, and applications serve and dial their own.
+    drafts' service resolution.
 *   **Segment types** — the vocabulary of beacons and signed entries.
 *   **Underlay** — the facts of the UDP/IP network beneath SCION that the
-    data plane shares with the sockets: the end-host port, the largest
-    datagram, and the resolution of underlay addresses.
-*   **Peer identity** — the verified chain's identity, shared as middleware
-    by every authenticated channel.
-*   **State files** — the files a node keeps in its state directory, written
-    whole: a reader sees the old content or the new one, and a crash leaves
-    one of the two.
-*   **Node bus** — the node's event bus: a component publishes the state
-    it owns as events, each carrying the full state, and the components
-    that depend on it subscribe to its changes or read its last event
+    data plane shares with the sockets.
+*   **Peer identity** — the verified chain's identity, shared by every
+    authenticated channel.
+*   **State files** — the state directory's files, written whole: a reader
+    or a crash sees the old content or the new.
+*   **Node bus** — the node's events: a component publishes the state it
+    owns, and the components that depend on it subscribe to its changes or
+    read its last event
     ([ADR-0031](/docs/adrs/0031-publish-node-state-as-events-on-a-node-bus.md)).
-    Its topics are:
-    *   The link state: the neighbor table's live entries, each with its
-        link's verdict and the source the link observes its peer at.
-    *   The interface-down signals the node's conns receive, each held for
-        ten seconds.
-    *   The per-link one-way delay estimates the selection loop measures,
-        which the beacons declare.
-    *   The node's own state: the host its peers see it at, which its
-        publications carry.
-    *   The view of each directory the node holds, by directory ID: each
-        node's signed entry the view shows.
 
 ### Modules
 
@@ -180,8 +165,9 @@ load refuses the boot with the fix named
     each naming a node, lists the nodes and hosts, releases hosts, and
     removes nodes and cores
     ([ADR-0022](/docs/adrs/0022-serve-the-operators-console-as-a-passkey-portal.md)).
-*   **Ping** — the network's probe, and the selection loop's measuring
-    instrument.
+*   **Ping** — the network's probe: it measures the paths the SCION
+    library's picks ask about, and the picks rank paths by its records
+    ([ADR-0035](/docs/adrs/0035-choose-paths-by-measured-health.md)).
 
 ## How the components interact
 

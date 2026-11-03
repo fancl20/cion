@@ -54,6 +54,7 @@ var Table = []Entry{
 	mihomoEntry,
 	votingEntry,
 	portalEntry,
+	pingEntry,
 }
 
 // Loaded is one constructed application: its name beside what its entry's

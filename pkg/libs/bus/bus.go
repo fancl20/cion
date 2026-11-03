@@ -20,12 +20,14 @@ import (
 
 // Bus is one node's topics.
 type Bus struct {
-	links     Topic[LinkState]
-	ifDown    Topic[InterfaceDownState]
-	latencies Topic[LinkLatencies]
-	self      Topic[SelfState]
-	directory Topic[Directory]
-	tailnet   Topic[TailnetState]
+	links        Topic[LinkState]
+	ifDown       Topic[InterfaceDownState]
+	latencies    Topic[LinkLatencies]
+	self         Topic[SelfState]
+	directory    Topic[Directory]
+	tailnet      Topic[TailnetState]
+	requests     Topic[PathRequests]
+	measurements Topic[PathMeasurements]
 }
 
 // New returns a bus nothing has been published on.
@@ -74,6 +76,20 @@ func (b *Bus) Directory() *Topic[Directory] {
 // mihomo application read it.
 func (b *Bus) Tailnet() *Topic[TailnetState] {
 	return &b.tailnet
+}
+
+// PathRequests returns the topic of the paths the node's requesters need
+// measured. Each requester updates its own entries, the SCION library's
+// path picks theirs at each pick; the ping application reads it.
+func (b *Bus) PathRequests() *Topic[PathRequests] {
+	return &b.requests
+}
+
+// PathMeasurements returns the topic of the measured paths' records. The
+// ping application publishes on it as its probes settle; the SCION
+// library's path picks read it.
+func (b *Bus) PathMeasurements() *Topic[PathMeasurements] {
+	return &b.measurements
 }
 
 // Topic carries one kind of event and remembers the last one published. Its
