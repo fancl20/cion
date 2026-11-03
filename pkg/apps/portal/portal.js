@@ -600,7 +600,7 @@ function hostRow(host) {
   const claims = [host.hostname, host.os].filter(Boolean).join(" · ");
   return h("tr", null,
     h("td", null, h("div", { class: "id" }, host.addr), claims && h("div", { class: "below claim" }, `claims ${claims}`)),
-    h("td", null, h("div", null, shortKey(host.nodeKey)), h("div", { class: "below muted" }, shortKey(host.machineKey))),
+    h("td", null, h("div", null, shortKey(host.nodeKey)), h("div", { class: "below muted" }, host.machineKey ? shortKey(host.machineKey) : dash())),
     h("td", null, connectsTo(host.owner, host.endpoint)),
     h("td", null, approval(host.note)),
     h("td", null, presence(host), host.exit && h("div", { class: "below claim" }, `Exit ${host.exit}`)),
