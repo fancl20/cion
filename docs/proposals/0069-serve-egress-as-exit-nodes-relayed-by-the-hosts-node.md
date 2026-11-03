@@ -35,12 +35,15 @@ The plan:
 *   the WireGuard application relays, at its host-facing port, every
     datagram that belongs to another node's session, over a new SCION
     service, and serves every host in the directory;
+*   the WireGuard application publishes its directory view on a new node-bus
+    topic, the tailnet topic;
 *   the router hands non-tailnet destinations arriving from the host device
     to the egress, and delivers what the node's own services produce to any
     host through the host device;
 *   the egress application ends exit flows on a tuned netstack that also
-    serves the node's own address;
-*   the exits application serves `GET /mihomo` at the node's own address;
+    serves the node's own address, which it reads from the tailnet topic;
+*   the exits application serves `GET /mihomo` at the node's own address,
+    listing the exits the tailnet topic names;
 *   the SOCKS application, its client, and its lab are removed.
 
 ## Motivation
@@ -54,6 +57,14 @@ above is taken to serve a DNS proxy of its own, and one below 26 without
 hostinfo crashes the client; with `Cap` 0, hostinfo, and
 `ExitNodeDNSResolvers`, the client resolves through the named resolvers
 while that exit is selected, and keeps its own resolver otherwise.
+
+The new applications follow
+[ADR-0031](/docs/adrs/0031-publish-node-state-as-events-on-a-node-bus.md)'s
+split: the state they read arrives on the node bus, and the capabilities
+they use — the router, a listener — stay dependencies borrowed through the
+table. The bus's directory topic carries the topology's node directory,
+whose entries name no WireGuard key and no slice, so the WireGuard
+directory gets a topic of its own.
 
 ### Goals
 
@@ -195,13 +206,55 @@ arrival:
 `Router` gains `DeliverDefault(deliver func(pkt []byte)) func()`, installed
 by the egress for as long as it runs.
 
+### The tailnet topic
+
+The bus declares one more topic ([bus.go](/pkg/libs/bus/bus.go)):
+`Tailnet() *Topic[TailnetState]`, published by the WireGuard application
+and read by the egress and the exits application. Its event is the
+application's view of the WireGuard directory, defined beside the bus's
+other events so the readers import no application:
+
+```go
+// TailnetState is the WireGuard application's view of the directory: the
+// node's own slice, unset until the directory assigns it, and the node
+// and host entries of the last directory it applied.
+type TailnetState struct {
+	Slice netip.Prefix
+	Nodes []TailnetNode
+	Hosts []TailnetHost
+}
+
+// TailnetNode is one node's WireGuard entry.
+type TailnetNode struct {
+	IA           addr.IA
+	PublicKey    [32]byte
+	Slice        netip.Prefix
+	HostEndpoint netip.AddrPort
+}
+
+// TailnetHost is one host's registry entry.
+type TailnetHost struct {
+	PublicKey [32]byte
+	Addr      netip.Addr
+	IA        addr.IA
+}
+```
+
+The application publishes at its slice's assignment and at every applied
+directory that changes what the event carries, the entries sorted so equal
+views compare equal; the WireGuard entry hands it the bus's topic as it
+hands the self and interface-down topics today
+([wireguard.go](/pkg/apps/wireguard.go)).
+
 ### The egress application
 
 `pkg/apps/egress` is the node's netstack: an IPv4 NIC, promiscuous and
 spoofing, claiming the node's own address through `Deliver` and the
 default through `DeliverDefault`, its TCP tuned as the SOCKS netstack's is.
-It ports the netstack egress the SOCKS landing retired — `egress.go` and
-`echo.go` beneath `pkg/apps/wireguard` before commit `d746db3`:
+It subscribes to the tailnet topic and claims the own address — the first
+of the slice the topic carries — once the slice arrives. It ports the
+netstack egress the SOCKS landing retired — `egress.go` and `echo.go`
+beneath `pkg/apps/wireguard` before commit `d746db3`:
 
 *   a TCP forwarder dials a non-tailnet destination from the node's own
     sockets under the dial timeout, then completes the host's handshake and
@@ -215,14 +268,15 @@ It ports the netstack egress the SOCKS landing retired — `egress.go` and
 
 `Listen(port uint16) (net.Listener, error)` binds a listener at the node's
 own address for a borrower. The entry is `egress`, requiring `wireguard`,
-loading wherever the WireGuard application loads.
+whose router it borrows, and loading wherever the WireGuard application
+loads.
 
 ### The exits application
 
-`pkg/apps/exits` borrows the egress's listener on port 80 and the WireGuard
-application's directory, and serves `GET /mihomo`: a JSON document, which a
-YAML reader reads as YAML, holding a `proxies` list of one entry per node
-that holds a slice, the host's own node included:
+`pkg/apps/exits` borrows the egress's listener on port 80, reads the tailnet
+topic's last event at each request, and serves `GET /mihomo`: a JSON
+document, which a YAML reader reads as YAML, holding a `proxies` list of one
+entry per node the event names, the host's own node included:
 
 ```json
 {"proxies": [{
@@ -307,14 +361,20 @@ by ADR-0024.
     another node owns enters the host device; a non-tailnet destination
     from the host device reaches the default delivery, and from a mesh
     device counts unroutable.
+*   **Unit, the tailnet topic:** the WireGuard application publishes its
+    slice at the assignment and the nodes and hosts of each applied
+    directory, sorted, and publishes nothing for a directory that changes
+    nothing the event carries.
 *   **Unit, the egress (decision 4):** the ported flows — TCP splice with
     refusal told by reset, UDP mapping, the flow bound, the idle sweep,
     echo relay — and the TCP tuning; a tailnet destination no listener
-    holds is refused; an IPv6 packet never enters.
+    holds is refused; an IPv6 packet never enters; the own address is
+    claimed once the topic carries the slice.
 *   **Unit, the exits (decision 7):** the document lists one instance per
-    node with a slice, with the exit's serving address, a state directory
-    stable across fetches, IPv4 only, and the core's origin; the listener
-    answers on the node's own address alone.
+    node the topic names, with the exit's serving address, a state directory
+    stable across fetches, IPv4 only, and the core's origin; before the
+    topic's first event it lists none; the listener answers on the node's
+    own address alone.
 *   **Integration, the exits lab (decisions 1 to 7):** the core and a leaf,
     a tsnet host on the leaf:
     *   with no exit selected, the host reaches the core's serving address
