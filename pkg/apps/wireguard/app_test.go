@@ -7,6 +7,8 @@ import (
 	"net"
 	"net/netip"
 	"path/filepath"
+	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -14,7 +16,10 @@ import (
 
 	"github.com/fancl20/cion/pkg/core/trust/trusttest"
 
+	"github.com/google/go-cmp/cmp"
+	"github.com/google/go-cmp/cmp/cmpopts"
 	"github.com/scionproto/scion/pkg/addr"
+	"golang.zx2c4.com/wireguard/device"
 
 	"github.com/fancl20/cion/pkg/core/trust"
 	"github.com/fancl20/cion/pkg/libs/bus"
@@ -215,6 +220,7 @@ func newTestWireguard(
 		ListenHost: testHost,
 		ListenPort: freeHostPort(t),
 		Self:       self,
+		Tailnet:    new(bus.Topic[bus.TailnetState]),
 		StateDir:   t.TempDir(),
 		Paths:      provider,
 		Engine:     trust.NewEngine(ia, nil, &trust.NetworkProvider{DB: db}, trusttest.Unchecked{}),
@@ -246,6 +252,9 @@ func newTestWireguard(
 		if port, ok := regs.registered(SvcWireguard); ok {
 			t.Errorf("the mesh service registration for port %d outlived Close", port)
 		}
+		if port, ok := regs.registered(SvcHostRelay); ok {
+			t.Errorf("the relay service registration for port %d outlived Close", port)
+		}
 		if port, ok := regs.registered(SvcDirectory); ok {
 			t.Errorf("the directory service registration for port %d outlived Close", port)
 		}
@@ -253,6 +262,9 @@ func newTestWireguard(
 	t.Cleanup(a.Close)
 	if _, ok := regs.registered(SvcWireguard); !ok {
 		t.Error("the mesh socket was not registered under the wireguard service")
+	}
+	if port, ok := regs.registered(SvcHostRelay); !ok || port != a.relay.conn.LocalPort() {
+		t.Error("the relay socket was not registered under the host relay service")
 	}
 	if _, ok := regs.registered(SvcDirectory); cfg.Store != nil && !ok {
 		t.Error("the core's directory socket was not registered under the directory service")
@@ -466,10 +478,52 @@ func TestWireguardAppliesDirectoryDiff(t *testing.T) {
 	}
 }
 
-// TestWireguardAppliesHostEntries checks the host device's diff: an owned
-// entry's key gains its /32 on the one host device, a departed key loses
-// it, and a foreign-owned key changes nothing — exactly as the mesh diff
-// treats the node's own entry.
+// devicePeer is one peer a device's configuration reads back.
+type devicePeer struct {
+	Endpoint   string
+	Handshaken bool
+	AllowedIPs []string
+}
+
+// devicePeers reads a device's peers back from its configuration, keyed by
+// their public keys in hexadecimal.
+func devicePeers(t *testing.T, dev *device.Device) map[string]devicePeer {
+	t.Helper()
+	ipc, err := dev.IpcGet()
+	if err != nil {
+		t.Fatal(err)
+	}
+	peers := make(map[string]devicePeer)
+	var key string
+	for line := range strings.Lines(ipc) {
+		name, value, _ := strings.Cut(strings.TrimSuffix(line, "\n"), "=")
+		if name == "public_key" {
+			key = value
+			peers[key] = devicePeer{}
+			continue
+		}
+		if key == "" {
+			continue
+		}
+		peer := peers[key]
+		switch name {
+		case "endpoint":
+			peer.Endpoint = value
+		case "last_handshake_time_sec":
+			peer.Handshaken = value != "0"
+		case "allowed_ip":
+			peer.AllowedIPs = append(peer.AllowedIPs, value)
+		}
+		peers[key] = peer
+	}
+	return peers
+}
+
+// TestWireguardAppliesHostEntries checks the host device's diff: every host
+// entry the directory holds gains its /32 on the one host device — a
+// foreign-owned one too, for every node serves every host — and a departed
+// key loses it, while the router forwards to the owned hosts alone and the
+// snapshot lists them.
 func TestWireguardAppliesHostEntries(t *testing.T) {
 	ia := addr.MustIAFrom(20, 0xff0000000221)
 	other := addr.MustIAFrom(20, 0xff0000000233)
@@ -487,40 +541,171 @@ func TestWireguardAppliesHostEntries(t *testing.T) {
 		Addr:      netip.MustParseAddr("100.64.33.7"),
 		IA:        other,
 	}
-
-	// A foreign-owned entry changes nothing.
-	a.applyDirectory(t.Context(), Directory{Hosts: []HostEntry{foreign}})
-	if len(a.hostPeers) != 0 {
-		t.Fatalf("a foreign host programmed the device: %v", a.hostPeers)
-	}
-
-	// An owned entry gains its /32; the router table follows.
 	h1 := owned(1, "100.64.1.2")
-	a.applyDirectory(t.Context(), Directory{Hosts: []HostEntry{h1, foreign}})
-	if len(a.hostPeers) != 1 || a.hostPeers[h1.PublicKey].Addr != h1.Addr {
-		t.Fatalf("owned hosts after the first directory = %v, want the one", a.hostPeers)
+	h2 := owned(2, "100.64.1.3")
+
+	// view is what the application holds after a directory: the host
+	// device's peers by key, the addresses the router forwards to the host
+	// device, and the snapshot's keys.
+	type view struct {
+		Device    map[string]devicePeer
+		Forwarded []string
+		Snapshot  []string
 	}
-	if len(a.router.hosts) != 1 || a.router.hosts[h1.Addr] != a.hosts.pipe {
-		t.Fatalf("router hosts = %v, want the one to the host device", a.router.hosts)
+	current := func() view {
+		v := view{Device: devicePeers(t, a.hosts.dev)}
+		if a.router.hostPipe != a.hosts.pipe {
+			t.Error("the router's host device is not the application's")
+		}
+		for ip, owned := range a.router.hosts {
+			if owned {
+				v.Forwarded = append(v.Forwarded, ip.String())
+			}
+		}
+		for _, host := range a.HostPeers() {
+			v.Snapshot = append(v.Snapshot, host.PublicKey.String())
+		}
+		slices.Sort(v.Forwarded)
+		slices.Sort(v.Snapshot)
+		return v
+	}
+	peerOf := func(h HostEntry) devicePeer {
+		return devicePeer{AllowedIPs: []string{netip.PrefixFrom(h.Addr, 32).String()}}
 	}
 
-	// A second owned key joins; the first departs with the second fetch.
-	h2 := owned(2, "100.64.1.3")
-	a.applyDirectory(t.Context(), Directory{Hosts: []HostEntry{h1, h2}})
-	if len(a.hostPeers) != 2 {
-		t.Fatalf("owned hosts after the second directory = %d, want 2", len(a.hostPeers))
+	for _, step := range []struct {
+		name  string
+		hosts []HostEntry
+		want  view
+	}{{
+		name:  "a foreign-owned entry",
+		hosts: []HostEntry{foreign},
+		want: view{
+			Device: map[string]devicePeer{foreign.PublicKey.String(): peerOf(foreign)},
+		},
+	}, {
+		name:  "an owned entry beside it",
+		hosts: []HostEntry{h1, foreign},
+		want: view{
+			Device: map[string]devicePeer{
+				foreign.PublicKey.String(): peerOf(foreign),
+				h1.PublicKey.String():      peerOf(h1),
+			},
+			Forwarded: []string{h1.Addr.String()},
+			Snapshot:  []string{h1.PublicKey.String()},
+		},
+	}, {
+		name:  "a second owned entry, the foreign departed",
+		hosts: []HostEntry{h1, h2},
+		want: view{
+			Device: map[string]devicePeer{
+				h1.PublicKey.String(): peerOf(h1),
+				h2.PublicKey.String(): peerOf(h2),
+			},
+			Forwarded: []string{h1.Addr.String(), h2.Addr.String()},
+			Snapshot:  []string{h1.PublicKey.String(), h2.PublicKey.String()},
+		},
+	}, {
+		name:  "the first owned departed",
+		hosts: []HostEntry{h2},
+		want: view{
+			Device:    map[string]devicePeer{h2.PublicKey.String(): peerOf(h2)},
+			Forwarded: []string{h2.Addr.String()},
+			Snapshot:  []string{h2.PublicKey.String()},
+		},
+	}} {
+		a.applyDirectory(t.Context(), Directory{Hosts: step.hosts})
+		if diff := cmp.Diff(step.want, current()); diff != "" {
+			t.Errorf("after %s (-want +got):\n%s", step.name, diff)
+		}
 	}
-	a.applyDirectory(t.Context(), Directory{Hosts: []HostEntry{h2}})
-	if len(a.hostPeers) != 1 || a.hostPeers[h2.PublicKey].Addr != h2.Addr {
-		t.Fatalf("the departed host kept its peer: %v", a.hostPeers)
+}
+
+// TestWireguardPublishesTheTailnetView checks the tailnet topic: an applied
+// directory publishes its node and host entries, sorted, before any slice;
+// the same entries in another order, or with a change the view does not
+// carry, publish nothing; the slice's assignment publishes it beside the
+// entries, and a later answer nothing; and a directory that changes an
+// entry publishes the new entries with the slice kept.
+func TestWireguardPublishesTheTailnetView(t *testing.T) {
+	ia := addr.MustIAFrom(20, 0xff0000000261)
+	peer := addr.MustIAFrom(20, 0xff0000000262)
+	db := newFlippableTrustDB(t, ia)
+	db.enroll(t)
+	a, _ := newTestWireguard(t, ia, db)
+	views := a.cfg.Tailnet.Subscribe(t.Context())
+	next := func() (bus.TailnetState, bool) {
+		select {
+		case v := <-views:
+			return v, true
+		default:
+			return bus.TailnetState{}, false
+		}
 	}
-	if len(a.router.hosts) != 1 {
-		t.Fatalf("router holds %d host routes after the departure, want 1",
-			len(a.router.hosts))
+	diff := func(want, got bus.TailnetState) string {
+		return cmp.Diff(want, got,
+			cmpopts.EquateComparable(netip.Prefix{}, netip.Addr{}, netip.AddrPort{}))
 	}
-	// The snapshot the application exposes matches.
-	if snap := a.HostPeers(); len(snap) != 1 || snap[0] != h2 {
-		t.Fatalf("the host snapshot = %v, want the survivor", snap)
+
+	own := Entry{IA: ia, PublicKey: a.PublicKey(), Overlay: netip.MustParsePrefix("100.64.0.0/24"),
+		HostEndpoint: netip.AddrPortFrom(testHost, a.HostPort())}
+	other := Entry{IA: peer, PublicKey: mustPubKey(0x62), Overlay: netip.MustParsePrefix("100.64.1.0/24"),
+		HostEndpoint: netip.MustParseAddrPort("192.0.2.62:51820")}
+	owned := HostEntry{PublicKey: mustPubKey(0x0a), Addr: netip.MustParseAddr("100.64.0.10"), IA: ia}
+	foreign := HostEntry{PublicKey: mustPubKey(0x0b), Addr: netip.MustParseAddr("100.64.1.11"), IA: peer}
+	nodeOf := func(e Entry) bus.TailnetNode {
+		return bus.TailnetNode{IA: e.IA, PublicKey: e.PublicKey, Slice: e.Overlay, HostEndpoint: e.HostEndpoint}
+	}
+	hostOf := func(h HostEntry) bus.TailnetHost {
+		return bus.TailnetHost{PublicKey: h.PublicKey, Addr: h.Addr, IA: h.IA}
+	}
+
+	a.applyDirectory(t.Context(), Directory{Nodes: []Entry{other, own}, Hosts: []HostEntry{foreign, owned}})
+	want := bus.TailnetState{
+		Nodes: []bus.TailnetNode{nodeOf(own), nodeOf(other)},
+		Hosts: []bus.TailnetHost{hostOf(owned), hostOf(foreign)},
+	}
+	if got, ok := next(); !ok {
+		t.Fatal("the first directory published nothing")
+	} else if d := diff(want, got); d != "" {
+		t.Errorf("the first directory's view (-want +got):\n%s", d)
+	}
+
+	noted := owned
+	noted.Note, noted.Hostname, noted.MachineKey = "approved", "laptop", mustPubKey(0x77)
+	a.applyDirectory(t.Context(), Directory{Nodes: []Entry{own, other}, Hosts: []HostEntry{noted, foreign}})
+	if got, ok := next(); ok {
+		t.Errorf("a directory changing nothing the view carries published %+v", got)
+	}
+
+	if err := a.publish(t.Context()); err != nil {
+		t.Fatalf("publishing the node's entry: %v", err)
+	}
+	want.Slice = netip.MustParsePrefix("100.64.0.0/24")
+	if got, ok := next(); !ok {
+		t.Fatal("the slice's assignment published nothing")
+	} else if d := diff(want, got); d != "" {
+		t.Errorf("the assignment's view (-want +got):\n%s", d)
+	}
+	if err := a.publish(t.Context()); err != nil {
+		t.Fatalf("republishing the node's entry: %v", err)
+	}
+	if got, ok := next(); ok {
+		t.Errorf("a republication's answer published %+v", got)
+	}
+
+	moved := other
+	moved.HostEndpoint = netip.MustParseAddrPort("192.0.2.63:51820")
+	a.applyDirectory(t.Context(), Directory{Nodes: []Entry{own, moved}, Hosts: []HostEntry{owned}})
+	want.Nodes = []bus.TailnetNode{nodeOf(own), nodeOf(moved)}
+	want.Hosts = []bus.TailnetHost{hostOf(owned)}
+	if got, ok := next(); !ok {
+		t.Fatal("a directory changing the entries published nothing")
+	} else if d := diff(want, got); d != "" {
+		t.Errorf("the changed directory's view (-want +got):\n%s", d)
+	}
+	if d := diff(want, a.cfg.Tailnet.Latest()); d != "" {
+		t.Errorf("the topic's last view (-want +got):\n%s", d)
 	}
 }
 
@@ -529,8 +714,8 @@ func TestWireguardAppliesHostEntries(t *testing.T) {
 // held to its end, a mesh peer's drain, the relay presence blocked in Recv
 // against a relay that sends nothing, the sockets' readers, the directory
 // service — and it releases nothing New bound but the directory socket its
-// service closed. Close then releases the rest: the store, and the host
-// port, which binds again at once.
+// service closed. Close then releases the rest: the store, the relay socket,
+// and the host port, which binds again at once.
 func TestWireguardRunJoinsItsLoops(t *testing.T) {
 	ia := addr.MustIAFrom(20, 0xff0000000251)
 	db := newFlippableTrustDB(t, ia)
@@ -616,6 +801,7 @@ func TestWireguardRunJoinsItsLoops(t *testing.T) {
 		t.Fatalf("binding the host port after Close: %v", err)
 	}
 	_ = held.Close()
+	assertReadsClosed(t, "the relay socket after Close", a.relay.conn)
 	if !store.closed.Load() {
 		t.Error("Close left the store open")
 	}

@@ -15,11 +15,12 @@ import (
 
 // addSharedNodeFlags registers the node arguments every assembling command
 // takes: the bare three that place the daemon, the static topology
-// provider's selection, the membership method, and the composition's list —
-// the arguments the retiring configuration file carried, with defaults so a
-// restart needs none of them. The link-set, the membership method, and the
-// list override working defaults — the measured provider, the founder
-// method, the inference — so they hide from the help while staying settable.
+// provider's selection, the membership method, the composition's list, and
+// the resolvers the applications ask — each with a default so a restart
+// needs none of them. The link-set, the membership method, the list, and the
+// resolvers override working defaults — the measured provider, the founder
+// method, the inference, Google's public resolvers — so they hide from the
+// help while staying settable.
 func addSharedNodeFlags(flags *pflag.FlagSet, opts *services.NodeConfig) {
 	flags.StringVar(&opts.State, "state", services.DefaultState,
 		"the state directory, where the first start generates the identity")
@@ -47,6 +48,10 @@ func addSharedNodeFlags(flags *pflag.FlagSet, opts *services.NodeConfig) {
 			"loads none — the deliberate core — and a list loads exactly the "+
 			"named ("+applicationNames()+")")
 	_ = flags.MarkHidden("applications")
+	flags.StringSliceVar(&opts.Resolvers, "dns.resolvers", []string{"8.8.8.8", "8.8.4.4"},
+		"the DNS resolvers the node's applications resolve names through, "+
+			"comma-separated IP addresses and repeatable")
+	_ = flags.MarkHidden("dns.resolvers")
 }
 
 // applicationNames lists the resident applications' names in table order,

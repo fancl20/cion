@@ -310,11 +310,12 @@ type hostView struct {
 	OS         string    `json:"os,omitempty"`
 	Connected  bool      `json:"connected"`
 	LastSeen   time.Time `json:"lastSeen,omitzero"`
+	Exit       string    `json:"exit,omitempty"`
 }
 
 // handleHosts lists the hosts, each beside the host endpoint of the node it
-// connects to; a core running no coordination application answers none
-// available.
+// connects to and the exit it reports; a core running no coordination
+// application answers none available.
 func (a *App) handleHosts(w http.ResponseWriter, r *http.Request) {
 	hosts, err := a.records.Hosts(r.Context())
 	available := !errors.Is(err, ErrNoCoordination)
@@ -338,6 +339,9 @@ func (a *App) handleHosts(w http.ResponseWriter, r *http.Request) {
 		}
 		if h.Endpoint.IsValid() {
 			v.Endpoint = h.Endpoint.String()
+		}
+		if !h.Exit.IsZero() {
+			v.Exit = h.Exit.String()
 		}
 		views = append(views, v)
 	}

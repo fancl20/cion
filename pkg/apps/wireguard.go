@@ -30,7 +30,7 @@ var wireguardEntry = Entry{
 			DefaultHostPort,
 			"the shared host-facing UDP port every host dials; the directory assigns "+
 				"the node's slice of the tailnet range at its first publication "+
-				"(zero runs no WireGuard or SOCKS application)")
+				"(zero runs no WireGuard application, nor any application requiring it)")
 		// The conventional port serves, so a different one is the
 		// operator's deliberate override — settable, off the help.
 		_ = flags.MarkHidden("wireguard.host-port")
@@ -64,10 +64,11 @@ func newWireguard(env *Environment, _ []Loaded) (Application, error) {
 }
 
 // wireguardConfig builds the application's configuration from the node's
-// facts: the shared port the entry's arguments name, the relay presence
-// derived from the domain, the application's own state directory, the
-// founding core's directory store or every other node's founder route, and
-// the pacing riders.
+// facts: the shared port the entry's arguments name, the node's own state
+// and the tailnet topic the application publishes on, the relay presence
+// derived from the domain and resolving through the node's resolvers, the
+// application's own state directory, the founding core's directory store or
+// every other node's founder route, and the pacing riders.
 func wireguardConfig(env *Environment) (wireguard.Config, error) {
 	listenHost, err := underlay.ResolveAddrPort(env.ControlHost)
 	if err != nil {
@@ -78,7 +79,8 @@ func wireguardConfig(env *Environment) (wireguard.Config, error) {
 		ListenHost:    listenHost.Addr(),
 		ListenPort:    env.Arguments.Wireguard.HostPort,
 		Self:          env.Bus.Self(),
-		DERP:          relayPresence(env.Domain, env.Relay),
+		Tailnet:       env.Bus.Tailnet(),
+		DERP:          relayPresence(env.Domain, env.Relay, env.Resolvers),
 		StateDir:      filepath.Join(env.StateRoot, "wireguard"),
 		Paths:         env.Paths,
 		Engine:        env.Engine,
@@ -118,14 +120,15 @@ func wireguardConfig(env *Environment) (wireguard.Config, error) {
 
 // relayPresence derives the node's relay presence: the core's coordination
 // endpoint on its own HTTPS identity — the name every node already holds, a
-// domain or an address. The harness's placement overrides it, its loopback
-// address and pinned certificate standing in for the identity and the
-// WebPKI.
-func relayPresence(identity string, relay RelayPlacement) *wireguard.DERPConfig {
+// domain or an address — whose name resolves through the node's resolvers.
+// The harness's placement overrides it, its loopback address and pinned
+// certificate standing in for the identity and the WebPKI.
+func relayPresence(identity string, relay RelayPlacement, resolvers []netip.Addr) *wireguard.DERPConfig {
 	// The relay's own path rides the URL: the client dials it verbatim, an
 	// IPv6 literal in RFC 3986's brackets.
 	derp := &wireguard.DERPConfig{
-		URL: "https://" + urlHost(identity) + "/derp",
+		URL:       "https://" + urlHost(identity) + "/derp",
+		Resolvers: resolvers,
 	}
 	if relay.URL != "" {
 		derp.URL = relay.URL

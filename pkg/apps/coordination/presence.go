@@ -6,6 +6,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/scionproto/scion/pkg/addr"
 	"tailscale.com/tailcfg"
 
 	"github.com/fancl20/cion/pkg/apps/wireguard"
@@ -17,9 +18,9 @@ const claimCap = 64
 
 // Presence is what the map handler last observed of one registered host:
 // whether a map stream is open, when its last map request arrived or its
-// last stream closed, and the hostname and operating system that request
-// claimed. It lives in memory: a restart observes each host anew when it
-// next maps.
+// last stream closed, and the hostname, operating system, and exit that
+// request claimed. It lives in memory: a restart observes each host anew
+// when it next maps.
 type Presence struct {
 	// Connected reports an open map stream.
 	Connected bool
@@ -30,6 +31,9 @@ type Presence struct {
 	// and stripped of control characters; empty where it claimed none.
 	Hostname string
 	OS       string
+	// Exit is the node whose peer the client reports as its selected exit;
+	// zero where it reports none or a stable ID no node holds.
+	Exit addr.IA
 }
 
 // sighting is one host's presence as the map handler keeps it: the open
@@ -39,6 +43,7 @@ type sighting struct {
 	lastSeen time.Time
 	hostname string
 	os       string
+	exit     addr.IA
 }
 
 // Presence returns a snapshot of every registered host the map handler has
@@ -53,15 +58,22 @@ func (a *App) Presence() map[wireguard.PublicKey]Presence {
 			LastSeen:  s.lastSeen,
 			Hostname:  s.hostname,
 			OS:        s.os,
+			Exit:      s.exit,
 		}
 	}
 	return out
 }
 
-// observe records one map request of a registered host and the claims its
-// hostinfo carries.
-func (a *App) observe(key wireguard.PublicKey, hostinfo tailcfg.HostinfoView) {
+// observe records one map request of a registered host: the claims its
+// hostinfo carries and the exit it reports, resolved against the directory
+// the request was answered from. A client reports a change of exit only by
+// a map request, so the request resolves it once and the snapshot reads no
+// registry.
+func (a *App) observe(key wireguard.PublicKey, hostinfo tailcfg.HostinfoView,
+	directory wireguard.Directory) {
+
 	hostname, osName := claimsOf(hostinfo)
+	exit := reportedExit(hostinfo, directory)
 	a.presenceMtx.Lock()
 	defer a.presenceMtx.Unlock()
 	s := a.presence[key]
@@ -70,7 +82,7 @@ func (a *App) observe(key wireguard.PublicKey, hostinfo tailcfg.HostinfoView) {
 		a.presence[key] = s
 	}
 	s.lastSeen = time.Now()
-	s.hostname, s.os = hostname, osName
+	s.hostname, s.os, s.exit = hostname, osName, exit
 }
 
 // streamOpened counts one open map stream of an observed host.
@@ -107,6 +119,22 @@ func claimsOf(hostinfo tailcfg.HostinfoView) (string, string) {
 		return "", ""
 	}
 	return capClaim(hostinfo.Hostname()), capClaim(hostinfo.OS())
+}
+
+// reportedExit resolves the exit a client reports — the stable ID of the
+// peer it selected — to the directory node holding that ID: zero when the
+// request carries no hostinfo, reports no exit, or names an ID no node
+// holds.
+func reportedExit(hostinfo tailcfg.HostinfoView, directory wireguard.Directory) addr.IA {
+	if !hostinfo.Valid() || hostinfo.ExitNodeID().IsZero() {
+		return 0
+	}
+	for _, node := range directory.Nodes {
+		if stableID(node.PublicKey) == hostinfo.ExitNodeID() {
+			return node.IA
+		}
+	}
+	return 0
 }
 
 // capClaim strips control characters and invalid encoding from a claim and

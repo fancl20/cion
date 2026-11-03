@@ -75,7 +75,9 @@ func TestSharedHostPortDemultiplexes(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = udpConn.Close() })
-	socket := newHostSocket(udpConn, cnt)
+	// A relay keyed to no node but this one hands every host's datagram to
+	// the device.
+	socket := newHostSocket(udpConn, newHostRelay(0, nodePub, nil, nil, cnt), cnt)
 	go socket.run(t.Context())
 	nodeAddr := udpConn.LocalAddr().(*net.UDPAddr).AddrPort()
 

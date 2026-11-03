@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/netip"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -163,6 +164,43 @@ func TestNodeConfigResolve(t *testing.T) {
 	}
 }
 
+// TestNodeConfigResolvers checks the resolvers' resolution: the commands'
+// default parses to Google's public resolvers, any list to its addresses in
+// the order given, none to none, and an entry that is not an IP address
+// refuses the boot, naming it.
+func TestNodeConfigResolvers(t *testing.T) {
+	for _, tc := range []struct {
+		resolvers []string
+		want      []netip.Addr
+	}{
+		{[]string{"8.8.8.8", "8.8.4.4"},
+			[]netip.Addr{netip.MustParseAddr("8.8.8.8"), netip.MustParseAddr("8.8.4.4")}},
+		{[]string{"2606:4700:4700::1111", "1.1.1.1"},
+			[]netip.Addr{netip.MustParseAddr("2606:4700:4700::1111"), netip.MustParseAddr("1.1.1.1")}},
+		{nil, nil},
+	} {
+		cfg := nodeConfig()
+		cfg.Resolvers = tc.resolvers
+		rc, err := cfg.resolve()
+		if err != nil {
+			t.Fatalf("resolving the resolvers %q: %v", tc.resolvers, err)
+		}
+		if !slices.Equal(rc.resolvers, tc.want) {
+			t.Errorf("the resolvers %q resolve to %v, want %v", tc.resolvers, rc.resolvers, tc.want)
+		}
+	}
+
+	cfg := nodeConfig()
+	cfg.Resolvers = []string{"8.8.8.8", "dns.google"}
+	_, err := cfg.resolve()
+	if err == nil {
+		t.Fatal("a resolver that is not an IP address was accepted")
+	}
+	if want := `--dns.resolvers "dns.google"`; !strings.Contains(err.Error(), want) {
+		t.Errorf("the refusal = %q, want it to carry %q", err, want)
+	}
+}
+
 // denyAll is a harness admission policy that denies every exchange.
 type denyAll struct{}
 
@@ -272,7 +310,7 @@ func TestNodeConfigResolveApplications(t *testing.T) {
 	}{
 		"an unknown name": {
 			func(c *NodeConfig) { c.Applications = []string{"middlebox"} },
-			"the residents are wireguard, coordination, socks",
+			"the residents are wireguard, coordination, egress",
 		},
 		"coordination off the core": {
 			func(c *NodeConfig) {
@@ -289,8 +327,8 @@ func TestNodeConfigResolveApplications(t *testing.T) {
 			},
 			"voting, which requires the founding core",
 		},
-		"socks without wireguard": {
-			func(c *NodeConfig) { c.Applications = []string{"socks"} },
+		"egress without wireguard": {
+			func(c *NodeConfig) { c.Applications = []string{"egress"} },
 			"requires wireguard beside it",
 		},
 		"coordination without wireguard": {

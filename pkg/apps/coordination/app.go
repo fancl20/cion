@@ -66,6 +66,10 @@ type Config struct {
 	// DERP names the relay the netmap advertises beside the coordination
 	// endpoint's own identity.
 	DERP DERPConfig
+	// Resolvers are the DNS resolvers every netmap names for each exit: a
+	// client resolves through them while it selects any exit. Empty names
+	// none.
+	Resolvers []netip.Addr
 	// StateDir persists the application's own keys: the noise machine key
 	// and the DERP server's node key.
 	StateDir string
@@ -79,18 +83,19 @@ type Config struct {
 	// connected host. Zero means the package constant.
 	MapResend time.Duration
 
-	// RelayOnly strips the peer's endpoint from every netmap: the
+	// RelayOnly strips every peer's endpoint from every netmap: the
 	// integration harness's stand-in for a network where UDP to the node
-	// cannot pass, forcing the relay leg.
+	// cannot pass, forcing the relay leg toward the host's own node.
 	RelayOnly bool
 }
 
 // App is the coordination application: the noise channel of the client
-// protocol carrying registration behind the admission seam, the netmap holding
-// one peer, and the DERP relay fallback — its three surfaces handed to the
-// node's assembly, which serves them over the core's WebPKI identity on the
-// HTTPS port it owns. Minimal by decision: no ACL engine, no naming, no user
-// management, no key expiry, no credential minting, no listener of its own.
+// protocol carrying registration behind the admission seam, the netmap naming
+// every node as an exit, and the DERP relay fallback — its three surfaces
+// handed to the node's assembly, which serves them over the core's WebPKI
+// identity on the HTTPS port it owns. Minimal by decision: no ACL engine, no
+// host naming, no user management, no key expiry, no credential minting, no
+// listener of its own.
 type App struct {
 	cfg        Config
 	machineKey key.MachinePrivate

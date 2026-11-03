@@ -101,6 +101,11 @@ type NodeConfig struct {
 	// one block per entry; the commands register them from the
 	// applications table.
 	AppArguments apps.Arguments
+	// Resolvers names the DNS resolvers the node's applications resolve
+	// names through, each an IP address — the commands default them to
+	// Google's public resolvers. Empty names none: the relay presence asks
+	// the system's resolver.
+	Resolvers []string
 	// Coordination overrides the coordination endpoint's placement for the
 	// integration harness: the loopback address its core serves on and the relay
 	// every node's presence dials, standing in for the production derivation from
@@ -115,6 +120,11 @@ type NodeConfig struct {
 	// place of the method EnrollAuth names; the two refuse to combine, and
 	// it refuses to load off the founding core.
 	Admission enrollauth.AdmissionAuthorizer
+	// Internet is the integration harness's stand-in for the internet: the
+	// address the egress's outbound legs reach for each destination a host
+	// addresses through the node as its exit. Nil reaches each destination
+	// itself; the daemon never sets it.
+	Internet func(netip.AddrPort) netip.AddrPort
 
 	// Pacing shortens the loops' periods; zero values keep the production
 	// constants. The daemon never sets it — the integration tests do.
@@ -129,7 +139,7 @@ type CoordinationOptions struct {
 	// DERP overrides the relay the netmap advertises and the nodes'
 	// presences dial.
 	DERP DERPOptions
-	// RelayOnly strips the peer's endpoint from every netmap the endpoint
+	// RelayOnly strips every peer's endpoint from every netmap the endpoint
 	// serves — the harness's stand-in for a network where UDP to the node
 	// cannot pass, forcing the relay leg.
 	RelayOnly bool
@@ -181,6 +191,8 @@ type resolvedConfig struct {
 	// binds the one answer.
 	controlAddr  netip.AddrPort
 	internalAddr netip.AddrPort
+	// resolvers are the addresses Resolvers names, in its order.
+	resolvers []netip.Addr
 	// enrollAuth gates the trust service's first issuance, the coordination
 	// application's registrations, and the TRC decision's sensitive vote:
 	// the method EnrollAuth names or the harness's Admission; nil leaves the
@@ -230,6 +242,13 @@ func (c NodeConfig) resolve() (resolvedConfig, error) {
 		if _, err := measured.ParseRendezvousAddr(s); err != nil {
 			return resolvedConfig{}, fmt.Errorf("parsing --topology.neighbor %q: %w", s, err)
 		}
+	}
+	for _, s := range c.Resolvers {
+		resolver, err := netip.ParseAddr(s)
+		if err != nil {
+			return resolvedConfig{}, fmt.Errorf("parsing --dns.resolvers %q: %w", s, err)
+		}
+		r.resolvers = append(r.resolvers, resolver)
 	}
 	var err error
 	if r.controlAddr, err = underlay.ResolveAddrPortDefault(

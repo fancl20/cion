@@ -52,6 +52,9 @@ func TestCountersServed(t *testing.T) {
 	}
 	cnt.droppedPackets.Add(1)
 	cnt.hostDatagrams.Add(3)
+	cnt.relayedDatagrams.Add(4)
+	cnt.relayDrops.Add(2)
+	cnt.relayCookies.Add(6)
 	want := map[string]int64{
 		"wireguard.dropped_packets_total":    1,
 		"wireguard.unroutable_packets_total": 0,
@@ -61,6 +64,9 @@ func TestCountersServed(t *testing.T) {
 		"wireguard.route_switches_total":     0,
 		"wireguard.published_total":          0,
 		"wireguard.host_datagrams_total":     3,
+		"wireguard.relayed_datagrams_total":  4,
+		"wireguard.relay_drops_total":        2,
+		"wireguard.relay_cookies_total":      6,
 	}
 	if diff := cmp.Diff(want, collected(t, reader, ia)); diff != "" {
 		t.Errorf("the first collection mismatches (-want +got):\n%s", diff)

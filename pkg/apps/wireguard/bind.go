@@ -16,6 +16,7 @@ import (
 	"net/netip"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/scionproto/scion/pkg/addr"
@@ -54,7 +55,7 @@ type localPaths interface {
 // them — all devices share the node's key pair, so each can decrypt a
 // handshake, but only the device whose peer table holds the sender's public
 // key completes it. It also owns the freshest-path cache sends resolve
-// through.
+// through, the relay's beside the mesh's.
 type meshSocket struct {
 	conn     *scion.Conn
 	resolver localPaths
@@ -158,15 +159,21 @@ func (s *meshSocket) unsubscribe(b *meshBind) {
 	delete(s.subs, b)
 }
 
-// send carries encrypted datagrams to the peer, resolving the peer endpoint
-// Addr{IA, Addr, Path} from local state — never a fetch inside a send —
-// caching the freshest path per peer and re-resolving when the cached path
-// nears expiry or a send fails. An endpoint carrying the reversed path of
-// the peer's latest arrival seeds the cache: replies ride arrival paths,
-// the one route to a peer no local state names — a core replying to a leaf
-// below it. One refresh and retry per send.
+// send carries a mesh device's encrypted datagrams to the peer on the mesh
+// socket.
 func (s *meshSocket) send(ep *meshEndpoint, bufs [][]byte) error {
-	dst := ep.addr
+	return s.sendOn(s.conn, ep.addr, bufs, &s.cnt.sentDatagrams, &s.cnt.sendFailures)
+}
+
+// sendOn carries datagrams on conn to dst, resolving the path to dst's
+// ISD-AS from local state — never a fetch inside a send — caching the
+// freshest path per ISD-AS and re-resolving when the cached path nears
+// expiry or a send fails. A destination carrying the reversed path of the
+// peer's latest arrival seeds the cache: replies ride arrival paths, the one
+// route to a peer no local state names — a core replying to a leaf below it.
+// One refresh and retry per send. It counts each datagram written in sent,
+// and each datagram of a send it gives up on in failed.
+func (s *meshSocket) sendOn(conn *scion.Conn, dst scion.Addr, bufs [][]byte, sent, failed *atomic.Int64) error {
 	for attempt := 0; ; attempt++ {
 		path := s.cachedPath(dst.IA)
 		if path == nil && dst.Path != nil &&
@@ -177,7 +184,7 @@ func (s *meshSocket) send(ep *meshEndpoint, bufs [][]byte) error {
 		if path == nil {
 			refreshed, err := s.resolver.LocalPath(dst.IA)
 			if err != nil {
-				s.cnt.sendFailures.Add(int64(len(bufs)))
+				failed.Add(int64(len(bufs)))
 				return fmt.Errorf("resolving a path to %s: %w", dst.IA, err)
 			}
 			s.setPath(dst.IA, refreshed)
@@ -186,10 +193,10 @@ func (s *meshSocket) send(ep *meshEndpoint, bufs [][]byte) error {
 		dst.Path = path
 		var sendErr error
 		for _, buf := range bufs {
-			if _, sendErr = s.conn.WriteTo(buf, &dst); sendErr != nil {
+			if _, sendErr = conn.WriteTo(buf, &dst); sendErr != nil {
 				break
 			}
-			s.cnt.sentDatagrams.Add(1)
+			sent.Add(1)
 		}
 		if sendErr == nil {
 			return nil
@@ -203,11 +210,11 @@ func (s *meshSocket) send(ep *meshEndpoint, bufs [][]byte) error {
 		delete(s.paths, dst.IA)
 		delete(s.routes, dst.IA)
 		s.mtx.Unlock()
-		// The endpoint's carried path is the one that just failed; the retry
-		// resolves fresh instead of reusing it.
+		// The destination's carried path is the one that just failed; the
+		// retry resolves fresh instead of reusing it.
 		dst.Path = nil
 		if attempt > 0 {
-			s.cnt.sendFailures.Add(int64(len(bufs)))
+			failed.Add(int64(len(bufs)))
 			return sendErr
 		}
 	}

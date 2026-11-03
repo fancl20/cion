@@ -1,6 +1,7 @@
 # Serve Egress as an Overlay SOCKS Service
 
-*   Status: accepted
+*   Status: superseded by
+    [ADR-0024](/docs/adrs/0024-serve-egress-as-exit-nodes-relayed-by-the-hosts-node.md)
 *   Date: 2026-09-26
 
 [TOC]

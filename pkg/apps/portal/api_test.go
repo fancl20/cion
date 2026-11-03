@@ -124,10 +124,10 @@ func (c *console) doWith(method, path string, body any,
 // TestRecordsAPI checks the console's views of the records: the nodes beside
 // the method's node and vote asks, each with its key, its membership's
 // expiry, omitted for a membership that never lapses, its observed tag, and
-// the slice's capacity counted; the hosts, each
-// beside its node's host endpoint and no asks beside them, none available
-// without the coordination application; and a release reaching the records,
-// a malformed key refused before it.
+// the slice's capacity counted; the hosts, each beside its node's host
+// endpoint and the exit it reports, omitted where it reports none, and no
+// asks beside them, none available without the coordination application;
+// and a release reaching the records, a malformed key refused before it.
 func TestRecordsAPI(t *testing.T) {
 	f, c, _ := signedIn(t)
 	f.records.nodes = []Node{{
@@ -153,6 +153,11 @@ func TestRecordsAPI(t *testing.T) {
 		Hostname:  "laptop",
 		OS:        "linux",
 		Connected: true,
+		Exit:      mustIA("1-ff00:0:112"),
+	}, {
+		Addr:    netip.MustParseAddr("100.64.0.3"),
+		NodeKey: strings.Repeat("cd", 32),
+		Owner:   mustIA("1-ff00:0:110"),
 	}}
 	seen := time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC)
 	f.operator.asks = []enrollauth.Ask{{
@@ -214,7 +219,8 @@ func TestRecordsAPI(t *testing.T) {
 		Hosts     []hostView `json:"hosts"`
 		Asks      []askView  `json:"asks"`
 	}
-	hosts := decodeJSON[hostsList](t, c.expect(http.StatusOK, http.MethodGet, "/admin/api/hosts", nil))
+	rec = c.expect(http.StatusOK, http.MethodGet, "/admin/api/hosts", nil)
+	hosts := decodeJSON[hostsList](t, rec)
 	wantHosts := hostsList{
 		Available: true,
 		Hosts: []hostView{{
@@ -226,10 +232,19 @@ func TestRecordsAPI(t *testing.T) {
 			Hostname:  "laptop",
 			OS:        "linux",
 			Connected: true,
+			Exit:      "1-ff00:0:112",
+		}, {
+			Addr:    "100.64.0.3",
+			NodeKey: strings.Repeat("cd", 32),
+			Owner:   "1-ff00:0:110",
 		}},
 	}
 	if diff := cmp.Diff(wantHosts, hosts); diff != "" {
 		t.Errorf("the hosts mismatch (-want +got):\n%s", diff)
+	}
+	if n := strings.Count(rec.Body.String(), `"exit"`); n != 1 {
+		t.Errorf("the hosts carry an exit %d times, want once: the host reporting none "+
+			"omits it", n)
 	}
 
 	c.expect(http.StatusBadRequest, http.MethodDelete, "/admin/api/hosts/nodekey", nil)

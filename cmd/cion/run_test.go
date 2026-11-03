@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"slices"
 	"strings"
 	"testing"
 
@@ -139,7 +140,7 @@ func TestRunCommandsHelpReadsInParts(t *testing.T) {
 			"--topology.neighbor",
 			"--trust.domain", "--trust.acme-email", "--trust.enroll-auth",
 		}, []string{
-			"--topology.link-set", "--applications",
+			"--topology.link-set", "--applications", "--dns.resolvers",
 			"--trust.cert-file", "--trust.key-file",
 			"--wireguard.host-port",
 			"--dataplane.processors", "--dataplane.batch-size",
@@ -150,7 +151,7 @@ func TestRunCommandsHelpReadsInParts(t *testing.T) {
 			"--topology.neighbor",
 			"--trust.domain",
 		}, []string{
-			"--topology.link-set", "--applications",
+			"--topology.link-set", "--applications", "--dns.resolvers",
 			"--wireguard.host-port",
 			"--dataplane.processors", "--dataplane.batch-size",
 			"--dataplane.queue-size",
@@ -161,7 +162,7 @@ func TestRunCommandsHelpReadsInParts(t *testing.T) {
 			"--trust.domain",
 			"--count", "--interval", "--wait",
 		}, []string{
-			"--topology.link-set", "--applications",
+			"--topology.link-set", "--applications", "--dns.resolvers",
 			"--wireguard.host-port",
 		}},
 	} {
@@ -338,11 +339,46 @@ func TestApplicationsArgumentParses(t *testing.T) {
 	})
 	t.Run("ping", func(t *testing.T) {
 		got := parse(t, pflag.NewFlagSet("ping", pflag.ContinueOnError),
-			"--applications", "socks,wireguard", "--applications", "coordination")
-		if len(got) != 3 || got[0] != "socks" || got[1] != "wireguard" ||
+			"--applications", "egress,wireguard", "--applications", "coordination")
+		if len(got) != 3 || got[0] != "egress" || got[1] != "wireguard" ||
 			got[2] != "coordination" {
 
 			t.Errorf("the repeated list = %v, want the spelled order kept", got)
 		}
 	})
+}
+
+// TestResolversArgumentParses checks the resolvers' list on every
+// assembling command: unpassed, it holds Google's public resolvers; passed,
+// the addresses as spelled, comma-separated and repeatable.
+func TestResolversArgumentParses(t *testing.T) {
+	defaults := []string{"8.8.8.8", "8.8.4.4"}
+	for _, command := range []struct {
+		name string
+		cmd  *cobra.Command
+	}{
+		{"run core", newRunCoreCommand()},
+		{"run local", newRunLocalCommand()},
+		{"ping", newPingCommand()},
+	} {
+		flag := command.cmd.Flags().Lookup("dns.resolvers")
+		if flag == nil {
+			t.Errorf("%s registers no --dns.resolvers", command.name)
+			continue
+		}
+		if got := flag.Value.(pflag.SliceValue).GetSlice(); !slices.Equal(got, defaults) {
+			t.Errorf("%s's unpassed --dns.resolvers = %v, want %v", command.name, got, defaults)
+		}
+	}
+
+	opts := &services.NodeConfig{}
+	flags := pflag.NewFlagSet("run", pflag.ContinueOnError)
+	addSharedNodeFlags(flags, opts)
+	args := []string{"--dns.resolvers", "1.1.1.1,2606:4700:4700::1111", "--dns.resolvers", "9.9.9.9"}
+	if err := flags.Parse(args); err != nil {
+		t.Fatalf("parsing %v: %v", args, err)
+	}
+	if want := []string{"1.1.1.1", "2606:4700:4700::1111", "9.9.9.9"}; !slices.Equal(opts.Resolvers, want) {
+		t.Errorf("the passed --dns.resolvers = %v, want %v", opts.Resolvers, want)
+	}
 }

@@ -11,6 +11,7 @@ import (
 	"github.com/scionproto/scion/pkg/addr"
 
 	"github.com/fancl20/cion/pkg/core/trust"
+	"github.com/fancl20/cion/pkg/libs/bus"
 	"github.com/fancl20/cion/pkg/libs/loops"
 )
 
@@ -239,9 +240,9 @@ var errNotReady = errors.New("the node's entry is not ready")
 // publish sends the node's entry once the node's chain exists: an
 // un-enrolled node has no certificate to authenticate the channel with. The
 // answer is the store's assignment, which the application holds as the
-// node's slice — the signal the SOCKS application's assembly waits on. A
-// host the entry's endpoint cannot name — neither the resolver nor the
-// wildcard bind — publishes nothing, the retry re-asking.
+// node's slice and publishes on the tailnet topic. A host the entry's
+// endpoint cannot name — neither the resolver nor the wildcard bind —
+// publishes nothing, the retry re-asking.
 func (a *App) publish(ctx context.Context) error {
 	chain, err := a.cfg.Engine.Chain(ctx)
 	if err != nil {
@@ -300,7 +301,8 @@ func (a *App) Subnet(ctx context.Context) (netip.Prefix, error) {
 	}
 }
 
-// assignSubnet holds the store's answer and wakes the waiters: the first
+// assignSubnet holds the store's answer, publishes it on the tailnet topic
+// beside the entries the view holds, and wakes the waiters: the first
 // answer is the one, for the assignment never moves.
 func (a *App) assignSubnet(subnet netip.Prefix) {
 	a.mtx.Lock()
@@ -309,8 +311,38 @@ func (a *App) assignSubnet(subnet netip.Prefix) {
 		return
 	}
 	a.subnet = subnet
+	view := a.tailnet
+	view.Slice = subnet
+	a.publishTailnetLocked(view)
 	close(a.assigned)
 	slog.Info("WireGuard slice assigned by the directory", "subnet", subnet)
+}
+
+// tailnetView returns the tailnet topic's view of the node's slice beside
+// the directory's node and host entries.
+func tailnetView(slice netip.Prefix, directory Directory) bus.TailnetState {
+	nodes := make([]bus.TailnetNode, 0, len(directory.Nodes))
+	for _, e := range directory.Nodes {
+		nodes = append(nodes, bus.TailnetNode{
+			IA: e.IA, PublicKey: e.PublicKey, Slice: e.Overlay, HostEndpoint: e.HostEndpoint,
+		})
+	}
+	hosts := make([]bus.TailnetHost, 0, len(directory.Hosts))
+	for _, h := range directory.Hosts {
+		hosts = append(hosts, bus.TailnetHost{PublicKey: h.PublicKey, Addr: h.Addr, IA: h.IA})
+	}
+	return bus.NewTailnetState(slice, nodes, hosts)
+}
+
+// publishTailnetLocked publishes the view on the tailnet topic unless it
+// equals the one last published. The caller holds the mutex, so the topic's
+// events follow the order of the changes they carry.
+func (a *App) publishTailnetLocked(view bus.TailnetState) {
+	if view.Equal(a.tailnet) {
+		return
+	}
+	a.tailnet = view
+	a.cfg.Tailnet.Publish(view)
 }
 
 // runSync owns the directory refresh: it re-fetches the directory on the

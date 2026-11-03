@@ -102,8 +102,8 @@ type AdmissionAnswer struct {
 	// records it with the entry.
 	Note string
 	// Node is the node a registration's host lands on: its address from
-	// that node's slice, its one peer that node. The zero IA names the
-	// founding core; the other boundaries ignore it.
+	// that node's slice, and every session it opens through that node. The
+	// zero IA names the founding core; the other boundaries ignore it.
 	Node addr.IA
 }
 

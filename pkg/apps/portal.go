@@ -184,7 +184,7 @@ func (r *portalRecords) Hosts(ctx context.Context) ([]portal.Host, error) {
 			host.MachineKey = h.MachineKey.String()
 		}
 		if seen, ok := presence[h.PublicKey]; ok {
-			host.Connected, host.LastSeen = seen.Connected, seen.LastSeen
+			host.Connected, host.LastSeen, host.Exit = seen.Connected, seen.LastSeen, seen.Exit
 			if seen.Hostname != "" {
 				host.Hostname = seen.Hostname
 			}

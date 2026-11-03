@@ -157,11 +157,16 @@ load refuses the boot with the fix named
 ([ADR-0014](/docs/adrs/0014-select-resident-applications-by-name.md)).
 
 *   **WireGuard** — carries host and mesh traffic over SCION paths between
-    nodes ([ADR-0005](/docs/adrs/0005-serve-endhosts-with-a-wireguard-gateway.md)).
-*   **SOCKS** — internet egress as a service on the overlay: every node
-    serves it by default at its own tailnet address, and the destination a
-    client names is the exit it uses
-    ([ADR-0012](/docs/adrs/0012-serve-egress-as-an-overlay-socks-service.md)).
+    nodes ([ADR-0005](/docs/adrs/0005-serve-endhosts-with-a-wireguard-gateway.md)),
+    and relays each host's sessions with other nodes
+    ([ADR-0024](/docs/adrs/0024-serve-egress-as-exit-nodes-relayed-by-the-hosts-node.md)).
+*   **Egress** — every node's internet exit by default: the node's netstack
+    ends the TCP and UDP flows a host sends through it and opens them again
+    from the node's own sockets, and serves the node's own tailnet address
+    ([ADR-0024](/docs/adrs/0024-serve-egress-as-exit-nodes-relayed-by-the-hosts-node.md)).
+*   **Mihomo** — the mihomo proxy provider each node serves its hosts at its
+    own tailnet address: one tailnet client instance per exit, so a host's
+    mihomo chooses its exit per flow.
 *   **Coordination** — the network's headscale, minimal by decision: hosts
     join by logging in with a standard tailnet client and an auth key
     against the core's coordination endpoint, registration asks the
@@ -246,15 +251,13 @@ links there.
 
 ### Endhost service
 
-Hosts are tailnet clients of their node, the node their auth key names:
-they join by logging in with the key against the core's coordination
-service and run no CION software. The tunnel carries the tailnet alone —
-no default route is advertised — and internet reachability is a service
-every node offers by default at its own tailnet address: the exit a flow
-uses is the destination it names
-([ADR-0012](/docs/adrs/0012-serve-egress-as-an-overlay-socks-service.md)).
-Host-to-host and exit traffic alike cross the SCION mesh between nodes. A
-join completes at the directory's fetch cadence.
+Hosts are tailnet clients of the node their auth key names: they log in
+against the core's coordination service and run no CION software. A host's
+netmap makes every node an exit peer, and the host's own node relays its
+sessions with the others over SCION, unopened
+([ADR-0024](/docs/adrs/0024-serve-egress-as-exit-nodes-relayed-by-the-hosts-node.md)).
+Host-to-host traffic crosses the SCION mesh. A join completes at the
+directory's fetch cadence.
 
 ## See also
 

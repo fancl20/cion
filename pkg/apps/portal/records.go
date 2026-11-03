@@ -84,6 +84,9 @@ type Host struct {
 	// sighting since the core started, zero when it has not mapped since.
 	Connected bool
 	LastSeen  time.Time
+	// Exit is the node the host reports as its selected exit, zero when it
+	// reports none.
+	Exit addr.IA
 }
 
 // Records is the network's records as the console reads them, and the two

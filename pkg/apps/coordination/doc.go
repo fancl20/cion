@@ -2,10 +2,10 @@
 // headscale, minimal by decision, served by the core alone beside the
 // WireGuard application. It speaks the tailnet client protocol from vendored
 // packages — the noise channel inside WebPKI HTTPS on the core's domain,
-// registration behind the generalized admission seam, the netmap holding one
-// peer — the host's node — and the DERP relay a client expects as its fallback
-// path. Hosts are logins, not configuration edits: admission allocates the
-// next free address in the slice of the node the admission names and
-// records one registry entry that distributes by the directory every node
-// already fetches.
+// registration behind the generalized admission seam, the netmap naming
+// every node as an exit peer, the host's own node holding the hosts, and the
+// DERP relay a client expects as its fallback path. Hosts are logins, not
+// configuration edits: admission allocates the next free address in the
+// slice of the node the admission names and records one registry entry that
+// distributes by the directory every node already fetches.
 package coordination

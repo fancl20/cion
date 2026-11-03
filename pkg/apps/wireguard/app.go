@@ -47,6 +47,11 @@ const (
 	// SvcDirectory is the core's directory service. The core node's
 	// application registers its directory socket under this value.
 	SvcDirectory addr.SVC = 0x7ff2
+	// SvcHostRelay is the host relay service. Every node's application
+	// registers its relay socket under this value in its own AS: a host's
+	// node relays the host's datagrams for another node to that node's
+	// relay service, and the node answers to the relaying node's.
+	SvcHostRelay addr.SVC = 0x7ff3
 )
 
 // PersistentKeepalive is the mesh peers' keepalive interval, a code constant
@@ -78,6 +83,11 @@ type Config struct {
 	// the publication for the cadence's retry — and each event publishes the
 	// entry anew.
 	Self *bus.Topic[bus.SelfState]
+	// Tailnet is the topic the application publishes its view of the
+	// directory on: the node's slice once the directory assigns it, beside
+	// the node and host entries of the last directory it applied, published
+	// at the assignment and at each applied directory that changes the view.
+	Tailnet *bus.Topic[bus.TailnetState]
 	// DERP is the relay presence the node holds: received datagrams feed
 	// the shared host port and sends carry the replies, so a host on a
 	// network where UDP to the node cannot pass still reaches its node.
@@ -99,9 +109,9 @@ type Config struct {
 	// ISD-AS named by the directory service — on non-core nodes.
 	FounderRoute func() *scion.Addr
 	// NewConn binds a SCION connection of this node on an ephemeral port:
-	// the socket the mesh transport serves on, the one the core's directory
-	// serves on beside it, and the one every other node's client publishes
-	// and fetches through.
+	// the socket the mesh transport serves on, the relay socket beside it,
+	// the one the core's directory serves on, and the one every other
+	// node's client publishes and fetches through.
 	NewConn func() (*scion.Conn, error)
 	// RegisterSvc registers one of the application's sockets as a SCION
 	// service in this AS — the same registration discovery makes for the CS
@@ -125,7 +135,8 @@ type Config struct {
 
 // App is the WireGuard application: the mesh transport and directory, the one
 // host-facing device behind its shared port — programmed from the host entries
-// the directory distributes — and the in-process router between the tunnels,
+// the directory distributes — with the relay that carries the node's hosts'
+// sessions with other nodes, and the in-process router between the tunnels,
 // the surface a resident service application borrows. The node running it
 // holds unprivileged UDP sockets and its own state, and nothing else.
 type App struct {
@@ -134,6 +145,7 @@ type App struct {
 	cnt *counters
 
 	mesh   *meshSocket
+	relay  *hostRelay
 	host   *hostSocket
 	router *router
 
@@ -162,17 +174,20 @@ type App struct {
 	// hosts holds the one host-facing device.
 	hosts *hostDevice
 	// hostPeers holds the host entries the device's peers are programmed
-	// from, keyed by the hosts' public keys.
+	// from — every host the directory holds — keyed by the hosts' public
+	// keys.
 	hostPeers map[PublicKey]HostEntry
 	// subnet is the slice the directory assigned — set once, when the
 	// publication's answer arrives, and assigned closes to wake the waits
 	// on it.
 	subnet   netip.Prefix
 	assigned chan struct{}
+	// tailnet is the view last published on the tailnet topic.
+	tailnet bus.TailnetState
 }
 
 // hostDevice is the one host-facing device: the node's key pair on the
-// shared port, its peers the host entries the node owns.
+// shared port, its peers every host entry the directory holds.
 type hostDevice struct {
 	dev  *device.Device
 	pipe *pipe
@@ -192,15 +207,18 @@ type svcReg struct {
 }
 
 // New assembles the application: it loads or creates the node's WireGuard key
-// pair, binds the mesh socket on an ephemeral port and registers it under
-// the wireguard service in its own AS, binds the shared host-facing port,
-// creates one host device per offered exit with the configured peers, builds
-// the router, and wires the directory surfaces: the core's store it serves
-// over its own registered service socket, the route every other node
-// publishes and fetches through. Run serves it.
+// pair, binds the mesh socket and the relay socket on ephemeral ports and
+// registers them under the wireguard and host relay services in its own AS,
+// binds the shared host-facing port, creates the one host device, builds the
+// router, and wires the directory surfaces: the core's store it serves over
+// its own registered service socket, the route every other node publishes
+// and fetches through. Run serves it.
 func New(cfg Config) (*App, error) {
 	if cfg.Self == nil {
 		return nil, fmt.Errorf("no topic of the node's own state")
+	}
+	if cfg.Tailnet == nil {
+		return nil, fmt.Errorf("no tailnet topic")
 	}
 	key, err := LoadOrCreateKey(cfg.StateDir)
 	if err != nil {
@@ -211,18 +229,27 @@ func New(cfg Config) (*App, error) {
 	if err != nil {
 		return nil, fmt.Errorf("binding the mesh socket: %w", err)
 	}
+	relayConn, err := cfg.NewConn()
+	if err != nil {
+		_ = meshConn.Close()
+		return nil, fmt.Errorf("binding the relay socket: %w", err)
+	}
 	hostConn, err := net.ListenUDP("udp",
 		&net.UDPAddr{IP: cfg.ListenHost.AsSlice(), Port: int(cfg.ListenPort)})
 	if err != nil {
 		_ = meshConn.Close()
+		_ = relayConn.Close()
 		return nil, fmt.Errorf("binding the host port: %w", err)
 	}
+	mesh := newMeshSocket(meshConn, cfg.Paths, cnt)
+	relay := newHostRelay(cfg.IA, key.PublicKey(), relayConn, mesh, cnt)
 	a := &App{
 		cfg:       cfg,
 		key:       key,
 		cnt:       cnt,
-		mesh:      newMeshSocket(meshConn, cfg.Paths, cnt),
-		host:      newHostSocket(hostConn, cnt),
+		mesh:      mesh,
+		relay:     relay,
+		host:      newHostSocket(hostConn, relay, cnt),
 		router:    newRouter(OverlayMTU, cnt),
 		meshPeers: make(map[addr.IA]*meshPeer),
 		hostPeers: make(map[PublicKey]HostEntry),
@@ -232,6 +259,10 @@ func New(cfg Config) (*App, error) {
 	if err := a.register(SvcWireguard, meshConn.LocalPort()); err != nil {
 		a.release()
 		return nil, fmt.Errorf("registering the mesh socket: %w", err)
+	}
+	if err := a.register(SvcHostRelay, relayConn.LocalPort()); err != nil {
+		a.release()
+		return nil, fmt.Errorf("registering the relay socket: %w", err)
 	}
 	if cfg.Store != nil {
 		a.directory = storeDirectoryClient{store: cfg.Store}
@@ -261,11 +292,12 @@ func New(cfg Config) (*App, error) {
 		// The relay presence stands before the host device, so the device's
 		// sends can return over the relay from the first datagram.
 		a.bridge = newDERPBridge(derpBridgeConfig{
-			Key:    key,
-			Socket: a.host,
-			Cnt:    cnt,
-			URL:    cfg.DERP.URL,
-			IPv4:   cfg.DERP.IPv4,
+			Key:       key,
+			Socket:    a.host,
+			Cnt:       cnt,
+			URL:       cfg.DERP.URL,
+			Resolvers: cfg.DERP.Resolvers,
+			IPv4:      cfg.DERP.IPv4,
 		})
 	}
 	if err := a.startHostDevice(); err != nil {
@@ -289,8 +321,8 @@ func validateAssignment(subnet netip.Prefix) error {
 }
 
 // Tailnet is the overlay's host space, the range every node's slice is a slice
-// of: the tunnel carries it and nothing else — no default route is advertised
-// anywhere.
+// of. A destination outside it is the internet, which only the host device's
+// packets reach, through the router's default delivery.
 var Tailnet = netip.MustParsePrefix("100.64.0.0/10")
 
 // register registers a socket's port as a SCION service in this AS and
@@ -321,6 +353,7 @@ func (a *App) deregisterAll() {
 func (a *App) release() {
 	a.deregisterAll()
 	a.mesh.Close()
+	a.relay.Close()
 	a.host.Close()
 	if a.dirConn != nil {
 		_ = a.dirConn.Close()
@@ -331,9 +364,9 @@ func (a *App) release() {
 }
 
 // Router returns the overlay routing a resident service application borrows:
-// the reply path its produced packets ride and the delivery installation for
-// the address it serves on. Without this application there is nothing to
-// borrow.
+// the reply path its produced packets ride, the delivery installation for
+// the address it serves on, and the default delivery of the hosts' packets
+// for the internet. Without this application there is nothing to borrow.
 func (a *App) Router() Router { return a.router }
 
 // startHostDevice creates the one host device on the shared port's
@@ -360,10 +393,8 @@ func (a *App) startHostDevice() error {
 }
 
 // newMeshDevice builds one directory peer's mesh device: the node's key pair,
-// the peer's entry as its endpoint and AllowedIPs — its overlay subnet, with
-// 0.0.0.0/0 added when the peer is one of this node's configured exits, so
-// the device's default-routed traffic finds a peer for any destination while
-// WireGuard's longest-prefix peer selection keeps subnet traffic direct.
+// and the peer's entry as its endpoint and allowed IPs — its overlay slice
+// alone, for the mesh carries tailnet traffic and nothing else.
 func (a *App) newMeshDevice(entry Entry) (*meshPeer, error) {
 	bind := newMeshBind(a.mesh)
 	pipe := newPipe("mesh-"+entry.IA.String(), OverlayMTU, a.cnt)
@@ -391,11 +422,13 @@ func (a *App) newMeshDevice(entry Entry) (*meshPeer, error) {
 
 // applyDirectory diffs a fetched directory against the mesh devices and the
 // one host device: new mesh peers gain a device, departed peers lose theirs
-// and their router entries; the host entries the node owns become the host
-// device's peers — a new key gains its /32, a departed key loses it — the
-// same diff shape the node entries give the mesh. A later milestone's host
-// removal arrives as this same diff. A new peer's drain joins the
-// application's wait group and returns when ctx ends or the peer departs.
+// and their router entries; every host entry becomes a host device peer — a
+// new key gains its /32, a departed key loses it — the same diff shape the
+// node entries give the mesh, and the node entries key the relay's checkers.
+// A later milestone's host removal arrives as this same diff. A new peer's
+// drain joins the application's wait group and returns when ctx ends or the
+// peer departs. The directory's entries beside the node's slice become the
+// tailnet topic's view, published when they change it.
 func (a *App) applyDirectory(ctx context.Context, directory Directory) {
 	a.mtx.Lock()
 	defer a.mtx.Unlock()
@@ -428,27 +461,28 @@ func (a *App) applyDirectory(ctx context.Context, directory Directory) {
 		delete(a.meshPeers, ia)
 		slog.Info("WireGuard mesh tunnel down", "peer", ia)
 	}
+	a.relay.setNodes(directory.Nodes)
 	a.applyHostEntries(directory.Hosts)
 	a.rebuildLocked()
+	a.publishTailnetLocked(tailnetView(a.subnet, directory))
 }
 
-// applyHostEntries programs the host device from the host entries the node
-// owns — the entries the coordination registry distributes. The IPC diff
+// applyHostEntries programs the host device from every host entry the
+// directory holds — the entries the coordination registry distributes — each
+// with its /32, so the node accepts a session from any host. The IPC diff
 // adds the new keys and removes the departed ones, so a surviving peer's
-// cached endpoint — the address its datagrams last arrived from, UDP or
+// cached endpoint — the leg its datagrams last arrived on, UDP, DERP, or
 // relay — survives the programming.
 func (a *App) applyHostEntries(hosts []HostEntry) {
 	if a.hosts == nil {
 		return
 	}
-	owned := make(map[PublicKey]HostEntry, len(hosts))
+	all := make(map[PublicKey]HostEntry, len(hosts))
 	for _, host := range hosts {
-		if host.IA.Equal(a.cfg.IA) {
-			owned[host.PublicKey] = host
-		}
+		all[host.PublicKey] = host
 	}
 	var ipc strings.Builder
-	for key, host := range owned {
+	for key, host := range all {
 		if _, ok := a.hostPeers[key]; ok {
 			continue
 		}
@@ -456,7 +490,7 @@ func (a *App) applyHostEntries(hosts []HostEntry) {
 		ipc.WriteString("allowed_ip=" + netip.PrefixFrom(host.Addr, 32).String() + "\n")
 	}
 	for key := range a.hostPeers {
-		if _, ok := owned[key]; ok {
+		if _, ok := all[key]; ok {
 			continue
 		}
 		ipc.WriteString("public_key=" + key.String() + "\n")
@@ -468,15 +502,15 @@ func (a *App) applyHostEntries(hosts []HostEntry) {
 			return
 		}
 	}
-	for key, host := range owned {
+	for key, host := range all {
 		if _, ok := a.hostPeers[key]; !ok {
 			a.hostPeers[key] = host
 			slog.Info("WireGuard host joined",
-				"key", key, "addr", host.Addr, "note", host.Note)
+				"key", key, "addr", host.Addr, "ia", host.IA, "note", host.Note)
 		}
 	}
 	for key := range a.hostPeers {
-		if _, ok := owned[key]; !ok {
+		if _, ok := all[key]; !ok {
 			delete(a.hostPeers, key)
 			slog.Info("WireGuard host departed", "key", key)
 		}
@@ -485,21 +519,23 @@ func (a *App) applyHostEntries(hosts []HostEntry) {
 
 // rebuildLocked recomposes the router table from the devices; the
 // application's mutex serializes rebuilds with the device set. The table
-// holds the owned hosts' /32s to the host device and each node entry's
-// slice to its mesh device — longest prefix first — and no default
-// anywhere: a destination no slice claims counts unroutable.
+// holds every directory host on the host device, the owned marked as the
+// hosts forwarded packets reach, and each node entry's slice to its mesh
+// device — longest prefix first.
 func (a *App) rebuildLocked() {
 	nets := make([]route, 0, len(a.meshPeers))
 	for _, peer := range a.meshPeers {
 		nets = append(nets, route{prefix: peer.entry.Overlay, dst: peer.pipe})
 	}
+	var hostPipe *pipe
 	var hosts []hostRoute
 	if a.hosts != nil {
+		hostPipe = a.hosts.pipe
 		for _, host := range a.hostPeers {
-			hosts = append(hosts, hostRoute{addr: host.Addr, pipe: a.hosts.pipe})
+			hosts = append(hosts, hostRoute{addr: host.Addr, owned: host.IA.Equal(a.cfg.IA)})
 		}
 	}
-	a.router.rebuild(hosts, nets)
+	a.router.rebuild(hostPipe, hosts, nets)
 }
 
 // PublicKey returns the node's WireGuard public key — the public key a
@@ -520,14 +556,17 @@ func (a *App) MeshPeers() []addr.IA {
 	return a.meshPeerIAs()
 }
 
-// HostPeers snapshots the host entries the node owns — the peers the one
-// host device holds, programmed from the fetched directory.
+// HostPeers snapshots the host entries the node owns — the hosts its router
+// forwards to — among the host device's peers, which are every host entry
+// the fetched directory holds.
 func (a *App) HostPeers() []HostEntry {
 	a.mtx.Lock()
 	defer a.mtx.Unlock()
 	hosts := make([]HostEntry, 0, len(a.hostPeers))
 	for _, host := range a.hostPeers {
-		hosts = append(hosts, host)
+		if host.IA.Equal(a.cfg.IA) {
+			hosts = append(hosts, host)
+		}
 	}
 	return hosts
 }
@@ -550,12 +589,12 @@ func (a *App) Registry() Registry {
 }
 
 // Run serves the application until the context is canceled: the sockets'
-// readers, the mesh socket's following of the interface-down signals, the
-// host device's drain, the relay presence, the directory — served by the
-// core, published and fetched by everyone — and the counters on the
-// process's meter. It returns once every goroutine it started has
-// returned, the mesh peers' drains among them, and leaves what New bound to
-// Close.
+// readers, the relay socket's among them, the mesh socket's following of the
+// interface-down signals, the host device's drain, the DERP presence, the
+// directory — served by the core, published and fetched by everyone — and
+// the counters on the process's meter. It returns once every goroutine it
+// started has returned, the mesh peers' drains among them, and leaves what
+// New bound to Close.
 func (a *App) Run(ctx context.Context) error {
 	served, err := a.cnt.serve(otel.GetMeterProvider().Meter(meterScope), a.cfg.IA)
 	if err != nil {
@@ -564,6 +603,7 @@ func (a *App) Run(ctx context.Context) error {
 	defer func() { _ = served.Unregister() }()
 	loops.Go(ctx, &a.wg, "wireguard mesh socket", a.mesh.run)
 	loops.Go(ctx, &a.wg, "wireguard host socket", a.host.run)
+	loops.Go(ctx, &a.wg, "wireguard relay socket", a.host.runRelay)
 	if a.cfg.InterfaceDown != nil {
 		loops.Go(ctx, &a.wg, "wireguard interface-down signals", func(ctx context.Context) {
 			a.mesh.followSignals(ctx, a.cfg.InterfaceDown)
@@ -572,7 +612,7 @@ func (a *App) Run(ctx context.Context) error {
 	if a.hosts != nil {
 		pipe := a.hosts.pipe
 		loops.Go(ctx, &a.wg, "wireguard host drain", func(ctx context.Context) {
-			pipe.drain(ctx, a.router.route)
+			pipe.drain(ctx, a.router.routeFromHost)
 		})
 	}
 	if a.bridge != nil {

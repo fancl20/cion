@@ -50,7 +50,8 @@ type Entry struct {
 var Table = []Entry{
 	wireguardEntry,
 	coordinationEntry,
-	socksEntry,
+	egressEntry,
+	mihomoEntry,
 	votingEntry,
 	portalEntry,
 }

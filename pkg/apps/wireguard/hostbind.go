@@ -2,6 +2,7 @@ package wireguard
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"net"
 	"net/netip"
@@ -9,17 +10,22 @@ import (
 	"time"
 
 	"golang.zx2c4.com/wireguard/conn"
+
+	"github.com/fancl20/cion/pkg/libs/scion"
 )
 
 // hostSocket is the node's shared host-facing port: one plain UDP socket
 // behind which every host-facing device listens — hosts are plain internet
-// clients with a single endpoint to reach — demultiplexed the way the mesh
-// socket is: a dispatcher delivers each datagram to every device, and the
-// device whose peer table holds the sender's public key completes the
-// handshake.
+// clients with a single endpoint to reach — beside the relay socket other
+// nodes reach the port's relay at. The relay classifies each datagram before
+// a device sees it and carries those of a host's sessions with other nodes
+// onward unchanged; the rest are demultiplexed the way the mesh socket's
+// are: a dispatcher delivers each datagram to every device, and the device
+// whose peer table holds the sender's public key completes the handshake.
 type hostSocket struct {
-	conn *net.UDPConn
-	cnt  *counters
+	conn  *net.UDPConn
+	relay *hostRelay
+	cnt   *counters
 
 	mtx    sync.Mutex
 	subs   map[*hostBind]chan datagram
@@ -27,23 +33,25 @@ type hostSocket struct {
 	done   chan struct{}
 }
 
-func newHostSocket(c *net.UDPConn, cnt *counters) *hostSocket {
+func newHostSocket(c *net.UDPConn, relay *hostRelay, cnt *counters) *hostSocket {
 	return &hostSocket{
-		conn: c,
-		cnt:  cnt,
-		subs: make(map[*hostBind]chan datagram),
-		done: make(chan struct{}),
+		conn:  c,
+		relay: relay,
+		cnt:   cnt,
+		subs:  make(map[*hostBind]chan datagram),
+		done:  make(chan struct{}),
 	}
 }
 
 // LocalPort returns the bound host-facing port.
 func (s *hostSocket) LocalPort() uint16 { return uint16(s.conn.LocalAddr().(*net.UDPAddr).Port) }
 
-// run reads the shared socket and delivers every datagram to every opened
-// bind until the context ends — its end sets a read deadline that wakes the
-// blocked read — or the socket fails, then finishes the socket, so every
-// bind's receive function reports it closed. The port stays bound for
-// Close.
+// run reads the shared socket until the context ends — its end sets a read
+// deadline that wakes the blocked read — or the socket fails, then finishes
+// the socket, so every bind's receive function reports it closed. A datagram
+// the relay carries leaves for its node, one it answers with a cookie reply
+// gets the reply back from the shared port, one it drops counts, and every
+// other reaches every opened bind. The port stays bound for Close.
 func (s *hostSocket) run(ctx context.Context) {
 	stop := context.AfterFunc(ctx, func() { _ = s.conn.SetReadDeadline(time.Now()) })
 	defer stop()
@@ -55,7 +63,52 @@ func (s *hostSocket) run(ctx context.Context) {
 			return
 		}
 		s.cnt.hostDatagrams.Add(1)
-		s.deliver(buf[:n], &hostEndpoint{addr: from.AddrPort()})
+		pkt, src := buf[:n], from.AddrPort()
+		switch node, reply, verdict := s.relay.fromHost(pkt, src); verdict {
+		case relayToDevice:
+			s.deliver(pkt, &hostEndpoint{addr: src})
+		case relayOnward:
+			s.relay.forward(node, pkt)
+		case relayCookie:
+			if _, err := s.conn.WriteToUDPAddrPort(reply, src); err != nil {
+				s.cnt.relayDrops.Add(1)
+				continue
+			}
+			s.cnt.relayCookies.Add(1)
+		case relayDrop:
+			s.cnt.relayDrops.Add(1)
+		}
+	}
+}
+
+// runRelay reads the relay socket until the context ends or the socket
+// fails. A datagram the relay carries leaves unchanged for its host's
+// endpoint from the shared port, one it drops counts, and every other
+// reaches every opened bind with a relay endpoint naming the node it came
+// from.
+func (s *hostSocket) runRelay(ctx context.Context) {
+	stop := context.AfterFunc(ctx, func() { _ = s.relay.conn.SetReadDeadline(time.Now()) })
+	defer stop()
+	buf := make([]byte, 64<<10)
+	for {
+		n, from, err := s.relay.conn.ReadFrom(buf)
+		if err != nil {
+			return
+		}
+		node := from.(*scion.Addr)
+		pkt := buf[:n]
+		switch host, verdict := s.relay.fromNode(pkt, node.IA); verdict {
+		case relayToDevice:
+			s.deliver(pkt, &hostEndpoint{relay: *node})
+		case relayOnward:
+			if _, err := s.conn.WriteToUDPAddrPort(pkt, host); err != nil {
+				s.cnt.relayDrops.Add(1)
+				continue
+			}
+			s.cnt.relayedDatagrams.Add(1)
+		case relayDrop:
+			s.cnt.relayDrops.Add(1)
+		}
 	}
 }
 
@@ -110,8 +163,8 @@ func (s *hostSocket) unsubscribe(b *hostBind) {
 // hostBind is one host device's half of the shared port.
 type hostBind struct {
 	socket *hostSocket
-	// bridge carries the sends of relay-sourced peers; nil when the node
-	// runs no relay presence.
+	// bridge carries the sends of DERP-sourced peers; nil when the node
+	// runs no DERP presence.
 	bridge *derpBridge
 	recv   chan datagram
 	// closed wakes the receive function the device retires.
@@ -145,18 +198,19 @@ func (b *hostBind) Close() error {
 
 func (b *hostBind) SetMark(uint32) error { return nil }
 
-// Send carries the datagrams to the host: over the plain UDP socket to the
-// arrival address a host's datagrams came from, or over the relay presence
-// to the key a relay-sourced datagram named — whichever leg the peer's last
-// authenticated packet arrived on.
+// Send carries the datagrams to the host over the leg the peer's last
+// authenticated datagram arrived on: the plain UDP socket to the arrival
+// address, the DERP presence to the key a DERP-sourced datagram named, or
+// the relay socket to the node that relayed the host's datagram.
 func (b *hostBind) Send(bufs [][]byte, ep conn.Endpoint) error {
 	peer, ok := ep.(*hostEndpoint)
 	if !ok {
 		return conn.ErrWrongEndpointType
 	}
-	if peer.onDERP() {
+	switch {
+	case peer.onDERP():
 		if b.bridge == nil {
-			return errors.New("no relay presence for a relay-sourced peer")
+			return errors.New("no DERP presence for a DERP-sourced peer")
 		}
 		for _, buf := range bufs {
 			if err := b.bridge.send(peer.derp, buf); err != nil {
@@ -164,6 +218,8 @@ func (b *hostBind) Send(bufs [][]byte, ep conn.Endpoint) error {
 			}
 		}
 		return nil
+	case peer.onRelay():
+		return b.socket.relay.send(peer.relay, bufs)
 	}
 	for _, buf := range bufs {
 		if _, err := b.socket.conn.WriteToUDPAddrPort(buf, peer.addr); err != nil {
@@ -199,24 +255,43 @@ func (b *hostBind) receive(packets [][]byte, sizes []int, eps []conn.Endpoint) (
 
 // hostEndpoint is a host as wireguard-go sees it: the leg its last
 // authenticated datagram arrived on — the internet address of a UDP
-// arrival, which replies return to, or the sender's key of a relay
-// arrival, which replies return over the relay.
+// arrival, which replies return to; the sender's key of a DERP arrival,
+// which replies return over the DERP presence; or the relaying node of a
+// relay arrival, which replies return to over the relay socket.
 type hostEndpoint struct {
 	addr netip.AddrPort
 	derp PublicKey
+	// relay is the node a relay arrival came from — its ISD-AS and the
+	// reversed path the datagram arrived on; its ISD-AS is zero off the
+	// relay leg.
+	relay scion.Addr
 }
 
-// onDERP reports whether the endpoint names the relay leg.
+// onDERP reports whether the endpoint names the DERP leg.
 func (e *hostEndpoint) onDERP() bool { return e.derp != PublicKey{} }
+
+// onRelay reports whether the endpoint names the relay leg.
+func (e *hostEndpoint) onRelay() bool { return !e.relay.IA.IsZero() }
 
 func (e *hostEndpoint) ClearSrc()           {}
 func (e *hostEndpoint) SrcToString() string { return "" }
 func (e *hostEndpoint) DstToString() string {
-	if e.onDERP() {
+	switch {
+	case e.onDERP():
 		return "derp:" + e.derp.String()
+	case e.onRelay():
+		return "relay:" + e.relay.IA.String()
 	}
 	return e.addr.String()
 }
-func (e *hostEndpoint) DstToBytes() []byte { return e.addr.Addr().AsSlice() }
-func (e *hostEndpoint) DstIP() netip.Addr  { return e.addr.Addr() }
-func (e *hostEndpoint) SrcIP() netip.Addr  { return netip.Addr{} }
+
+// DstToBytes returns the source digest wireguard-go's cookie replies bind
+// to: the arrival address, or on the relay leg the relaying node's ISD-AS.
+func (e *hostEndpoint) DstToBytes() []byte {
+	if e.onRelay() {
+		return binary.BigEndian.AppendUint64(nil, uint64(e.relay.IA))
+	}
+	return e.addr.Addr().AsSlice()
+}
+func (e *hostEndpoint) DstIP() netip.Addr { return e.addr.Addr() }
+func (e *hostEndpoint) SrcIP() netip.Addr { return netip.Addr{} }

@@ -41,6 +41,7 @@ func newCoordination(env *Environment, loaded []Loaded) (Application, error) {
 		// gate answering what the node admits and where each host lands.
 		Authorizer: env.Authorizer,
 		DERP:       relay,
+		Resolvers:  env.Resolvers,
 		StateDir:   filepath.Join(env.StateRoot, "coordination"),
 		MountHTTPS: env.MountHTTPS,
 		RelayOnly:  env.Relay.RelayOnly,

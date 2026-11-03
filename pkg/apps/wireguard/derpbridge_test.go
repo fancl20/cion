@@ -1,16 +1,22 @@
 package wireguard
 
 import (
+	"context"
 	"encoding/hex"
+	"fmt"
 	"net"
 	"net/http/httptest"
 	"net/netip"
+	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/scionproto/scion/pkg/addr"
+	"golang.org/x/net/dns/dnsmessage"
 	"tailscale.com/derp"
 	"tailscale.com/derp/derpserver"
 	"tailscale.com/types/key"
@@ -159,7 +165,7 @@ func TestDERPBridgeRoamsByLastArrival(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = udpConn.Close() })
-	socket := newHostSocket(udpConn, cnt)
+	socket := newHostSocket(udpConn, newHostRelay(0, nodePub, nil, nil, cnt), cnt)
 	go socket.run(t.Context())
 
 	relay := &relayDouble{}
@@ -300,4 +306,183 @@ func TestDERPBridgeRoamsByLastArrival(t *testing.T) {
 // takeResult carries one decrypted packet out of the pump.
 type takeResult struct {
 	pkt []byte
+}
+
+// relayName is the host name the resolution tests' relay URLs name.
+const relayName = "relay.cion.test"
+
+// fakeResolver is a DNS resolver over UDP at port 53 of a loopback address.
+// It records the names it is asked and, unless silent, answers the relay's
+// name with the loopback address the relay listens on and every other name
+// with no such host.
+type fakeResolver struct {
+	conn   *net.UDPConn
+	silent bool
+
+	mtx   sync.Mutex
+	asked []string
+}
+
+// newFakeResolver serves a resolver at port 53 of the host until the test
+// ends.
+func newFakeResolver(t *testing.T, host netip.Addr, silent bool) *fakeResolver {
+	t.Helper()
+	conn, err := net.ListenUDP("udp", net.UDPAddrFromAddrPort(netip.AddrPortFrom(host, dnsPort)))
+	if err != nil {
+		t.Fatalf("binding a resolver at port %d of %v: %v", dnsPort, host, err)
+	}
+	r := &fakeResolver{conn: conn, silent: silent}
+	served := make(chan struct{})
+	go func() {
+		defer close(served)
+		r.serve()
+	}()
+	t.Cleanup(func() {
+		_ = conn.Close()
+		<-served
+	})
+	return r
+}
+
+// serve records and answers each query until the socket closes.
+func (r *fakeResolver) serve() {
+	buf := make([]byte, 1500)
+	for {
+		n, src, err := r.conn.ReadFromUDPAddrPort(buf)
+		if err != nil {
+			return
+		}
+		var p dnsmessage.Parser
+		h, err := p.Start(buf[:n])
+		if err != nil {
+			continue
+		}
+		q, err := p.Question()
+		if err != nil {
+			continue
+		}
+		r.mtx.Lock()
+		r.asked = append(r.asked, q.Name.String())
+		r.mtx.Unlock()
+		if r.silent {
+			continue
+		}
+		resp := dnsmessage.Message{
+			ID: h.ID, Response: true, RecursionAvailable: true,
+			Questions: []dnsmessage.Question{q},
+		}
+		switch {
+		case !strings.EqualFold(q.Name.String(), relayName+"."):
+			resp.RCode = dnsmessage.RCodeNameError
+		case q.Type == dnsmessage.TypeA:
+			resp.Answers = []dnsmessage.Resource{{
+				Header: dnsmessage.ResourceHeader{
+					Name: q.Name, Type: dnsmessage.TypeA, Class: dnsmessage.ClassINET, TTL: 60,
+				},
+				Body: &dnsmessage.AResource{A: [4]byte{127, 0, 0, 1}},
+			}}
+		}
+		out, err := resp.Pack()
+		if err != nil {
+			panic(fmt.Sprintf("packing the resolver's answer: %v", err))
+		}
+		_, _ = r.conn.WriteToUDPAddrPort(out, src)
+	}
+}
+
+// names returns the names the resolver has been asked.
+func (r *fakeResolver) names() []string {
+	r.mtx.Lock()
+	defer r.mtx.Unlock()
+	return slices.Clone(r.asked)
+}
+
+// namedRelay returns the relay's configuration with its URL naming the
+// relay by relayName in place of its loopback address.
+func namedRelay(t *testing.T, relay *DERPConfig) *DERPConfig {
+	t.Helper()
+	u, err := url.Parse(relay.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	u.Host = net.JoinHostPort(relayName, u.Port())
+	return &DERPConfig{URL: u.String()}
+}
+
+// runPresence runs the presence until the test ends, failing the test
+// unless it connects within one connect timeout.
+func runPresence(t *testing.T, b *derpBridge) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		b.run(ctx)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		<-done
+	})
+	tick := time.NewTicker(10 * time.Millisecond)
+	defer tick.Stop()
+	bound := time.After(derpConnect)
+	for !relayConnected(b) {
+		select {
+		case <-tick.C:
+		case <-bound:
+			t.Fatal("the relay presence never connected")
+		}
+	}
+}
+
+// TestDERPPresenceResolvesThroughTheResolvers checks the presence's name
+// resolution: the relay's host name resolves through the configured
+// resolvers, the presence connecting at the address they answer, and a
+// resolver that never answers stops nothing — every resolver is asked, the
+// first answer taken.
+func TestDERPPresenceResolvesThroughTheResolvers(t *testing.T) {
+	silent := newFakeResolver(t, netip.MustParseAddr("127.0.0.129"), true)
+	answering := newFakeResolver(t, testHost, false)
+	relay := namedRelay(t, newSilentRelay(t))
+	relay.Resolvers = []netip.Addr{netip.MustParseAddr("127.0.0.129"), testHost}
+	ia := addr.MustIAFrom(20, 0xff0000000271)
+	a, _ := newTestWireguard(t, ia, newFlippableTrustDB(t, ia), func(cfg *Config) {
+		cfg.DERP = relay
+	})
+
+	runPresence(t, a.bridge)
+	if !slices.Contains(answering.names(), relayName+".") {
+		t.Errorf("the answering resolver was asked %v, want the relay's name", answering.names())
+	}
+	// The silent resolver's share of the exchange reached its socket before
+	// the answer did; its reader records it in its own time.
+	tick := time.NewTicker(10 * time.Millisecond)
+	defer tick.Stop()
+	bound := time.After(5 * time.Second)
+	for !slices.Contains(silent.names(), relayName+".") {
+		select {
+		case <-tick.C:
+		case <-bound:
+			t.Fatalf("the silent resolver was asked %v, want the relay's name", silent.names())
+		}
+	}
+}
+
+// TestDERPPresenceKeepsThePinnedAddress checks the harness's pin: a
+// presence pinned to the relay's address dials it there, its name never
+// resolved — the resolvers it names answer nothing.
+func TestDERPPresenceKeepsThePinnedAddress(t *testing.T) {
+	silent := newFakeResolver(t, testHost, true)
+	relay := namedRelay(t, newSilentRelay(t))
+	relay.Resolvers = []netip.Addr{testHost}
+	relay.IPv4 = "127.0.0.1"
+	ia := addr.MustIAFrom(20, 0xff0000000272)
+	a, _ := newTestWireguard(t, ia, newFlippableTrustDB(t, ia), func(cfg *Config) {
+		cfg.DERP = relay
+	})
+
+	runPresence(t, a.bridge)
+	if names := silent.names(); len(names) != 0 {
+		t.Errorf("the pinned presence asked the resolver for %v, want nothing", names)
+	}
 }

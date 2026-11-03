@@ -654,7 +654,7 @@ func TestDeliberateCore(t *testing.T) {
 		name string
 		app  *services.App
 	}{{"the core", a.app}, {"the joiner", b.app}} {
-		for _, resident := range []string{"wireguard", "coordination", "socks"} {
+		for _, resident := range []string{"wireguard", "coordination", "egress", "mihomo"} {
 			if got := node.app.Application(resident); got != nil {
 				t.Errorf("%s loaded the %s application beside an empty list",
 					node.name, resident)

@@ -23,9 +23,12 @@ type counters struct {
 	// unroutablePackets counts packets no table entry and no default
 	// claimed.
 	unroutablePackets atomic.Int64
-	// sentDatagrams counts mesh datagrams the SCION transport carried.
+	// sentDatagrams counts the datagrams the SCION transport carried for the
+	// node's own devices: the mesh devices', and the host device's to the
+	// nodes that relay its hosts.
 	sentDatagrams atomic.Int64
-	// sendFailures counts mesh sends that failed even after a path refresh.
+	// sendFailures counts those datagrams a send failed to carry even after
+	// a path refresh.
 	sendFailures atomic.Int64
 	// pathRefreshes counts mid-stream path re-resolutions: expiry, near
 	// expiry, or a failed send.
@@ -37,6 +40,18 @@ type counters struct {
 	published atomic.Int64
 	// hostDatagrams counts datagrams the shared host port received.
 	hostDatagrams atomic.Int64
+	// relayedDatagrams counts the datagrams the relay carried, unchanged,
+	// between one of the node's hosts and another node, either way.
+	relayedDatagrams atomic.Int64
+	// relayDrops counts the datagrams the relay dropped: a host's initiation
+	// keyed to no directory node's key or past the pending sessions' bounds,
+	// a node's initiation toward a host, and a datagram or cookie reply
+	// whose way onward failed.
+	relayDrops atomic.Int64
+	// relayCookies counts the cookie replies the relay sent under load on
+	// its nodes' behalf, each to a host whose initiation carried no valid
+	// mac2.
+	relayCookies atomic.Int64
 }
 
 // counterSeries is one counter beside the name the meter serves it by.
@@ -56,6 +71,9 @@ func (c *counters) series() []counterSeries {
 		{"wireguard.route_switches_total", &c.routeSwitches},
 		{"wireguard.published_total", &c.published},
 		{"wireguard.host_datagrams_total", &c.hostDatagrams},
+		{"wireguard.relayed_datagrams_total", &c.relayedDatagrams},
+		{"wireguard.relay_drops_total", &c.relayDrops},
+		{"wireguard.relay_cookies_total", &c.relayCookies},
 	}
 }
 

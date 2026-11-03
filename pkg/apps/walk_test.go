@@ -108,9 +108,9 @@ func TestWalkFixtures(t *testing.T) {
 				"wireguard/app.go": "package wireguard",
 			},
 			entries: map[string]bool{
-				"wireguard": true, "socks": true,
+				"wireguard": true, "egress": true,
 			},
-			problems: []string{"socks: holds an entry"},
+			problems: []string{"egress: holds an entry"},
 		},
 		{
 			name: "the ping application exempt by name",
@@ -216,7 +216,7 @@ func aboveRoof(imp string) bool {
 func TestImportRuleFixtures(t *testing.T) {
 	requires := map[string][]string{
 		"coordination": {"wireguard"},
-		"socks":        {"wireguard"},
+		"egress":       {"wireguard"},
 	}
 	listing := map[string]*walktest.Package{
 		roofPath + "/wireguard": {Imports: []string{
@@ -226,7 +226,7 @@ func TestImportRuleFixtures(t *testing.T) {
 		roofPath + "/wireguard/impl/bbolt": {Imports: []string{
 			roofPath + "/wireguard",
 		}},
-		roofPath + "/socks": {Imports: []string{
+		roofPath + "/egress": {Imports: []string{
 			moduleRoot + "/internal/services",
 			roofPath + "/wireguard",
 		}},
@@ -243,7 +243,7 @@ func TestImportRuleFixtures(t *testing.T) {
 		imp  string
 	}{
 		{roofPath + "/wireguard", roofPath},
-		{roofPath + "/socks", moduleRoot + "/internal/services"},
+		{roofPath + "/egress", moduleRoot + "/internal/services"},
 		{roofPath + "/voting", roofPath + "/coordination"},
 	}
 	for _, w := range want {

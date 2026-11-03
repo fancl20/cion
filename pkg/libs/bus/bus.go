@@ -25,6 +25,7 @@ type Bus struct {
 	latencies Topic[LinkLatencies]
 	self      Topic[SelfState]
 	directory Topic[Directory]
+	tailnet   Topic[TailnetState]
 }
 
 // New returns a bus nothing has been published on.
@@ -65,6 +66,14 @@ func (b *Bus) Self() *Topic[SelfState] {
 // view changes; the topology provider's own loops and the portal read it.
 func (b *Bus) Directory() *Topic[Directory] {
 	return &b.directory
+}
+
+// Tailnet returns the tailnet topic. The WireGuard application publishes
+// its view of the WireGuard directory on it at its slice's assignment and
+// whenever a directory it applies changes the view; the egress and the
+// mihomo application read it.
+func (b *Bus) Tailnet() *Topic[TailnetState] {
+	return &b.tailnet
 }
 
 // Topic carries one kind of event and remembers the last one published. Its

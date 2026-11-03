@@ -27,7 +27,7 @@ func TestSelectInfers(t *testing.T) {
 		t.Fatal(err)
 	}
 	if got, want := strings.Join(namesOf(core), ","),
-		"wireguard,coordination,socks,voting"; got != want {
+		"wireguard,coordination,egress,mihomo,voting"; got != want {
 		t.Errorf("the serving core's inference = %s, want %s", got, want)
 	}
 
@@ -36,7 +36,7 @@ func TestSelectInfers(t *testing.T) {
 		t.Fatal(err)
 	}
 	if got, want := strings.Join(namesOf(leaf), ","),
-		"wireguard,socks"; got != want {
+		"wireguard,egress,mihomo"; got != want {
 		t.Errorf("the serving leaf's inference = %s, want %s", got, want)
 	}
 
@@ -57,9 +57,9 @@ func TestSelectInfers(t *testing.T) {
 		admission string
 		want      string
 	}{
-		{"the portal method", serving, "portal", "wireguard,coordination,socks,voting,portal"},
+		{"the portal method", serving, "portal", "wireguard,coordination,egress,mihomo,voting,portal"},
 		{"the portal method serving no hosts", Arguments{}, "portal", "voting,portal"},
-		{"another method", serving, "cidrs", "wireguard,coordination,socks,voting"},
+		{"another method", serving, "cidrs", "wireguard,coordination,egress,mihomo,voting"},
 	} {
 		selected, err := Select(nil, true, tc.args, tc.admission)
 		if err != nil {
@@ -85,14 +85,14 @@ func TestSelectGiven(t *testing.T) {
 		t.Errorf("the empty list loaded %v, want the deliberate core", namesOf(none))
 	}
 
-	spelled, err := Select([]string{"socks", "wireguard"}, false, serving, "")
+	spelled, err := Select([]string{"mihomo", "egress", "wireguard"}, false, serving, "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got, want := strings.Join(namesOf(spelled), ","),
-		"wireguard,socks"; got != want {
+		"wireguard,egress,mihomo"; got != want {
 		t.Errorf("the list %q selected %s, want table order %s",
-			"socks,wireguard", got, want)
+			"mihomo,egress,wireguard", got, want)
 	}
 
 	core, err := Select([]string{"coordination", "wireguard"}, true, serving, "")
@@ -131,7 +131,12 @@ func TestSelectRefuses(t *testing.T) {
 		{
 			"an unknown name",
 			[]string{"middlebox"}, true, serving, "",
-			"the residents are wireguard, coordination, socks, voting, portal",
+			"the residents are wireguard, coordination, egress, mihomo, voting, portal",
+		},
+		{
+			"the retired SOCKS application",
+			[]string{"wireguard", "socks"}, true, serving, "",
+			`unknown application "socks"`,
 		},
 		{
 			"a role violation",
@@ -144,9 +149,14 @@ func TestSelectRefuses(t *testing.T) {
 			"voting, which requires the founding core",
 		},
 		{
-			"socks without its owner",
-			[]string{"socks"}, true, serving, "",
-			"requires wireguard beside it",
+			"the egress without its owner",
+			[]string{"egress"}, true, serving, "",
+			"egress, which requires wireguard beside it",
+		},
+		{
+			"the mihomo application without the egress",
+			[]string{"wireguard", "mihomo"}, true, serving, "",
+			"mihomo, which requires egress beside it",
 		},
 		{
 			"coordination without its owner",

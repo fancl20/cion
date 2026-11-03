@@ -2,6 +2,7 @@ package apps
 
 import (
 	"net/netip"
+	"slices"
 	"testing"
 
 	"github.com/fancl20/cion/pkg/core/trust/trusttest"
@@ -25,6 +26,7 @@ func wireguardEnvironment(t *testing.T, core bool) *Environment {
 		StateRoot:   t.TempDir(),
 		ControlHost: "127.0.0.1:30042",
 		Domain:      "core.example.org",
+		Resolvers:   []netip.Addr{netip.MustParseAddr("8.8.8.8"), netip.MustParseAddr("8.8.4.4")},
 		Engine:      trust.NewEngine(ia, nil, nil, trusttest.Unchecked{}),
 		Paths:       &scion.PathProvider{},
 		Bus:         bus.New(),
@@ -33,9 +35,10 @@ func wireguardEnvironment(t *testing.T, core bool) *Environment {
 
 // TestWireguardConfigFromEnvironment checks the configuration the entry
 // derives: the shared port its arguments name — no slice, the directory
-// assigning it — the node's own state beside the bind host, the relay
-// presence from the core's domain, the node's interface-down topic, and the
-// core's own store beside the joiner's founder route.
+// assigning it — the node's own state beside the bind host, the tailnet
+// topic the application publishes on, the relay presence from the core's
+// domain resolving through the node's resolvers, the node's interface-down
+// topic, and the core's own store beside the joiner's founder route.
 func TestWireguardConfigFromEnvironment(t *testing.T) {
 	env := wireguardEnvironment(t, true)
 	core, err := wireguardConfig(env)
@@ -55,8 +58,14 @@ func TestWireguardConfigFromEnvironment(t *testing.T) {
 	if cfg.Self != env.Bus.Self() {
 		t.Error("the entry did not hand the application the node's own state")
 	}
-	if cfg.DERP == nil || cfg.DERP.URL != "https://core.example.org/derp" {
-		t.Errorf("relay presence = %+v, want the core's domain", cfg.DERP)
+	if cfg.Tailnet != env.Bus.Tailnet() {
+		t.Error("the entry did not hand the application the node's tailnet topic")
+	}
+	if cfg.DERP == nil || cfg.DERP.URL != "https://core.example.org/derp" ||
+		!slices.Equal(cfg.DERP.Resolvers, env.Resolvers) {
+
+		t.Errorf("relay presence = %+v, want the core's domain resolving through %v",
+			cfg.DERP, env.Resolvers)
 	}
 	if cfg.InterfaceDown != env.Bus.InterfaceDown() {
 		t.Error("the entry did not hand the application the node's interface-down topic")

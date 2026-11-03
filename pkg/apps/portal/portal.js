@@ -590,12 +590,12 @@ function renderHosts(list) {
   if (!available) return;
   const query = $("#hosts-filter").value;
   const hosts = (list?.hosts ?? []).filter(host =>
-    matches(query, [host.addr, host.hostname, host.os, host.nodeKey, host.machineKey, host.owner, host.endpoint, host.note]));
+    matches(query, [host.addr, host.hostname, host.os, host.nodeKey, host.machineKey, host.owner, host.endpoint, host.note, host.exit]));
   fillTable($("#hosts-rows"), hosts.map(hostRow), emptyText(list, query, "No host holds an address yet."));
 }
 
 // One host: its address and claims, keys, the node it connects to, its
-// approval, and its presence, with its menu.
+// approval, and its presence above the exit it reports, with its menu.
 function hostRow(host) {
   const claims = [host.hostname, host.os].filter(Boolean).join(" · ");
   return h("tr", null,
@@ -603,7 +603,7 @@ function hostRow(host) {
     h("td", null, h("div", null, shortKey(host.nodeKey)), h("div", { class: "below muted" }, shortKey(host.machineKey))),
     h("td", null, connectsTo(host.owner, host.endpoint)),
     h("td", null, approval(host.note)),
-    h("td", null, presence(host)),
+    h("td", null, presence(host), host.exit && h("div", { class: "below claim" }, `Exit ${host.exit}`)),
     h("td", { class: "cell-action" }, h("button", {
       class: "icon-btn",
       "aria-label": `Actions for ${host.addr}`,

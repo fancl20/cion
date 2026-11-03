@@ -206,7 +206,8 @@ func TestMapBindingKeepsRelease(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := a.netmap(context.Background(), nodePublicOf(dbtest.MustKey(0x41)),
-		key.NewMachine().Public(), stale, key.DiscoPublic{}, tailcfg.HostinfoView{}); err == nil {
+		key.NewMachine().Public(), stale, key.DiscoPublic{}, tailcfg.HostinfoView{},
+		mapArrival); err == nil {
 		t.Error("the stale snapshot mapped a released record, want refusal")
 	}
 	if hosts := storeHosts(t, store); len(hosts) != 0 {

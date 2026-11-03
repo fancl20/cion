@@ -53,9 +53,22 @@ func assertNothing(t *testing.T, p *pipe) {
 	}
 }
 
-// TestRouterRoutesByDestination checks the table's lookups: host /32s to
-// the host device, mesh slices longest-prefix first —
-// and no default anywhere, a destination no slice claims counting
+// landed names the pipe the router's last delivery went to — the router
+// delivers before it returns — and "" when none of the pipes holds one.
+func landed(pipes ...*pipe) string {
+	for _, p := range pipes {
+		select {
+		case <-p.inbound:
+			return p.name
+		default:
+		}
+	}
+	return ""
+}
+
+// TestRouterRoutesByDestination checks the table's lookups: owned host /32s
+// to the host device, mesh slices longest-prefix first — and no default for
+// a mesh device's packets, a destination no slice claims counting
 // unroutable.
 func TestRouterRoutesByDestination(t *testing.T) {
 	cnt := &counters{}
@@ -67,12 +80,12 @@ func TestRouterRoutesByDestination(t *testing.T) {
 	host := netip.MustParseAddr("100.64.1.10")
 	netA := netip.MustParsePrefix("100.64.1.0/24")
 	netWide := netip.MustParsePrefix("100.64.0.0/16")
-	r.rebuild(
-		[]hostRoute{{addr: host, pipe: hostDev}},
+	r.rebuild(hostDev,
+		[]hostRoute{{addr: host, owned: true}},
 		[]route{{prefix: netWide, dst: meshA}, {prefix: netA, dst: meshB}},
 	)
 
-	// A host's /32 goes to the host device — from anywhere.
+	// An owned host's /32 goes to the host device — from anywhere.
 	fromMesh := func(pkt []byte) { r.route(pkt) }
 	fromMesh(ipPacket(t, netip.MustParseAddr("100.64.2.10"), host, nil))
 	if pkt := take(t, hostDev); pkt == nil {
@@ -90,9 +103,8 @@ func TestRouterRoutesByDestination(t *testing.T) {
 		t.Fatal("the covering slice did not route to its device")
 	}
 
-	// No default exists: a destination no slice claims counts unroutable,
-	// wherever the packet came from — the internet is a service on the
-	// overlay, never a property of the routing.
+	// A mesh device's packet takes no default: a destination no slice
+	// claims counts unroutable.
 	before := cnt.unroutablePackets.Load()
 	r.route(ipPacket(t, host, netip.MustParseAddr("192.0.2.53"), nil))
 	if unroutable := cnt.unroutablePackets.Load(); unroutable != before+1 {
@@ -119,8 +131,8 @@ func TestRouterDeliversServedAddress(t *testing.T) {
 	mesh := newPipe("mesh", OverlayMTU, cnt)
 	host := netip.MustParseAddr("100.64.1.10")
 	own := netip.MustParseAddr("100.64.1.1")
-	r.rebuild(
-		[]hostRoute{{addr: host, pipe: hostDev}},
+	r.rebuild(hostDev,
+		[]hostRoute{{addr: host, owned: true}},
 		[]route{{prefix: netip.MustParsePrefix("100.64.2.0/24"), dst: mesh}},
 	)
 
@@ -149,7 +161,7 @@ func TestRouterDeliversServedAddress(t *testing.T) {
 
 	// The host's leg and a far peer's leg alike: delivery is by
 	// destination, never by arrival.
-	r.route(ipPacket(t, host, own, []byte("near")))
+	r.routeFromHost(ipPacket(t, host, own, []byte("near")))
 	r.route(ipPacket(t, netip.MustParseAddr("100.64.2.10"), own, []byte("far")))
 	want := []delivery{
 		{Dst: own.String(), Data: "near"},
@@ -174,6 +186,107 @@ func TestRouterDeliversServedAddress(t *testing.T) {
 	}
 }
 
+// TestRouterDeliversTheDefault checks the default delivery: a destination
+// outside the tailnet that the host device decrypted reaches it while it
+// stands and counts unroutable before and after; the same destination from
+// a mesh device, or from the node's own services, counts unroutable even
+// while it stands; and a tailnet destination from the host device routes as
+// it always has.
+func TestRouterDeliversTheDefault(t *testing.T) {
+	cnt := &counters{}
+	r := newRouter(OverlayMTU, cnt)
+	hostDev := newPipe("host", OverlayMTU, cnt)
+	mesh := newPipe("mesh", OverlayMTU, cnt)
+	host := netip.MustParseAddr("100.64.1.10")
+	far := netip.MustParseAddr("100.64.2.10")
+	internet := netip.MustParseAddr("192.0.2.53")
+	r.rebuild(hostDev,
+		[]hostRoute{{addr: host, owned: true}},
+		[]route{{prefix: netip.MustParsePrefix("100.64.2.0/24"), dst: mesh}},
+	)
+	unroutable := func() int64 { return cnt.unroutablePackets.Load() }
+
+	r.routeFromHost(ipPacket(t, host, internet, []byte("before")))
+	if got := unroutable(); got != 1 {
+		t.Fatalf("with no default the host's internet-bound packet counted %d unroutable, want 1", got)
+	}
+
+	var got []string
+	undo := r.DeliverDefault(func(pkt []byte) {
+		got = append(got, string(pkt[header.IPv4MinimumSize:]))
+	})
+	r.routeFromHost(ipPacket(t, host, internet, []byte("from the host")))
+	r.route(ipPacket(t, far, internet, []byte("from the mesh")))
+	r.Route(ipPacket(t, netip.MustParseAddr("100.64.1.1"), internet, []byte("from the node")))
+	r.routeFromHost(ipPacket(t, host, far, []byte("to the tailnet")))
+	if diff := cmp.Diff([]string{"from the host"}, got); diff != "" {
+		t.Errorf("the default's deliveries (-want +got):\n%s", diff)
+	}
+	if got := unroutable(); got != 3 {
+		t.Errorf("unroutable = %d, want 3: the mesh's and the node's internet-bound packets", got)
+	}
+	if pkt := take(t, mesh); string(pkt[header.IPv4MinimumSize:]) != "to the tailnet" {
+		t.Errorf("the host's tailnet packet reached the mesh as %q", pkt[header.IPv4MinimumSize:])
+	}
+
+	undo()
+	r.routeFromHost(ipPacket(t, host, internet, []byte("after")))
+	if len(got) != 1 {
+		t.Errorf("the default delivered %q after its undo", got[1:])
+	}
+	if got := unroutable(); got != 4 {
+		t.Errorf("unroutable = %d after the undo, want 4", got)
+	}
+}
+
+// TestRouterRoutesOwnPacketsToEveryHost checks the rule for the packets the
+// node's own services produce: any directory host's address enters the host
+// device, whoever owns the host, and a tailnet destination no host holds
+// routes by slice; a packet forwarded from a device reaches the owned hosts
+// alone, a foreign host's going to the slice that holds it. The rule follows
+// the directory: a host the rebuild drops routes by slice again.
+func TestRouterRoutesOwnPacketsToEveryHost(t *testing.T) {
+	cnt := &counters{}
+	r := newRouter(OverlayMTU, cnt)
+	hostDev := newPipe("host", OverlayMTU, cnt)
+	mesh := newPipe("mesh", OverlayMTU, cnt)
+	own := netip.MustParseAddr("100.64.1.1")
+	owned := netip.MustParseAddr("100.64.1.10")
+	foreign := netip.MustParseAddr("100.64.2.10")
+	farNode := netip.MustParseAddr("100.64.2.1")
+	nets := []route{{prefix: netip.MustParsePrefix("100.64.2.0/24"), dst: mesh}}
+	r.rebuild(hostDev, []hostRoute{{addr: owned, owned: true}, {addr: foreign}}, nets)
+
+	var trace []string
+	for _, send := range []func(){
+		func() { r.Route(ipPacket(t, own, owned, nil)) },
+		func() { r.Route(ipPacket(t, own, foreign, nil)) },
+		func() { r.Route(ipPacket(t, own, farNode, nil)) },
+		func() { r.route(ipPacket(t, netip.MustParseAddr("100.64.3.10"), foreign, nil)) },
+		func() { r.routeFromHost(ipPacket(t, owned, foreign, nil)) },
+		func() { r.route(ipPacket(t, foreign, owned, nil)) },
+		func() {
+			r.rebuild(hostDev, []hostRoute{{addr: owned, owned: true}}, nets)
+			r.Route(ipPacket(t, own, foreign, nil))
+		},
+	} {
+		send()
+		trace = append(trace, landed(hostDev, mesh))
+	}
+	want := []string{
+		"host", // the node's own packet for the owned host
+		"host", // the node's own packet for the foreign host
+		"mesh", // the node's own packet for a far node's address
+		"mesh", // a forwarded packet for the foreign host
+		"mesh", // the owned host's packet for the foreign host
+		"host", // a forwarded packet for the owned host
+		"mesh", // the node's own packet for the foreign host, dropped
+	}
+	if diff := cmp.Diff(want, trace); diff != "" {
+		t.Errorf("where the packets landed (-want +got):\n%s", diff)
+	}
+}
+
 // TestRouterDropsOversized checks the overlay MTU: an inner packet larger
 // than the constant is dropped, never sent.
 func TestRouterDropsOversized(t *testing.T) {
@@ -181,7 +294,7 @@ func TestRouterDropsOversized(t *testing.T) {
 	r := newRouter(OverlayMTU, cnt)
 	dst := newPipe("dst", OverlayMTU, cnt)
 	host := netip.MustParseAddr("100.64.1.10")
-	r.rebuild([]hostRoute{{addr: host, pipe: dst}}, nil)
+	r.rebuild(dst, []hostRoute{{addr: host, owned: true}}, nil)
 
 	oversized := ipPacket(t, netip.MustParseAddr("100.64.2.1"), host,
 		make([]byte, OverlayMTU))

@@ -391,3 +391,72 @@ by ADR-0024.
     refuses `socks`; the coordination labs' joins and echoes hold unchanged.
 
 ## Implementation history
+
+*   Landed as proposed: the resolvers argument ([run.go](/cmd/cion/run.go),
+    [config.go](/internal/services/config.go)), the tailnet topic
+    ([tailnet.go](/pkg/libs/bus/tailnet.go)), the relay
+    ([relay.go](/pkg/apps/wireguard/relay.go),
+    [hostbind.go](/pkg/apps/wireguard/hostbind.go)), the relay presence's
+    lookups ([derpbridge.go](/pkg/apps/wireguard/derpbridge.go)), the router
+    ([router.go](/pkg/apps/wireguard/router.go)), the egress
+    ([app.go](/pkg/apps/egress/app.go), [flows.go](/pkg/apps/egress/flows.go),
+    [echo.go](/pkg/apps/egress/echo.go)), the exits application
+    ([app.go](/pkg/apps/mihomo/app.go), [mihomo.go](/pkg/apps/mihomo.go)),
+    the netmap and the reported exit
+    ([netmap.go](/pkg/apps/coordination/netmap.go),
+    [presence.go](/pkg/apps/coordination/presence.go)), the console
+    ([api.go](/pkg/apps/portal/api.go),
+    [portal.js](/pkg/apps/portal/portal.js)), and the exits lab
+    ([exits_test.go](/internal/testnetwork/exits_test.go)). ADR-0024 is
+    accepted and supersedes ADR-0012. Beside the plan:
+    *   The exits application is named `mihomo`, in its package and in the
+        applications table, for the provider it serves is mihomo's alone.
+    *   The relay presence asks every resolver at once over UDP and takes
+        the first answer, and tries them in order over TCP, so one silent
+        resolver cannot stall a lookup. `--dns.resolvers` is hidden from the
+        help, as its neighbors are, and its default lives on the flag alone:
+        an empty list, the harness's, leaves lookups to the system's
+        resolver.
+    *   A relayed host's endpoint moves only with an initiation under a
+        fresh sender index: a copy of a recorded initiation changes nothing
+        the relay holds, and no later message moves it. A send toward a
+        node the mesh socket holds no path to rides the reversed path of the
+        node's latest arrival, as the mesh's replies do.
+    *   A host's relayed session stays pending until the node answers it,
+        which the node does for a host the directory holds alone, and only
+        an answered session lasts. A pending session lasts WireGuard's retry
+        time, `RekeyTimeout` and its jitter; the relay holds at most 1024,
+        and 64 of one source — an IPv4 address, an IPv6 /64. While pending
+        sessions hold an eighth of that bound, the relay answers an
+        initiation without a valid mac2 with a cookie reply on its node's
+        behalf, as WireGuard answers under load, so a host proves it
+        receives at its address before the relay keeps anything; the
+        counters gain `relay_cookies_total`.
+    *   `Listen` takes a context, for the node's own address arrives on the
+        tailnet topic after the egress is built, and both of the egress's
+        deliveries stand from their installation until it closes. A TCP flow
+        counts against the bound while it dials, and a UDP flow's socket is
+        connected to its destination and outlives the refusal an unreachable
+        port returns. The test that the listener answers on the node's own
+        address alone is the egress's.
+    *   The echo relay the SOCKS landing retired never ran: it named its
+        socket's address `:0`, which the ICMP package cannot bind, wrote its
+        relay sequence into the identifier the system overwrites, and shut
+        down at its first failed send. The egress's relay binds the ping
+        socket, demultiplexes replies by the sequence, drops a request whose
+        send fails alone, and takes a reply only from the destination
+        pinged. Its mappings hold a bound of their own, 64, and expire 5
+        seconds after their request left, so unanswered pings starve only
+        other pings; the flow bound counts TCP and UDP flows alone.
+    *   The egress drops destinations in the loopback range: a tailnet
+        client drops a reply from a loopback source as a martian, so a flow
+        there would reach the node's local services one way alone. The
+        lab's internet is a documentation range instead, which each node's
+        harness rider (`Internet` in
+        [config.go](/internal/services/config.go)) maps onto loopback
+        services of its own.
+    *   A client on the vendored tsnet resolves through its exit over TCP
+        alone: on Linux its DNS forwarder sends its UDP queries from the
+        system's sockets, which follow no exit route, so they leave outside
+        the tunnel, and the first answer wins. The lab checks the answer and
+        the resolvers the client names, not the transport.

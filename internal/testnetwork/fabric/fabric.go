@@ -1,5 +1,5 @@
 // Package fabric is the integration labs' userspace network: one gVisor
-// netstack per node — the SOCKS application's own recipe — connected by a
+// netstack per node — the egress application's own recipe — connected by a
 // forwarder the harness owns, so a lab's nodes hold no kernel port at all
 // and the network's behaviors are taps the lab draws: delay, loss,
 // blackhole, cut, and the NAT, on whose router a node may run. The hosts
@@ -40,7 +40,7 @@ import (
 )
 
 // queueDepth is the depth of every channel endpoint's packet queue, the
-// SOCKS application's own choice for the same pump.
+// egress application's own choice for the same pump.
 const queueDepth = 512
 
 // drawnPortBase is the first port DrawPort draws. The band from it up to

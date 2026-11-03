@@ -15,6 +15,7 @@ package apps
 import (
 	"context"
 	"net/http"
+	"net/netip"
 	"time"
 
 	"github.com/scionproto/scion/pkg/addr"
@@ -70,6 +71,9 @@ type Environment struct {
 	// on: https:// and the domain, with the harness's port when its
 	// placement binds one other than HTTPS's own.
 	HTTPSOrigin string
+	// Resolvers are the DNS resolvers the node's applications resolve
+	// names through, as --dns.resolvers names them; empty names none.
+	Resolvers []netip.Addr
 	// Engine provides the node's chain for the directory channel; Paths
 	// resolves the paths the mesh datagrams ride.
 	Engine *trust.Engine
@@ -121,6 +125,10 @@ type Environment struct {
 	// address and pinned certificate — stands in for the domain and the
 	// WebPKI. The zero value derives everything from Domain.
 	Relay RelayPlacement
+	// Internet is the integration harness's stand-in for the internet: the
+	// address the egress's outbound legs reach for each destination a host
+	// addresses. Nil reaches each destination itself.
+	Internet func(netip.AddrPort) netip.AddrPort
 	// DirectoryPacing overrides the directory's publish and fetch cadence;
 	// zero keeps the production constants.
 	DirectoryPacing time.Duration
@@ -158,6 +166,6 @@ type Arguments struct {
 type WireguardArguments struct {
 	// HostPort is the shared host-facing UDP port every host dials. It
 	// alone decides whether the node serves hosts: zero runs no WireGuard
-	// or SOCKS application.
+	// application, nor any application requiring it.
 	HostPort uint16
 }
