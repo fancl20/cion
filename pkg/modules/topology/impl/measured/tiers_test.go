@@ -231,8 +231,9 @@ func TestWindowTiersWithoutMeasurements(t *testing.T) {
 
 // TestMemberPrice checks a member's price: each route at its cost, the
 // measured round trip or else the declared sum doubled, an undeclared and
-// unmeasured one pricing nothing; each route charged the transit penalty for
-// every AS it crosses between its ends, each way; the cheapest winning.
+// unmeasured one, or one measured at zero, pricing nothing; each route
+// charged the transit penalty for every AS it crosses between its ends, each
+// way; the cheapest winning.
 func TestMemberPrice(t *testing.T) {
 	ms := time.Millisecond
 	direct := measured(route(0, ms, local(1), link(selA)), 20*ms)
@@ -250,6 +251,7 @@ func TestMemberPrice(t *testing.T) {
 		{"a declared route, its transit charged", ptrs(oneTransit), 28 * ms},
 		{"two transits charged", ptrs(twoTransits), 26 * ms},
 		{"an undeclared route", ptrs(undeclared), 0},
+		{"a zero cost, its transit uncharged", ptrs(measured(oneTransit, 0)), 0},
 		{"the cheapest", ptrs(measured(direct, 30*ms), oneTransit, twoTransits, undeclared), 26 * ms},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

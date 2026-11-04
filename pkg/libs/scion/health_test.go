@@ -417,8 +417,9 @@ func TestBackoff(t *testing.T) {
 
 // TestPicksFollowHealth checks the picks' order: a deliverable path before a
 // suspect one before an ejected one, a suspect one no signal names since its
-// last answer before a signaled one; within a tier, a cost beyond the band,
-// an unmeasured path's prior standing in, else the prior order.
+// last answer before a signaled one; within a tier, a price beyond the band,
+// each transit charged and an unmeasured path's prior standing in, else the
+// prior order.
 func TestPicksFollowHealth(t *testing.T) {
 	ms := time.Millisecond
 	viaMidLink := func(measuredFixture) segment.LinkID { return segment.LinkID{IA: iaMid, IfID: 23} }
@@ -470,25 +471,41 @@ func TestPicksFollowHealth(t *testing.T) {
 		},
 		direct: true,
 	}, {
-		name: "measured costs within the band's floor",
+		// The middle's route crosses one more transit: 25ms against 30ms
+		// prices at 45ms against 40ms, within the band's share of 8ms.
+		name: "measured prices within the band",
 		records: func(f measuredFixture, now time.Time) map[*Candidate]bus.PathRecord {
 			return map[*Candidate]bus.PathRecord{
-				&f.direct: answered(now, 1*ms),
-				&f.viaMid: answered(now, 2500*time.Microsecond),
+				&f.direct: answered(now, 30*ms),
+				&f.viaMid: answered(now, 25*ms),
 			}
 		},
 	}, {
-		name: "measured costs within the band's share",
+		name: "a transit shorter at the same round trip",
 		records: func(f measuredFixture, now time.Time) map[*Candidate]bus.PathRecord {
 			return map[*Candidate]bus.PathRecord{
-				&f.direct: answered(now, 100*ms),
-				&f.viaMid: answered(now, 110*ms),
+				&f.direct: answered(now, 20*ms),
+				&f.viaMid: answered(now, 20*ms),
 			}
 		},
+		direct: true,
 	}, {
-		name: "an unmeasured prior beyond a measured cost",
+		// 200ms against 205ms prices at 210ms against 225ms: within the
+		// band's share of 42ms, beyond its cap of a transit's price.
+		name: "long paths beyond the band's cap",
 		records: func(f measuredFixture, now time.Time) map[*Candidate]bus.PathRecord {
-			return map[*Candidate]bus.PathRecord{&f.direct: answered(now, 40*ms)}
+			return map[*Candidate]bus.PathRecord{
+				&f.direct: answered(now, 200*ms),
+				&f.viaMid: answered(now, 205*ms),
+			}
+		},
+		direct: true,
+	}, {
+		// The middle's declared 30ms prices at 50ms, the direct route's
+		// measured 50ms at 60ms.
+		name: "an unmeasured prior beyond a measured price",
+		records: func(f measuredFixture, now time.Time) map[*Candidate]bus.PathRecord {
+			return map[*Candidate]bus.PathRecord{&f.direct: answered(now, 50*ms)}
 		},
 	}} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -533,6 +550,59 @@ func TestPicksFollowHealth(t *testing.T) {
 			t.Errorf("LocalPath picked %q, want the direct branch over the ejected %q", pick.ID, mid.ID)
 		}
 	})
+}
+
+// TestPrice checks a path's price: its cost charged the transit penalty
+// for every AS it crosses between its ends, each way, and none without a
+// cost.
+func TestPrice(t *testing.T) {
+	ms := time.Millisecond
+	f := newMeasuredFixture(t, time.Minute)
+	f.measure(map[*Candidate]bus.PathRecord{&f.direct: answered(time.Now(), 10*ms)})
+	candidates, err := f.p.Enumerate(context.Background(), iaDest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prices := map[bus.PathID]time.Duration{}
+	for _, c := range candidates {
+		if p, ok := c.Price(); ok {
+			prices[c.ID] = p
+		}
+	}
+	// The direct route crosses the core, the middle's the middle too; the
+	// middle's cost is its declared 15ms doubled.
+	want := map[bus.PathID]time.Duration{f.direct.ID: 20 * ms, f.viaMid.ID: 50 * ms}
+	if diff := cmp.Diff(want, prices); diff != "" {
+		t.Errorf("prices (-want +got):\n%s", diff)
+	}
+	if _, ok := (&Candidate{}).Price(); ok {
+		t.Error("a path without a cost has a price")
+	}
+}
+
+// TestBand checks the band two prices tie within: a fifth of the smaller,
+// at least bandFloor and at most bandCap, the difference at the band's edge
+// beyond it.
+func TestBand(t *testing.T) {
+	ms := time.Millisecond
+	for _, tc := range []struct {
+		a, b   time.Duration
+		beyond bool
+	}{
+		{a: ms, b: 2500 * time.Microsecond, beyond: false}, // within the floor
+		{a: 5 * ms, b: 7 * ms, beyond: true},               // at the floor
+		{a: 40 * ms, b: 47 * ms, beyond: false},            // within a fifth
+		{a: 40 * ms, b: 48 * ms, beyond: true},             // at a fifth
+		{a: 200 * ms, b: 209 * ms, beyond: false},          // within the cap
+		{a: 200 * ms, b: 210 * ms, beyond: true},           // at the cap
+	} {
+		if got := beyondBand(tc.a, tc.b); got != tc.beyond {
+			t.Errorf("beyondBand(%v, %v) = %v, want %v", tc.a, tc.b, got, tc.beyond)
+		}
+		if got := beyondBand(tc.b, tc.a); got != tc.beyond {
+			t.Errorf("beyondBand(%v, %v) = %v, want %v", tc.b, tc.a, got, tc.beyond)
+		}
+	}
 }
 
 // TestPickRequests checks the entries a pick updates for its destination:

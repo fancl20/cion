@@ -297,27 +297,17 @@ func (t *tier) qualifies(ia addr.IA, direct time.Duration) bool {
 }
 
 // memberPrice prices one member's routes by the cheapest of them, each at
-// its cost charged TransitPenalty for every AS it crosses between its ends,
-// each way. A route without a cost prices nothing. Zero when nothing prices
-// the member.
+// its price, the picks' own: its cost charged scion.TransitPenalty for every
+// AS it crosses between its ends, each way. A route without a cost, or with
+// a zero one, prices nothing. Zero when nothing prices the member.
 func memberPrice(routes []*scion.Candidate) time.Duration {
 	var price time.Duration
 	for _, c := range routes {
-		if c.Cost != nil && *c.Cost > 0 {
-			price = lower(price, *c.Cost+transitCost(c))
+		if p, ok := c.Price(); ok && *c.Cost > 0 {
+			price = lower(price, p)
 		}
 	}
 	return price
-}
-
-// transitCost is what a route's transits add to its round trip: the
-// penalty for every AS of its link set beyond its two ends, each way.
-func transitCost(c *scion.Candidate) time.Duration {
-	ases := make(map[addr.IA]bool, len(c.Links))
-	for _, l := range c.Links {
-		ases[l.IA] = true
-	}
-	return 2 * TransitPenalty * time.Duration(max(0, len(ases)-2))
 }
 
 // lower returns the smaller of two prices, a zero pricing nothing.

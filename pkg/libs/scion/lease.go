@@ -50,8 +50,8 @@ type Leased struct {
 // Lease is the path every flow to one destination rides. It keeps its path
 // while the path composes and is not ejected, moves at once when it is
 // ejected, no longer composes, or nears its hop fields' expiry, and moves to
-// a healthy path cheaper beyond the band once that path stayed so for
-// LeaseSwitchHold. Its methods are safe for concurrent use.
+// a healthy path whose price beats its own beyond the band once that path
+// stayed so for LeaseSwitchHold. Its methods are safe for concurrent use.
 type Lease struct {
 	p   *PathProvider
 	dst addr.IA
@@ -214,7 +214,9 @@ func (l *Lease) freshest(candidates []Candidate) *Candidate {
 	return out
 }
 
-// cheaper reports whether a costs less than b beyond the band.
+// cheaper reports whether a's price beats b's beyond the band.
 func cheaper(a, b *Candidate) bool {
-	return a.Cost != nil && b.Cost != nil && *a.Cost < *b.Cost && beyondBand(*a.Cost, *b.Cost)
+	pa, aPriced := a.Price()
+	pb, bPriced := b.Price()
+	return aPriced && bPriced && pa < pb && beyondBand(pa, pb)
 }

@@ -181,6 +181,11 @@ func bestOf(candidates []Candidate) *Candidate {
 // beaconing selects others.
 const StaleAfter = 5 * time.Minute
 
+// TransitPenalty is what each AS a path crosses between its ends adds to its
+// one-way price: the forwarding a transit costs, and one more failure on the
+// way. The picks, the leases, and the topology selection charge it alike.
+const TransitPenalty = 5 * time.Millisecond
+
 // Candidate is one composed path beside the facts composition holds on its
 // way to ranking it.
 type Candidate struct {
@@ -225,13 +230,27 @@ type Candidate struct {
 	// Retry is when an ejected path is due its half-open probe; zero for
 	// the others.
 	Retry time.Time
-	// Cost is the round trip the path is ranked and priced at: its measured
-	// cost, else twice its declared one-way sum; nil when it has neither.
+	// Cost is the path's round trip: its measured cost, else twice its
+	// declared one-way sum; nil when it has neither.
 	Cost *time.Duration
 }
 
+// Price returns what the picks and the leases rank the path by: its cost
+// charged TransitPenalty for every AS it crosses between its ends, each way.
+// False without a cost.
+func (c *Candidate) Price() (time.Duration, bool) {
+	if c.Cost == nil {
+		return 0, false
+	}
+	ases := make(map[addr.IA]bool, len(c.Links))
+	for _, l := range c.Links {
+		ases[l.IA] = true
+	}
+	return *c.Cost + 2*TransitPenalty*time.Duration(max(0, len(ases)-2)), true
+}
+
 // Outranks reports whether c outranks o by the prior order, the one the picks
-// fall back on past health and cost: a fresh candidate before a stale one, a
+// fall back on past health and price: a fresh candidate before a stale one, a
 // declared sum before an undeclared one — unknown is not free — a smaller
 // declared sum before a larger one, and every tie to Before.
 func (c *Candidate) Outranks(o *Candidate) bool {

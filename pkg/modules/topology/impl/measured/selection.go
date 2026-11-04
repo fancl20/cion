@@ -47,10 +47,6 @@ const (
 	// MarginFloor is the least a direct round trip must beat its peer's
 	// price by to promote: a smaller gain is jitter on a fast link.
 	MarginFloor = 2 * time.Millisecond
-	// TransitPenalty is what each AS a route crosses between its ends adds
-	// to the route's one-way price: the forwarding a transit costs, and one
-	// more failure on the way.
-	TransitPenalty = 5 * time.Millisecond
 	// TierGap is the multiple of a tier's median direct round trip at which
 	// a peer opens the next tier.
 	TierGap = 2.0

@@ -45,9 +45,6 @@ const (
 	// the cut link once they left it: past the path's first two half-open
 	// probes, which the cut link fails.
 	offWatch = 30 * time.Second
-	// detour is the one-way delay the cheaper-return lab draws on C's link
-	// to E, so the branch through B costs less beyond the band.
-	detour = 10 * time.Millisecond
 )
 
 // bootFabricTopology boots a static topology on a bubble's fabric: each
@@ -244,29 +241,12 @@ func TestPathsFollowMeasuredHealth(t *testing.T) {
 	// With the ping application measuring the pick, the lease, and their
 	// standby, a cut of B's link to D moves both around B within a heartbeat
 	// and a burst, and both stay there while the link is cut. Once the link
-	// is up again, the pick returns at the next half-open probe, while the
-	// lease stays put: the two branches cost the same.
+	// is up again, the pick returns at the next half-open probe, and the
+	// lease LeaseSwitchHold after it: the branch through B prices a transit
+	// less.
 	t.Run("measured", func(t *testing.T) {
 		InBubble(t, func(t *testing.T, f *fabric.Fabric, wpki *webpkitest.CA) {
 			n := bootBranches(t, f, wpki, nil)
-			n.cutAndLift(t, f)
-			for range 3 * scion.LeaseSwitchHold / virtualPollInterval {
-				time.Sleep(virtualPollInterval)
-				synctest.Wait()
-				n.throughB()
-				if !n.leasedAroundB() {
-					t.Fatal("A's lease returned to B's link, which costs no less beyond the band")
-				}
-			}
-		})
-	})
-
-	// With C's link to E delayed, the branch through B costs less beyond
-	// the band, and the lease returns to it LeaseSwitchHold after the pick.
-	t.Run("cheaper return", func(t *testing.T) {
-		InBubble(t, func(t *testing.T, f *fabric.Fabric, wpki *webpkitest.CA) {
-			n := bootBranches(t, f, wpki, nil)
-			f.Delay(n.c.Host(), n.e.Host(), detour)
 			n.cutAndLift(t, f)
 			returned := time.Now()
 			for range scion.LeaseSwitchHold/virtualPollInterval - 1 {
@@ -283,6 +263,25 @@ func TestPathsFollowMeasuredHealth(t *testing.T) {
 					return n.leasedThroughB()
 				})
 			t.Logf("A's lease returned %v after the pick", time.Since(returned))
+		})
+	})
+
+	// With B's link to D slower by a transit's price, the two branches price
+	// the same: the pick returns to the branch through B, of fewer hops, and
+	// the lease stays put.
+	t.Run("within the band", func(t *testing.T) {
+		InBubble(t, func(t *testing.T, f *fabric.Fabric, wpki *webpkitest.CA) {
+			n := bootBranches(t, f, wpki, nil)
+			f.Delay(n.b.Host(), n.d.Host(), scion.TransitPenalty)
+			n.cutAndLift(t, f)
+			for range 3 * scion.LeaseSwitchHold / virtualPollInterval {
+				time.Sleep(virtualPollInterval)
+				synctest.Wait()
+				n.throughB()
+				if !n.leasedAroundB() {
+					t.Fatal("A's lease returned to B's link, which prices no less beyond the band")
+				}
+			}
 		})
 	})
 

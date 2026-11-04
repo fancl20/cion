@@ -47,10 +47,13 @@ const (
 	// backoffCap.
 	backoffBase = 10 * time.Second
 	backoffCap  = time.Minute
-	// bandShare and bandFloor are the band within which two costs tie: a
-	// difference within bandShare of the smaller or within bandFloor.
+	// bandShare, bandFloor, and bandCap make the band two prices tie
+	// within: bandShare of the smaller, at least bandFloor — jitter on a
+	// fast path — and at most bandCap, one transit's price, so a path that
+	// saves a transit takes over however long the path.
 	bandShare = 0.2
 	bandFloor = 2 * time.Millisecond
+	bandCap   = 2 * TransitPenalty
 	// picksRequester names the picks' entries among the path requests.
 	picksRequester = "picks"
 )
@@ -203,8 +206,8 @@ func suspectLinks(m bus.PathMeasurements, now time.Time) map[segment.LinkID]bool
 // ranksAbove reports whether a ranks above b among the picks: by health,
 // a healthy or unknown path before a suspect one, a suspect one no signal
 // names since its last answer before a signaled one, an ejected one last;
-// then by cost, where both have one and the two differ beyond the band; then
-// by Outranks.
+// then by price, where both have one and the two differ beyond the band;
+// then by Outranks.
 func ranksAbove(a, b *Candidate) bool {
 	if ta, tb := tier(a.Health), tier(b.Health); ta != tb {
 		return ta < tb
@@ -212,14 +215,16 @@ func ranksAbove(a, b *Candidate) bool {
 	if a.Health == HealthSuspect && a.Signaled != b.Signaled {
 		return !a.Signaled
 	}
-	if a.Cost != nil && b.Cost != nil && beyondBand(*a.Cost, *b.Cost) {
-		return *a.Cost < *b.Cost
+	pa, aPriced := a.Price()
+	pb, bPriced := b.Price()
+	if aPriced && bPriced && beyondBand(pa, pb) {
+		return pa < pb
 	}
 	return a.Outranks(b)
 }
 
 // tier orders the healths for the picks: healthy and unknown paths share the
-// first tier, their costs ordering them.
+// first tier, their prices ordering them.
 func tier(h Health) int {
 	switch h {
 	case HealthSuspect:
@@ -231,13 +236,13 @@ func tier(h Health) int {
 	}
 }
 
-// beyondBand reports whether two costs differ by more than the band.
+// beyondBand reports whether two prices differ by the band or more.
 func beyondBand(a, b time.Duration) bool {
 	d := a - b
 	if d < 0 {
 		d = -d
 	}
-	return d > bandFloor && float64(d) > bandShare*float64(min(a, b))
+	return d >= max(bandFloor, min(time.Duration(bandShare*float64(min(a, b))), bandCap))
 }
 
 // backoff returns how long after its last loss an ejected path is due for a

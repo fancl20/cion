@@ -99,6 +99,35 @@ func TestLeaseKeepsAndMoves(t *testing.T) {
 	})
 }
 
+// TestLeaseMovesForATransit checks the band's cap on long paths: a healthy
+// path whose price beats the leased one's by a transit's price takes over,
+// though within a fifth of it.
+func TestLeaseMovesForATransit(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		ms := time.Millisecond
+		f := newMeasuredFixture(t, time.Minute)
+		f.measure(map[*Candidate]bus.PathRecord{
+			&f.viaMid: answered(time.Now(), 100*ms),
+			&f.direct: answered(time.Now(), 200*ms),
+		})
+		lease := f.p.Lease(iaDest)
+		if got := leased(t, lease).ID; got != f.viaMid.ID {
+			t.Fatalf("the first read leased %q, want the middle's %q", got, f.viaMid.ID)
+		}
+		// 205ms through the middle prices at 225ms, 200ms direct at 210ms.
+		f.measure(map[*Candidate]bus.PathRecord{
+			&f.viaMid: answered(time.Now(), 205*ms),
+			&f.direct: answered(time.Now(), 200*ms),
+		})
+		time.Sleep(LeaseEvaluation)
+		leased(t, lease)
+		time.Sleep(LeaseSwitchHold)
+		if got := leased(t, lease).ID; got != f.direct.ID {
+			t.Errorf("the lease holds %q, want the direct route, a transit's price cheaper", got)
+		}
+	})
+}
+
 // TestLeaseIgnoresUnmeasuredChallengers checks that an unmeasured path whose
 // declared cost beats the leased path's beyond the band never takes over.
 func TestLeaseIgnoresUnmeasuredChallengers(t *testing.T) {

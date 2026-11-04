@@ -96,3 +96,17 @@ Nothing on the wire changes.
 *   **The benchmarks.** The regions settled, regions cut, and stranded cut
     benchmarks run against the commit before, the leases' cost over the
     best paths reported.
+
+## Implementation history
+
+*   Landed as planned. In runs on one machine against the commit before,
+    the regions network's leases cost 1.00 times the best paths over the
+    formed links on average and at most 1.06 times, once settled and after
+    its cut, against up to 1.68: a transit's price now outweighs the band
+    on the far region's paths. The network recovered from its cut in 10
+    seconds in 4 runs of 6, against 6 of 6; the slow runs promoted links
+    after the cut and retired them as useless minutes later, the tail the
+    commits since proposal 0107 showed in 0 to 4 runs of 6. One of three
+    settled runs went through 21 link changes in 13 minutes, against at
+    most 14 in 8. The stranded network recovered from its cut in 10
+    seconds in three runs of three.
