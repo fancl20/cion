@@ -90,3 +90,22 @@ Nothing on the wire changes.
 *   **The benchmarks.** The regions settled, regions cut, and stranded cut
     benchmarks run against the commit before; what the leases' evidence
     changes in their numbers is recorded in the implementation history.
+
+## Implementation history
+
+*   Landed as planned. In runs on one machine against the commit before,
+    the regions network recovered from its cut in 10 seconds in 6 runs of
+    6, against 5 of 6. After the cut its leases cost 1.00 to 1.03 times the
+    best paths over the formed links on average, the picks 1.00, and the
+    costliest pair up to 1.68 times, the picks' up to 1.03: those leases
+    hold paths whose measured round trips lie within the band of the best's,
+    a fifth of some 200 milliseconds to the far region, while the grading
+    charges the transits the band does not see. Without the challenger's
+    requests the costliest pair reached 1.36 times, within the same spread.
+    The stranded network recovered from its cut in 10 seconds in three runs
+    of three, and the NAT network's survivors reached each other over their
+    leases in every read after the founder failed.
+*   ADR-0035 is accepted with near-best spreading unbuilt: no caller holds
+    several flows to one destination, and spreading them blindly, without
+    the load evidence the record defers, would split them onto paths that
+    may share a bottleneck.

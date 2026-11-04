@@ -1,6 +1,6 @@
 # Choose Paths by Measured Health
 
-*   Status: proposed
+*   Status: accepted
 *   Date: 2026-11-03
 
 [TOC]

@@ -12,6 +12,7 @@ import (
 	spath "github.com/scionproto/scion/pkg/slayers/path/scion"
 
 	"github.com/fancl20/cion/pkg/libs/bus"
+	"github.com/fancl20/cion/pkg/modules/pathdb"
 )
 
 // A lease's pacing.
@@ -38,11 +39,12 @@ var held = func() context.Context {
 	return ctx
 }()
 
-// Leased is the path a lease holds and its identity, empty for the
-// bootstrap route.
+// Leased is the path a lease holds, its identity, and the stored segments
+// it joins; the identity and the segments are empty for the bootstrap route.
 type Leased struct {
-	Path *spath.Decoded
-	ID   bus.PathID
+	Path     *spath.Decoded
+	ID       bus.PathID
+	Segments []*pathdb.Segment
 }
 
 // Lease is the path every flow to one destination rides. It keeps its path
@@ -154,7 +156,7 @@ func (l *Lease) get(use bool) (Leased, error) {
 	if l.cur == nil {
 		return Leased{}, serrors.New("no path to destination", "isd_as", l.dst)
 	}
-	return Leased{Path: l.cur.Path, ID: l.cur.ID}, nil
+	return Leased{Path: l.cur.Path, ID: l.cur.ID, Segments: l.cur.Segments}, nil
 }
 
 // evaluate composes the destination's candidates and keeps, refreshes, or

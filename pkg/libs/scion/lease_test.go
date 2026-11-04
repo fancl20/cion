@@ -2,11 +2,13 @@ package scion
 
 import (
 	"context"
+	"slices"
 	"sync"
 	"testing"
 	"testing/synctest"
 	"time"
 
+	"github.com/google/go-cmp/cmp"
 	"github.com/scionproto/scion/pkg/addr"
 	spath "github.com/scionproto/scion/pkg/slayers/path/scion"
 
@@ -122,7 +124,7 @@ func TestLeaseIgnoresUnmeasuredChallengers(t *testing.T) {
 
 // TestLeaseRefreshesTheLeasedPath checks that an evaluation refreshes the
 // leased path to its freshest composition: a fresher origination of the
-// leased route replaces the one leased.
+// leased route replaces the one leased, and the lease names its segment.
 func TestLeaseRefreshesTheLeasedPath(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		f := newRankFixture(t, time.Minute)
@@ -134,9 +136,10 @@ func TestLeaseRefreshesTheLeasedPath(t *testing.T) {
 		p := f.provider(t, direct(time.Now().Add(-4*time.Minute)))
 		lease := p.Lease(iaDest)
 		first := leased(t, lease)
+		fresher := direct(time.Now().Add(-2 * time.Minute))
 		if _, err := p.DB.Insert(context.Background(), &pathdb.Segment{
 			Type: pathdb.SegmentTypeUp,
-			PCB:  direct(time.Now().Add(-2 * time.Minute)),
+			PCB:  fresher,
 		}); err != nil {
 			t.Fatal(err)
 		}
@@ -145,6 +148,9 @@ func TestLeaseRefreshesTheLeasedPath(t *testing.T) {
 		if got.ID != first.ID || !PathExpiry(got.Path).After(PathExpiry(first.Path)) {
 			t.Errorf("the lease holds %q lapsing at %v, want %q's fresher origination",
 				got.ID, PathExpiry(got.Path), first.ID)
+		}
+		if !slices.ContainsFunc(got.Segments, func(s *pathdb.Segment) bool { return s.PCB == fresher }) {
+			t.Error("the lease does not name the fresher origination's segment")
 		}
 	})
 }
@@ -285,6 +291,68 @@ func TestLeaseRequests(t *testing.T) {
 			if r.ID == id && !r.Confirmed.Equal(used) {
 				t.Errorf("an evaluation RequestLapse past the last use updated %+v", r)
 			}
+		}
+	})
+}
+
+// TestLeaseRequestsItsChallenger checks that a lease measures the path it
+// would move to: an unmeasured path ranking above the leased one, sharing a
+// link with it so that another path is the disjoint standby, is requested
+// standby beside that one.
+func TestLeaseRequestsItsChallenger(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		f := newMeasuredFixture(t, time.Minute)
+		// A second branch through the middle, over a link to the core of
+		// its own, shares the leaf's link to the middle with the first.
+		second := signedLine(t, time.Now(),
+			linkHop{ia: iaCore, eg: 26, latency: 6 * time.Millisecond},
+			linkHop{ia: iaMid, in: 25, eg: 23, latency: 5 * time.Millisecond},
+			linkHop{ia: iaLeaf, in: 24})
+		p := f.provider(t, f.upDirect, f.upMid, second)
+		p.Measurements = new(bus.Topic[bus.PathMeasurements])
+		p.Requests = new(bus.Topic[bus.PathRequests])
+		candidates, err := p.Enumerate(context.Background(), iaCore)
+		if err != nil {
+			t.Fatal(err)
+		}
+		branch := map[*segment.PCB]*Candidate{}
+		for i := range candidates {
+			branch[candidates[i].Segments[0].PCB] = &candidates[i]
+		}
+		direct, first, viaSecond := branch[f.upDirect], branch[f.upMid], branch[second]
+		measure := func(records map[*Candidate]bus.PathRecord) {
+			m := make(map[bus.PathID]bus.PathRecord, len(records))
+			for c, r := range records {
+				r.Links = c.Crossed
+				m[c.ID] = r
+			}
+			p.Measurements.Publish(bus.NewPathMeasurements(m))
+		}
+		measure(map[*Candidate]bus.PathRecord{
+			viaSecond: answered(time.Now(), 20*time.Millisecond),
+			first:     ejectedAt(time.Now()),
+		})
+		lease := p.Lease(iaCore)
+		if got := leased(t, lease).ID; got != viaSecond.ID {
+			t.Fatalf("the lease took %q, want the second middle branch %q", got, viaSecond.ID)
+		}
+
+		// The second branch slows and the first's record is gone: the first
+		// ranks above the leased path by its declared cost, unmeasured.
+		measure(map[*Candidate]bus.PathRecord{viaSecond: answered(time.Now(), 80*time.Millisecond)})
+		time.Sleep(LeaseEvaluation)
+		if got := leased(t, lease).ID; got != viaSecond.ID {
+			t.Fatalf("the unmeasured first branch took the lease to %q", got)
+		}
+		roles := map[bus.PathID]bus.PathRole{}
+		for r := range p.Requests.Latest().All() {
+			roles[r.ID] = r.Role
+		}
+		want := map[bus.PathID]bus.PathRole{
+			viaSecond.ID: bus.PathInUse, direct.ID: bus.PathStandby, first.ID: bus.PathStandby,
+		}
+		if diff := cmp.Diff(want, roles); diff != "" {
+			t.Errorf("requests (-want +got):\n%s", diff)
 		}
 	})
 }

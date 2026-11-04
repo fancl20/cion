@@ -253,13 +253,15 @@ func backoff(lostBursts int) time.Duration {
 
 // request updates the requester's entries for the destination about the
 // path in use: that path; the best other candidate crossing none of its
-// links, else the best other, standby; the best suspect candidate besides the
-// standby whose prior order beats the one in use, suspect, for the
-// verification that decides; and the best ejected candidate whose prior
-// order beats the one in use, half-open once its backoff elapses. Each entry
-// carries the destination's last pick or use, and when callers last confirmed
-// and doubted its path. A provider without the requests topic, and a path in
-// use without an identity, request nothing.
+// links, else the best other, standby; the best other too when it ranks
+// above the one in use, standby, so a lease measures the path it would move
+// to; the best suspect candidate besides those whose prior order beats the
+// one in use, suspect, for the verification that decides; and the best
+// ejected candidate whose prior order beats the one in use, half-open once
+// its backoff elapses. Each entry carries the destination's last pick or
+// use, and when callers last confirmed and doubted its path. A provider
+// without the requests topic, and a path in use without an identity, request
+// nothing.
 func (p *PathProvider) request(requester string, dst addr.IA, inUse *Candidate, picked time.Time,
 	candidates []Candidate, v view) {
 
@@ -267,7 +269,7 @@ func (p *PathProvider) request(requester string, dst addr.IA, inUse *Candidate, 
 		return
 	}
 	entries := []bus.PathRequest{v.entry(dst, inUse, bus.PathInUse, time.Time{}, picked)}
-	var standby, disjoint, halfOpen *Candidate
+	var best, disjoint, halfOpen *Candidate
 	for i := range candidates {
 		c := &candidates[i]
 		if c.ID == "" || c.ID == inUse.ID {
@@ -279,23 +281,30 @@ func (p *PathProvider) request(requester string, dst addr.IA, inUse *Candidate, 
 			}
 			continue
 		}
-		if standby == nil || ranksAbove(c, standby) {
-			standby = c
+		if best == nil || ranksAbove(c, best) {
+			best = c
 		}
 		if !sharesLink(c, inUse) && (disjoint == nil || ranksAbove(c, disjoint)) {
 			disjoint = c
 		}
 	}
+	standby := best
 	if disjoint != nil {
 		standby = disjoint
 	}
 	if standby != nil {
 		entries = append(entries, v.entry(dst, standby, bus.PathStandby, time.Time{}, picked))
 	}
+	var challenger *Candidate
+	if best != nil && best != standby && ranksAbove(best, inUse) {
+		challenger = best
+		entries = append(entries, v.entry(dst, challenger, bus.PathStandby, time.Time{}, picked))
+	}
 	var suspect *Candidate
 	for i := range candidates {
 		c := &candidates[i]
-		if c.ID == "" || c.ID == inUse.ID || c == standby || c.Health != HealthSuspect || !c.Outranks(inUse) {
+		if c.ID == "" || c.ID == inUse.ID || c == standby || c == challenger || c.Health != HealthSuspect ||
+			!c.Outranks(inUse) {
 			continue
 		}
 		if suspect == nil || ranksAbove(c, suspect) {

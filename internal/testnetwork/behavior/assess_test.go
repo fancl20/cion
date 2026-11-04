@@ -141,8 +141,9 @@ type paths struct {
 	candidates bool
 }
 
-// readPaths reads every ordered pair's chosen path, walked over the formed
-// links, and with candidates set every candidate the pair's segments
+// readPaths reads every ordered pair's chosen path — the path the source's
+// lease of the destination holds, read as a send reads it — walked over the
+// formed links, and with candidates set every candidate the pair's segments
 // compose. A lookup that outlasts lookupBudget finds no segment it would
 // have fetched.
 func readPaths(t *testing.T, n *network, candidates bool) paths {
@@ -165,13 +166,13 @@ func readPaths(t *testing.T, n *network, candidates bool) paths {
 			}
 			provider, dst := n.nodes[s].App().Provider(), n.nodes[d].App().IA()
 			ctx, cancel := lookup()
-			c, err := provider.Choose(ctx, dst)
+			leased, err := provider.Lease(dst).Await(ctx)
 			cancel()
 			if err == nil {
-				for _, seg := range c.Segments {
+				for _, seg := range leased.Segments {
 					r.routes[routeKey(seg)] = true
 				}
-				if hops, ok := r.formed.walk(s, d, c.Path); ok {
+				if hops, ok := r.formed.walk(s, d, leased.Path); ok {
 					r.chosen[[2]int{s, d}] = hops
 				}
 			}

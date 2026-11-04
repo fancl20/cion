@@ -486,10 +486,11 @@ func TestBenchNATSymmetric(t *testing.T) {
 	})
 }
 
-// readReach reads every ordered pair of the given nodes' chosen path each
-// settleSample until watch passes, each lookup bounded by lookupBudget, and
-// returns the fewest pairs a read reached over the formed links, and the
-// slowest and the mean lookup.
+// readReach reads every ordered pair of the given nodes' chosen path — the
+// path the source's lease of the destination holds — each settleSample until
+// watch passes, each lookup bounded by lookupBudget, and returns the fewest
+// pairs a read reached over the formed links, and the slowest and the mean
+// lookup.
 func readReach(
 	t *testing.T, n *network, which []int, watch time.Duration,
 ) (fewest int, slowest, mean time.Duration) {
@@ -510,7 +511,7 @@ func readReach(
 				}
 				ctx, cancel := context.WithTimeout(t.Context(), lookupBudget)
 				began := time.Now()
-				c, err := n.nodes[s].App().Provider().Choose(ctx, n.nodes[d].App().IA())
+				leased, err := n.nodes[s].App().Provider().Lease(n.nodes[d].App().IA()).Await(ctx)
 				took := time.Since(began)
 				cancel()
 				slowest = max(slowest, took)
@@ -519,7 +520,7 @@ func readReach(
 				if err != nil {
 					continue
 				}
-				if _, ok := f.walk(s, d, c.Path); ok {
+				if _, ok := f.walk(s, d, leased.Path); ok {
 					reached++
 				}
 			}
