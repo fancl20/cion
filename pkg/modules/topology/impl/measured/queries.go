@@ -1,6 +1,7 @@
 package measured
 
 import (
+	"slices"
 	"time"
 
 	"github.com/fancl20/cion/pkg/libs/scion"
@@ -8,13 +9,13 @@ import (
 )
 
 // The comparator's queries over the enumerated candidates, answered beside
-// the selection loop that owns them: the baseline echo's carrier, the route
-// count into a tier, and the price of the cheapest route.
+// the selection loop that owns them: the baseline, the route count into a
+// tier, and the price of the cheapest route.
 
-// freshest returns the freshest clean candidate of an enumeration: freshness
-// picks the route the baseline echo measures, never a freshness value
-// itself. Nil when no clean route resolves: the baseline stays unmeasured
-// for the window rather than ride a route the network would not serve.
+// freshest returns the freshest clean candidate of an enumeration: the
+// peer's baseline, the route the window requests priced for it. Freshness
+// picks the route, never a freshness value itself. Nil when no clean route
+// resolves.
 func (s *selection) freshest(candidates []scion.Candidate) *scion.Candidate {
 	var best *scion.Candidate
 	for i := range candidates {
@@ -26,24 +27,24 @@ func (s *selection) freshest(candidates []scion.Candidate) *scion.Candidate {
 }
 
 // clean reports whether the candidate is a route the comparator may count:
-// it crosses no signaled interface — the wrapper's last resort, never the
-// comparator's route — and no link the node's own verdicts mark down, the
-// store and the verdicts naming the local interfaces and the candidate's
-// Links naming what it traverses. A flagged candidate or one over the node's
-// own dead interface is last-resort forwarding, not redundancy, and counting
-// either would overcount routes — the one error that errs toward
-// under-protection, where every accepted blind spot errs toward
-// over-protection.
+// not ejected, crossing no signaled interface — the wrapper's last resort,
+// never the comparator's route — and over none of the node's down links. A
+// dead route, a flagged one, or one over the node's own dead interface is no
+// redundancy, and counting it would overcount routes — the one error that
+// errs toward under-protection, where every accepted blind spot errs toward
+// over-protection. A suspect route counts: what it lacks is evidence, and
+// the window's request of it, its baseline or a survivor, decides it.
 func (s *selection) clean(c *scion.Candidate) bool {
-	if c.Crossing {
-		return false
-	}
-	for _, link := range c.Links {
-		if link.IA.Equal(s.cfg.IA) && !s.linkUp(link.IfID) {
-			return false
-		}
-	}
-	return true
+	return c.Health != scion.HealthEjected && !c.Crossing && !s.overDownLink(c)
+}
+
+// overDownLink reports whether the candidate leaves through a link the
+// node's own verdicts mark down: the store and the verdicts name the local
+// interfaces, and the candidate's Links name what it traverses.
+func (s *selection) overDownLink(c *scion.Candidate) bool {
+	return slices.ContainsFunc(c.Links, func(link segment.LinkID) bool {
+		return link.IA.Equal(s.cfg.IA) && !s.linkUp(link.IfID)
+	})
 }
 
 // routeCount counts the independent routes into a tier, saturating at two.
@@ -110,30 +111,16 @@ func edgeDisjoint(a, b *scion.Candidate) bool {
 	return true
 }
 
-// cheapest prices a set of routes by the cheapest of them: the routes the
-// window probed by their echoes — the measured authority, an unanswered
-// echo, a zero, pricing nothing — and every other route by its declared
-// one-way sum, doubled to meet the round trips it is judged against. A
-// route whose sum is unknown prices nothing: an undeclared edge is unknown,
-// not free. Zero when nothing prices the set.
-func cheapest(
-	echoes []time.Duration,
-	routes []*scion.Candidate,
-	probed map[*scion.Candidate]bool,
-) time.Duration {
-
+// cheapest prices a set of routes by the cheapest of them, each at its cost:
+// the measured round trip raised by loss, else its declared one-way sum
+// doubled to meet the round trips it is judged against. A route with
+// neither prices nothing: an undeclared edge is unknown, not free. Zero when
+// nothing prices the set.
+func cheapest(routes []*scion.Candidate) time.Duration {
 	var price time.Duration
-	consider := func(p time.Duration) {
-		if p > 0 && (price == 0 || p < price) {
-			price = p
-		}
-	}
-	for _, echo := range echoes {
-		consider(echo)
-	}
 	for _, c := range routes {
-		if !probed[c] && c.Latency != nil {
-			consider(2 * *c.Latency)
+		if c.Cost != nil {
+			price = lower(price, *c.Cost)
 		}
 	}
 	return price

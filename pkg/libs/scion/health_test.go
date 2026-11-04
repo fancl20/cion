@@ -361,6 +361,30 @@ func TestHealth(t *testing.T) {
 	}
 }
 
+// TestEjectedRetry checks when an ejected candidate is due its half-open
+// probe: its backoff after its last loss, and never for one not ejected.
+func TestEjectedRetry(t *testing.T) {
+	f := newMeasuredFixture(t, time.Minute)
+	now := time.Now()
+	f.measure(map[*Candidate]bus.PathRecord{
+		&f.viaMid: ejectedAt(now),
+		&f.direct: answered(now, 10*time.Millisecond),
+	})
+	candidates, err := f.p.Enumerate(context.Background(), iaDest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range candidates {
+		var want time.Time
+		if c.ID == f.viaMid.ID {
+			want = now.Add(backoff(2))
+		}
+		if !c.Retry.Equal(want) {
+			t.Errorf("%s retries at %v, want %v", c.ID, c.Retry, want)
+		}
+	}
+}
+
 // TestBackoff checks the half-open backoff: ten seconds after the first lost
 // burst, doubling with each, at most a minute.
 func TestBackoff(t *testing.T) {

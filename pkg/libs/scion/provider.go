@@ -223,8 +223,11 @@ type Candidate struct {
 	// Health is what the measurements, the callers' reports, and the held
 	// signals said of the path at composition.
 	Health Health
-	// Cost is the round trip the picks rank the path by: its measured cost,
-	// else twice its declared one-way sum; nil when it has neither.
+	// Retry is when an ejected path is due its half-open probe; zero for
+	// the others.
+	Retry time.Time
+	// Cost is the round trip the path is ranked and priced at: its measured
+	// cost, else twice its declared one-way sum; nil when it has neither.
 	Cost *time.Duration
 }
 

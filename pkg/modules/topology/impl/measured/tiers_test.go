@@ -11,9 +11,10 @@ import (
 	"github.com/fancl20/cion/pkg/modules/links"
 )
 
-// sm builds a window sample of the given round trips and enumerated routes.
-func sm(direct, path time.Duration, candidates ...scion.Candidate) sample {
-	return sample{m: measurement{direct: direct, path: path}, candidates: candidates}
+// sm builds a window sample of the given direct round trip and enumerated
+// routes.
+func sm(direct time.Duration, candidates ...scion.Candidate) sample {
+	return sample{direct: direct, candidates: candidates}
 }
 
 // TestDeriveTiers checks the sorted walk: a peer within the gap joins, one
@@ -22,12 +23,12 @@ func sm(direct, path time.Duration, candidates ...scion.Candidate) sample {
 // across recomputation.
 func TestDeriveTiers(t *testing.T) {
 	samples := map[addr.IA]sample{
-		selA: sm(5, 0),
-		selB: sm(6, 0),
-		selC: sm(7, 0),
-		selD: sm(9, 0),
-		// Unmeasured, however favorable its path baseline: not placed.
-		selE: sm(0, 4),
+		selA: sm(5),
+		selB: sm(6),
+		selC: sm(7),
+		selD: sm(9),
+		// Unmeasured, however favorable its route: not placed.
+		selE: sm(0, measured(route(0, 0, link(selE)), 4)),
 	}
 	// The median recomputes as the tier grows — {5} then {5,6} then
 	// {5,6,7} then {5,6,7,9} — and every peer stays within the gap.
@@ -43,7 +44,7 @@ func TestDeriveTiers(t *testing.T) {
 	}
 
 	// A peer past twice the median opens the next tier.
-	samples[selE] = sm(30, 0)
+	samples[selE] = sm(30)
 	ts = deriveTiers(samples)
 	if len(ts) != 2 {
 		t.Fatalf("tiers = %d, want two", len(ts))
@@ -55,7 +56,7 @@ func TestDeriveTiers(t *testing.T) {
 	// The walk is order-stable among equals: recomputation derives the same
 	// classes, equal samples holding their order.
 	equal := map[addr.IA]sample{
-		selA: sm(10, 0), selB: sm(10, 0), selC: sm(10, 0), selD: sm(10, 0),
+		selA: sm(10), selB: sm(10), selC: sm(10), selD: sm(10),
 	}
 	for range 3 {
 		ts = deriveTiers(equal)
@@ -71,51 +72,45 @@ func TestDeriveTiers(t *testing.T) {
 }
 
 // TestWindowTierFacts checks what one helper turns a tier into: up links
-// from the verdicts alone; the baseline the fastest answered echo takes;
-// the price of the cheapest route — a declared route under the echoed
-// carrier sets it, while an unanswered carrier, a crossing candidate, and
-// one over a local down interface price nothing; each member's own price
-// over its own routes, a member no route prices absent; the route count
-// reading the clean candidates alone; and strandedness on the echoes,
-// however many clean candidates compose into a tier none of whose echoes
-// answered.
+// from the verdicts alone; the price of the cheapest clean route at its cost
+// — a declared route under a measured one sets it, while a crossing route,
+// an ejected one, and one over a local down interface price nothing; each
+// member's own price over its own routes, a member no route prices absent;
+// the route count reading the clean candidates alone; and strandedness, once
+// no up link reaches a tier and the measurements doubt every route into it.
 func TestWindowTierFacts(t *testing.T) {
 	verdicts := map[uint16]bool{3: true, 4: false, 7: false} // B's link down, the node's own 7 dead
 	up := &links.Link{NeighborIA: selA, IfID: 3, State: links.StateEstablished}
 	dead := &links.Link{NeighborIA: selB, IfID: 4, State: links.StateEstablished}
 	neighbors := map[addr.IA]*links.Link{selA: up, selB: dead}
-	s := &selection{
-		cfg: SelectionConfig{
-			IA:    selIA,
-			Links: verdictTopic(verdicts),
-		},
-		pathEchoFn: func(addr.IA, *scion.Candidate) time.Duration { return 0 },
-	}
-	// One fast tier of three measured peers: A up, its echoed carrier at
+	s := &selection{cfg: SelectionConfig{
+		IA:    selIA,
+		Links: verdictTopic(verdicts),
+	}}
+	// One fast tier of three measured peers: A up, its route measured at
 	// 20ms beside a clean route declaring 8ms one way; B verdict-down, its
-	// carrier over the down link; C a candidate whose routes are a crossing
+	// route over the down link; C a candidate whose routes are a crossing
 	// one and one over the node's own dead interface, both declaring 1ms,
-	// beside one clean undeclared route. And a slow tier of one, D, whose
-	// clean carrier declares 2ms but went unanswered.
-	a := sm(5, 20*time.Millisecond,
-		route(0, 0, local(3), link(selA)),
+	// beside one clean undeclared route. And a slow tier of two: D, whose
+	// one route declares 2ms but was ejected, and E, whose one route is
+	// suspect.
+	a := sm(5,
+		measured(route(0, 0, local(3), link(selA)), 20*time.Millisecond),
 		route(-time.Minute, 8*time.Millisecond, link(selX), link(selA)),
 	)
-	a.carrier = &a.candidates[0]
-	b := sm(6, 0, route(0, time.Millisecond, local(4), link(selB)))
-	b.carrier = &b.candidates[0]
+	b := sm(6, route(0, time.Millisecond, local(4), link(selB)))
 	crossing := route(0, time.Millisecond, link(selC))
 	crossing.Crossing = true
-	c := sm(7, 0,
+	c := sm(7,
 		crossing,
 		route(0, time.Millisecond, local(7), link(selC)),
 		route(0, 0, link(selX), link(selC)),
 	)
-	d := sm(50, 0, route(0, 2*time.Millisecond, link(selX), link(selD)))
-	d.carrier = &d.candidates[0]
-	samples := map[addr.IA]sample{selA: a, selB: b, selC: c, selD: d}
+	d := sm(50, with(route(0, 2*time.Millisecond, link(selX), link(selD)), scion.HealthEjected))
+	e := sm(60, with(route(0, 3*time.Millisecond, link(selX), link(selE)), scion.HealthSuspect))
+	samples := map[addr.IA]sample{selA: a, selB: b, selC: c, selD: d, selE: e}
 
-	ts := s.windowTiers(t.Context(), neighbors, samples)
+	ts := s.windowTiers(neighbors, samples)
 	if len(ts) != 2 {
 		t.Fatalf("tiers = %d, want the fast one and the slow one", len(ts))
 	}
@@ -124,13 +119,10 @@ func TestWindowTierFacts(t *testing.T) {
 	if len(fast.upLinks) != 1 || fast.upLinks[0] != local(3) {
 		t.Errorf("up links = %v, want the verdict-up link alone", fast.upLinks)
 	}
-	if fast.baseline != 20*time.Millisecond {
-		t.Errorf("baseline = %v, want the answered echo 20ms", fast.baseline)
-	}
 	if fast.price != 16*time.Millisecond {
 		t.Errorf("price = %v, want the declared route's doubled 16ms", fast.price)
 	}
-	// A's declared route undercuts its carrier's 20ms echo; B's and C's
+	// A's declared route undercuts its measured 20ms route; B's and C's
 	// routes are dirty or undeclared.
 	wantPrices := map[addr.IA]time.Duration{selA: 16 * time.Millisecond}
 	if diff := cmp.Diff(wantPrices, fast.prices); diff != "" {
@@ -148,17 +140,24 @@ func TestWindowTierFacts(t *testing.T) {
 		t.Error("no excluded measurement for the up link")
 	}
 
-	// D's tier: a clean route composes into it, but no up link and no
-	// answered echo reach it — stranded, and unpriced.
+	// The slow tier: D's one route was ejected, and E's suspect one counts
+	// and prices, but no up link reaches the tier and the measurements doubt
+	// its one route — stranded.
 	if slow.routes != 1 || !slow.stranded {
-		t.Errorf("the slow tier = %d routes, stranded %v; want 1 and stranded",
+		t.Errorf("the slow tier = %d routes, stranded %v; want E's one and stranded",
 			slow.routes, slow.stranded)
 	}
-	if slow.price != 0 {
-		t.Errorf("the stranded tier's price = %v, want nothing pricing it", slow.price)
+	if slow.price != 6*time.Millisecond {
+		t.Errorf("the stranded tier's price = %v, want E's declared 6ms", slow.price)
 	}
-	if len(slow.prices) != 0 {
-		t.Errorf("the stranded tier's member prices = %v, want none", slow.prices)
+
+	// An up link to D: the slow tier is not stranded, though the
+	// measurements still doubt every route into it.
+	verdicts[9] = true
+	s.cfg.Links = verdictTopic(verdicts)
+	neighbors[selD] = &links.Link{NeighborIA: selD, IfID: 9, State: links.StateEstablished}
+	if ts := s.windowTiers(neighbors, samples); len(ts) != 2 || ts[1].stranded {
+		t.Error("a tier an up link reaches is stranded")
 	}
 }
 
@@ -174,21 +173,17 @@ func TestExcludedCutsOffTheLinksOwnNeighbor(t *testing.T) {
 		selA: {NeighborIA: selA, IfID: 3, State: links.StateEstablished},
 		selB: {NeighborIA: selB, IfID: 5, State: links.StateEstablished},
 	}
-	s := &selection{
-		cfg: SelectionConfig{
-			IA:    selIA,
-			Links: verdictTopic(verdicts),
-		},
-		pathEchoFn: func(addr.IA, *scion.Candidate) time.Duration { return 20 * ms },
-	}
-	// A answers its direct echo, and no route composes into it. B's carrier
-	// rides B's own link, and a second route reaches B around it.
-	b := sm(10*ms, 20*ms,
-		route(0, 0, local(5), link(selB)),
+	s := &selection{cfg: SelectionConfig{
+		IA:    selIA,
+		Links: verdictTopic(verdicts),
+	}}
+	// A answers its direct echo, and no route composes into it. B's measured
+	// route rides B's own link, and a second route reaches B around it.
+	b := sm(10*ms,
+		measured(route(0, 0, local(5), link(selB)), 20*ms),
 		route(0, 12*ms, link(selX), link(selB)),
 	)
-	b.carrier = &b.candidates[0]
-	ts := s.windowTiers(t.Context(), neighbors, map[addr.IA]sample{selA: sm(10*ms, 0), selB: b})
+	ts := s.windowTiers(neighbors, map[addr.IA]sample{selA: sm(10 * ms), selB: b})
 	if len(ts) != 1 {
 		t.Fatalf("tiers = %d, want one", len(ts))
 	}
@@ -201,40 +196,68 @@ func TestExcludedCutsOffTheLinksOwnNeighbor(t *testing.T) {
 	}
 }
 
-// TestMemberPrice checks a member's price: the carrier by its echo, an
-// unanswered one pricing nothing; every other route the window did not probe
-// by its declared sum doubled, an undeclared one pricing nothing; each route
-// charged the transit penalty for every AS it crosses between its ends, each
-// way; the cheapest winning.
+// TestWindowTiersWithoutMeasurements checks a window nothing measured, every
+// route unknown, as on a node without the ping application: routes price by
+// their declarations, a tier with no up link is not stranded while a clean
+// route composes into it, and no up link's useless test decides.
+func TestWindowTiersWithoutMeasurements(t *testing.T) {
+	ms := time.Millisecond
+	verdicts := map[uint16]bool{3: true, 5: true}
+	neighbors := map[addr.IA]*links.Link{
+		selA: {NeighborIA: selA, IfID: 3, State: links.StateEstablished},
+		selB: {NeighborIA: selB, IfID: 5, State: links.StateEstablished},
+	}
+	s := &selection{cfg: SelectionConfig{
+		IA:    selIA,
+		Links: verdictTopic(verdicts),
+	}}
+	ts := s.windowTiers(neighbors, map[addr.IA]sample{
+		selA: sm(10*ms, route(0, 6*ms, local(3), link(selA)), route(0, 7*ms, local(5), link(selB), link(selA))),
+		selB: sm(11*ms, route(0, 6*ms, local(5), link(selB)), route(0, 7*ms, local(3), link(selA), link(selB))),
+		selC: sm(100*ms, route(0, 30*ms, local(3), link(selA), link(selC))),
+	})
+	if len(ts) != 2 {
+		t.Fatalf("tiers = %d, want A's and B's, and C's", len(ts))
+	}
+	fast, slow := &ts[0], &ts[1]
+	if fast.price != 12*ms || slow.price != 60*ms {
+		t.Errorf("prices = %v and %v, want the declared 12ms and 60ms", fast.price, slow.price)
+	}
+	if slow.stranded {
+		t.Error("a tier a clean route reaches is stranded")
+	}
+	for _, ia := range []addr.IA{selA, selB} {
+		if decided, _ := judge(fast, ia); decided {
+			t.Errorf("a window nothing measured decided %s's link", ia)
+		}
+	}
+}
+
+// TestMemberPrice checks a member's price: each route at its cost, the
+// measured round trip or else the declared sum doubled, an undeclared and
+// unmeasured one pricing nothing; each route charged the transit penalty for
+// every AS it crosses between its ends, each way; the cheapest winning.
 func TestMemberPrice(t *testing.T) {
 	ms := time.Millisecond
-	routes := ptrs(
-		route(0, ms, local(1), link(selA)),
-		route(0, 9*ms, local(2), link(selB), link(selA)),
-		route(0, 3*ms, local(2), link(selB), link(selC), link(selA)),
-		route(0, 0, local(3), link(selC), link(selA)),
-	)
-	direct, oneTransit, twoTransits, undeclared := routes[0], routes[1], routes[2], routes[3]
-	probed := map[*scion.Candidate]bool{direct: true}
+	direct := measured(route(0, ms, local(1), link(selA)), 20*ms)
+	oneTransit := route(0, 9*ms, local(2), link(selB), link(selA))
+	twoTransits := route(0, 3*ms, local(2), link(selB), link(selC), link(selA))
+	undeclared := route(0, 0, local(3), link(selC), link(selA))
 
 	for _, tc := range []struct {
-		name    string
-		carrier *scion.Candidate
-		echo    time.Duration
-		routes  []*scion.Candidate
-		want    time.Duration
+		name   string
+		routes []*scion.Candidate
+		want   time.Duration
 	}{
-		{"the carrier by its echo", direct, 20 * ms, nil, 20 * ms},
-		{"an unanswered carrier", direct, 0, nil, 0},
-		{"the carrier's transit charged", oneTransit, 20 * ms, nil, 30 * ms},
-		{"a declared route, its transit charged", nil, 0, []*scion.Candidate{oneTransit}, 28 * ms},
-		{"two transits charged", nil, 0, []*scion.Candidate{twoTransits}, 26 * ms},
-		{"an undeclared route", nil, 0, []*scion.Candidate{undeclared}, 0},
-		{"a probed route's declaration", nil, 0, []*scion.Candidate{direct}, 0},
-		{"the cheapest", direct, 30 * ms, routes, 26 * ms},
+		{"a measured route at its cost", ptrs(direct), 20 * ms},
+		{"a measured route's transit charged", ptrs(measured(oneTransit, 20*ms)), 30 * ms},
+		{"a declared route, its transit charged", ptrs(oneTransit), 28 * ms},
+		{"two transits charged", ptrs(twoTransits), 26 * ms},
+		{"an undeclared route", ptrs(undeclared), 0},
+		{"the cheapest", ptrs(measured(direct, 30*ms), oneTransit, twoTransits, undeclared), 26 * ms},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := memberPrice(tc.carrier, tc.echo, tc.routes, probed); got != tc.want {
+			if got := memberPrice(tc.routes); got != tc.want {
 				t.Errorf("price = %v, want %v", got, tc.want)
 			}
 		})
@@ -288,7 +311,7 @@ func TestTierQualifies(t *testing.T) {
 // window undecided, unless another member decides the link useful; a
 // survivor of a member no route prices counts for nothing, and a member cut
 // off, priced or not, decides the link useful. A tier nothing prices, or a
-// survivor that went unanswered, decides nothing.
+// survivor that did not answer, decides nothing.
 func TestJudge(t *testing.T) {
 	ms := time.Millisecond
 	type prices = map[addr.IA]time.Duration
@@ -311,11 +334,11 @@ func TestJudge(t *testing.T) {
 	// price, the members given cut off.
 	held := func(p prices, cutOff ...addr.IA) excludedSample {
 		ex := excludedSample{
-			echo:   20 * ms,
-			price:  22 * ms,
-			routes: 2,
-			prices: p,
-			cutOff: make(map[addr.IA]bool),
+			answered: true,
+			price:    22 * ms,
+			routes:   2,
+			prices:   p,
+			cutOff:   make(map[addr.IA]bool),
 		}
 		for _, ia := range cutOff {
 			ex.cutOff[ia] = true
@@ -344,9 +367,9 @@ func TestJudge(t *testing.T) {
 		{"a survivor of a member no route prices",
 			held(prices{selA: 12 * ms, selB: 24 * ms, selC: 100 * ms}), true, true},
 		{"the tier's price past the ratio",
-			excludedSample{echo: 20 * ms, price: 26 * ms, routes: 2, prices: within}, true, false},
+			excludedSample{answered: true, price: 26 * ms, routes: 2, prices: within}, true, false},
 		{"a route lost",
-			excludedSample{echo: 20 * ms, price: 22 * ms, routes: 1, prices: within}, true, false},
+			excludedSample{answered: true, price: 22 * ms, routes: 1, prices: within}, true, false},
 		{"the survivor unanswered",
 			excludedSample{price: 22 * ms, routes: 2, prices: within}, false, false},
 	} {

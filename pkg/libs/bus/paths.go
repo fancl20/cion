@@ -36,9 +36,13 @@ func PathIDOf(links []segment.LinkID) PathID {
 // PathRole is what a requester needs a path measured for.
 type PathRole uint8
 
+// The roles, most demanding first: a path two requesters name takes the
+// earlier role.
 const (
 	// PathInUse is the path a destination's pick or lease holds.
 	PathInUse PathRole = iota
+	// PathPriced is a route a requester prices by its measurements.
+	PathPriced
 	// PathStandby is the path the one in use would fail over to.
 	PathStandby
 	// PathSuspect is a path the evidence doubts whose prior order beats the
@@ -49,7 +53,7 @@ const (
 )
 
 // RequestLapse is how long a request stands after its destination's last
-// pick or use.
+// pick, use, or pricing.
 const RequestLapse = 10 * time.Minute
 
 // PathRequest is one path a requester needs measured.
@@ -66,7 +70,7 @@ type PathRequest struct {
 	Role PathRole
 	// Due is when a half-open probe is due; zero for the other roles.
 	Due time.Time
-	// Picked is when the destination was last picked or used.
+	// Picked is when the destination was last picked, used, or priced.
 	Picked time.Time
 	// Confirmed is when a caller's traffic last confirmed the path; zero
 	// while none did.
@@ -105,6 +109,25 @@ func (r PathRequests) Requested(
 	}
 	if len(entries) > 0 {
 		own[dst] = slices.Clone(entries)
+	}
+	next.by[requester] = own
+	return next
+}
+
+// Replaced returns the requests with the requester's entries replaced by
+// entries, by destination.
+func (r PathRequests) Replaced(requester string, entries map[addr.IA][]PathRequest) PathRequests {
+	next := PathRequests{by: make(map[string]map[addr.IA][]PathRequest, len(r.by)+1)}
+	for name, dsts := range r.by {
+		if name != requester {
+			next.by[name] = dsts
+		}
+	}
+	own := make(map[addr.IA][]PathRequest, len(entries))
+	for dst, es := range entries {
+		if len(es) > 0 {
+			own[dst] = slices.Clone(es)
+		}
 	}
 	next.by[requester] = own
 	return next

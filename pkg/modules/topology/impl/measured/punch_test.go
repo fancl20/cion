@@ -489,8 +489,8 @@ func TestProbePunchesUnansweredCandidates(t *testing.T) {
 	e := target{IA: selPeer, Scope: bus.DirectoryID{7},
 		RendezvousAddr: netip.MustParseAddrPort("192.0.2.9:30043"),
 		Reach:          bus.Reach{RendezvousUnanswered: true}}
-	if sm := s.probe(context.Background(), e, nil); sm.m.direct != punch.rtt {
-		t.Errorf("direct sample = %v, want the punch's %v", sm.m.direct, punch.rtt)
+	if sm := s.probe(context.Background(), e, nil); sm.direct != punch.rtt {
+		t.Errorf("direct sample = %v, want the punch's %v", sm.direct, punch.rtt)
 	}
 	if want := []addr.IA{selPeer}; !slices.Equal(punch.probed, want) {
 		t.Errorf("the punch probed %v, want %v", punch.probed, want)

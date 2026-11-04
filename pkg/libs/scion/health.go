@@ -88,8 +88,9 @@ func (r report) lostSince(since, within time.Time) int {
 // since its last loss, or by callerLosses of its callers' losses; suspect,
 // for a held signal on a link it crosses or a caller's loss newer than its
 // last answer; healthy, for an answer within the trust window; suspect, for
-// stale segments or a crossed link its failed paths share; unknown. Its cost
-// is its measured cost, else twice its declared one-way sum.
+// stale segments or a crossed link its failed paths share; unknown. An
+// ejected candidate is due its half-open probe its backoff after its last
+// loss. Its cost is its measured cost, else twice its declared one-way sum.
 func (v view) assess(c *Candidate) {
 	r, measured := v.measured.Of(c.ID)
 	rep := v.reports[c.ID]
@@ -98,6 +99,7 @@ func (v view) assess(c *Candidate) {
 	case measured && ejected(r) && !rep.delivered.After(r.LastLoss),
 		rep.lostSince(answered, v.now.Add(-trustWindow)) >= callerLosses:
 		c.Health = HealthEjected
+		c.Retry = r.LastLoss.Add(backoff(r.LostBursts))
 	case v.signaledSince(c.Crossed, answered), rep.doubted().After(answered):
 		c.Health = HealthSuspect
 	case !answered.IsZero() && v.now.Sub(answered) < trustWindow:
@@ -301,9 +303,7 @@ func (p *PathProvider) request(requester string, dst addr.IA, inUse *Candidate, 
 		entries = append(entries, v.entry(dst, suspect, bus.PathSuspect, time.Time{}, picked))
 	}
 	if halfOpen != nil {
-		r, _ := v.measured.Of(halfOpen.ID)
-		due := r.LastLoss.Add(backoff(r.LostBursts))
-		entries = append(entries, v.entry(dst, halfOpen, bus.PathHalfOpen, due, picked))
+		entries = append(entries, v.entry(dst, halfOpen, bus.PathHalfOpen, halfOpen.Retry, picked))
 	}
 	p.Requests.Update(func(r bus.PathRequests) bus.PathRequests {
 		return r.Requested(requester, dst, entries, v.now.Add(-bus.RequestLapse))

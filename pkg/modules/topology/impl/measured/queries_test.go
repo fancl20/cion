@@ -1,7 +1,6 @@
 package measured
 
 import (
-	"fmt"
 	"testing"
 	"time"
 
@@ -9,6 +8,7 @@ import (
 	"github.com/google/go-cmp/cmp/cmpopts"
 	"github.com/scionproto/scion/pkg/addr"
 
+	"github.com/fancl20/cion/pkg/libs/bus"
 	"github.com/fancl20/cion/pkg/libs/scion"
 	"github.com/fancl20/cion/pkg/libs/segment"
 	"github.com/fancl20/cion/pkg/modules/links"
@@ -16,11 +16,10 @@ import (
 
 var selX = addr.MustIAFrom(20, 0xfd0000000031)
 
-// TestFreshestClean checks the baseline's carrier: the freshest clean
-// candidate carries it, a crossing candidate — the wrapper's last resort —
-// never, and a candidate over one of the node's own verdict-down links
-// neither. All dirty leaves it unmeasured rather than served over a route
-// the network would not.
+// TestFreshestClean checks the baseline: the freshest clean candidate,
+// never an ejected one, a crossing one — the wrapper's last resort — nor one
+// over one of the node's own verdict-down links, while a suspect one serves.
+// All dirty leaves no baseline.
 func TestFreshestClean(t *testing.T) {
 	verdicts := map[uint16]bool{7: false} // the node's own dead interface
 	s := &selection{cfg: SelectionConfig{
@@ -29,22 +28,23 @@ func TestFreshestClean(t *testing.T) {
 	}}
 	now := time.Now()
 	dirty := []scion.Candidate{
-		{Fresh: now, Crossing: true},                                // flagged
+		{Fresh: now, Health: scion.HealthEjected},
+		{Fresh: now, Crossing: true},
 		{Fresh: now, Links: []segment.LinkID{{IA: selIA, IfID: 7}}}, // over the dead interface
 	}
 	if c := s.freshest(dirty); c != nil {
-		t.Errorf("freshest over the dirty pair = %v, want none", c.Fresh)
+		t.Errorf("freshest over the dirty ones = %v, want none", c.Fresh)
 	}
-	// The dirty pair beside one clean candidate however stale: the clean
-	// one carries the baseline.
+	// The dirty ones beside one clean candidate however stale: the clean
+	// one is the baseline.
 	stale := append(dirty, scion.Candidate{
 		Fresh: now.Add(-time.Hour), Links: []segment.LinkID{link(selX)},
 	})
 	if c := s.freshest(stale); c == nil || !c.Fresh.Equal(now.Add(-time.Hour)) {
 		t.Errorf("freshest = %v, want the stale clean one", c)
 	}
-	// A clean candidate at the head outranks them all.
-	fresh := append(stale, scion.Candidate{Fresh: now})
+	// A clean candidate at the head outranks them all, suspect though it is.
+	fresh := append(stale, scion.Candidate{Fresh: now, Health: scion.HealthSuspect})
 	if c := s.freshest(fresh); c == nil || !c.Fresh.Equal(now) {
 		t.Errorf("freshest over the clean set = %v, want the fresh clean one", c)
 	}
@@ -60,24 +60,33 @@ func link(ia addr.IA) segment.LinkID { return segment.LinkID{IA: ia, IfID: 1} }
 // local names one of the node's own interfaces.
 func local(ifID uint16) segment.LinkID { return segment.LinkID{IA: selIA, IfID: ifID} }
 
-// declared builds an enumerated route declaring its one-way latency.
-func declared(oneWay time.Duration) scion.Candidate {
-	return scion.Candidate{Latency: &oneWay}
-}
-
 // route builds an enumerated route over the links, fresh at the given
-// offset from now, declaring the one-way latency when it is nonzero.
+// offset, as composition returns one nothing measured: unknown, its cost
+// twice the one-way latency it declares when that is nonzero.
 func route(fresh time.Duration, oneWay time.Duration, links ...segment.LinkID) scion.Candidate {
-	c := scion.Candidate{Links: links, Fresh: time.Unix(1<<30, 0).Add(fresh)}
+	c := scion.Candidate{
+		Links: links, Crossed: links, ID: bus.PathIDOf(links),
+		Fresh: time.Unix(1<<30, 0).Add(fresh),
+	}
 	if oneWay > 0 {
-		c.Latency = &oneWay
+		prior := 2 * oneWay
+		c.Latency, c.Cost = &oneWay, &prior
 	}
 	return c
 }
 
-// routeKey names a route by its links, the key the path echo seam's
-// answers are given by.
-func routeKey(c *scion.Candidate) string { return fmt.Sprint(c.Links) }
+// measured returns the route as the measurements leave it: healthy, at the
+// measured cost.
+func measured(c scion.Candidate, cost time.Duration) scion.Candidate {
+	c.Health, c.Cost = scion.HealthHealthy, &cost
+	return c
+}
+
+// with returns the route in the given health.
+func with(c scion.Candidate, h scion.Health) scion.Candidate {
+	c.Health = h
+	return c
+}
 
 // ptrs points at the candidates, the form the tier's routes take.
 func ptrs(cs ...scion.Candidate) []*scion.Candidate {
@@ -134,31 +143,25 @@ func TestRouteCount(t *testing.T) {
 	}
 }
 
-// TestCheapest checks the price of a set of routes: a probed route by its
-// echo, an unanswered one pricing nothing whatever it declares, every other
-// route by its declared one-way sum doubled, an undeclared one pricing
-// nothing — and the cheapest wins, a declaration under the echoes included.
+// TestCheapest checks the price of a set of routes: each at its cost, the
+// measured round trip or else the declared sum doubled, a route with neither
+// pricing nothing, and the cheapest winning.
 func TestCheapest(t *testing.T) {
-	probedRoute := declared(time.Millisecond) // its declaration never prices
-	cheap := declared(8 * time.Millisecond)
-	pricier := declared(20 * time.Millisecond)
-	routes := ptrs(probedRoute, cheap, cand(), pricier)
-	probed := map[*scion.Candidate]bool{routes[0]: true}
-
+	ms := time.Millisecond
+	slow := measured(cand(), 30*ms)
+	fast := measured(cand(), 12*ms)
+	declared := route(0, 8*ms)
 	for _, tc := range []struct {
 		name   string
-		echoes []time.Duration
 		routes []*scion.Candidate
 		want   time.Duration
 	}{
-		{"a declaration under the echo", []time.Duration{30 * time.Millisecond}, routes, 16 * time.Millisecond},
-		{"an echo under the declarations", []time.Duration{12 * time.Millisecond}, routes, 12 * time.Millisecond},
-		{"an unanswered echo", []time.Duration{0}, routes, 16 * time.Millisecond},
-		{"the probed route alone, unanswered", []time.Duration{0}, routes[:1], 0},
-		{"undeclared routes", nil, routes[2:3], 0},
+		{"a declaration under a measurement", ptrs(slow, declared, cand()), 16 * ms},
+		{"a measurement under a declaration", ptrs(fast, declared), 12 * ms},
+		{"routes without a cost", ptrs(cand(), cand()), 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := cheapest(tc.echoes, tc.routes, probed); got != tc.want {
+			if got := cheapest(tc.routes); got != tc.want {
 				t.Errorf("price = %v, want %v", got, tc.want)
 			}
 		})
@@ -167,13 +170,12 @@ func TestCheapest(t *testing.T) {
 
 // TestMeasureExcluded checks each up link's excluded measurement over the
 // window's candidates: the survivors are the clean candidates that traverse
-// the link nowhere, the freshest of them echoed; the price is the cheapest
-// survivor — the echoed one by its new echo, unanswered pricing nothing, a
-// surviving carrier by its baseline echo, any other by its declaration;
-// each member's price is the same over its own survivors, each route charged
-// the transit penalty per AS it crosses; the route count reads the tier's
-// other up links beside the survivors; a link every route crosses leaves no
-// survivor, no echo, and no price; and a down link takes no measurement.
+// the link nowhere, the freshest of them the window's survivor, answered
+// when healthy; the price is the cheapest survivor at its cost; each
+// member's price is the same over its own survivors, each route charged the
+// transit penalty per AS it crosses; the route count reads the tier's other
+// up links beside the survivors; a link every route crosses leaves no
+// survivor and no price; and a down link takes no measurement.
 func TestMeasureExcluded(t *testing.T) {
 	verdicts := map[uint16]bool{1: true, 2: true, 4: false, 5: true}
 	neighbors := map[addr.IA]*links.Link{
@@ -182,63 +184,57 @@ func TestMeasureExcluded(t *testing.T) {
 		selD: {NeighborIA: selD, IfID: 4, State: links.StateEstablished},
 		selE: {NeighborIA: selE, IfID: 5, State: links.StateEstablished},
 	}
-	// A's carrier leaves through B's link; A's other route through its own.
-	// B's carrier leaves through its own link; B's other route through a
-	// third, declaring.
-	a := sm(10*time.Millisecond, 22*time.Millisecond,
-		route(-time.Minute, 0, local(2), link(selB), link(selA)),
+	// A's measured route leaves through B's link; A's other route, unknown,
+	// through its own. B's measured route leaves through its own link; B's
+	// other route through a third, declaring.
+	a := sm(10*time.Millisecond,
+		measured(route(-time.Minute, 0, local(2), link(selB), link(selA)), 22*time.Millisecond),
 		route(-2*time.Minute, 0, local(1), link(selA)),
 	)
-	a.carrier = &a.candidates[0]
-	b := sm(12*time.Millisecond, 18*time.Millisecond,
-		route(-30*time.Second, 0, local(2), link(selB)),
+	b := sm(12*time.Millisecond,
+		measured(route(-30*time.Second, 0, local(2), link(selB)), 26*time.Millisecond),
 		route(-3*time.Minute, 30*time.Millisecond, local(3), link(selC), link(selB)),
 	)
-	b.carrier = &b.candidates[0]
 	// E, alone in a slow tier, reached only over its own link.
-	e := sm(100*time.Millisecond, 0, route(0, 0, local(5), link(selE)))
+	e := sm(100*time.Millisecond, route(0, 0, local(5), link(selE)))
 	samples := map[addr.IA]sample{
-		selA: a, selB: b, selD: sm(11*time.Millisecond, 0), selE: e,
+		selA: a, selB: b, selD: sm(11 * time.Millisecond), selE: e,
 	}
-	echoes := map[string]time.Duration{
-		routeKey(&b.candidates[0]): 26 * time.Millisecond, // B's carrier, echoed anew
-	}
-	s := &selection{
-		cfg: SelectionConfig{
-			IA:    selIA,
-			Links: verdictTopic(verdicts),
-		},
-		pathEchoFn: func(_ addr.IA, c *scion.Candidate) time.Duration {
-			return echoes[routeKey(c)]
-		},
-	}
-	ts := s.windowTiers(t.Context(), neighbors, samples)
+	s := &selection{cfg: SelectionConfig{
+		IA:    selIA,
+		Links: verdictTopic(verdicts),
+	}}
+	ts := s.windowTiers(neighbors, samples)
 	if len(ts) != 2 {
 		t.Fatalf("tiers = %d, want the fast one and E's", len(ts))
 	}
 	fast, slow := &ts[0], &ts[1]
 
 	opts := []cmp.Option{cmp.AllowUnexported(excludedSample{}), cmpopts.EquateEmpty()}
-	// Excluding A's link: B's carrier is the freshest survivor, priced by
-	// its new 26ms echo, and A's surviving carrier by its 22ms baseline —
-	// the price. B's link and the declared third route keep two routes. A's
-	// own price rides B's link, one transit: 22ms and 10ms more.
+	// Excluding A's link: B's measured route is the freshest survivor,
+	// answered, and A's surviving route at 22ms the price. B's link and the
+	// declared third route keep two routes. A's own price rides B's link,
+	// one transit: 22ms and 10ms more.
 	want := excludedSample{
-		echo:   26 * time.Millisecond,
-		price:  22 * time.Millisecond,
-		routes: 2,
-		prices: map[addr.IA]time.Duration{selA: 32 * time.Millisecond, selB: 26 * time.Millisecond},
+		survivor: &b.candidates[0],
+		dst:      selB,
+		answered: true,
+		price:    22 * time.Millisecond,
+		routes:   2,
+		prices:   map[addr.IA]time.Duration{selA: 32 * time.Millisecond, selB: 26 * time.Millisecond},
 	}
 	if diff := cmp.Diff(want, fast.excluded[selA], opts...); diff != "" {
 		t.Errorf("A's excluded measurement (-want +got):\n%s", diff)
 	}
-	// Excluding B's link: A's own route is the freshest survivor and goes
-	// unanswered, pricing nothing; the declared route prices at 60ms, and
+	// Excluding B's link: A's own route is the freshest survivor, unknown,
+	// so the window decides nothing; the declared route prices at 60ms, and
 	// B at 70ms with its one transit.
 	want = excludedSample{
-		price:  60 * time.Millisecond,
-		routes: 2,
-		prices: map[addr.IA]time.Duration{selB: 70 * time.Millisecond},
+		survivor: &a.candidates[1],
+		dst:      selA,
+		price:    60 * time.Millisecond,
+		routes:   2,
+		prices:   map[addr.IA]time.Duration{selB: 70 * time.Millisecond},
 	}
 	if diff := cmp.Diff(want, fast.excluded[selB], opts...); diff != "" {
 		t.Errorf("B's excluded measurement (-want +got):\n%s", diff)

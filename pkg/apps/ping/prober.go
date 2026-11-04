@@ -22,21 +22,27 @@ import (
 )
 
 // The prober's pacing. A destination is hot for HotWindow after its last
-// pick or use: its path in use is probed every Heartbeat, and its standby and
-// its suspect every SlowProbe, each first at once. Until its requests lapse,
-// its path in use is probed every SlowProbe, its standby and suspect not at
-// all. A caller's confirmation of a path counts as its routine probe. A lost
-// probe of a path in use or suspect, and a caller's doubt newer than a path's
-// last answer, call a burst, which decides the path: an answer keeps or
-// clears it, a burst lost whole ejects it.
+// pick, use, or pricing: its path in use is probed every Heartbeat, its
+// priced routes every RouteProbe, and its standby and its suspect every
+// SlowProbe, each first at once. Until its requests lapse, its path in use is
+// probed every SlowProbe, its other paths not at all. A caller's confirmation
+// of a path counts as its routine probe. A lost probe of a path in use,
+// priced, or suspect, and a caller's doubt newer than a path's last answer,
+// call a burst, which decides the path: an answer keeps or clears it, a burst
+// lost whole ejects it.
 const (
 	// Heartbeat bounds how long a silent failure of a path in use goes
 	// unseen, a burst's second beside it.
 	Heartbeat = 5 * time.Second
+	// RouteProbe spaces the probes of a priced route: a requester that
+	// prices its routes each half minute reads a probe from within its last
+	// pricing.
+	RouteProbe = 30 * time.Second
 	// SlowProbe matches the cadence at which registrations and lookups
 	// refresh the segments the candidates are composed from.
 	SlowProbe = time.Minute
-	// HotWindow is how long after its last pick or use a destination is hot.
+	// HotWindow is how long after its last pick, use, or pricing a
+	// destination is hot.
 	HotWindow = time.Minute
 	// BurstProbes and BurstSpacing shape a burst: five probes over a second.
 	BurstProbes  = 5
@@ -146,8 +152,8 @@ type probe struct {
 	id    bus.PathID
 	sent  time.Time
 	burst bool
-	// confirm reports whether the path was in use or suspect when the
-	// probe went: its routine probe's loss calls a burst.
+	// confirm reports whether the path was in use, priced, or suspect when
+	// the probe went: its routine probe's loss calls a burst.
 	confirm bool
 }
 
@@ -524,7 +530,7 @@ func (p *Prober) dispatch(now time.Time) time.Duration {
 }
 
 // interval returns how often the path's routine probes go by its role and
-// its destination's last pick or use, zero for none.
+// its destination's last pick, use, or pricing, zero for none.
 func (p *Prober) interval(ps *probed, now time.Time) time.Duration {
 	hot := now.Sub(ps.req.Picked) < HotWindow
 	switch ps.req.Role {
@@ -533,6 +539,10 @@ func (p *Prober) interval(ps *probed, now time.Time) time.Duration {
 			return Heartbeat
 		}
 		return SlowProbe
+	case bus.PathPriced:
+		if hot {
+			return RouteProbe
+		}
 	case bus.PathStandby, bus.PathSuspect:
 		if hot {
 			return SlowProbe
@@ -584,7 +594,7 @@ func (p *Prober) resolutionPaths(dst addr.IA) []*spath.Decoded {
 func (p *Prober) send(d due, host netip.Addr, now time.Time) {
 	p.seq++
 	pr := probe{id: d.id, sent: now, burst: d.class == 0,
-		confirm: d.ps.req.Role == bus.PathInUse || d.ps.req.Role == bus.PathSuspect}
+		confirm: slices.Contains([]bus.PathRole{bus.PathInUse, bus.PathPriced, bus.PathSuspect}, d.ps.req.Role)}
 	p.tokens--
 	if pr.burst {
 		d.ps.burstLeft--

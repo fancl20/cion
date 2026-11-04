@@ -725,7 +725,8 @@ func (z *Provider) Close() error {
 
 // selectionConfig builds the topology loop's configuration from the
 // provider's own pieces: the link store its decisions land in, the directory
-// its candidates come from, the paths and conn its probes ride, and the
+// its candidates come from, the paths its routes compose from and the
+// requests that have them measured, the conn its probes ride, and the
 // monitor's verdicts its demotions read.
 func (z *Provider) selectionConfig() SelectionConfig {
 	return SelectionConfig{
@@ -735,6 +736,7 @@ func (z *Provider) selectionConfig() SelectionConfig {
 		Links:       z.linkState,
 		Latencies:   z.env.Bus.Latencies(),
 		Paths:       z.env.Paths,
+		Requests:    z.env.Bus.PathRequests(),
 		Conn:        z.probeConn,
 		ControlHost: z.cfg.ControlHost,
 		LinkHost:    z.cfg.ControlHost,

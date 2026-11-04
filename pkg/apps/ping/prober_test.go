@@ -595,3 +595,39 @@ func TestProberBurstsOnDoubt(t *testing.T) {
 		})
 	})
 }
+
+// TestProberProbesPricedRoutes checks a priced route's pacing: probed every
+// RouteProbe while hot, first at once, its lost probe calling a burst, its
+// role kept over the standby another requester names it, and never once its
+// destination is warm.
+func TestProberProbesPricedRoutes(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		e, r := newFakeEcho(), &fakeResolver{}
+		priced, lossy, warm := &spath.Decoded{}, &spath.Decoded{}, &spath.Decoded{}
+		e.drop(lossy, 1)
+		prober(t, e, r, func(b *bus.Bus) {
+			now := time.Now()
+			b.PathRequests().Update(func(rs bus.PathRequests) bus.PathRequests {
+				return rs.Replaced("selection", map[addr.IA][]bus.PathRequest{
+					dstA: {
+						entryOf("priced", dstA, priced, bus.PathPriced, now),
+						entryOf("lossy", dstA, lossy, bus.PathPriced, now),
+					},
+					dstB: {entryOf("warm", dstB, warm, bus.PathPriced, now.Add(-2*time.Minute))},
+				})
+			})
+			request(b, dstA, entryOf("priced", dstA, priced, bus.PathStandby, now))
+			time.Sleep(RouteProbe + time.Second)
+			synctest.Wait()
+			for _, tc := range []struct {
+				name string
+				path *spath.Decoded
+				want int
+			}{{"priced", priced, 2}, {"lossy", lossy, 2 + BurstProbes}, {"warm", warm, 0}} {
+				if got := e.sends(tc.path); got != tc.want {
+					t.Errorf("the %s route drew %d probes in %v, want %d", tc.name, got, RouteProbe+time.Second, tc.want)
+				}
+			}
+		})
+	})
+}

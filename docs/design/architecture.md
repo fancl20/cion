@@ -168,7 +168,8 @@ load refuses the boot with the fix named
     removes nodes and cores
     ([ADR-0022](/docs/adrs/0022-serve-the-operators-console-as-a-passkey-portal.md)).
 *   **Ping** — the network's probe: it measures the paths the SCION
-    library's picks and leases ask about, and they rank paths by its records
+    library's picks and leases and the topology selection ask about, and
+    each chooses by its records
     ([ADR-0035](/docs/adrs/0035-choose-paths-by-measured-health.md)).
 
 ## How the components interact

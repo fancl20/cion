@@ -105,7 +105,9 @@ type Environment struct {
 	// witness of where the peer's packets come from, which the
 	// authenticated link request's agreement rule reads. It publishes the
 	// selection loop's per-link one-way delay estimates on the latency
-	// topic, which the beaconer's entries declare.
+	// topic, which the beaconer's entries declare, and the routes the loop
+	// prices on the path requests topic, which the ping application
+	// measures.
 	Bus *bus.Bus
 }
 

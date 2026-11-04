@@ -36,10 +36,12 @@ import (
 
 // selFixture is the selection loop's test harness: a memory link store, the
 // directory's entries and the monitor's verdicts, which each pass publishes
-// first, injected measurements and path echoes, and injected candidate-grace
-// probes. The establishment is recorded rather than performed; the promotion
-// and retirement rules are what the tests assert.
+// first, injected samples, their routes' health and cost as the
+// measurements leave them, and injected candidate-grace probes. The
+// establishment is recorded rather than performed; the promotion and
+// retirement rules are what the tests assert.
 type selFixture struct {
+	t              *testing.T
 	store          *memory.DB
 	directory      []bus.DirectoryEntry
 	directoryTopic *bus.Topic[bus.Directory]
@@ -51,11 +53,8 @@ type selFixture struct {
 	alive map[addr.IA]bool
 	// probed holds the peers the last pass measured, and probedAt the
 	// address each was measured at.
-	probed   map[addr.IA]bool
-	probedAt map[addr.IA]netip.AddrPort
-	// echoes holds the excluded measurements' path echoes by route key; an
-	// unset route goes unanswered.
-	echoes      map[string]time.Duration
+	probed      map[addr.IA]bool
+	probedAt    map[addr.IA]netip.AddrPort
 	established []addr.IA // the promoted candidates, in order
 	// writes counts the loop's own writes, signaled through its store as
 	// the node's store signals them; the fixture's writes bypass it.
@@ -119,6 +118,7 @@ func (f *selFixture) accept(t *testing.T, ia addr.IA) {
 func newSelFixture(t *testing.T, neighbors ...addr.IA) *selFixture {
 	t.Helper()
 	f := &selFixture{
+		t:              t,
 		store:          memory.New(),
 		directoryTopic: new(bus.Topic[bus.Directory]),
 		samples:        make(map[addr.IA]sample),
@@ -127,7 +127,6 @@ func newSelFixture(t *testing.T, neighbors ...addr.IA) *selFixture {
 		alive:          make(map[addr.IA]bool),
 		probed:         make(map[addr.IA]bool),
 		probedAt:       make(map[addr.IA]netip.AddrPort),
-		echoes:         make(map[string]time.Duration),
 	}
 	for _, ia := range neighbors {
 		if err := f.store.Insert(context.Background(),
@@ -137,7 +136,7 @@ func newSelFixture(t *testing.T, neighbors ...addr.IA) *selFixture {
 	}
 	for _, ia := range neighbors {
 		f.directory = append(f.directory, entryOf(ia))
-		f.samples[ia] = sm(10*time.Millisecond, 20*time.Millisecond)
+		f.samples[ia] = f.priced(ia, 10*time.Millisecond, 20*time.Millisecond)
 	}
 	f.sel = &selection{
 		cfg: SelectionConfig{
@@ -150,10 +149,9 @@ func newSelFixture(t *testing.T, neighbors ...addr.IA) *selFixture {
 		probeFn: func(_ context.Context, e target, _ *links.Link) sample {
 			f.probed[e.IA] = true
 			f.probedAt[e.IA] = e.RendezvousAddr
-			return f.samples[e.IA]
-		},
-		pathEchoFn: func(_ addr.IA, c *scion.Candidate) time.Duration {
-			return f.echoes[routeKey(c)]
+			sm := f.samples[e.IA]
+			sm.baseline = f.sel.freshest(sm.candidates)
+			return sm
 		},
 		establishFn: func(_ context.Context, e target, _ string) bool {
 			if err := f.store.Insert(context.Background(),
@@ -245,10 +243,32 @@ func (f *selFixture) hasEntry(t *testing.T, ia addr.IA) bool {
 	return false
 }
 
-// candidate adds a directory candidate with the given sample.
-func (f *selFixture) candidate(ia addr.IA, direct, path time.Duration, routes ...scion.Candidate) {
+// priced returns a sample of the direct round trip whose routes carry the
+// price: the first route measured at it, else — none given — the stalest
+// route measured at it, over the peer's own link for a neighbor and through
+// X for a candidate. A zero price leaves the routes as given.
+func (f *selFixture) priced(ia addr.IA, direct, price time.Duration, routes ...scion.Candidate) sample {
+	f.t.Helper()
+	if price == 0 {
+		return sm(direct, routes...)
+	}
+	routes = slices.Clone(routes)
+	if len(routes) == 0 {
+		if f.hasEntry(f.t, ia) {
+			routes = append(routes, f.via(f.t, ia, -time.Hour, ia))
+		} else {
+			routes = append(routes, route(-time.Hour, 0, link(selX), link(ia)))
+		}
+	}
+	routes[0] = measured(routes[0], price)
+	return sm(direct, routes...)
+}
+
+// candidate adds a directory candidate with the given sample, its routes
+// carrying the price as priced has them.
+func (f *selFixture) candidate(ia addr.IA, direct, price time.Duration, routes ...scion.Candidate) {
 	f.directory = append(f.directory, entryOf(ia))
-	f.samples[ia] = sample{m: measurement{direct: direct, path: path}, candidates: routes}
+	f.samples[ia] = f.priced(ia, direct, price, routes...)
 }
 
 // via builds a route that leaves through the neighbor's link and crosses
@@ -262,14 +282,10 @@ func (f *selFixture) via(t *testing.T, through addr.IA, fresh time.Duration, rem
 	return route(fresh, 0, path...)
 }
 
-// carried sets the peer's sample to the round trips and routes given, the
-// first route the baseline's carrier: an excluded measurement echoing that
-// route answers as the baseline did.
-func (f *selFixture) carried(ia addr.IA, direct, path time.Duration, routes ...scion.Candidate) {
-	s := sm(direct, path, routes...)
-	s.carrier = &s.candidates[0]
-	f.samples[ia] = s
-	f.echoes[routeKey(s.carrier)] = path
+// carried sets the peer's sample to the round trip and routes given, the
+// first route measured at the price.
+func (f *selFixture) carried(ia addr.IA, direct, price time.Duration, routes ...scion.Candidate) {
+	f.samples[ia] = f.priced(ia, direct, price, routes...)
 }
 
 // ifID returns the neighbor's entry's interface ID.
@@ -298,7 +314,7 @@ func TestSelectionDeclaresLatency(t *testing.T) {
 	f.sel.cfg.Latencies = latencies
 	ifID := f.ifID(t, selPeer)
 
-	f.samples[selPeer] = sm(10*time.Millisecond, 20*time.Millisecond)
+	f.samples[selPeer] = f.priced(selPeer, 10*time.Millisecond, 20*time.Millisecond)
 	f.pass(t)
 	if got := latencies.Latest().Of(ifID); got != 5*time.Millisecond {
 		t.Errorf("declared one-way delay = %v, want the halved round trip 5ms", got)
@@ -306,10 +322,73 @@ func TestSelectionDeclaresLatency(t *testing.T) {
 
 	// A window the link goes unanswered declares nothing: the next entries
 	// carry no stale sample.
-	f.samples[selPeer] = sm(0, 0)
+	f.samples[selPeer] = sm(0)
 	f.pass(t)
 	if got := latencies.Latest().Of(ifID); got != 0 {
 		t.Errorf("declared one-way delay past an unanswered window = %v, want 0", got)
+	}
+}
+
+// TestSelectionRequestsItsRoutes checks the routes a window requests
+// measured: each peer's baseline and each up link's freshest clean survivor,
+// priced, and a peer's freshest ejected route fresher than its baseline,
+// half-open at its retry, never a staler one or one a signal holds off; the
+// next window's requests replace them, a peer the directory no longer names
+// requesting nothing.
+func TestSelectionRequestsItsRoutes(t *testing.T) {
+	ms := time.Millisecond
+	f := newSelFixture(t, selPeer, selA, selB)
+	requests := new(bus.Topic[bus.PathRequests])
+	f.sel.cfg.Requests = requests
+	viaPeer := f.via(t, selPeer, 0, selPeer, selA)
+	f.carried(selA, 18*ms, 12*ms, viaPeer)
+	// B's ejected route through Peer is staler than its baseline.
+	bOwn := f.via(t, selB, -time.Hour, selB)
+	f.carried(selB, 10*ms, 20*ms, bOwn,
+		with(f.via(t, selPeer, -2*time.Hour, selPeer, selB), scion.HealthEjected))
+	// C's baseline rides Peer's link; its route through B, older, is the
+	// freshest route around Peer's link; its route through A, fresher than
+	// the baseline, was ejected; and its freshest, through B and X, crosses
+	// a signaled interface.
+	cViaPeer := f.via(t, selPeer, 0, selPeer, selC)
+	cViaB := f.via(t, selB, -time.Minute, selB, selC)
+	cViaA := with(f.via(t, selA, time.Minute, selA, selC), scion.HealthEjected)
+	cViaA.Retry = time.Unix(1<<30, 0).Add(20 * time.Second)
+	cCrossing := f.via(t, selB, 2*time.Minute, selB, selX, selC)
+	cCrossing.Crossing = true
+	f.candidate(selC, 15*ms, 0, cViaPeer, cViaB, cViaA, cCrossing)
+
+	type requested struct {
+		Dst  addr.IA
+		Role bus.PathRole
+		Due  time.Time
+	}
+	got := func() map[bus.PathID]requested {
+		out := make(map[bus.PathID]requested)
+		for r := range requests.Latest().All() {
+			out[r.ID] = requested{Dst: r.Dst, Role: r.Role, Due: r.Due}
+		}
+		return out
+	}
+	f.pass(t)
+	want := map[bus.PathID]requested{
+		f.samples[selPeer].candidates[0].ID: {Dst: selPeer, Role: bus.PathPriced},
+		viaPeer.ID:                          {Dst: selA, Role: bus.PathPriced},
+		bOwn.ID:                             {Dst: selB, Role: bus.PathPriced},
+		cViaPeer.ID:                         {Dst: selC, Role: bus.PathPriced},
+		cViaB.ID:                            {Dst: selC, Role: bus.PathPriced},
+		cViaA.ID:                            {Dst: selC, Role: bus.PathHalfOpen, Due: cViaA.Retry},
+	}
+	if diff := cmp.Diff(want, got()); diff != "" {
+		t.Errorf("the window's requests (-want +got):\n%s", diff)
+	}
+
+	f.directory = slices.DeleteFunc(f.directory, func(e bus.DirectoryEntry) bool { return e.IA.Equal(selC) })
+	f.pass(t)
+	for id := range got() {
+		if id == cViaPeer.ID || id == cViaB.ID || id == cViaA.ID {
+			t.Errorf("the next window still requests %s to a peer the directory dropped", id)
+		}
 	}
 }
 
@@ -399,7 +478,7 @@ func TestSelectionPricedPromotion(t *testing.T) {
 
 	// A candidate that answers no probe is never promoted, however
 	// favorable its tier's declared prices.
-	f.candidate(selD, 0, 0, declared(1*time.Millisecond))
+	f.candidate(selD, 0, 0, route(0, time.Millisecond, link(selX), link(selD)))
 	for range 3 {
 		f.pass(t)
 	}
@@ -459,13 +538,14 @@ func TestSelectionSingleRoutePromotion(t *testing.T) {
 }
 
 // TestSelectionUnpricedTier checks the unpriced reading: a tier nothing
-// prices — its up link's echo unanswered and no edge declaring — promotes
-// nothing, however many windows pass; the up link keeps it from stranding.
+// prices — no route to its up link's neighbor, and no edge declaring —
+// promotes nothing, however many windows pass; the up link keeps it from
+// stranding.
 func TestSelectionUnpricedTier(t *testing.T) {
 	f := newSelFixture(t, selPeer, selA)
 	// A slow tier of A, up, and the candidate B, whose single route is
 	// clean but undeclared.
-	f.samples[selA] = sm(50*time.Millisecond, 0)
+	f.samples[selA] = sm(50 * time.Millisecond)
 	f.candidate(selB, 55*time.Millisecond, 0, cand(link(selX)))
 
 	for range 4 {
@@ -484,9 +564,9 @@ func TestSelectionFlappingCandidate(t *testing.T) {
 	f.candidate(selB, 8*time.Millisecond, 20*time.Millisecond)
 
 	f.pass(t) // good: streak 1
-	f.samples[selB] = sm(18*time.Millisecond, 20*time.Millisecond)
+	f.samples[selB] = f.priced(selB, 18*time.Millisecond, 20*time.Millisecond)
 	f.pass(t) // bad: streak reset
-	f.samples[selB] = sm(8*time.Millisecond, 20*time.Millisecond)
+	f.samples[selB] = f.priced(selB, 8*time.Millisecond, 20*time.Millisecond)
 	f.pass(t) // good again: streak 1
 	f.pass(t) // good: streak 2 — promoted now, four windows in
 	if len(f.established) != 1 || !f.established[0].Equal(selB) {
@@ -516,7 +596,7 @@ func TestSelectionOneEstablishment(t *testing.T) {
 // exclusion leaves its tier's route count unchanged, its price within the
 // demotion ratio, and every member a route within the ratio of its own price
 // retires on the third consecutive window decided useless — the survivor
-// measured each window — and never at the floor of up links.
+// answering each window — and never at the floor of up links.
 func TestSelectionUselessRetirement(t *testing.T) {
 	f := newSelFixture(t, selPeer, selA, selB) // above the floor of two
 	// A's baseline rides Peer's link at 12ms: excluding A's link leaves the
@@ -605,7 +685,7 @@ func TestSelectionOwnFloor(t *testing.T) {
 		t.Fatal(err)
 	}
 	f.directory = append(f.directory, entryOf(selC))
-	f.samples[selC] = sm(50*time.Millisecond, 60*time.Millisecond)
+	f.samples[selC] = f.priced(selC, 50*time.Millisecond, 60*time.Millisecond)
 	f.pass(t)
 	if f.state(t, selA) != links.StateRetired {
 		t.Error("a useless dialed link stood with the dialed links above the floor")
@@ -702,13 +782,13 @@ func TestSelectionRetirementCounts(t *testing.T) {
 	}
 
 	// The floor holds A while its useless count passes the threshold; a
-	// third up link lifts the floor in a window A's survivor goes
-	// unanswered, which decides nothing; the next window decided useless
-	// retires A.
+	// third up link lifts the floor in a window A's survivor is ejected, so
+	// the freshest survivor left is unknown, which decides nothing; the next
+	// window decided useless retires A.
 	f = newSelFixture(t, selPeer, selA)
 	carrier := f.via(t, selPeer, 0, selPeer, selA)
-	f.carried(selA, 18*time.Millisecond, 12*time.Millisecond, carrier,
-		route(-time.Minute, 0, local(9), link(selX), link(selA)))
+	around := route(-time.Minute, 0, local(9), link(selX), link(selA))
+	f.carried(selA, 18*time.Millisecond, 12*time.Millisecond, carrier, around)
 	for range DemoteWindows + 1 {
 		f.pass(t)
 	}
@@ -720,13 +800,13 @@ func TestSelectionRetirementCounts(t *testing.T) {
 		t.Fatal(err)
 	}
 	f.directory = append(f.directory, entryOf(selB))
-	f.samples[selB] = sm(10*time.Millisecond, 20*time.Millisecond)
-	f.echoes[routeKey(&carrier)] = 0
+	f.samples[selB] = f.priced(selB, 10*time.Millisecond, 20*time.Millisecond)
+	f.carried(selA, 18*time.Millisecond, 0, with(carrier, scion.HealthEjected), around)
 	f.pass(t)
 	if f.state(t, selA) != links.StateEstablished {
 		t.Fatal("a count at the threshold retired the link in an undecided window")
 	}
-	f.echoes[routeKey(&carrier)] = 12 * time.Millisecond
+	f.carried(selA, 18*time.Millisecond, 12*time.Millisecond, carrier, around)
 	f.pass(t)
 	if f.state(t, selA) != links.StateRetired {
 		t.Fatal("a window decided useless past the threshold did not retire the link")
@@ -902,7 +982,7 @@ func capFixture(t *testing.T) *selFixture {
 	viaPeer := func(oneWay time.Duration, ia addr.IA) scion.Candidate {
 		return route(-time.Minute, oneWay, local(f.ifID(t, selPeer)), link(selPeer), link(ia))
 	}
-	f.samples[selPeer] = sm(30*time.Millisecond, 0)
+	f.samples[selPeer] = sm(30 * time.Millisecond)
 	f.carried(selA, 30*time.Millisecond, 18*time.Millisecond, f.via(t, selPeer, 0, selPeer, selA))
 	f.carried(selB, 36*time.Millisecond, 18*time.Millisecond, f.via(t, selPeer, 0, selPeer, selB))
 	f.carried(selC, 30*time.Millisecond, 16*time.Millisecond,
@@ -998,9 +1078,7 @@ func TestSelectionEquilibrium(t *testing.T) {
 	f.carried(r2, 18*time.Millisecond, 12*time.Millisecond,
 		f.via(t, r1, 0, r1, r2), f.via(t, z, -time.Minute, z, selX, r2))
 	f.carried(z, 100*time.Millisecond, 200*time.Millisecond, f.via(t, z, 0, z))
-	viaR1 := f.via(t, r1, 0, r1, r3)
-	f.candidate(r3, 5*time.Millisecond, 20*time.Millisecond, viaR1)
-	f.echoes[routeKey(&viaR1)] = 20 * time.Millisecond
+	f.candidate(r3, 5*time.Millisecond, 20*time.Millisecond, f.via(t, r1, 0, r1, r3))
 
 	f.pass(t)
 	f.pass(t)
@@ -1017,7 +1095,7 @@ func TestSelectionEquilibrium(t *testing.T) {
 	// The bridge goes down: its one-hop echo and its routes fail. W, far,
 	// answers its rendezvous echo, and its routes all ride the bridge.
 	f.down[z] = true
-	f.samples[z] = sm(0, 0, f.via(t, z, 0, z))
+	f.samples[z] = sm(0, f.via(t, z, 0, z))
 	f.carried(r1, 10*time.Millisecond, 20*time.Millisecond,
 		f.via(t, r3, 0, r3, r1), f.via(t, z, -time.Minute, z, selX, r1))
 	f.carried(r3, 5*time.Millisecond, 20*time.Millisecond, f.via(t, r1, 0, r1, r3))
@@ -1074,7 +1152,7 @@ func TestSelectionStrandedFlag(t *testing.T) {
 	}
 
 	// The candidate goes silent: stranded again.
-	f.samples[selB] = sm(0, 0)
+	f.samples[selB] = sm(0)
 	f.pass(t)
 	if !stranded.Load() {
 		t.Error("a window no candidate answered recorded the node unstranded")
@@ -1138,7 +1216,7 @@ func TestSelectionSweepCandidateWindow(t *testing.T) {
 // moves nothing.
 func TestSelectionNoAction(t *testing.T) {
 	f := newSelFixture(t, selPeer, selA)
-	f.samples[selPeer] = sm(20*time.Millisecond, 20*time.Millisecond)
+	f.samples[selPeer] = f.priced(selPeer, 20*time.Millisecond, 20*time.Millisecond)
 	f.candidate(selB, 20*time.Millisecond, 20*time.Millisecond)
 
 	for range 4 {
@@ -1446,8 +1524,8 @@ func TestProbeSendsNothingOverAnUnusableLink(t *testing.T) {
 	if held := time.Since(start); held >= ProbeWait {
 		t.Errorf("the probe returned after %v, want under one ProbeWait", held)
 	}
-	if sm.m.direct != 0 {
-		t.Errorf("direct sample = %v, want none for the down neighbor", sm.m.direct)
+	if sm.direct != 0 {
+		t.Errorf("direct sample = %v, want none for the down neighbor", sm.direct)
 	}
 	// A request the probe sent is queued at the router by now; the deadline
 	// bounds the read when none was.
@@ -1540,8 +1618,8 @@ func TestProbeEchoesTheHostThePeerResolves(t *testing.T) {
 	sm := s.probe(t.Context(),
 		target{IA: selPeer, ControlAddr: netip.AddrPortFrom(external, 30042)},
 		&links.Link{NeighborIA: selPeer, IfID: dataplanetest.IfID, State: links.StateEstablished})
-	if sm.m.direct <= 0 {
-		t.Errorf("direct sample = %v, want the round trip to the resolved host", sm.m.direct)
+	if sm.direct <= 0 {
+		t.Errorf("direct sample = %v, want the round trip to the resolved host", sm.direct)
 	}
 	if got := s.hosts[selPeer]; got != q.ControlIP {
 		t.Errorf("the window's host of the peer = %v, want the resolved %v", got, q.ControlIP)
@@ -1657,8 +1735,8 @@ func TestProbeRendezvousRecordsNothing(t *testing.T) {
 	}}
 
 	sm := s.probe(t.Context(), targetOf(selB, f.addr.String()), nil)
-	if sm.m.direct <= 0 {
-		t.Errorf("direct sample = %v, want the binding request's round trip", sm.m.direct)
+	if sm.direct <= 0 {
+		t.Errorf("direct sample = %v, want the binding request's round trip", sm.direct)
 	}
 	candidate := &links.Link{NeighborIA: selB, Rendezvous: f.addr, State: links.StateCandidate}
 	if !s.candidateAlive(t.Context(), candidate) {

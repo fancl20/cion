@@ -119,3 +119,29 @@ Nothing on the wire changes.
     name follows the merged role.
 *   **The labs and benchmarks** pass; the regions settled and cut benchmarks
     and the stranded cut benchmark hold against the commit before.
+
+## Implementation history
+
+*   Landed with two changes to the plan
+    ([queries.go](/pkg/modules/topology/impl/measured/queries.go),
+    [selection.go](/pkg/modules/topology/impl/measured/selection.go)).
+    *   A route counts and prices unless it is ejected, crosses a held
+        signal, or crosses one of the node's down links. A suspect route
+        counts, as it did before, while the window's request decides it. A
+        tier is stranded, as planned, once no up link reaches it and none of
+        its routes is healthy or unknown. With suspect routes left out, the
+        regions network promoted and retired links in turn: one of three cut
+        runs promoted 28 links whose direct round trip beat their price and
+        retired 21 as useless, against 13 to 17 and 4 to 7 the commit
+        before, and its links never held for ten minutes within the hour.
+        One settled run took 28 minutes.
+    *   A half-open request skips a route over one of the node's down
+        links.
+
+    In three runs on one machine against the commit before, the regions
+    network settled after 12 to 15 link changes in 6 to 7 minutes, against
+    11 to 14 in 4 to 7, and recovered from its cut in 10 seconds every
+    time. In 11 runs each, the stranded network recovered from its cut in
+    10 seconds in 9, against 10; the slowest took 3.5 minutes, against
+    2.8. Two runs each never settled: the cut took one of the founder's
+    two links, and the lab had cut the founder off the far side.

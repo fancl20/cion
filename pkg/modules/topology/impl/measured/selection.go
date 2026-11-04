@@ -14,7 +14,6 @@ import (
 	"time"
 
 	"github.com/scionproto/scion/pkg/addr"
-	spath "github.com/scionproto/scion/pkg/slayers/path/scion"
 
 	"github.com/fancl20/cion/pkg/libs/bus"
 	"github.com/fancl20/cion/pkg/libs/loops"
@@ -85,7 +84,7 @@ type LinkRequester interface {
 }
 
 // SelectionPaths is the path resolution the selection loop calls: the
-// composed paths with their facts, the baseline among them.
+// composed paths with their facts, each one's health and cost among them.
 type SelectionPaths interface {
 	Enumerate(ctx context.Context, dst addr.IA) ([]scion.Candidate, error)
 }
@@ -112,11 +111,16 @@ type SelectionConfig struct {
 	// neighbor's echo round trip halved — for the beaconer's entries to
 	// declare; nil publishes none.
 	Latencies *bus.Topic[bus.LinkLatencies]
-	// Paths resolves the freshest path to a candidate — the baseline — and
-	// enumerates the composed ones.
+	// Paths composes the routes to each peer, with each one's health and
+	// cost.
 	Paths SelectionPaths
-	// Conn carries the SCMP echo probes and the service resolution that
-	// names each peer's host for them; its port is the reply address.
+	// Requests is the node's path requests topic, on which each window
+	// requests the routes it prices measured; nil requests nothing, and the
+	// routes no other requester names stay unmeasured.
+	Requests *bus.Topic[bus.PathRequests]
+	// Conn carries the neighbors' SCMP echo probes and the service
+	// resolution that names each neighbor's host for them; its port is the
+	// reply address.
 	Conn *scion.Conn
 	// Sockets is the socket source the dials and the band probes construct
 	// through; the zero value is the kernel's.
@@ -146,12 +150,12 @@ type SelectionConfig struct {
 }
 
 // RunSelection runs the topology loop until the context is canceled: each
-// evaluation window it sweeps the candidates, probes every peer the directory
-// names by rendezvous echo against SCMP echo over the freshest clean path,
-// classes the samples into tiers with their facts and excluded measurements,
-// and lands promotion and retirement decisions in the link store — each
-// change a data plane generation swap the node assembly's supervisor
-// performs.
+// evaluation window it sweeps the candidates, measures every peer the
+// directory names by its direct side, prices the routes into it by their
+// health and cost, requests the routes it prices measured, classes the
+// samples into tiers with their facts and excluded measurements, and lands
+// promotion and retirement decisions in the link store — each change a data
+// plane generation swap the node assembly's supervisor performs.
 func RunSelection(ctx context.Context, cfg SelectionConfig) {
 	s := &selection{cfg: cfg}
 	interval := cfg.Interval
@@ -189,15 +193,14 @@ type selection struct {
 	// eviction: each departure changes the routes every other exclusion was
 	// measured against, so one up link leaves per window.
 	upLeft bool
-	// hosts are the hosts the peers' own resolution named this window, the
-	// ones their echoes address; each window asks anew.
+	// hosts are the hosts the neighbors' own resolution named this window,
+	// the ones their echoes address; each window asks anew.
 	hosts map[addr.IA]netip.Addr
-	// probeFn, pathEchoFn, aliveFn, establishFn, and rendezvousFn override
-	// the measurement, the excluded measurement's echo, the candidate-grace
-	// probe, the establishment, and the binding request to a rendezvous
-	// socket in tests; nil uses the real ones.
+	// probeFn, aliveFn, establishFn, and rendezvousFn override the
+	// measurement, the candidate-grace probe, the establishment, and the
+	// binding request to a rendezvous socket in tests; nil uses the real
+	// ones.
 	probeFn      func(context.Context, target, *links.Link) sample
-	pathEchoFn   func(addr.IA, *scion.Candidate) time.Duration
 	aliveFn      func(*links.Link) bool
 	establishFn  func(context.Context, target, string) bool
 	rendezvousFn func(context.Context, netip.AddrPort) (time.Duration, error)
@@ -229,27 +232,19 @@ type peerStreak struct {
 	useless int
 }
 
-// measurement is one peer's probe sample.
-type measurement struct {
+// sample is one peer's window record: its direct side beside the routes to
+// it, whose health and cost the tier's route counts and prices read.
+type sample struct {
 	// direct is the direct side's median: the SCMP echo over the one-hop
 	// path for an established neighbor, the rendezvous echo for a
 	// candidate — one instrument over two carriers, each reaching where
 	// the other cannot. Zero when unreachable.
 	direct time.Duration
-	// path is the baseline: the SCMP echo median over the freshest clean
-	// composed route; zero when no path answered.
-	path time.Duration
-}
-
-// sample is one peer's window record: the probe's measurement — its two
-// fields — beside the enumeration the probe already ran, kept rather than
-// discarded: the tier's route counts and prices read it. carrier points
-// into the enumeration at the candidate the baseline echo rode; nil when no
-// clean candidate resolved.
-type sample struct {
-	m          measurement
+	// candidates are the routes to the peer.
 	candidates []scion.Candidate
-	carrier    *scion.Candidate
+	// baseline points into candidates at the peer's freshest clean route,
+	// which the window requests priced; nil when no clean route resolves.
+	baseline *scion.Candidate
 }
 
 // pass runs one evaluation window. A context that ends mid-window cuts the
@@ -287,15 +282,16 @@ func (s *selection) pass(ctx context.Context) {
 		candidates = append(candidates, t)
 		samples[p.IA] = s.measure(ctx, t, nil)
 	}
-	ts := s.windowTiers(ctx, neighbors, samples)
+	ts := s.windowTiers(neighbors, samples)
 	if ctx.Err() != nil {
 		return
 	}
+	s.request(samples, ts)
 	s.declare(neighbors, samples)
 	if s.cfg.Stranded != nil {
 		reachable := false
 		for _, e := range candidates {
-			if samples[e.IA].m.direct > 0 {
+			if samples[e.IA].direct > 0 {
 				reachable = true
 				break
 			}
@@ -539,89 +535,66 @@ func (s *selection) establish(ctx context.Context, e target, why string) bool {
 // and a candidate whose published rendezvous address answers nothing by the
 // punch that opens both NATs between. A neighbor whose link the conn cannot
 // send over — its verdict down — fails its writes at once, and the zero
-// sample is what it would measure. The baseline is the same SCMP echo
-// instrument over the freshest clean composed route of the enumeration the
-// probe keeps beside the sample, the route recorded as the sample's carrier:
-// one destination, two routes, the same median-of-runs discipline, and no
-// clean route leaves the baseline unmeasured for the window rather than
-// measured over a route the network would not serve. The binding request
-// records nothing at the candidate. Both SCMP echoes address the host the
-// peer's own resolution names.
+// sample is what it would measure. The binding request records nothing at
+// the candidate. Beside the direct side, the probe keeps the routes to the
+// peer, its baseline the freshest clean one.
 func (s *selection) probe(ctx context.Context, e target, l *links.Link) sample {
-	var m measurement
+	var sm sample
 	switch {
 	case l != nil:
-		m.direct = s.peerEcho(ctx, e.IA, nil)
+		sm.direct = s.peerEcho(ctx, e.IA)
 	case s.punched(e):
 		if rtt, err := s.cfg.Punch.Probe(ctx, e.IA, e.Scope); err == nil {
-			m.direct = rtt
+			sm.direct = rtt
 		} else {
 			slog.Debug("The punch probe did not answer", "peer", e.IA, "err", err)
 		}
 	default:
 		if rtt, err := s.probeRendezvous(ctx, e.RendezvousAddr); err == nil {
-			m.direct = rtt
+			sm.direct = rtt
 		}
 	}
-	probeCtx, cancel := context.WithTimeout(ctx, ProbeWait*ProbeRuns+time.Second)
+	lookupCtx, cancel := context.WithTimeout(ctx, ProbeWait*ProbeRuns+time.Second)
 	defer cancel()
-	sm := sample{m: m}
-	candidates, err := s.cfg.Paths.Enumerate(probeCtx, e.IA)
+	candidates, err := s.cfg.Paths.Enumerate(lookupCtx, e.IA)
 	if err != nil {
 		return sm
 	}
 	sm.candidates = candidates
-	// Freshness picks the baseline's route and the echo measures it: the
-	// comparator reads the two round trips against each other.
-	if c := s.freshest(candidates); c != nil {
-		sm.carrier = c
-		sm.m.path = s.pathEcho(ctx, e.IA, c)
-	}
+	sm.baseline = s.freshest(candidates)
 	return sm
 }
 
-// pathEcho takes the median SCMP echo round trip to the peer over the
-// candidate's path, through the test seam when set.
-func (s *selection) pathEcho(ctx context.Context, ia addr.IA, c *scion.Candidate) time.Duration {
-	if s.pathEchoFn != nil {
-		return s.pathEchoFn(ia, c)
-	}
-	return s.peerEcho(ctx, ia, c.Path)
-}
-
-// peerEcho takes the median SCMP echo round trip to the peer over the path —
-// nil for the one-hop path the conn resolves — addressed to the host the
-// peer's own resolution names, at the endhost port its responder binds
-// beside the endpoint. A peer whose resolution answers over no route of the
-// window measures nothing.
-func (s *selection) peerEcho(ctx context.Context, ia addr.IA, path *spath.Decoded) time.Duration {
+// peerEcho takes the median SCMP echo round trip to the neighbor over the
+// one-hop path the conn resolves, addressed to the host the neighbor's own
+// resolution names, at the endhost port its responder binds beside the
+// endpoint. A neighbor whose resolution goes unanswered measures nothing.
+func (s *selection) peerEcho(ctx context.Context, ia addr.IA) time.Duration {
 	if s.cfg.Conn == nil {
 		return 0
 	}
-	host, ok := s.peerHost(ctx, ia, path)
+	host, ok := s.peerHost(ctx, ia)
 	if !ok {
 		return 0
 	}
 	return s.echoRTT(ctx, &scion.Addr{
 		IA:   ia,
 		Addr: netip.AddrPortFrom(host, underlay.EndhostPort),
-		Path: path,
 	})
 }
 
-// peerHost returns the host the peer's own resolution names — the drafts'
-// service resolution of its control service over the path the echo is about
-// to ride, answered with the host its router delivers to — memoized for the
-// window. The directory's published host is the peer as the network sees
-// it, which behind a NAT no socket of the peer's holds. A route the
-// resolution goes unanswered over memoizes nothing, so the window's next
-// route asks again.
-func (s *selection) peerHost(ctx context.Context, ia addr.IA, path *spath.Decoded) (netip.Addr, bool) {
+// peerHost returns the host the neighbor's own resolution names — the
+// drafts' service resolution of its control service over the one-hop path
+// the echo is about to ride, answered with the host its router delivers to —
+// memoized for the window. The directory's published host is the peer as the
+// network sees it, which behind a NAT no socket of the peer's holds. A
+// resolution that goes unanswered memoizes nothing.
+func (s *selection) peerHost(ctx context.Context, ia addr.IA) (netip.Addr, bool) {
 	if host, ok := s.hosts[ia]; ok {
 		return host, true
 	}
 	resolved, err := scionrpc.ResolveService(ctx, s.cfg.Conn,
-		&scion.Addr{IA: ia, Service: addr.SvcCS, Path: path})
+		&scion.Addr{IA: ia, Service: addr.SvcCS})
 	if err != nil {
 		return netip.Addr{}, false
 	}
@@ -630,6 +603,66 @@ func (s *selection) peerHost(ctx context.Context, ia addr.IA, path *spath.Decode
 	}
 	s.hosts[ia] = resolved.Addr()
 	return resolved.Addr(), true
+}
+
+// selectionRequester names the selection's entries among the path requests.
+const selectionRequester = "selection"
+
+// request replaces the selection's path requests with the window's: each
+// peer's baseline and each up link's freshest clean survivor, priced, and
+// each peer's freshest ejected route fresher than its baseline, half-open at
+// its retry, so a route that recovers counts again.
+func (s *selection) request(samples map[addr.IA]sample, ts []tier) {
+	if s.cfg.Requests == nil {
+		return
+	}
+	now := time.Now()
+	entries := make(map[addr.IA][]bus.PathRequest)
+	add := func(dst addr.IA, c *scion.Candidate, role bus.PathRole, due time.Time) {
+		if slices.ContainsFunc(entries[dst], func(r bus.PathRequest) bool { return r.ID == c.ID }) {
+			return
+		}
+		entries[dst] = append(entries[dst], bus.PathRequest{
+			ID: c.ID, Dst: dst, Links: c.Crossed, Path: c.Path, Role: role, Due: due, Picked: now,
+		})
+	}
+	for ia, sm := range samples {
+		if sm.baseline != nil {
+			add(ia, sm.baseline, bus.PathPriced, time.Time{})
+		}
+	}
+	for _, t := range ts {
+		for _, ex := range t.excluded {
+			if ex.survivor != nil {
+				add(ex.dst, ex.survivor, bus.PathPriced, time.Time{})
+			}
+		}
+	}
+	for ia, sm := range samples {
+		if c := s.recovering(sm); c != nil {
+			add(ia, c, bus.PathHalfOpen, c.Retry)
+		}
+	}
+	s.cfg.Requests.Update(func(r bus.PathRequests) bus.PathRequests {
+		return r.Replaced(selectionRequester, entries)
+	})
+}
+
+// recovering returns the peer's freshest ejected route fresher than its
+// baseline over none of the node's down links, nil when none is.
+func (s *selection) recovering(sm sample) *scion.Candidate {
+	var out *scion.Candidate
+	for i := range sm.candidates {
+		c := &sm.candidates[i]
+		if c.Health != scion.HealthEjected || s.overDownLink(c) ||
+			sm.baseline != nil && !c.Fresh.After(sm.baseline.Fresh) {
+			continue
+		}
+		if out == nil || c.Fresh.After(out.Fresh) {
+			out = c
+		}
+	}
+	return out
 }
 
 // declare publishes the window's per-link one-way estimates, which the
@@ -642,18 +675,17 @@ func (s *selection) declare(neighbors map[addr.IA]*links.Link, samples map[addr.
 	}
 	estimates := make(map[uint16]time.Duration, len(neighbors))
 	for ia, l := range neighbors {
-		estimates[l.IfID] = samples[ia].m.direct / 2
+		estimates[l.IfID] = samples[ia].direct / 2
 	}
 	s.cfg.Latencies.Publish(bus.NewLinkLatencies(estimates))
 }
 
-// echoRTT takes the median SCMP echo round trip to the destination — over
-// the one-hop path the conn resolves for a neighbor, over the supplied path
-// for the baseline. Zero without a probe conn. A run whose request a router
-// refuses with an interface-down signal is lost at the signal rather than
-// at ProbeWait. The context's end moves the read deadline to the past,
-// ending a wait in flight; each run reads the context after setting its own
-// deadline, so no run overrides the move unseen.
+// echoRTT takes the median SCMP echo round trip to the destination over the
+// one-hop path the conn resolves. Zero without a probe conn. A run whose
+// request a router refuses with an interface-down signal is lost at the
+// signal rather than at ProbeWait. The context's end moves the read deadline
+// to the past, ending a wait in flight; each run reads the context after
+// setting its own deadline, so no run overrides the move unseen.
 func (s *selection) echoRTT(ctx context.Context, dst *scion.Addr) time.Duration {
 	if s.cfg.Conn == nil {
 		return 0
@@ -686,15 +718,15 @@ func (s *selection) echoRTT(ctx context.Context, dst *scion.Addr) time.Duration 
 // network-wide, so the window's budget is one establishment, as today.
 // Below the floor of up links, reachability alone admits, the fastest
 // reachable candidate. A stranded tier admits a reachable member at once,
-// no streak — the clause that keeps every cut transient, for no up link and
-// no answered composed route reach the tier, and the establishment rides
-// the rendezvous exchange that reaches where no path does. A single-route
-// tier admits a second member within the demotion ratio of the price, and a
-// candidate whose direct round trip beats its own price by the promotion
-// ratio and the margin floor is admitted — the priced cases sustained, the
-// sustained winner the fastest direct sample among qualifiers. At the cap
-// every case requires an eviction that qualifies under retirement, the
-// floor and stranded cases included.
+// no streak — the clause that keeps every cut transient, for no up link
+// reaches the tier and the measurements doubt every route into it, and the
+// establishment rides the rendezvous exchange that reaches where no path
+// does. A single-route tier admits a second member within the demotion
+// ratio of the price, and a candidate whose direct round trip beats its own
+// price by the promotion ratio and the margin floor is admitted — the priced
+// cases sustained, the sustained winner the fastest direct sample among
+// qualifiers. At the cap every case requires an eviction that qualifies
+// under retirement, the floor and stranded cases included.
 func (s *selection) promote(
 	ctx context.Context,
 	entries []*links.Link,
@@ -708,12 +740,12 @@ func (s *selection) promote(
 	// Rank the reachable candidates: fastest first.
 	var reachable []target
 	for _, e := range candidates {
-		if samples[e.IA].m.direct > 0 {
+		if samples[e.IA].direct > 0 {
 			reachable = append(reachable, e)
 		}
 	}
 	sort.Slice(reachable, func(i, j int) bool {
-		return samples[reachable[i].IA].m.direct < samples[reachable[j].IA].m.direct
+		return samples[reachable[i].IA].direct < samples[reachable[j].IA].direct
 	})
 
 	if live < NeighborFloor {
@@ -756,7 +788,7 @@ func (s *selection) promote(
 			continue
 		}
 		if s.streak(e.IA).promote >= PromoteWindows &&
-			samples[e.IA].m.direct <= ratioOf(t.price, DemotionRatio) {
+			samples[e.IA].direct <= ratioOf(t.price, DemotionRatio) {
 			s.admit(ctx, entries, neighbors, ts, samples, e, "a second route for its tier")
 			return
 		}
@@ -777,11 +809,11 @@ func (s *selection) promote(
 // to compare with.
 func (s *selection) qualifies(ia addr.IA, samples map[addr.IA]sample, ts []tier) bool {
 	sm := samples[ia]
-	if sm.m.direct == 0 {
+	if sm.direct == 0 {
 		return false
 	}
 	t := tierOf(ts, ia)
-	return t != nil && t.qualifies(ia, sm.m.direct)
+	return t != nil && t.qualifies(ia, sm.direct)
 }
 
 // admit lands a promotion, evicting at the cap first: the victim is the
@@ -850,7 +882,7 @@ func (s *selection) evict(
 			}
 			cost = harm(t, ia)
 		}
-		direct := samples[ia].m.direct
+		direct := samples[ia].direct
 		if worst == nil || cost < worstHarm ||
 			cost == worstHarm && slower(direct, worstDirect) {
 			worst, worstHarm, worstDirect = l, cost, direct
@@ -950,7 +982,7 @@ func (s *selection) prune(
 			continue
 		}
 		cost := harm(t, l.NeighborIA)
-		direct := samples[l.NeighborIA].m.direct
+		direct := samples[l.NeighborIA].direct
 		if worst == nil || cost < worstHarm ||
 			cost == worstHarm && slower(direct, worstDirect) {
 			worst, worstHarm, worstDirect = l, cost, direct

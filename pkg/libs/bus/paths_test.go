@@ -29,7 +29,8 @@ func TestPathIDOf(t *testing.T) {
 
 // TestPathRequestsRequested checks a requester's update: its entries for the
 // destination replaced, its lapsed destinations dropped, no entries dropping
-// the destination, and every other requester's entries left alone.
+// the destination, and every other requester's entries left alone; and its
+// replacement, which swaps every destination's entries at once.
 func TestPathRequestsRequested(t *testing.T) {
 	now := time.Now()
 	d1, d2, d3 := addr.MustIAFrom(1, 1), addr.MustIAFrom(1, 2), addr.MustIAFrom(1, 3)
@@ -65,6 +66,19 @@ func TestPathRequestsRequested(t *testing.T) {
 	// No entries drop the destination.
 	if diff := cmp.Diff([]PathID{"d"}, ids(next.Requested("picks", d2, nil, now.Add(-RequestLapse)))); diff != "" {
 		t.Errorf("after dropping d2 (-want +got):\n%s", diff)
+	}
+
+	// A replacement swaps the requester's entries whole, the destinations it
+	// leaves out dropped, and another requester's kept.
+	replaced := r.Replaced("picks", map[addr.IA][]PathRequest{
+		d3: {entry("f", d3, now)},
+		d1: nil,
+	})
+	if diff := cmp.Diff([]PathID{"d", "f"}, ids(replaced)); diff != "" {
+		t.Errorf("after the replacement (-want +got):\n%s", diff)
+	}
+	if diff := cmp.Diff([]PathID{"a", "b", "c", "d"}, ids(r)); diff != "" {
+		t.Errorf("the replacement changed the published state (-want +got):\n%s", diff)
 	}
 }
 
