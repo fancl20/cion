@@ -107,7 +107,7 @@ type Prober struct {
 	hosts        map[addr.IA]netip.Addr
 	resolving    map[addr.IA]bool
 	resolveAfter map[addr.IA]time.Time
-	lapses       map[segment.LinkID]time.Time
+	signaled     map[segment.LinkID]time.Time
 	tokens       float64
 	refilled     time.Time
 	changed      bool
@@ -180,7 +180,7 @@ func NewProber(cfg ProberConfig) *Prober {
 		hosts:        make(map[addr.IA]netip.Addr),
 		resolving:    make(map[addr.IA]bool),
 		resolveAfter: make(map[addr.IA]time.Time),
-		lapses:       make(map[segment.LinkID]time.Time),
+		signaled:     make(map[segment.LinkID]time.Time),
 		tokens:       Budget,
 	}
 }
@@ -342,26 +342,26 @@ func (p *Prober) forget(now time.Time) {
 	}
 }
 
-// signal calls a burst for each requested path crossing a link a newer
-// signal holds.
+// signal calls a burst for each requested path crossing a link whose
+// standing signal arrived after the last one the prober saw on it.
 func (p *Prober) signal(s bus.InterfaceDownState, now time.Time) {
-	lapses := make(map[segment.LinkID]time.Time)
+	seen := make(map[segment.LinkID]time.Time)
 	for _, ps := range p.paths {
 		if !ps.requested {
 			continue
 		}
 		for _, l := range ps.req.Links {
-			lapse, ok := s.Lapse(l, now)
+			at, ok := s.Arrived(l, now)
 			if !ok {
 				continue
 			}
-			lapses[l] = lapse
-			if lapse.After(p.lapses[l]) {
+			seen[l] = at
+			if at.After(p.signaled[l]) {
 				p.startBurst(ps, now)
 			}
 		}
 	}
-	maps.Copy(p.lapses, lapses)
+	maps.Copy(p.signaled, seen)
 }
 
 // answer settles the probe a reply answers; a reply after the probe's wait

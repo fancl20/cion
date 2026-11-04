@@ -1,30 +1,19 @@
 package scion
 
 import (
-	"time"
-
 	"github.com/gopacket/gopacket"
 	"github.com/scionproto/scion/pkg/addr"
 	"github.com/scionproto/scion/pkg/slayers"
 )
 
-// InterfaceDownHold is how long a recognized interface-down signal holds:
-// the retention the drafts describe as current practice. A held signal only
-// deprioritizes, so a short hold prices a forged signal at one skipped path.
-const InterfaceDownHold = 10 * time.Second
-
 // InterfaceDownSignal is one recognized SCMP External Interface Down
-// message: the signaled ISD-AS and interface, the quoted packet's
-// destination, whose path just failed, and the quoted echo request, whose
-// sender waits for a reply that will not come.
+// message: the signaled ISD-AS and interface, and the quoted echo request,
+// whose sender waits for a reply that will not come.
 type InterfaceDownSignal struct {
 	// IA is the ISD-AS whose interface is signaled down.
 	IA addr.IA
 	// IfID is the signaled interface ID.
 	IfID uint16
-	// Dst is the quoted packet's destination ISD-AS; zero when the quote
-	// does not decode.
-	Dst addr.IA
 	// Echo is the quoted packet's SCMP echo request; nil when the quote
 	// carries none.
 	Echo *Echo
@@ -32,8 +21,8 @@ type InterfaceDownSignal struct {
 
 // parseInterfaceDownPacket recognizes an SCMP External Interface Down
 // error in a received packet: the signaled ISD-AS and interface from the
-// message, the failed destination and any echo request from the quote.
-// Anything else — every packet that is not a type-5 error — reports false.
+// message, any echo request from the quote. Anything else — every packet
+// that is not a type-5 error — reports false.
 func parseInterfaceDownPacket(raw []byte) (InterfaceDownSignal, bool) {
 	pkt := gopacket.NewPacket(raw, slayers.LayerTypeSCION, gopacket.NoCopy)
 	scmpL := pkt.Layer(slayers.LayerTypeSCMP)
@@ -49,13 +38,11 @@ func parseInterfaceDownPacket(raw []byte) (InterfaceDownSignal, bool) {
 		return InterfaceDownSignal{}, false
 	}
 	sig := InterfaceDownSignal{IA: hdr.IA, IfID: uint16(hdr.IfID)}
-	// The quote follows the message: its destination names whose path just
-	// failed.
+	// The quote follows the message: the packet the router dropped.
 	quote := hdr.LayerPayload()
 	if len(quote) >= slayers.CmnHdrLen+addr.IABytes {
 		var scn slayers.SCION
 		if err := scn.DecodeFromBytes(quote, gopacket.NilDecodeFeedback); err == nil {
-			sig.Dst = scn.DstIA
 			sig.Echo = quotedEcho(&scn)
 		}
 	}

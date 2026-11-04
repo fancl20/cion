@@ -107,3 +107,19 @@ Nothing on the wire changes.
     seconds a signal once held.
 *   **The labs and benchmarks** pass; the regions cut and the stranded cut
     benchmarks hold against the commit before.
+
+## Implementation history
+
+*   Landed as planned. A first cut also dropped the picks' order between
+    signaled and other suspects, as `Crossing`'s removal would have: right
+    after a cut, the picks then chose cheap paths a router had just reported
+    failing over live suspect ones, and 3 of 5 regions cut runs recovered in
+    40 seconds to 4 minutes. `Signaled` keeps that order.
+
+    In runs on one machine against the commit before: the regions network
+    settled after 11 to 15 link changes in 5 to 8 minutes in three runs,
+    against 12 to 15 in 6 to 7. It recovered from its cut in 10 seconds in
+    5 runs of 6, against 2 of 6 side by side; the slow runs at both commits
+    promoted links after the cut and retired them as useless minutes later.
+    The stranded network recovered from its cut in 10 seconds in three runs
+    of three.

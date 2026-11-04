@@ -202,7 +202,8 @@ func echoAcrossDownLink(t *testing.T, n *Node, dst addr.IA,
 	t.Helper()
 	Poll(t, "the interface-down signal to reach the topic", func() bool {
 		echoOver(t, n, dst, host, path, 100*time.Millisecond)
-		return n.app.Bus().InterfaceDown().Latest().Holds(down, time.Now())
+		_, ok := n.app.Bus().InterfaceDown().Latest().Arrived(down, time.Now())
+		return ok
 	})
 }
 

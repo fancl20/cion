@@ -73,11 +73,11 @@ func TestDeriveTiers(t *testing.T) {
 
 // TestWindowTierFacts checks what one helper turns a tier into: up links
 // from the verdicts alone; the price of the cheapest clean route at its cost
-// — a declared route under a measured one sets it, while a crossing route,
-// an ejected one, and one over a local down interface price nothing; each
-// member's own price over its own routes, a member no route prices absent;
-// the route count reading the clean candidates alone; and strandedness, once
-// no up link reaches a tier and the measurements doubt every route into it.
+// — a declared route under a measured one sets it, while an ejected route
+// and one over a local down interface price nothing; each member's own price
+// over its own routes, a member no route prices absent; the route count
+// reading the clean candidates alone; and strandedness, once no up link
+// reaches a tier and the measurements doubt every route into it.
 func TestWindowTierFacts(t *testing.T) {
 	verdicts := map[uint16]bool{3: true, 4: false, 7: false} // B's link down, the node's own 7 dead
 	up := &links.Link{NeighborIA: selA, IfID: 3, State: links.StateEstablished}
@@ -89,20 +89,16 @@ func TestWindowTierFacts(t *testing.T) {
 	}}
 	// One fast tier of three measured peers: A up, its route measured at
 	// 20ms beside a clean route declaring 8ms one way; B verdict-down, its
-	// route over the down link; C a candidate whose routes are a crossing
-	// one and one over the node's own dead interface, both declaring 1ms,
-	// beside one clean undeclared route. And a slow tier of two: D, whose
-	// one route declares 2ms but was ejected, and E, whose one route is
-	// suspect.
+	// route over the down link; C a candidate whose route over the node's
+	// own dead interface declares 1ms, beside one clean undeclared route.
+	// And a slow tier of two: D, whose one route declares 2ms but was
+	// ejected, and E, whose one route is suspect.
 	a := sm(5,
 		measured(route(0, 0, local(3), link(selA)), 20*time.Millisecond),
 		route(-time.Minute, 8*time.Millisecond, link(selX), link(selA)),
 	)
 	b := sm(6, route(0, time.Millisecond, local(4), link(selB)))
-	crossing := route(0, time.Millisecond, link(selC))
-	crossing.Crossing = true
 	c := sm(7,
-		crossing,
 		route(0, time.Millisecond, local(7), link(selC)),
 		route(0, 0, link(selX), link(selC)),
 	)

@@ -708,9 +708,6 @@ func TestEnumerateFacts(t *testing.T) {
 	if c.Entries != 5 {
 		t.Errorf("candidate entries = %d, want the pair's 5", c.Entries)
 	}
-	if c.Crossing {
-		t.Error("candidate crosses a signaled interface, want clean")
-	}
 	// The traversed stretch alone: both of the middle entry's interface IDs
 	// present, the zero interfaces of the segment ends absent, the dropped
 	// core-ward stretch of the up segment contributing nothing (there is
@@ -913,10 +910,10 @@ func TestEnumerateIdlePartsComposeNothing(t *testing.T) {
 	}
 }
 
-// TestEnumerateLastResortAndBounds checks the signaled-down skip and the
-// enumeration's bounds: a signaled interface on the traversed stretch
-// yields a flagged candidate — the last resort — never a filtered one; the
-// local ISD-AS errors, and an unreachable destination enumerates empty.
+// TestEnumerateLastResortAndBounds checks a signaled interface and the
+// enumeration's bounds: a signaled interface on the traversed stretch yields
+// a suspect candidate — the last resort — never a filtered one; the local
+// ISD-AS errors, and an unreachable destination enumerates empty.
 func TestEnumerateLastResortAndBounds(t *testing.T) {
 	up := linePCB(t, time.Now(), iaCore, iaMid, iaLeaf)
 	down := linePCB(t, time.Now(), iaCore, iaDest)
@@ -940,9 +937,9 @@ func TestEnumerateLastResortAndBounds(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(candidates) != 1 || !candidates[0].Crossing {
-		t.Fatalf("candidates past the signal = %d (crossing %v), want one flagged",
-			len(candidates), len(candidates) == 1 && candidates[0].Crossing)
+	if len(candidates) != 1 || candidates[0].Health != HealthSuspect {
+		t.Fatalf("candidates past the signal = %d (suspect %v), want one suspect",
+			len(candidates), len(candidates) == 1 && candidates[0].Health == HealthSuspect)
 	}
 
 	if _, err := p.Enumerate(context.Background(), iaLeaf); err == nil {
@@ -1266,7 +1263,7 @@ func TestProviderEntriesTiebreak(t *testing.T) {
 }
 
 // TestProviderLastResortRanks checks the last resort: with every candidate
-// crossing a held signal, the best-ranked one serves.
+// through a signaled interface, the best-ranked one serves.
 func TestProviderLastResortRanks(t *testing.T) {
 	up := linePCB(t, time.Now(), iaCore, iaLeaf)
 	downLong := linePCB(t, time.Now(), iaCore, iaMid, iaDest)
@@ -1290,7 +1287,8 @@ func TestProviderLastResortRanks(t *testing.T) {
 		},
 	}
 	// Every join leaves through the signaled core interface, so every
-	// candidate crosses, and the shorter join, emitted second, ranks first.
+	// candidate is suspect, and the shorter join, emitted second, ranks
+	// first.
 	signal(p.InterfaceDown, iaCore, testIfID)
 
 	path, err := p.Path(context.Background(), iaDest)

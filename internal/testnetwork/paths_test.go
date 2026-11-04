@@ -41,6 +41,10 @@ const (
 	// returnBound bounds how long after the cut link is up again the pick
 	// returns to it: the half-open backoff's one-minute cap and a burst.
 	returnBound = time.Minute + ping.BurstProbes*ping.BurstSpacing + virtualPollInterval
+	// offWatch is how long the lab watches the pick and the lease stay off
+	// the cut link once they left it: past the path's first two half-open
+	// probes, which the cut link fails.
+	offWatch = 30 * time.Second
 	// detour is the one-way delay the cheaper-return lab draws on C's link
 	// to E, so the branch through B costs less beyond the band.
 	detour = 10 * time.Millisecond
@@ -174,9 +178,9 @@ func (n branches) leasedAroundB() bool {
 
 // cutAndLift cuts B's link to D once A measured the branch around B, and
 // checks that A's pick and lease leave the cut link within a heartbeat and a
-// burst and stay off it past the interface-down hold, the path through B
-// ejected. It then lifts the cut and waits for the pick to return at the
-// next half-open probe, A's lease read as a send does at every check.
+// burst and stay off it while it is cut, the path through B ejected. It then
+// lifts the cut and waits for the pick to return at the next half-open
+// probe, A's lease read as a send does at every check.
 func (n branches) cutAndLift(t *testing.T, f *fabric.Fabric) {
 	t.Helper()
 	PollVirtual(t, branchesBudget, "A to measure the branch around B", func() bool {
@@ -207,7 +211,7 @@ func (n branches) cutAndLift(t *testing.T, f *fabric.Fabric) {
 		}
 		return pickLeft && leaseLeft
 	})
-	for range 3 * scion.InterfaceDownHold / virtualPollInterval {
+	for range offWatch / virtualPollInterval {
 		time.Sleep(virtualPollInterval)
 		synctest.Wait()
 		if !n.aroundB() {
@@ -239,9 +243,9 @@ func (n branches) cutAndLift(t *testing.T, f *fabric.Fabric) {
 func TestPathsFollowMeasuredHealth(t *testing.T) {
 	// With the ping application measuring the pick, the lease, and their
 	// standby, a cut of B's link to D moves both around B within a heartbeat
-	// and a burst, and both stay there after the interface-down hold lapses.
-	// Once the link is up again, the pick returns at the next half-open
-	// probe, while the lease stays put: the two branches cost the same.
+	// and a burst, and both stay there while the link is cut. Once the link
+	// is up again, the pick returns at the next half-open probe, while the
+	// lease stays put: the two branches cost the same.
 	t.Run("measured", func(t *testing.T) {
 		InBubble(t, func(t *testing.T, f *fabric.Fabric, wpki *webpkitest.CA) {
 			n := bootBranches(t, f, wpki, nil)
@@ -282,10 +286,10 @@ func TestPathsFollowMeasuredHealth(t *testing.T) {
 		})
 	})
 
-	// A core run without the ping application holds no measurements and
-	// keeps the interface-down hold alone: an echo over its pick across the
-	// cut link draws the signal and moves the pick around B, and the pick
-	// returns to the cut link once the hold lapses.
+	// A core run without the ping application holds no measurements: an
+	// echo over its pick across the cut link draws the signal, which moves
+	// the pick around B and keeps it there for a minute, past the ten
+	// seconds a signal once held.
 	t.Run("without ping", func(t *testing.T) {
 		InBubble(t, func(t *testing.T, f *fabric.Fabric, wpki *webpkitest.CA) {
 			n := bootBranches(t, f, wpki, func(cfg *services.NodeConfig) {
@@ -305,8 +309,14 @@ func TestPathsFollowMeasuredHealth(t *testing.T) {
 				pingFrom(n.ctx, n.a, branchD, n.d.host)
 				return n.aroundB()
 			})
-			PollVirtual(t, scion.InterfaceDownHold+2*virtualPollInterval,
-				"A's pick to return to the cut link", n.throughB)
+			left := time.Now()
+			for range time.Minute / virtualPollInterval {
+				time.Sleep(virtualPollInterval)
+				synctest.Wait()
+				if !n.aroundB() {
+					t.Fatalf("A's pick returned to the signaled link %v after it left", time.Since(left))
+				}
+			}
 		})
 	})
 }

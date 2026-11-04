@@ -105,17 +105,3 @@ func TestPathMeasurements(t *testing.T) {
 		t.Error("the zero measurements hold a record")
 	}
 }
-
-// TestInterfaceDownLapse checks the lapse a held signal reports, and none
-// once it lapsed.
-func TestInterfaceDownLapse(t *testing.T) {
-	now := time.Now()
-	link := segment.LinkID{IA: addr.MustIAFrom(1, 1), IfID: 3}
-	s := InterfaceDownState{}.Signaled(link, 0, now, now.Add(10*time.Second))
-	if lapse, ok := s.Lapse(link, now); !ok || !lapse.Equal(now.Add(10*time.Second)) {
-		t.Errorf("Lapse = %v, %v, want the signal's lapse", lapse, ok)
-	}
-	if _, ok := s.Lapse(link, now.Add(10*time.Second)); ok {
-		t.Error("a lapsed signal reports a lapse")
-	}
-}

@@ -55,10 +55,10 @@ func (f measuredFixture) measure(records map[*Candidate]bus.PathRecord) {
 	f.p.Measurements.Publish(bus.NewPathMeasurements(m))
 }
 
-// signalAt holds a signal on the link, received at the given time.
+// signalAt records a signal on the link, arrived at the given time.
 func (f measuredFixture) signalAt(link segment.LinkID, at time.Time) {
 	f.p.InterfaceDown.Update(func(s bus.InterfaceDownState) bus.InterfaceDownState {
-		return s.Signaled(link, 0, at, at.Add(InterfaceDownHold))
+		return s.Signaled(link, at)
 	})
 }
 
@@ -130,8 +130,8 @@ func TestCandidateIdentity(t *testing.T) {
 }
 
 // TestHealth checks the health and cost a candidate carries by its record,
-// its callers' reports, the held signals, its staleness, and the links its
-// failed paths share.
+// its callers' reports, the signals, its staleness, and the links its failed
+// paths share.
 func TestHealth(t *testing.T) {
 	ms := time.Millisecond
 	for _, tc := range []struct {
@@ -214,6 +214,23 @@ func TestHealth(t *testing.T) {
 		},
 		health: HealthHealthy,
 		cost:   10 * ms,
+	}, {
+		name:   "a signal standing since the last answer",
+		midAge: time.Minute,
+		setup: func(f measuredFixture, now time.Time) {
+			f.measure(map[*Candidate]bus.PathRecord{&f.viaMid: answered(now.Add(-2*time.Minute), 10*ms)})
+			f.signalAt(segment.LinkID{IA: iaMid, IfID: 22}, now.Add(-time.Minute))
+		},
+		health: HealthSuspect,
+		cost:   10 * ms,
+	}, {
+		name:   "a signal past its lapse",
+		midAge: time.Minute,
+		setup: func(f measuredFixture, now time.Time) {
+			f.signalAt(segment.LinkID{IA: iaMid, IfID: 22}, now.Add(-bus.RequestLapse))
+		},
+		health: HealthUnknown,
+		cost:   30 * ms,
 	}, {
 		name:   "stale and unanswered",
 		midAge: StaleAfter + time.Minute,
@@ -399,16 +416,16 @@ func TestBackoff(t *testing.T) {
 }
 
 // TestPicksFollowHealth checks the picks' order: a deliverable path before a
-// suspect one before an ejected one, a suspect one crossing no held signal
-// before one crossing it; within a tier, a cost beyond the band, an
-// unmeasured path's prior standing in, else the prior order.
+// suspect one before an ejected one, a suspect one no signal names since its
+// last answer before a signaled one; within a tier, a cost beyond the band,
+// an unmeasured path's prior standing in, else the prior order.
 func TestPicksFollowHealth(t *testing.T) {
 	ms := time.Millisecond
 	viaMidLink := func(measuredFixture) segment.LinkID { return segment.LinkID{IA: iaMid, IfID: 23} }
 	for _, tc := range []struct {
 		name    string
 		records func(f measuredFixture, now time.Time) map[*Candidate]bus.PathRecord
-		// signal, when set, names the link a signal holds.
+		// signal, when set, names the link signaled as the pick runs.
 		signal func(f measuredFixture) segment.LinkID
 		// stale has the route through the middle read stale.
 		stale  bool

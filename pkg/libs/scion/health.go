@@ -83,24 +83,26 @@ func (r report) lostSince(since, within time.Time) int {
 }
 
 // assess gives the candidate its health and cost by what the view holds; its
-// last answer is the later of its probes' and its callers' last delivery. Its
-// health is the first of: ejected, by its record unless a caller delivered
-// since its last loss, or by callerLosses of its callers' losses; suspect,
-// for a held signal on a link it crosses or a caller's loss newer than its
-// last answer; healthy, for an answer within the trust window; suspect, for
-// stale segments or a crossed link its failed paths share; unknown. An
-// ejected candidate is due its half-open probe its backoff after its last
-// loss. Its cost is its measured cost, else twice its declared one-way sum.
+// last answer is the later of its probes' and its callers' last delivery. It
+// is signaled while a signal on a link it crosses arrived after its last
+// answer. Its health is the first of: ejected, by its record unless a caller
+// delivered since its last loss, or by callerLosses of its callers' losses;
+// suspect, signaled or for a caller's loss newer than its last answer;
+// healthy, for an answer within the trust window; suspect, for stale
+// segments or a crossed link its failed paths share; unknown. An ejected
+// candidate is due its half-open probe its backoff after its last loss. Its
+// cost is its measured cost, else twice its declared one-way sum.
 func (v view) assess(c *Candidate) {
 	r, measured := v.measured.Of(c.ID)
 	rep := v.reports[c.ID]
 	answered := later(r.LastAnswer, rep.delivered)
+	c.Signaled = v.signaledSince(c.Crossed, answered)
 	switch {
 	case measured && ejected(r) && !rep.delivered.After(r.LastLoss),
 		rep.lostSince(answered, v.now.Add(-trustWindow)) >= callerLosses:
 		c.Health = HealthEjected
 		c.Retry = r.LastLoss.Add(backoff(r.LostBursts))
-	case v.signaledSince(c.Crossed, answered), rep.doubted().After(answered):
+	case c.Signaled, rep.doubted().After(answered):
 		c.Health = HealthSuspect
 	case !answered.IsZero() && v.now.Sub(answered) < trustWindow:
 		c.Health = HealthHealthy
@@ -117,11 +119,11 @@ func (v view) assess(c *Candidate) {
 	}
 }
 
-// signaledSince reports whether a held signal names one of the links later
-// than since.
+// signaledSince reports whether a signal standing on one of the links
+// arrived later than since.
 func (v view) signaledSince(links []segment.LinkID, since time.Time) bool {
 	for _, l := range links {
-		if lapse, ok := v.down.Lapse(l, v.now); ok && lapse.Add(-InterfaceDownHold).After(since) {
+		if at, ok := v.down.Arrived(l, v.now); ok && at.After(since) {
 			return true
 		}
 	}
@@ -199,15 +201,16 @@ func suspectLinks(m bus.PathMeasurements, now time.Time) map[segment.LinkID]bool
 }
 
 // ranksAbove reports whether a ranks above b among the picks: by health,
-// a healthy or unknown path before a suspect one, a suspect one crossing no
-// held signal before one crossing it, an ejected one last; then by cost,
-// where both have one and the two differ beyond the band; then by Outranks.
+// a healthy or unknown path before a suspect one, a suspect one no signal
+// names since its last answer before a signaled one, an ejected one last;
+// then by cost, where both have one and the two differ beyond the band; then
+// by Outranks.
 func ranksAbove(a, b *Candidate) bool {
 	if ta, tb := tier(a.Health), tier(b.Health); ta != tb {
 		return ta < tb
 	}
-	if a.Health == HealthSuspect && a.Crossing != b.Crossing {
-		return !a.Crossing
+	if a.Health == HealthSuspect && a.Signaled != b.Signaled {
+		return !a.Signaled
 	}
 	if a.Cost != nil && b.Cost != nil && beyondBand(*a.Cost, *b.Cost) {
 		return *a.Cost < *b.Cost

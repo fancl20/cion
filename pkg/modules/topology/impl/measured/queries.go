@@ -27,15 +27,14 @@ func (s *selection) freshest(candidates []scion.Candidate) *scion.Candidate {
 }
 
 // clean reports whether the candidate is a route the comparator may count:
-// not ejected, crossing no signaled interface — the wrapper's last resort,
-// never the comparator's route — and over none of the node's down links. A
-// dead route, a flagged one, or one over the node's own dead interface is no
-// redundancy, and counting it would overcount routes — the one error that
-// errs toward under-protection, where every accepted blind spot errs toward
-// over-protection. A suspect route counts: what it lacks is evidence, and
+// not ejected and over none of the node's down links. A dead route, or one
+// over the node's own dead interface, is no redundancy, and counting it
+// would overcount routes — the one error that errs toward under-protection,
+// where every accepted blind spot errs toward over-protection. A suspect
+// route counts, a signaled one among them: what it lacks is evidence, and
 // the window's request of it, its baseline or a survivor, decides it.
 func (s *selection) clean(c *scion.Candidate) bool {
-	return c.Health != scion.HealthEjected && !c.Crossing && !s.overDownLink(c)
+	return c.Health != scion.HealthEjected && !s.overDownLink(c)
 }
 
 // overDownLink reports whether the candidate leaves through a link the

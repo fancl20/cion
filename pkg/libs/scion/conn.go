@@ -128,7 +128,7 @@ type ConnConfig struct {
 	Links *bus.Topic[bus.LinkState]
 	// InterfaceDown is the node's interface-down topic: the conn's receive
 	// paths recognize each SCMP External Interface Down signal and update
-	// the topic with it, held for InterfaceDownHold. Nil publishes none.
+	// the topic with its arrival. Nil publishes none.
 	InterfaceDown *bus.Topic[bus.InterfaceDownState]
 	// WildcardHost resolves the host the conn names for itself where a
 	// wildcard bind names none: the packets' source host, which the peer's
@@ -187,16 +187,15 @@ func NewConn(cfg ConnConfig) (*Conn, error) {
 }
 
 // recordInterfaceDown recognizes an interface-down signal in a received
-// packet and, when the conn has the topic, updates it with the signal, held
-// for InterfaceDownHold from its arrival. Reports the signal and whether one
-// was recognized.
+// packet and, when the conn has the topic, updates it with the signal's
+// arrival. Reports the signal and whether one was recognized.
 func (c *Conn) recordInterfaceDown(raw []byte) (InterfaceDownSignal, bool) {
 	sig, ok := parseInterfaceDownPacket(raw)
 	if ok && c.ifDown != nil {
 		now := time.Now()
 		link := segment.LinkID{IA: sig.IA, IfID: sig.IfID}
 		c.ifDown.Update(func(s bus.InterfaceDownState) bus.InterfaceDownState {
-			return s.Signaled(link, sig.Dst, now, now.Add(InterfaceDownHold))
+			return s.Signaled(link, now)
 		})
 	}
 	return sig, ok

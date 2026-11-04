@@ -17,9 +17,8 @@ import (
 var selX = addr.MustIAFrom(20, 0xfd0000000031)
 
 // TestFreshestClean checks the baseline: the freshest clean candidate,
-// never an ejected one, a crossing one — the wrapper's last resort — nor one
-// over one of the node's own verdict-down links, while a suspect one serves.
-// All dirty leaves no baseline.
+// never an ejected one nor one over one of the node's own verdict-down
+// links, while a suspect one serves. All dirty leaves no baseline.
 func TestFreshestClean(t *testing.T) {
 	verdicts := map[uint16]bool{7: false} // the node's own dead interface
 	s := &selection{cfg: SelectionConfig{
@@ -29,7 +28,6 @@ func TestFreshestClean(t *testing.T) {
 	now := time.Now()
 	dirty := []scion.Candidate{
 		{Fresh: now, Health: scion.HealthEjected},
-		{Fresh: now, Crossing: true},
 		{Fresh: now, Links: []segment.LinkID{{IA: selIA, IfID: 7}}}, // over the dead interface
 	}
 	if c := s.freshest(dirty); c != nil {

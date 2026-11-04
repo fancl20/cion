@@ -282,8 +282,8 @@ func TestProberBurstsOnLoss(t *testing.T) {
 }
 
 // TestProberBurstsOnSignal checks that a signal on a link a requested path
-// crosses calls a burst for that path alone, and that a later state holding
-// the same signal calls none.
+// crosses calls a burst for that path alone, and that a later state still
+// holding the same signal calls none.
 func TestProberBurstsOnSignal(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		e, r := newFakeEcho(), &fakeResolver{}
@@ -291,7 +291,7 @@ func TestProberBurstsOnSignal(t *testing.T) {
 		link := segment.LinkID{IA: addr.MustIAFrom(1, 0xff0000000020), IfID: 4}
 		signal := func(b *bus.Bus, link segment.LinkID) {
 			b.InterfaceDown().Update(func(s bus.InterfaceDownState) bus.InterfaceDownState {
-				return s.Signaled(link, 0, time.Now(), time.Now().Add(10*time.Second))
+				return s.Signaled(link, time.Now())
 			})
 		}
 		prober(t, e, r, func(b *bus.Bus) {
@@ -430,7 +430,7 @@ func TestProberBudgetOrder(t *testing.T) {
 				entryOf("slow", dstA, slow, bus.PathStandby, now))...)
 			synctest.Wait()
 			b.InterfaceDown().Update(func(s bus.InterfaceDownState) bus.InterfaceDownState {
-				return s.Signaled(link, 0, now, now.Add(10*time.Second))
+				return s.Signaled(link, now)
 			})
 			for _, want := range [][3]int{{1, 0, 0}, {1, 1, 0}, {1, 1, 1}} {
 				time.Sleep(time.Second / Budget)

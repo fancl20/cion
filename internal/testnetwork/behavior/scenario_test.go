@@ -34,9 +34,8 @@ type response struct {
 	interim grading
 	// recover is how long until as many pairs reached as before the
 	// scenario's first change and stayed so: the start of the final run of
-	// reads at that reach, for a held interface-down signal lifts a read's
-	// reach for the hold alone. A stale segment can hold a pair unreached
-	// before any change.
+	// reads at that reach, for a read's reach can lift before it holds. A
+	// stale segment can hold a pair unreached before any change.
 	recover   time.Duration
 	recovered bool
 	// surface is how long until every pair's cheapest candidate cost the

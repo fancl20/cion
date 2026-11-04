@@ -45,7 +45,7 @@ func (b *Bus) Links() *Topic[LinkState] {
 
 // InterfaceDown returns the node's interface-down topic. The node's conns
 // update it with each SCMP External Interface Down signal they recognize;
-// the path provider and the WireGuard application read it.
+// the path provider's health and the ping application's prober read it.
 func (b *Bus) InterfaceDown() *Topic[InterfaceDownState] {
 	return &b.ifDown
 }

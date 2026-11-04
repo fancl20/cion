@@ -38,11 +38,9 @@ type PathProvider struct {
 	Bootstrap func(core addr.IA) *spath.Decoded
 	// Cores enumerates the core ASes of an ISD named by the pinned TRC.
 	Cores func(isd addr.ISD) []addr.IA
-	// InterfaceDown is the node's interface-down topic. Composition reads it
-	// where it holds full knowledge — each segment's entries carry their
-	// ISD-ASes and interface IDs — and flags a composed path that crosses a
-	// link a held signal names; the picks rank it suspect unless it answered
-	// since the signal. A nil topic composes without the filter.
+	// InterfaceDown is the node's interface-down topic. Health reads it: a
+	// composed path crossing a link whose signal arrived after the path's
+	// last answer is signaled, and suspect. A nil topic signals nothing.
 	InterfaceDown *bus.Topic[bus.InterfaceDownState]
 	// Links is the node's link state topic, whose usable links are the
 	// interfaces routes may leave the node through. A segment through an
@@ -202,9 +200,6 @@ type Candidate struct {
 	Stale bool
 	// Entries is the joined pieces' total segment entries.
 	Entries int
-	// Crossing reports whether the traversed stretch crosses a signaled
-	// interface — the flag a consumer honors as last resort.
-	Crossing bool
 	// Latency is the traversed inter-AS edges' declared one-way delays
 	// summed, the path's one-way estimate; nil when any traversed edge is
 	// declared by neither end: an undeclared edge is unknown, not free.
@@ -220,9 +215,13 @@ type Candidate struct {
 	// ID is the path's identity, its crossed pairs, which the segments'
 	// refreshes keep; empty for the bootstrap route.
 	ID bus.PathID
-	// Health is what the measurements, the callers' reports, and the held
+	// Health is what the measurements, the callers' reports, and the
 	// signals said of the path at composition.
 	Health Health
+	// Signaled reports whether a signal on a link the path crosses arrived
+	// after its last answer: a router reported the path failing, and the
+	// picks rank it after the other suspects.
+	Signaled bool
 	// Retry is when an ejected path is due its half-open probe; zero for
 	// the others.
 	Retry time.Time
@@ -377,12 +376,10 @@ func (p *PathProvider) compose(
 		latency += sum
 		known = known && downKnown
 	}
-	crossing := false
 	for _, link := range links {
 		if link.IA.Equal(p.IA) && v.retired(link.IfID) {
 			return nil, nil
 		}
-		crossing = crossing || v.down.Holds(link, v.now)
 	}
 	var parts []*spath.Decoded
 	if upTravel {
@@ -427,7 +424,6 @@ func (p *PathProvider) compose(
 		Fresh:    fresh,
 		Stale:    time.Since(fresh) > StaleAfter,
 		Entries:  entries,
-		Crossing: crossing,
 		Segments: pieces,
 		Crossed:  crossed,
 		ID:       bus.PathIDOf(crossed),
@@ -558,8 +554,9 @@ func (p *PathProvider) containing(ia addr.IA, v view) ([]Candidate, error) {
 }
 
 // view is the state one call composes from, read once: the node's usable
-// links, the interface-down signals that hold at now, the path measurements,
-// the links the measured failed paths share, and the callers' reports.
+// links, the interface-down signals that stand at now, the path
+// measurements, the links the measured failed paths share, and the callers'
+// reports.
 type view struct {
 	live     map[uint16]addr.IA
 	down     bus.InterfaceDownState

@@ -332,9 +332,8 @@ func TestSelectionDeclaresLatency(t *testing.T) {
 // TestSelectionRequestsItsRoutes checks the routes a window requests
 // measured: each peer's baseline and each up link's freshest clean survivor,
 // priced, and a peer's freshest ejected route fresher than its baseline,
-// half-open at its retry, never a staler one or one a signal holds off; the
-// next window's requests replace them, a peer the directory no longer names
-// requesting nothing.
+// half-open at its retry, never a staler one; the next window's requests
+// replace them, a peer the directory no longer names requesting nothing.
 func TestSelectionRequestsItsRoutes(t *testing.T) {
 	ms := time.Millisecond
 	f := newSelFixture(t, selPeer, selA, selB)
@@ -347,16 +346,13 @@ func TestSelectionRequestsItsRoutes(t *testing.T) {
 	f.carried(selB, 10*ms, 20*ms, bOwn,
 		with(f.via(t, selPeer, -2*time.Hour, selPeer, selB), scion.HealthEjected))
 	// C's baseline rides Peer's link; its route through B, older, is the
-	// freshest route around Peer's link; its route through A, fresher than
-	// the baseline, was ejected; and its freshest, through B and X, crosses
-	// a signaled interface.
+	// freshest route around Peer's link; and its freshest, through A, was
+	// ejected.
 	cViaPeer := f.via(t, selPeer, 0, selPeer, selC)
 	cViaB := f.via(t, selB, -time.Minute, selB, selC)
 	cViaA := with(f.via(t, selA, time.Minute, selA, selC), scion.HealthEjected)
 	cViaA.Retry = time.Unix(1<<30, 0).Add(20 * time.Second)
-	cCrossing := f.via(t, selB, 2*time.Minute, selB, selX, selC)
-	cCrossing.Crossing = true
-	f.candidate(selC, 15*ms, 0, cViaPeer, cViaB, cViaA, cCrossing)
+	f.candidate(selC, 15*ms, 0, cViaPeer, cViaB, cViaA)
 
 	type requested struct {
 		Dst  addr.IA
