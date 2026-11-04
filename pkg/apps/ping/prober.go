@@ -22,11 +22,13 @@ import (
 )
 
 // The prober's pacing. A destination is hot for HotWindow after its last
-// pick: its path in use is probed every Heartbeat, and its standby and its
-// suspect every SlowProbe, each first at once. Until its requests lapse, its
-// path in use is probed every SlowProbe, its standby and suspect not at all.
-// A lost probe of a path in use or suspect calls a burst, which decides the
-// path: an answer keeps or clears it, a burst lost whole ejects it.
+// pick or use: its path in use is probed every Heartbeat, and its standby and
+// its suspect every SlowProbe, each first at once. Until its requests lapse,
+// its path in use is probed every SlowProbe, its standby and suspect not at
+// all. A caller's confirmation of a path counts as its routine probe. A lost
+// probe of a path in use or suspect, and a caller's doubt newer than a path's
+// last answer, call a burst, which decides the path: an answer keeps or
+// clears it, a burst lost whole ejects it.
 const (
 	// Heartbeat bounds how long a silent failure of a path in use goes
 	// unseen, a burst's second beside it.
@@ -34,7 +36,7 @@ const (
 	// SlowProbe matches the cadence at which registrations and lookups
 	// refresh the segments the candidates are composed from.
 	SlowProbe = time.Minute
-	// HotWindow is how long after its last pick a destination is hot.
+	// HotWindow is how long after its last pick or use a destination is hot.
 	HotWindow = time.Minute
 	// BurstProbes and BurstSpacing shape a burst: five probes over a second.
 	BurstProbes  = 5
@@ -115,6 +117,10 @@ type probed struct {
 	record    bus.PathRecord
 	// lastProbe is when the path's last routine probe went.
 	lastProbe time.Time
+	// confirmed is when a caller's traffic last confirmed the path, which
+	// stands in for a routine probe; doubted is the latest caller's doubt the
+	// prober saw.
+	confirmed, doubted time.Time
 	// burstLeft counts the probes of the path's burst still to send, the
 	// next due at burstNext; burstOut counts those sent and unsettled; and
 	// burstHit reports whether one of them answered.
@@ -124,6 +130,15 @@ type probed struct {
 	burstHit  bool
 	// halfOpened is the due time of the half-open burst already sent.
 	halfOpened time.Time
+}
+
+// routineAfter returns when the path's last routine probe went, or a caller
+// confirmed it in its stead, whichever came later.
+func (ps *probed) routineAfter() time.Time {
+	if ps.confirmed.After(ps.lastProbe) {
+		return ps.confirmed
+	}
+	return ps.lastProbe
 }
 
 // probe is one probe awaiting its answer.
@@ -276,8 +291,10 @@ func (p *Prober) probe(ctx context.Context) {
 }
 
 // take adopts the latest requests: a path two entries name keeps the most
-// demanding role, in the roles' order, and the latest pick. A path its last
-// pick lapsed for is forgotten.
+// demanding role, in the roles' order, the latest pick, and the latest
+// confirmation. A caller's doubt newer than the last one seen calls a burst
+// for its path, unless the path answered since. A path its last pick lapsed
+// for is forgotten.
 func (p *Prober) take(rs bus.PathRequests, now time.Time) {
 	for _, ps := range p.paths {
 		ps.requested = false
@@ -296,6 +313,15 @@ func (p *Prober) take(rs bus.PathRequests, now time.Time) {
 			ps.req = r
 		}
 		ps.requested = true
+		if r.Confirmed.After(ps.confirmed) {
+			ps.confirmed = r.Confirmed
+		}
+		if r.Doubted.After(ps.doubted) {
+			ps.doubted = r.Doubted
+			if r.Doubted.After(ps.record.LastAnswer) {
+				p.startBurst(ps, now)
+			}
+		}
 	}
 	p.forget(now)
 }
@@ -457,7 +483,7 @@ func (p *Prober) dispatch(now time.Time) time.Duration {
 		if interval == 0 || ps.burstOut > 0 {
 			continue
 		}
-		if at := ps.lastProbe.Add(interval); now.Before(at) {
+		if at := ps.routineAfter().Add(interval); now.Before(at) {
 			soonest(at)
 		} else {
 			class := 2
@@ -488,7 +514,7 @@ func (p *Prober) dispatch(now time.Time) time.Duration {
 		if d.ps.burstLeft > 0 {
 			soonest(d.ps.burstNext)
 		} else if interval := p.interval(d.ps, now); interval > 0 {
-			soonest(d.ps.lastProbe.Add(interval))
+			soonest(d.ps.routineAfter().Add(interval))
 		}
 	}
 	for _, pr := range p.pending {
@@ -498,7 +524,7 @@ func (p *Prober) dispatch(now time.Time) time.Duration {
 }
 
 // interval returns how often the path's routine probes go by its role and
-// its destination's last pick, zero for none.
+// its destination's last pick or use, zero for none.
 func (p *Prober) interval(ps *probed, now time.Time) time.Duration {
 	hot := now.Sub(ps.req.Picked) < HotWindow
 	switch ps.req.Role {

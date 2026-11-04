@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/netip"
 	"slices"
+	"strings"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -14,11 +15,12 @@ import (
 	"github.com/fancl20/cion/internal/testnetwork/fabric"
 	"github.com/fancl20/cion/pkg/apps/ping"
 	"github.com/fancl20/cion/pkg/core/webpki/webpkitest"
+	"github.com/fancl20/cion/pkg/libs/bus"
 	"github.com/fancl20/cion/pkg/libs/scion"
 	"github.com/fancl20/cion/pkg/libs/segment"
 )
 
-// The picks lab's topology: the core A reaches D over two branches, B, and
+// The paths lab's topology: the core A reaches D over two branches, B, and
 // C then E, the one through B of fewer hops. B's interface toward D is
 // pinned so the lab names the link it cuts.
 var (
@@ -27,7 +29,7 @@ var (
 	viaB    = segment.LinkID{IA: nodeIA, IfID: 7}
 )
 
-// The picks lab's bounds, in virtual time, each with a poll's second.
+// The paths lab's bounds, in virtual time, each with a poll's second.
 const (
 	// branchesBudget bounds each wait on the network: five nodes' links and
 	// enrollments and both branches' segments, or a link's return.
@@ -39,6 +41,9 @@ const (
 	// returnBound bounds how long after the cut link is up again the pick
 	// returns to it: the half-open backoff's one-minute cap and a burst.
 	returnBound = time.Minute + ping.BurstProbes*ping.BurstSpacing + virtualPollInterval
+	// detour is the one-way delay the cheaper-return lab draws on C's link
+	// to E, so the branch through B costs less beyond the band.
+	detour = 10 * time.Millisecond
 )
 
 // bootFabricTopology boots a static topology on a bubble's fabric: each
@@ -84,13 +89,13 @@ func bootFabricTopology(t *testing.T, f *fabric.Fabric, wpki *webpkitest.CA,
 	return nodes
 }
 
-// branches is the picks lab's network: the core A, B, and D.
+// branches is the paths lab's network: the core A, B, C, D, and E.
 type branches struct {
-	ctx     context.Context
-	a, b, d *Node
+	ctx           context.Context
+	a, b, c, d, e *Node
 }
 
-// bootBranches boots the picks lab's topology on the fabric, every node's
+// bootBranches boots the paths lab's topology on the fabric, every node's
 // run arguments taking mutate last, and waits for A to pick the branch
 // through B and reach D over it.
 func bootBranches(t *testing.T, f *fabric.Fabric, wpki *webpkitest.CA,
@@ -107,7 +112,14 @@ func bootBranches(t *testing.T, f *fabric.Fabric, wpki *webpkitest.CA,
 		pins:   map[[2]addr.IA]uint16{{nodeIA, branchD}: viaB.IfID},
 		mutate: mutate,
 	})
-	n := branches{ctx: t.Context(), a: nodes[coreIA], b: nodes[nodeIA], d: nodes[branchD]}
+	n := branches{
+		ctx: t.Context(),
+		a:   nodes[coreIA],
+		b:   nodes[nodeIA],
+		c:   nodes[lineCIA],
+		d:   nodes[branchD],
+		e:   nodes[branchE],
+	}
 	PollVirtual(t, branchesBudget, "A to reach D through B", func() bool {
 		return n.throughB() && pingFrom(n.ctx, n.a, branchD, n.d.host)
 	})
@@ -136,49 +148,137 @@ func (n branches) aroundB() bool {
 	return ok && !through
 }
 
-// TestPicksFollowMeasuredHealth is the measured picks' proof on the fabric,
-// in virtual time: the core A reaches D over two branches, B and C then E,
-// and picks the one through B, of fewer hops.
-func TestPicksFollowMeasuredHealth(t *testing.T) {
-	// With the ping application measuring the pick and its standby, a cut
-	// of B's link to D moves the pick around B within a heartbeat and a
-	// burst, and the pick stays there after the interface-down hold lapses,
-	// the path through B ejected. Once the link is up again, the pick
-	// returns at the next half-open probe.
+// lease reads A's lease of D as a payload's send does: whether its path
+// crosses B's link to D, and whether it holds a composed path at all.
+func (n branches) lease() (throughB, ok bool) {
+	leased, err := n.a.app.Provider().Lease(branchD).Path()
+	if err != nil || leased.ID == "" {
+		return false, false
+	}
+	crossed := strings.Fields(string(leased.ID))
+	return slices.Contains(crossed, string(bus.PathIDOf([]segment.LinkID{viaB}))), true
+}
+
+// leasedThroughB reports whether A's lease of D crosses B's link to D.
+func (n branches) leasedThroughB() bool {
+	through, _ := n.lease()
+	return through
+}
+
+// leasedAroundB reports whether A's lease of D holds a path avoiding B's
+// link to D.
+func (n branches) leasedAroundB() bool {
+	through, ok := n.lease()
+	return ok && !through
+}
+
+// cutAndLift cuts B's link to D once A measured the branch around B, and
+// checks that A's pick and lease leave the cut link within a heartbeat and a
+// burst and stay off it past the interface-down hold, the path through B
+// ejected. It then lifts the cut and waits for the pick to return at the
+// next half-open probe, A's lease read as a send does at every check.
+func (n branches) cutAndLift(t *testing.T, f *fabric.Fabric) {
+	t.Helper()
+	PollVirtual(t, branchesBudget, "A to measure the branch around B", func() bool {
+		n.throughB()
+		n.lease()
+		for _, r := range n.a.app.Bus().PathMeasurements().Latest().All() {
+			if r.Dst == branchD && !r.LastAnswer.IsZero() && !slices.Contains(r.Links, viaB) {
+				return true
+			}
+		}
+		return false
+	})
+	if !n.leasedThroughB() {
+		t.Fatal("A's lease of D avoids B's link before the cut")
+	}
+
+	lift := f.Cut(n.b.Host(), n.d.Host())
+	cut := time.Now()
+	var pickLeft, leaseLeft bool
+	PollVirtual(t, leaveBound+scion.LeaseEvaluation, "A's pick and lease to leave the cut link", func() bool {
+		if !pickLeft && n.aroundB() {
+			pickLeft = true
+			t.Logf("A's pick left the cut link %v after the cut", time.Since(cut))
+		}
+		if !leaseLeft && n.leasedAroundB() {
+			leaseLeft = true
+			t.Logf("A's lease left the cut link %v after the cut", time.Since(cut))
+		}
+		return pickLeft && leaseLeft
+	})
+	for range 3 * scion.InterfaceDownHold / virtualPollInterval {
+		time.Sleep(virtualPollInterval)
+		synctest.Wait()
+		if !n.aroundB() {
+			t.Fatalf("A's pick returned to the cut link %v after the cut", time.Since(cut))
+		}
+		if !n.leasedAroundB() {
+			t.Fatalf("A's lease returned to the cut link %v after the cut", time.Since(cut))
+		}
+	}
+
+	lift()
+	dIfID := entryOf(n.ctx, n.d, nodeIA).IfID
+	PollVirtual(t, branchesBudget, "B's link to D to come up again", func() bool {
+		n.throughB()
+		n.lease()
+		return n.b.app.Monitor().Up(viaB.IfID) && n.d.app.Monitor().Up(dIfID)
+	})
+	up := time.Now()
+	PollVirtual(t, returnBound, "A's pick to return to B's link to D", func() bool {
+		n.lease()
+		return n.throughB()
+	})
+	t.Logf("A's pick returned %v after the link came up", time.Since(up))
+}
+
+// TestPathsFollowMeasuredHealth is the measured picks' and leases' proof on
+// the fabric, in virtual time: the core A reaches D over two branches, B and
+// C then E, and picks and leases the one through B, of fewer hops.
+func TestPathsFollowMeasuredHealth(t *testing.T) {
+	// With the ping application measuring the pick, the lease, and their
+	// standby, a cut of B's link to D moves both around B within a heartbeat
+	// and a burst, and both stay there after the interface-down hold lapses.
+	// Once the link is up again, the pick returns at the next half-open
+	// probe, while the lease stays put: the two branches cost the same.
 	t.Run("measured", func(t *testing.T) {
 		InBubble(t, func(t *testing.T, f *fabric.Fabric, wpki *webpkitest.CA) {
 			n := bootBranches(t, f, wpki, nil)
-			PollVirtual(t, branchesBudget, "A to measure the branch around B", func() bool {
-				n.throughB()
-				for _, r := range n.a.app.Bus().PathMeasurements().Latest().All() {
-					if r.Dst == branchD && !r.LastAnswer.IsZero() && !slices.Contains(r.Links, viaB) {
-						return true
-					}
-				}
-				return false
-			})
-
-			lift := f.Cut(n.b.Host(), n.d.Host())
-			cut := time.Now()
-			PollVirtual(t, leaveBound, "A's pick to leave the cut link", n.aroundB)
-			t.Logf("A's pick left the cut link %v after the cut", time.Since(cut))
-			for range 3 * scion.InterfaceDownHold / virtualPollInterval {
+			n.cutAndLift(t, f)
+			for range 3 * scion.LeaseSwitchHold / virtualPollInterval {
 				time.Sleep(virtualPollInterval)
 				synctest.Wait()
-				if !n.aroundB() {
-					t.Fatalf("A's pick returned to the cut link %v after the cut", time.Since(cut))
+				n.throughB()
+				if !n.leasedAroundB() {
+					t.Fatal("A's lease returned to B's link, which costs no less beyond the band")
 				}
 			}
+		})
+	})
 
-			lift()
-			dIfID := entryOf(n.ctx, n.d, nodeIA).IfID
-			PollVirtual(t, branchesBudget, "B's link to D to come up again", func() bool {
+	// With C's link to E delayed, the branch through B costs less beyond
+	// the band, and the lease returns to it LeaseSwitchHold after the pick.
+	t.Run("cheaper return", func(t *testing.T) {
+		InBubble(t, func(t *testing.T, f *fabric.Fabric, wpki *webpkitest.CA) {
+			n := bootBranches(t, f, wpki, nil)
+			f.Delay(n.c.Host(), n.e.Host(), detour)
+			n.cutAndLift(t, f)
+			returned := time.Now()
+			for range scion.LeaseSwitchHold/virtualPollInterval - 1 {
+				time.Sleep(virtualPollInterval)
+				synctest.Wait()
 				n.throughB()
-				return n.b.app.Monitor().Up(viaB.IfID) && n.d.app.Monitor().Up(dIfID)
-			})
-			up := time.Now()
-			PollVirtual(t, returnBound, "A's pick to return to B's link to D", n.throughB)
-			t.Logf("A's pick returned %v after the link came up", time.Since(up))
+				if !n.leasedAroundB() {
+					t.Fatalf("A's lease returned %v after the pick, within the hold", time.Since(returned))
+				}
+			}
+			PollVirtual(t, scion.LeaseEvaluation+virtualPollInterval,
+				"A's lease to return to B's link to D", func() bool {
+					n.throughB()
+					return n.leasedThroughB()
+				})
+			t.Logf("A's lease returned %v after the pick", time.Since(returned))
 		})
 	})
 

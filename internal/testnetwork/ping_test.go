@@ -2,7 +2,6 @@ package testnetwork
 
 import (
 	"context"
-	"errors"
 	"hash"
 	"net/netip"
 	"sync/atomic"
@@ -11,7 +10,6 @@ import (
 
 	"github.com/scionproto/scion/pkg/addr"
 	"github.com/scionproto/scion/pkg/scrypto"
-	spath "github.com/scionproto/scion/pkg/slayers/path/scion"
 
 	"github.com/fancl20/cion/pkg/apps/ping"
 	"github.com/fancl20/cion/pkg/core/webpki/webpkitest"
@@ -225,19 +223,19 @@ func TestPingSiblingNodes(t *testing.T) {
 	}
 }
 
-// TestPingReresolvesExpiredPath checks the mid-run expiry: a pinger whose
-// resolved path has expired re-resolves and the run continues — here from a
-// stale up segment to a fresh one, with the replies proving the fresh path
-// carried them.
-func TestPingReresolvesExpiredPath(t *testing.T) {
+// TestPingSkipsExpiredPath checks the lease's expiry filter on a run: a
+// pinger whose provider first composes from an expired up segment, and from
+// a fresh one thereafter, never rides the expired path — the replies prove
+// the fresh path carried every request.
+func TestPingSkipsExpiredPath(t *testing.T) {
 	t.Parallel()
 	iaP := addr.MustIAFrom(20, 0xff0000000021)
 	iaR := addr.MustIAFrom(20, 0xff0000000022)
 	p, r := bootPair(t, iaP, iaR)
 	keyP, keyR := p.forwardingKey(t), r.forwardingKey(t)
 
-	// The pinger resolves through a provider of crafted up segments: the
-	// first resolution sees a stale segment — expired twenty-five hours
+	// The pinger leases through a provider of crafted up segments: the
+	// first composition sees a stale segment — expired twenty-five hours
 	// after its beacon — and every later one a fresh segment routing over
 	// the real link.
 	fresh := upSegment(t, keyR, keyP, time.Now(), iaR, iaP)
@@ -258,9 +256,6 @@ func TestPingReresolvesExpiredPath(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if report.Reresolves != 1 {
-		t.Errorf("re-resolutions = %d, want 1 (the expired initial path)", report.Reresolves)
-	}
 	if report.Received != 3 || report.Loss() != 0 {
 		t.Fatalf("received %d of %d replies over the fresh path",
 			report.Received, report.Sent)
@@ -277,7 +272,8 @@ func TestPingReresolvesExpiredPath(t *testing.T) {
 // freshly booted pair — the peer's BFD handshake and boot's generation
 // swaps still settling, the first replies lost to them — sends uncounted
 // requests until one is answered and only then counts, the counted run
-// reporting the network rather than its bring-up.
+// reporting the network rather than its bring-up, and its replies
+// confirming the path.
 func TestPingReadyWarmsUp(t *testing.T) {
 	t.Parallel()
 	iaP := addr.MustIAFrom(20, 0xff0000000061)
@@ -288,9 +284,10 @@ func TestPingReadyWarmsUp(t *testing.T) {
 	// warm-up: the run's own readiness bound absorbs what warmUp polled for,
 	// budgeted at the restart lab's patience the same way.
 	seg := upSegment(t, r.forwardingKey(t), p.forwardingKey(t), time.Now(), iaR, iaP)
+	provider := &scion.PathProvider{IA: iaP, DB: &staticPathDB{seg: seg}}
 	report, err := ping.Run(t.Context(), ping.Config{
 		Conn:     p.conn(t),
-		Paths:    &scion.PathProvider{IA: iaP, DB: &staticPathDB{seg: seg}},
+		Paths:    provider,
 		Dst:      iaR,
 		DstHost:  r.host,
 		Count:    3,
@@ -305,13 +302,29 @@ func TestPingReadyWarmsUp(t *testing.T) {
 		t.Fatalf("received %d of %d replies, want 3 of 3 after the warm-up",
 			report.Received, report.Sent)
 	}
+	if got := healthOf(t, provider, iaR); got != scion.HealthHealthy {
+		t.Errorf("the path's health after the replies = %v, want healthy", got)
+	}
+}
+
+// healthOf returns the health of the one path the provider composes to dst.
+func healthOf(t *testing.T, provider *scion.PathProvider, dst addr.IA) scion.Health {
+	t.Helper()
+	candidates, err := provider.Enumerate(t.Context(), dst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(candidates) != 1 {
+		t.Fatalf("%d candidates to %s, want 1", len(candidates), dst)
+	}
+	return candidates[0].Health
 }
 
 // TestPingReadyRetriesResolution checks the readiness bound's other wait:
-// the first resolutions failing — a cold boot's beaconing not landed yet —
-// retry within the bound and the run counts on the one that serves, while a
-// destination nothing resolves for within the bound stays the error it
-// always was.
+// the lease's first waits finding nothing — a cold boot's beaconing not
+// landed yet — retry within the bound and the run counts once a path
+// composes, while a destination nothing composes for within the bound stays
+// an error.
 func TestPingReadyRetriesResolution(t *testing.T) {
 	t.Parallel()
 	iaP := addr.MustIAFrom(20, 0xff0000000071)
@@ -319,11 +332,10 @@ func TestPingReadyRetriesResolution(t *testing.T) {
 	p, r := bootPair(t, iaP, iaR)
 
 	seg := upSegment(t, r.forwardingKey(t), p.forwardingKey(t), time.Now(), iaR, iaP)
-	provider := &scion.PathProvider{IA: iaP, DB: &staticPathDB{seg: seg}}
-	paths := &delayedPaths{inner: provider, failFor: 2}
+	db := &delayedPathDB{seg: seg, failFor: 2}
 	report, err := ping.Run(t.Context(), ping.Config{
 		Conn:     p.conn(t),
-		Paths:    paths,
+		Paths:    &scion.PathProvider{IA: iaP, DB: db},
 		Dst:      iaR,
 		DstHost:  r.host,
 		Count:    3,
@@ -338,16 +350,16 @@ func TestPingReadyRetriesResolution(t *testing.T) {
 		t.Fatalf("received %d of %d replies, want 3 of 3 past the failed resolutions",
 			report.Received, report.Sent)
 	}
-	if calls := paths.calls.Load(); calls < 3 {
-		t.Errorf("resolutions = %d, want the first two failures retried past", calls)
+	if calls := db.calls.Load(); calls < 3 {
+		t.Errorf("queries = %d, want the first two empty ones retried past", calls)
 	}
 
-	// The bound kept: a provider nothing resolves for fails within it, not
+	// The bound kept: a provider nothing composes for fails within it, not
 	// by hanging.
-	paths = &delayedPaths{inner: provider, failFor: 1 << 30}
+	never := &delayedPathDB{seg: seg, failFor: 1 << 30}
 	if _, err := ping.Run(t.Context(), ping.Config{
 		Conn:     p.conn(t),
-		Paths:    paths,
+		Paths:    &scion.PathProvider{IA: iaP, DB: never},
 		Dst:      iaR,
 		DstHost:  r.host,
 		Count:    1,
@@ -359,20 +371,19 @@ func TestPingReadyRetriesResolution(t *testing.T) {
 	}
 }
 
-// delayedPaths fails the first failFor resolutions the way a cold boot's
-// provider does — its segments not landed yet — then serves the inner
-// provider's answers.
-type delayedPaths struct {
-	inner   ping.Paths
+// delayedPathDB serves nothing for its first failFor queries, the way a cold
+// boot's database holds no segment yet, then serves its one segment.
+type delayedPathDB struct {
+	staticPathDB
 	failFor int32
 	calls   atomic.Int32
 }
 
-func (d *delayedPaths) Path(ctx context.Context, dst addr.IA) (*spath.Decoded, error) {
+func (d *delayedPathDB) Get(ctx context.Context, q pathdb.Query) ([]*pathdb.Segment, error) {
 	if d.calls.Add(1) <= d.failFor {
-		return nil, errors.New("no path yet")
+		return nil, nil
 	}
-	return d.inner.Path(ctx, dst)
+	return d.staticPathDB.Get(ctx, q)
 }
 
 // bootPair boots the crafted-path labs' two non-core nodes, P and R, on the
@@ -492,7 +503,7 @@ func TestPingUnreachable(t *testing.T) {
 
 // TestPingLossSummary checks the loss accounting: a destination host no
 // responder listens on loses every request, and the run still completes
-// with the summary.
+// with the summary, the losses doubting the path.
 func TestPingLossSummary(t *testing.T) {
 	t.Parallel()
 	iaP := addr.MustIAFrom(20, 0xff0000000041)
@@ -505,9 +516,10 @@ func TestPingLossSummary(t *testing.T) {
 	// address, which no node binds.
 	seg := upSegment(t, r.forwardingKey(t), p.forwardingKey(t), time.Now(), iaR, iaP)
 	warmUp(t, p, r, seg)
+	provider := &scion.PathProvider{IA: iaP, DB: &staticPathDB{seg: seg}}
 	report, err := ping.Run(t.Context(), ping.Config{
 		Conn:     p.conn(t),
-		Paths:    &scion.PathProvider{IA: iaP, DB: &staticPathDB{seg: seg}},
+		Paths:    provider,
 		Dst:      iaR,
 		DstHost:  HostSlot(t),
 		Count:    2,
@@ -520,6 +532,9 @@ func TestPingLossSummary(t *testing.T) {
 	if report.Sent != 2 || report.Received != 0 || report.Loss() != 2 {
 		t.Fatalf("sent %d, received %d, lost %d; want 2/0/2",
 			report.Sent, report.Received, report.Loss())
+	}
+	if got := healthOf(t, provider, iaR); got != scion.HealthSuspect {
+		t.Errorf("the path's health after the losses = %v, want suspect", got)
 	}
 }
 

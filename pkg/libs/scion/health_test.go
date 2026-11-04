@@ -130,7 +130,8 @@ func TestCandidateIdentity(t *testing.T) {
 }
 
 // TestHealth checks the health and cost a candidate carries by its record,
-// the held signals, its staleness, and the links its failed paths share.
+// its callers' reports, the held signals, its staleness, and the links its
+// failed paths share.
 func TestHealth(t *testing.T) {
 	ms := time.Millisecond
 	for _, tc := range []struct {
@@ -260,6 +261,83 @@ func TestHealth(t *testing.T) {
 				f.failedThrough(segment.LinkID{IA: iaCore, IfID: 31}): ejectedAt(now),
 				&f.direct: answered(now.Add(-time.Second), 50*ms),
 			})
+		},
+		health: HealthUnknown,
+		cost:   30 * ms,
+	}, {
+		name:   "a caller's delivery",
+		midAge: time.Minute,
+		setup: func(f measuredFixture, now time.Time) {
+			f.p.record(f.viaMid.ID, true, now.Add(-time.Minute))
+		},
+		health: HealthHealthy,
+		cost:   30 * ms,
+	}, {
+		name:   "a caller's delivery since a lost burst",
+		midAge: time.Minute,
+		setup: func(f measuredFixture, now time.Time) {
+			f.measure(map[*Candidate]bus.PathRecord{&f.viaMid: ejectedAt(now.Add(-10 * time.Second))})
+			f.p.record(f.viaMid.ID, true, now.Add(-5*time.Second))
+		},
+		health: HealthHealthy,
+		cost:   10 * ms,
+	}, {
+		name:   "a caller's loss since the last answer",
+		midAge: time.Minute,
+		setup: func(f measuredFixture, now time.Time) {
+			f.measure(map[*Candidate]bus.PathRecord{&f.viaMid: answered(now.Add(-time.Minute), 10*ms)})
+			f.p.record(f.viaMid.ID, false, now.Add(-30*time.Second))
+		},
+		health: HealthSuspect,
+		cost:   10 * ms,
+	}, {
+		name:   "callers' losses within the trust window",
+		midAge: time.Minute,
+		setup: func(f measuredFixture, now time.Time) {
+			f.measure(map[*Candidate]bus.PathRecord{&f.viaMid: answered(now.Add(-2*time.Minute), 10*ms)})
+			for _, ago := range []time.Duration{90, 60, 30} {
+				f.p.record(f.viaMid.ID, false, now.Add(-ago*time.Second))
+			}
+		},
+		health: HealthEjected,
+		cost:   10 * ms,
+	}, {
+		name:   "two callers' losses within the trust window",
+		midAge: time.Minute,
+		setup: func(f measuredFixture, now time.Time) {
+			f.measure(map[*Candidate]bus.PathRecord{&f.viaMid: answered(now.Add(-2*time.Minute), 10*ms)})
+			for _, ago := range []time.Duration{60, 30} {
+				f.p.record(f.viaMid.ID, false, now.Add(-ago*time.Second))
+			}
+		},
+		health: HealthSuspect,
+		cost:   10 * ms,
+	}, {
+		name:   "callers' losses before the last answer",
+		midAge: time.Minute,
+		setup: func(f measuredFixture, now time.Time) {
+			for _, ago := range []time.Duration{90, 80, 70} {
+				f.p.record(f.viaMid.ID, false, now.Add(-ago*time.Second))
+			}
+			f.measure(map[*Candidate]bus.PathRecord{&f.viaMid: answered(now.Add(-time.Minute), 10*ms)})
+		},
+		health: HealthHealthy,
+		cost:   10 * ms,
+	}, {
+		name:   "callers' losses past the trust window",
+		midAge: time.Minute,
+		setup: func(f measuredFixture, now time.Time) {
+			for _, ago := range []time.Duration{240, 200, 30} {
+				f.p.record(f.viaMid.ID, false, now.Add(-ago*time.Second))
+			}
+		},
+		health: HealthSuspect,
+		cost:   30 * ms,
+	}, {
+		name:   "a caller's loss past the request lapse",
+		midAge: time.Minute,
+		setup: func(f measuredFixture, now time.Time) {
+			f.p.record(f.viaMid.ID, false, now.Add(-bus.RequestLapse))
 		},
 		health: HealthUnknown,
 		cost:   30 * ms,

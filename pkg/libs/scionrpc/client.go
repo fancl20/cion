@@ -5,6 +5,7 @@ import (
 	"crypto"
 	"crypto/tls"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/netip"
@@ -19,6 +20,7 @@ import (
 	"github.com/scionproto/scion/pkg/addr"
 	spath "github.com/scionproto/scion/pkg/slayers/path/scion"
 
+	"github.com/fancl20/cion/pkg/libs/bus"
 	"github.com/fancl20/cion/pkg/libs/scion"
 )
 
@@ -31,24 +33,17 @@ type PeerClientConfig struct {
 	Key crypto.Signer
 	// Conn is the SCION connection QUIC rides.
 	Conn *scion.Conn
-	// PathTo resolves the data-plane path to a destination whose authority
-	// names no path and that is not a direct neighbor; nil, or a nil result,
-	// sends over a one-hop path.
-	PathTo func(dst addr.IA) *spath.Decoded
+	// Lease returns the lease of a destination whose authority names no
+	// path; nil, or a lease with nothing composed, sends over a one-hop
+	// path.
+	Lease func(dst addr.IA) *scion.Lease
 }
-
-// maxConnAge caps how long a pooled connection over a resolved path serves.
-// A connection rides its dial-time path for life — the far end reverses the
-// first packet's — so the cap bounds how stale the path grows: a route the
-// segments since improved on is taken within it, and the path's
-// expiration, hours after its segment's origination, lies far beyond it.
-const maxConnAge = 10 * time.Minute
 
 // NewSCIONClient returns an HTTP client over the SCION-native channel: HTTP/3
 // (QUIC) riding the connection's SCION paths, presenting the node's chain as
 // the client certificate and — with verifyServer set — verifying the peer's
 // chain against the pinned TRC. A dial rides the path the peer's authority
-// names, else the one PathTo resolves. Closing qclt releases the connections
+// names, else the one its lease holds. Closing qclt releases the connections
 // the client dials.
 func NewSCIONClient(
 	cfg PeerClientConfig,
@@ -58,17 +53,19 @@ func NewSCIONClient(
 
 	// QUIC datagrams are capped so a datagram wrapped in a SCION header
 	// still fits a standard 1500-byte MTU. The pool holds a connection by its
-	// authority, riding the path its dial took. One whose route went
-	// dark is detectable only by its silence: keep-alives sustain the healthy
-	// ones while an idle timeout an order below QUIC's half-minute default
-	// retires a dark one. Over resolved paths the age cap retires the healthy
-	// ones too, and the next request dials the route the provider resolves
-	// then; a one-hop path needs no cap, created afresh for every packet, and
-	// neither does a path the authority names, which keys the connection. (A
-	// request that times out on a dark connection leaves it pooled: only the
-	// connection's own silence closes it.) A connection dialed before the
-	// node held a chain retires once it holds one.
+	// authority, riding the path its dial took for life: the far end reverses
+	// the first packet's. One whose route went dark is detectable only by its
+	// silence: keep-alives sustain the healthy ones while an idle timeout an
+	// order below QUIC's half-minute default retires a dark one. A connection
+	// over a lease's path retires before the next request once the lease left
+	// that path or its hop fields near their expiry, and the request dials the
+	// path the lease holds then; a one-hop path, created afresh for every
+	// packet, and a path the authority names, which keys the connection, need
+	// neither. (A request that times out on a dark connection leaves it
+	// pooled: only the connection's own silence closes it.) A connection
+	// dialed before the node held a chain retires once it holds one.
 	unchained := &unchainedConns{creds: cfg.Credentials}
+	leased := &leasedConns{lease: cfg.Lease, conns: make(map[string]leasedConn)}
 	quicConf := &quic.Config{
 		InitialPacketSize: 1200,
 		MaxIdleTimeout:    5 * time.Second,
@@ -87,8 +84,13 @@ func NewSCIONClient(
 			if err != nil {
 				return nil, err
 			}
-			if peer.Path == nil && cfg.PathTo != nil {
-				peer.Path = cfg.PathTo(peer.IA)
+			var path scion.Leased
+			overLease := peer.Path == nil && cfg.Lease != nil
+			if overLease {
+				if path, err = cfg.Lease(peer.IA).Path(); err != nil {
+					overLease = false
+				}
+				peer.Path = path.Path
 			}
 			ephemeral := !holdsChain(ctx, cfg.Credentials)
 			conn, err := qclt.Dial(ctx, peer,
@@ -96,14 +98,13 @@ func NewSCIONClient(
 			if err == nil && ephemeral {
 				unchained.track(conn)
 			}
+			if overLease {
+				leased.dialed(authorityKey(authority), peer.IA, path, conn, err)
+			}
 			return conn, err
 		},
 	}
-	var pool connPool = h3t
-	if cfg.PathTo != nil {
-		pool = newAgedTransport(h3t, maxConnAge)
-	}
-	return &http.Client{Transport: &chainTransport{pool: pool, unchained: unchained}}
+	return &http.Client{Transport: &chainTransport{pool: h3t, unchained: unchained, leased: leased}}
 }
 
 // unchainedConns holds the connections a client dialed while the node held
@@ -151,17 +152,26 @@ func holdsChain(ctx context.Context, creds Credentials) bool {
 
 // chainTransport retires the unchained connections before a request once
 // the node holds a chain, the pool dropping its idle ones beside them, so
-// the request dials anew and presents the chain.
+// the request dials anew and presents the chain. It retires the authority's
+// connection over a lease's path first when that path no longer serves, and
+// reports each response on the path its connection rides.
 type chainTransport struct {
 	pool      connPool
 	unchained *unchainedConns
+	leased    *leasedConns
 }
 
 func (t *chainTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	if t.unchained.retire(req.Context()) {
 		t.pool.CloseIdleConnections()
 	}
-	return t.pool.RoundTrip(req)
+	key := authorityKey(req.URL.Host)
+	t.leased.retireStale(key)
+	resp, err := t.pool.RoundTrip(req)
+	if err == nil {
+		t.leased.delivered(key)
+	}
+	return resp, err
 }
 
 // CloseIdleConnections closes the pool's connections no request rides.
@@ -175,39 +185,108 @@ type connPool interface {
 	CloseIdleConnections()
 }
 
-// agedTransport retires its pool's connections by age: the first request an
-// age past the last sweep sweeps again, the pool closing every connection no
-// request rides — the request's own included, which then dials anew. The
-// HTTP/3 pool counts a request as riding until its response's headers
-// arrive, and a connection a request rode through a sweep serves until the
-// next one.
-type agedTransport struct {
-	pool   connPool
-	maxAge time.Duration
+// leasedConns holds the connections a client dialed over leases' paths, each
+// by its authority's key, and reports their outcomes on those paths: a
+// completed handshake and every response delivered, a refused handshake
+// delivered too, an idle or a handshake timeout lost.
+type leasedConns struct {
+	// lease returns a destination's lease, read afresh at each use: the one
+	// the provider holds then.
+	lease func(dst addr.IA) *scion.Lease
 
 	mtx   sync.Mutex
-	swept time.Time
+	conns map[string]leasedConn
 }
 
-// newAgedTransport returns the pool's aged transport, its first sweep an age
-// away.
-func newAgedTransport(pool connPool, maxAge time.Duration) *agedTransport {
-	return &agedTransport{pool: pool, maxAge: maxAge, swept: time.Now()}
+// leasedConn is one connection over a lease's path: its destination, the
+// path's identity, and its hop fields' expiry.
+type leasedConn struct {
+	conn   *quic.Conn
+	dst    addr.IA
+	id     bus.PathID
+	expiry time.Time
 }
 
-func (t *agedTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	t.mtx.Lock()
-	if now := time.Now(); now.Sub(t.swept) >= t.maxAge {
-		t.swept = now
-		t.pool.CloseIdleConnections()
+// dialed reports a dial's outcome on the path dst's lease held, and holds
+// the connection it dialed by the authority's key until the connection
+// closes, its idle timeout then reported. A transport error the peer sent,
+// or one its handshake messages raised, is a refused handshake.
+func (l *leasedConns) dialed(key string, dst addr.IA, path scion.Leased, conn *quic.Conn, err error) {
+	lease := l.lease(dst)
+	var refused *quic.TransportError
+	switch {
+	case silent(err):
+		lease.Lost(path.ID)
+		return
+	case errors.As(err, &refused) && (refused.Remote || refused.ErrorCode.IsCryptoError()):
+		lease.Delivered(path.ID)
+		return
+	case err != nil:
+		return
 	}
-	t.mtx.Unlock()
-	return t.pool.RoundTrip(req)
+	lease.Delivered(path.ID)
+	l.mtx.Lock()
+	l.conns[key] = leasedConn{conn: conn, dst: dst, id: path.ID, expiry: scion.PathExpiry(path.Path)}
+	l.mtx.Unlock()
+	context.AfterFunc(conn.Context(), func() {
+		if silent(context.Cause(conn.Context())) {
+			l.lease(dst).Lost(path.ID)
+		}
+		l.forget(key, conn)
+	})
 }
 
-// CloseIdleConnections closes the pool's connections no request rides.
-func (t *agedTransport) CloseIdleConnections() {
-	t.pool.CloseIdleConnections()
+// retireStale closes the authority's connection when its destination's
+// lease left the connection's path, or the path's hop fields lapse within
+// the lease's margin: the pool then dials anew, and the requests in flight
+// on it fail.
+func (l *leasedConns) retireStale(key string) {
+	l.mtx.Lock()
+	lc, ok := l.conns[key]
+	l.mtx.Unlock()
+	if !ok {
+		return
+	}
+	if path, err := l.lease(lc.dst).Path(); err == nil && path.ID == lc.id &&
+		time.Until(lc.expiry) >= scion.LeaseExpiryMargin {
+		return
+	}
+	_ = lc.conn.CloseWithError(0, "the path no longer serves its lease")
+	l.forget(key, lc.conn)
+}
+
+// delivered reports a response on the path of the authority's connection.
+func (l *leasedConns) delivered(key string) {
+	l.mtx.Lock()
+	lc, ok := l.conns[key]
+	l.mtx.Unlock()
+	if ok {
+		l.lease(lc.dst).Delivered(lc.id)
+	}
+}
+
+// forget drops the authority's connection when it is still conn.
+func (l *leasedConns) forget(key string, conn *quic.Conn) {
+	l.mtx.Lock()
+	defer l.mtx.Unlock()
+	if l.conns[key].conn == conn {
+		delete(l.conns, key)
+	}
+}
+
+// silent reports whether a connection's error is its path's silence: an idle
+// or a handshake timeout.
+func silent(err error) bool {
+	var idle *quic.IdleTimeoutError
+	var handshake *quic.HandshakeTimeoutError
+	return errors.As(err, &idle) || errors.As(err, &handshake)
+}
+
+// authorityKey returns the authority without the port the HTTP/3 transport
+// appends to it.
+func authorityKey(authority string) string {
+	key, _, _ := strings.Cut(authority, ":")
+	return key
 }
 
 // PeerAuthority encodes the peer address as a URL authority: hexadecimal, so

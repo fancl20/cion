@@ -432,13 +432,7 @@ func (n *node) buildMessenger() error {
 		Credentials: n.engine,
 		Key:         n.engine.Key,
 		Conn:        peerConn,
-		PathTo: func(dst addr.IA) *spath.Decoded {
-			path, err := n.pathProvider.LocalPath(dst)
-			if err != nil {
-				return nil
-			}
-			return path
-		},
+		Lease:       func(dst addr.IA) *scion.Lease { return n.pathProvider.Lease(dst) },
 	})
 	n.group.Own("peer client", peerClt.Close)
 	n.peerClt = peerClt

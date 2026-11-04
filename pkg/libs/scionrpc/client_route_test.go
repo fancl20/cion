@@ -13,7 +13,6 @@ import (
 
 	"github.com/quic-go/quic-go"
 	"github.com/scionproto/scion/pkg/addr"
-	spath "github.com/scionproto/scion/pkg/slayers/path/scion"
 
 	"github.com/fancl20/cion/pkg/core/trust"
 	"github.com/fancl20/cion/pkg/libs/scion"
@@ -112,7 +111,7 @@ func get(ctx context.Context, t *testing.T, hclt *http.Client, authority string)
 
 // TestSCIONClientDialsTheNamedPath checks a registrant's reach back: a
 // request the peer sends the core over a SCION path carries, at the core,
-// the reverse of that path, and a core's client that resolves no path of its
+// the reverse of that path, and a core's client that leases no path of its
 // own reaches the peer's control service over that reverse — the peer seeing
 // the request arrive over a SCION path — while the same address without the
 // path takes one hop.
@@ -128,22 +127,16 @@ func TestSCIONClientDialsTheNamedPath(t *testing.T) {
 	atCore := recordingEndpoint(t, coreEndpoint, f.engine)
 	atPeer := recordingEndpoint(t, peer.newConn(t, EndpointPort), f.peer)
 
-	// The peer reaches the core over the SCION path its PathTo resolves.
+	// The peer reaches the core over the SCION path its lease holds.
 	peerConn := peer.newConn(t, 0)
 	peerQUIC := &quic.Transport{Conn: peerConn}
 	t.Cleanup(func() { _ = peerQUIC.Close() })
+	provider, _ := providerToCore(t, peer.MACKey)
 	peerClient := NewSCIONClient(PeerClientConfig{
 		Credentials: f.peer,
 		Key:         f.peer.Key,
 		Conn:        peerConn,
-		PathTo: func(addr.IA) *spath.Decoded {
-			p, err := pathToCore(peer.MACKey, time.Now())
-			if err != nil {
-				t.Error(err)
-				return nil
-			}
-			return p
-		},
+		Lease:       provider.Lease,
 	}, peerQUIC, true)
 	get(ctx, t, peerClient, PeerAuthority(&scion.Addr{
 		IA: nodeIATest, Addr: netip.AddrPortFrom(core.ControlIP, coreEndpoint.LocalPort()),
@@ -153,8 +146,8 @@ func TestSCIONClientDialsTheNamedPath(t *testing.T) {
 		t.Fatalf("the core saw the request arrive from %v, want over a SCION path", arrived)
 	}
 
-	// The core's client resolves no path of its own — its PathTo answers
-	// none — so it rides the path an authority names, and one hop otherwise.
+	// The core's client leases no path of its own, so it rides the path an
+	// authority names, and one hop otherwise.
 	coreConn := core.newConn(t, 0)
 	coreQUIC := &quic.Transport{Conn: coreConn}
 	t.Cleanup(func() { _ = coreQUIC.Close() })
@@ -162,7 +155,6 @@ func TestSCIONClientDialsTheNamedPath(t *testing.T) {
 		Credentials: f.engine,
 		Key:         f.engine.Key,
 		Conn:        coreConn,
-		PathTo:      func(addr.IA) *spath.Decoded { return nil },
 	}, coreQUIC, true)
 	back, err := RouteAuthority(&scion.Addr{IA: iaLineC, Service: addr.SvcCS, Path: arrived.Path})
 	if err != nil {

@@ -37,19 +37,19 @@ func PathIDOf(links []segment.LinkID) PathID {
 type PathRole uint8
 
 const (
-	// PathInUse is a destination's pick.
+	// PathInUse is the path a destination's pick or lease holds.
 	PathInUse PathRole = iota
-	// PathStandby is the path a destination's pick would fail over to.
+	// PathStandby is the path the one in use would fail over to.
 	PathStandby
 	// PathSuspect is a path the evidence doubts whose prior order beats the
-	// pick's, due the verification that decides.
+	// one in use, due the verification that decides.
 	PathSuspect
 	// PathHalfOpen is an ejected path due for the probe that may return it.
 	PathHalfOpen
 )
 
 // RequestLapse is how long a request stands after its destination's last
-// pick.
+// pick or use.
 const RequestLapse = 10 * time.Minute
 
 // PathRequest is one path a requester needs measured.
@@ -66,8 +66,14 @@ type PathRequest struct {
 	Role PathRole
 	// Due is when a half-open probe is due; zero for the other roles.
 	Due time.Time
-	// Picked is when the destination was last picked.
+	// Picked is when the destination was last picked or used.
 	Picked time.Time
+	// Confirmed is when a caller's traffic last confirmed the path; zero
+	// while none did.
+	Confirmed time.Time
+	// Doubted is when a caller's traffic last doubted the path; zero while
+	// none did.
+	Doubted time.Time
 }
 
 // PathRequests is the paths the node's requesters need measured: each

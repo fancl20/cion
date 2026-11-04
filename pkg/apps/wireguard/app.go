@@ -17,7 +17,6 @@ import (
 	"connectrpc.com/connect/v2"
 	"connectrpc.com/connect/v2/connecthttp"
 	"github.com/scionproto/scion/pkg/addr"
-	spath "github.com/scionproto/scion/pkg/slayers/path/scion"
 	"go.opentelemetry.io/otel"
 	"golang.zx2c4.com/wireguard/device"
 
@@ -56,15 +55,14 @@ const (
 
 // PersistentKeepalive is the mesh peers' keepalive interval, a code constant
 // set so sessions and paths stay warm enough that path rotation is exercised
-// rather than discovered at first use.
+// rather than discovered at first use. A keepalive reads its peer's lease
+// without use, so a peer kept alive but idle goes unprobed.
 const PersistentKeepalive = 25 * time.Second
 
-// Paths is the node's path resolution the application calls: the composed
-// candidates the route warm-up ranks, and the path from local state its sends
-// and its directory channel ride.
+// Paths is the node's path resolution the application calls: each
+// destination's lease, the path its sends and its directory channel ride.
 type Paths interface {
-	Enumerate(ctx context.Context, dst addr.IA) ([]scion.Candidate, error)
-	LocalPath(dst addr.IA) (*spath.Decoded, error)
+	Lease(dst addr.IA) *scion.Lease
 }
 
 // Config configures the application.
@@ -96,8 +94,7 @@ type Config struct {
 	// StateDir is the application's own state directory: the WireGuard key
 	// pair's home.
 	StateDir string
-	// Paths resolves the paths mesh datagrams ride and enumerates the
-	// candidates the route warm-up ranks.
+	// Paths leases the paths mesh datagrams and the directory channel ride.
 	Paths Paths
 	// Engine provides the node's chain for the directory channel.
 	Engine *Engine
@@ -121,11 +118,6 @@ type Config struct {
 	RegisterSvc func(svc addr.SVC, port uint16) error
 	// UnregisterSvc deregisters a socket RegisterSvc registered.
 	UnregisterSvc func(svc addr.SVC, port uint16) error
-	// InterfaceDown is the node's interface-down topic; the mesh transport
-	// drops the cached path of each destination a signal's quote names, so
-	// its next send re-resolves through the filtered composition. Nil leaves
-	// the failure-and-refresh behavior alone.
-	InterfaceDown *bus.Topic[bus.InterfaceDownState]
 
 	// Cadence overrides for tests; zero means the package constant.
 	PublishInterval time.Duration
@@ -589,12 +581,11 @@ func (a *App) Registry() Registry {
 }
 
 // Run serves the application until the context is canceled: the sockets'
-// readers, the relay socket's among them, the mesh socket's following of the
-// interface-down signals, the host device's drain, the DERP presence, the
-// directory — served by the core, published and fetched by everyone — and
-// the counters on the process's meter. It returns once every goroutine it
-// started has returned, the mesh peers' drains among them, and leaves what
-// New bound to Close.
+// readers, the relay socket's among them, the host device's drain, the DERP
+// presence, the directory — served by the core, published and fetched by
+// everyone — and the counters on the process's meter. It returns once every
+// goroutine it started has returned, the mesh peers' drains among them, and
+// leaves what New bound to Close.
 func (a *App) Run(ctx context.Context) error {
 	served, err := a.cnt.serve(otel.GetMeterProvider().Meter(meterScope), a.cfg.IA)
 	if err != nil {
@@ -604,11 +595,6 @@ func (a *App) Run(ctx context.Context) error {
 	loops.Go(ctx, &a.wg, "wireguard mesh socket", a.mesh.run)
 	loops.Go(ctx, &a.wg, "wireguard host socket", a.host.run)
 	loops.Go(ctx, &a.wg, "wireguard relay socket", a.host.runRelay)
-	if a.cfg.InterfaceDown != nil {
-		loops.Go(ctx, &a.wg, "wireguard interface-down signals", func(ctx context.Context) {
-			a.mesh.followSignals(ctx, a.cfg.InterfaceDown)
-		})
-	}
 	if a.hosts != nil {
 		pipe := a.hosts.pipe
 		loops.Go(ctx, &a.wg, "wireguard host drain", func(ctx context.Context) {
@@ -662,10 +648,9 @@ func (a *App) DirectoryHandler() http.Handler {
 }
 
 // Close releases what New bound: the devices close, the sockets retire with
-// their service registrations and the interface-down receiver, and the
-// store closes last; no operating-system provisioning exists to undo. It
-// runs once Run has returned, or alone when Run never ran, and a second
-// call releases nothing.
+// their service registrations, and the store closes last; no operating-system
+// provisioning exists to undo. It runs once Run has returned, or alone when
+// Run never ran, and a second call releases nothing.
 func (a *App) Close() {
 	a.closeOnce.Do(func() {
 		a.mtx.Lock()

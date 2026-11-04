@@ -60,7 +60,6 @@ func TestCountersServed(t *testing.T) {
 		"wireguard.unroutable_packets_total": 0,
 		"wireguard.sent_datagrams_total":     0,
 		"wireguard.send_failures_total":      0,
-		"wireguard.path_refreshes_total":     0,
 		"wireguard.route_switches_total":     0,
 		"wireguard.published_total":          0,
 		"wireguard.host_datagrams_total":     3,

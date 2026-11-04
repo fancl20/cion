@@ -11,8 +11,6 @@ import (
 	"connectrpc.com/connect/v2"
 	"connectrpc.com/connect/v2/connecthttp"
 	"github.com/quic-go/quic-go"
-	"github.com/scionproto/scion/pkg/addr"
-	spath "github.com/scionproto/scion/pkg/slayers/path/scion"
 
 	"github.com/fancl20/cion/pkg/libs/scion"
 	"github.com/fancl20/cion/pkg/libs/scionrpc"
@@ -27,7 +25,7 @@ import (
 type rpcDirectoryClient struct {
 	conn         *scion.Conn
 	engine       *Engine
-	resolver     localPaths
+	leases       leases
 	founderRoute func() *scion.Addr
 
 	// qclt is the one QUIC transport every dial rides.
@@ -49,12 +47,12 @@ func newRPCDirectoryClient(
 	conn *scion.Conn,
 	founderRoute func() *scion.Addr,
 	engine *Engine,
-	resolver localPaths,
+	leases leases,
 ) *rpcDirectoryClient {
 	return &rpcDirectoryClient{
 		conn:         conn,
 		engine:       engine,
-		resolver:     resolver,
+		leases:       leases,
 		founderRoute: founderRoute,
 		qclt:         &quic.Transport{Conn: conn},
 	}
@@ -69,8 +67,7 @@ func (c *rpcDirectoryClient) Close() error {
 // client returns the ConnectRPC client for the core's directory endpoint,
 // building it — or rebuilding it when the core's route moved — on demand. A
 // rebuild closes the connections no request rides then: the replaced
-// endpoint's, which its keep-alives would otherwise hold open, unused, until
-// the age cap's next sweep.
+// endpoint's, which its keep-alives would otherwise hold open, unused.
 func (c *rpcDirectoryClient) client() (wireguardv1connect.DirectoryServiceClient, error) {
 	core := c.founderRoute()
 	if core == nil {
@@ -87,13 +84,7 @@ func (c *rpcDirectoryClient) client() (wireguardv1connect.DirectoryServiceClient
 			Credentials: c.engine,
 			Key:         c.engine.Key,
 			Conn:        c.conn,
-			PathTo: func(dst addr.IA) *spath.Decoded {
-				path, err := c.resolver.LocalPath(dst)
-				if err != nil {
-					return nil
-				}
-				return path
-			},
+			Lease:       c.leases.Lease,
 		}, c.qclt, true)
 	}
 	if c.clt != nil {

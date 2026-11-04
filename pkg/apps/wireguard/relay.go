@@ -76,8 +76,7 @@ type hostRelay struct {
 	ia addr.IA
 	// conn is the relay socket, registered under SvcHostRelay.
 	conn *scion.Conn
-	// paths is the mesh socket, whose path cache the relay's sends resolve
-	// through.
+	// paths is the mesh socket, whose leases the relay's sends ride.
 	paths *meshSocket
 	cnt   *counters
 	// now is the clock sessions expire and load passes by.
@@ -442,7 +441,7 @@ func sourceBytes(from netip.AddrPort) []byte {
 }
 
 // forward carries a host's datagram, unchanged, to the node's relay
-// service, on the path the mesh socket holds for the node.
+// service, on the path the node's lease holds.
 func (r *hostRelay) forward(node addr.IA, pkt []byte) {
 	err := r.paths.sendOn(r.conn, scion.Addr{IA: node, Service: SvcHostRelay}, [][]byte{pkt},
 		&r.cnt.relayedDatagrams, &r.cnt.relayDrops)
@@ -452,9 +451,8 @@ func (r *hostRelay) forward(node addr.IA, pkt []byte) {
 }
 
 // send carries the host device's datagrams to the relay service of the node
-// that relays the host: on the path the mesh socket holds for the node, the
-// reversed path of the node's latest arrival seeding the cache when it holds
-// none.
+// that relays the host: on the path the node's lease holds, the reversed
+// path of the node's latest arrival serving while the lease holds none.
 func (r *hostRelay) send(via scion.Addr, bufs [][]byte) error {
 	return r.paths.sendOn(r.conn, scion.Addr{IA: via.IA, Service: SvcHostRelay, Path: via.Path}, bufs,
 		&r.cnt.sentDatagrams, &r.cnt.sendFailures)

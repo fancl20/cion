@@ -27,14 +27,10 @@ type counters struct {
 	// node's own devices: the mesh devices', and the host device's to the
 	// nodes that relay its hosts.
 	sentDatagrams atomic.Int64
-	// sendFailures counts those datagrams a send failed to carry even after
-	// a path refresh.
+	// sendFailures counts those datagrams a send failed to carry.
 	sendFailures atomic.Int64
-	// pathRefreshes counts mid-stream path re-resolutions: expiry, near
-	// expiry, or a failed send.
-	pathRefreshes atomic.Int64
-	// routeSwitches counts the warm loop's route replacements: a pick that
-	// displaced an incumbent route.
+	// routeSwitches counts the moves of a peer's lease its sends saw: a send
+	// riding another path than the peer's previous one.
 	routeSwitches atomic.Int64
 	// published counts accepted directory publications the core served.
 	published atomic.Int64
@@ -67,7 +63,6 @@ func (c *counters) series() []counterSeries {
 		{"wireguard.unroutable_packets_total", &c.unroutablePackets},
 		{"wireguard.sent_datagrams_total", &c.sentDatagrams},
 		{"wireguard.send_failures_total", &c.sendFailures},
-		{"wireguard.path_refreshes_total", &c.pathRefreshes},
 		{"wireguard.route_switches_total", &c.routeSwitches},
 		{"wireguard.published_total", &c.published},
 		{"wireguard.host_datagrams_total", &c.hostDatagrams},

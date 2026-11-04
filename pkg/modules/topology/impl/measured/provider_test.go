@@ -19,7 +19,6 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/scionproto/scion/pkg/addr"
-	spath "github.com/scionproto/scion/pkg/slayers/path/scion"
 
 	"github.com/fancl20/cion/pkg/core/trust"
 	"github.com/fancl20/cion/pkg/libs/bus"
@@ -1322,12 +1321,13 @@ func TestRepunchMovesTheLink(t *testing.T) {
 	}
 }
 
-// failingPunchPaths counts the routes a punch asks for, answering none.
+// failingPunchPaths counts the leases a punch asks for, each composing
+// nothing.
 type failingPunchPaths struct{ calls atomic.Int32 }
 
-func (p *failingPunchPaths) Path(context.Context, addr.IA) (*spath.Decoded, error) {
+func (p *failingPunchPaths) Lease(dst addr.IA) *scion.Lease {
 	p.calls.Add(1)
-	return nil, errors.New("no route")
+	return (&scion.PathProvider{IA: rendezvousIA, DB: emptyPathDB{}}).Lease(dst)
 }
 
 // reported returns an entry of the ISD-AS naming one address whose report

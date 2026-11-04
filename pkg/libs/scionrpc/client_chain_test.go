@@ -16,7 +16,6 @@ import (
 	"github.com/quic-go/quic-go"
 	"github.com/scionproto/scion/pkg/addr"
 	"github.com/scionproto/scion/pkg/scrypto/cppki"
-	spath "github.com/scionproto/scion/pkg/slayers/path/scion"
 
 	"github.com/fancl20/cion/pkg/libs/peeria"
 	"github.com/fancl20/cion/pkg/libs/scion"
@@ -64,8 +63,10 @@ func TestSCIONClientRedialsOnceChained(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
 
-	// The endpoint answers each request with the ISD-AS it authenticated.
+	// The endpoint answers each request with the ISD-AS it authenticated,
+	// counting the client's dials.
 	serverCreds := &unpinnedCredentials{Credentials: f.engine}
+	var dials atomic.Int32
 	endpoint := core.newConn(t, 0)
 	served := make(chan error, 1)
 	t.Cleanup(func() {
@@ -83,27 +84,19 @@ func TestSCIONClientRedialsOnceChained(t *testing.T) {
 			peeria.Authenticate(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				_, _ = w.Write([]byte(peeria.AuthenticatedIA(r.Context()).String()))
 			})),
-			EndpointTLS(EndpointTLSConfig{Credentials: serverCreds, Key: f.engine.Key}))
+			countingTLS(EndpointTLS(EndpointTLSConfig{Credentials: serverCreds, Key: f.engine.Key}), &dials))
 	}()
 
 	creds := &switchedCredentials{Credentials: f.peer}
 	conn := peer.newConn(t, 0)
 	qclt := &quic.Transport{Conn: conn}
 	t.Cleanup(func() { _ = qclt.Close() })
-	var dials atomic.Int32
+	provider, _ := providerToCore(t, peer.MACKey)
 	hclt := NewSCIONClient(PeerClientConfig{
 		Credentials: creds,
 		Key:         f.peer.Key,
 		Conn:        conn,
-		PathTo: func(addr.IA) *spath.Decoded {
-			dials.Add(1)
-			p, err := pathToCore(peer.MACKey, time.Now())
-			if err != nil {
-				t.Error(err)
-				return nil
-			}
-			return p
-		},
+		Lease:       provider.Lease,
 	}, qclt, true)
 	server := &scion.Addr{IA: nodeIATest, Addr: netip.AddrPortFrom(core.ControlIP, endpoint.LocalPort())}
 	identity := func() string {
@@ -174,18 +167,12 @@ func TestSCIONChannelRecordsThePresentedChains(t *testing.T) {
 	conn := peer.newConn(t, 0)
 	qclt := &quic.Transport{Conn: conn}
 	t.Cleanup(func() { _ = qclt.Close() })
+	provider, _ := providerToCore(t, peer.MACKey)
 	hclt := NewSCIONClient(PeerClientConfig{
 		Credentials: clientCreds,
 		Key:         f.peer.Key,
 		Conn:        conn,
-		PathTo: func(addr.IA) *spath.Decoded {
-			p, err := pathToCore(peer.MACKey, time.Now())
-			if err != nil {
-				t.Error(err)
-				return nil
-			}
-			return p
-		},
+		Lease:       provider.Lease,
 	}, qclt, true)
 	server := &scion.Addr{IA: nodeIATest, Addr: netip.AddrPortFrom(core.ControlIP, endpoint.LocalPort())}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://"+PeerAuthority(server), nil)

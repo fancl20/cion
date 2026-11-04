@@ -15,7 +15,6 @@ import (
 
 	"github.com/scionproto/scion/pkg/addr"
 	"github.com/scionproto/scion/pkg/scrypto/cppki"
-	spath "github.com/scionproto/scion/pkg/slayers/path/scion"
 
 	"github.com/fancl20/cion/internal/services"
 	"github.com/fancl20/cion/pkg/core/controlplane"
@@ -112,13 +111,7 @@ func handshake(t *testing.T, from *Node, dst addr.IA, creds scionrpc.Credentials
 		Credentials: creds,
 		Key:         key,
 		Conn:        conn,
-		PathTo: func(ia addr.IA) *spath.Decoded {
-			path, err := from.app.Provider().LocalPath(ia)
-			if err != nil {
-				return nil
-			}
-			return path
-		},
+		Lease:       from.app.Provider().Lease,
 	})
 	defer func() {
 		_ = clt.Close()

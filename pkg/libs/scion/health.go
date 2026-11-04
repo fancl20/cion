@@ -10,7 +10,8 @@ import (
 	"github.com/fancl20/cion/pkg/libs/segment"
 )
 
-// Health is what the measurements and the signals say of a path's delivery.
+// Health is what the measurements, the callers' reports, and the signals say
+// of a path's delivery.
 type Health uint8
 
 const (
@@ -18,11 +19,12 @@ const (
 	HealthUnknown Health = iota
 	// HealthHealthy is a path that answered within the trust window.
 	HealthHealthy
-	// HealthSuspect is a path with a reason for doubt: a signal newer than
-	// its last answer, stale segments, or a link it shares with failed paths.
+	// HealthSuspect is a path with a reason for doubt: a signal or a
+	// caller's loss newer than its last answer, stale segments, or a link it
+	// shares with failed paths.
 	HealthSuspect
 	// HealthEjected is a path that lost a burst whole since its last answer,
-	// or nearly every recent probe.
+	// nearly every recent probe, or callerLosses of its callers' exchanges.
 	HealthEjected
 )
 
@@ -34,6 +36,9 @@ const (
 	// ejectSamples probes, ejectShare of them lost.
 	ejectSamples = 10
 	ejectShare   = 0.9
+	// callerLosses ejects a path whose callers reported that many losses
+	// within the trust window since its last answer.
+	callerLosses = 3
 	// lossCap bounds the loss a cost counts, so a lossy path's cost stays
 	// finite.
 	lossCap = 0.9
@@ -50,20 +55,52 @@ const (
 	picksRequester = "picks"
 )
 
-// assess gives the candidate its health and cost by what the view holds. Its
-// health is the first of: ejected, by its record; suspect, for a held signal
-// on a link it crosses newer than its last answer; healthy, for an answer
-// within the trust window; suspect, for stale segments or a crossed link its
-// failed paths share; unknown. Its cost is its measured cost, else twice its
-// declared one-way sum.
+// report is what callers' traffic saw of one path: when it last delivered,
+// and its losses since, the latest callerLosses of them.
+type report struct {
+	delivered time.Time
+	losses    []time.Time
+}
+
+// doubted returns the report's latest loss, zero for none.
+func (r report) doubted() time.Time {
+	if len(r.losses) == 0 {
+		return time.Time{}
+	}
+	return r.losses[len(r.losses)-1]
+}
+
+// lostSince counts the report's losses after since and no earlier than
+// within.
+func (r report) lostSince(since, within time.Time) int {
+	n := 0
+	for _, at := range r.losses {
+		if at.After(since) && !at.Before(within) {
+			n++
+		}
+	}
+	return n
+}
+
+// assess gives the candidate its health and cost by what the view holds; its
+// last answer is the later of its probes' and its callers' last delivery. Its
+// health is the first of: ejected, by its record unless a caller delivered
+// since its last loss, or by callerLosses of its callers' losses; suspect,
+// for a held signal on a link it crosses or a caller's loss newer than its
+// last answer; healthy, for an answer within the trust window; suspect, for
+// stale segments or a crossed link its failed paths share; unknown. Its cost
+// is its measured cost, else twice its declared one-way sum.
 func (v view) assess(c *Candidate) {
 	r, measured := v.measured.Of(c.ID)
+	rep := v.reports[c.ID]
+	answered := later(r.LastAnswer, rep.delivered)
 	switch {
-	case measured && ejected(r):
+	case measured && ejected(r) && !rep.delivered.After(r.LastLoss),
+		rep.lostSince(answered, v.now.Add(-trustWindow)) >= callerLosses:
 		c.Health = HealthEjected
-	case v.signaledSince(c.Crossed, r.LastAnswer):
+	case v.signaledSince(c.Crossed, answered), rep.doubted().After(answered):
 		c.Health = HealthSuspect
-	case measured && !r.LastAnswer.IsZero() && v.now.Sub(r.LastAnswer) < trustWindow:
+	case !answered.IsZero() && v.now.Sub(answered) < trustWindow:
 		c.Health = HealthHealthy
 	case c.Stale || slices.ContainsFunc(c.Crossed, func(l segment.LinkID) bool { return v.suspect[l] }):
 		c.Health = HealthSuspect
@@ -209,26 +246,30 @@ func backoff(lostBursts int) time.Duration {
 	return min(d, backoffCap)
 }
 
-// request updates the picks' entries for the destination: the pick, in use;
-// the best other candidate crossing none of its links, else the best other,
-// standby; the best suspect candidate besides the standby whose prior order
-// beats the pick's, suspect, for the verification that decides; and the best
-// ejected candidate whose prior order beats the pick's, half-open once its
-// backoff elapses. A provider without the requests topic, and a pick without
-// an identity, request nothing.
-func (p *PathProvider) request(dst addr.IA, pick *Candidate, candidates []Candidate, v view) {
-	if p.Requests == nil || pick.ID == "" {
+// request updates the requester's entries for the destination about the
+// path in use: that path; the best other candidate crossing none of its
+// links, else the best other, standby; the best suspect candidate besides the
+// standby whose prior order beats the one in use, suspect, for the
+// verification that decides; and the best ejected candidate whose prior
+// order beats the one in use, half-open once its backoff elapses. Each entry
+// carries the destination's last pick or use, and when callers last confirmed
+// and doubted its path. A provider without the requests topic, and a path in
+// use without an identity, request nothing.
+func (p *PathProvider) request(requester string, dst addr.IA, inUse *Candidate, picked time.Time,
+	candidates []Candidate, v view) {
+
+	if p.Requests == nil || inUse.ID == "" {
 		return
 	}
-	entries := []bus.PathRequest{entry(dst, pick, bus.PathInUse, time.Time{}, v.now)}
+	entries := []bus.PathRequest{v.entry(dst, inUse, bus.PathInUse, time.Time{}, picked)}
 	var standby, disjoint, halfOpen *Candidate
 	for i := range candidates {
 		c := &candidates[i]
-		if c.ID == "" || c.ID == pick.ID {
+		if c.ID == "" || c.ID == inUse.ID {
 			continue
 		}
 		if c.Health == HealthEjected {
-			if c.Outranks(pick) && (halfOpen == nil || c.Outranks(halfOpen)) {
+			if c.Outranks(inUse) && (halfOpen == nil || c.Outranks(halfOpen)) {
 				halfOpen = c
 			}
 			continue
@@ -236,7 +277,7 @@ func (p *PathProvider) request(dst addr.IA, pick *Candidate, candidates []Candid
 		if standby == nil || ranksAbove(c, standby) {
 			standby = c
 		}
-		if !sharesLink(c, pick) && (disjoint == nil || ranksAbove(c, disjoint)) {
+		if !sharesLink(c, inUse) && (disjoint == nil || ranksAbove(c, disjoint)) {
 			disjoint = c
 		}
 	}
@@ -244,12 +285,12 @@ func (p *PathProvider) request(dst addr.IA, pick *Candidate, candidates []Candid
 		standby = disjoint
 	}
 	if standby != nil {
-		entries = append(entries, entry(dst, standby, bus.PathStandby, time.Time{}, v.now))
+		entries = append(entries, v.entry(dst, standby, bus.PathStandby, time.Time{}, picked))
 	}
 	var suspect *Candidate
 	for i := range candidates {
 		c := &candidates[i]
-		if c.ID == "" || c.ID == pick.ID || c == standby || c.Health != HealthSuspect || !c.Outranks(pick) {
+		if c.ID == "" || c.ID == inUse.ID || c == standby || c.Health != HealthSuspect || !c.Outranks(inUse) {
 			continue
 		}
 		if suspect == nil || ranksAbove(c, suspect) {
@@ -257,28 +298,31 @@ func (p *PathProvider) request(dst addr.IA, pick *Candidate, candidates []Candid
 		}
 	}
 	if suspect != nil {
-		entries = append(entries, entry(dst, suspect, bus.PathSuspect, time.Time{}, v.now))
+		entries = append(entries, v.entry(dst, suspect, bus.PathSuspect, time.Time{}, picked))
 	}
 	if halfOpen != nil {
 		r, _ := v.measured.Of(halfOpen.ID)
 		due := r.LastLoss.Add(backoff(r.LostBursts))
-		entries = append(entries, entry(dst, halfOpen, bus.PathHalfOpen, due, v.now))
+		entries = append(entries, v.entry(dst, halfOpen, bus.PathHalfOpen, due, picked))
 	}
 	p.Requests.Update(func(r bus.PathRequests) bus.PathRequests {
-		return r.Requested(picksRequester, dst, entries, v.now.Add(-bus.RequestLapse))
+		return r.Requested(requester, dst, entries, v.now.Add(-bus.RequestLapse))
 	})
 }
 
 // entry returns the request of one candidate.
-func entry(dst addr.IA, c *Candidate, role bus.PathRole, due, picked time.Time) bus.PathRequest {
+func (v view) entry(dst addr.IA, c *Candidate, role bus.PathRole, due, picked time.Time) bus.PathRequest {
+	rep := v.reports[c.ID]
 	return bus.PathRequest{
-		ID:     c.ID,
-		Dst:    dst,
-		Links:  c.Crossed,
-		Path:   c.Path,
-		Role:   role,
-		Due:    due,
-		Picked: picked,
+		ID:        c.ID,
+		Dst:       dst,
+		Links:     c.Crossed,
+		Path:      c.Path,
+		Role:      role,
+		Due:       due,
+		Picked:    picked,
+		Confirmed: rep.delivered,
+		Doubted:   rep.doubted(),
 	}
 }
 

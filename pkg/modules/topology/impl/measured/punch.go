@@ -15,7 +15,6 @@ import (
 	"connectrpc.com/connect/v2/connecthttp"
 	"github.com/quic-go/quic-go"
 	"github.com/scionproto/scion/pkg/addr"
-	spath "github.com/scionproto/scion/pkg/slayers/path/scion"
 
 	"github.com/fancl20/cion/pkg/core/trust"
 	"github.com/fancl20/cion/pkg/libs/bus"
@@ -409,11 +408,11 @@ type Puncher interface {
 	) (netip.AddrPort, uint16, error)
 }
 
-// punchPaths resolves the route a punch request rides, segment lookups
-// allowed: the puncher resolves it before the request, so the request's
-// dial resolves nothing.
+// punchPaths leases the route a punch request rides: the puncher awaits the
+// lease's path before the request, segment lookups allowed, so the request's
+// dial reads it without waiting.
 type punchPaths interface {
-	Path(ctx context.Context, dst addr.IA) (*spath.Decoded, error)
+	Lease(dst addr.IA) *scion.Lease
 }
 
 // puncher sends the punches the selection loop asks for, over a channel of
@@ -444,10 +443,10 @@ var _ Puncher = (*puncher)(nil)
 
 // client returns a link service client of the peer for one request, and
 // the release that closes its connection: its own HTTP client, whose dial
-// rides the route resolved here.
+// rides the peer's lease, its path awaited here.
 func (p *puncher) client(ctx context.Context, peer addr.IA) (nodev1connect.LinkServiceClient, func(), error) {
-	route, err := p.paths.Path(ctx, peer)
-	if err != nil {
+	lease := p.paths.Lease(peer)
+	if _, err := lease.Await(ctx); err != nil {
 		return nil, nil, fmt.Errorf("resolving the route to %s: %w", peer, err)
 	}
 	p.mtx.Lock()
@@ -460,7 +459,7 @@ func (p *puncher) client(ctx context.Context, peer addr.IA) (nodev1connect.LinkS
 		Credentials: p.engine,
 		Key:         p.engine.Key,
 		Conn:        p.conn,
-		PathTo:      func(addr.IA) *spath.Decoded { return route },
+		Lease:       func(addr.IA) *scion.Lease { return lease },
 	}, qclt, true)
 	authority := scionrpc.PeerAuthority(&scion.Addr{IA: peer, Service: addr.SvcCS})
 	clt := nodev1connect.NewLinkServiceClient(connect.NewClient(

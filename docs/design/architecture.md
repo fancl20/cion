@@ -83,7 +83,9 @@ Libraries carry the vocabulary both sides of the node's boundary speak; they
 run no loops of their own and hold no policy.
 
 *   **SCION library** — the socket that carries datagrams over SCION paths,
-    and the path provider that composes paths from discovered segments.
+    and the path provider that composes paths from discovered segments and
+    holds each destination's lease, the path every flow to it rides
+    ([ADR-0035](/docs/adrs/0035-choose-paths-by-measured-health.md)).
 *   **SCION RPC** — the SCION-native channel: HTTP/3 over QUIC riding SCION
     paths, peers authenticated by their chains against the TRC, and the
     drafts' service resolution.
@@ -166,7 +168,7 @@ load refuses the boot with the fix named
     removes nodes and cores
     ([ADR-0022](/docs/adrs/0022-serve-the-operators-console-as-a-passkey-portal.md)).
 *   **Ping** — the network's probe: it measures the paths the SCION
-    library's picks ask about, and the picks rank paths by its records
+    library's picks and leases ask about, and they rank paths by its records
     ([ADR-0035](/docs/adrs/0035-choose-paths-by-measured-health.md)).
 
 ## How the components interact

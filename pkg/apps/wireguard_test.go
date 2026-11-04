@@ -37,8 +37,8 @@ func wireguardEnvironment(t *testing.T, core bool) *Environment {
 // derives: the shared port its arguments name — no slice, the directory
 // assigning it — the node's own state beside the bind host, the tailnet
 // topic the application publishes on, the relay presence from the core's
-// domain resolving through the node's resolvers, the node's interface-down
-// topic, and the core's own store beside the joiner's founder route.
+// domain resolving through the node's resolvers, and the core's own store
+// beside the joiner's founder route.
 func TestWireguardConfigFromEnvironment(t *testing.T) {
 	env := wireguardEnvironment(t, true)
 	core, err := wireguardConfig(env)
@@ -66,9 +66,6 @@ func TestWireguardConfigFromEnvironment(t *testing.T) {
 
 		t.Errorf("relay presence = %+v, want the core's domain resolving through %v",
 			cfg.DERP, env.Resolvers)
-	}
-	if cfg.InterfaceDown != env.Bus.InterfaceDown() {
-		t.Error("the entry did not hand the application the node's interface-down topic")
 	}
 	if cfg.FounderRoute != nil {
 		t.Error("the core node got a founder route")

@@ -85,10 +85,8 @@ type LinkRequester interface {
 }
 
 // SelectionPaths is the path resolution the selection loop calls: the
-// freshest path to a candidate, the baseline, and the composed paths with
-// their facts.
+// composed paths with their facts, the baseline among them.
 type SelectionPaths interface {
-	Path(ctx context.Context, dst addr.IA) (*spath.Decoded, error)
 	Enumerate(ctx context.Context, dst addr.IA) ([]scion.Candidate, error)
 }
 

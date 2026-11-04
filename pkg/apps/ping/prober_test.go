@@ -524,3 +524,74 @@ func TestProberVerifiesSuspects(t *testing.T) {
 		})
 	})
 }
+
+// TestProberSkipsConfirmed checks that a caller's confirmation stands in for
+// a routine probe: the path's next probe is due a heartbeat after it.
+func TestProberSkipsConfirmed(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		e, r := newFakeEcho(), &fakeResolver{}
+		path := &spath.Decoded{}
+		prober(t, e, r, func(b *bus.Bus) {
+			picked := time.Now()
+			confirmed := func() bus.PathRequest {
+				entry := entryOf("use", dstA, path, bus.PathInUse, picked)
+				entry.Confirmed = time.Now()
+				return entry
+			}
+			request(b, dstA, confirmed())
+			time.Sleep(4 * time.Second)
+			synctest.Wait()
+			request(b, dstA, confirmed())
+			time.Sleep(4500 * time.Millisecond) // the heartbeat a confirmation at 4s put off to 9s
+			synctest.Wait()
+			if got := e.sends(path); got != 0 {
+				t.Fatalf("probes = %d, want none while callers confirm the path", got)
+			}
+			time.Sleep(time.Second)
+			synctest.Wait()
+			if got := e.sends(path); got != 1 {
+				t.Errorf("probes = %d, want the heartbeat at 9s", got)
+			}
+		})
+	})
+}
+
+// TestProberBurstsOnDoubt checks that a caller's doubt newer than the path's
+// last answer calls a burst once, however often the requests repeat it, and
+// that one older than its last answer calls none.
+func TestProberBurstsOnDoubt(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		e, r := newFakeEcho(), &fakeResolver{}
+		path := &spath.Decoded{}
+		prober(t, e, r, func(b *bus.Bus) {
+			picked := time.Now()
+			doubted := func(at time.Time) bus.PathRequest {
+				entry := entryOf("standby", dstA, path, bus.PathStandby, picked)
+				entry.Doubted = at
+				return entry
+			}
+			request(b, dstA, entryOf("standby", dstA, path, bus.PathStandby, picked))
+			time.Sleep(time.Second) // the first probe at 0s answered
+			synctest.Wait()
+			request(b, dstA, doubted(time.Now().Add(-2*time.Second)))
+			time.Sleep(time.Second)
+			synctest.Wait()
+			if got := e.sends(path); got != 1 {
+				t.Fatalf("probes = %d, want the first alone for a doubt older than its answer", got)
+			}
+			// The doubt's burst is lost whole, so its answer stays older than
+			// the doubt the requests repeat.
+			e.lose(path)
+			doubt := time.Now()
+			request(b, dstA, doubted(doubt))
+			time.Sleep(2 * time.Second)
+			synctest.Wait()
+			request(b, dstA, doubted(doubt))
+			time.Sleep(2 * time.Second)
+			synctest.Wait()
+			if got := e.sends(path); got != 1+BurstProbes {
+				t.Errorf("probes = %d, want the first and one burst for the doubt", got)
+			}
+		})
+	})
+}

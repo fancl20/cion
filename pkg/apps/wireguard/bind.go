@@ -14,14 +14,15 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/scionproto/scion/pkg/addr"
-	spath "github.com/scionproto/scion/pkg/slayers/path/scion"
 	"golang.zx2c4.com/wireguard/conn"
+	"golang.zx2c4.com/wireguard/device"
 
 	"github.com/fancl20/cion/pkg/libs/bus"
 	"github.com/fancl20/cion/pkg/libs/scion"
@@ -31,11 +32,6 @@ import (
 // wireguard-go; one datagram per call, a batch worth of buffering.
 const bindBatchSize = 16
 
-// pathRefreshMargin is how close to a cached path's expiry the transport
-// re-resolves: a path whose hops lapse inside the margin is refreshed before
-// it fails, not after.
-const pathRefreshMargin = 30 * time.Second
-
 // datagram is one received datagram handed to a subscriber: the bytes owned
 // by the subscriber, the sender as the endpoint wireguard-go caches.
 type datagram struct {
@@ -43,10 +39,10 @@ type datagram struct {
 	src  conn.Endpoint
 }
 
-// localPaths resolves a path from local state alone, the resolution safe
-// inside a send or a dial.
-type localPaths interface {
-	LocalPath(dst addr.IA) (*spath.Decoded, error)
+// leases returns each destination's lease: the path its sends and its dials
+// ride, read without waiting.
+type leases interface {
+	Lease(dst addr.IA) *scion.Lease
 }
 
 // meshSocket is the node's mesh transport: one SCION socket bound to an
@@ -54,38 +50,31 @@ type localPaths interface {
 // shared by every mesh device, fanning each received datagram out to all of
 // them — all devices share the node's key pair, so each can decrypt a
 // handshake, but only the device whose peer table holds the sender's public
-// key completes it. It also owns the freshest-path cache sends resolve
-// through, the relay's beside the mesh's.
+// key completes it. Its sends, the relay's beside the mesh's, ride each
+// peer's lease.
 type meshSocket struct {
-	conn     *scion.Conn
-	resolver localPaths
-	cnt      *counters
+	conn   *scion.Conn
+	leases leases
+	cnt    *counters
 
 	mtx sync.Mutex
 	// subs holds one queue per opened device bind.
 	subs map[*meshBind]chan datagram
-	// paths caches the freshest local path per peer ISD-AS.
-	paths map[addr.IA]*spath.Decoded
-	// expiry caches each path's hop expiry, beside the path itself.
-	expiry map[addr.IA]time.Time
-	// routes holds the warm loop's route choice per peer, beside the cached
-	// path: the incumbent route's links and the challenger streak, read and
-	// landed in the same critical section as the pick they govern.
-	routes map[addr.IA]routeChoice
+	// routes holds the identity of the path each peer's last send rode over
+	// its lease, a change of which counts a route switch.
+	routes map[addr.IA]bus.PathID
 	closed bool
 	done   chan struct{}
 }
 
-func newMeshSocket(c *scion.Conn, resolver localPaths, cnt *counters) *meshSocket {
+func newMeshSocket(c *scion.Conn, leases leases, cnt *counters) *meshSocket {
 	return &meshSocket{
-		conn:     c,
-		resolver: resolver,
-		cnt:      cnt,
-		subs:     make(map[*meshBind]chan datagram),
-		paths:    make(map[addr.IA]*spath.Decoded),
-		expiry:   make(map[addr.IA]time.Time),
-		routes:   make(map[addr.IA]routeChoice),
-		done:     make(chan struct{}),
+		conn:   c,
+		leases: leases,
+		cnt:    cnt,
+		subs:   make(map[*meshBind]chan datagram),
+		routes: make(map[addr.IA]bus.PathID),
+		done:   make(chan struct{}),
 	}
 }
 
@@ -165,126 +154,60 @@ func (s *meshSocket) send(ep *meshEndpoint, bufs [][]byte) error {
 	return s.sendOn(s.conn, ep.addr, bufs, &s.cnt.sentDatagrams, &s.cnt.sendFailures)
 }
 
-// sendOn carries datagrams on conn to dst, resolving the path to dst's
-// ISD-AS from local state — never a fetch inside a send — caching the
-// freshest path per ISD-AS and re-resolving when the cached path nears
-// expiry or a send fails. A destination carrying the reversed path of the
-// peer's latest arrival seeds the cache: replies ride arrival paths, the one
-// route to a peer no local state names — a core replying to a leaf below it.
-// One refresh and retry per send. It counts each datagram written in sent,
-// and each datagram of a send it gives up on in failed.
+// sendOn carries datagrams on conn to dst over the path dst's lease holds,
+// read without waiting — never a fetch inside a send — a batch carrying a
+// data packet counting as the destination's use, keepalives and handshakes
+// not. While the lease holds no path, the reversed path of the peer's latest
+// arrival dst carries serves: replies ride arrival paths, the one route to a
+// peer no local state names — a core replying to a leaf below it. It counts
+// each datagram written in sent, and each datagram of a send it gives up on
+// in failed.
 func (s *meshSocket) sendOn(conn *scion.Conn, dst scion.Addr, bufs [][]byte, sent, failed *atomic.Int64) error {
-	for attempt := 0; ; attempt++ {
-		path := s.cachedPath(dst.IA)
-		if path == nil && dst.Path != nil &&
-			time.Since(scion.PathExpiry(dst.Path)) <= -pathRefreshMargin {
-			path = dst.Path
-			s.setPath(dst.IA, path)
-		}
-		if path == nil {
-			refreshed, err := s.resolver.LocalPath(dst.IA)
-			if err != nil {
-				failed.Add(int64(len(bufs)))
-				return fmt.Errorf("resolving a path to %s: %w", dst.IA, err)
-			}
-			s.setPath(dst.IA, refreshed)
-			path = refreshed
-		}
-		dst.Path = path
-		var sendErr error
-		for _, buf := range bufs {
-			if _, sendErr = conn.WriteTo(buf, &dst); sendErr != nil {
-				break
-			}
-			sent.Add(1)
-		}
-		if sendErr == nil {
-			return nil
-		}
-		// The cached path failed to carry the datagram — expired en route or
-		// rejected by a router. Invalidate it and retry once on a fresh one.
-		if attempt == 0 {
-			s.cnt.pathRefreshes.Add(1)
-		}
-		s.mtx.Lock()
-		delete(s.paths, dst.IA)
-		delete(s.routes, dst.IA)
-		s.mtx.Unlock()
-		// The destination's carried path is the one that just failed; the
-		// retry resolves fresh instead of reusing it.
-		dst.Path = nil
-		if attempt > 0 {
-			failed.Add(int64(len(bufs)))
-			return sendErr
-		}
+	lease := s.leases.Lease(dst.IA)
+	read := lease.Peek
+	if slices.ContainsFunc(bufs, carriesData) {
+		read = lease.Path
 	}
+	leased, err := read()
+	switch {
+	case err == nil:
+		s.rode(dst.IA, leased.ID)
+		dst.Path = leased.Path
+	case dst.Path != nil && time.Until(scion.PathExpiry(dst.Path)) > scion.LeaseExpiryMargin:
+	default:
+		failed.Add(int64(len(bufs)))
+		return fmt.Errorf("resolving a path to %s: %w", dst.IA, err)
+	}
+	for i, buf := range bufs {
+		if _, err := conn.WriteTo(buf, &dst); err != nil {
+			failed.Add(int64(len(bufs) - i))
+			return err
+		}
+		sent.Add(1)
+	}
+	return nil
 }
 
-// setPath caches the freshest path for a peer, counting the refresh when it
-// replaces one the margin refused. A path a send resolved is never one the
-// warm loop chose, so the route entry clears with the cache entry it evicts:
-// the next warm window finds no incumbent and picks best at once.
-func (s *meshSocket) setPath(ia addr.IA, path *spath.Decoded) {
+// rode notes the identity of the path a send to the peer rode, counting a
+// route switch when it differs from the last send's.
+func (s *meshSocket) rode(ia addr.IA, id bus.PathID) {
 	s.mtx.Lock()
 	defer s.mtx.Unlock()
-	if _, ok := s.paths[ia]; ok {
-		// A cached path the margin refused: a refresh by expiry.
-		s.cnt.pathRefreshes.Add(1)
+	if last, ok := s.routes[ia]; ok && last != id {
+		s.cnt.routeSwitches.Add(1)
 	}
-	s.paths[ia] = path
-	s.expiry[ia] = scion.PathExpiry(path)
-	delete(s.routes, ia)
+	s.routes[ia] = id
 }
 
-// followSignals keeps the path cache off the paths interface-down signals
-// report failed, until ctx ends: each event of the topic drops the cached
-// path of every destination a signal quoted after the last event it
-// handled, so a signal drops a path once.
-func (s *meshSocket) followSignals(ctx context.Context, topic *bus.Topic[bus.InterfaceDownState]) {
-	var handled uint64
-	for state := range topic.Subscribe(ctx) {
-		s.dropQuoted(state, handled)
-		handled = state.Seq()
-	}
-}
-
-// dropQuoted releases the cached path of each destination a signal of the
-// state quoted after its handled-th signal — the path the quoted packet rode
-// just failed — so the next send re-resolves through the filtered
-// composition: the existing failure-and-refresh behavior, prompted by the
-// signal instead of a lost datagram. A decoded path names no ISD-AS for its
-// hops, so the drop goes by the quoted destination.
-func (s *meshSocket) dropQuoted(state bus.InterfaceDownState, handled uint64) {
-	s.mtx.Lock()
-	defer s.mtx.Unlock()
-	for dst := range state.QuotedAfter(handled) {
-		if _, ok := s.paths[dst]; ok {
-			s.cnt.pathRefreshes.Add(1)
-			delete(s.paths, dst)
-			delete(s.expiry, dst)
-			delete(s.routes, dst)
-		}
-	}
-}
-
-// cachedPath returns the cached path for the peer when it exists and its hops
-// do not lapse inside the refresh margin.
-func (s *meshSocket) cachedPath(ia addr.IA) *spath.Decoded {
-	s.mtx.Lock()
-	defer s.mtx.Unlock()
-	path, ok := s.paths[ia]
-	if !ok {
-		return nil
-	}
-	if time.Since(s.expiry[ia]) > -pathRefreshMargin {
-		return nil
-	}
-	return path
+// carriesData reports whether a datagram is a WireGuard data packet: a
+// transport message longer than an empty keepalive.
+func carriesData(pkt []byte) bool {
+	return messageType(pkt) == device.MessageTransportType && len(pkt) > device.MessageTransportSize
 }
 
 // meshBind is one mesh device's half of the shared socket: the conn.Bind
-// wireguard-go owns, reading the socket's fan-out and sending through the
-// path cache.
+// wireguard-go owns, reading the socket's fan-out and sending over the
+// socket's leases.
 type meshBind struct {
 	socket *meshSocket
 	recv   chan datagram

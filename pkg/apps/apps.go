@@ -19,7 +19,6 @@ import (
 	"time"
 
 	"github.com/scionproto/scion/pkg/addr"
-	spath "github.com/scionproto/scion/pkg/slayers/path/scion"
 
 	"github.com/fancl20/cion/pkg/apps/voting"
 	"github.com/fancl20/cion/pkg/core/trust"
@@ -75,7 +74,7 @@ type Environment struct {
 	// names through, as --dns.resolvers names them; empty names none.
 	Resolvers []netip.Addr
 	// Engine provides the node's chain for the directory channel; Paths
-	// resolves the paths the mesh datagrams ride.
+	// leases the paths the mesh datagrams ride.
 	Engine *trust.Engine
 	Paths  Paths
 	// Memberships lists the memberships the node's membership method holds
@@ -134,11 +133,10 @@ type Environment struct {
 	DirectoryPacing time.Duration
 }
 
-// Paths is the node's path resolution as the residents call it: the composed
-// candidates to a destination, and a path from local state alone.
+// Paths is the node's path resolution as the residents call it: each
+// destination's lease.
 type Paths interface {
-	Enumerate(ctx context.Context, dst addr.IA) ([]scion.Candidate, error)
-	LocalPath(dst addr.IA) (*spath.Decoded, error)
+	Lease(dst addr.IA) *scion.Lease
 }
 
 // RelayPlacement is the harness's stand-in for the production relay

@@ -87,7 +87,6 @@ func wireguardConfig(env *Environment) (wireguard.Config, error) {
 		NewConn:       env.NewConn,
 		RegisterSvc:   env.RegisterSvc,
 		UnregisterSvc: env.UnregisterSvc,
-		InterfaceDown: env.Bus.InterfaceDown(),
 	}
 	// The pacing knob the join's tail latency rides: the directory's fetch
 	// cadence bounds when a joined host's node programs it. Zero keeps the

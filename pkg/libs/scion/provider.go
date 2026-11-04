@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"slices"
+	"sync"
 	"time"
 
 	"github.com/scionproto/scion/pkg/addr"
@@ -57,10 +58,16 @@ type PathProvider struct {
 	// each candidate its health and measured cost. A nil topic, or one
 	// nothing has been published on, measures nothing.
 	Measurements *bus.Topic[bus.PathMeasurements]
-	// Requests is the node's path requests topic, on which each pick updates
-	// the paths its destination needs measured. A nil topic requests
-	// nothing.
+	// Requests is the node's path requests topic, on which each pick and
+	// each lease update the paths their destination needs measured. A nil
+	// topic requests nothing.
 	Requests *bus.Topic[bus.PathRequests]
+
+	// mtx guards the leases, their sweep, and the callers' reports.
+	mtx     sync.Mutex
+	leases  map[addr.IA]*Lease
+	swept   time.Time
+	reports map[bus.PathID]report
 }
 
 // LocalPath resolves a data-plane path from local state only: up segments
@@ -93,18 +100,28 @@ func (p *PathProvider) local(dst addr.IA) (*Candidate, error) {
 		return nil, err
 	}
 	if pick := bestOf(candidates); pick != nil {
-		p.request(dst, pick, candidates, v)
+		p.request(picksRequester, dst, pick, v.now, candidates, v)
 		return pick, nil
 	}
-	// Before any up segment is verified — a fresh node that has not even
-	// pinned the TRC — the bootstrap beacon's reversed route serves the
-	// core; beacons originate only at cores.
-	if p.Bootstrap != nil {
-		if bs := p.Bootstrap(dst); bs != nil && !v.retired(egress(bs)) {
-			return &Candidate{Path: bs, Hops: len(bs.HopFields)}, nil
-		}
+	if bs := p.bootstrap(dst, v); bs != nil {
+		return bs, nil
 	}
 	return nil, serrors.New("no path to destination", "isd_as", dst)
+}
+
+// bootstrap returns the bootstrap route's candidate, nil when none serves.
+// Before any up segment is verified — a fresh node that has not even pinned
+// the TRC — the bootstrap beacon's reversed route serves the core; beacons
+// originate only at cores.
+func (p *PathProvider) bootstrap(dst addr.IA, v view) *Candidate {
+	if p.Bootstrap == nil {
+		return nil
+	}
+	bs := p.Bootstrap(dst)
+	if bs == nil || v.retired(egress(bs)) {
+		return nil
+	}
+	return &Candidate{Path: bs, Hops: len(bs.HopFields)}
 }
 
 // egress returns the interface a path leaves the local AS through: its
@@ -141,7 +158,7 @@ func (p *PathProvider) Choose(ctx context.Context, dst addr.IA) (*Candidate, err
 		return nil, err
 	}
 	if pick := bestOf(candidates); pick != nil {
-		p.request(dst, pick, candidates, v)
+		p.request(picksRequester, dst, pick, v.now, candidates, v)
 		return pick, nil
 	}
 	return p.local(dst)
@@ -203,8 +220,8 @@ type Candidate struct {
 	// ID is the path's identity, its crossed pairs, which the segments'
 	// refreshes keep; empty for the bootstrap route.
 	ID bus.PathID
-	// Health is what the measurements and the held signals said of the path
-	// at composition.
+	// Health is what the measurements, the callers' reports, and the held
+	// signals said of the path at composition.
 	Health Health
 	// Cost is the round trip the picks rank the path by: its measured cost,
 	// else twice its declared one-way sum; nil when it has neither.
@@ -539,27 +556,69 @@ func (p *PathProvider) containing(ia addr.IA, v view) ([]Candidate, error) {
 
 // view is the state one call composes from, read once: the node's usable
 // links, the interface-down signals that hold at now, the path measurements,
-// and the links the measured failed paths share.
+// the links the measured failed paths share, and the callers' reports.
 type view struct {
 	live     map[uint16]addr.IA
 	down     bus.InterfaceDownState
 	measured bus.PathMeasurements
 	suspect  map[segment.LinkID]bool
+	reports  map[bus.PathID]report
 	now      time.Time
 }
 
-// view reads the link state, the interface-down state, and the path
-// measurements.
+// view reads the link state, the interface-down state, the path
+// measurements, and the callers' reports, dropping the reports nothing
+// added to for RequestLapse.
 func (p *PathProvider) view() view {
 	now := time.Now()
 	measured := p.Measurements.Latest()
+	p.mtx.Lock()
+	reports := make(map[bus.PathID]report, len(p.reports))
+	for id, r := range p.reports {
+		if now.Sub(later(r.delivered, r.doubted())) >= bus.RequestLapse {
+			delete(p.reports, id)
+			continue
+		}
+		reports[id] = r
+	}
+	p.mtx.Unlock()
 	return view{
 		live:     p.Links.Latest().Usable(),
 		down:     p.InterfaceDown.Latest(),
 		measured: measured,
 		suspect:  suspectLinks(measured, now),
+		reports:  reports,
 		now:      now,
 	}
+}
+
+// record adds a caller's outcome on the path to its report: a delivery
+// replaces the report, a loss joins its latest callerLosses losses. A path
+// without an identity records nothing.
+func (p *PathProvider) record(id bus.PathID, delivered bool, now time.Time) {
+	if id == "" {
+		return
+	}
+	p.mtx.Lock()
+	defer p.mtx.Unlock()
+	if p.reports == nil {
+		p.reports = make(map[bus.PathID]report)
+	}
+	r := p.reports[id]
+	if delivered {
+		r = report{delivered: now}
+	} else {
+		r.losses = append(r.losses[max(0, len(r.losses)-callerLosses+1):len(r.losses):len(r.losses)], now)
+	}
+	p.reports[id] = r
+}
+
+// later returns the later of two times.
+func later(a, b time.Time) time.Time {
+	if a.After(b) {
+		return a
+	}
+	return b
 }
 
 // retired reports whether the usable links lack one of the node's own

@@ -63,7 +63,7 @@ func NewPeerClient(cfg scionrpc.PeerClientConfig) *PeerClient {
 	// off the one-hop path — a provider path to the neighbor would leave it
 	// unknown, and one exists whenever two cores beacon each other.
 	beaconCfg := cfg
-	beaconCfg.PathTo = nil
+	beaconCfg.Lease = nil
 	c.beaconHCLT = scionrpc.NewSCIONClient(beaconCfg, c.qclt, false)
 	c.verifiedHCLT = scionrpc.NewSCIONClient(cfg, c.qclt, true)
 	// The one-hop channel keeps the beacon dial's discipline with the

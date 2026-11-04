@@ -25,6 +25,7 @@ import (
 	"github.com/fancl20/cion/pkg/libs/bus"
 	"github.com/fancl20/cion/pkg/libs/scion"
 	"github.com/fancl20/cion/pkg/modules/links"
+	"github.com/fancl20/cion/pkg/modules/pathdb"
 	"github.com/fancl20/cion/pkg/modules/trustdb"
 	"github.com/fancl20/cion/pkg/modules/trustdb/impl/bbolt"
 )
@@ -475,6 +476,40 @@ func TestWireguardAppliesDirectoryDiff(t *testing.T) {
 	}
 	if a.router.nets[0].dst != a.meshPeers[peer2].pipe {
 		t.Error("the mesh route does not point at the survivor's device")
+	}
+}
+
+// TestWireguardWarmsMeshLeases checks the warm-up of the mesh peers' leases:
+// it reads each peer's lease without use, so each lookup it starts serves
+// what it holds, never waiting, and nothing is requested measured.
+func TestWireguardWarmsMeshLeases(t *testing.T) {
+	ia := addr.MustIAFrom(20, 0xff0000000221)
+	peer1 := addr.MustIAFrom(20, 0xff0000000231)
+	peer2 := addr.MustIAFrom(20, 0xff0000000232)
+	var asked []addr.IA
+	requests := new(bus.Topic[bus.PathRequests])
+	a := &App{
+		cfg: Config{Paths: &scion.PathProvider{
+			IA: ia,
+			DB: &memDB{segs: []*pathdb.Segment{upSegmentAt(t, time.Now(), peer1, ia)}},
+			Lookup: func(ctx context.Context, dst addr.IA) []*pathdb.Segment {
+				if ctx.Err() == nil {
+					t.Errorf("the warm-up's lookup of %s may wait", dst)
+				}
+				asked = append(asked, dst)
+				return nil
+			},
+			Requests: requests,
+		}},
+		meshPeers: map[addr.IA]*meshPeer{peer1: nil, peer2: nil},
+	}
+	a.warmMeshPaths()
+	slices.Sort(asked)
+	if want := []addr.IA{peer1, peer2}; !slices.Equal(asked, want) {
+		t.Errorf("the warm-up looked up %v, want every peer %v", asked, want)
+	}
+	if got := slices.Collect(requests.Latest().All()); len(got) != 0 {
+		t.Errorf("the warm-up requested %d paths measured, want none", len(got))
 	}
 }
 

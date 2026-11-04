@@ -347,9 +347,8 @@ func (a *App) publishTailnetLocked(view bus.TailnetState) {
 
 // runSync owns the directory refresh: it re-fetches the directory on the
 // constant and diffs it against the mesh devices — new peers gain a device,
-// departed peers lose theirs. A fetch that fails logs and waits; a peer
-// without a reachable path queues a refresh and logs rather than erroring
-// the application.
+// departed peers lose theirs — and warms every peer's lease. A fetch that
+// fails logs and waits.
 func (a *App) runSync(ctx context.Context) {
 	interval := a.cfg.RefreshInterval
 	if interval == 0 {
@@ -365,36 +364,20 @@ func (a *App) runSync(ctx context.Context) {
 			continue
 		}
 		a.applyDirectory(ctx, directory)
-		a.warmMeshPaths(ctx)
+		a.warmMeshPaths()
 	}
 }
 
-// warmMeshPaths picks each mesh peer's route in the background, where a
-// fetch belongs: sends only ever read the cache, but a leaf-to-leaf route
-// composes up and down segments and needs the lookup. Each refresh
-// enumerates the peer's candidates and hands them to the socket's landing,
-// which ranks them by their declared one-way sums and lands the pick behind
-// the switch hysteresis. An empty answer or an error keeps the cache and
-// warns — before enrollment, the enumeration composes nothing, and the sends
-// the loop would serve keep working through the bootstrap fallback.
-func (a *App) warmMeshPaths(ctx context.Context) {
+// warmMeshPaths reads each mesh peer's lease without use: a send never
+// waits on a fetch, and a leaf-to-leaf route composes down segments the
+// lookup fetches, so each read starts the lookups the peer's first send
+// needs held. A peer nothing composes for yet logs at debug — before
+// enrollment, nothing composes, and the sends serve through the bootstrap
+// route or the peer's arrival path.
+func (a *App) warmMeshPaths() {
 	for _, ia := range a.meshPeerIAs() {
-		candidates, err := a.cfg.Paths.Enumerate(ctx, ia)
-		if err != nil {
-			slog.Warn("WireGuard mesh route", "peer", ia, "err", err)
-			continue
-		}
-		if len(candidates) == 0 {
-			slog.Warn("WireGuard mesh route composed no candidate", "peer", ia)
-			continue
-		}
-		pick, switched := a.mesh.landRoute(ia, candidates)
-		if switched {
-			attrs := []any{"peer", ia, "hops", pick.Hops}
-			if pick.Latency != nil {
-				attrs = append(attrs, "latency", *pick.Latency)
-			}
-			slog.Info("WireGuard mesh route switched", attrs...)
+		if _, err := a.cfg.Paths.Lease(ia).Peek(); err != nil {
+			slog.Debug("WireGuard mesh route", "peer", ia, "err", err)
 		}
 	}
 }

@@ -6,13 +6,15 @@ import (
 	"hash"
 	"net"
 	"net/netip"
+	"slices"
 	"testing"
-	"testing/synctest"
 	"time"
 
 	"github.com/scionproto/scion/pkg/addr"
 	"github.com/scionproto/scion/pkg/scrypto"
+	"github.com/scionproto/scion/pkg/slayers/path"
 	spath "github.com/scionproto/scion/pkg/slayers/path/scion"
+	"golang.zx2c4.com/wireguard/device"
 
 	"github.com/fancl20/cion/pkg/libs/bus"
 	"github.com/fancl20/cion/pkg/libs/scion"
@@ -90,17 +92,19 @@ func upSegmentAt(t *testing.T, now time.Time, core, leaf addr.IA) *pathdb.Segmen
 	return &pathdb.Segment{Type: pathdb.SegmentTypeUp, PCB: pcb}
 }
 
-// testMeshSocket builds a mesh socket whose conn submits to a throwaway
-// internal link, the path library's socket without the router behind it.
-func testMeshSocket(t *testing.T, db pathdb.DB) (*meshSocket, *countingDB) {
+// testMeshSocket builds a mesh socket over a provider of the database's
+// segments, returning the path requests the provider publishes. Its conn
+// submits to a throwaway internal link: the path library's socket without
+// the router behind it.
+func testMeshSocket(t *testing.T, db pathdb.DB) (*meshSocket, *bus.Topic[bus.PathRequests]) {
 	t.Helper()
 	internal, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = internal.Close() })
-	counting := &countingDB{inner: db}
-	provider := &scion.PathProvider{IA: addr.MustIAFrom(20, 1), DB: counting}
+	requests := new(bus.Topic[bus.PathRequests])
+	provider := &scion.PathProvider{IA: addr.MustIAFrom(20, 1), DB: db, Requests: requests}
 	linkState := new(bus.Topic[bus.LinkState])
 	linkState.Publish(bus.NewLinkState(bus.Link{
 		Entry: links.Link{IfID: 1, NeighborIA: addr.MustIAFrom(20, 2)},
@@ -116,98 +120,159 @@ func testMeshSocket(t *testing.T, db pathdb.DB) (*meshSocket, *countingDB) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = conn.Close() })
-	cnt := &counters{}
-	return newMeshSocket(conn, provider, cnt), counting
+	return newMeshSocket(conn, provider, &counters{}), requests
 }
 
-// TestMeshSocketCachesPath checks the send path's resolution discipline: the
-// freshest path is resolved once per peer and cached, not per datagram.
-func TestMeshSocketCachesPath(t *testing.T) {
+// message returns a WireGuard message of the type and size, its body zero.
+func message(typ byte, size int) []byte {
+	pkt := make([]byte, size)
+	pkt[0] = typ
+	return pkt
+}
+
+// dataPacket returns a transport message carrying a data packet.
+func dataPacket() []byte {
+	return message(device.MessageTransportType, device.MessageTransportSize+64)
+}
+
+// TestMeshSocketRidesTheLease checks the sends' reads of the peer's lease:
+// the sends within LeaseEvaluation share one evaluation, and every datagram
+// counts.
+func TestMeshSocketRidesTheLease(t *testing.T) {
 	core, leaf := addr.MustIAFrom(20, 0xff0000000021), addr.MustIAFrom(20, 0xff0000000022)
-	db := &memDB{segs: []*pathdb.Segment{upSegmentAt(t, time.Now(), core, leaf)}}
-	socket, counting := testMeshSocket(t, db)
+	counting := &countingDB{inner: &memDB{segs: []*pathdb.Segment{upSegmentAt(t, time.Now(), core, leaf)}}}
+	socket, _ := testMeshSocket(t, counting)
 
 	peer := &meshEndpoint{addr: scion.Addr{
 		IA:   core,
 		Addr: netip.MustParseAddrPort("127.0.0.1:40001"),
 	}}
 	for i := range 5 {
-		if err := socket.send(peer, [][]byte{[]byte("datagram")}); err != nil {
+		if err := socket.send(peer, [][]byte{dataPacket()}); err != nil {
 			t.Fatalf("send %d: %v", i, err)
 		}
 	}
 	if counting.queries != 1 {
-		t.Errorf("%d path queries for 5 sends, want 1 (the cache)", counting.queries)
+		t.Errorf("%d path queries for 5 sends, want 1 (the lease's one evaluation)", counting.queries)
 	}
 	if got := socket.cnt.sentDatagrams.Load(); got != 5 {
 		t.Errorf("%d datagrams counted, want 5", got)
 	}
 }
 
-// TestMeshSocketRefreshesExpiredPath checks the cache's expiry: a path whose
-// hops have lapsed — or lapse inside the refresh margin — is re-resolved
-// before it fails, not after.
-func TestMeshSocketRefreshesExpiredPath(t *testing.T) {
-	core, leaf := addr.MustIAFrom(20, 0xff0000000031), addr.MustIAFrom(20, 0xff0000000032)
-	stale := upSegmentAt(t, time.Now().Add(-25*time.Hour), core, leaf)
-	db := &memDB{segs: []*pathdb.Segment{stale}}
-	socket, _ := testMeshSocket(t, db)
-
-	peer := &meshEndpoint{addr: scion.Addr{
-		IA:   core,
-		Addr: netip.MustParseAddrPort("127.0.0.1:40001"),
-	}}
-	if err := socket.send(peer, [][]byte{[]byte("datagram")}); err != nil {
-		t.Fatalf("send over a stale path: %v", err)
+// TestMeshSocketUsesTheLeaseForData checks which sends count as their
+// peer's use: a data packet's, whose lease then requests its path measured,
+// while a keepalive's read requests nothing.
+func TestMeshSocketUsesTheLeaseForData(t *testing.T) {
+	data, idle := addr.MustIAFrom(20, 0xff0000000031), addr.MustIAFrom(20, 0xff0000000033)
+	leaf := addr.MustIAFrom(20, 0xff0000000032)
+	socket, requests := testMeshSocket(t, &memDB{segs: []*pathdb.Segment{
+		upSegmentAt(t, time.Now(), data, leaf),
+		upSegmentAt(t, time.Now(), idle, leaf),
+	}})
+	for _, send := range []struct {
+		ia  addr.IA
+		pkt []byte
+	}{
+		{idle, message(device.MessageTransportType, device.MessageTransportSize)},
+		{data, dataPacket()},
+	} {
+		peer := &meshEndpoint{addr: scion.Addr{IA: send.ia, Service: SvcWireguard}}
+		if err := socket.send(peer, [][]byte{send.pkt}); err != nil {
+			t.Fatalf("send to %s: %v", send.ia, err)
+		}
 	}
-	socket.mtx.Lock()
-	path := socket.paths[core]
-	socket.mtx.Unlock()
-	if path == nil {
-		t.Fatal("the stale path was not cached at all")
+	var inUse []addr.IA
+	for r := range requests.Latest().All() {
+		if r.Role == bus.PathInUse {
+			inUse = append(inUse, r.Dst)
+		}
 	}
-	// The cached path is the stale one — its expiry sits inside the refresh
-	// margin, so the next send refreshes it.
-	if scion.PathExpiry(path).After(time.Now().Add(pathRefreshMargin)) {
-		t.Fatalf("stale path expiry %v is outside the refresh margin",
-			scion.PathExpiry(path))
-	}
-	socket.mtx.Lock()
-	socket.expiry[core] = time.Now().Add(-time.Hour) // age it past the margin
-	socket.mtx.Unlock()
-	if socket.cachedPath(core) != nil {
-		t.Error("an expired cached path was served")
+	if !slices.Equal(inUse, []addr.IA{data}) {
+		t.Errorf("paths in use requested to %v, want the data packet's peer %s alone", inUse, data)
 	}
 }
 
-// TestMeshSocketRefreshesFailedSend checks the error path: a send that fails
-// invalidates the cached path and retries once on a fresh one.
-func TestMeshSocketRefreshesFailedSend(t *testing.T) {
-	core, leaf := addr.MustIAFrom(20, 0xff0000000041), addr.MustIAFrom(20, 0xff0000000042)
-	db := &memDB{segs: []*pathdb.Segment{upSegmentAt(t, time.Now(), core, leaf)}}
-	socket, counting := testMeshSocket(t, db)
+// TestCarriesData checks which datagrams count as data: transport messages
+// longer than a keepalive, never a keepalive, a handshake message, or a
+// cookie reply.
+func TestCarriesData(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		pkt  []byte
+		want bool
+	}{
+		{"data", dataPacket(), true},
+		{"keepalive", message(device.MessageTransportType, device.MessageTransportSize), false},
+		{"initiation", message(device.MessageInitiationType, device.MessageInitiationSize), false},
+		{"response", message(device.MessageResponseType, device.MessageResponseSize), false},
+		{"cookie reply", message(device.MessageCookieReplyType, device.MessageCookieReplySize), false},
+	} {
+		if got := carriesData(tc.pkt); got != tc.want {
+			t.Errorf("carriesData(%s) = %t, want %t", tc.name, got, tc.want)
+		}
+	}
+}
 
-	peer := &meshEndpoint{addr: scion.Addr{
-		IA:   core,
-		Addr: netip.MustParseAddrPort("127.0.0.1:40001"),
-	}}
-	if err := socket.send(peer, [][]byte{[]byte("datagram")}); err != nil {
-		t.Fatalf("first send: %v", err)
+// TestMeshSocketFallsBackOnArrival checks a send while the peer's lease
+// holds no path: it rides the peer's arrival path while that path lapses
+// beyond LeaseExpiryMargin, and fails, every datagram counted, without one.
+func TestMeshSocketFallsBackOnArrival(t *testing.T) {
+	core, leaf := addr.MustIAFrom(20, 0xff0000000041), addr.MustIAFrom(20, 0xff0000000042)
+	arrival := func(origin time.Time) *spath.Decoded {
+		p, err := upSegmentAt(t, origin, core, leaf).PCB.ReversePathTo(0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return p
 	}
-	// A closed socket fails every send; the failure refreshes the path once
-	// and reports.
-	_ = socket.conn.Close()
-	if err := socket.send(peer, [][]byte{[]byte("datagram")}); err == nil {
-		t.Fatal("sending over a closed socket succeeded")
+	lifetime := path.ExpTimeToDuration(segment.HopExpTime)
+	for _, tc := range []struct {
+		name         string
+		path         *spath.Decoded
+		sent, failed int64
+	}{
+		{"fresh arrival", arrival(time.Now()), 2, 0},
+		{"expiring arrival", arrival(time.Now().Add(scion.LeaseExpiryMargin - lifetime)), 0, 2},
+		{"no arrival", nil, 0, 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			socket, _ := testMeshSocket(t, &memDB{})
+			peer := &meshEndpoint{addr: scion.Addr{
+				IA:   core,
+				Addr: netip.MustParseAddrPort("127.0.0.1:40001"),
+				Path: tc.path,
+			}}
+			err := socket.send(peer, [][]byte{dataPacket(), dataPacket()})
+			if (err == nil) != (tc.failed == 0) {
+				t.Errorf("send = %v, want failure %t", err, tc.failed != 0)
+			}
+			if got := socket.cnt.sentDatagrams.Load(); got != tc.sent {
+				t.Errorf("%d datagrams sent, want %d", got, tc.sent)
+			}
+			if got := socket.cnt.sendFailures.Load(); got != tc.failed {
+				t.Errorf("%d datagrams failed, want %d", got, tc.failed)
+			}
+		})
 	}
-	if got := socket.cnt.pathRefreshes.Load(); got != 1 {
-		t.Errorf("%d path refreshes after a failed send, want 1", got)
+}
+
+// TestMeshSocketCountsRouteSwitches checks the route switches: a send riding
+// another path than its peer's last send counts one, never the same path or
+// a peer's first send.
+func TestMeshSocketCountsRouteSwitches(t *testing.T) {
+	socket := newMeshSocket(nil, nil, &counters{})
+	near, far := addr.MustIAFrom(20, 0xff0000000071), addr.MustIAFrom(20, 0xff0000000072)
+	for _, ride := range []struct {
+		ia addr.IA
+		id bus.PathID
+	}{
+		{near, "a"}, {near, "a"}, {far, "b"}, {near, "b"}, {far, "b"}, {near, "a"},
+	} {
+		socket.rode(ride.ia, ride.id)
 	}
-	if got := socket.cnt.sendFailures.Load(); got == 0 {
-		t.Error("the failed send was not counted")
-	}
-	if counting.queries < 2 {
-		t.Errorf("%d path queries; the failed send did not re-resolve", counting.queries)
+	if got := socket.cnt.routeSwitches.Load(); got != 2 {
+		t.Errorf("%d route switches, want 2", got)
 	}
 }
 
@@ -255,124 +320,4 @@ func TestMeshBindEndpointRoundTrip(t *testing.T) {
 	if bytes.Equal(peer.DstToBytes(), other.DstToBytes()) {
 		t.Error("two peers share an endpoint digest")
 	}
-}
-
-// quoting returns the state with one more signal, held from now, naming an
-// interface of the leaf and quoting a packet to dst.
-func quoting(s bus.InterfaceDownState, dst addr.IA) bus.InterfaceDownState {
-	now := time.Now()
-	link := segment.LinkID{IA: addr.MustIAFrom(20, 0xff0000000062), IfID: 1}
-	return s.Signaled(link, dst, now, now.Add(scion.InterfaceDownHold))
-}
-
-// TestMeshSocketDropsPathOnSignal checks the signal's prompting: a signal
-// quoting the peer drops exactly the peer's cached path, the next send
-// re-resolving through the filtered composition; a signal quoting another
-// destination drops nothing, and a signal already handled drops no path
-// again.
-func TestMeshSocketDropsPathOnSignal(t *testing.T) {
-	core, leaf := addr.MustIAFrom(20, 0xff0000000061), addr.MustIAFrom(20, 0xff0000000062)
-	fresh := upSegmentAt(t, time.Now(), core, leaf)
-	db := &memDB{segs: []*pathdb.Segment{fresh}}
-	socket, counting := testMeshSocket(t, db)
-
-	peer := &meshEndpoint{addr: scion.Addr{
-		IA:   core,
-		Addr: netip.MustParseAddrPort("127.0.0.1:40001"),
-	}}
-	if err := socket.send(peer, [][]byte{[]byte("datagram")}); err != nil {
-		t.Fatal(err)
-	}
-	queries := counting.queries
-	socket.mtx.Lock()
-	cached := socket.paths[core]
-	socket.mtx.Unlock()
-	if cached == nil {
-		t.Fatal("the send cached no path")
-	}
-
-	// The signal's quote names the destination; the bind drops its path.
-	first := quoting(bus.InterfaceDownState{}, core)
-	socket.dropQuoted(first, 0)
-	socket.mtx.Lock()
-	_, kept := socket.paths[core]
-	socket.mtx.Unlock()
-	if kept {
-		t.Fatal("the quoted destination's path survived the signal")
-	}
-	if err := socket.send(peer, [][]byte{[]byte("datagram")}); err != nil {
-		t.Fatal(err)
-	}
-	if counting.queries != queries+1 {
-		t.Errorf("path queries = %d after the drop and resend, want %d (the re-resolution)",
-			counting.queries, queries+1)
-	}
-
-	// A signal naming another destination drops nothing, and the first
-	// signal, handled, drops the re-resolved path no more.
-	before := socket.cnt.sentDatagrams.Load()
-	socket.dropQuoted(quoting(first, addr.MustIAFrom(20, 0xff0000000099)), first.Seq())
-	socket.mtx.Lock()
-	_, kept = socket.paths[core]
-	socket.mtx.Unlock()
-	if !kept {
-		t.Error("a signal naming another destination, or one handled, dropped this peer's path")
-	}
-	if socket.cnt.sentDatagrams.Load() != before {
-		t.Error("a signal counted a send")
-	}
-}
-
-// TestMeshSocketFollowsSignals checks the subscription: each event drops
-// the cached paths its new quotes name, a quote an earlier event carried
-// drops no path again, and the following ends with its context.
-func TestMeshSocketFollowsSignals(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		socket := newMeshSocket(nil, nil, &counters{})
-		near, far := addr.MustIAFrom(20, 0xff0000000071), addr.MustIAFrom(20, 0xff0000000072)
-		cache := func(ias ...addr.IA) {
-			socket.mtx.Lock()
-			defer socket.mtx.Unlock()
-			for _, ia := range ias {
-				socket.paths[ia] = &spath.Decoded{}
-			}
-		}
-		cached := func(ia addr.IA) bool {
-			socket.mtx.Lock()
-			defer socket.mtx.Unlock()
-			_, ok := socket.paths[ia]
-			return ok
-		}
-		topic := new(bus.Topic[bus.InterfaceDownState])
-		ctx, cancel := context.WithCancel(t.Context())
-		done := make(chan struct{})
-		go func() {
-			socket.followSignals(ctx, topic)
-			close(done)
-		}()
-
-		cache(near, far)
-		topic.Update(func(s bus.InterfaceDownState) bus.InterfaceDownState { return quoting(s, near) })
-		synctest.Wait()
-		if cached(near) || !cached(far) {
-			t.Errorf("after a signal quoting %v: cached %v %t, %v %t; want only %v dropped",
-				near, near, cached(near), far, cached(far), near)
-		}
-
-		cache(near)
-		topic.Update(func(s bus.InterfaceDownState) bus.InterfaceDownState { return quoting(s, far) })
-		synctest.Wait()
-		if !cached(near) || cached(far) {
-			t.Errorf("after a signal quoting %v: cached %v %t, %v %t; want only %v dropped",
-				far, near, cached(near), far, cached(far), far)
-		}
-
-		cancel()
-		synctest.Wait()
-		select {
-		case <-done:
-		default:
-			t.Error("the following outlived its context")
-		}
-	})
 }

@@ -159,3 +159,36 @@ Nothing on the wire changes. WireGuard's `path_refreshes_total` metric goes.
     within a heartbeat and a burst, and returns once its path is cheaper
     beyond the band; between near-equal paths it stays put.
 *   **The labs and benchmarks** pass, the regions cut benchmark among them.
+
+## Implementation history
+
+*   Landed with five changes to the plan: the leases
+    ([lease.go](/pkg/libs/scion/lease.go)), the callers' reports
+    ([health.go](/pkg/libs/scion/health.go)), the prober
+    ([prober.go](/pkg/apps/ping/prober.go)), the RPC clients
+    ([client.go](/pkg/libs/scionrpc/client.go)), WireGuard's sends
+    ([bind.go](/pkg/apps/wireguard/bind.go)), and the pinger
+    ([pinger.go](/pkg/apps/ping/pinger.go)).
+    *   An ejected leased path stays while the best path is ejected too: a
+        move between dead paths gains nothing.
+    *   An evaluation drops the candidates whose hop fields lapse within
+        thirty seconds before it ranks them, so a lease never moves to an
+        expiring path either.
+    *   Any transport error the peer sent, `CONNECTION_REFUSED` among them,
+        counts as a refused handshake, beside a crypto error either end
+        raised.
+    *   WireGuard's arrival path serves only while its hop fields lapse
+        beyond thirty seconds.
+    *   The pinger's uncounted warm-up echoes report nothing, and its
+        report's re-resolution count goes: a lease never holds a lapsed
+        path.
+
+    The lab ([paths_test.go](/internal/testnetwork/paths_test.go)) runs on
+    the fabric in virtual time. A's lease left the cut link 5 to 6 seconds
+    after the cut, at the path's ejection, and stayed off it past the hold;
+    its pick, which also leaves a suspect path, left after 3 to 4. Between
+    the two branches at equal cost, the lease stayed put once the pick
+    returned; with C's link to E delayed 10 milliseconds each way, it
+    returned 5 seconds after the pick. In three runs on one machine, the
+    regions network recovered from its cut in 10 seconds, its picks on the
+    best path over the formed links.

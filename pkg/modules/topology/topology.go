@@ -26,7 +26,6 @@ import (
 	"net/http"
 
 	"github.com/scionproto/scion/pkg/addr"
-	spath "github.com/scionproto/scion/pkg/slayers/path/scion"
 
 	"github.com/fancl20/cion/pkg/core/trust"
 	"github.com/fancl20/cion/pkg/libs/bus"
@@ -125,8 +124,8 @@ type PeerChannel interface {
 
 // Paths resolves the node's paths to a destination ISD-AS.
 type Paths interface {
-	// Path returns a data-plane path from the local AS to dst.
-	Path(ctx context.Context, dst addr.IA) (*spath.Decoded, error)
+	// Lease returns dst's lease: the path every flow to it rides.
+	Lease(dst addr.IA) *scion.Lease
 	// Enumerate returns every composed candidate path to dst with its
 	// facts.
 	Enumerate(ctx context.Context, dst addr.IA) ([]scion.Candidate, error)
