@@ -3,6 +3,7 @@ package wireguard
 import (
 	"context"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"net"
 	"net/http/httptest"
@@ -12,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -324,10 +326,13 @@ type fakeResolver struct {
 }
 
 // newFakeResolver serves a resolver at port 53 of the host until the test
-// ends.
+// ends. A host that keeps port 53 for privileged processes skips the test.
 func newFakeResolver(t *testing.T, host netip.Addr, silent bool) *fakeResolver {
 	t.Helper()
 	conn, err := net.ListenUDP("udp", net.UDPAddrFromAddrPort(netip.AddrPortFrom(host, dnsPort)))
+	if errors.Is(err, syscall.EACCES) {
+		t.Skipf("binding a resolver at port %d of %v takes privileges here: %v", dnsPort, host, err)
+	}
 	if err != nil {
 		t.Fatalf("binding a resolver at port %d of %v: %v", dnsPort, host, err)
 	}

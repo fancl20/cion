@@ -16,6 +16,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -49,6 +50,21 @@ func serveHTTPS(t *testing.T, m *CertManager, ln net.Listener, handler http.Hand
 			t.Error("the HTTPS server did not stop")
 		}
 	})
+}
+
+// requireHTTP01Port skips the test on a host that keeps port 80, the one
+// the ACME drafts fix for HTTP-01, for privileged processes: an ACME-managed
+// identity binds it to answer the challenge.
+func requireHTTP01Port(t *testing.T) {
+	t.Helper()
+	ln, err := net.Listen("tcp", ":80")
+	if errors.Is(err, syscall.EACCES) {
+		t.Skipf("binding HTTP-01's port 80 takes privileges here: %v", err)
+	}
+	if err != nil {
+		t.Fatalf("binding HTTP-01's port 80: %v", err)
+	}
+	_ = ln.Close()
 }
 
 // TestServeHTTPSHTTP11 checks the serving half against a static-file
@@ -324,6 +340,7 @@ func TestPrepareTLSCertAddressIdentity(t *testing.T) {
 
 	// An address the CA validates takes the shortlived profile; the HTTP-01
 	// listener it stands is closed before the domain's takes the port.
+	requireHTTP01Port(t)
 	address, err := PrepareTLSCert(TLSCertConfig{
 		Domain:  "192.0.2.20",
 		Storage: t.TempDir(),
@@ -368,6 +385,7 @@ func TestPrepareTLSCertAddressIdentity(t *testing.T) {
 // local address — the SCION transport's wildcard shape on the QUIC endpoint
 // — would name nothing the cache holds.
 func TestGetCertificateNamelessHello(t *testing.T) {
+	requireHTTP01Port(t)
 	identity := "192.0.2.20"
 	ca := webpkitest.NewFor(t, netip.MustParseAddr(identity))
 	manager, err := PrepareTLSCert(TLSCertConfig{
@@ -476,6 +494,7 @@ func TestServeHTTPSACMEChallengeIPIdentifier(t *testing.T) {
 // seeded key authorization, and every other request reaches the wrapped
 // handler.
 func TestHTTP01ChallengeSolves(t *testing.T) {
+	requireHTTP01Port(t)
 	magic, issuer := newTestIssuer(t)
 	domain := "cion-core-01.test"
 	seedChallenge(t, magic, issuer, acme.Challenge{
@@ -533,6 +552,7 @@ func TestHTTP01ChallengeSolves(t *testing.T) {
 // binds again at once; a static-file manager's Close releases nothing and
 // returns nil.
 func TestCertManagerClose(t *testing.T) {
+	requireHTTP01Port(t)
 	manager, err := PrepareTLSCert(TLSCertConfig{
 		Domain:  "cion-core-02.test",
 		Storage: t.TempDir(),
@@ -573,6 +593,7 @@ func TestCertManagerClose(t *testing.T) {
 // that accepts and answers nothing: Manage holds while the issuance waits
 // on the CA, and returns nil once its context ends.
 func TestManageRunsUntilItsContextEnds(t *testing.T) {
+	requireHTTP01Port(t)
 	ca, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)

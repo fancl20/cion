@@ -220,8 +220,10 @@ func TestMembershipsOutliveTheFounder(t *testing.T) {
 		return true
 	})
 	expired := time.Now()
+	// A chain renews 45 seconds after the last; a validity's wait outlasts a
+	// renewal a loaded runner slows.
 	for _, node := range members {
-		PollFor(t, RestartTimeout, "a chain the authoritative core issued past the expiry",
+		PollFor(t, memberValidity, "a chain the authoritative core issued past the expiry",
 			func() bool {
 				chain := newestChain(t, node)
 				return chain != nil && issuedBy(t, chain) == a.app.IA() &&

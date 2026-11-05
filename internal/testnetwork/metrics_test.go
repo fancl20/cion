@@ -152,9 +152,18 @@ func TestMetricsScrapedOverTheVerifiedChannel(t *testing.T) {
 	slog.SetDefault(prev)
 
 	served := lines.String()
-	if got := strings.Count(served, errCannotRouteText); got != discardCapLines {
-		t.Errorf("B's discard lines naming the refusal = %d, want the cap's %d",
-			got, discardCapLines)
+	// The cap holds each second: a burst within one second logs the cap's
+	// lines exactly, and one across a second's edge up to the cap on each
+	// side.
+	perSecond := linesPerSecond(t, served, errCannotRouteText)
+	if len(perSecond) == 0 {
+		t.Error("no discard line names the refusal")
+	}
+	for second, got := range perSecond {
+		if got > discardCapLines || len(perSecond) == 1 && got != discardCapLines {
+			t.Errorf("B's discard lines naming the refusal in the second at %v = %d, want the cap's %d",
+				time.Unix(second, 0), got, discardCapLines)
+		}
 	}
 	if !strings.Contains(served, errMacVerificationText) {
 		t.Error("no discard line names the failed MAC verification")
@@ -306,6 +315,25 @@ func writeRaw(t *testing.T, pkt []byte, to netip.AddrPort) {
 	if _, err := conn.Write(pkt); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// linesPerSecond counts the recorded lines naming the text by the second
+// their records were made in, the window the discard cap counts in.
+func linesPerSecond(t *testing.T, served, text string) map[int64]int {
+	t.Helper()
+	out := make(map[int64]int)
+	for line := range strings.Lines(served) {
+		if !strings.Contains(line, text) {
+			continue
+		}
+		stamp, _, _ := strings.Cut(strings.TrimPrefix(line, "time="), " ")
+		at, err := time.Parse(time.RFC3339Nano, stamp)
+		if err != nil {
+			t.Fatalf("reading a recorded line's time: %v", err)
+		}
+		out[at.Unix()]++
+	}
+	return out
 }
 
 // lockedLines collects the lines the recording handler writes, locked for

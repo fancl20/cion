@@ -496,7 +496,10 @@ func TestBootstrapWithoutAnswer(t *testing.T) {
 // existing WireGuard interface — fails loudly at the bind, the argument's
 // override the remedy. The refusal releases what the boot acquired: once the
 // held socket closes, a second boot on the same host and state succeeds,
-// the endpoint, responder, and rendezvous ports free again.
+// the endpoint, responder, and rendezvous ports free again. The HTTPS server
+// the WireGuard application mounts on binds a pinned port, as in the
+// coordination labs, not HTTPS's own, which a host can keep for privileged
+// processes.
 func TestHeldHostPortRefusesBoot(t *testing.T) {
 	t.Parallel()
 	wpki := webpkitest.New(t)
@@ -508,13 +511,14 @@ func TestHeldHostPortRefusesBoot(t *testing.T) {
 	}
 
 	cfg := services.NodeConfig{
-		Core:     true,
-		Domain:   webpkitest.Domain,
-		State:    t.TempDir(),
-		Internal: PinnedUDPAddrOn(t, ip),
-		Control:  FreeUDPAddrOn(t, ip),
-		CertFile: wpki.CertFile,
-		KeyFile:  wpki.KeyFile,
+		Core:         true,
+		Domain:       webpkitest.Domain,
+		State:        t.TempDir(),
+		Internal:     PinnedUDPAddrOn(t, ip),
+		Control:      FreeUDPAddrOn(t, ip),
+		CertFile:     wpki.CertFile,
+		KeyFile:      wpki.KeyFile,
+		Coordination: &services.CoordinationOptions{Addr: PinnedTCPAddrOn(t, ip)},
 		AppArguments: apps.Arguments{
 			Wireguard: apps.WireguardArguments{HostPort: apps.DefaultHostPort},
 		},
