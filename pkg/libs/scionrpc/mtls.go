@@ -31,7 +31,8 @@ import (
 // node that has not pinned the TRC yet cannot authenticate anyone: its
 // handshakes degrade to encryption without authentication, the window in
 // which a fresh node receives the unverified beacons that route its
-// enrollment fetch. Beacons carry the authoritative signature; this layer
+// enrollment fetch, and a connection it accepts then serves no peer identity
+// for its life. Beacons carry the authoritative signature; this layer
 // authenticates the transport.
 
 // EndpointTLSConfig configures the endpoint's two channels.
@@ -54,19 +55,9 @@ type EndpointTLSConfig struct {
 // EndpointTLS composes the endpoint's TLS configuration: the bootstrap channel
 // — the WebPKI certificate for the clients the identity takes, a domain's
 // naming it as the TLS server name and an address's arriving nameless — and
-// the SCION-native channel for everything else.
+// the SCION-native channel for everything else, configured per handshake so
+// each marks its own connection's record.
 func EndpointTLS(cfg EndpointTLSConfig) *tls.Config {
-	native := &tls.Config{
-		MinVersion: tls.VersionTLS13,
-		NextProtos: []string{"h3"},
-		// Any client certificate is required, but it is only verified against
-		// the TRC once the node has pinned one.
-		ClientAuth: tls.RequireAnyClientCert,
-		GetCertificate: func(*tls.ClientHelloInfo) (*tls.Certificate, error) {
-			return nativeCert(cfg.Credentials, cfg.Key)
-		},
-		VerifyPeerCertificate: verifyChainAgainstTRC(cfg.Credentials, nil),
-	}
 	return &tls.Config{
 		MinVersion: tls.VersionTLS13,
 		NextProtos: []string{"h3"},
@@ -74,7 +65,33 @@ func EndpointTLS(cfg EndpointTLSConfig) *tls.Config {
 			if cfg.WebPKI != nil && bootstrapHello(chi.ServerName, cfg.Domain) {
 				return cfg.WebPKI, nil
 			}
-			return native, nil
+			return nativeServerTLS(cfg, handshakeOf(chi.Context())), nil
+		},
+	}
+}
+
+// nativeServerTLS returns the SCION-native channel's configuration for one
+// handshake: any client certificate required, verified against the TRC once
+// the node has pinned one, and a chain that verifies marks the handshake's
+// record h, when it has one. It issues no session tickets: crypto/tls skips
+// VerifyPeerCertificate on a resumed session and carries over the
+// certificates of the handshake it resumes, so a resumption would outlive
+// the trust that handshake ran under.
+func nativeServerTLS(cfg EndpointTLSConfig, h *handshake) *tls.Config {
+	return &tls.Config{
+		MinVersion:             tls.VersionTLS13,
+		NextProtos:             []string{"h3"},
+		ClientAuth:             tls.RequireAnyClientCert,
+		SessionTicketsDisabled: true,
+		GetCertificate: func(*tls.ClientHelloInfo) (*tls.Certificate, error) {
+			return nativeCert(cfg.Credentials, cfg.Key)
+		},
+		VerifyPeerCertificate: func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
+			verified, err := verifyPeerChain(cfg.Credentials, nil, rawCerts)
+			if verified && h != nil {
+				h.verified.Store(true)
+			}
+			return err
 		},
 	}
 }
@@ -122,57 +139,64 @@ func nativeClientTLS(
 	return conf
 }
 
-// verifyChainAgainstTRC returns a VerifyPeerCertificate callback checking
-// that the presented chain — the first two certificates the peer presented
-// — verifies against the anchor pool — the pinned newest TRC's roots, the
-// predecessor's beside them while the newest is within its grace period —
-// and, when expected is non-nil, that its subject names the expected IA. A
-// chain that passes is handed to the credentials to decide, beside the
-// certificates the peer presented after it. Without a pinned TRC every
-// chain is accepted — the bootstrap window — and none is decided.
+// verifyChainAgainstTRC returns a VerifyPeerCertificate callback applying
+// verifyPeerChain.
 func verifyChainAgainstTRC(creds Credentials, expected *addr.IA) func([][]byte, [][]*x509.Certificate) error {
 	return func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
-		if len(rawCerts) == 0 {
-			return errors.New("peer presented no certificate")
-		}
-		certs := make([]*x509.Certificate, len(rawCerts))
-		for i, raw := range rawCerts {
-			cert, err := x509.ParseCertificate(raw)
-			if err != nil {
-				return fmt.Errorf("parsing certificate: %w", err)
-			}
-			certs[i] = cert
-		}
-		chain, presented := certs[:min(2, len(certs))], certs[min(2, len(certs)):]
-		pool, err := creds.AnchorPool()
-		if err != nil {
-			return err
-		}
-		if len(pool) == 0 {
-			slog.Warn("SCION-native handshake without a pinned TRC; peer not authenticated",
-				"peer", chainSubjectIA(chain))
-			return nil
-		}
-		if err := cppki.VerifyChain(chain, cppki.VerifyOptions{
-			TRC: pool,
-		}); err != nil {
-			return fmt.Errorf("chain does not verify against the anchor pool: %w", err)
-		}
-		if expected != nil {
-			ia, err := cppki.ExtractIA(chain[0].Subject)
-			if err != nil {
-				return fmt.Errorf("extracting peer ISD-AS from certificate: %w", err)
-			}
-			if !ia.Equal(*expected) {
-				return serrors.New("certificate is for another ISD-AS",
-					"expected", *expected, "actual", ia)
-			}
-		}
-		if err := creds.AcceptChain(chain, presented); err != nil {
-			return fmt.Errorf("chain refused: %w", err)
-		}
-		return nil
+		_, err := verifyPeerChain(creds, expected, rawCerts)
+		return err
 	}
+}
+
+// verifyPeerChain checks that the presented chain — the first two
+// certificates the peer presented — verifies against the anchor pool — the
+// pinned newest TRC's roots, the predecessor's beside them while the newest
+// is within its grace period — and, when expected is non-nil, that its
+// subject names the expected IA, reporting whether it verified one. A chain
+// that passes is handed to the credentials to decide, beside the
+// certificates the peer presented after it. Without a pinned TRC every
+// chain is accepted unverified — the bootstrap window — and none is decided.
+func verifyPeerChain(creds Credentials, expected *addr.IA, rawCerts [][]byte) (bool, error) {
+	if len(rawCerts) == 0 {
+		return false, errors.New("peer presented no certificate")
+	}
+	certs := make([]*x509.Certificate, len(rawCerts))
+	for i, raw := range rawCerts {
+		cert, err := x509.ParseCertificate(raw)
+		if err != nil {
+			return false, fmt.Errorf("parsing certificate: %w", err)
+		}
+		certs[i] = cert
+	}
+	chain, presented := certs[:min(2, len(certs))], certs[min(2, len(certs)):]
+	pool, err := creds.AnchorPool()
+	if err != nil {
+		return false, err
+	}
+	if len(pool) == 0 {
+		slog.Warn("SCION-native handshake without a pinned TRC; peer not authenticated",
+			"peer", chainSubjectIA(chain))
+		return false, nil
+	}
+	if err := cppki.VerifyChain(chain, cppki.VerifyOptions{
+		TRC: pool,
+	}); err != nil {
+		return false, fmt.Errorf("chain does not verify against the anchor pool: %w", err)
+	}
+	if expected != nil {
+		ia, err := cppki.ExtractIA(chain[0].Subject)
+		if err != nil {
+			return false, fmt.Errorf("extracting peer ISD-AS from certificate: %w", err)
+		}
+		if !ia.Equal(*expected) {
+			return false, serrors.New("certificate is for another ISD-AS",
+				"expected", *expected, "actual", ia)
+		}
+	}
+	if err := creds.AcceptChain(chain, presented); err != nil {
+		return false, fmt.Errorf("chain refused: %w", err)
+	}
+	return true, nil
 }
 
 // nativeCert returns the node's AS chain as a TLS certificate, the

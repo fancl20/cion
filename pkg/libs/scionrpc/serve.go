@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/quic-go/quic-go"
@@ -31,7 +32,10 @@ var quicConfig = &quic.Config{InitialPacketSize: 1200}
 // canceling its requests' contexts, and the server's Close waits for their
 // handlers. The return waits on a close already under way, for a second
 // Close returns before the first's release finishes. The TLS configuration
-// must carry the certificate for the served domain.
+// must carry the certificate for the served domain. A request carries its
+// client's certificates only when its connection's handshake verified them:
+// the SCION-native channel's handshakes verify a chain against the pinned
+// TRC, and every other handshake verifies none.
 func ServeHTTP3(
 	ctx context.Context,
 	conn *scion.Conn,
@@ -45,13 +49,21 @@ func ServeHTTP3(
 		stop()
 		_ = release()
 	}()
-	transport := &quic.Transport{Conn: &resolutionConn{conn: conn}}
+	transport := &quic.Transport{
+		Conn: &resolutionConn{conn: conn},
+		// Each connection carries the record of its handshake, which the
+		// SCION-native channel's configuration marks once it verified the
+		// client's chain.
+		ConnContext: func(ctx context.Context, _ *quic.ClientInfo) (context.Context, error) {
+			return context.WithValue(ctx, handshakeKey{}, &handshake{}), nil
+		},
+	}
 	ln, err := transport.Listen(tlsConf, quicConfig)
 	if err != nil {
 		return err
 	}
 	server := &http3.Server{
-		Handler:    handler,
+		Handler:    withholdUnverified(handler),
 		TLSConfig:  tlsConf,
 		QUICConfig: quicConfig,
 	}
@@ -60,6 +72,46 @@ func ServeHTTP3(
 	// none.
 	_ = server.Close()
 	return err
+}
+
+// handshakeKey is the context key of a served connection's handshake record.
+type handshakeKey struct{}
+
+// handshake records whether a served connection's handshake verified the
+// client's chain: verified against the pinned TRC and accepted by the
+// credentials.
+type handshake struct {
+	verified atomic.Bool
+}
+
+// handshakeOf returns the handshake record the context carries, nil when it
+// carries none or there is no context.
+func handshakeOf(ctx context.Context) *handshake {
+	if ctx == nil {
+		return nil
+	}
+	h, _ := ctx.Value(handshakeKey{}).(*handshake)
+	return h
+}
+
+// withholdUnverified hands the handler a request's client certificates only
+// when its connection's handshake verified them, so a handler reads a peer's
+// identity from a verified chain alone. A connection the node accepted
+// before it pinned a TRC verified nothing — the bootstrap window accepts any
+// certificate — and serves no identity for its life, the node's later pin
+// notwithstanding.
+func withholdUnverified(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.TLS != nil && len(r.TLS.PeerCertificates) > 0 {
+			if h := handshakeOf(r.Context()); h == nil || !h.verified.Load() {
+				state := *r.TLS
+				state.PeerCertificates = nil
+				r = r.WithContext(r.Context())
+				r.TLS = &state
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 // resolutionConn demuxes the endpoint's socket: QUIC datagrams pass to the

@@ -34,9 +34,11 @@ func AuthenticatedIA(ctx context.Context) addr.IA {
 
 // Authenticate peers the verified chain's ISD-AS into the request context.
 // The middleware shape serves every service the SCION-native channel serves:
-// the handler reads what the transport authenticated. A chain that names no
-// ISD-AS authenticates nothing — the request proceeds unidentified and the
-// handlers that require an identity refuse it.
+// the handler reads what the transport authenticated, and the transport
+// hands over only the client certificates its handshake verified. A request
+// without them, or with a chain that names no ISD-AS, authenticates nothing
+// — the request proceeds unidentified and the handlers that require an
+// identity refuse it.
 func Authenticate(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.TLS != nil && len(r.TLS.PeerCertificates) > 0 {
