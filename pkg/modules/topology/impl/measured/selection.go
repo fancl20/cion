@@ -613,9 +613,10 @@ func (s *selection) peerHost(ctx context.Context, ia addr.IA) (netip.Addr, bool)
 const selectionRequester = "selection"
 
 // request replaces the selection's path requests with the window's: each
-// peer's baseline and each up link's freshest clean survivor, priced, and
-// each peer's freshest ejected route fresher than its baseline, half-open at
-// its retry, so a route that recovers counts again.
+// peer's baseline, the route each member is priced by with every link and
+// without each up link, and each up link's freshest clean survivor, priced;
+// and each peer's freshest ejected route fresher than its baseline,
+// half-open at its retry, so a route that recovers counts again.
 func (s *selection) request(samples map[addr.IA]sample, ts []tier) {
 	if s.cfg.Requests == nil {
 		return
@@ -636,9 +637,19 @@ func (s *selection) request(samples map[addr.IA]sample, ts []tier) {
 		}
 	}
 	for _, t := range ts {
+		for _, m := range t.members {
+			if c := t.cheapest[m.ia]; c != nil {
+				add(m.ia, c, bus.PathPriced, time.Time{})
+			}
+		}
 		for _, ex := range t.excluded {
 			if ex.survivor != nil {
 				add(ex.dst, ex.survivor, bus.PathPriced, time.Time{})
+			}
+			for _, m := range t.members {
+				if c := ex.cheapest[m.ia]; c != nil {
+					add(m.ia, c, bus.PathPriced, time.Time{})
+				}
 			}
 		}
 	}

@@ -391,6 +391,59 @@ func TestSelectionRequestsItsRoutes(t *testing.T) {
 	}
 }
 
+// TestSelectionRequestsEachMembersCheapest checks the routes the window
+// requests beside each peer's baseline and each up link's freshest
+// survivor: the route each member is priced by, with every link — in a tier
+// no up link reaches as well — and without each up link, at its price,
+// transits charged, not the one cheapest at its cost, whichever member the
+// freshest survivor resolves into.
+func TestSelectionRequestsEachMembersCheapest(t *testing.T) {
+	ms := time.Millisecond
+	f := newSelFixture(t, selPeer, selA)
+	requests := new(bus.Topic[bus.PathRequests])
+	f.sel.cfg.Requests = requests
+	// B's freshest route rides Peer's link at 30ms, 40ms with its transit.
+	// Around Peer's link: through A at 40ms, the freshest there; at 20ms,
+	// 30ms with its transit, B's cheapest; and through A and X at 15ms, 35ms
+	// with its two transits.
+	viaPeer := measured(f.via(t, selPeer, 0, selPeer, selB), 30*ms)
+	freshest := measured(f.via(t, selA, -time.Minute, selA, selB), 40*ms)
+	cheapest := measured(f.via(t, selA, -2*time.Minute, selA, selB), 20*ms)
+	viaAX := measured(f.via(t, selA, -3*time.Minute, selA, selX, selB), 15*ms)
+	f.candidate(selB, 12*ms, 0, viaPeer, freshest, cheapest, viaAX)
+	// C's cheapest route rides Peer's link at 20ms, 30ms with its transit;
+	// around it, through A at 30ms, 40ms with its transit, staler than B's
+	// routes there.
+	cViaPeer := measured(f.via(t, selPeer, 0, selPeer, selC), 20*ms)
+	cViaA := measured(f.via(t, selA, -5*time.Minute, selA, selC), 30*ms)
+	f.candidate(selC, 12*ms, 0, cViaPeer, cViaA)
+	// D, far, in a tier no up link reaches: its freshest route through Peer
+	// at 80ms, its cheapest through A at 60ms.
+	dViaPeer := measured(f.via(t, selPeer, 0, selPeer, selD), 80*ms)
+	dViaA := measured(f.via(t, selA, -time.Minute, selA, selD), 60*ms)
+	f.candidate(selD, 50*ms, 0, dViaPeer, dViaA)
+
+	f.pass(t)
+	got := make(map[bus.PathID]bool)
+	for r := range requests.Latest().All() {
+		got[r.ID] = true
+	}
+	want := map[bus.PathID]bool{
+		f.samples[selPeer].candidates[0].ID: true,
+		f.samples[selA].candidates[0].ID:    true,
+		viaPeer.ID:                          true,
+		freshest.ID:                         true,
+		cheapest.ID:                         true,
+		cViaPeer.ID:                         true,
+		cViaA.ID:                            true,
+		dViaPeer.ID:                         true,
+		dViaA.ID:                            true,
+	}
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("the window's requests (-want +got):\n%s", diff)
+	}
+}
+
 // TestSelectionFloorPromotion checks the redundancy floor: below it, any
 // reachable candidate is promoted outright — reachability outranks latency —
 // and the unreachable one is skipped.

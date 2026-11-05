@@ -7,6 +7,7 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"github.com/scionproto/scion/pkg/addr"
 
+	"github.com/fancl20/cion/pkg/libs/bus"
 	"github.com/fancl20/cion/pkg/libs/scion"
 	"github.com/fancl20/cion/pkg/modules/links"
 )
@@ -75,9 +76,10 @@ func TestDeriveTiers(t *testing.T) {
 // from the verdicts alone; the price of the cheapest clean route at its cost
 // — a declared route under a measured one sets it, while an ejected route
 // and one over a local down interface price nothing; each member's own price
-// over its own routes, a member no route prices absent; the route count
-// reading the clean candidates alone; and strandedness, once no up link
-// reaches a tier and the measurements doubt every route into it.
+// over its own routes, beside the route it is, a member no route prices
+// absent; the route count reading the clean candidates alone; and
+// strandedness, once no up link reaches a tier and the measurements doubt
+// every route into it.
 func TestWindowTierFacts(t *testing.T) {
 	verdicts := map[uint16]bool{3: true, 4: false, 7: false} // B's link down, the node's own 7 dead
 	up := &links.Link{NeighborIA: selA, IfID: 3, State: links.StateEstablished}
@@ -123,6 +125,9 @@ func TestWindowTierFacts(t *testing.T) {
 	wantPrices := map[addr.IA]time.Duration{selA: 16 * time.Millisecond}
 	if diff := cmp.Diff(wantPrices, fast.prices); diff != "" {
 		t.Errorf("member prices (-want +got):\n%s", diff)
+	}
+	if len(fast.cheapest) != 1 || fast.cheapest[selA].ID != a.candidates[1].ID {
+		t.Errorf("the routes the members are priced by = %v, want A's declared route", fast.cheapest)
 	}
 	// The up link beside a clean route that avoids it: the declared route
 	// and C's clean route share no link with the up link.
@@ -192,6 +197,57 @@ func TestExcludedCutsOffTheLinksOwnNeighbor(t *testing.T) {
 	}
 }
 
+// TestExcludedCheapestSurvivors checks the survivor the excluded
+// measurement prices each member by: the cheapest at its price, transits
+// charged, not the cheapest at its cost; none for a member whose survivors
+// price nothing or that no survivor reaches.
+func TestExcludedCheapestSurvivors(t *testing.T) {
+	ms := time.Millisecond
+	verdicts := map[uint16]bool{3: true, 5: true}
+	neighbors := map[addr.IA]*links.Link{
+		selA: {NeighborIA: selA, IfID: 3, State: links.StateEstablished},
+		selB: {NeighborIA: selB, IfID: 5, State: links.StateEstablished},
+	}
+	s := &selection{cfg: SelectionConfig{
+		IA:    selIA,
+		Links: verdictTopic(verdicts),
+	}}
+	// A's own link at 20ms; around it, through B at 15ms, 25ms with its
+	// transit, and through B and X at 12ms, 32ms with its two. B rides its
+	// own link alone. C's routes declare nothing.
+	aOwn := measured(route(0, 0, local(3), link(selA)), 20*ms)
+	aViaB := measured(route(-time.Minute, 0, local(5), link(selB), link(selA)), 15*ms)
+	aViaBX := measured(route(-time.Minute, 0, local(5), link(selB), link(selX), link(selA)), 12*ms)
+	bOwn := measured(route(0, 0, local(5), link(selB)), 20*ms)
+	ts := s.windowTiers(neighbors, map[addr.IA]sample{
+		selA: sm(10*ms, aOwn, aViaB, aViaBX),
+		selB: sm(10*ms, bOwn),
+		selC: sm(10*ms, route(0, 0, local(3), link(selA), link(selC)), route(0, 0, local(5), link(selB), link(selC))),
+	})
+	if len(ts) != 1 {
+		t.Fatalf("tiers = %d, want one", len(ts))
+	}
+	ids := func(cheapest map[addr.IA]*scion.Candidate) map[addr.IA]bus.PathID {
+		out := make(map[addr.IA]bus.PathID, len(cheapest))
+		for ia, c := range cheapest {
+			out[ia] = c.ID
+		}
+		return out
+	}
+	for _, tc := range []struct {
+		name string
+		link addr.IA
+		want map[addr.IA]bus.PathID
+	}{
+		{"around A's link", selA, map[addr.IA]bus.PathID{selA: aViaB.ID, selB: bOwn.ID}},
+		{"around B's link", selB, map[addr.IA]bus.PathID{selA: aOwn.ID}},
+	} {
+		if diff := cmp.Diff(tc.want, ids(ts[0].excluded[tc.link].cheapest)); diff != "" {
+			t.Errorf("%s: cheapest survivors (-want +got):\n%s", tc.name, diff)
+		}
+	}
+}
+
 // TestWindowTiersWithoutMeasurements checks a window nothing measured, every
 // route unknown, as on a node without the ping application: routes price by
 // their declarations, a tier with no up link is not stranded while a clean
@@ -229,12 +285,12 @@ func TestWindowTiersWithoutMeasurements(t *testing.T) {
 	}
 }
 
-// TestMemberPrice checks a member's price: each route at its cost, the
-// measured round trip or else the declared sum doubled, an undeclared and
-// unmeasured one, or one measured at zero, pricing nothing; each route
-// charged the transit penalty for every AS it crosses between its ends, each
-// way; the cheapest winning.
-func TestMemberPrice(t *testing.T) {
+// TestMemberRoute checks the route a member is priced by: each route at its
+// cost, the measured round trip or else the declared sum doubled, an
+// undeclared and unmeasured one, or one measured at zero, pricing nothing;
+// each route charged the transit penalty for every AS it crosses between its
+// ends, each way; the cheapest winning.
+func TestMemberRoute(t *testing.T) {
 	ms := time.Millisecond
 	direct := measured(route(0, ms, local(1), link(selA)), 20*ms)
 	oneTransit := route(0, 9*ms, local(2), link(selB), link(selA))
@@ -242,21 +298,27 @@ func TestMemberPrice(t *testing.T) {
 	undeclared := route(0, 0, local(3), link(selC), link(selA))
 
 	for _, tc := range []struct {
-		name   string
-		routes []*scion.Candidate
-		want   time.Duration
+		name      string
+		routes    []*scion.Candidate
+		want      time.Duration
+		wantRoute bus.PathID
 	}{
-		{"a measured route at its cost", ptrs(direct), 20 * ms},
-		{"a measured route's transit charged", ptrs(measured(oneTransit, 20*ms)), 30 * ms},
-		{"a declared route, its transit charged", ptrs(oneTransit), 28 * ms},
-		{"two transits charged", ptrs(twoTransits), 26 * ms},
-		{"an undeclared route", ptrs(undeclared), 0},
-		{"a zero cost, its transit uncharged", ptrs(measured(oneTransit, 0)), 0},
-		{"the cheapest", ptrs(measured(direct, 30*ms), oneTransit, twoTransits, undeclared), 26 * ms},
+		{"a measured route at its cost", ptrs(direct), 20 * ms, direct.ID},
+		{"a measured route's transit charged", ptrs(measured(oneTransit, 20*ms)), 30 * ms, oneTransit.ID},
+		{"a declared route, its transit charged", ptrs(oneTransit), 28 * ms, oneTransit.ID},
+		{"two transits charged", ptrs(twoTransits), 26 * ms, twoTransits.ID},
+		{"an undeclared route", ptrs(undeclared), 0, ""},
+		{"a zero cost, its transit uncharged", ptrs(measured(oneTransit, 0)), 0, ""},
+		{"the cheapest", ptrs(measured(direct, 30*ms), oneTransit, twoTransits, undeclared), 26 * ms, twoTransits.ID},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := memberPrice(tc.routes); got != tc.want {
-				t.Errorf("price = %v, want %v", got, tc.want)
+			c, price := memberRoute(tc.routes)
+			var got bus.PathID
+			if c != nil {
+				got = c.ID
+			}
+			if price != tc.want || got != tc.wantRoute {
+				t.Errorf("route %v at %v, want %v at %v", got, price, tc.wantRoute, tc.want)
 			}
 		})
 	}

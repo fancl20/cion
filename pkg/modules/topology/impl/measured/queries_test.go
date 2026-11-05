@@ -171,9 +171,10 @@ func TestCheapest(t *testing.T) {
 // the link nowhere, the freshest of them the window's survivor, answered
 // when healthy; the price is the cheapest survivor at its cost; each
 // member's price is the same over its own survivors, each route charged the
-// transit penalty per AS it crosses; the route count reads the tier's other
-// up links beside the survivors; a link every route crosses leaves no
-// survivor and no price; and a down link takes no measurement.
+// transit penalty per AS it crosses, beside the survivor it is priced by;
+// the route count reads the tier's other up links beside the survivors; a
+// link every route crosses leaves no survivor and no price; and a down link
+// takes no measurement.
 func TestMeasureExcluded(t *testing.T) {
 	verdicts := map[uint16]bool{1: true, 2: true, 4: false, 5: true}
 	neighbors := map[addr.IA]*links.Link{
@@ -220,6 +221,7 @@ func TestMeasureExcluded(t *testing.T) {
 		price:    22 * time.Millisecond,
 		routes:   2,
 		prices:   map[addr.IA]time.Duration{selA: 32 * time.Millisecond, selB: 26 * time.Millisecond},
+		cheapest: map[addr.IA]*scion.Candidate{selA: &a.candidates[0], selB: &b.candidates[0]},
 	}
 	if diff := cmp.Diff(want, fast.excluded[selA], opts...); diff != "" {
 		t.Errorf("A's excluded measurement (-want +got):\n%s", diff)
@@ -233,6 +235,7 @@ func TestMeasureExcluded(t *testing.T) {
 		price:    60 * time.Millisecond,
 		routes:   2,
 		prices:   map[addr.IA]time.Duration{selB: 70 * time.Millisecond},
+		cheapest: map[addr.IA]*scion.Candidate{selB: &b.candidates[1]},
 	}
 	if diff := cmp.Diff(want, fast.excluded[selB], opts...); diff != "" {
 		t.Errorf("B's excluded measurement (-want +got):\n%s", diff)

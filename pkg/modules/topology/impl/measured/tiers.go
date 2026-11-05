@@ -31,9 +31,13 @@ type tier struct {
 	// nothing prices the tier, and no priced rule fires on it.
 	price time.Duration
 	// prices is each member's own price: the cheapest clean route into the
-	// member, priced as memberPrice prices routes. A member no route prices
+	// member, priced as memberRoute prices routes. A member no route prices
 	// is absent.
 	prices map[addr.IA]time.Duration
+	// cheapest holds the route each member's own price is, requested priced
+	// so one through a dead link is ejected and the price rises to the
+	// routes that serve. A member no route prices is absent.
+	cheapest map[addr.IA]*scion.Candidate
 	// routes is the independent routes into the tier, saturated at two.
 	routes int
 	// stranded reports that no up link reaches the tier and none of its
@@ -69,8 +73,12 @@ type excludedSample struct {
 	// beside the survivors, saturated at two.
 	routes int
 	// prices is each member's price over its survivors, priced as
-	// memberPrice prices routes. A member no survivor prices is absent.
+	// memberRoute prices routes. A member no survivor prices is absent.
 	prices map[addr.IA]time.Duration
+	// cheapest holds the survivor each member is priced by, requested
+	// priced so one through a dead link is ejected before its price
+	// retires the link. A member no survivor prices is absent.
+	cheapest map[addr.IA]*scion.Candidate
 	// cutOff holds the members no survivor reaches that a clean route or
 	// the link reaches: the link's own neighbor, which the link reaches
 	// whatever composes, is cut off unless a survivor reaches it.
@@ -141,9 +149,10 @@ func (s *selection) windowTiers(
 		}
 		t.price = cheapest(routes)
 		t.prices = make(map[addr.IA]time.Duration, len(t.members))
+		t.cheapest = make(map[addr.IA]*scion.Candidate, len(t.members))
 		for _, m := range t.members {
-			if p := memberPrice(clean[m.ia]); p > 0 {
-				t.prices[m.ia] = p
+			if c, price := memberRoute(clean[m.ia]); c != nil {
+				t.prices[m.ia], t.cheapest[m.ia] = price, c
 			}
 		}
 		t.routes = routeCount(t.upLinks, routes)
@@ -162,8 +171,9 @@ func (s *selection) windowTiers(
 // candidates: the tier's clean candidates that do not traverse the link —
 // either of its two interface IDs sufficing, a hard filter, for a survivor
 // crossing the link would answer the question falsely — the freshest of
-// them requested priced over the member it resolves into. The measurement
-// crosses the survivors, not the questioned link.
+// them, and each member's cheapest, requested priced over the member it
+// resolves into. The measurement crosses the survivors, not the questioned
+// link.
 func measureExcluded(
 	t *tier,
 	clean map[addr.IA][]*scion.Candidate,
@@ -195,6 +205,7 @@ func measureExcluded(
 	ex.answered = ex.survivor.Health == scion.HealthHealthy
 	ex.price = cheapest(survivors)
 	ex.prices = make(map[addr.IA]time.Duration, len(t.members))
+	ex.cheapest = make(map[addr.IA]*scion.Candidate, len(t.members))
 	ex.cutOff = make(map[addr.IA]bool)
 	for _, m := range t.members {
 		var own []*scion.Candidate
@@ -207,8 +218,8 @@ func measureExcluded(
 			ex.cutOff[m.ia] = true
 			continue
 		}
-		if price := memberPrice(own); price > 0 {
-			ex.prices[m.ia] = price
+		if c, price := memberRoute(own); c != nil {
+			ex.prices[m.ia], ex.cheapest[m.ia] = price, c
 		}
 	}
 	return ex
@@ -296,18 +307,20 @@ func (t *tier) qualifies(ia addr.IA, direct time.Duration) bool {
 	return beats || (t.routes == 1 && direct <= ratioOf(t.price, DemotionRatio))
 }
 
-// memberPrice prices one member's routes by the cheapest of them, each at
-// its price, the picks' own: its cost charged scion.TransitPenalty for every
-// AS it crosses between its ends, each way. A route without a cost, or with
-// a zero one, prices nothing. Zero when nothing prices the member.
-func memberPrice(routes []*scion.Candidate) time.Duration {
+// memberRoute returns the route a member's routes price it by, and that
+// price: the cheapest of them, each at its price, the picks' own — its cost
+// charged scion.TransitPenalty for every AS it crosses between its ends,
+// each way — the first of the cheapest. A route without a cost, or with a
+// zero one, prices nothing. Nil and zero when nothing prices the member.
+func memberRoute(routes []*scion.Candidate) (*scion.Candidate, time.Duration) {
+	var out *scion.Candidate
 	var price time.Duration
 	for _, c := range routes {
-		if p, ok := c.Price(); ok && *c.Cost > 0 {
-			price = lower(price, p)
+		if p, ok := c.Price(); ok && *c.Cost > 0 && (out == nil || p < price) {
+			out, price = c, p
 		}
 	}
-	return price
+	return out, price
 }
 
 // lower returns the smaller of two prices, a zero pricing nothing.

@@ -92,3 +92,22 @@ Nothing on the wire changes.
 *   **The labs and benchmarks** pass. The regions settled, regions cut,
     stranded cut, and site settled benchmarks run against the commit
     before, with their useless retirements and settling reported.
+
+## Implementation history
+
+*   Landed as planned. Pricing the useless test only by survivors that
+    answered would also have stopped those decisions, but ADR-0017 decision
+    2 prices an unprobed route by its declared delays; the requests leave
+    that rule as it is.
+
+    In runs on one machine against the commit before, the site lab joined
+    both ways settled after 9 to 13 link changes in 6 to 9 minutes in three
+    runs, with 3 or 4 useless retirements each, against 10 to 26 changes in
+    8 to 43 minutes and 3 to 9 retirements; joined the other two ways it
+    settled as before. The regions network recovered from its cut in 10
+    seconds in 5 runs of 6, against 6 of 6: in the slow run, two links
+    promoted two windows apart after the cut retired as useless, the herd
+    [proposal 0111](/docs/proposals/0111-stagger-the-priced-promotions.md)
+    staggers. It settled after 14 to 21 link changes in 7 to 13 minutes in
+    three runs, against 13 to 17 in 5.5 to 8. The stranded network
+    recovered from its cut in 10 seconds in three runs of three.
