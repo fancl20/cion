@@ -88,9 +88,9 @@ func TestCoreBaseURLBracketsTheLiteral(t *testing.T) {
 }
 
 // TestCoreClientConsultsItsLocatorOncePerRequest checks that each request
-// reads the core's locator once, in its dial: a locator that takes turns
-// among cores, as the bootstrap core does, then hands every dial the turn it
-// advanced. The service resolution refuses, so each request ends in its dial.
+// reads the core's locator once, in its dial, so every dial takes the route
+// the locator names then. The service resolution refuses, so each request
+// ends in its dial.
 func TestCoreClientConsultsItsLocatorOncePerRequest(t *testing.T) {
 	ia := addr.MustIAFrom(20, 0xff0000000002)
 	calls := 0

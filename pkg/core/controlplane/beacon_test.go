@@ -48,7 +48,8 @@ func macFactory() func() hash.Hash {
 // peer in failFor answers every RPC with its error, and an RPC to a peer in
 // dark waits until the peer's channel closes or the RPC's deadline passes —
 // a peer gone silent. attempts counts every RPC per peer, the waiting ones
-// included.
+// included. Every peer has enrolled but those in unenrolled, and probes
+// records the peers probed.
 type fakeSender struct {
 	mtx           sync.Mutex
 	beacons       []sentBeacon
@@ -56,6 +57,8 @@ type fakeSender struct {
 	failFor       map[addr.IA]error
 	dark          map[addr.IA]chan struct{}
 	attempts      map[addr.IA]int
+	unenrolled    map[addr.IA]bool
+	probes        []addr.IA
 }
 
 type sentBeacon struct {
@@ -93,6 +96,19 @@ func (s *fakeSender) RegisterSegments(
 		return err
 	}
 	s.registrations = append(s.registrations, sentRegistration{peer: peer, segments: segments})
+	return nil
+}
+
+func (s *fakeSender) Enrolled(peer addr.IA) bool {
+	s.mtx.Lock()
+	defer s.mtx.Unlock()
+	return !s.unenrolled[peer]
+}
+
+func (s *fakeSender) Probe(_ context.Context, peer *scion.Addr) error {
+	s.mtx.Lock()
+	defer s.mtx.Unlock()
+	s.probes = append(s.probes, peer.IA)
 	return nil
 }
 
@@ -173,49 +189,6 @@ func newBeaconFixture(t *testing.T) *beaconFixture {
 		founder: founder, db: founder.DB, pathDB: pathDB, engines: engines, store: store,
 		sender: sender, beaconer: beaconer, links: links,
 	}
-}
-
-// carryRoot returns the founder-completed successor of its base TRC that
-// carries the root certificate of the fellow core the base names.
-func carryRoot(t *testing.T, f *trusttest.Founder, fellow addr.IA) cppki.SignedTRC {
-	t.Helper()
-	state := t.TempDir()
-	votingKey, err := trust.LoadOrCreateVotingKey(state)
-	if err != nil {
-		t.Fatal(err)
-	}
-	votingCert, err := trust.LoadOrCreateVotingCert(state, fellow, votingKey)
-	if err != nil {
-		t.Fatal(err)
-	}
-	keys, err := trust.LoadOrCreateIssuerKeys(state)
-	if err != nil {
-		t.Fatal(err)
-	}
-	rootCert, err := trust.LoadOrCreateRootCert(state, fellow, keys.Root)
-	if err != nil {
-		t.Fatal(err)
-	}
-	trc, err := trust.AssembleOnboarding(f.TRC, fellow, votingCert, rootCert)
-	if err != nil {
-		t.Fatal(err)
-	}
-	partial, err := trust.SignUpdate(trc, trust.KeyCert{Key: keys.Root, Cert: rootCert})
-	if err != nil {
-		t.Fatal(err)
-	}
-	sensitive, err := trust.SignerCert(f.TRC.TRC, cppki.Sensitive)
-	if err != nil {
-		t.Fatal(err)
-	}
-	completed, err := trust.CoSign(partial, f.Keys.Sensitive, sensitive)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := completed.Verify(&f.TRC.TRC); err != nil {
-		t.Fatal(err)
-	}
-	return completed
 }
 
 // lineBeacon builds the beacon the core A sends to B: [A] with next B.
@@ -748,14 +721,13 @@ func TestHandleBeaconWithoutTRC(t *testing.T) {
 	}
 }
 
-// TestBootstrapAlternatesOrigins checks the bootstrap slot's per-origin
-// keeping and alternation: a node that has not pinned the TRC records each
-// origin's freshest unverified beacon, BootstrapCore alternates across the
-// origins with the freshest first, and BootstrapRoute serves each origin
-// its own route — one origin's fresher beacons cannot starve the other's.
-// Once the TRC is pinned, the turns go to the founder alone, though the TRC
-// carries the fellow core's root beside the founder's.
-func TestBootstrapAlternatesOrigins(t *testing.T) {
+// TestBootstrapCoreNamesTheFreshestOrigin checks the bootstrap slots'
+// per-origin keeping and the core a node that has not pinned the TRC aims
+// at: each origin's freshest unverified beacon stands in its own slot,
+// BootstrapCore names the origin of the freshest at every call, taking no
+// turns, BootstrapNeighbor the neighbor that sent it, and BootstrapRoute
+// serves each origin its own route.
+func TestBootstrapCoreNamesTheFreshestOrigin(t *testing.T) {
 	f := newBeaconFixture(t)
 	ctx := context.Background()
 
@@ -773,10 +745,13 @@ func TestBootstrapAlternatesOrigins(t *testing.T) {
 		MACKey: []byte(testMACKey),
 		Store:  f.store,
 		DB:     f.pathDB,
-		Links:  tableTopic(map[uint16]addr.IA{1: coreIATest, 3: iaCore2Test}),
+		Links:  tableTopic(map[uint16]addr.IA{1: coreIATest, 2: iaLineC, 3: iaCore2Test}),
 	})
 	if err != nil {
 		t.Fatal(err)
+	}
+	if got := beaconer.BootstrapCore(); !got.IsZero() {
+		t.Errorf("bootstrap core without a beacon = %v, want none", got)
 	}
 
 	// The two cores' beacons, the fellow core's the fresher.
@@ -787,13 +762,16 @@ func TestBootstrapAlternatesOrigins(t *testing.T) {
 	if err := beaconer.HandleBeacon(ctx, core2Beacon(t, f, now.Add(time.Second)), 3); err != nil {
 		t.Fatal(err)
 	}
-
-	// The fresher origin leads and the calls alternate, so a retrying
-	// enrollment reaches every origin the beacons name.
-	for i, want := range []addr.IA{iaCore2Test, coreIATest, iaCore2Test} {
-		if got := beaconer.BootstrapCore(); !got.Equal(want) {
-			t.Errorf("bootstrap core %d = %v, want %v", i, got, want)
+	for i := range 3 {
+		if got := beaconer.BootstrapCore(); !got.Equal(iaCore2Test) {
+			t.Errorf("bootstrap core %d = %v, want the fresher origin %v", i, got, iaCore2Test)
 		}
+	}
+	if got := beaconer.BootstrapNeighbor(iaCore2Test); !got.Equal(iaCore2Test) {
+		t.Errorf("the fellow core's beacon came from %v, want its sender %v", got, iaCore2Test)
+	}
+	if got := beaconer.BootstrapNeighbor(iaLineC); !got.IsZero() {
+		t.Errorf("an origin no beacon named came from %v, want none", got)
 	}
 
 	// Each origin's route serves its own beacon alone.
@@ -807,17 +785,16 @@ func TestBootstrapAlternatesOrigins(t *testing.T) {
 		t.Error("a bootstrap route served an origin no beacon named")
 	}
 
-	// The pin: the TRC carries both cores' roots, and the founder alone —
-	// the holder of the sensitive voting certificate — takes the turns.
-	for _, trc := range []cppki.SignedTRC{f.founder.TRC, carryRoot(t, f.founder, iaCore2Test)} {
-		if _, err := freshDB.InsertTRC(ctx, trc); err != nil {
-			t.Fatal(err)
-		}
+	// A fresher beacon of the founder, which C propagated, takes over.
+	if err := beaconer.HandleBeacon(ctx,
+		crossingBeacon(t, f, now.Add(2*time.Second), coreIATest, iaLineC), 2); err != nil {
+		t.Fatal(err)
 	}
-	for i := range 3 {
-		if got := beaconer.BootstrapCore(); !got.Equal(coreIATest) {
-			t.Errorf("pinned bootstrap core %d = %v, want the founder %v", i, got, coreIATest)
-		}
+	if got := beaconer.BootstrapCore(); !got.Equal(coreIATest) {
+		t.Errorf("bootstrap core = %v, want the founder's fresher origin %v", got, coreIATest)
+	}
+	if got := beaconer.BootstrapNeighbor(coreIATest); !got.Equal(iaLineC) {
+		t.Errorf("the founder's beacon came from %v, want the neighbor that sent it %v", got, iaLineC)
 	}
 }
 
@@ -1012,6 +989,97 @@ func TestPropagateOnce(t *testing.T) {
 			parsed.Entries[i].Signed, parsed.AssociatedData(i)...); err != nil {
 			t.Fatalf("propagated entry %d does not verify: %v", i, err)
 		}
+	}
+}
+
+// TestPropagateOnceSendsAnUnenrolledPeerTheFounders checks the propagation
+// to a peer that has not enrolled: B holds [A] from the founder and the
+// fresher [A2] from the fellow core, and C, not enrolled, receives [A, B]
+// alone beside a probe; once C has enrolled it receives both, freshest
+// first, and no probe.
+func TestPropagateOnceSendsAnUnenrolledPeerTheFounders(t *testing.T) {
+	f := newBeaconFixture(t)
+	ctx := context.Background()
+	now := time.Now()
+	if err := f.beaconer.HandleBeacon(ctx, lineBeacon(t, f, now), 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.beaconer.HandleBeacon(ctx, core2Beacon(t, f, now.Add(time.Second)), 3); err != nil {
+		t.Fatal(err)
+	}
+	f.sender.mtx.Lock()
+	f.sender.unenrolled = map[addr.IA]bool{iaLineC: true}
+	f.sender.mtx.Unlock()
+	f.beaconer.propagateOnce(ctx)
+	f.beaconer.sends.Wait()
+	want := map[addr.IA][][]addr.IA{iaLineC: {{coreIATest, nodeIATest}}}
+	if diff := cmp.Diff(want, propagatedHops(t, f)); diff != "" {
+		t.Errorf("propagated to the unenrolled peer (-want +got):\n%s", diff)
+	}
+	f.sender.mtx.Lock()
+	probes := slices.Clone(f.sender.probes)
+	f.sender.unenrolled = nil
+	f.sender.beacons = nil
+	f.sender.mtx.Unlock()
+	if !slices.Equal(probes, []addr.IA{iaLineC}) {
+		t.Errorf("probed %v, want the unenrolled peer %v", probes, iaLineC)
+	}
+
+	f.beaconer.propagateOnce(ctx)
+	f.beaconer.sends.Wait()
+	want = map[addr.IA][][]addr.IA{iaLineC: {{iaCore2Test, nodeIATest}, {coreIATest, nodeIATest}}}
+	if diff := cmp.Diff(want, propagatedHops(t, f)); diff != "" {
+		t.Errorf("propagated to the enrolled peer (-want +got):\n%s", diff)
+	}
+	f.sender.mtx.Lock()
+	defer f.sender.mtx.Unlock()
+	if len(f.sender.probes) != 1 {
+		t.Errorf("probes = %v, want none of the enrolled peer", f.sender.probes[1:])
+	}
+}
+
+// TestOriginationReachesAnUnenrolledPeerFromTheFounderAlone checks the
+// origination toward a peer that has not enrolled: the fellow core A2
+// originates toward the founder A — a core the TRC names, enrolled whatever
+// the record says — but not toward B, which has not enrolled, while the
+// founder originates toward B all the same.
+func TestOriginationReachesAnUnenrolledPeerFromTheFounderAlone(t *testing.T) {
+	f := newBeaconFixture(t)
+	ctx := context.Background()
+	f.sender.unenrolled = map[addr.IA]bool{nodeIATest: true, coreIATest: true}
+	// originated runs one origination pass of the core over the links and
+	// returns the peers it sent a beacon.
+	originated := func(ia addr.IA, links map[uint16]addr.IA) map[addr.IA]bool {
+		t.Helper()
+		core, err := NewBeaconer(BeaconerConfig{
+			IA:     ia,
+			Engine: f.engines[ia],
+			MACKey: []byte(testMACKey),
+			Store:  f.store,
+			DB:     f.pathDB,
+			Links:  tableTopic(links),
+			Sender: f.sender,
+			Core:   true,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		before := len(snapshotBeacons(t, f))
+		core.originateOnce(ctx)
+		core.sends.Wait()
+		peers := make(map[addr.IA]bool)
+		for _, sent := range snapshotBeacons(t, f)[before:] {
+			peers[sent.peer.IA] = true
+		}
+		return peers
+	}
+	got := originated(iaCore2Test, map[uint16]addr.IA{1: nodeIATest, 2: coreIATest})
+	if diff := cmp.Diff(map[addr.IA]bool{coreIATest: true}, got); diff != "" {
+		t.Errorf("the fellow core's origination (-want +got):\n%s", diff)
+	}
+	got = originated(coreIATest, map[uint16]addr.IA{1: nodeIATest, 2: iaCore2Test})
+	if diff := cmp.Diff(map[addr.IA]bool{nodeIATest: true, iaCore2Test: true}, got); diff != "" {
+		t.Errorf("the founder's origination (-want +got):\n%s", diff)
 	}
 }
 

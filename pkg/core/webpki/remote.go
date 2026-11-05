@@ -52,7 +52,9 @@ func newClient(clt connect.HTTPClient, baseURL string) *client {
 // end-to-end against the core's identity. It is a TLS identity, not a
 // locator; the locator supplies the SCION route — the core's control
 // service as a service destination on the one-hop path, or the reversed up
-// segment the path provider composes.
+// segment the path provider composes. A dial whose handshake meets a
+// certificate that does not name the identity fails with a
+// trust.NotFounderError naming the core it reached.
 type CoreClient struct {
 	conn    *scion.Conn
 	qclt    *quic.Transport
@@ -77,8 +79,8 @@ type CoreClientConfig struct {
 	// core's control service as a service destination, or an underlay address —
 	// and path — the one-hop path when the core is a neighbor, else the reversed
 	// freshest up segment. It is consulted at dial time and only then, so later
-	// dials pick up fresh paths and a locator taking turns among cores turns
-	// once per dial, and a nil address means the locator is unknown yet.
+	// dials pick up fresh paths, and a nil address means the locator is unknown
+	// yet.
 	Locator func() *scion.Addr
 	// ResolveService resolves a service-destined locator through the drafts'
 	// service discovery (control plane draft, Section 5): the request the
@@ -138,7 +140,11 @@ func NewCoreClient(cfg CoreClientConfig) (*CoreClient, error) {
 					Service: 0,
 				}
 			}
-			return c.qclt.Dial(ctx, peer, tlsCfg, cfg)
+			conn, err := c.qclt.Dial(ctx, peer, tlsCfg, cfg)
+			if _, ok := errors.AsType[x509.HostnameError](err); ok {
+				return nil, &trust.NotFounderError{Core: peer.IA, Err: err}
+			}
+			return conn, err
 		},
 	}
 	c.clt = newClient(&http.Client{Transport: newAgedTransport(h3t, maxConnAge)},

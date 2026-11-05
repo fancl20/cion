@@ -6,7 +6,6 @@ import (
 	"hash"
 	"log/slog"
 	"net"
-	"sort"
 	"sync"
 	"time"
 
@@ -57,6 +56,13 @@ type SegmentSender interface {
 	// service.
 	RegisterSegments(ctx context.Context, peer *scion.Addr,
 		segments []*control_plane.PathSegment) error
+	// Enrolled reports whether the peer's latest handshake on the beacon
+	// channel presented a chain the pinned TRC anchors.
+	Enrolled(peer addr.IA) bool
+	// Probe reaches the peer's control service over the beacon channel,
+	// so that the peer's enrollment is recorded whether or not a beacon
+	// goes to it.
+	Probe(ctx context.Context, peer *scion.Addr) error
 }
 
 // Beaconer runs beacon exploration: the core tiers — founding and
@@ -88,14 +94,12 @@ type Beaconer struct {
 	// has pinned the TRC and may use their reversed path — extended with its
 	// own hop — as the route for its enrollment fetch, and a core tier,
 	// which stores no up segments, keeps riding it to its neighboring cores;
-	// never for storing, propagating, or registering. BootstrapCore
-	// alternates across the origins, freshest first, so a retrying
-	// enrollment reaches every origin the beacons name — one core's fresher
-	// beacons cannot starve another's route.
+	// never for storing, propagating, or registering. BootstrapCore names the
+	// freshest origin: a node not enrolled receives the founder's beacons
+	// alone.
 	bootstrapMtx     sync.Mutex
 	bootstraps       map[addr.IA]*segment.PCB
 	bootstrapIngress map[addr.IA]uint16
-	bootstrapTurn    int
 
 	// sends joins the RPCs the passes run off their loops, and busy holds
 	// the slots whose RPCs are outstanding. A pass skips a busy slot, so a
@@ -107,14 +111,15 @@ type Beaconer struct {
 }
 
 // sendKind names the pass an RPC belongs to. Each pass holds its own slot
-// per peer, so origination, propagation, and registration never wait on
-// one another.
+// per peer, so origination, propagation, registration, and the enrollment
+// probe never wait on one another.
 type sendKind uint8
 
 const (
 	originating sendKind = iota
 	propagating
 	registering
+	probing
 )
 
 // sendTarget is one pass's slot for one peer.
@@ -274,8 +279,9 @@ func (b *Beaconer) goSend(t sendTarget, rpcs func()) {
 // the core. It refreshes the slots it holds with each verified beacon, so
 // their routes name the interfaces the link's two ends use now. A core opens
 // a slot for every core it hears, whatever its pin: the slot is its only
-// route to a core it links to. A non-core opens none after its pin: the
-// cores BootstrapCore alternates over stay the ones it heard before.
+// route to a core it links to. A non-core opens none after its pin: its
+// slots stay the origins it heard before, the founder's alone when its
+// neighbors sent it the founder's beacons alone.
 func (b *Beaconer) HandleBeacon(
 	ctx context.Context,
 	pcb *segment.PCB,
@@ -385,40 +391,37 @@ func (b *Beaconer) recordBootstrap(ingress uint16, pcb *segment.PCB, add bool) {
 	b.bootstrapIngress[origin] = ingress
 }
 
-// BootstrapCore returns the ISD-AS a bootstrap beacon originated — the
-// freshest origin first, alternating across calls, so the destination a
-// node that has not pinned the TRC aims its founder route at reaches every
-// origin the beacons name: one origin's fresher beacons cannot starve
-// another's route, and the founder's is the one a retrying enrollment
-// completes against. Once the TRC is pinned, only the founder it names
-// qualifies, as in the founder route's other branches: no other core serves
-// first issuance or hosts the voting application, and a joining core whose
-// onboarding submission lands elsewhere stops. Zero when no origin
-// qualifies. Beacons originate only at cores.
+// BootstrapCore returns the origin of the freshest bootstrap beacon, the core
+// a node that has not pinned the TRC aims its founder route at: a node not
+// enrolled receives the founder's beacons alone, so the origin is the
+// founder unless a neighbor broke that rule, which the founder's WebPKI
+// identity then exposes. Zero when the node holds none. Beacons originate
+// only at cores.
 func (b *Beaconer) BootstrapCore() addr.IA {
-	founder, err := b.engine.FounderAS(b.ia.ISD())
-	if err != nil {
-		slog.Error("Reading the founding core", "err", err)
-		return 0
-	}
 	b.bootstrapMtx.Lock()
 	defer b.bootstrapMtx.Unlock()
-	origins := make([]addr.IA, 0, len(b.bootstraps))
-	for origin := range b.bootstraps {
-		if founder.IsZero() || origin.Equal(founder) {
-			origins = append(origins, origin)
+	var core addr.IA
+	var freshest time.Time
+	for origin, pcb := range b.bootstraps {
+		at := pcb.Timestamp()
+		if core.IsZero() || at.After(freshest) || at.Equal(freshest) && origin < core {
+			core, freshest = origin, at
 		}
 	}
-	if len(origins) == 0 {
+	return core
+}
+
+// BootstrapNeighbor returns the neighbor that sent the freshest bootstrap
+// beacon of the origin — the beacon's last AS entry — and zero when the node
+// holds none of it.
+func (b *Beaconer) BootstrapNeighbor(origin addr.IA) addr.IA {
+	b.bootstrapMtx.Lock()
+	defer b.bootstrapMtx.Unlock()
+	pcb, ok := b.bootstraps[origin]
+	if !ok {
 		return 0
 	}
-	sort.Slice(origins, func(i, j int) bool {
-		return b.bootstraps[origins[i]].Timestamp().
-			After(b.bootstraps[origins[j]].Timestamp())
-	})
-	origin := origins[b.bootstrapTurn%len(origins)]
-	b.bootstrapTurn++
-	return origin
+	return pcb.LastIA()
 }
 
 // checkBeacon applies the structural reception checks of Section 2.3.1: PCB
@@ -560,9 +563,21 @@ func (b *Beaconer) coreASes() (map[addr.IA]bool, error) {
 // signed AS entry, delivered to the neighbor's beacon service — the
 // neighbor's control service as a service destination on the one-hop path,
 // the drafts' own control-traffic pattern, the neighbor's ISD-AS read from
-// the store's snapshot. Each neighbor's send runs off the loop; a neighbor
-// whose previous beacon is still in flight gets none this round.
+// the store's snapshot. A core other than the founder originates nothing
+// toward a peer that has not enrolled, which receives the founder's beacons
+// alone. Each neighbor's send runs off the loop; a neighbor whose previous
+// beacon is still in flight gets none this round.
 func (b *Beaconer) originateOnce(ctx context.Context) {
+	founder, err := b.engine.FounderAS(b.ia.ISD())
+	if err != nil {
+		slog.Error("Originating beacons", "err", err)
+		return
+	}
+	cores, err := b.coreASes()
+	if err != nil {
+		slog.Error("Originating beacons", "err", err)
+		return
+	}
 	state := b.links.Latest()
 	for ifID, neighborIA := range state.Table() {
 		if neighborIA.IsZero() {
@@ -570,6 +585,9 @@ func (b *Beaconer) originateOnce(ctx context.Context) {
 		}
 		if !state.Up(ifID) {
 			continue // a down interface originates nothing
+		}
+		if !b.ia.Equal(founder) && !cores[neighborIA] && !b.sender.Enrolled(neighborIA) {
+			continue
 		}
 		target := sendTarget{originating, neighborIA}
 		if b.pending(target) {
@@ -604,21 +622,33 @@ func (b *Beaconer) originateOnce(ctx context.Context) {
 // neighbor the beacon already crosses, which would discard it as a loop
 // (Section 2.3.1): the neighbor it arrived from, and on links between
 // non-cores, which carry beacons both ways, any neighbor it passed on its way
-// here. The propagation targets are the neighbors' control services as
-// service destinations on the one-hop paths. Each neighbor's beacons go out
-// off the loop in candidate order, until a call fails short of the
-// neighbor's answer — a refused or failed dial, which every further call
-// would repeat — while a beacon the neighbor rejects as invalid leaves the
-// rest to go; the next round retries. A neighbor whose previous beacons are
-// still in flight gets none this round.
+// here. A neighbor that has not enrolled receives the founder's freshest
+// candidates alone, the bounded set narrowed to the founder's origin, and a
+// probe that records its enrollment once it has. The propagation targets
+// are the neighbors' control services as service destinations on the
+// one-hop paths. Each neighbor's beacons go out off the loop in candidate
+// order, until a call fails short of the neighbor's answer — a refused or
+// failed dial, which every further call would repeat — while a beacon the
+// neighbor rejects as invalid leaves the rest to go; the next round retries.
+// A neighbor whose previous beacons are still in flight gets none this
+// round.
 func (b *Beaconer) propagateOnce(ctx context.Context) {
 	cores, err := b.coreASes()
 	if err != nil {
 		slog.Error("Propagating beacons", "err", err)
 		return
 	}
+	founder, err := b.engine.FounderAS(b.ia.ISD())
+	if err != nil {
+		slog.Error("Propagating beacons", "err", err)
+		return
+	}
 	state := b.links.Latest()
-	cands := b.bestSet(state)
+	cands := b.bestSet(state, 0)
+	var founders []Candidate
+	if !founder.IsZero() {
+		founders = b.bestSet(state, founder)
+	}
 	for egress, neighborIA := range state.Table() {
 		if neighborIA.IsZero() {
 			continue // a link whose neighbor establishment has not named
@@ -629,12 +659,17 @@ func (b *Beaconer) propagateOnce(ctx context.Context) {
 		if !state.Up(egress) {
 			continue // a down interface propagates nothing
 		}
+		set := cands
+		if !b.sender.Enrolled(neighborIA) {
+			b.probe(ctx, neighborIA)
+			set = founders
+		}
 		target := sendTarget{propagating, neighborIA}
 		if b.pending(target) {
 			continue
 		}
 		var beacons []*control_plane.PathSegment
-		for _, cand := range cands {
+		for _, cand := range set {
 			if cand.PCB.ContainsIA(neighborIA) {
 				continue
 			}
@@ -687,7 +722,7 @@ func (b *Beaconer) propagateOnce(ctx context.Context) {
 // dial that fails logs and a later pass retries.
 func (b *Beaconer) registerOnce(ctx context.Context) {
 	peers := make(map[addr.IA][]*control_plane.PathSegment)
-	for _, cand := range b.bestSet(b.links.Latest()) {
+	for _, cand := range b.bestSet(b.links.Latest(), 0) {
 		terminated, err := b.terminate(cand)
 		if err != nil {
 			slog.Error("Terminating beacon", "err", err)
@@ -727,7 +762,7 @@ func (b *Beaconer) registerCoreOnce(ctx context.Context) {
 		slog.Error("Terminating core beacons", "err", err)
 		return
 	}
-	for _, cand := range b.bestSet(b.links.Latest()) {
+	for _, cand := range b.bestSet(b.links.Latest(), 0) {
 		if !cores[cand.PCB.LastIA()] {
 			continue
 		}
@@ -747,18 +782,37 @@ func (b *Beaconer) registerCoreOnce(ctx context.Context) {
 	}
 }
 
-// bestSet selects the fixed bounded set of freshest candidates among those
-// whose arrival interface the link table still binds to the neighbor that
-// sent them — the beacon's last entry, the binding reception checked. A
-// beacon that arrived over a link since retired, or since re-established
-// under a new interface ID, names an ingress interface that no longer leads
-// to its sender, and a hop extended or terminated through it would publish a
-// route the data plane cannot carry: the beaconer neither propagates nor
-// terminates it.
-func (b *Beaconer) bestSet(state bus.LinkState) []Candidate {
+// bestSet selects the fixed bounded set of freshest candidates — of the
+// origin's alone when origin is nonzero — among those whose arrival
+// interface the link table still binds to the neighbor that sent them — the
+// beacon's last entry, the binding reception checked. A beacon that arrived
+// over a link since retired, or since re-established under a new interface
+// ID, names an ingress interface that no longer leads to its sender, and a
+// hop extended or terminated through it would publish a route the data
+// plane cannot carry: the beaconer neither propagates nor terminates it.
+func (b *Beaconer) bestSet(state bus.LinkState, origin addr.IA) []Candidate {
 	table := state.Table()
 	return b.store.BestSet(BestSetSize, func(c Candidate) bool {
-		return table[c.Ingress].Equal(c.PCB.LastIA())
+		return table[c.Ingress].Equal(c.PCB.LastIA()) &&
+			(origin.IsZero() || c.PCB.FirstIA().Equal(origin))
+	})
+}
+
+// probe sends the peer the sender's probe off the loop, unless the previous
+// one is still in flight: a dial that records whether the peer has enrolled,
+// whatever beacons go to it.
+func (b *Beaconer) probe(ctx context.Context, peerIA addr.IA) {
+	target := sendTarget{probing, peerIA}
+	if b.pending(target) {
+		return
+	}
+	peer := &scion.Addr{IA: peerIA, Service: addr.SvcCS}
+	b.goSend(target, func() {
+		ctx, cancel := context.WithTimeout(ctx, SendTimeout)
+		defer cancel()
+		if err := b.sender.Probe(ctx, peer); err != nil {
+			slog.Debug("Probing the peer's enrollment", "peer", peerIA, "err", err)
+		}
 	})
 }
 

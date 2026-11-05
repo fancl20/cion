@@ -205,6 +205,64 @@ func TestEnrollmentStopsWithoutVotingApp(t *testing.T) {
 	})
 }
 
+// misnamedFounder is the founder remote of a bootstrap whose beacons led to a
+// core other than the founder: every call meets a certificate that does not
+// name the founder's identity.
+type misnamedFounder struct {
+	core addr.IA
+}
+
+func (m misnamedFounder) err() error {
+	return &trust.NotFounderError{Core: m.core, Err: x509.HostnameError{Host: "cion.test"}}
+}
+
+func (m misnamedFounder) TRC(context.Context, cppki.TRCID) (cppki.SignedTRC, error) {
+	return cppki.SignedTRC{}, m.err()
+}
+
+func (m misnamedFounder) Chains(context.Context, trustdb.ChainQuery) ([][]*x509.Certificate, error) {
+	return nil, m.err()
+}
+
+func (m misnamedFounder) RenewChain(
+	context.Context, *x509.CertificateRequest, crypto.Signer, []*x509.Certificate,
+) ([]*x509.Certificate, error) {
+
+	return nil, m.err()
+}
+
+// TestEnrollmentStopsAtACoreThatIsNotTheFounder checks the first enrollment
+// before the TRC is pinned: a founder remote that reached a core whose
+// endpoint holds no certificate for the founder's identity stops the loop
+// with the NotFounderError naming the core, while any other failure before
+// the pin, and the same failure after it, only retry.
+func TestEnrollmentStopsAtACoreThatIsNotTheFounder(t *testing.T) {
+	f := newFounder(t)
+	lf := newLifecycleFixture(t, f)
+	ctx := context.Background()
+	misled := addr.MustIAFrom(20, 0xff0000000009)
+	cfg := lf.cfg
+
+	cfg.Renewal = trust.NormalRenewal(misnamedFounder{core: misled}, lf.core)
+	_, err := trust.EnrollPass(cfg, ctx)
+	if notFounder, ok := errors.AsType[*trust.NotFounderError](err); !ok || !notFounder.Core.Equal(misled) {
+		t.Fatalf("the pass before the pin = %v, want the NotFounderError naming %v", err, misled)
+	}
+
+	cfg.Renewal = trust.NormalRenewal(&fakeCore{}, lf.core)
+	if got := enrollPassOf(t, ctx, cfg); got != time.Millisecond {
+		t.Errorf("the pass before the pin against an unavailable core = %v, want the retry interval", got)
+	}
+
+	if _, err := lf.db.InsertTRC(ctx, f.TRC); err != nil {
+		t.Fatal(err)
+	}
+	cfg.Renewal = trust.NormalRenewal(misnamedFounder{core: misled}, lf.core)
+	if got := enrollPassOf(t, ctx, cfg); got != time.Millisecond {
+		t.Errorf("the pass after the pin = %v, want the retry interval", got)
+	}
+}
+
 // TestEnrollmentPasses checks the lifecycle loop's decisions: a valid chain
 // with enough remaining validity only inspects; below the renewal threshold
 // it re-enrolls; past expiry it re-enrolls too. The chain's validity is

@@ -73,8 +73,9 @@ func EndpointTLS(cfg EndpointTLSConfig) *tls.Config {
 // nativeServerTLS returns the SCION-native channel's configuration for one
 // handshake: any client certificate required, verified against the TRC once
 // the node has pinned one, and a chain that verifies marks the handshake's
-// record h, when it has one. It issues no session tickets: crypto/tls skips
-// VerifyPeerCertificate on a resumed session and carries over the
+// record h, when it has one, as does the ephemeral certificate the node
+// presents before it holds a chain. It issues no session tickets: crypto/tls
+// skips VerifyPeerCertificate on a resumed session and carries over the
 // certificates of the handshake it resumes, so a resumption would outlive
 // the trust that handshake ran under.
 func nativeServerTLS(cfg EndpointTLSConfig, h *handshake) *tls.Config {
@@ -84,7 +85,12 @@ func nativeServerTLS(cfg EndpointTLSConfig, h *handshake) *tls.Config {
 		ClientAuth:             tls.RequireAnyClientCert,
 		SessionTicketsDisabled: true,
 		GetCertificate: func(*tls.ClientHelloInfo) (*tls.Certificate, error) {
-			return nativeCert(cfg.Credentials, cfg.Key)
+			cert, chained, err := nativeCert(cfg.Credentials, cfg.Key)
+			if err == nil && !chained && h != nil {
+				creds := cfg.Credentials
+				h.chainless.Store(&creds)
+			}
+			return cert, err
 		},
 		VerifyPeerCertificate: func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
 			verified, err := verifyPeerChain(cfg.Credentials, nil, rawCerts)
@@ -130,7 +136,8 @@ func nativeClientTLS(
 		NextProtos:         []string{"h3"},
 		InsecureSkipVerify: true, // verified against the TRC below
 		GetClientCertificate: func(*tls.CertificateRequestInfo) (*tls.Certificate, error) {
-			return nativeCert(creds, key)
+			cert, _, err := nativeCert(creds, key)
+			return cert, err
 		},
 	}
 	if verifyServer {
@@ -178,20 +185,8 @@ func verifyPeerChain(creds Credentials, expected *addr.IA, rawCerts [][]byte) (b
 			"peer", chainSubjectIA(chain))
 		return false, nil
 	}
-	if err := cppki.VerifyChain(chain, cppki.VerifyOptions{
-		TRC: pool,
-	}); err != nil {
-		return false, fmt.Errorf("chain does not verify against the anchor pool: %w", err)
-	}
-	if expected != nil {
-		ia, err := cppki.ExtractIA(chain[0].Subject)
-		if err != nil {
-			return false, fmt.Errorf("extracting peer ISD-AS from certificate: %w", err)
-		}
-		if !ia.Equal(*expected) {
-			return false, serrors.New("certificate is for another ISD-AS",
-				"expected", *expected, "actual", ia)
-		}
+	if err := anchoredFor(pool, chain, expected); err != nil {
+		return false, err
 	}
 	if err := creds.AcceptChain(chain, presented); err != nil {
 		return false, fmt.Errorf("chain refused: %w", err)
@@ -199,23 +194,62 @@ func verifyPeerChain(creds Credentials, expected *addr.IA, rawCerts [][]byte) (b
 	return true, nil
 }
 
+// anchoredFor checks that the chain verifies against the anchor pool and,
+// when expected is non-nil, that its subject names the expected IA.
+func anchoredFor(pool []*cppki.TRC, chain []*x509.Certificate, expected *addr.IA) error {
+	if err := cppki.VerifyChain(chain, cppki.VerifyOptions{
+		TRC: pool,
+	}); err != nil {
+		return fmt.Errorf("chain does not verify against the anchor pool: %w", err)
+	}
+	if expected == nil {
+		return nil
+	}
+	ia, err := cppki.ExtractIA(chain[0].Subject)
+	if err != nil {
+		return fmt.Errorf("extracting peer ISD-AS from certificate: %w", err)
+	}
+	if !ia.Equal(*expected) {
+		return serrors.New("certificate is for another ISD-AS",
+			"expected", *expected, "actual", ia)
+	}
+	return nil
+}
+
+// chainAnchored reports whether the certificates a peer presented open with
+// a chain the anchor pool verifies, its subject naming the peer: the checks
+// verifyPeerChain applies, without the credentials' decision, for a record
+// rather than a handshake. Without a pinned TRC nothing is anchored.
+func chainAnchored(creds Credentials, peer addr.IA, certs []*x509.Certificate) bool {
+	if len(certs) == 0 {
+		return false
+	}
+	pool, err := creds.AnchorPool()
+	if err != nil || len(pool) == 0 {
+		return false
+	}
+	return anchoredFor(pool, certs[:min(2, len(certs))], &peer) == nil
+}
+
 // nativeCert returns the node's AS chain as a TLS certificate, the
-// certificates its credentials present beside the chain after it. A node
-// without a valid chain gets an ephemeral self-signed one: it can then
-// receive beacons — whose signatures it cannot verify yet anyway — but not
-// send anything whose authentication would matter.
-func nativeCert(creds Credentials, key crypto.Signer) (*tls.Certificate, error) {
+// certificates its credentials present beside the chain after it, and
+// whether it is the chain. A node without a valid chain gets an ephemeral
+// self-signed one: it can then receive beacons — whose signatures it cannot
+// verify yet anyway — but not send anything whose authentication would
+// matter.
+func nativeCert(creds Credentials, key crypto.Signer) (*tls.Certificate, bool, error) {
 	ctx := context.Background()
 	chain, err := creds.Chain(ctx)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	if len(chain) == 0 {
-		return ephemeralCert()
+		cert, err := ephemeralCert()
+		return cert, false, err
 	}
 	beside, err := creds.Beside(ctx, chain)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	raw := make([][]byte, 0, len(chain)+len(beside))
 	for _, cert := range chain {
@@ -228,7 +262,7 @@ func nativeCert(creds Credentials, key crypto.Signer) (*tls.Certificate, error) 
 		Certificate: raw,
 		PrivateKey:  key,
 		Leaf:        chain[0],
-	}, nil
+	}, true, nil
 }
 
 // ephemeralCache holds the self-signed certificate serving un-enrolled nodes.

@@ -37,14 +37,46 @@ type PeerClientConfig struct {
 	// path; nil, or a lease with nothing composed, sends over a one-hop
 	// path.
 	Lease func(dst addr.IA) *scion.Lease
+	// Receivers, when set, records each peer's enrollment from the
+	// certificate its handshake presented: the record of a client that
+	// verifies no server, the beacon channel's.
+	Receivers *Receivers
+}
+
+// Receivers records, per peer, whether the receiver of a client's latest
+// handshake with it presented a chain the pinned TRC anchors, naming the
+// peer: an enrolled node. A peer without a record has not enrolled. The zero
+// value records nothing yet.
+type Receivers struct {
+	mtx      sync.Mutex
+	enrolled map[addr.IA]bool
+}
+
+// Enrolled reports whether the peer's latest handshake presented a chain the
+// pinned TRC anchors.
+func (r *Receivers) Enrolled(peer addr.IA) bool {
+	r.mtx.Lock()
+	defer r.mtx.Unlock()
+	return r.enrolled[peer]
+}
+
+// record records what the peer's latest handshake presented.
+func (r *Receivers) record(peer addr.IA, enrolled bool) {
+	r.mtx.Lock()
+	defer r.mtx.Unlock()
+	if r.enrolled == nil {
+		r.enrolled = make(map[addr.IA]bool)
+	}
+	r.enrolled[peer] = enrolled
 }
 
 // NewSCIONClient returns an HTTP client over the SCION-native channel: HTTP/3
 // (QUIC) riding the connection's SCION paths, presenting the node's chain as
 // the client certificate and — with verifyServer set — verifying the peer's
 // chain against the pinned TRC. A dial rides the path the peer's authority
-// names, else the one its lease holds. Closing qclt releases the connections
-// the client dials.
+// names, else the one its lease holds, and records what the peer presented
+// in the configuration's Receivers when set. Closing qclt releases the
+// connections the client dials.
 func NewSCIONClient(
 	cfg PeerClientConfig,
 	qclt *quic.Transport,
@@ -97,6 +129,10 @@ func NewSCIONClient(
 				nativeClientTLS(peer.IA, cfg.Credentials, cfg.Key, verifyServer), quicCfg)
 			if err == nil && ephemeral {
 				unchained.track(conn)
+			}
+			if err == nil && cfg.Receivers != nil {
+				cfg.Receivers.record(peer.IA, chainAnchored(cfg.Credentials, peer.IA,
+					conn.ConnectionState().TLS.PeerCertificates))
 			}
 			if overLease {
 				leased.dialed(authorityKey(authority), peer.IA, path, conn, err)

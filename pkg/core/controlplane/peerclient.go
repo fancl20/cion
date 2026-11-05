@@ -29,8 +29,10 @@ import (
 // — sent over a one-hop path — or a SCION path supplied by the provider.
 // Beacons ride a client-authenticated channel whose server certificate is
 // not verified: their receivers may not be enrolled yet, and the PCB's
-// signatures authenticate the path authoritatively anyway. Registrations and
-// lookups verify the peer's chain against the pinned TRC.
+// signatures authenticate the path authoritatively anyway. The channel
+// records instead whether each receiver presented a chain, the receivers'
+// enrollment the beaconer reads. Registrations and lookups verify the peer's
+// chain against the pinned TRC.
 type PeerClient struct {
 	qclt *quic.Transport
 	// beaconHCLT pools connections for beacon sends; verifiedHCLT for the
@@ -41,6 +43,9 @@ type PeerClient struct {
 	beaconHCLT   *http.Client
 	verifiedHCLT *http.Client
 	oneHopHCLT   *http.Client
+	// receivers records what each receiver's handshake on the beacon
+	// channel presented.
+	receivers scionrpc.Receivers
 
 	mtx         sync.Mutex
 	beaconClt   map[string]*Client
@@ -62,8 +67,10 @@ func NewPeerClient(cfg scionrpc.PeerClientConfig) *PeerClient {
 	// neighbor's control service, whose handler reads the arrival interface
 	// off the one-hop path — a provider path to the neighbor would leave it
 	// unknown, and one exists whenever two cores beacon each other.
-	beaconCfg := cfg
-	beaconCfg.Lease = nil
+	oneHopCfg := cfg
+	oneHopCfg.Lease = nil
+	beaconCfg := oneHopCfg
+	beaconCfg.Receivers = &c.receivers
 	c.beaconHCLT = scionrpc.NewSCIONClient(beaconCfg, c.qclt, false)
 	c.verifiedHCLT = scionrpc.NewSCIONClient(cfg, c.qclt, true)
 	// The one-hop channel keeps the beacon dial's discipline with the
@@ -71,8 +78,33 @@ func NewPeerClient(cfg scionrpc.PeerClientConfig) *PeerClient {
 	// the route its peer's address names, never a resolved one — the direct
 	// link of the entry it names, so the observation the peer's link records
 	// is the sender's link socket, or the path a registrant's address carries.
-	c.oneHopHCLT = scionrpc.NewSCIONClient(beaconCfg, c.qclt, true)
+	c.oneHopHCLT = scionrpc.NewSCIONClient(oneHopCfg, c.qclt, true)
 	return c
+}
+
+// Enrolled reports whether the peer's latest handshake on the beacon channel
+// presented a chain the pinned TRC anchors; a peer the channel never dialed
+// has not enrolled.
+func (c *PeerClient) Enrolled(peer addr.IA) bool {
+	return c.receivers.Enrolled(peer)
+}
+
+// Probe sends the peer's control service a request no service answers over
+// the beacon channel: a dial when no connection to the peer serves, which
+// records whether its receiver enrolled, and a connection that serves the
+// next beacon. A receiver that obtained a chain since the connection's
+// handshake refuses the request and the channel dials anew.
+func (c *PeerClient) Probe(ctx context.Context, peer *scion.Addr) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
+		"https://"+scionrpc.PeerAuthority(peer)+"/", nil)
+	if err != nil {
+		return err
+	}
+	resp, err := c.beaconHCLT.Do(req)
+	if err != nil {
+		return err
+	}
+	return resp.Body.Close()
 }
 
 // Beacon propagates the extended PCB to the peer's beacon service (draft

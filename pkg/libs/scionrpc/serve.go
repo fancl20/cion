@@ -35,7 +35,9 @@ var quicConfig = &quic.Config{InitialPacketSize: 1200}
 // must carry the certificate for the served domain. A request carries its
 // client's certificates only when its connection's handshake verified them:
 // the SCION-native channel's handshakes verify a chain against the pinned
-// TRC, and every other handshake verifies none.
+// TRC, and every other handshake verifies none. A connection the native
+// channel answered with the ephemeral certificate closes at its first
+// request once the node holds a chain.
 func ServeHTTP3(
 	ctx context.Context,
 	conn *scion.Conn,
@@ -52,8 +54,7 @@ func ServeHTTP3(
 	transport := &quic.Transport{
 		Conn: &resolutionConn{conn: conn},
 		// Each connection carries the record of its handshake, which the
-		// SCION-native channel's configuration marks once it verified the
-		// client's chain.
+		// SCION-native channel's configuration marks.
 		ConnContext: func(ctx context.Context, _ *quic.ClientInfo) (context.Context, error) {
 			return context.WithValue(ctx, handshakeKey{}, &handshake{}), nil
 		},
@@ -63,9 +64,15 @@ func ServeHTTP3(
 		return err
 	}
 	server := &http3.Server{
-		Handler:    withholdUnverified(handler),
+		Handler:    retireChainless(withholdUnverified(handler)),
 		TLSConfig:  tlsConf,
 		QUICConfig: quicConfig,
+		ConnContext: func(ctx context.Context, c *quic.Conn) context.Context {
+			if h := handshakeOf(ctx); h != nil {
+				h.conn.Store(c)
+			}
+			return ctx
+		},
 	}
 	err = server.ServeListener(ln)
 	// Close fails only on listeners the server opened itself, and it opened
@@ -77,11 +84,24 @@ func ServeHTTP3(
 // handshakeKey is the context key of a served connection's handshake record.
 type handshakeKey struct{}
 
-// handshake records whether a served connection's handshake verified the
-// client's chain: verified against the pinned TRC and accepted by the
-// credentials.
+// handshake records what a served connection's handshake verified and
+// presented, beside the connection itself.
 type handshake struct {
+	// verified marks a handshake that verified the client's chain against
+	// the pinned TRC, the credentials accepting it.
 	verified atomic.Bool
+	// chainless holds the credentials of a SCION-native handshake that
+	// presented the ephemeral certificate, whose chain outlives it; nil for
+	// every other handshake.
+	chainless atomic.Pointer[Credentials]
+	conn      atomic.Pointer[quic.Conn]
+}
+
+// outlived reports whether the node holds a chain since the handshake
+// presented the ephemeral certificate in its place.
+func (h *handshake) outlived(ctx context.Context) bool {
+	creds := h.chainless.Load()
+	return creds != nil && holdsChain(ctx, *creds)
 }
 
 // handshakeOf returns the handshake record the context carries, nil when it
@@ -108,6 +128,24 @@ func withholdUnverified(next http.Handler) http.Handler {
 				state.PeerCertificates = nil
 				r = r.WithContext(r.Context())
 				r.TLS = &state
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// retireChainless closes a connection the node answered with the ephemeral
+// certificate at its first request once the node holds a chain, the request
+// refused unprocessed — H3_REQUEST_REJECTED, which a client may retry on a
+// new connection. The client's next handshake finds the chain: how a
+// beacon sender learns the node enrolled.
+func retireChainless(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if h := handshakeOf(r.Context()); h != nil && h.outlived(r.Context()) {
+			if conn := h.conn.Load(); conn != nil {
+				_ = conn.CloseWithError(quic.ApplicationErrorCode(http3.ErrCodeRequestRejected),
+					"the node holds a chain")
+				return
 			}
 		}
 		next.ServeHTTP(w, r)

@@ -2,6 +2,7 @@ package testnetwork
 
 import (
 	"context"
+	"errors"
 	"net"
 	"net/netip"
 	"strings"
@@ -488,6 +489,60 @@ func TestBootstrapWithoutAnswer(t *testing.T) {
 	})
 	if got := d.app.IA().ISD(); got != a.app.IA().ISD() {
 		t.Errorf("the joiner's ISD = %d, want the network's %d", got, a.app.IA().ISD())
+	}
+}
+
+// TestJoinerStopsWhereTheIdentityIsNotHeld checks the first enrollment's
+// stop: a joiner whose bootstrap beacons lead to a core that holds no
+// certificate for the identity it names — here the founder, the joiner
+// naming an identity other than the founder's — stops before it pins the
+// TRC, with a NotFounderError naming the core and the error naming the
+// neighbor whose beacon led there.
+func TestJoinerStopsWhereTheIdentityIsNotHeld(t *testing.T) {
+	t.Parallel()
+	wpki := webpkitest.New(t)
+	ipA, ipD := HostSlot(t), HostSlot(t)
+	a := bootAssembly(t, func(cfg *services.NodeConfig) {
+		cfg.Core = true
+		cfg.State = t.TempDir()
+		cfg.Internal = PinnedUDPAddrOn(t, ipA)
+		cfg.Control = FreeUDPAddrOn(t, ipA)
+		cfg.CertFile = wpki.CertFile
+		cfg.KeyFile = wpki.KeyFile
+	})
+	d, err := services.BootApp(t.Context(), services.NodeConfig{
+		Domain:    "elsewhere.test",
+		State:     t.TempDir(),
+		Internal:  PinnedUDPAddrOn(t, ipD),
+		Control:   FreeUDPAddrOn(t, ipD),
+		Neighbors: []string{a.Rendezvous()},
+		RootCAs:   wpki.Pool,
+		Pacing:    fastPacing,
+	}, underlay.Kernel)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = d.Close() })
+	stop := make(chan error, 1)
+	go func() { stop <- d.Wait() }()
+	var stopped error
+	PollFor(t, RestartTimeout, "the joiner to stop", func() bool {
+		select {
+		case stopped = <-stop:
+			return true
+		default:
+			return false
+		}
+	})
+	notFounder, ok := errors.AsType[*trust.NotFounderError](stopped)
+	if !ok {
+		t.Fatalf("the joiner's stop = %v, want a NotFounderError", stopped)
+	}
+	if !notFounder.Core.Equal(a.app.IA()) {
+		t.Errorf("the stop names the core %v, want the founder it reached %v", notFounder.Core, a.app.IA())
+	}
+	if want := "bootstrap beacon from " + a.app.IA().String(); !strings.Contains(stopped.Error(), want) {
+		t.Errorf("the stop = %q, want it to name the neighbor: %q", stopped, want)
 	}
 }
 

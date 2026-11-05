@@ -20,8 +20,8 @@ import (
 // real path — and registers its down segments with both cores; the third
 // node's lookups fetch down segments from each core and compose paths to
 // either child; the node first started under the authoritative alone
-// enrolls and pins the successor, its retries riding the alternation of the
-// bootstrap slot to the founder's fresher beacon.
+// enrolls at the founder and pins the successor, the authoritative having
+// sent it the founder's beacons alone before it enrolled.
 func TestPathLayerServesTwoCores(t *testing.T) {
 	t.Parallel()
 	wpki := webpkitest.New(t)
@@ -84,16 +84,25 @@ func TestPathLayerServesTwoCores(t *testing.T) {
 		return pingFrom(ctx, b, a.app.IA(), a.host)
 	})
 
-	// The node under the authoritative enrolls — its retries riding the
-	// alternation of the bootstrap slot to the founder's fresher beacon, for
-	// the founder alone serves the bootstrap channel — and pins the
-	// successor that names its neighbor a core.
+	// The node under the authoritative enrolls — the founder alone serves
+	// the bootstrap channel — and pins the successor that names its
+	// neighbor a core.
 	Poll(t, "the node under the authoritative enrolled", func() bool {
 		return holdsAssemblyChain(t, d, d.app.IA())
 	})
 	Poll(t, "the node under the authoritative pinned the successor", func() bool {
 		return pinned(d)
 	})
+	// Before its pin it heard the founder's beacons alone: the authoritative
+	// sends a peer not enrolled nothing else, and a non-core opens no
+	// bootstrap slot after its pin, so the node holds the founder's slot and
+	// none of the authoritative's.
+	if d.app.Provider().Bootstrap(a.app.IA()) == nil {
+		t.Error("the node under the authoritative holds no bootstrap route to the founder")
+	}
+	if d.app.Provider().Bootstrap(b.app.IA()) != nil {
+		t.Error("the node under the authoritative heard the authoritative's beacons before its pin")
+	}
 
 	// It holds up segments of both origins over its one ingress — the
 	// founder's beacons propagated down by the authoritative beside the

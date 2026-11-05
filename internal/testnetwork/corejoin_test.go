@@ -158,11 +158,12 @@ func TestCoreJoinsBySensitiveUpdate(t *testing.T) {
 
 // TestCoreJoinsThroughAnAuthoritative checks the onboarding's route when a
 // joining core's one neighbor is an onboarded authoritative core, an issuer
-// whose root the TRC carries: the joiner holds both cores' beacons from
-// before its pin, and its enrollment and its submission reach the founder
-// past the authoritative. The founder alone serves the bootstrap channel and
-// hosts the voting application, and a submission the authoritative refused
-// would stop the joiner.
+// whose root the TRC carries: the joiner holds the founder's beacons alone
+// from before its pin — the authoritative sends a peer not enrolled nothing
+// else — and its enrollment and its submission reach the founder past the
+// authoritative. The founder alone serves the bootstrap channel and hosts
+// the voting application, and a submission the authoritative refused would
+// stop the joiner.
 func TestCoreJoinsThroughAnAuthoritative(t *testing.T) {
 	t.Parallel()
 	wpki := webpkitest.New(t)

@@ -283,11 +283,12 @@ func (n *node) setupAuthoritative(ctx context.Context) error {
 	voting := trust.KeyCert{Key: votingKey, Cert: votingCert}
 	root := trust.KeyCert{Key: issuerKeys.Root, Cert: rootCert}
 	n.roleLoops = []roleLoop{
-		// The onboarding's failure is terminal: the loop returns it, and the
-		// node stops with it as the cause.
+		// The onboarding's failure is terminal, as is a first enrollment that
+		// reached a core other than the founder before the pin: the loop
+		// returns it, and the node stops with it as the cause.
 		{"enrollment", supervise.Fatal, func(ctx context.Context) error {
-			return trust.RunEnrollment(ctx, n.enrollment(trust.AuthoritativeRenewal(
-				coreClt, n.issuers(), n.submitter(), voting, root, issuer)))
+			return n.runEnrollment(ctx, trust.AuthoritativeRenewal(
+				coreClt, n.issuers(), n.submitter(), voting, root, issuer))
 		}},
 		// The authoritative core's rotation watch: its certificates roll
 		// through the same channel its join used, by a regular update its
@@ -311,8 +312,7 @@ func (n *node) setupNormal() error {
 	n.remote = coreClt
 	n.roleLoops = []roleLoop{
 		{"enrollment", supervise.Fatal, func(ctx context.Context) error {
-			return trust.RunEnrollment(ctx,
-				n.enrollment(trust.NormalRenewal(coreClt, n.issuers())))
+			return n.runEnrollment(ctx, trust.NormalRenewal(coreClt, n.issuers()))
 		}},
 	}
 	return nil
@@ -640,47 +640,54 @@ func (n *node) connConfig(port uint16) scion.ConnConfig {
 // segment from the founder — or, before any is verified, the bootstrap
 // beacon's route — addressed to the control service the same way. The
 // founder is the core the newest pinned TRC's sensitive voting certificate
-// names; before any TRC is pinned, the bootstrap route takes turns among
-// the beacons' origins. The endpoint address is resolved, not remembered:
-// the drafts' service resolution answers it at dial time. Local state only:
-// resolving a route inside a dial must not spawn RPCs over the transport
-// being dialed.
+// names; before any TRC is pinned, the origin of the freshest bootstrap
+// beacon, the founder's when the neighbors send a node not enrolled the
+// founder's beacons alone. The endpoint address is resolved, not
+// remembered: the drafts' service resolution answers it at dial time. Local
+// state only: resolving a route inside a dial must not spawn RPCs over the
+// transport being dialed.
 func (n *node) founderRoute() *scion.Addr {
 	founder, err := n.engine.FounderAS(n.ident.ia.ISD())
 	if err != nil {
 		slog.Error("Reading the founding core", "err", err)
 		return nil
 	}
-	if !founder.IsZero() {
-		// The one-hop shortcut: a usable link reaches the founder directly
-		// — a link the monitor marked down falls through to the composed
-		// route.
-		for ifID, neighborIA := range n.bus.Links().Latest().Usable() {
-			if neighborIA.Equal(founder) {
-				return &scion.Addr{IA: founder, Service: addr.SvcCS, IfID: ifID}
-			}
+	if founder.IsZero() {
+		founder = n.beaconer.BootstrapCore()
+		if founder.IsZero() {
+			return nil
+		}
+	}
+	// The one-hop shortcut: a usable link reaches the founder directly — a
+	// link the monitor marked down falls through to the composed route.
+	for ifID, neighborIA := range n.bus.Links().Latest().Usable() {
+		if neighborIA.Equal(founder) {
+			return &scion.Addr{IA: founder, Service: addr.SvcCS, IfID: ifID}
 		}
 	}
 	// At distance: the founder's freshest up segment, or the bootstrap
 	// beacon's before any is verified, reversed.
-	freshest := func() addr.IA {
-		if founder.IsZero() {
-			return 0
-		}
-		cores := n.freshestUpCores(map[addr.IA]bool{founder: true})
-		if len(cores) == 0 {
-			return 0
-		}
-		return cores[0]
+	path, err := n.pathProvider.LocalPath(founder)
+	if err != nil {
+		return nil
 	}
-	for _, core := range []func() addr.IA{freshest, n.beaconer.BootstrapCore} {
-		if coreIA := core(); !coreIA.IsZero() {
-			if path, err := n.pathProvider.LocalPath(coreIA); err == nil {
-				return &scion.Addr{IA: coreIA, Service: addr.SvcCS, Path: path}
-			}
-		}
+	return &scion.Addr{IA: founder, Service: addr.SvcCS, Path: path}
+}
+
+// runEnrollment runs the chain lifecycle with the role's renewal. A first
+// enrollment that reached a core other than the founder before the TRC is
+// pinned stops it, the error naming the neighbor whose bootstrap beacon led
+// there and the identity the core does not hold.
+func (n *node) runEnrollment(ctx context.Context, renewal trust.Renewal) error {
+	err := trust.RunEnrollment(ctx, n.enrollment(renewal))
+	if notFounder, ok := errors.AsType[*trust.NotFounderError](err); ok {
+		return fmt.Errorf("the bootstrap beacon from %s leads to %s, which holds no certificate "+
+			"for %s: %s sent a beacon the founder did not originate, or %s is not the "+
+			"founder's identity: %w", n.beaconer.BootstrapNeighbor(notFounder.Core),
+			notFounder.Core, n.cfg.Domain, n.beaconer.BootstrapNeighbor(notFounder.Core),
+			n.cfg.Domain, err)
 	}
-	return nil
+	return err
 }
 
 // issuerRoutes returns the routes to the issuers — the cores whose root

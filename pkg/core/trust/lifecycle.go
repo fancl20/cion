@@ -77,6 +77,25 @@ type Renewal interface {
 	owed(ctx context.Context, cfg EnrollmentConfig) (bool, error)
 }
 
+// NotFounderError reports a founder remote that reached Core, a core whose
+// endpoint presented a certificate that does not name the founder's
+// identity: not the founder. Before the TRC is pinned, the first
+// enrollment's founder is the origin of the bootstrap beacons, so the error
+// is terminal there: a neighbor sent a beacon the founder did not
+// originate, or the identity is not the founder's.
+type NotFounderError struct {
+	Core addr.IA
+	Err  error
+}
+
+func (e *NotFounderError) Error() string {
+	return fmt.Sprintf("the core %s holds no certificate for the founder's identity: %v", e.Core, e.Err)
+}
+
+func (e *NotFounderError) Unwrap() error {
+	return e.Err
+}
+
 // FounderRenewal is the founding core's renewal: its chain self-issued
 // through the issuer that serves the enrollment requests, and nothing more
 // owed.
@@ -249,8 +268,9 @@ func (r authoritativeRenewal) owed(ctx context.Context, cfg EnrollmentConfig) (b
 // threshold, and with a current chain does the work the role still owes. It
 // also runs the trust database's expired-chain sweep on its own interval.
 // The founding core's synchronous startup self-enrollment is its first pass.
-// It returns nil once the context ends, and the owed work's terminal failure
-// — a joining core's ErrNoVotingApp — with the sweep stopped.
+// It returns nil once the context ends, and with the sweep stopped a
+// terminal failure: the first enrollment's NotFounderError before the TRC
+// is pinned, or the owed work's — a joining core's ErrNoVotingApp.
 func RunEnrollment(ctx context.Context, cfg EnrollmentConfig) error {
 	sweepCtx, stopSweep := context.WithCancel(ctx)
 	var sweep sync.WaitGroup
@@ -273,9 +293,10 @@ func RunEnrollment(ctx context.Context, cfg EnrollmentConfig) error {
 // enrollPass runs one inspection: it returns how long to wait before the
 // next one — the fast retry cadence while unenrolled, renewing, doing owed
 // work, or failing to read the chains or the newest pinned TRC, the calm
-// inspection interval with a current chain and nothing owed — or the owed
-// work's terminal failure. A renewal rests on the node's anchored chain,
-// which the anchor pool verifies.
+// inspection interval with a current chain and nothing owed — or a terminal
+// failure: the first enrollment's NotFounderError before the TRC is pinned,
+// or the owed work's. A renewal rests on the node's anchored chain, which
+// the anchor pool verifies.
 func (cfg EnrollmentConfig) enrollPass(ctx context.Context) (time.Duration, error) {
 	newest, err := cfg.DB.SignedTRC(ctx, NewestTRCID(cfg.IA.ISD()))
 	if err != nil {
@@ -296,15 +317,18 @@ func (cfg EnrollmentConfig) enrollPass(ctx context.Context) (time.Duration, erro
 	switch {
 	case len(chains) == 0:
 		slog.Warn("No valid chain; enrolling", "isd_as", cfg.IA)
-		cfg.attemptRenewal(ctx, nil)
+		err := cfg.attemptRenewal(ctx, nil)
+		if _, ok := errors.AsType[*NotFounderError](err); ok && newest.IsZero() {
+			return 0, fmt.Errorf("enrolling before the TRC is pinned: %w", err)
+		}
 	case current == nil:
 		slog.Warn("No chain anchors in the newest TRC; renewing",
 			"isd_as", cfg.IA, "trc", newest.TRC.ID)
-		cfg.attemptRenewal(ctx, cfg.anchoredChain(ctx))
+		_ = cfg.attemptRenewal(ctx, cfg.anchoredChain(ctx))
 	case current[0].NotAfter.Sub(now) < cfg.interval(cfg.RenewalThreshold, ChainRenewalThreshold):
 		slog.Warn("Chain approaching expiry; renewing",
 			"isd_as", cfg.IA, "remaining", current[0].NotAfter.Sub(now))
-		cfg.attemptRenewal(ctx, cfg.anchoredChain(ctx))
+		_ = cfg.attemptRenewal(ctx, cfg.anchoredChain(ctx))
 	default:
 		owed, err := cfg.Renewal.owed(ctx, cfg)
 		if err != nil {
@@ -355,15 +379,16 @@ func (cfg EnrollmentConfig) anchoredChain(ctx context.Context) []*x509.Certifica
 
 // attemptRenewal performs one renewal attempt the Renewal's way on the
 // anchored chain, bounded so a wedged connection does not stall the loop
-// renewing through it.
-func (cfg EnrollmentConfig) attemptRenewal(ctx context.Context, chain []*x509.Certificate) {
+// renewing through it, and returns its failure, logged.
+func (cfg EnrollmentConfig) attemptRenewal(ctx context.Context, chain []*x509.Certificate) error {
 	attemptCtx, cancel := context.WithTimeout(ctx, EnrollmentTimeout)
 	defer cancel()
 	if err := cfg.Renewal.renew(attemptCtx, cfg, chain); err != nil {
 		slog.Warn("Renewing chain", "isd_as", cfg.IA, "err", err)
-		return
+		return err
 	}
 	slog.Info("Renewed chain", "isd_as", cfg.IA)
+	return nil
 }
 
 // logTRCValidity logs the newest pinned TRC's validity once it approaches

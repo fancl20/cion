@@ -136,3 +136,57 @@ founder and stop. Networks start afresh, as none is in production.
     founder's beacons alone before its pin and enrolls at its first
     attempt. The labs and benchmarks pass, and the site and NAT labs
     report their joins' first attempts against the commit before.
+
+## Implementation history
+
+*   The record: the beacon channel's dial records each receiver's
+    enrollment in a `scionrpc.Receivers` from the certificate the
+    receiver's handshake presented — a chain the pinned TRC anchors,
+    naming the peer — and `PeerClient.Enrolled` reads it
+    ([client.go](/pkg/libs/scionrpc/client.go),
+    [peerclient.go](/pkg/core/controlplane/peerclient.go)). A core the TRC
+    names counts as enrolled whatever the record.
+*   A probe beside the rule: the record forms only on a dial, so a node
+    holding no founder beacon would never record its enrolled peers and
+    send them nothing — a node restarted while the founder is down, say.
+    Each propagation pass probes every peer the record holds as not
+    enrolled with a request no service answers
+    ([beacon.go](/pkg/core/controlplane/beacon.go)).
+*   The endpoint closes a connection it answered with the ephemeral
+    certificate at its first request once the node holds a chain, with
+    H3_REQUEST_REJECTED: the client's transport retries a request without
+    a body, the probe, on a new connection, whose handshake updates the
+    record within the same call ([serve.go](/pkg/libs/scionrpc/serve.go),
+    [mtls.go](/pkg/libs/scionrpc/mtls.go)).
+*   The joiner: `BootstrapCore` names the freshest origin, and
+    `BootstrapNeighbor` the neighbor that sent its beacon for the stop's
+    error. Before the pin the founder route takes `BootstrapCore`'s
+    origin as the founder, the one-hop shortcut included; after it, the
+    path provider's route to the founder covers both former branches
+    ([controlplane.go](/internal/services/controlplane.go)).
+*   The stop: the core client marks a handshake that meets a certificate
+    not naming the identity (`x509.HostnameError`) with a
+    `trust.NotFounderError` naming the core reached
+    ([remote.go](/pkg/core/webpki/remote.go)); the enrollment pass returns
+    it as terminal before the pin
+    ([lifecycle.go](/pkg/core/trust/lifecycle.go)), and the role loop names
+    the neighbor and the identity.
+*   The tests landed as planned, with the lab's subject moved: a core
+    opens a bootstrap slot for every core it hears after its pin, so the
+    path lab's node under the authoritative, a non-core, carries the
+    assertion that it holds the founder's slot alone
+    ([corepath_test.go](/internal/testnetwork/corepath_test.go)); a new join
+    lab stops a joiner that names an identity the founder does not hold
+    ([join_test.go](/internal/testnetwork/join_test.go)). Mutations 16 of
+    16 killed.
+*   Benchmarks against the commit before, in the site and NAT labs, which
+    join through a second core: no enrollment took a turn at a core other
+    than the founder, against 8 such turns in nine site runs and 11 in six
+    NAT runs before, and the NAT lab's founder-down joins took 15 seconds at
+    most, against up to 35. In the site lab joined from inside, one node
+    joined after 26 seconds instead of 21, waiting a pass longer for a
+    beacon of the founder. The site lab joined both ways settled after a
+    median of 13 changes in 10.7 minutes over nine runs, against 11 in 8.5
+    before, with overlapping ranges (8.5 to 20.7 minutes, against 7.3 to
+    19.2), and reached every pair in all nine runs, against seven of nine
+    before. The other site and NAT benchmarks held.

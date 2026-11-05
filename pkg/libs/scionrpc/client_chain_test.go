@@ -20,7 +20,10 @@ import (
 	"github.com/scionproto/scion/pkg/addr"
 	"github.com/scionproto/scion/pkg/scrypto/cppki"
 
+	"github.com/fancl20/cion/pkg/core/trust"
 	"github.com/fancl20/cion/pkg/core/trust/trusttest"
+	"github.com/fancl20/cion/pkg/core/webpki"
+	"github.com/fancl20/cion/pkg/core/webpki/webpkitest"
 	"github.com/fancl20/cion/pkg/libs/peeria"
 	"github.com/fancl20/cion/pkg/libs/scion"
 )
@@ -198,9 +201,9 @@ func TestSCIONChannelRecordsThePresentedChains(t *testing.T) {
 }
 
 // serveNative serves the handler on an ephemeral endpoint socket of the node
-// over the SCION-native channel under creds until the test's context ends,
-// and returns the endpoint's address.
-func serveNative(t *testing.T, n *testNode, handler http.Handler, creds Credentials, key crypto.Signer) *scion.Addr {
+// under the TLS configuration until the test's context ends, and returns the
+// endpoint's address.
+func serveNative(t *testing.T, n *testNode, handler http.Handler, tlsConf *tls.Config) *scion.Addr {
 	t.Helper()
 	endpoint := n.newConn(t, 0)
 	served := make(chan error, 1)
@@ -215,8 +218,7 @@ func serveNative(t *testing.T, n *testNode, handler http.Handler, creds Credenti
 		}
 	})
 	go func() {
-		served <- ServeHTTP3(t.Context(), endpoint, handler,
-			EndpointTLS(EndpointTLSConfig{Credentials: creds, Key: key}))
+		served <- ServeHTTP3(t.Context(), endpoint, handler, tlsConf)
 	}()
 	return &scion.Addr{IA: n.IA, Addr: netip.AddrPortFrom(n.ControlIP, endpoint.LocalPort())}
 }
@@ -256,7 +258,7 @@ func TestEndpointServesNoIdentityItDidNotVerify(t *testing.T) {
 	server := serveNative(t, core,
 		peeria.Authenticate(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			_, _ = w.Write([]byte(peeria.AuthenticatedIA(r.Context()).String()))
-		})), serverCreds, f.engine.Key)
+		})), EndpointTLS(EndpointTLSConfig{Credentials: serverCreds, Key: f.engine.Key}))
 
 	conn := peer.newConn(t, 0)
 	qclt := &quic.Transport{Conn: conn}
@@ -323,7 +325,7 @@ func TestEndpointResumesNoSession(t *testing.T) {
 
 	server := serveNative(t, core, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
-	}), f.engine, f.engine.Key)
+	}), EndpointTLS(EndpointTLSConfig{Credentials: f.engine, Key: f.engine.Key}))
 
 	conn := peer.newConn(t, 0)
 	qclt := &quic.Transport{Conn: conn}
@@ -362,5 +364,109 @@ func TestEndpointResumesNoSession(t *testing.T) {
 	}
 	if resumed() {
 		t.Error("the second handshake resumed the first's session")
+	}
+}
+
+// TestBeaconChannelRecordsTheReceiversEnrollment checks the record of a
+// client that verifies no server, over real handshakes: a receiver that
+// presents the ephemeral certificate is recorded as not enrolled. Once it
+// holds a chain, its endpoint closes that connection at the next request,
+// refused unprocessed; the client's transport retries the request on a new
+// connection, whose handshake records the receiver enrolled. A connection
+// answered with the chain stays.
+func TestBeaconChannelRecordsTheReceiversEnrollment(t *testing.T) {
+	f := newMTLSFixture(t)
+	extA, extB := freeUDPAddr(t), freeUDPAddr(t)
+	core := startTestNode(t, nodeIATest, iaLineC, extA, extB)
+	peer := startTestNode(t, iaLineC, nodeIATest, extB, extA)
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+
+	receiverCreds := &switchedCredentials{Credentials: f.engine}
+	var dials atomic.Int32
+	server := serveNative(t, core, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}), countingTLS(EndpointTLS(EndpointTLSConfig{Credentials: receiverCreds, Key: f.engine.Key}),
+		&dials))
+
+	conn := peer.newConn(t, 0)
+	qclt := &quic.Transport{Conn: conn}
+	t.Cleanup(func() { _ = qclt.Close() })
+	provider, _ := providerToCore(t, peer.MACKey)
+	var receivers Receivers
+	hclt := NewSCIONClient(PeerClientConfig{
+		Credentials: f.peer,
+		Key:         f.peer.Key,
+		Conn:        conn,
+		Lease:       provider.Lease,
+		Receivers:   &receivers,
+	}, qclt, false)
+	send := func() {
+		t.Helper()
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://"+PeerAuthority(server), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp, err := hclt.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusNoContent {
+			t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusNoContent)
+		}
+	}
+
+	send()
+	if receivers.Enrolled(nodeIATest) {
+		t.Fatal("the receiver presenting the ephemeral certificate was recorded enrolled")
+	}
+	receiverCreds.enrolled.Store(true)
+	send()
+	if !receivers.Enrolled(nodeIATest) {
+		t.Error("the receiver holding a chain was not recorded enrolled")
+	}
+	if got := dials.Load(); got != 2 {
+		t.Errorf("dials = %d, want 2: the request after the chain dials anew", got)
+	}
+	send()
+	if got := dials.Load(); got != 2 {
+		t.Errorf("dials = %d, want 2: the connection answered with the chain stays", got)
+	}
+}
+
+// TestCoreClientMarksACoreWithoutTheIdentity checks the bootstrap client
+// against a core that does not hold the identity — an endpoint serving the
+// SCION-native channel alone, as every core but the founder does: the
+// handshake meets a certificate that does not name the identity, and the
+// request fails with a NotFounderError naming the core it reached.
+func TestCoreClientMarksACoreWithoutTheIdentity(t *testing.T) {
+	f := newMTLSFixture(t)
+	wpki := webpkitest.New(t)
+	extA, extB := freeUDPAddr(t), freeUDPAddr(t)
+	core := startTestNode(t, nodeIATest, iaLineC, extA, extB)
+	peer := startTestNode(t, iaLineC, nodeIATest, extB, extA)
+	server := serveNative(t, core, http.NotFoundHandler(),
+		EndpointTLS(EndpointTLSConfig{Credentials: f.engine, Key: f.engine.Key}))
+
+	client, err := webpki.NewCoreClient(webpki.CoreClientConfig{
+		Domain:  webpkitest.Domain,
+		Conn:    peer.newConn(t, 0),
+		RootCAs: wpki.Pool,
+		Locator: func() *scion.Addr { return server },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = client.Close() })
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
+	defer cancel()
+	_, err = client.TRC(ctx, cppki.TRCID{ISD: nodeIATest.ISD(), Base: 1, Serial: 1})
+	notFounder, ok := errors.AsType[*trust.NotFounderError](err)
+	if !ok {
+		t.Fatalf("the request's error = %v, want a NotFounderError", err)
+	}
+	if !notFounder.Core.Equal(nodeIATest) {
+		t.Errorf("the error names %v, want the core reached %v", notFounder.Core, nodeIATest)
 	}
 }

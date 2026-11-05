@@ -258,12 +258,16 @@ func TestEndpointTLSDispatchAddressIdentity(t *testing.T) {
 }
 
 // TestNativeCertFromEngine checks the certificate the endpoint presents: the
-// node's AS chain with the AS key.
+// node's AS chain with the AS key, reported as the chain, and before the node
+// holds one the ephemeral certificate, reported as none.
 func TestNativeCertFromEngine(t *testing.T) {
 	f := newMTLSFixture(t)
-	cert, err := nativeCert(f.engine, f.engine.Key)
+	cert, chained, err := nativeCert(f.engine, f.engine.Key)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if !chained {
+		t.Error("the node's chain was reported as the ephemeral certificate")
 	}
 	chain, err := f.engine.Chain(context.Background())
 	if err != nil || len(chain) == 0 {
@@ -274,6 +278,15 @@ func TestNativeCertFromEngine(t *testing.T) {
 	}
 	if ia, err := cppki.ExtractIA(chain[0].Subject); err != nil || !ia.Equal(nodeIATest) {
 		t.Errorf("certificate subject = %v, want %v", ia, nodeIATest)
+	}
+
+	ephemeral, chained, err := nativeCert(&switchedCredentials{Credentials: f.engine}, f.engine.Key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if chained || len(ephemeral.Certificate) != 1 {
+		t.Errorf("a node without a chain presented %d certificates reported as the chain (%v), "+
+			"want the ephemeral one", len(ephemeral.Certificate), chained)
 	}
 }
 
@@ -432,7 +445,7 @@ func TestNativeCertPresentsWhatStandsBeside(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cert, err := nativeCert(besideCredentials{Credentials: f.engine, beside: beside}, f.engine.Key)
+	cert, _, err := nativeCert(besideCredentials{Credentials: f.engine, beside: beside}, f.engine.Key)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -446,5 +459,32 @@ func TestNativeCertPresentsWhatStandsBeside(t *testing.T) {
 	}
 	if !cert.Leaf.Equal(chain[0]) {
 		t.Error("the leaf is not the node's AS certificate")
+	}
+}
+
+// TestChainAnchoredNamesThePeer checks the record's verification: a chain
+// the TRC anchors records its own ISD-AS enrolled and no other, while the
+// ephemeral certificate, and any chain before a TRC is pinned, records none.
+func TestChainAnchoredNamesThePeer(t *testing.T) {
+	f := newMTLSFixture(t)
+	chain, err := f.peer.Chain(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !chainAnchored(f.engine, iaLineC, chain) {
+		t.Error("the peer's anchored chain recorded nothing")
+	}
+	if chainAnchored(f.engine, nodeIATest, chain) {
+		t.Error("the peer's chain recorded another ISD-AS enrolled")
+	}
+	self, err := ephemeralCert()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if chainAnchored(f.engine, iaLineC, []*x509.Certificate{self.Leaf}) {
+		t.Error("the ephemeral certificate recorded the peer enrolled")
+	}
+	if chainAnchored(&unpinnedCredentials{Credentials: f.engine}, iaLineC, chain) {
+		t.Error("a chain recorded the peer enrolled before a TRC was pinned")
 	}
 }
