@@ -1,33 +1,42 @@
 package controlplane
 
 import (
+	"encoding/binary"
 	"sort"
 	"sync"
 	"time"
 
-	"github.com/scionproto/scion/pkg/addr"
-
 	"github.com/fancl20/cion/pkg/libs/segment"
 )
 
-// storePerInterface bounds the candidate PCBs kept per ingress interface: the
-// store is write-heavy and valid for one beaconing period at a time, so the
-// freshest candidates are enough.
+// storePerInterface bounds the routes kept per ingress interface, the
+// stalest leaving first.
 const storePerInterface = 64
 
-// beaconKey identifies a candidate by its ingress interface, originating
-// ISD-AS, and segment ID: the identity the rest of the system already reads
-// from a segment, so two origins sharing an ingress and an ID are two
-// candidates, not one slot the fresher takes.
+// beaconKey identifies a candidate by its ingress interface and its route:
+// every origination of one route over one interface shares the key, each
+// drawing a fresh segment ID and timestamp over the same links.
 type beaconKey struct {
 	ingress uint16
-	origin  addr.IA
-	id      uint16
+	route   string
+}
+
+// routeOf encodes the route a beacon's entries cross: each entry's ISD-AS
+// and its ingress and egress interface IDs in construction order, the path
+// database's key.
+func routeOf(pcb *segment.PCB) string {
+	key := make([]byte, 0, 12*len(pcb.Entries))
+	for _, e := range pcb.Entries {
+		key = binary.BigEndian.AppendUint64(key, uint64(e.IA))
+		key = binary.BigEndian.AppendUint16(key, e.Hop.ConsIngress)
+		key = binary.BigEndian.AppendUint16(key, e.Hop.ConsEgress)
+	}
+	return string(key)
 }
 
 // BeaconStore holds candidate PCBs in memory (draft Section 2.3.2): keyed by
-// ingress interface, originating ISD-AS, and segment ID, keeping the latest
-// origination per key, expiring entries with their hops. A restarted node is
+// ingress interface and route, keeping each route's latest origination and
+// when it arrived, expiring entries with their hops. A restarted node is
 // rebuilt by the next period's beacons.
 type BeaconStore struct {
 	mtx     sync.Mutex
@@ -50,23 +59,24 @@ func NewBeaconStore() *BeaconStore {
 type candidate struct {
 	Candidate
 	timestamp time.Time
+	arrived   time.Time
 }
 
-// Insert stores the beacon, replacing the entry with the same key — one
-// origin's re-origination of one segment over one ingress — when the new
-// origination is fresher, and keeping per-interface capacity bounded by
-// evicting the stalest candidates. The origin is the beacon's first entry,
-// the identity reception verified against the TRC's core list.
+// Insert stores the beacon, replacing the entry with the same key — a
+// re-origination of one route over one ingress — when the new origination is
+// fresher, recording when it arrived, and keeping per-interface capacity
+// bounded by evicting the stalest candidates.
 func (s *BeaconStore) Insert(ingress uint16, pcb *segment.PCB) {
 	s.mtx.Lock()
 	defer s.mtx.Unlock()
-	key := beaconKey{ingress: ingress, origin: pcb.FirstIA(), id: pcb.ID()}
+	key := beaconKey{ingress: ingress, route: routeOf(pcb)}
 	if existing, ok := s.beacons[key]; ok && !pcb.Timestamp().After(existing.timestamp) {
 		return
 	}
 	s.beacons[key] = candidate{
 		Ingress: ingress, PCB: pcb,
 		timestamp: pcb.Timestamp(),
+		arrived:   time.Now(),
 	}
 	s.evictStale(ingress)
 }
@@ -97,32 +107,19 @@ func (s *BeaconStore) evictStale(ingress uint16) {
 	}
 }
 
-// BestSet returns the fixed bounded set of freshest unexpired candidates keep
-// admits — the store's per-key freshness ordering is the only selection rule
-// (no policy engine). keep runs before the bound, so a refused candidate
-// never takes the place of an admitted one; it runs under the store's lock.
-func (s *BeaconStore) BestSet(n int, keep func(Candidate) bool) []Candidate {
+// Qualifying returns the unexpired candidates keep admits whose latest
+// origination arrived within the window, in no particular order. keep runs
+// under the store's lock.
+func (s *BeaconStore) Qualifying(window time.Duration, keep func(Candidate) bool) []Candidate {
 	s.mtx.Lock()
 	defer s.mtx.Unlock()
 	now := time.Now()
-	cands := make([]candidate, 0, len(s.beacons))
+	var out []Candidate
 	for _, cand := range s.beacons {
-		if cand.PCB.Expiration().After(now) && keep(cand.Candidate) {
-			cands = append(cands, cand)
+		if cand.PCB.Expiration().After(now) && now.Sub(cand.arrived) <= window &&
+			keep(cand.Candidate) {
+			out = append(out, cand.Candidate)
 		}
-	}
-	sort.Slice(cands, func(i, j int) bool {
-		if cands[i].timestamp.Equal(cands[j].timestamp) {
-			return cands[i].PCB.ID() > cands[j].PCB.ID()
-		}
-		return cands[i].timestamp.After(cands[j].timestamp)
-	})
-	if len(cands) > n {
-		cands = cands[:n]
-	}
-	out := make([]Candidate, len(cands))
-	for i, cand := range cands {
-		out[i] = cand.Candidate
 	}
 	return out
 }

@@ -566,3 +566,39 @@ func TestParseDeclaredLatencyRange(t *testing.T) {
 		t.Error("parsing an out-of-range declared interface succeeded, want error")
 	}
 }
+
+// TestEdgeDelay checks the rule pricing one edge: the declaration of
+// whichever end declares, the higher where both do — up's egress interface
+// and down's ingress interface naming the edge — and no price where neither
+// declares, or where a declaration names another interface.
+func TestEdgeDelay(t *testing.T) {
+	up := func(latency map[segment.LinkID]time.Duration) *segment.ASEntry {
+		return &segment.ASEntry{IA: iaA, Hop: path.HopField{ConsEgress: 1}, Latency: latency}
+	}
+	down := func(latency map[segment.LinkID]time.Duration) *segment.ASEntry {
+		return &segment.ASEntry{IA: iaB, Hop: path.HopField{ConsIngress: 2, ConsEgress: 3},
+			Latency: latency}
+	}
+	upDecl := map[segment.LinkID]time.Duration{{IA: iaA, IfID: 1}: 4 * time.Millisecond}
+	downDecl := map[segment.LinkID]time.Duration{{IA: iaB, IfID: 2}: 6 * time.Millisecond}
+	elsewhere := map[segment.LinkID]time.Duration{{IA: iaB, IfID: 3}: 9 * time.Millisecond}
+	for _, tc := range []struct {
+		name     string
+		up, down *segment.ASEntry
+		want     time.Duration
+		declared bool
+	}{
+		{"upstream alone", up(upDecl), down(nil), 4 * time.Millisecond, true},
+		{"downstream alone", up(nil), down(downDecl), 6 * time.Millisecond, true},
+		{"both, the higher", up(upDecl), down(downDecl), 6 * time.Millisecond, true},
+		{"neither", up(nil), down(nil), 0, false},
+		{"another interface", up(nil), down(elsewhere), 0, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, declared := segment.EdgeDelay(tc.up, tc.down)
+			if got != tc.want || declared != tc.declared {
+				t.Errorf("EdgeDelay = %v, %v; want %v, %v", got, declared, tc.want, tc.declared)
+			}
+		})
+	}
+}

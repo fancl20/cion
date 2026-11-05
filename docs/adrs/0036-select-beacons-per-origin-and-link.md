@@ -1,6 +1,6 @@
 # Select Beacons per Origin and per Link
 
-*   Status: proposed
+*   Status: accepted
 *   Date: 2026-11-05
 
 [TOC]

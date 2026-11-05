@@ -491,8 +491,8 @@ func crossedLinks(seg *pathdb.Segment, from int, against bool) []segment.LinkID 
 // interface and AS i+1's ingress interface whichever direction travel runs,
 // so each edge is priced by lookup on the edge, never on the hop field: an
 // up part traversed against construction finds the link's declaration on
-// the adjacent upstream entry. Where both ends of an edge declare, the
-// higher value wins; where neither declares, the sum is unknown.
+// the adjacent upstream entry. segment.EdgeDelay prices each edge; where an
+// edge is undeclared, the sum is unknown.
 func stretch(seg *pathdb.Segment, from int) (links []segment.LinkID, latency time.Duration, known bool) {
 	for _, e := range seg.PCB.Entries[from:] {
 		if e.Hop.ConsIngress != 0 {
@@ -504,19 +504,12 @@ func stretch(seg *pathdb.Segment, from int) (links []segment.LinkID, latency tim
 	}
 	known = true
 	for i := from; i+1 < len(seg.PCB.Entries); i++ {
-		e, next := seg.PCB.Entries[i], seg.PCB.Entries[i+1]
-		egress, fromUpstream := e.Latency[segment.LinkID{IA: e.IA, IfID: e.Hop.ConsEgress}]
-		ingress, fromDownstream := next.Latency[segment.LinkID{IA: next.IA, IfID: next.Hop.ConsIngress}]
-		switch {
-		case fromUpstream && fromDownstream:
-			latency += max(egress, ingress)
-		case fromUpstream:
-			latency += egress
-		case fromDownstream:
-			latency += ingress
-		default:
-			known = false // an undeclared edge is unknown, not free
+		d, declared := segment.EdgeDelay(&seg.PCB.Entries[i], &seg.PCB.Entries[i+1])
+		if !declared {
+			known = false
+			continue
 		}
+		latency += d
 	}
 	return links, latency, known
 }

@@ -88,6 +88,25 @@ type ASEntry struct {
 	Signed *cryptopb.SignedMessage
 }
 
+// EdgeDelay returns the declared one-way delay of the link between two
+// consecutive entries, from up's egress interface to down's ingress
+// interface, whichever direction travel runs: the higher of the two ends'
+// declarations where both declare, false where neither does — an undeclared
+// edge is unknown, not free.
+func EdgeDelay(up, down *ASEntry) (time.Duration, bool) {
+	egress, fromUp := up.Latency[LinkID{IA: up.IA, IfID: up.Hop.ConsEgress}]
+	ingress, fromDown := down.Latency[LinkID{IA: down.IA, IfID: down.Hop.ConsIngress}]
+	switch {
+	case fromUp && fromDown:
+		return max(egress, ingress), true
+	case fromUp:
+		return egress, true
+	case fromDown:
+		return ingress, true
+	}
+	return 0, false
+}
+
 // NewPCB creates a fresh beacon's wire form: new segment information with a
 // cryptographically random 16-bit segment ID and the creation timestamp
 // (Section 2.2.1). The caller appends the originating core's AS entry.

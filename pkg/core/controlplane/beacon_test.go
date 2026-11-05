@@ -325,102 +325,134 @@ func TestHandleBeaconAsksTheSender(t *testing.T) {
 	}
 }
 
-// originatedSegment builds a one-entry beacon of the given origin with the
-// given segment ID: the store's episodes read the origin, the ID, and the
-// timestamps, and one signed entry carries all three.
-func originatedSegment(
-	t *testing.T, f *beaconFixture, origin addr.IA, id uint16, now time.Time) *segment.PCB {
+// originatedRoute builds a one-entry beacon of the given origin leaving by
+// the given interface: one route per origin and interface, each call a
+// fresh origination of it.
+func originatedRoute(
+	t *testing.T, f *beaconFixture, origin addr.IA, egress uint16, now time.Time) *segment.PCB {
 
 	t.Helper()
-	pcb, err := segment.PCBWithID(now, id)
+	pcb, err := segment.NewPCB(now)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := pcb.AppendEntry(context.Background(), origin, segment.EntryOptions{
-		EgressIfID: 1,
+		Next:       nodeIATest,
+		EgressIfID: egress,
 	}, macFactory(), f.engines[origin]); err != nil {
 		t.Fatal(err)
 	}
 	return pcb
 }
 
-// keepAll admits every candidate to a best set.
+// keepAll admits every candidate.
 func keepAll(Candidate) bool { return true }
 
-// TestBeaconStoreKeysByOrigin checks the store's key widened by the origin:
-// two candidates of distinct origins over one ingress and one segment ID are
-// two candidates — both stored, both returned by BestSet — while one origin's
-// re-origination of its own segment holds a single slot whatever its
-// freshness, and a beacon of another origin never replaces its namesake.
-func TestBeaconStoreKeysByOrigin(t *testing.T) {
+// storedRoutes returns the timestamps of the qualifying candidates, by
+// ingress interface and origin.
+func storedRoutes(s *BeaconStore) map[uint16]map[addr.IA]time.Time {
+	out := make(map[uint16]map[addr.IA]time.Time)
+	for _, cand := range s.Qualifying(time.Hour, keepAll) {
+		if out[cand.Ingress] == nil {
+			out[cand.Ingress] = make(map[addr.IA]time.Time)
+		}
+		out[cand.Ingress][cand.PCB.FirstIA()] = cand.PCB.Timestamp()
+	}
+	return out
+}
+
+// TestBeaconStoreKeysByRoute checks the store's key: the originations of one
+// route over one interface share a candidate, the fresher kept whatever
+// order they arrive in, while another route, or the same route over another
+// interface, is a candidate of its own.
+func TestBeaconStoreKeysByRoute(t *testing.T) {
 	f := newBeaconFixture(t)
 	now := time.Now()
 
-	fromCore := originatedSegment(t, f, coreIATest, 7, now)
-	fromNode := originatedSegment(t, f, nodeIATest, 7, now.Add(time.Second))
-	f.store.Insert(1, fromCore)
-	f.store.Insert(1, fromNode)
-	if got := f.store.Len(); got != 2 {
-		t.Fatalf("store length = %d, want 2: distinct origins are distinct candidates", got)
-	}
-	stored := map[addr.IA]time.Time{}
-	for _, cand := range f.store.BestSet(2, keepAll) {
-		stored[cand.PCB.FirstIA()] = cand.PCB.Timestamp()
-	}
-	if len(stored) != 2 {
-		t.Fatalf("BestSet origins = %v, want both", stored)
-	}
-
-	// One origin's fresher re-origination replaces its own entry alone.
-	fresher := originatedSegment(t, f, nodeIATest, 7, now.Add(2*time.Second))
+	f.store.Insert(1, originatedRoute(t, f, coreIATest, 1, now))
+	fresher := originatedRoute(t, f, coreIATest, 1, now.Add(time.Second))
 	f.store.Insert(1, fresher)
-	if got := f.store.Len(); got != 2 {
-		t.Fatalf("store length after re-origination = %d, want 2: one segment, one slot", got)
-	}
-	stored = map[addr.IA]time.Time{}
-	for _, cand := range f.store.BestSet(2, keepAll) {
-		stored[cand.PCB.FirstIA()] = cand.PCB.Timestamp()
-	}
-	if !stored[nodeIATest].Equal(fresher.Timestamp()) {
-		t.Errorf("node's entry = %v, want the fresher re-origination %v",
-			stored[nodeIATest], fresher.Timestamp())
+	f.store.Insert(1, originatedRoute(t, f, coreIATest, 1, now))
+	want := map[uint16]map[addr.IA]time.Time{1: {coreIATest: fresher.Timestamp()}}
+	if diff := cmp.Diff(want, storedRoutes(f.store)); diff != "" {
+		t.Fatalf("one route's originations (-want +got):\n%s", diff)
 	}
 
-	// A staler re-origination never replaces the fresher entry.
-	f.store.Insert(1, originatedSegment(t, f, nodeIATest, 7, now))
-	stored = map[addr.IA]time.Time{}
-	for _, cand := range f.store.BestSet(2, keepAll) {
-		stored[cand.PCB.FirstIA()] = cand.PCB.Timestamp()
+	other := originatedRoute(t, f, iaCore2Test, 1, now)
+	f.store.Insert(1, other)
+	f.store.Insert(3, fresher)
+	want = map[uint16]map[addr.IA]time.Time{
+		1: {coreIATest: fresher.Timestamp(), iaCore2Test: other.Timestamp()},
+		3: {coreIATest: fresher.Timestamp()},
 	}
-	if !stored[nodeIATest].Equal(fresher.Timestamp()) {
-		t.Errorf("node's entry = %v, want the fresher to stand past the staler write",
-			stored[nodeIATest])
+	if diff := cmp.Diff(want, storedRoutes(f.store)); diff != "" {
+		t.Errorf("distinct routes and interfaces (-want +got):\n%s", diff)
+	}
+	if got := f.store.Len(); got != 3 {
+		t.Errorf("store length = %d, want 3", got)
 	}
 }
 
-// TestBeaconStoreCapBoundsWidenedKeys checks that the per-interface cap
-// bounds the origin-widened keys as one set: candidates of alternating
-// origins over one ingress count together against the bound, and the stalest
-// leave first.
-func TestBeaconStoreCapBoundsWidenedKeys(t *testing.T) {
+// TestBeaconStoreBoundCountsRoutes checks the per-interface bound: it counts
+// the distinct routes over one interface, the stalest leaving first.
+func TestBeaconStoreBoundCountsRoutes(t *testing.T) {
 	f := newBeaconFixture(t)
 	now := time.Now()
-	origins := []addr.IA{coreIATest, nodeIATest}
 	for i := range storePerInterface + 2 {
-		f.store.Insert(1, originatedSegment(t, f, origins[i%len(origins)],
-			uint16(i), now.Add(time.Duration(i)*time.Second)))
+		f.store.Insert(1, originatedRoute(t, f, coreIATest, uint16(i+1),
+			now.Add(time.Duration(i)*time.Second)))
 	}
 	if got := f.store.Len(); got != storePerInterface {
-		t.Fatalf("store length = %d, want the per-interface bound %d over both origins together",
-			got, storePerInterface)
+		t.Fatalf("store length = %d, want the per-interface bound %d", got, storePerInterface)
 	}
-	ids := map[uint16]bool{}
-	for _, cand := range f.store.BestSet(storePerInterface, keepAll) {
-		ids[cand.PCB.ID()] = true
+	for _, cand := range f.store.Qualifying(time.Hour, keepAll) {
+		if egress := cand.PCB.Entries[0].Hop.ConsEgress; egress <= 2 {
+			t.Errorf("the stalest route, leaving by interface %d, survived the bound", egress)
+		}
 	}
-	if ids[0] || ids[1] {
-		t.Errorf("the stalest candidates (ids 0, 1) survived the bound: %v", ids)
-	}
+}
+
+// TestBeaconStoreQualifiesWhileBeaconsArrive checks the window: a route
+// qualifies until the window passes without a fresher origination, a copy of
+// the origination it holds renews nothing, and a fresher origination
+// qualifies it again. A route whose hops expire inside the window stops
+// qualifying then.
+func TestBeaconStoreQualifiesWhileBeaconsArrive(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		f := newBeaconFixture(t)
+		const window = 15 * time.Second
+		qualifying := func() int {
+			return len(f.store.Qualifying(window, keepAll))
+		}
+		first := originatedRoute(t, f, coreIATest, 1, time.Now())
+		f.store.Insert(1, first)
+		time.Sleep(window)
+		if got := qualifying(); got != 1 {
+			t.Fatalf("qualifying at the window's end = %d, want 1", got)
+		}
+		f.store.Insert(1, first)
+		time.Sleep(time.Second)
+		if got := qualifying(); got != 0 {
+			t.Fatalf("qualifying past the window = %d, want 0: a copy renews nothing", got)
+		}
+		f.store.Insert(1, originatedRoute(t, f, coreIATest, 1, time.Now()))
+		if got := qualifying(); got != 1 {
+			t.Errorf("qualifying after a fresher origination = %d, want 1", got)
+		}
+
+		probe := originatedRoute(t, f, coreIATest, 2, time.Now())
+		lifetime := probe.Expiration().Sub(probe.Timestamp())
+		late := NewBeaconStore()
+		late.Insert(1, originatedRoute(t, f, coreIATest, 2,
+			time.Now().Add(-lifetime+5*time.Second)))
+		if got := len(late.Qualifying(window, keepAll)); got != 1 {
+			t.Fatalf("qualifying before the hops expire = %d, want 1", got)
+		}
+		time.Sleep(6 * time.Second)
+		if got := len(late.Qualifying(window, keepAll)); got != 0 {
+			t.Errorf("qualifying once the hops expired = %d, want 0", got)
+		}
+	})
 }
 
 // fabricatedBeacon builds the beacon of a fabricating neighbor: the entry
@@ -995,7 +1027,7 @@ func TestPropagateOnce(t *testing.T) {
 // TestPropagateOnceSendsAnUnenrolledPeerTheFounders checks the propagation
 // to a peer that has not enrolled: B holds [A] from the founder and the
 // fresher [A2] from the fellow core, and C, not enrolled, receives [A, B]
-// alone beside a probe; once C has enrolled it receives both, freshest
+// alone beside a probe; once C has enrolled it receives both, the founder's
 // first, and no probe.
 func TestPropagateOnceSendsAnUnenrolledPeerTheFounders(t *testing.T) {
 	f := newBeaconFixture(t)
@@ -1027,7 +1059,7 @@ func TestPropagateOnceSendsAnUnenrolledPeerTheFounders(t *testing.T) {
 
 	f.beaconer.propagateOnce(ctx)
 	f.beaconer.sends.Wait()
-	want = map[addr.IA][][]addr.IA{iaLineC: {{iaCore2Test, nodeIATest}, {coreIATest, nodeIATest}}}
+	want = map[addr.IA][][]addr.IA{iaLineC: {{coreIATest, nodeIATest}, {iaCore2Test, nodeIATest}}}
 	if diff := cmp.Diff(want, propagatedHops(t, f)); diff != "" {
 		t.Errorf("propagated to the enrolled peer (-want +got):\n%s", diff)
 	}
@@ -1175,6 +1207,139 @@ func TestPropagateOnceSkipsNeighborsTheBeaconCrosses(t *testing.T) {
 	if diff := cmp.Diff(want, propagatedHops(t, f)); diff != "" {
 		t.Errorf("propagated hops by peer (-want +got):\n%s", diff)
 	}
+}
+
+// declaredBeacon builds the beacon the hops forwarded in order to B, each
+// entry naming the next hop and the last naming B, with the interfaces and
+// declarations the hops give.
+func declaredBeacon(t *testing.T, f *beaconFixture, now time.Time, hops ...hopSpec) *segment.PCB {
+	t.Helper()
+	pcb, err := segment.NewPCB(now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, h := range hops {
+		next := nodeIATest
+		if i+1 < len(hops) {
+			next = hops[i+1].ia
+		}
+		if err := pcb.AppendEntry(context.Background(), h.ia, segment.EntryOptions{
+			Next:          next,
+			IngressIfID:   h.ingress,
+			EgressIfID:    h.egress,
+			EgressLatency: h.latency,
+		}, macFactory(), f.engines[h.ia]); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return pcb
+}
+
+// hopsOf returns the ISD-ASes the candidates' beacons cross, in order.
+func hopsOf(cands []Candidate) [][]addr.IA {
+	out := make([][]addr.IA, 0, len(cands))
+	for _, c := range cands {
+		hops := make([]addr.IA, 0, len(c.PCB.Entries))
+		for _, e := range c.PCB.Entries {
+			hops = append(hops, e.IA)
+		}
+		out = append(out, hops)
+	}
+	return out
+}
+
+// TestPropagateOncePicksEachNeighborsSetAmongTheRoutesItCanTake checks that a
+// neighbor's set is picked among the routes it can take, not cut from the
+// node's own. B — beside C on link 2 and D on link 4 — holds [A, D, C], the
+// founder's cheapest route, and the dearer [A, C], both from C, and [A2, D]
+// from D. Its own set is [A, D, C] and [A2, D]. D can take neither, yet
+// receives [A, C], the founder's cheapest route avoiding it; C receives
+// [A2, D], the one route avoiding it.
+func TestPropagateOncePicksEachNeighborsSetAmongTheRoutesItCanTake(t *testing.T) {
+	f := newBeaconFixture(t)
+	ctx := context.Background()
+	b := beaconerOver(t, f, tableTopic(map[uint16]addr.IA{2: iaLineC, 4: iaLineD}))
+	now := time.Now()
+	for _, held := range []struct {
+		ingress uint16
+		pcb     *segment.PCB
+	}{
+		{2, declaredBeacon(t, f, now,
+			hopSpec{coreIATest, 0, 1, ms}, hopSpec{iaLineD, 2, 3, ms}, hopSpec{iaLineC, 4, 5, ms})},
+		{2, declaredBeacon(t, f, now,
+			hopSpec{coreIATest, 0, 6, 30 * ms}, hopSpec{iaLineC, 7, 5, ms})},
+		{4, declaredBeacon(t, f, now,
+			hopSpec{iaCore2Test, 0, 1, ms}, hopSpec{iaLineD, 8, 9, ms})},
+	} {
+		if err := b.HandleBeacon(ctx, held.pcb, held.ingress); err != nil {
+			t.Fatal(err)
+		}
+	}
+	own, err := b.ownSet()
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantOwn := [][]addr.IA{{coreIATest, iaLineD, iaLineC}, {iaCore2Test, iaLineD}}
+	if diff := cmp.Diff(wantOwn, hopsOf(own)); diff != "" {
+		t.Fatalf("own set (-want +got):\n%s", diff)
+	}
+
+	b.propagateOnce(ctx)
+	b.sends.Wait()
+	want := map[addr.IA][][]addr.IA{
+		iaLineC: {{iaCore2Test, iaLineD, nodeIATest}},
+		iaLineD: {{coreIATest, iaLineC, nodeIATest}},
+	}
+	if diff := cmp.Diff(want, propagatedHops(t, f)); diff != "" {
+		t.Errorf("propagated hops by peer (-want +got):\n%s", diff)
+	}
+}
+
+// TestBeaconingDropsARouteWhoseBeaconsStopped checks the window on the
+// passes: B holds [A] over link 1, which C receives and B registers until
+// three propagation intervals pass without a fresher origination; then C
+// receives nothing and B registers nothing, though the candidate stays
+// stored, until a fresher origination arrives.
+func TestBeaconingDropsARouteWhoseBeaconsStopped(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		f := newBeaconFixture(t)
+		ctx := context.Background()
+		// pass runs a propagation and a registration pass and returns the
+		// beacons and registrations they sent.
+		pass := func() (int, int) {
+			t.Helper()
+			f.sender.mtx.Lock()
+			f.sender.beacons, f.sender.registrations = nil, nil
+			f.sender.mtx.Unlock()
+			f.beaconer.propagateOnce(ctx)
+			f.beaconer.registerOnce(ctx)
+			f.beaconer.sends.Wait()
+			f.sender.mtx.Lock()
+			defer f.sender.mtx.Unlock()
+			return len(f.sender.beacons), len(f.sender.registrations)
+		}
+		if err := f.beaconer.HandleBeacon(ctx, lineBeacon(t, f, time.Now()), 1); err != nil {
+			t.Fatal(err)
+		}
+		time.Sleep(qualifyingIntervals * PropagationInterval)
+		if beacons, regs := pass(); beacons != 1 || regs != 1 {
+			t.Fatalf("at the window's end: %d beacons, %d registrations; want 1 and 1", beacons, regs)
+		}
+		time.Sleep(time.Second)
+		if beacons, regs := pass(); beacons != 0 || regs != 0 {
+			t.Fatalf("past the window: %d beacons, %d registrations; want none", beacons, regs)
+		}
+		if got := f.store.Len(); got != 1 {
+			t.Fatalf("store length = %d, want the unexpired candidate kept", got)
+		}
+		if err := f.beaconer.HandleBeacon(ctx, lineBeacon(t, f, time.Now()), 1); err != nil {
+			t.Fatal(err)
+		}
+		if beacons, regs := pass(); beacons != 1 || regs != 1 {
+			t.Errorf("after a fresher origination: %d beacons, %d registrations; want 1 and 1",
+				beacons, regs)
+		}
+	})
 }
 
 // TestPropagateOnceEndsARoundAtAFailedCall checks a neighbor's round: B —

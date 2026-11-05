@@ -201,15 +201,14 @@ only once the founder signed it.
 
 ### Path discovery
 
-Cores originate beacons; each AS on the way appends a signed entry of its
-own and forwards the beacon to its neighbors, which verify every entry
-against the TRC. Receiving nodes keep candidates briefly, then terminate
-selected beacons into segments — up segments kept locally, down segments
-registered with the originating core — where the freshest segment of each
-route persists in the path database until it expires. The path provider
-composes registered segments into end-to-end paths and is the single seam
-every consumer uses: the control endpoint's own transport rides it, and
-applications reach it through the SCION library's socket.
+Cores originate beacons; each AS appends a signed entry and forwards them,
+and receivers verify every entry against the TRC. A node sends each
+neighbor, among the routes it can take, each core's cheapest route, backups,
+and each link's cheapest route
+([ADR-0036](/docs/adrs/0036-select-beacons-per-origin-and-link.md)), and
+registers its own selection: up segments locally, down segments at the
+originating core. The path provider composes segments into end-to-end paths,
+the one seam every consumer uses, the control endpoint's transport included.
 
 ### Topology and liveness
 
