@@ -38,8 +38,8 @@ var (
 
 const (
 	// natBudget bounds the NAT network's join and settling
-	// in virtual time.
-	natBudget = 30 * time.Minute
+	// in virtual time, as regionsBudget bounds the regions lab's.
+	natBudget = time.Hour
 	// natWatch is how long a benchmark reads the NAT
 	// network's answer to a change.
 	natWatch = 10 * time.Minute

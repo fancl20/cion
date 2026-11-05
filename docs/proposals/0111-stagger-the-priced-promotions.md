@@ -106,3 +106,33 @@ Nothing on the wire changes.
     times against the commit before, with its cut's link changes and
     recovery reported, and the regions settled and stranded cut benchmarks
     three times each.
+
+## Implementation history
+
+*   Landed as planned. A first cut capped the jitter at 4 windows, a
+    registration and a lookup refresh: in runs on one machine, the regions
+    network promoted 4 links on price after its cut in 6 runs and retired 2
+    of them as useless, against 7 and 4 at the commit before, and two pairs
+    still promoted a window and a half apart or in the same window. It also
+    drew the waits with FNV-1a, which draws nearly alike for ISD-ASes a byte
+    apart; SHA-256 does not.
+
+    With the jitter at `StaleAfter`, in runs on one machine against the
+    commit before: the regions network promoted at most one link on price
+    after its cut, 4 in 6 runs, and retired none as useless, against 7 and
+    4; it recovered from its cut in 10 seconds in 6 runs of 6, against 4 of
+    6. It settled after 13 to 17 link changes in 5.5 to 8 minutes in three
+    runs, against 12 to 21 in 6 to 12.5. The stranded network recovered
+    from its cut in 10 seconds in three runs of three; in one, the restore
+    took 4 minutes, a second route promoted during the cut retiring as
+    useless after it.
+
+    Under the pipeline's load, the site lab joined both ways was still
+    changing links at 28 minutes, past the 30 minutes the NAT and site labs
+    then had to settle. Run alone, it made its last change at 6 to 15
+    minutes in seven runs, as at the commit before, 6 to 16 in eleven: at
+    both commits the site's nodes promote links to the same public node and
+    retire them within seconds of each other, and a promotion back now
+    waits up to six minutes. Neither pricing the useless test by survivors
+    that answered nor staggering the useless retirements settled it sooner,
+    so those labs get an hour.

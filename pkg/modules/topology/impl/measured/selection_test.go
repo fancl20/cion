@@ -62,8 +62,11 @@ type selFixture struct {
 	sel    *selection
 }
 
+// The fixture's ISD-ASes. The node's is picked so that its priced promotion
+// of D waits PromoteWindows, and of B the most,
+// PromoteWindows+PromoteJitter (TestPromoteWindows).
 var (
-	selIA   = addr.MustIAFrom(20, 0xfd0000000001)
+	selIA   = addr.MustIAFrom(20, 0xfd0000000041)
 	selPeer = addr.MustIAFrom(20, 0xfd0000000002)
 	selA    = addr.MustIAFrom(20, 0xfd0000000011)
 	selB    = addr.MustIAFrom(20, 0xfd0000000012)
@@ -434,8 +437,9 @@ func TestSelectionFloorWarning(t *testing.T) {
 
 // TestSelectionStrandedPromotion checks the stranded clause: a tier no live
 // route resolves into admits its fastest reachable member at once, no
-// streak — the establishment riding the rendezvous path — and an
-// unreachable member of the same tier is not that member.
+// streak — the establishment riding the rendezvous path — though its pair
+// waits the most windows a priced promotion can, and an unreachable member
+// of the same tier is not that member.
 func TestSelectionStrandedPromotion(t *testing.T) {
 	f := newSelFixture(t, selPeer, selA) // at the floor
 	// A slow tier of two: one member reachable over the rendezvous echo,
@@ -450,19 +454,51 @@ func TestSelectionStrandedPromotion(t *testing.T) {
 	}
 }
 
+// TestPromoteWindows checks each pair's wait: from PromoteWindows to
+// PromoteWindows+PromoteJitter windows, and every value between drawn by a
+// range of peers from one node and by a range of nodes from one peer.
+func TestPromoteWindows(t *testing.T) {
+	want := make(map[int]bool)
+	for w := PromoteWindows; w <= PromoteWindows+PromoteJitter; w++ {
+		want[w] = true
+	}
+	fromNode := make(map[int]bool)
+	toPeer := make(map[int]bool)
+	for as := range addr.AS(64) {
+		other := addr.MustIAFrom(20, 0xfd0000000100|as)
+		fromNode[promoteWindows(selIA, other)] = true
+		toPeer[promoteWindows(other, selB)] = true
+	}
+	if diff := cmp.Diff(want, fromNode); diff != "" {
+		t.Errorf("one node's waits for a range of peers (-want +got):\n%s", diff)
+	}
+	if diff := cmp.Diff(want, toPeer); diff != "" {
+		t.Errorf("a range of nodes' waits for one peer (-want +got):\n%s", diff)
+	}
+
+	// The fixture's pairs wait what the tests below rely on.
+	got := map[addr.IA]int{selB: promoteWindows(selIA, selB), selD: promoteWindows(selIA, selD)}
+	fixture := map[addr.IA]int{selB: PromoteWindows + PromoteJitter, selD: PromoteWindows}
+	if diff := cmp.Diff(fixture, got); diff != "" {
+		t.Errorf("the fixture's waits (-want +got):\n%s", diff)
+	}
+}
+
 // TestSelectionPricedPromotion checks the beaten-baseline case: a candidate
 // no route prices, whose direct round trip beats its tier's price by the
-// promotion ratio, is promoted on the second consecutive good window, never
-// on the first, and a candidate that beats no price never is — however cheap
-// the declarations its unreachable self would price.
+// promotion ratio, is promoted on the last of its pair's windows, never
+// before, and a candidate that beats no price never is — however cheap the
+// declarations its unreachable self would price.
 func TestSelectionPricedPromotion(t *testing.T) {
 	f := newSelFixture(t, selPeer, selA)                        // at the floor
 	f.candidate(selB, 8*time.Millisecond, 20*time.Millisecond)  // beats 0.8 of the 20ms price
 	f.candidate(selC, 18*time.Millisecond, 20*time.Millisecond) // does not
 
-	f.pass(t)
+	for range promoteWindows(selIA, selB) - 1 {
+		f.pass(t)
+	}
 	if len(f.established) != 0 {
-		t.Fatal("a candidate was promoted on a single good window")
+		t.Fatal("a candidate was promoted short of its pair's windows")
 	}
 	f.pass(t)
 	if len(f.established) != 1 || !f.established[0].Equal(selB) {
@@ -499,8 +535,9 @@ func TestSelectionOwnPricePromotion(t *testing.T) {
 	// C's 6.3ms is within the ratio of the tier's 8ms, short of the floor.
 	f.candidate(selC, 6300*time.Microsecond, 0)
 
-	f.pass(t)
-	f.pass(t)
+	for range promoteWindows(selIA, selB) {
+		f.pass(t)
+	}
 	if len(f.established) != 1 || !f.established[0].Equal(selB) {
 		t.Fatalf("promoted %v, want the candidate its own route detours %v", f.established, selB)
 	}
@@ -512,7 +549,7 @@ func TestSelectionOwnPricePromotion(t *testing.T) {
 
 // TestSelectionSingleRoutePromotion checks the redundancy purchase: a
 // single-route tier admits a second member within the demotion ratio of the
-// price, sustained, and rejects one outside it.
+// price, on the last of its pair's windows, and rejects one outside it.
 func TestSelectionSingleRoutePromotion(t *testing.T) {
 	f := newSelFixture(t, selPeer, selA) // at the floor
 	// A slow tier of one member, its single route the clean path to it:
@@ -520,9 +557,11 @@ func TestSelectionSingleRoutePromotion(t *testing.T) {
 	f.candidate(selB, 22*time.Millisecond, 20*time.Millisecond, cand(link(selX)))
 	f.candidate(selC, 26*time.Millisecond, 20*time.Millisecond, cand(link(selX)))
 
-	f.pass(t)
+	for range promoteWindows(selIA, selB) - 1 {
+		f.pass(t)
+	}
 	if len(f.established) != 0 {
-		t.Fatal("the second route was purchased on a single window")
+		t.Fatal("the second route was purchased short of its pair's windows")
 	}
 	f.pass(t)
 	if len(f.established) != 1 || !f.established[0].Equal(selB) {
@@ -530,6 +569,26 @@ func TestSelectionSingleRoutePromotion(t *testing.T) {
 	}
 	if f.hasEntry(t, selC) {
 		t.Error("a member outside the demotion ratio of the price was admitted")
+	}
+}
+
+// TestSelectionSecondRouteFirst checks the priced cases' order: a second
+// route for a single-route tier goes ahead of a faster candidate whose
+// beaten price falls due in the same window.
+func TestSelectionSecondRouteFirst(t *testing.T) {
+	f := newSelFixture(t, selPeer, selA) // at the floor
+	f.candidate(selB, 22*time.Millisecond, 20*time.Millisecond, cand(link(selX)))
+	// D beats its price in the fast tier, its streak ending in B's last
+	// window.
+	for range promoteWindows(selIA, selB) - promoteWindows(selIA, selD) {
+		f.pass(t)
+	}
+	f.candidate(selD, 8*time.Millisecond, 20*time.Millisecond)
+	for range promoteWindows(selIA, selD) {
+		f.pass(t)
+	}
+	if len(f.established) != 1 || !f.established[0].Equal(selB) {
+		t.Fatalf("promoted %v, want the second route %v first", f.established, selB)
 	}
 }
 
@@ -552,19 +611,27 @@ func TestSelectionUnpricedTier(t *testing.T) {
 	}
 }
 
-// TestSelectionFlappingCandidate checks the damping: a candidate with a good
-// window, a bad one, and a good one is never promoted — the streak resets on
-// the bad window.
+// TestSelectionFlappingCandidate checks the damping: a candidate whose good
+// windows a bad one breaks short of its pair's windows starts over, and is
+// promoted once that many good windows run unbroken.
 func TestSelectionFlappingCandidate(t *testing.T) {
 	f := newSelFixture(t, selPeer, selA)
 	f.candidate(selB, 8*time.Millisecond, 20*time.Millisecond)
+	windows := promoteWindows(selIA, selB)
 
-	f.pass(t) // good: streak 1
+	for range windows - 1 {
+		f.pass(t) // good
+	}
 	f.samples[selB] = f.priced(selB, 18*time.Millisecond, 20*time.Millisecond)
-	f.pass(t) // bad: streak reset
+	f.pass(t) // bad: the streak resets
 	f.samples[selB] = f.priced(selB, 8*time.Millisecond, 20*time.Millisecond)
-	f.pass(t) // good again: streak 1
-	f.pass(t) // good: streak 2 — promoted now, four windows in
+	for range windows - 1 {
+		f.pass(t) // good again
+	}
+	if len(f.established) != 0 {
+		t.Fatalf("promoted %v short of its windows since the bad one", f.established)
+	}
+	f.pass(t)
 	if len(f.established) != 1 || !f.established[0].Equal(selB) {
 		t.Fatalf("promoted %v, want the flapper only after sustained evidence", f.established)
 	}

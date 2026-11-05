@@ -3,6 +3,7 @@ package measured
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/binary"
 	"errors"
 	"log/slog"
@@ -50,8 +51,15 @@ const (
 	// TierGap is the multiple of a tier's median direct round trip at which
 	// a peer opens the next tier.
 	TierGap = 2.0
-	// PromoteWindows is the consecutive good windows a promotion needs.
+	// PromoteWindows is the least consecutive good windows a priced
+	// promotion needs.
 	PromoteWindows = 2
+	// PromoteJitter is the most windows a priced promotion waits beyond
+	// PromoteWindows: scion.StaleAfter's worth, the horizon in which a link
+	// change plays out in every node's segments. Each pair of ends draws its
+	// own share, so the nodes one change moves promote in turn, and most see
+	// the first link's routes before their streaks end.
+	PromoteJitter = int(scion.StaleAfter / SelectionInterval)
 	// DemoteWindows is the consecutive bad windows a retirement needs.
 	DemoteWindows = 3
 	// ProbeRuns is the echoes per measurement run; the median is the sample.
@@ -720,9 +728,10 @@ func (s *selection) echoRTT(ctx context.Context, dst *scion.Addr) time.Duration 
 // does. A single-route tier admits a second member within the demotion
 // ratio of the price, and a candidate whose direct round trip beats its own
 // price by the promotion ratio and the margin floor is admitted — the priced
-// cases sustained, the sustained winner the fastest direct sample among
-// qualifiers. At the cap every case requires an eviction that qualifies
-// under retirement, the floor and stranded cases included.
+// cases sustained for the pair's own windows, the sustained winner the
+// fastest direct sample among qualifiers. At the cap every case requires an
+// eviction that qualifies under retirement, the floor and stranded cases
+// included.
 func (s *selection) promote(
 	ctx context.Context,
 	entries []*links.Link,
@@ -775,22 +784,23 @@ func (s *selection) promote(
 		return
 	}
 
-	// The priced cases, sustained — a second route for a single-route tier
-	// first, redundancy purchased at a bounded latency price, then any
-	// beaten price — the fastest sustained winner either way.
+	// The priced cases, sustained for each pair's windows — a second route
+	// for a single-route tier first, redundancy purchased at a bounded
+	// latency price, then any beaten price — the fastest sustained winner
+	// either way.
 	for _, e := range reachable {
 		t := tierOf(ts, e.IA)
 		if t == nil || t.routes != 1 || t.price == 0 {
 			continue
 		}
-		if s.streak(e.IA).promote >= PromoteWindows &&
+		if s.streak(e.IA).promote >= promoteWindows(s.cfg.IA, e.IA) &&
 			samples[e.IA].direct <= ratioOf(t.price, DemotionRatio) {
 			s.admit(ctx, entries, neighbors, ts, samples, e, "a second route for its tier")
 			return
 		}
 	}
 	for _, e := range reachable {
-		if s.streak(e.IA).promote < PromoteWindows ||
+		if s.streak(e.IA).promote < promoteWindows(s.cfg.IA, e.IA) ||
 			!s.qualifies(e.IA, samples, ts) {
 			continue
 		}
@@ -810,6 +820,17 @@ func (s *selection) qualifies(ia addr.IA, samples map[addr.IA]sample, ts []tier)
 	}
 	t := tierOf(ts, ia)
 	return t != nil && t.qualifies(ia, sm.direct)
+}
+
+// promoteWindows returns the consecutive good windows the node's priced
+// promotion of the peer needs: PromoteWindows plus the pair's draw of up to
+// PromoteJitter, from SHA-256 over both ends' ISD-ASes. The draw never
+// changes; the ISD-ASes' own random draws spread it across pairs.
+func promoteWindows(self, peer addr.IA) int {
+	b := binary.BigEndian.AppendUint64(nil, uint64(self))
+	b = binary.BigEndian.AppendUint64(b, uint64(peer))
+	sum := sha256.Sum256(b)
+	return PromoteWindows + int(binary.BigEndian.Uint64(sum[:8])%uint64(PromoteJitter+1))
 }
 
 // admit lands a promotion, evicting at the cap first: the victim is the
