@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net"
 	"net/netip"
+	"strconv"
 	"syscall"
 	"testing"
 	"testing/synctest"
@@ -255,6 +256,50 @@ func TestTapsOnVirtualTime(t *testing.T) {
 		send(t, ca, ab, "after the lift")
 		if got, _ := recv(t, cb, 2*oneWay); got != "after the lift" {
 			t.Fatalf("the pair did not carry after the cut lifted: %q", got)
+		}
+	})
+}
+
+// TestJitterOnVirtualTime checks the jitter tap inside a synctest bubble:
+// every packet of the pair is held at least the pair's one-way delay, its
+// extra hold averages the jitter's mean, and a burst of packets arrives in
+// the order sent.
+func TestJitterOnVirtualTime(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		f := New(t, UDPOnly())
+		a, b := f.Node(insideAddr), f.Node(upstreamAddr)
+		ca, aa := listen(t, a)
+		cb, ab := listen(t, b)
+		const oneWay, mean, samples = 10 * time.Millisecond, 5 * time.Millisecond, 400
+		f.Delay(insideAddr, upstreamAddr, oneWay)
+		f.Jitter(insideAddr, upstreamAddr, mean)
+
+		// One packet at a time, so no packet waits behind another.
+		var extra time.Duration
+		for k := range samples {
+			sent := time.Now()
+			send(t, ca, ab, strconv.Itoa(k))
+			if got, _ := recv(t, cb, time.Second); got != strconv.Itoa(k) {
+				t.Fatalf("packet %d did not arrive: %q", k, got)
+			}
+			held := time.Since(sent)
+			if held < oneWay {
+				t.Fatalf("packet %d was held %v, want at least %v", k, held, oneWay)
+			}
+			extra += held - oneWay
+		}
+		if got := extra / samples; got < mean*4/5 || got > mean*6/5 {
+			t.Errorf("the extra hold averaged %v over %d packets, want about %v", got, samples, mean)
+		}
+
+		// A burst the other way arrives in the order sent.
+		for k := range 100 {
+			send(t, cb, aa, strconv.Itoa(k))
+		}
+		for k := range 100 {
+			if got, _ := recv(t, ca, time.Second); got != strconv.Itoa(k) {
+				t.Fatalf("packet %d of the burst arrived as %q", k, got)
+			}
 		}
 	})
 }

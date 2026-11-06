@@ -59,12 +59,14 @@ type Fabric struct {
 	wg     sync.WaitGroup
 
 	// mtx guards the drawn network: the stacks by host, the taps, the
-	// NATs, the names, and the watches. A packet's walk from one stack to
-	// another reads it twice — once for the taps, once for the destination
-	// — so no tap draw or node boot waits on a packet in flight.
+	// NATs, the names, and the watches, beside when the last packet of each
+	// jittered direction is due. A packet's walk from one stack to another
+	// reads it twice — once for the taps, once for the destination — so no
+	// tap draw or node boot waits on a packet in flight.
 	mtx     sync.Mutex
 	hosts   map[netip.Addr]*Node
 	taps    []*tap
+	due     map[[2]netip.Addr]tcpip.MonotonicTime
 	nats    []*NAT
 	names   map[string]netip.Addr
 	watches []*watch
@@ -99,6 +101,7 @@ func New(t *testing.T, opts ...Option) *Fabric {
 		ctx:    ctx,
 		cancel: cancel,
 		hosts:  make(map[netip.Addr]*Node),
+		due:    make(map[[2]netip.Addr]tcpip.MonotonicTime),
 		names:  make(map[string]netip.Addr),
 	}
 	for _, opt := range opts {

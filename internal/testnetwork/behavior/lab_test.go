@@ -200,6 +200,14 @@ func (n *network) setDelay(i, j int, oneWay time.Duration) {
 	n.oneWay[i][j], n.oneWay[j][i] = oneWay, oneWay
 }
 
+// jitterPair draws a jitter of the given mean on the pair's packets on the
+// fabric, beside its delay; the returned lift removes it.
+func (n *network) jitterPair(i, j int, mean time.Duration) func() {
+	return n.drawPair(i, j, func(a, b netip.Addr) func() {
+		return n.fab.Jitter(a, b, mean)
+	})
+}
+
 // cutPair cuts the pair on the fabric; the returned lift restores it.
 func (n *network) cutPair(i, j int) func() {
 	lift := n.drawPair(i, j, n.fab.Cut)

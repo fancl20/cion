@@ -129,3 +129,12 @@ Only the labs change, and only the new benchmarks draw a jitter tap.
     burst of packets arrives in the order sent.
 *   **The benchmarks** run at proposal 0115's code, and the loss sweep's
     output keeps its form.
+
+## Implementation history
+
+*   The jitter tap and the benchmarks landed as proposed, with
+    `TestJitterOnVirtualTime` for the tap. A burst scenario logs each burst,
+    its link, and its length; the first regions run predates that.
+*   The pre-commit checks passed but for `TestBFDStaticLabEpisode`, the
+    static lab's known failure under the race detector's load, which
+    passed five runs of five alone.
