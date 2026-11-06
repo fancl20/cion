@@ -228,7 +228,11 @@ Admitted links enter the neighbor table; the selection loop then measures
 every peer and keeps a link for what it adds into the region beyond its peer
 — a cheaper route or an independent one, judged by the end that dialed the
 link — holding a resilience floor and changing slowly, because every change
-reshapes paths network-wide. Membership changes land as generation swaps:
+reshapes paths network-wide. Directory entries carry each node's measured
+round trips, links, and announced changes, and a change waits while another
+node's would serve or undo it
+([ADR-0037](/docs/adrs/0037-coordinate-link-changes-through-the-node-directory.md)).
+Membership changes land as generation swaps:
 the new data plane is built from the neighbor table's snapshot and the old
 one retires. Liveness runs beside the source: a session per link feeds the
 monitor, whose verdict stops forwarding on a dead link and resumes it on

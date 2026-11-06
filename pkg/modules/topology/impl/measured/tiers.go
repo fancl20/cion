@@ -299,12 +299,21 @@ func (t *tier) qualifies(ia addr.IA, direct time.Duration) bool {
 	if t.price == 0 {
 		return false
 	}
+	return t.beats(ia, direct) || (t.routes == 1 && direct <= ratioOf(t.price, DemotionRatio))
+}
+
+// beats reports whether the member's direct round trip beats its own price,
+// the tier's when no route prices the member, by the promotion ratio and by
+// at least the margin floor. An unpriced tier beats nothing.
+func (t *tier) beats(ia addr.IA, direct time.Duration) bool {
+	if t.price == 0 {
+		return false
+	}
 	price := t.prices[ia]
 	if price == 0 {
 		price = t.price
 	}
-	beats := direct < ratioOf(price, PromotionRatio) && price-direct >= MarginFloor
-	return beats || (t.routes == 1 && direct <= ratioOf(t.price, DemotionRatio))
+	return direct < ratioOf(price, PromotionRatio) && price-direct >= MarginFloor
 }
 
 // memberRoute returns the route a member's routes price it by, and that

@@ -74,6 +74,13 @@ func (s LinkState) Up(ifID uint16) bool {
 	return !s.links[ifID].Down
 }
 
+// Established reports whether the interface's live entry is established;
+// false when the state holds no entry for it.
+func (s LinkState) Established(ifID uint16) bool {
+	l, ok := s.links[ifID]
+	return ok && l.Entry.State == links.StateEstablished
+}
+
 // Observed returns the source the interface's link last observed its peer
 // at; zero when the state holds none.
 func (s LinkState) Observed(ifID uint16) netip.AddrPort {

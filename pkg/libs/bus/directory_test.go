@@ -2,12 +2,15 @@ package bus
 
 import (
 	"net/netip"
+	"slices"
 	"testing"
 	"time"
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
 	"github.com/scionproto/scion/pkg/addr"
+
+	"github.com/fancl20/cion/pkg/libs/segment"
 )
 
 // TestDirectory checks the directory: the zero directory holds no scope; a
@@ -54,5 +57,31 @@ func TestDirectory(t *testing.T) {
 	}
 	if e, ok := d.Latest(b); !ok || !e.Published.Equal(at.Add(time.Minute)) {
 		t.Errorf("the latest entry of %v = %+v (%t), want the one signed last", b, e, ok)
+	}
+}
+
+// TestPeerReportEqual checks that two reports are equal only when every
+// field is, the reliance in order.
+func TestPeerReportEqual(t *testing.T) {
+	a, b := addr.MustIAFrom(1, 0xff0000000001), addr.MustIAFrom(1, 0xff0000000002)
+	base := PeerReport{IA: a, RTT: time.Millisecond, IfID: 1, Promoting: true, Retiring: true,
+		Relies: []segment.LinkID{{IA: a, IfID: 2}, {IA: b, IfID: 3}}}
+	if !base.Equal(base) {
+		t.Error("a report differs from itself")
+	}
+	for name, change := range map[string]func(*PeerReport){
+		"IA":        func(r *PeerReport) { r.IA = b },
+		"RTT":       func(r *PeerReport) { r.RTT++ },
+		"IfID":      func(r *PeerReport) { r.IfID++ },
+		"Promoting": func(r *PeerReport) { r.Promoting = false },
+		"Retiring":  func(r *PeerReport) { r.Retiring = false },
+		"Relies":    func(r *PeerReport) { slices.Reverse(r.Relies) },
+	} {
+		o := base
+		o.Relies = slices.Clone(base.Relies)
+		change(&o)
+		if base.Equal(o) {
+			t.Errorf("reports differing in %s are equal", name)
+		}
 	}
 }

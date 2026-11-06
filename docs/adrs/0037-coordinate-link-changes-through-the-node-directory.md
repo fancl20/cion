@@ -1,6 +1,6 @@
 # Coordinate Link Changes Through the Node Directory
 
-*   Status: proposed
+*   Status: accepted
 *   Date: 2026-11-06
 
 [TOC]

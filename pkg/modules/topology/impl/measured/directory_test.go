@@ -44,6 +44,7 @@ import (
 	"github.com/fancl20/cion/pkg/libs/peeria"
 	"github.com/fancl20/cion/pkg/libs/scion"
 	"github.com/fancl20/cion/pkg/libs/scionrpc"
+	"github.com/fancl20/cion/pkg/libs/segment"
 	"github.com/fancl20/cion/pkg/modules/links"
 	"github.com/fancl20/cion/pkg/modules/trustdb"
 	"github.com/fancl20/cion/pkg/modules/trustdb/impl/bbolt"
@@ -694,6 +695,102 @@ func TestDirectoryEntryAddresses(t *testing.T) {
 	v, _ := d.pass(now)
 	if got := slices.Sorted(maps.Keys(v.scopes[id])); !slices.Equal(got, []addr.IA{signer(4)}) {
 		t.Errorf("the view shows %v, want the two-host entry alone", got)
+	}
+}
+
+// TestDirectoryEntryPeers checks the entry's peer reports: they read back as
+// signed, and an entry naming an interface no hop field could carry — its
+// link's or one a retirement relies on — is refused.
+func TestDirectoryEntryPeers(t *testing.T) {
+	now := time.Now()
+	signer := func(n uint64) addr.IA { return addr.MustIAFrom(20, addr.AS(0xfd0000000500+n)) }
+	good := bodyAt(signer(1), "192.0.2.1")
+	good.Peers = []*nodev1.Peer{
+		{IsdAs: uint64(signer(2)), RttUs: 1500, IfId: 3, Promoting: true},
+		{IsdAs: uint64(signer(3)), RttUs: 20000, Retiring: true,
+			Relies: []*nodev1.LinkRef{{IsdAs: uint64(signer(2)), IfId: 7}}},
+	}
+	wideLink := bodyAt(signer(4), "192.0.2.4")
+	wideLink.Peers = []*nodev1.Peer{{IsdAs: uint64(signer(1)), RttUs: 1, IfId: 1 << 16}}
+	wideReliance := bodyAt(signer(5), "192.0.2.5")
+	wideReliance.Peers = []*nodev1.Peer{{IsdAs: uint64(signer(1)), RttUs: 1, Retiring: true,
+		Relies: []*nodev1.LinkRef{{IsdAs: uint64(signer(2)), IfId: 1 << 16}}}}
+	msgs := []*cryptopb.SignedMessage{
+		fakeEntry(t, signer(1), trcN, now, good),
+		fakeEntry(t, signer(4), trcN, now, wideLink),
+		fakeEntry(t, signer(5), trcN, now, wideReliance),
+	}
+	d := NewNodeDirectory(NodeDirectoryConfig{IA: directoryIA, Trust: &fakeTrust{}})
+	id := attachLink(d, 1)
+	if n := d.accept(t.Context(), msgs, founderIA, 1); n != 1 {
+		t.Fatalf("merged %d, want the well-formed entry alone", n)
+	}
+	want := []bus.PeerReport{
+		{IA: signer(2), RTT: 1500 * time.Microsecond, IfID: 3, Promoting: true},
+		{IA: signer(3), RTT: 20 * time.Millisecond, Retiring: true,
+			Relies: []segment.LinkID{{IA: signer(2), IfID: 7}}},
+	}
+	e := heldIn(d, id)[signer(1)]
+	if e == nil {
+		t.Fatal("the well-formed entry is not held")
+	}
+	if diff := cmp.Diff(want, e.entry.Peers); diff != "" {
+		t.Errorf("peers (-want +got):\n%s", diff)
+	}
+}
+
+// TestSameChanges checks what signs a node's entry again at once: a peer's
+// link or announcements, a peer one report omits naming none; round trips,
+// and peers that name neither, wait for the refresh.
+func TestSameChanges(t *testing.T) {
+	a, b := addr.MustIAFrom(20, 0xfd0000000601), addr.MustIAFrom(20, 0xfd0000000602)
+	held := []bus.PeerReport{
+		{IA: a, RTT: 5 * time.Millisecond, IfID: 2},
+		{IA: b, RTT: 30 * time.Millisecond},
+	}
+	relies := []segment.LinkID{{IA: b, IfID: 4}}
+	for _, tc := range []struct {
+		name string
+		want []bus.PeerReport
+		same bool
+	}{
+		{"round trips moved", []bus.PeerReport{
+			{IA: a, RTT: 7 * time.Millisecond, IfID: 2}, {IA: b, RTT: 40 * time.Millisecond},
+		}, true},
+		{"an unlinked peer left", []bus.PeerReport{{IA: a, RTT: 5 * time.Millisecond, IfID: 2}}, true},
+		{"an unlinked peer joined", append(slices.Clone(held),
+			bus.PeerReport{IA: addr.MustIAFrom(20, 0xfd0000000603), RTT: time.Millisecond}), true},
+		{"a link left", []bus.PeerReport{
+			{IA: a, RTT: 5 * time.Millisecond}, {IA: b, RTT: 30 * time.Millisecond},
+		}, false},
+		{"a linked peer left", []bus.PeerReport{{IA: b, RTT: 30 * time.Millisecond}}, false},
+		{"a link joined", []bus.PeerReport{
+			{IA: a, RTT: 5 * time.Millisecond, IfID: 2}, {IA: b, RTT: 30 * time.Millisecond, IfID: 3},
+		}, false},
+		{"a promotion announced", []bus.PeerReport{
+			{IA: a, RTT: 5 * time.Millisecond, IfID: 2},
+			{IA: b, RTT: 30 * time.Millisecond, Promoting: true},
+		}, false},
+		{"a retirement announced", []bus.PeerReport{
+			{IA: a, RTT: 5 * time.Millisecond, IfID: 2, Retiring: true, Relies: relies},
+			{IA: b, RTT: 30 * time.Millisecond},
+		}, false},
+	} {
+		if got := sameChanges(held, tc.want); got != tc.same {
+			t.Errorf("%s: sameChanges = %v, want %v", tc.name, got, tc.same)
+		}
+	}
+	retiring := []bus.PeerReport{{IA: a, RTT: 5 * time.Millisecond, IfID: 2, Retiring: true, Relies: relies}}
+	other := []bus.PeerReport{{IA: a, RTT: 5 * time.Millisecond, IfID: 2, Retiring: true,
+		Relies: []segment.LinkID{{IA: b, IfID: 5}}}}
+	if sameChanges(retiring, other) {
+		t.Error("a retirement's changed reliance signs nothing")
+	}
+	// A retirement stays announced through a window its link's verdict is
+	// down, the link named nowhere: its withdrawal signs too.
+	down := []bus.PeerReport{{IA: a, RTT: 5 * time.Millisecond, Retiring: true, Relies: relies}}
+	if sameChanges(down, []bus.PeerReport{{IA: a, RTT: 5 * time.Millisecond}}) {
+		t.Error("a retirement withdrawn while its link is down signs nothing")
 	}
 }
 
@@ -1842,8 +1939,11 @@ func TestDirectorySignsItsOwnEntry(t *testing.T) {
 		}
 		engine := trust.NewEngine(directoryIA, key, &trust.NetworkProvider{DB: founder.DB},
 			trusttest.Unchecked{})
-		// silent is the host whose echo went unanswered, if any.
+		// silent is the host whose echo went unanswered, if any, and peers
+		// the node's peer reports.
 		var silent atomic.Pointer[netip.Addr]
+		var peers atomic.Pointer[[]*nodev1.Peer]
+		verdicts := new(bus.Topic[bus.LinkState])
 		d := NewNodeDirectory(NodeDirectoryConfig{
 			IA: directoryIA, Trust: engine,
 			Addresses: func(hosts []netip.Addr) ([]*nodev1.Address, error) {
@@ -1855,6 +1955,13 @@ func TestDirectorySignsItsOwnEntry(t *testing.T) {
 				}
 				return out, err
 			},
+			Peers: func(bus.DirectoryID) []*nodev1.Peer {
+				if p := peers.Load(); p != nil {
+					return *p
+				}
+				return nil
+			},
+			Links: verdicts,
 		})
 		d.mint = counterIDs(0xf0)
 		ctx, cancel := context.WithCancel(t.Context())
@@ -1916,6 +2023,17 @@ func TestDirectorySignsItsOwnEntry(t *testing.T) {
 			t.Errorf("after the echo went unanswered the entry = %+v, want its report", e)
 		}
 
+		// A peer report the link state changes signs again at the link
+		// state's publication, with no other wake.
+		peers.Store(&[]*nodev1.Peer{{IsdAs: uint64(founderIA), RttUs: 5000, IfId: 1}})
+		verdicts.Publish(bus.NewLinkState())
+		time.Sleep(time.Nanosecond)
+		synctest.Wait()
+		want := []bus.PeerReport{{IA: founderIA, RTT: 5 * time.Millisecond, IfID: 1}}
+		if _, e := own(); !slices.EqualFunc(e.Peers, want, bus.PeerReport.Equal) {
+			t.Errorf("after the link state changed the entry reports %+v, want %+v", e.Peers, want)
+		}
+
 		d.attach(2, hostOne)
 		time.Sleep(time.Nanosecond)
 		synctest.Wait()
@@ -1923,10 +2041,33 @@ func TestDirectorySignsItsOwnEntry(t *testing.T) {
 			t.Errorf("with a second host the entry names %v, want both in order", hostsOf(e))
 		}
 
-		time.Sleep(EntryRefreshInterval)
+		// A changed round trip, and a peer that names no link, sign nothing
+		// at the link state's publication: the refresh carries them.
+		last, _ := own()
+		other := addr.MustIAFrom(20, 0xfd0000000099)
+		peers.Store(&[]*nodev1.Peer{
+			{IsdAs: uint64(founderIA), RttUs: 7000, IfId: 1},
+			{IsdAs: uint64(other), RttUs: 9000},
+		})
+		verdicts.Publish(bus.NewLinkState())
+		time.Sleep(time.Second)
 		synctest.Wait()
-		if refreshed, _ := own(); !refreshed.Equal(time.Now()) {
+		if at, _ := own(); !at.Equal(last) {
+			t.Errorf("a changed round trip signed again %v after the last signing", at.Sub(last))
+		}
+
+		time.Sleep(EntryRefreshInterval - time.Second)
+		synctest.Wait()
+		refreshed, e := own()
+		if !refreshed.Equal(time.Now()) {
 			t.Errorf("the refresh signed at %v, want %v", refreshed, time.Now())
+		}
+		want = []bus.PeerReport{
+			{IA: founderIA, RTT: 7 * time.Millisecond, IfID: 1},
+			{IA: other, RTT: 9 * time.Millisecond},
+		}
+		if !slices.EqualFunc(e.Peers, want, bus.PeerReport.Equal) {
+			t.Errorf("the refresh reports %+v, want %+v", e.Peers, want)
 		}
 
 		// An entry of the node's own signed an hour ahead — its clock

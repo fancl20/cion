@@ -163,3 +163,103 @@ for proposals 0097 and 0098.
     equal. The provider names the lowest established up link alone.
 *   **The labs.** The labs pass, and the benchmarks run against the commit
     before.
+
+## Implementation history
+
+*   **Policy variants.** A temporary switch ran the benchmark suite under
+    each policy from one test binary per round, against proposal 0114's
+    runs: the regions lab settled twice and cut three or four times, the
+    stranded cut three times, the site lab two or three times, and the NAT
+    lab twice. Medians, with ranges where the cuts' tails spread:
+
+    | Policy | Regions, settled | Regions, cut settled | Stranded, cut settled | Site, both joins | NAT |
+    | :-- | :-- | :-- | :-- | :-- | :-- |
+    | The stagger (0114) | 18.5 changes, 7.3 min | 120 s | 300 s (10–1800) | 12 changes, 7.3 min | 12.5 changes, 5.3 min |
+    | Announced | 15.5, 4.9 min | 50 s (50–150) | 210 s | 9, 7.8 min | 10, 3.8 min |
+    | Predicted, first round | 15, 5.1 min | 130 s (50–370) | 160 s | 8, 5.0 min | 8.5, 4.3 min |
+    | The same, no retirement order | 15.5, 4.0 min | 60 s | 60 s | 6.5, 4.8 min | 9.5, 3.8 min |
+    | Predicted | 14, 4.1 min | 250 s (60–300) | 70 s | 7, 4.3 min | 9, 4.3 min |
+    | The same, no retirement order | 14.5, 4.0 min | 50 s (10–70) | 10 s (10–200) | 8, 5.3 min | 10.5, 4.3 min |
+    | Predicted, second routes too | 17.5, 8.8 min | 95 s (10–300) | 10 s | 6, 4.2 min | 9.5, 3.8 min |
+
+    *   Announced alone, the first node to announce goes first: over three
+        regions cuts, 11 links retired as useless, against 8 under
+        prediction, and one cut's reach held only after 160 seconds.
+    *   The first round announced a retirement at its third useless window
+        and made it a window later, so each retirement took a window more.
+        The second announces from the first useless window.
+    *   Retirement order changes nothing the labs tell apart: once
+        promotions wait on each other, retirements that rest on each other
+        are rare there. It stays for that case, at no added wait.
+    *   The regions cuts' tails come from second-route promotions, whose
+        draws remain: in the second round's slowest cut, three nodes bought
+        second routes within six seconds, one retired as useless, and reach
+        held only after five minutes. Ordered by the round-trip test as
+        beaten prices are, second routes left one of four cuts' reach at 310
+        seconds, and 14 links retired as useless over the four runs, against
+        7 over three; they keep their draws.
+*   **Changes from the first prototype.**
+    *   The beaten-price loop first tested `qualifies`, which counts a second
+        route too, so second-route candidates skipped their draws;
+        `tier.beats` holds the beaten price alone.
+    *   An announced promotion held the other nodes as long as it stood, so
+        a node at its cap with no victim to evict, or whose establishment
+        fails, would hold them without end; two windows now bound an
+        announcement as they bound a prediction.
+    *   The selection first named its links itself, as of its window: a new
+        link showed at the accepting end a window late, and a retired link
+        stayed named, because `LinkState.Up` reads an interface no entry
+        holds as up. The provider now names each link from the link state
+        at the signing.
+    *   A departure is recorded only for a pair the window before showed
+        linked, so an announcement that outlives its link keeps the
+        interfaces the departure recorded.
+    *   Every change of the reports first signed at once, so a node's entry
+        would sign whenever any of its peers' round trips moved past the
+        step: a rate growing with the network, each signing flooding an
+        entry that grows with it too. Round trips now travel with the next
+        signing.
+*   **Directory traffic.** The payload of the directory's pushes and syncs,
+    per node, instrumented in the regions lab, two runs: 37 and 38 bytes
+    per second once the links settled, against 27 at the commit before, and
+    144 and 194 while they converged, against 42, a node signing five to six
+    times per five minutes then, against one to two. A signed entry is 180
+    bytes plus 15 per peer; each signing crossed 32 of the lab's 20 links'
+    40 directions, as 2E − N + 1 predicts, and each end of a link sends a
+    59-byte summary per entry every five minutes. Before round trips waited
+    for the refresh, one run sent 188 bytes per second converging: the lab's
+    fixed delays move no round trip, so the labs cannot show the churn the
+    change removes.
+*   The tests landed as planned, with `TestSelectionReports` and
+    `TestObserveRestartsPredictions` beside them. Mutations 61 of 61
+    killed.
+*   Benchmarks against the commit before, two or three runs each:
+    *   The regions lab settled after 14 and 17 link changes within 4.5 and
+        10.5 minutes, against 18 and 19 within 6.2 and 8.3, its worst pair at
+        1.11 times the reference, as before. The slow run's tail was two
+        second routes bought 33 seconds apart, one retired as useless three
+        minutes later.
+    *   After the regions cut, reach held from 10 seconds in all three runs,
+        against 20, and the links settled within 10 to 120 seconds, a median
+        of 50, against 100 to 140; the worst pair stood at 1.16 to 1.23 times
+        the reference, against 1.23.
+    *   After the stranded cut, the links settled within 10 to 310 seconds, a
+        median of 60, against 10 seconds to never within the budget; after
+        the restore, within 120 to 280, against 0 to 260.
+    *   The site lab joined both ways settled after 6 or 7 changes within 4.3
+        to 5.5 minutes, against 11 to 14 within 6.8 to 8, and one run of
+        three left one pair unreached, as found below; joined inside or
+        outside, after 5 changes within 2.5 and 1.8 minutes, against 7 and 8
+        within 4.5 and 6.
+    *   The NAT lab settled after 9 and 10 changes within 4.3 and 4.8
+        minutes, against 11 and 14 within 4.8 and 5.8; its founder-down
+        nodes survived in 1.6 and 16.1 seconds and returned in 216 and 219,
+        against 14.1 and 15.5, and 219 and 231.
+    *   Useless retirements: 6 over the site lab's three runs, against 10; 10
+        over the regions cut runs, against 7, one link each promoted for a
+        beaten price, the others bought for the floor, a stranded tier, or a
+        second route, or accepted.
+*   Found, not fixed: in some runs of the site lab joined both ways, one
+    pair stays unreached through the assessment, in 2 of 5 runs before
+    proposal 0114. The founder's lease to a site node holds a down segment
+    over a link that node retired, though a direct link joins the two.

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log/slog"
 	"maps"
+	"math"
 	"net"
 	"net/netip"
 	"slices"
@@ -33,6 +34,7 @@ import (
 	"github.com/fancl20/cion/pkg/libs/peeria"
 	"github.com/fancl20/cion/pkg/libs/scion"
 	"github.com/fancl20/cion/pkg/libs/scionrpc"
+	"github.com/fancl20/cion/pkg/libs/segment"
 	"github.com/fancl20/cion/pkg/modules/topology"
 	nodev1 "github.com/fancl20/cion/proto/node/v1"
 	nodev1connect "github.com/fancl20/cion/proto/node/v1/nodev1connect"
@@ -106,6 +108,11 @@ type NodeDirectoryConfig struct {
 	// node's report of how its peers reach it there; an error fails the
 	// signing.
 	Addresses func(hosts []netip.Addr) ([]*nodev1.Address, error)
+	// Peers returns, at each signing, the peers the node reports in the
+	// directory the ID names, ordered by ISD-AS; nil reports none. Each
+	// publication of Links signs again where a reported peer's link or
+	// announcements changed.
+	Peers func(id bus.DirectoryID) []*nodev1.Peer
 	// Trust signs the node's entries and verifies its neighbors'; nil signs
 	// and accepts none.
 	Trust DirectoryTrust
@@ -373,7 +380,46 @@ func (e *signedEntry) read(body *nodev1.Entry) error {
 			},
 		})
 	}
+	for _, p := range body.Peers {
+		report, err := readPeer(p)
+		if err != nil {
+			return err
+		}
+		e.entry.Peers = append(e.entry.Peers, report)
+	}
 	return nil
+}
+
+// readPeer reads one reported peer: an interface ID no hop field could carry
+// fails.
+func readPeer(p *nodev1.Peer) (bus.PeerReport, error) {
+	ifID, err := interfaceID(p.IfId)
+	if err != nil {
+		return bus.PeerReport{}, err
+	}
+	report := bus.PeerReport{
+		IA:        addr.IA(p.IsdAs),
+		RTT:       time.Duration(p.RttUs) * time.Microsecond,
+		IfID:      ifID,
+		Promoting: p.Promoting,
+		Retiring:  p.Retiring,
+	}
+	for _, l := range p.Relies {
+		ifID, err := interfaceID(l.IfId)
+		if err != nil {
+			return bus.PeerReport{}, err
+		}
+		report.Relies = append(report.Relies, segment.LinkID{IA: addr.IA(l.IsdAs), IfID: ifID})
+	}
+	return report, nil
+}
+
+// interfaceID reads a reported interface ID.
+func interfaceID(id uint32) (uint16, error) {
+	if id > math.MaxUint16 {
+		return 0, fmt.Errorf("an interface ID of %d", id)
+	}
+	return uint16(id), nil
 }
 
 // summary returns the summary naming the entry.
@@ -558,19 +604,26 @@ func (d *NodeDirectory) withdrawals(ctx context.Context) (map[bus.DirectoryID][]
 }
 
 // runSign signs the node's entry in each directory it holds once it holds
-// a chain, again in each directory whose attachments or their reach
-// changed, and in each directory a refresh interval past the node's entry
+// a chain, again in each directory whose attachments, their reach, or the
+// links and announcements of the node's peer reports changed — at each
+// publication of the link state, which the reports' links follow, among
+// others — and in each directory a refresh interval past the node's entry
 // held there; each signing names the newest TRC the node pins. A signing
 // that waits on the chain, or fails, retries at the retry interval.
 func (d *NodeDirectory) runSign(ctx context.Context) {
 	retry := intervalOr(d.cfg.Retry, EntryRetry)
 	timer := time.NewTimer(0)
 	defer timer.Stop()
+	var linkStates <-chan bus.LinkState
+	if d.cfg.Links != nil && d.cfg.Peers != nil {
+		linkStates = d.cfg.Links.Subscribe(ctx)
+	}
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-d.signWake:
+		case <-linkStates:
 		case <-timer.C:
 		}
 		next, err := d.signScopes(ctx)
@@ -590,8 +643,9 @@ func (d *NodeDirectory) runSign(ctx context.Context) {
 }
 
 // signScopes signs the node's entry in each directory its links attach to
-// whose addresses differ from the node's entry held there, or whose held
-// entry is a refresh interval old, and returns when the next signing is
+// whose addresses, or whose peers' links and announcements, differ from the
+// node's entry held there, or whose held entry is a refresh interval old,
+// and returns when the next signing is
 // due — a refresh, or the retry of one that lost to an entry of the node's
 // own signed later by its clock — the zero time when no directory waits on
 // one. The first signing that finds the node's chain wakes the catch-up.
@@ -663,13 +717,16 @@ func (d *NodeDirectory) ownBodies() (map[bus.DirectoryID]*nodev1.Entry, error) {
 			return nil, fmt.Errorf("reading the addresses at %v: %w", hs, err)
 		}
 		bodies[id] = &nodev1.Entry{IsdAs: uint64(d.cfg.IA), Addresses: addresses}
+		if d.cfg.Peers != nil {
+			bodies[id].Peers = d.cfg.Peers(id)
+		}
 	}
 	return bodies, nil
 }
 
 // ownHeld returns the signing time of the node's entry the directory
 // holds, and whether that entry is no withdrawal and names the body's
-// addresses.
+// addresses and its peers' links and announcements.
 func (d *NodeDirectory) ownHeld(id bus.DirectoryID, body *nodev1.Entry) (time.Time, bool) {
 	want := signedEntry{signer: d.cfg.IA}
 	if want.read(body) != nil {
@@ -685,7 +742,28 @@ func (d *NodeDirectory) ownHeld(id bus.DirectoryID, body *nodev1.Entry) (time.Ti
 	if !ok {
 		return time.Time{}, false
 	}
-	return held.key.signedAt, !held.withdrawn && slices.Equal(held.entry.Addresses, want.entry.Addresses)
+	return held.key.signedAt, !held.withdrawn &&
+		slices.Equal(held.entry.Addresses, want.entry.Addresses) &&
+		sameChanges(held.entry.Peers, want.entry.Peers)
+}
+
+// sameChanges reports whether two peer reports name the same links and
+// announcements: each peer's interface, promotion, retirement, and
+// reliance, a peer one report omits naming none. Round trips, and peers
+// that name neither, may differ: every signing carries the whole report,
+// so they wait for the entry's next signing, at the latest its refresh.
+func sameChanges(a, b []bus.PeerReport) bool {
+	changes := func(reports []bus.PeerReport) map[addr.IA]bus.PeerReport {
+		out := make(map[addr.IA]bus.PeerReport, len(reports))
+		for _, r := range reports {
+			if r.IfID != 0 || r.Promoting || r.Retiring {
+				r.RTT = 0
+				out[r.IA] = r
+			}
+		}
+		return out
+	}
+	return maps.EqualFunc(changes(a), changes(b), bus.PeerReport.Equal)
 }
 
 // signIn signs the body as the node's entry in the directory the ID names,

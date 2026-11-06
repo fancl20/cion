@@ -7,11 +7,12 @@ import "proto/crypto/v1/signed.proto";
 option go_package = "github.com/fancl20/cion/proto/node/v1;nodev1";
 
 // Entry is one node's statement in one of the directories it holds: the
-// addresses that directory's peers reach it at, and its report of how they
-// reach each. It travels as the body of a SCION signed message its node
-// signed, as a beacon's AS entry does: the header names the signer's
-// ISD-AS, its subject key, the TRC its chain verifies under, and the signing
-// time. An entry naming no address withdraws its signer from the directory.
+// addresses that directory's peers reach it at, its report of how they
+// reach each, and the round trips it measured to them. It travels as the
+// body of a SCION signed message its node signed, as a beacon's AS entry
+// does: the header names the signer's ISD-AS, its subject key, the TRC its
+// chain verifies under, and the signing time. An entry naming no address
+// withdraws its signer from the directory.
 message Entry {
   // isd_as is the signer's ISD-AS; a receiver refuses an entry whose signer
   // is another.
@@ -19,6 +20,36 @@ message Entry {
   // addresses are the signer's addresses, one per host the directory's
   // peers see it at, ordered by host.
   repeated Address addresses = 2;
+  // peers are the directory's peers the signer measured, ordered by ISD-AS:
+  // every node of the directory it reached, linked or not.
+  repeated Peer peers = 3;
+}
+
+// Peer is one peer a node measured, as the node reports it: the round trip,
+// the link it holds to the peer, and the changes it announced there.
+message Peer {
+  // isd_as is the peer's ISD-AS.
+  uint64 isd_as = 1;
+  // rtt_us is the round trip the node measured to the peer, in
+  // microseconds.
+  uint32 rtt_us = 2;
+  // if_id is the node's interface of its established link to the peer
+  // whose verdict is up, zero for none.
+  uint32 if_id = 3;
+  // promoting reports that the node announced establishing a link to the
+  // peer.
+  bool promoting = 4;
+  // retiring reports that the node announced retiring its link to the
+  // peer, and relies the links the routes it judged that link by cross.
+  bool retiring = 5;
+  repeated LinkRef relies = 6;
+}
+
+// LinkRef names one link by one end: that end's ISD-AS and its interface
+// ID.
+message LinkRef {
+  uint64 isd_as = 1;
+  uint32 if_id = 2;
 }
 
 // Address is one host a directory's peers see a node at, and the node's

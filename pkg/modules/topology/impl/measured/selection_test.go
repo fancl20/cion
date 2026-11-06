@@ -56,14 +56,16 @@ type selFixture struct {
 	probed      map[addr.IA]bool
 	probedAt    map[addr.IA]netip.AddrPort
 	established []addr.IA // the promoted candidates, in order
+	// reports holds the last window's reports, by directory.
+	reports map[bus.DirectoryID][]bus.PeerReport
 	// writes counts the loop's own writes, signaled through its store as
 	// the node's store signals them; the fixture's writes bypass it.
 	writes int
 	sel    *selection
 }
 
-// The fixture's ISD-ASes. The node's is picked so that its priced promotion
-// of D waits PromoteWindows, and of B the most,
+// The fixture's ISD-ASes. The node's is picked so that its second-route
+// promotion of D waits PromoteWindows, and of B the most,
 // PromoteWindows+PromoteJitter (TestPromoteWindows).
 var (
 	selIA   = addr.MustIAFrom(20, 0xfd0000000041)
@@ -168,6 +170,7 @@ func newSelFixture(t *testing.T, neighbors ...addr.IA) *selFixture {
 	}
 	f.sel.cfg.Directory = f.directoryTopic
 	f.sel.cfg.Links = f.links
+	f.sel.cfg.Report = func(r map[bus.DirectoryID][]bus.PeerReport) { f.reports = r }
 	f.sel.aliveFn = func(l *links.Link) bool { return f.alive[l.NeighborIA] }
 	f.refresh()
 	return f
@@ -289,6 +292,28 @@ func (f *selFixture) via(t *testing.T, through addr.IA, fresh time.Duration, rem
 // first route measured at the price.
 func (f *selFixture) carried(ia addr.IA, direct, price time.Duration, routes ...scion.Candidate) {
 	f.samples[ia] = f.priced(ia, direct, price, routes...)
+}
+
+// reported returns the last window's report of the peer, and whether the
+// window reported it.
+func (f *selFixture) reported(ia addr.IA) (bus.PeerReport, bool) {
+	for _, reports := range f.reports {
+		for _, r := range reports {
+			if r.IA == ia {
+				return r, true
+			}
+		}
+	}
+	return bus.PeerReport{}, false
+}
+
+// report sets the reports the peer's directory entry carries.
+func (f *selFixture) report(ia addr.IA, reports ...bus.PeerReport) {
+	for i := range f.directory {
+		if f.directory[i].IA == ia {
+			f.directory[i].Peers = reports
+		}
+	}
 }
 
 // ifID returns the neighbor's entry's interface ID.
@@ -539,19 +564,25 @@ func TestPromoteWindows(t *testing.T) {
 
 // TestSelectionPricedPromotion checks the beaten-baseline case: a candidate
 // no route prices, whose direct round trip beats its tier's price by the
-// promotion ratio, is promoted on the last of its pair's windows, never
-// before, and a candidate that beats no price never is — however cheap the
-// declarations its unreachable self would price.
+// promotion ratio, is announced in its first window and promoted on the
+// PromoteWindows-th, never before, and a candidate that beats no price never
+// is — however cheap the declarations its unreachable self would price.
 func TestSelectionPricedPromotion(t *testing.T) {
 	f := newSelFixture(t, selPeer, selA)                        // at the floor
 	f.candidate(selB, 8*time.Millisecond, 20*time.Millisecond)  // beats 0.8 of the 20ms price
 	f.candidate(selC, 18*time.Millisecond, 20*time.Millisecond) // does not
 
-	for range promoteWindows(selIA, selB) - 1 {
+	for range PromoteWindows - 1 {
 		f.pass(t)
 	}
 	if len(f.established) != 0 {
-		t.Fatal("a candidate was promoted short of its pair's windows")
+		t.Fatal("a candidate was promoted short of its windows")
+	}
+	if r, ok := f.reported(selB); !ok || !r.Promoting {
+		t.Fatalf("the report of %v = %+v, want its promotion announced", selB, r)
+	}
+	if r, _ := f.reported(selC); r.Promoting {
+		t.Errorf("the report announces %v, which beats no price", selC)
 	}
 	f.pass(t)
 	if len(f.established) != 1 || !f.established[0].Equal(selB) {
@@ -572,6 +603,64 @@ func TestSelectionPricedPromotion(t *testing.T) {
 	}
 }
 
+// TestSelectionPromotionWaits checks the beaten price's coordination: a
+// candidate another node's lighter announced promotion would serve is
+// neither announced nor promoted while that announcement holds, then is
+// announced, and promoted a window later.
+func TestSelectionPromotionWaits(t *testing.T) {
+	f := newSelFixture(t, selPeer, selA)                        // at the floor
+	f.candidate(selB, 25*time.Millisecond, 40*time.Millisecond) // beats 0.8 of the 40ms price
+	// Peer, linked to the node at 1ms, announces its promotion of B at 5ms:
+	// the path to B over it would cost the node 16ms with Peer's transit,
+	// against the 25ms B measures it at.
+	f.report(selPeer, bus.PeerReport{IA: selIA, RTT: time.Millisecond, IfID: 1},
+		bus.PeerReport{IA: selB, RTT: 5 * time.Millisecond, Promoting: true})
+	f.report(selB, bus.PeerReport{IA: selIA, RTT: 25 * time.Millisecond})
+	for window := 1; window <= runnerUpWindows+1; window++ {
+		f.pass(t)
+		if r, _ := f.reported(selB); r.Promoting || len(f.established) != 0 {
+			t.Fatalf("window %d: B announced or promoted while Peer's announcement holds", window)
+		}
+	}
+	f.pass(t)
+	if r, _ := f.reported(selB); !r.Promoting || len(f.established) != 0 {
+		t.Fatalf("once Peer's announcement lapsed: report %+v, established %v; want B announced alone",
+			r, f.established)
+	}
+	f.pass(t)
+	if len(f.established) != 1 || !f.established[0].Equal(selB) {
+		t.Fatalf("established = %v, want B a window after its announcement", f.established)
+	}
+}
+
+// TestSelectionReports checks the window's reports: every peer measured, in
+// the directory that named it, at the round trip last reported unless the
+// measurement moved past the step, naming no link.
+func TestSelectionReports(t *testing.T) {
+	f := newSelFixture(t, selPeer, selA)
+	f.candidate(selB, 30*time.Millisecond, 0)
+	f.candidate(selC, 0, 0) // unreachable
+	f.pass(t)
+	want := []bus.PeerReport{
+		{IA: selPeer, RTT: 10 * time.Millisecond},
+		{IA: selA, RTT: 10 * time.Millisecond},
+		{IA: selB, RTT: 30 * time.Millisecond},
+	}
+	if diff := cmp.Diff(map[bus.DirectoryID][]bus.PeerReport{selScope: want}, f.reports); diff != "" {
+		t.Fatalf("reports (-want +got):\n%s", diff)
+	}
+	f.samples[selB] = f.priced(selB, 31*time.Millisecond, 0)
+	f.pass(t)
+	if r, _ := f.reported(selB); r.RTT != 30*time.Millisecond {
+		t.Errorf("a move within the step reports %v, want the 30ms reported", r.RTT)
+	}
+	f.samples[selB] = f.priced(selB, 34*time.Millisecond, 0)
+	f.pass(t)
+	if r, _ := f.reported(selB); r.RTT != 34*time.Millisecond {
+		t.Errorf("a move past the step reports %v, want 34ms", r.RTT)
+	}
+}
+
 // TestSelectionOwnPricePromotion checks promotion by a candidate's own
 // price: a candidate whose one route detours through two transits promotes
 // though a neighbor prices the tier below the candidate's round trip, while
@@ -588,7 +677,7 @@ func TestSelectionOwnPricePromotion(t *testing.T) {
 	// C's 6.3ms is within the ratio of the tier's 8ms, short of the floor.
 	f.candidate(selC, 6300*time.Microsecond, 0)
 
-	for range promoteWindows(selIA, selB) {
+	for range PromoteWindows {
 		f.pass(t)
 	}
 	if len(f.established) != 1 || !f.established[0].Equal(selB) {
@@ -665,18 +754,21 @@ func TestSelectionUnpricedTier(t *testing.T) {
 }
 
 // TestSelectionFlappingCandidate checks the damping: a candidate whose good
-// windows a bad one breaks short of its pair's windows starts over, and is
+// windows a bad one breaks short of PromoteWindows starts over, and is
 // promoted once that many good windows run unbroken.
 func TestSelectionFlappingCandidate(t *testing.T) {
 	f := newSelFixture(t, selPeer, selA)
 	f.candidate(selB, 8*time.Millisecond, 20*time.Millisecond)
-	windows := promoteWindows(selIA, selB)
+	windows := PromoteWindows
 
 	for range windows - 1 {
 		f.pass(t) // good
 	}
 	f.samples[selB] = f.priced(selB, 18*time.Millisecond, 20*time.Millisecond)
 	f.pass(t) // bad: the streak resets
+	if r, _ := f.reported(selB); r.Promoting {
+		t.Fatal("the bad window kept the flapper's promotion announced")
+	}
 	f.samples[selB] = f.priced(selB, 8*time.Millisecond, 20*time.Millisecond)
 	for range windows - 1 {
 		f.pass(t) // good again
@@ -722,6 +814,16 @@ func TestSelectionUselessRetirement(t *testing.T) {
 	f.carried(selA, 18*time.Millisecond, 12*time.Millisecond, f.via(t, selPeer, 0, selPeer, selA))
 
 	f.pass(t)
+	// The survivor through Peer and B's own route, each member's cheapest.
+	want := []segment.LinkID{link(selPeer), link(selA), link(selB),
+		local(f.ifID(t, selPeer)), local(f.ifID(t, selB))}
+	if r, _ := f.reported(selA); !r.Retiring || !slices.Equal(r.Relies, want) {
+		t.Fatalf("after the first useless window the report of A = %+v, want its retirement "+
+			"announced relying on %v", r, want)
+	}
+	if r, _ := f.reported(selB); r.Retiring {
+		t.Fatal("the report announces retiring B, which no window judged useless")
+	}
 	f.pass(t)
 	if f.state(t, selA) != links.StateEstablished {
 		t.Fatal("a neighbor was retired before three useless windows")
@@ -729,6 +831,9 @@ func TestSelectionUselessRetirement(t *testing.T) {
 	f.pass(t)
 	if f.state(t, selA) != links.StateRetired {
 		t.Fatal("a durably useless neighbor was not retired")
+	}
+	if r, _ := f.reported(selA); r.Retiring {
+		t.Error("the retired link's retirement is still announced")
 	}
 
 	// At the floor, the same useless evidence retires nothing: B's baseline
@@ -742,6 +847,28 @@ func TestSelectionUselessRetirement(t *testing.T) {
 	}
 	if f.state(t, selPeer) != links.StateEstablished || f.state(t, selB) != links.StateEstablished {
 		t.Error("an up link retired at the floor")
+	}
+}
+
+// TestSelectionRetirementWaits checks the useless retirement's
+// coordination: a link whose judgment rests on a link another node
+// announced to retire stands while that announcement holds, and retires
+// once it is withdrawn.
+func TestSelectionRetirementWaits(t *testing.T) {
+	f := newSelFixture(t, selPeer, selA, selB) // above the floor of two
+	f.carried(selA, 18*time.Millisecond, 12*time.Millisecond, f.via(t, selPeer, 0, selPeer, selA))
+	// Peer announces retiring its link to A, which A's route rides.
+	f.report(selPeer, bus.PeerReport{IA: selA, RTT: 3 * time.Millisecond, IfID: 1, Retiring: true})
+	for range 2 * DemoteWindows {
+		f.pass(t)
+	}
+	if f.state(t, selA) != links.StateEstablished {
+		t.Fatal("a link retired resting on another node's announced retirement")
+	}
+	f.report(selPeer, bus.PeerReport{IA: selA, RTT: 3 * time.Millisecond, IfID: 1})
+	f.pass(t)
+	if f.state(t, selA) != links.StateRetired {
+		t.Fatal("the useless link stood past the announcement's withdrawal")
 	}
 }
 
@@ -784,8 +911,9 @@ func TestSelectionAcceptedLinkStands(t *testing.T) {
 
 // TestSelectionOwnFloor checks the useless retirement's floor: it counts the
 // up links the node dialed, so a link it accepted never frees it to shed one
-// it dialed — a useless dialed link stands while the dialed links sit at the
-// floor, and retires once a third dialed link lifts them above it.
+// it dialed — a useless dialed link stands, unannounced, while the dialed
+// links sit at the floor, and once a third dialed link lifts them above it,
+// is announced, then retired a window later.
 func TestSelectionOwnFloor(t *testing.T) {
 	f := newSelFixture(t, selPeer, selA, selB) // up links above the floor
 	f.accept(t, selB)
@@ -796,12 +924,20 @@ func TestSelectionOwnFloor(t *testing.T) {
 	if f.state(t, selA) != links.StateEstablished {
 		t.Fatal("a useless dialed link retired with the dialed links at the floor")
 	}
+	if r, _ := f.reported(selA); r.Retiring {
+		t.Fatal("a retirement was announced with the dialed links at the floor")
+	}
 
 	if err := f.store.Insert(context.Background(), neighborLink(selC, links.StateEstablished)); err != nil {
 		t.Fatal(err)
 	}
 	f.directory = append(f.directory, entryOf(selC))
 	f.samples[selC] = f.priced(selC, 50*time.Millisecond, 60*time.Millisecond)
+	f.pass(t)
+	if r, _ := f.reported(selA); !r.Retiring || f.state(t, selA) != links.StateEstablished {
+		t.Fatalf("above the floor the report of A = %+v, state %v; want announced, not yet retired",
+			r, f.state(t, selA))
+	}
 	f.pass(t)
 	if f.state(t, selA) != links.StateRetired {
 		t.Error("a useless dialed link stood with the dialed links above the floor")
@@ -862,8 +998,10 @@ func TestSelectionLinkKeptForItsRoutes(t *testing.T) {
 // count at DemoteWindows retires a link only in a window decided useless.
 func TestSelectionRetirementCounts(t *testing.T) {
 	// A down window between useless ones holds the useless count: the link
-	// retires on the third useless window, not on the down one.
-	f := newSelFixture(t, selPeer, selA, selB)
+	// retires on the third useless window, not on the down one. C keeps the
+	// dialed up links above the floor through the down window, so the
+	// retirement's announcement stands.
+	f := newSelFixture(t, selPeer, selA, selB, selC)
 	f.carried(selA, 18*time.Millisecond, 12*time.Millisecond, f.via(t, selPeer, 0, selPeer, selA))
 	f.pass(t)
 	f.pass(t)
@@ -876,6 +1014,28 @@ func TestSelectionRetirementCounts(t *testing.T) {
 	f.pass(t)
 	if f.state(t, selA) != links.StateRetired {
 		t.Fatal("the third useless window did not retire the link")
+	}
+
+	// Without C, the down window drops the dialed up links to the floor,
+	// which withdraws the announcement: announced again on the third
+	// useless window, the link retires on the fourth.
+	f = newSelFixture(t, selPeer, selA, selB)
+	f.carried(selA, 18*time.Millisecond, 12*time.Millisecond, f.via(t, selPeer, 0, selPeer, selA))
+	f.pass(t)
+	f.pass(t)
+	f.down[selA] = true
+	f.pass(t)
+	if r, _ := f.reported(selA); r.Retiring {
+		t.Fatal("the retirement stayed announced at the floor")
+	}
+	f.down[selA] = false
+	f.pass(t)
+	if f.state(t, selA) != links.StateEstablished {
+		t.Fatal("the link retired in the window its announcement resumed")
+	}
+	f.pass(t)
+	if f.state(t, selA) != links.StateRetired {
+		t.Fatal("the fourth useless window did not retire the link")
 	}
 
 	// An up window resets the down count: two down windows, an up one, and

@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/scionproto/scion/pkg/addr"
+
+	"github.com/fancl20/cion/pkg/libs/segment"
 )
 
 // DirectoryID names one of the node's directories: a UUIDv7 an attachment
@@ -49,16 +51,46 @@ type Scope struct {
 // DirectoryEntry is one node's entry in a directory: the addresses the
 // directory's peers reach it at, everything the selection loop needs to
 // probe it as a candidate, each with the node's report of how its peers
-// reach it there. The node signed it, and its ISD-AS is the one the
-// signer's chain certifies.
+// reach it there, and the round trips the node measured to them. The node
+// signed it, and its ISD-AS is the one the signer's chain certifies.
 type DirectoryEntry struct {
 	// IA is the node's ISD-AS.
 	IA addr.IA
 	// Addresses are the node's addresses, one per host the directory's
 	// peers see it at, ordered by host.
 	Addresses []Address
+	// Peers are the directory's peers the node measured, ordered by
+	// ISD-AS.
+	Peers []PeerReport
 	// Published is the time the node signed the entry.
 	Published time.Time
+}
+
+// PeerReport is one peer a node measured, as its entry reports it: the
+// round trip, the link the node holds to the peer, and the changes it
+// announced there.
+type PeerReport struct {
+	// IA is the peer's ISD-AS.
+	IA addr.IA
+	// RTT is the round trip the node measured to the peer.
+	RTT time.Duration
+	// IfID is the node's interface of its established link to the peer
+	// whose verdict is up, zero for none.
+	IfID uint16
+	// Promoting reports that the node announced establishing a link to the
+	// peer.
+	Promoting bool
+	// Retiring reports that the node announced retiring its link to the
+	// peer, and Relies names the links the routes it judged that link by
+	// cross.
+	Retiring bool
+	Relies   []segment.LinkID
+}
+
+// Equal reports whether two reports say the same.
+func (r PeerReport) Equal(o PeerReport) bool {
+	return r.IA == o.IA && r.RTT == o.RTT && r.IfID == o.IfID && r.Promoting == o.Promoting &&
+		r.Retiring == o.Retiring && slices.Equal(r.Relies, o.Relies)
 }
 
 // Address is one host a directory's peers see a node at.

@@ -25,6 +25,7 @@ import (
 	"github.com/fancl20/cion/pkg/libs/loops"
 	"github.com/fancl20/cion/pkg/libs/scion"
 	"github.com/fancl20/cion/pkg/libs/scionrpc"
+	"github.com/fancl20/cion/pkg/libs/segment"
 	"github.com/fancl20/cion/pkg/libs/underlay"
 	"github.com/fancl20/cion/pkg/modules/links"
 	"github.com/fancl20/cion/pkg/modules/links/impl/memory"
@@ -949,6 +950,65 @@ func TestProviderAddresses(t *testing.T) {
 	if addresses, err := z.addresses([]netip.Addr{translated}); err != nil ||
 		addresses[0].RendezvousUnanswered {
 		t.Errorf("after an answered echo the address = %v (%v), want it answering", addresses, err)
+	}
+}
+
+// TestProviderPeers checks the reports the provider signs: each names the
+// node's established link to its peer whose verdict is up, the lowest
+// interface where several reach it, as the link state stands at the
+// signing — none for a down link, a candidate, or a peer with no link — and
+// a new report wakes the signing.
+func TestProviderPeers(t *testing.T) {
+	z, err := New(Config{ControlHost: netip.MustParseAddr("0.0.0.0")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	z.directory = NewNodeDirectory(NodeDirectoryConfig{IA: directoryIA})
+	z.linkState = new(bus.Topic[bus.LinkState])
+	established := func(ia addr.IA, ifID uint16) links.Link {
+		return links.Link{NeighborIA: ia, IfID: ifID, State: links.StateEstablished}
+	}
+	candidate := established(selC, 7)
+	candidate.State = links.StateCandidate
+	z.linkState.Publish(bus.NewLinkState(
+		bus.Link{Entry: established(selA, 4)},
+		bus.Link{Entry: established(selA, 2), Down: true},
+		bus.Link{Entry: established(selB, 5)},
+		bus.Link{Entry: established(selB, 3)},
+		bus.Link{Entry: candidate},
+	))
+	id := bus.DirectoryID{1}
+	reliance := []segment.LinkID{{IA: selC, IfID: 3}}
+	z.report(map[bus.DirectoryID][]bus.PeerReport{id: {
+		{IA: selA, RTT: 5 * time.Millisecond, Promoting: true},
+		{IA: selB, RTT: 7 * time.Millisecond, Retiring: true, Relies: reliance},
+		{IA: selC, RTT: 9 * time.Millisecond},
+		{IA: selD, RTT: 11 * time.Millisecond},
+	}})
+	select {
+	case <-z.directory.signWake:
+	default:
+		t.Error("the new reports woke no signing")
+	}
+	var got []bus.PeerReport
+	for _, p := range z.peers(id) {
+		r, err := readPeer(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got = append(got, r)
+	}
+	want := []bus.PeerReport{
+		{IA: selA, RTT: 5 * time.Millisecond, IfID: 4, Promoting: true},
+		{IA: selB, RTT: 7 * time.Millisecond, IfID: 3, Retiring: true, Relies: reliance},
+		{IA: selC, RTT: 9 * time.Millisecond},
+		{IA: selD, RTT: 11 * time.Millisecond},
+	}
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("the signed reports (-want +got):\n%s", diff)
+	}
+	if len(z.peers(bus.DirectoryID{2})) != 0 {
+		t.Error("a directory with no reports reports peers")
 	}
 }
 

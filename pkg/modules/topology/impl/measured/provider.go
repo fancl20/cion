@@ -131,6 +131,11 @@ type Provider struct {
 	reachMtx sync.Mutex
 	reach    map[netip.Addr]bool
 
+	// reports holds the selection's last reports for the node's directory
+	// entries, by directory; reportMtx guards it.
+	reportMtx sync.Mutex
+	reports   map[bus.DirectoryID][]bus.PeerReport
+
 	// mtx guards the one-time assembly of the serving machinery.
 	mtx sync.Mutex
 	// rendezvous, links, linker, puncher, directory, and the two conns
@@ -565,6 +570,7 @@ func (z *Provider) assemble() error {
 	directoryCfg := NodeDirectoryConfig{
 		IA:            z.env.IA,
 		Addresses:     z.addresses,
+		Peers:         z.peers,
 		Links:         z.linkState,
 		Peer:          z.env.Peer,
 		Directory:     z.directoryState,
@@ -744,9 +750,54 @@ func (z *Provider) selectionConfig() SelectionConfig {
 		Link:        z.linker,
 		Punch:       z.puncher,
 		Stranded:    &z.stranded,
+		Report:      z.report,
 		Interval:    z.cfg.Pacing.Selection,
 		Window:      z.cfg.Pacing.CandidateWindow,
 	}
+}
+
+// report holds the selection's reports for the node's directory entries and
+// wakes the signing: an entry whose peers' links or announcements they
+// change signs again at once, one whose round trips alone change at its
+// refresh.
+func (z *Provider) report(reports map[bus.DirectoryID][]bus.PeerReport) {
+	z.reportMtx.Lock()
+	z.reports = reports
+	z.reportMtx.Unlock()
+	z.directory.resign()
+}
+
+// peers returns the node's reports in the directory the ID names, each
+// naming the node's established link to the peer whose verdict is up — the
+// lowest interface where several reach it — as the link state stands at
+// the signing, so a link's gain or loss travels before the selection's next
+// window.
+func (z *Provider) peers(id bus.DirectoryID) []*nodev1.Peer {
+	z.reportMtx.Lock()
+	reports := z.reports[id]
+	z.reportMtx.Unlock()
+	state := z.linkState.Latest()
+	linked := make(map[addr.IA]uint16)
+	for ifID, ia := range state.Usable() {
+		if cur, ok := linked[ia]; state.Established(ifID) && (!ok || ifID < cur) {
+			linked[ia] = ifID
+		}
+	}
+	out := make([]*nodev1.Peer, 0, len(reports))
+	for _, r := range reports {
+		p := &nodev1.Peer{
+			IsdAs:     uint64(r.IA),
+			RttUs:     uint32(r.RTT / time.Microsecond),
+			IfId:      uint32(linked[r.IA]),
+			Promoting: r.Promoting,
+			Retiring:  r.Retiring,
+		}
+		for _, l := range r.Relies {
+			p.Relies = append(p.Relies, &nodev1.LinkRef{IsdAs: uint64(l.IA), IfId: uint32(l.IfID)})
+		}
+		out = append(out, p)
+	}
+	return out
 }
 
 // runJoinDials dials the rendezvous of every entry still aimed at one: the

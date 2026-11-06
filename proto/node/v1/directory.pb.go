@@ -23,11 +23,12 @@ const (
 )
 
 // Entry is one node's statement in one of the directories it holds: the
-// addresses that directory's peers reach it at, and its report of how they
-// reach each. It travels as the body of a SCION signed message its node
-// signed, as a beacon's AS entry does: the header names the signer's
-// ISD-AS, its subject key, the TRC its chain verifies under, and the signing
-// time. An entry naming no address withdraws its signer from the directory.
+// addresses that directory's peers reach it at, its report of how they
+// reach each, and the round trips it measured to them. It travels as the
+// body of a SCION signed message its node signed, as a beacon's AS entry
+// does: the header names the signer's ISD-AS, its subject key, the TRC its
+// chain verifies under, and the signing time. An entry naming no address
+// withdraws its signer from the directory.
 type Entry struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// isd_as is the signer's ISD-AS; a receiver refuses an entry whose signer
@@ -35,7 +36,10 @@ type Entry struct {
 	IsdAs uint64 `protobuf:"varint,1,opt,name=isd_as,json=isdAs,proto3" json:"isd_as,omitempty"`
 	// addresses are the signer's addresses, one per host the directory's
 	// peers see it at, ordered by host.
-	Addresses     []*Address `protobuf:"bytes,2,rep,name=addresses,proto3" json:"addresses,omitempty"`
+	Addresses []*Address `protobuf:"bytes,2,rep,name=addresses,proto3" json:"addresses,omitempty"`
+	// peers are the directory's peers the signer measured, ordered by ISD-AS:
+	// every node of the directory it reached, linked or not.
+	Peers         []*Peer `protobuf:"bytes,3,rep,name=peers,proto3" json:"peers,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -84,6 +88,162 @@ func (x *Entry) GetAddresses() []*Address {
 	return nil
 }
 
+func (x *Entry) GetPeers() []*Peer {
+	if x != nil {
+		return x.Peers
+	}
+	return nil
+}
+
+// Peer is one peer a node measured, as the node reports it: the round trip,
+// the link it holds to the peer, and the changes it announced there.
+type Peer struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// isd_as is the peer's ISD-AS.
+	IsdAs uint64 `protobuf:"varint,1,opt,name=isd_as,json=isdAs,proto3" json:"isd_as,omitempty"`
+	// rtt_us is the round trip the node measured to the peer, in
+	// microseconds.
+	RttUs uint32 `protobuf:"varint,2,opt,name=rtt_us,json=rttUs,proto3" json:"rtt_us,omitempty"`
+	// if_id is the node's interface of its established link to the peer
+	// whose verdict is up, zero for none.
+	IfId uint32 `protobuf:"varint,3,opt,name=if_id,json=ifId,proto3" json:"if_id,omitempty"`
+	// promoting reports that the node announced establishing a link to the
+	// peer.
+	Promoting bool `protobuf:"varint,4,opt,name=promoting,proto3" json:"promoting,omitempty"`
+	// retiring reports that the node announced retiring its link to the
+	// peer, and relies the links the routes it judged that link by cross.
+	Retiring      bool       `protobuf:"varint,5,opt,name=retiring,proto3" json:"retiring,omitempty"`
+	Relies        []*LinkRef `protobuf:"bytes,6,rep,name=relies,proto3" json:"relies,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Peer) Reset() {
+	*x = Peer{}
+	mi := &file_proto_node_v1_directory_proto_msgTypes[1]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Peer) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Peer) ProtoMessage() {}
+
+func (x *Peer) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_node_v1_directory_proto_msgTypes[1]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Peer.ProtoReflect.Descriptor instead.
+func (*Peer) Descriptor() ([]byte, []int) {
+	return file_proto_node_v1_directory_proto_rawDescGZIP(), []int{1}
+}
+
+func (x *Peer) GetIsdAs() uint64 {
+	if x != nil {
+		return x.IsdAs
+	}
+	return 0
+}
+
+func (x *Peer) GetRttUs() uint32 {
+	if x != nil {
+		return x.RttUs
+	}
+	return 0
+}
+
+func (x *Peer) GetIfId() uint32 {
+	if x != nil {
+		return x.IfId
+	}
+	return 0
+}
+
+func (x *Peer) GetPromoting() bool {
+	if x != nil {
+		return x.Promoting
+	}
+	return false
+}
+
+func (x *Peer) GetRetiring() bool {
+	if x != nil {
+		return x.Retiring
+	}
+	return false
+}
+
+func (x *Peer) GetRelies() []*LinkRef {
+	if x != nil {
+		return x.Relies
+	}
+	return nil
+}
+
+// LinkRef names one link by one end: that end's ISD-AS and its interface
+// ID.
+type LinkRef struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	IsdAs         uint64                 `protobuf:"varint,1,opt,name=isd_as,json=isdAs,proto3" json:"isd_as,omitempty"`
+	IfId          uint32                 `protobuf:"varint,2,opt,name=if_id,json=ifId,proto3" json:"if_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *LinkRef) Reset() {
+	*x = LinkRef{}
+	mi := &file_proto_node_v1_directory_proto_msgTypes[2]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *LinkRef) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*LinkRef) ProtoMessage() {}
+
+func (x *LinkRef) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_node_v1_directory_proto_msgTypes[2]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use LinkRef.ProtoReflect.Descriptor instead.
+func (*LinkRef) Descriptor() ([]byte, []int) {
+	return file_proto_node_v1_directory_proto_rawDescGZIP(), []int{2}
+}
+
+func (x *LinkRef) GetIsdAs() uint64 {
+	if x != nil {
+		return x.IsdAs
+	}
+	return 0
+}
+
+func (x *LinkRef) GetIfId() uint32 {
+	if x != nil {
+		return x.IfId
+	}
+	return 0
+}
+
 // Address is one host a directory's peers see a node at, and the node's
 // report of how they reach it there.
 type Address struct {
@@ -107,7 +267,7 @@ type Address struct {
 
 func (x *Address) Reset() {
 	*x = Address{}
-	mi := &file_proto_node_v1_directory_proto_msgTypes[1]
+	mi := &file_proto_node_v1_directory_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -119,7 +279,7 @@ func (x *Address) String() string {
 func (*Address) ProtoMessage() {}
 
 func (x *Address) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_node_v1_directory_proto_msgTypes[1]
+	mi := &file_proto_node_v1_directory_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -132,7 +292,7 @@ func (x *Address) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Address.ProtoReflect.Descriptor instead.
 func (*Address) Descriptor() ([]byte, []int) {
-	return file_proto_node_v1_directory_proto_rawDescGZIP(), []int{1}
+	return file_proto_node_v1_directory_proto_rawDescGZIP(), []int{3}
 }
 
 func (x *Address) GetControlAddr() string {
@@ -182,7 +342,7 @@ type Summary struct {
 
 func (x *Summary) Reset() {
 	*x = Summary{}
-	mi := &file_proto_node_v1_directory_proto_msgTypes[2]
+	mi := &file_proto_node_v1_directory_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -194,7 +354,7 @@ func (x *Summary) String() string {
 func (*Summary) ProtoMessage() {}
 
 func (x *Summary) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_node_v1_directory_proto_msgTypes[2]
+	mi := &file_proto_node_v1_directory_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -207,7 +367,7 @@ func (x *Summary) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Summary.ProtoReflect.Descriptor instead.
 func (*Summary) Descriptor() ([]byte, []int) {
-	return file_proto_node_v1_directory_proto_rawDescGZIP(), []int{2}
+	return file_proto_node_v1_directory_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *Summary) GetIsdAs() uint64 {
@@ -256,7 +416,7 @@ type PushRequest struct {
 
 func (x *PushRequest) Reset() {
 	*x = PushRequest{}
-	mi := &file_proto_node_v1_directory_proto_msgTypes[3]
+	mi := &file_proto_node_v1_directory_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -268,7 +428,7 @@ func (x *PushRequest) String() string {
 func (*PushRequest) ProtoMessage() {}
 
 func (x *PushRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_node_v1_directory_proto_msgTypes[3]
+	mi := &file_proto_node_v1_directory_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -281,7 +441,7 @@ func (x *PushRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PushRequest.ProtoReflect.Descriptor instead.
 func (*PushRequest) Descriptor() ([]byte, []int) {
-	return file_proto_node_v1_directory_proto_rawDescGZIP(), []int{3}
+	return file_proto_node_v1_directory_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *PushRequest) GetEntries() []*crypto.SignedMessage {
@@ -299,7 +459,7 @@ type PushResponse struct {
 
 func (x *PushResponse) Reset() {
 	*x = PushResponse{}
-	mi := &file_proto_node_v1_directory_proto_msgTypes[4]
+	mi := &file_proto_node_v1_directory_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -311,7 +471,7 @@ func (x *PushResponse) String() string {
 func (*PushResponse) ProtoMessage() {}
 
 func (x *PushResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_node_v1_directory_proto_msgTypes[4]
+	mi := &file_proto_node_v1_directory_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -324,7 +484,7 @@ func (x *PushResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PushResponse.ProtoReflect.Descriptor instead.
 func (*PushResponse) Descriptor() ([]byte, []int) {
-	return file_proto_node_v1_directory_proto_rawDescGZIP(), []int{4}
+	return file_proto_node_v1_directory_proto_rawDescGZIP(), []int{6}
 }
 
 type SyncRequest struct {
@@ -340,7 +500,7 @@ type SyncRequest struct {
 
 func (x *SyncRequest) Reset() {
 	*x = SyncRequest{}
-	mi := &file_proto_node_v1_directory_proto_msgTypes[5]
+	mi := &file_proto_node_v1_directory_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -352,7 +512,7 @@ func (x *SyncRequest) String() string {
 func (*SyncRequest) ProtoMessage() {}
 
 func (x *SyncRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_node_v1_directory_proto_msgTypes[5]
+	mi := &file_proto_node_v1_directory_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -365,7 +525,7 @@ func (x *SyncRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SyncRequest.ProtoReflect.Descriptor instead.
 func (*SyncRequest) Descriptor() ([]byte, []int) {
-	return file_proto_node_v1_directory_proto_rawDescGZIP(), []int{5}
+	return file_proto_node_v1_directory_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *SyncRequest) GetDirectory() []byte {
@@ -399,7 +559,7 @@ type SyncResponse struct {
 
 func (x *SyncResponse) Reset() {
 	*x = SyncResponse{}
-	mi := &file_proto_node_v1_directory_proto_msgTypes[6]
+	mi := &file_proto_node_v1_directory_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -411,7 +571,7 @@ func (x *SyncResponse) String() string {
 func (*SyncResponse) ProtoMessage() {}
 
 func (x *SyncResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_node_v1_directory_proto_msgTypes[6]
+	mi := &file_proto_node_v1_directory_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -424,7 +584,7 @@ func (x *SyncResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SyncResponse.ProtoReflect.Descriptor instead.
 func (*SyncResponse) Descriptor() ([]byte, []int) {
-	return file_proto_node_v1_directory_proto_rawDescGZIP(), []int{6}
+	return file_proto_node_v1_directory_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *SyncResponse) GetDirectory() []byte {
@@ -452,10 +612,21 @@ var File_proto_node_v1_directory_proto protoreflect.FileDescriptor
 
 const file_proto_node_v1_directory_proto_rawDesc = "" +
 	"\n" +
-	"\x1dproto/node/v1/directory.proto\x12\anode.v1\x1a\x1cproto/crypto/v1/signed.proto\"N\n" +
+	"\x1dproto/node/v1/directory.proto\x12\anode.v1\x1a\x1cproto/crypto/v1/signed.proto\"s\n" +
 	"\x05Entry\x12\x15\n" +
 	"\x06isd_as\x18\x01 \x01(\x04R\x05isdAs\x12.\n" +
-	"\taddresses\x18\x02 \x03(\v2\x10.node.v1.AddressR\taddresses\"\xa9\x01\n" +
+	"\taddresses\x18\x02 \x03(\v2\x10.node.v1.AddressR\taddresses\x12#\n" +
+	"\x05peers\x18\x03 \x03(\v2\r.node.v1.PeerR\x05peers\"\xad\x01\n" +
+	"\x04Peer\x12\x15\n" +
+	"\x06isd_as\x18\x01 \x01(\x04R\x05isdAs\x12\x15\n" +
+	"\x06rtt_us\x18\x02 \x01(\rR\x05rttUs\x12\x13\n" +
+	"\x05if_id\x18\x03 \x01(\rR\x04ifId\x12\x1c\n" +
+	"\tpromoting\x18\x04 \x01(\bR\tpromoting\x12\x1a\n" +
+	"\bretiring\x18\x05 \x01(\bR\bretiring\x12(\n" +
+	"\x06relies\x18\x06 \x03(\v2\x10.node.v1.LinkRefR\x06relies\"5\n" +
+	"\aLinkRef\x12\x15\n" +
+	"\x06isd_as\x18\x01 \x01(\x04R\x05isdAs\x12\x13\n" +
+	"\x05if_id\x18\x02 \x01(\rR\x04ifId\"\xa9\x01\n" +
 	"\aAddress\x12!\n" +
 	"\fcontrol_addr\x18\x01 \x01(\tR\vcontrolAddr\x12'\n" +
 	"\x0frendezvous_addr\x18\x02 \x01(\tR\x0erendezvousAddr\x12\x1d\n" +
@@ -495,31 +666,35 @@ func file_proto_node_v1_directory_proto_rawDescGZIP() []byte {
 	return file_proto_node_v1_directory_proto_rawDescData
 }
 
-var file_proto_node_v1_directory_proto_msgTypes = make([]protoimpl.MessageInfo, 7)
+var file_proto_node_v1_directory_proto_msgTypes = make([]protoimpl.MessageInfo, 9)
 var file_proto_node_v1_directory_proto_goTypes = []any{
 	(*Entry)(nil),                // 0: node.v1.Entry
-	(*Address)(nil),              // 1: node.v1.Address
-	(*Summary)(nil),              // 2: node.v1.Summary
-	(*PushRequest)(nil),          // 3: node.v1.PushRequest
-	(*PushResponse)(nil),         // 4: node.v1.PushResponse
-	(*SyncRequest)(nil),          // 5: node.v1.SyncRequest
-	(*SyncResponse)(nil),         // 6: node.v1.SyncResponse
-	(*crypto.SignedMessage)(nil), // 7: proto.crypto.v1.SignedMessage
+	(*Peer)(nil),                 // 1: node.v1.Peer
+	(*LinkRef)(nil),              // 2: node.v1.LinkRef
+	(*Address)(nil),              // 3: node.v1.Address
+	(*Summary)(nil),              // 4: node.v1.Summary
+	(*PushRequest)(nil),          // 5: node.v1.PushRequest
+	(*PushResponse)(nil),         // 6: node.v1.PushResponse
+	(*SyncRequest)(nil),          // 7: node.v1.SyncRequest
+	(*SyncResponse)(nil),         // 8: node.v1.SyncResponse
+	(*crypto.SignedMessage)(nil), // 9: proto.crypto.v1.SignedMessage
 }
 var file_proto_node_v1_directory_proto_depIdxs = []int32{
-	1, // 0: node.v1.Entry.addresses:type_name -> node.v1.Address
-	7, // 1: node.v1.PushRequest.entries:type_name -> proto.crypto.v1.SignedMessage
-	2, // 2: node.v1.SyncRequest.summaries:type_name -> node.v1.Summary
-	7, // 3: node.v1.SyncResponse.entries:type_name -> proto.crypto.v1.SignedMessage
-	3, // 4: node.v1.DirectoryService.Push:input_type -> node.v1.PushRequest
-	5, // 5: node.v1.DirectoryService.Sync:input_type -> node.v1.SyncRequest
-	4, // 6: node.v1.DirectoryService.Push:output_type -> node.v1.PushResponse
-	6, // 7: node.v1.DirectoryService.Sync:output_type -> node.v1.SyncResponse
-	6, // [6:8] is the sub-list for method output_type
-	4, // [4:6] is the sub-list for method input_type
-	4, // [4:4] is the sub-list for extension type_name
-	4, // [4:4] is the sub-list for extension extendee
-	0, // [0:4] is the sub-list for field type_name
+	3, // 0: node.v1.Entry.addresses:type_name -> node.v1.Address
+	1, // 1: node.v1.Entry.peers:type_name -> node.v1.Peer
+	2, // 2: node.v1.Peer.relies:type_name -> node.v1.LinkRef
+	9, // 3: node.v1.PushRequest.entries:type_name -> proto.crypto.v1.SignedMessage
+	4, // 4: node.v1.SyncRequest.summaries:type_name -> node.v1.Summary
+	9, // 5: node.v1.SyncResponse.entries:type_name -> proto.crypto.v1.SignedMessage
+	5, // 6: node.v1.DirectoryService.Push:input_type -> node.v1.PushRequest
+	7, // 7: node.v1.DirectoryService.Sync:input_type -> node.v1.SyncRequest
+	6, // 8: node.v1.DirectoryService.Push:output_type -> node.v1.PushResponse
+	8, // 9: node.v1.DirectoryService.Sync:output_type -> node.v1.SyncResponse
+	8, // [8:10] is the sub-list for method output_type
+	6, // [6:8] is the sub-list for method input_type
+	6, // [6:6] is the sub-list for extension type_name
+	6, // [6:6] is the sub-list for extension extendee
+	0, // [0:6] is the sub-list for field type_name
 }
 
 func init() { file_proto_node_v1_directory_proto_init() }
@@ -533,7 +708,7 @@ func file_proto_node_v1_directory_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_proto_node_v1_directory_proto_rawDesc), len(file_proto_node_v1_directory_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   7,
+			NumMessages:   9,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
