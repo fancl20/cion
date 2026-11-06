@@ -401,7 +401,7 @@ func (p *Prober) settle(ps *probed, pr probe, rtt time.Duration, lost bool, now 
 		samples = nil
 	}
 	samples = append(slices.Clone(samples), bus.PathSample{At: pr.sent, RTT: rtt, Lost: lost})
-	r.Samples = samples[max(0, len(samples)-bus.PathSamples):]
+	r.Samples = kept(samples, now)
 	if lost {
 		r.LastLoss = now
 	} else {
@@ -421,6 +421,16 @@ func (p *Prober) settle(ps *probed, pr probe, rtt time.Duration, lost bool, now 
 	}
 	ps.record = r
 	p.changed = true
+}
+
+// kept returns the samples a record keeps: the last bus.PathSamples, and
+// every older one sent within scion.ReadingSpan of now.
+func kept(samples []bus.PathSample, now time.Time) []bus.PathSample {
+	cut := len(samples) - bus.PathSamples
+	for cut > 0 && now.Sub(samples[cut-1].At) <= scion.ReadingSpan {
+		cut--
+	}
+	return samples[max(0, cut):]
 }
 
 // startBurst starts a burst for the path unless one runs.

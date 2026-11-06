@@ -378,6 +378,130 @@ func TestHealth(t *testing.T) {
 	}
 }
 
+// TestCandidateReading checks the reading a candidate carries beside its
+// cost: its record's reading over ReadingSpan, else twice its declared
+// one-way sum — while its health and cost read its last bus.PathSamples
+// probes alone.
+func TestCandidateReading(t *testing.T) {
+	ms := time.Millisecond
+	probes := func(at time.Time, n int, rtt time.Duration, lost bool) []bus.PathSample {
+		samples := make([]bus.PathSample, n)
+		for i := range samples {
+			samples[i] = bus.PathSample{At: at, RTT: rtt, Lost: lost}
+		}
+		return samples
+	}
+	for _, tc := range []struct {
+		name    string
+		record  func(now time.Time) bus.PathRecord
+		health  Health
+		cost    time.Duration
+		reading time.Duration
+	}{{
+		name:    "unmeasured",
+		health:  HealthUnknown,
+		cost:    30 * ms,
+		reading: 30 * ms, // twice the declared 15ms
+	}, {
+		name: "answered lately",
+		record: func(now time.Time) bus.PathRecord {
+			r := answered(now.Add(-time.Minute), 10*ms, 12*ms, 30*ms)
+			r.Samples = append(r.Samples, bus.PathSample{At: now, Lost: true})
+			return r
+		},
+		health:  HealthHealthy,
+		cost:    16 * ms, // the median 12ms over a delivery of three in four
+		reading: 40 * ms, // the highest of three, 30ms, over the same delivery
+	}, {
+		name: "answered before the five minutes",
+		record: func(now time.Time) bus.PathRecord {
+			return answered(now.Add(-6*time.Minute), 20*ms)
+		},
+		health:  HealthUnknown,
+		cost:    20 * ms,
+		reading: 30 * ms,
+	}, {
+		name: "more probes within the span than the last ones",
+		record: func(now time.Time) bus.PathRecord {
+			last := now.Add(-time.Minute)
+			samples := append(probes(now.Add(-4*time.Minute), 25, 50*ms, false), probes(last, 20, 10*ms, false)...)
+			return bus.PathRecord{Samples: samples, LastAnswer: last}
+		},
+		health:  HealthHealthy,
+		cost:    10 * ms,
+		reading: 50 * ms,
+	}, {
+		name: "losses before the last probes",
+		record: func(now time.Time) bus.PathRecord {
+			last := now.Add(-time.Minute)
+			samples := probes(now.Add(-4*time.Minute), 30, 0, true)
+			samples = append(samples, probes(last, 5, 10*ms, false)...)
+			samples = append(samples, probes(last, 15, 0, true)...)
+			return bus.PathRecord{Samples: samples, LastAnswer: last}
+		},
+		health:  HealthHealthy, // three in four of its last probes lost
+		cost:    40 * ms,       // 10ms over a delivery of one in four
+		reading: 100 * ms,      // 10ms over the delivery of one in ten
+	}} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newMeasuredFixture(t, time.Minute)
+			if tc.record != nil {
+				f.measure(map[*Candidate]bus.PathRecord{&f.viaMid: tc.record(time.Now())})
+			}
+			candidates, err := f.p.Enumerate(context.Background(), iaDest)
+			if err != nil {
+				t.Fatal(err)
+			}
+			c := candidates[slices.IndexFunc(candidates, func(c Candidate) bool { return c.ID == f.viaMid.ID })]
+			if c.Health != tc.health {
+				t.Errorf("health = %d, want %d", c.Health, tc.health)
+			}
+			if c.Cost == nil || *c.Cost != tc.cost {
+				t.Errorf("cost = %v, want %v", c.Cost, tc.cost)
+			}
+			if c.Reading == nil || *c.Reading != tc.reading {
+				t.Errorf("reading = %v, want %v", c.Reading, tc.reading)
+			}
+		})
+	}
+}
+
+// TestMeasuredReading checks a record's reading: the reading of its probes
+// sent within ReadingSpan of now, the one at the span's edge among them,
+// divided by their delivery rate, the loss counted up to lossCap; none when
+// none of them answered.
+func TestMeasuredReading(t *testing.T) {
+	ms := time.Millisecond
+	now := time.Now()
+	at := func(ago, rtt time.Duration) bus.PathSample {
+		return bus.PathSample{At: now.Add(-ago), RTT: rtt}
+	}
+	lost := func(ago time.Duration) bus.PathSample {
+		return bus.PathSample{At: now.Add(-ago), Lost: true}
+	}
+	past := ReadingSpan + time.Nanosecond
+	for _, tc := range []struct {
+		name    string
+		samples []bus.PathSample
+		want    time.Duration
+		ok      bool
+	}{
+		{"none", nil, 0, false},
+		{"lost alone", []bus.PathSample{lost(0)}, 0, false},
+		{"answered past the span", []bus.PathSample{at(past, 10*ms), lost(0)}, 0, false},
+		{"at the span's edge", []bus.PathSample{at(past, 90*ms), at(ReadingSpan, 20*ms), at(0, 10*ms)}, 20 * ms, true},
+		{"a loss within the span", []bus.PathSample{lost(past), at(time.Minute, 30*ms), lost(30 * time.Second),
+			at(0, 10*ms), at(0, 10*ms)}, 40 * ms, true},
+		{"losses past the cap", append([]bus.PathSample{at(0, 10*ms)}, slices.Repeat([]bus.PathSample{lost(0)}, 19)...),
+			100 * ms, true},
+	} {
+		got, ok := measuredReading(bus.PathRecord{Samples: tc.samples}, now)
+		if got != tc.want || ok != tc.ok {
+			t.Errorf("%s: measuredReading = %v, %v, want %v, %v", tc.name, got, ok, tc.want, tc.ok)
+		}
+	}
+}
+
 // TestEjectedRetry checks when an ejected candidate is due its half-open
 // probe: its backoff after its last loss, and never for one not ejected.
 func TestEjectedRetry(t *testing.T) {

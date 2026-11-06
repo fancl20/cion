@@ -155,8 +155,8 @@ func TestPunchProbeAnswers(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if rtt, err := probeRTT(context.Background(), prober, theirs, nonce); err != nil || rtt <= 0 {
-		t.Errorf("the punched probe measured %v (%v), want a round trip", rtt, err)
+	if rtts, err := probeRTT(context.Background(), prober, theirs, nonce); err != nil || len(rtts) != ProbeRuns {
+		t.Errorf("the punched probe measured %v (%v), want ProbeRuns round trips", rtts, err)
 	}
 	if err := p.close(); err != nil {
 		t.Errorf("the probe's handler returned %v once its request ended, want nil", err)
@@ -440,7 +440,7 @@ func TestPunchRateCap(t *testing.T) {
 // stubPuncher answers the selection's punches with fixed results,
 // recording the peers asked.
 type stubPuncher struct {
-	rtt       time.Duration
+	rtts      []time.Duration
 	reflexive netip.AddrPort
 	ifID      uint16
 
@@ -451,12 +451,12 @@ type stubPuncher struct {
 	establishedIn []bus.DirectoryID
 }
 
-func (p *stubPuncher) Probe(_ context.Context, peer addr.IA, id bus.DirectoryID) (time.Duration, error) {
+func (p *stubPuncher) Probe(_ context.Context, peer addr.IA, id bus.DirectoryID) ([]time.Duration, error) {
 	p.mtx.Lock()
 	defer p.mtx.Unlock()
 	p.probed = append(p.probed, peer)
 	p.probedIn = append(p.probedIn, id)
-	return p.rtt, nil
+	return p.rtts, nil
 }
 
 func (p *stubPuncher) Establish(
@@ -475,9 +475,10 @@ func (p *stubPuncher) Establish(
 
 // TestProbePunchesUnansweredCandidates checks the probe's carrier for a
 // candidate whose own report says its rendezvous address answers nothing:
-// the punch measures it, in the directory that names the address.
+// the punch measures it, in the directory that names the address, and its
+// round trips are the punch probe's own samples.
 func TestProbePunchesUnansweredCandidates(t *testing.T) {
-	punch := &stubPuncher{rtt: 7 * time.Millisecond}
+	punch := &stubPuncher{rtts: []time.Duration{7 * time.Millisecond, 9 * time.Millisecond}}
 	s := &selection{cfg: SelectionConfig{
 		Punch: punch,
 		Paths: &scion.PathProvider{
@@ -489,8 +490,12 @@ func TestProbePunchesUnansweredCandidates(t *testing.T) {
 	e := target{IA: selPeer, Scope: bus.DirectoryID{7},
 		RendezvousAddr: netip.MustParseAddrPort("192.0.2.9:30043"),
 		Reach:          bus.Reach{RendezvousUnanswered: true}}
-	if sm := s.probe(context.Background(), e, nil); sm.direct != punch.rtt {
-		t.Errorf("direct sample = %v, want the punch's %v", sm.direct, punch.rtt)
+	_, by, rtts := s.probe(context.Background(), e, nil)
+	if !slices.Equal(rtts, punch.rtts) {
+		t.Errorf("round trips = %v, want the punch's %v", rtts, punch.rtts)
+	}
+	if want := (instrument{ia: selPeer, punched: true}); by != want {
+		t.Errorf("instrument = %+v, want %+v", by, want)
 	}
 	if want := []addr.IA{selPeer}; !slices.Equal(punch.probed, want) {
 		t.Errorf("the punch probed %v, want %v", punch.probed, want)

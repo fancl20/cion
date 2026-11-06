@@ -56,7 +56,7 @@ const (
 )
 
 // RendezvousRequest is the joiner's first contact: a nonce, its ISD-AS, and
-// the link address it will receive on. The nonce is random per dial; the
+// the link address it will receive on. The nonce is random per attempt; the
 // reply echoing it proves it reached the acceptor and came back — a spoofed
 // source never receives its reply. A binding request claims no link
 // address and names no ISD-AS: the acceptor answers it with the
@@ -564,9 +564,11 @@ func bindingEcho(
 }
 
 // echoOn sends one request run from a socket the caller holds — the request
-// given, under a fresh nonce — and returns the reply with the round trip
-// and the address the reply arrived from. The context's end moves the read
-// deadline to the past, ending a wait in flight; each attempt reads the
+// given, each attempt under a fresh nonce — and returns the first reply to
+// any attempt with the round trip from that attempt's send, and the address
+// the reply arrived from: a late reply to one attempt answers the run, timed
+// from its own request rather than the next one. The context's end moves the
+// read deadline to the past, ending a wait in flight; each attempt reads the
 // context after setting its own deadline, so no attempt overrides the move
 // unseen.
 func echoOn(
@@ -578,25 +580,26 @@ func echoOn(
 
 	stop := context.AfterFunc(ctx, func() { _ = conn.SetReadDeadline(time.Now()) })
 	defer stop()
-	if _, err := rand.Read(req.Nonce[:]); err != nil {
-		return RendezvousReply{}, netip.AddrPort{}, 0, err
-	}
-	raw, err := req.Marshal()
-	if err != nil {
-		return RendezvousReply{}, netip.AddrPort{}, 0, err
-	}
 
 	// The reply carries two addresses beside the fixed fields; the buffer
 	// holds the longest form an IPv6 reply takes.
 	buf := make([]byte, 192)
+	sent := make(map[[16]byte]time.Time, RendezvousAttempts)
 	for range RendezvousAttempts {
+		if _, err := rand.Read(req.Nonce[:]); err != nil {
+			return RendezvousReply{}, netip.AddrPort{}, 0, err
+		}
+		raw, err := req.Marshal()
+		if err != nil {
+			return RendezvousReply{}, netip.AddrPort{}, 0, err
+		}
 		if err := conn.SetReadDeadline(time.Now().Add(RendezvousAttemptWait)); err != nil {
 			return RendezvousReply{}, netip.AddrPort{}, 0, err
 		}
 		if err := ctx.Err(); err != nil {
 			return RendezvousReply{}, netip.AddrPort{}, 0, err
 		}
-		sent := time.Now()
+		sent[req.Nonce] = time.Now()
 		if _, err := conn.WriteToUDP(raw, udpAddr(target)); err != nil {
 			return RendezvousReply{}, netip.AddrPort{}, 0, err
 		}
@@ -606,10 +609,12 @@ func echoOn(
 				break // the wait elapsed or the context ended: lost, retry
 			}
 			reply, err := ParseRendezvousReply(buf[:n])
-			if err != nil || reply.Nonce != req.Nonce {
+			if err != nil {
 				continue
 			}
-			return reply, observedAddr(src), time.Since(sent), nil
+			if at, ok := sent[reply.Nonce]; ok {
+				return reply, observedAddr(src), time.Since(at), nil
+			}
 		}
 	}
 	return RendezvousReply{}, netip.AddrPort{}, 0,

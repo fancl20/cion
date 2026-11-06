@@ -754,8 +754,8 @@ func TestSelectionUnpricedTier(t *testing.T) {
 }
 
 // TestSelectionFlappingCandidate checks the damping: a candidate whose good
-// windows a bad one breaks short of PromoteWindows starts over, and is
-// promoted once that many good windows run unbroken.
+// windows an unanswered one breaks short of PromoteWindows starts over, and
+// is promoted once that many good windows run unbroken.
 func TestSelectionFlappingCandidate(t *testing.T) {
 	f := newSelFixture(t, selPeer, selA)
 	f.candidate(selB, 8*time.Millisecond, 20*time.Millisecond)
@@ -764,8 +764,8 @@ func TestSelectionFlappingCandidate(t *testing.T) {
 	for range windows - 1 {
 		f.pass(t) // good
 	}
-	f.samples[selB] = f.priced(selB, 18*time.Millisecond, 20*time.Millisecond)
-	f.pass(t) // bad: the streak resets
+	f.samples[selB] = f.priced(selB, 0, 20*time.Millisecond)
+	f.pass(t) // unanswered: the streak resets
 	if r, _ := f.reported(selB); r.Promoting {
 		t.Fatal("the bad window kept the flapper's promotion announced")
 	}
@@ -779,6 +779,164 @@ func TestSelectionFlappingCandidate(t *testing.T) {
 	f.pass(t)
 	if len(f.established) != 1 || !f.established[0].Equal(selB) {
 		t.Fatalf("promoted %v, want the flapper only after sustained evidence", f.established)
+	}
+}
+
+// TestSelectionReadingDamps checks the damping the readings add, the seam's
+// direct side one sample a window: a slow window holds a candidate back
+// while its round trip stands above four fifths of the samples, and the
+// promotion's streak starts once it no longer does; fast windows among slow
+// ones promote nothing.
+func TestSelectionReadingDamps(t *testing.T) {
+	fast, slow, price := 8*time.Millisecond, 18*time.Millisecond, 20*time.Millisecond
+	t.Run("a slow window", func(t *testing.T) {
+		f := newSelFixture(t, selPeer, selA)
+		f.candidate(selB, fast, price)
+		f.pass(t)
+		f.carried(selB, slow, price)
+		f.pass(t)
+		f.carried(selB, fast, price)
+		// The slow round trip stands above four fifths of up to four samples.
+		for range 2 {
+			f.pass(t)
+			if r, _ := f.reported(selB); r.RTT != slow {
+				t.Fatalf("reported %v, want the slow window's %v", r.RTT, slow)
+			}
+		}
+		for range PromoteWindows {
+			if len(f.established) != 0 {
+				t.Fatalf("promoted %v short of its windows since the slow one", f.established)
+			}
+			f.pass(t)
+			if r, _ := f.reported(selB); r.RTT != fast {
+				t.Fatalf("reported %v, want %v once the slow window is a fifth", r.RTT, fast)
+			}
+		}
+		if len(f.established) != 1 || !f.established[0].Equal(selB) {
+			t.Fatalf("promoted %v, want the candidate once its readings run fast", f.established)
+		}
+	})
+	t.Run("fast windows", func(t *testing.T) {
+		f := newSelFixture(t, selPeer, selA)
+		f.candidate(selB, slow, price)
+		for range 4 {
+			f.pass(t)
+		}
+		f.carried(selB, fast, price)
+		for range PromoteWindows {
+			f.pass(t)
+		}
+		if r, _ := f.reported(selB); r.RTT != slow {
+			t.Errorf("reported %v, want the slow windows' %v", r.RTT, slow)
+		}
+		if len(f.established) != 0 {
+			t.Errorf("promoted %v on fast windows among slow ones", f.established)
+		}
+	})
+}
+
+// TestSelectionRead checks the direct side's reading over an instrument's
+// samples: each window's round trips join them, those taken more than
+// scion.ReadingSpan before drop out — the ones at the span's edge stay — and
+// the reading is their 80th percentile; a window of no round trip reads
+// unreachable and keeps them; each peer's instruments keep their own; and the
+// window forgets the instruments whose samples all lie past the span.
+func TestSelectionRead(t *testing.T) {
+	ms := time.Millisecond
+	s := &selection{}
+	link := instrument{ia: selPeer, ifID: 1}
+	rendezvous := instrument{ia: selB, at: netip.MustParseAddrPort("192.0.2.1:30043")}
+	start := time.Now()
+	for i, step := range []struct {
+		by    instrument
+		rtts  []time.Duration
+		after time.Duration
+		want  time.Duration
+	}{
+		{link, []time.Duration{10 * ms, 12 * ms, 11 * ms}, 0, 12 * ms},
+		{link, nil, 30 * time.Second, 0},
+		{link, []time.Duration{10 * ms, 10 * ms}, time.Minute, 11 * ms},
+		{rendezvous, []time.Duration{40 * ms}, time.Minute, 40 * ms},
+		{link, []time.Duration{9 * ms}, scion.ReadingSpan, 11 * ms},
+		{link, []time.Duration{9 * ms}, scion.ReadingSpan + time.Nanosecond, 10 * ms},
+	} {
+		if got := s.read(step.by, step.rtts, start.Add(step.after)); got != step.want {
+			t.Errorf("step %d: read %v, want %v", i, got, step.want)
+		}
+	}
+
+	s.forget(start.Add(time.Minute + scion.ReadingSpan + time.Nanosecond))
+	if _, ok := s.history[rendezvous]; ok {
+		t.Error("kept the instrument whose samples all lie past the span")
+	}
+	if _, ok := s.history[link]; !ok {
+		t.Error("forgot the instrument with samples within the span")
+	}
+	later := start.Add(time.Hour)
+	if got := s.read(link, nil, later); got != 0 {
+		t.Errorf("an unanswered window past every sample read %v, want 0", got)
+	}
+	if _, ok := s.history[link]; ok {
+		t.Error("kept the instrument whose samples all dropped out")
+	}
+	s.forget(later)
+}
+
+// TestSelectionReadCarriesThePeer checks a change of instrument: one with
+// no sample within the span starts from those of the instrument that read
+// the peer last — a link from its candidate's binding requests, the
+// candidate again from the link's echoes — while one with samples keeps its
+// own, and no peer starts from another's.
+func TestSelectionReadCarriesThePeer(t *testing.T) {
+	ms := time.Millisecond
+	s := &selection{}
+	rendezvous := instrument{ia: selPeer, at: netip.MustParseAddrPort("192.0.2.1:30043")}
+	link := instrument{ia: selPeer, ifID: 1}
+	other := instrument{ia: selB, ifID: 2}
+	start := time.Now()
+	for i, step := range []struct {
+		by    instrument
+		rtts  []time.Duration
+		after time.Duration
+		want  time.Duration
+	}{
+		{rendezvous, []time.Duration{10 * ms, 12 * ms, 30 * ms}, 0, 30 * ms},
+		{other, []time.Duration{5 * ms}, 0, 5 * ms},
+		{link, []time.Duration{11 * ms, 11 * ms}, time.Minute, 12 * ms},
+		{link, []time.Duration{11 * ms}, 2 * time.Minute, 12 * ms},
+		{rendezvous, []time.Duration{5 * ms}, scion.ReadingSpan + 30*time.Second, 11 * ms},
+		{other, []time.Duration{50 * ms}, scion.ReadingSpan + 30*time.Second, 50 * ms},
+	} {
+		if got := s.read(step.by, step.rtts, start.Add(step.after)); got != step.want {
+			t.Errorf("step %d: read %v, want %v", i, got, step.want)
+		}
+	}
+	s.forget(start.Add(time.Hour))
+	if len(s.history) != 0 || len(s.last) != 0 {
+		t.Errorf("past every sample the window keeps %d instruments and %d peers, want none",
+			len(s.history), len(s.last))
+	}
+}
+
+// TestSelectionForgetsUnprobedInstruments checks the window's upkeep of the
+// samples: an instrument no window probes any longer goes once its samples
+// all lie past scion.ReadingSpan.
+func TestSelectionForgetsUnprobedInstruments(t *testing.T) {
+	f := newSelFixture(t, selPeer)
+	gone := instrument{ia: selX, ifID: 9}
+	f.sel.history = map[instrument][]heard{
+		gone: {{at: time.Now().Add(-scion.ReadingSpan - time.Second), rtt: time.Millisecond}},
+	}
+	f.sel.last = map[addr.IA]instrument{selX: gone}
+	f.pass(t)
+	if _, ok := f.sel.history[gone]; ok {
+		t.Error("the window kept the samples of an instrument it no longer probes")
+	}
+	if _, ok := f.sel.last[selX]; ok {
+		t.Error("the window kept the peer whose last instrument went")
+	}
+	if len(f.sel.history) != 1 {
+		t.Errorf("the window keeps %d instruments, want the neighbor's link alone", len(f.sel.history))
 	}
 }
 
@@ -1612,12 +1770,12 @@ func TestSelectionCancelledPassLandsNothing(t *testing.T) {
 	})
 }
 
-// TestEchoRTTEndsWithItsContext checks the SCMP echo's wait: a probe no one
-// answers, its context ending once the first request is out, returns well
-// inside the run's ProbeWait — the end cuts the wait short, and no next run
-// starts. A plain UDP socket stands in for the router the requests leave
+// TestEchoesEndWithTheirContext checks the SCMP echoes' wait: a probe no
+// one answers, its context ending once the first request is out, returns
+// well inside the run's ProbeWait — the end cuts the wait short, and no next
+// run starts. A plain UDP socket stands in for the router the requests leave
 // through.
-func TestEchoRTTEndsWithItsContext(t *testing.T) {
+func TestEchoesEndWithTheirContext(t *testing.T) {
 	host := netip.MustParseAddr("127.0.0.1")
 	router, err := net.ListenUDP("udp", net.UDPAddrFromAddrPort(netip.AddrPortFrom(host, 0)))
 	if err != nil {
@@ -1641,7 +1799,7 @@ func TestEchoRTTEndsWithItsContext(t *testing.T) {
 	returned := make(chan struct{})
 	start := time.Now()
 	go func() {
-		s.echoRTT(ctx, &scion.Addr{
+		s.echoes(ctx, &scion.Addr{
 			IA:   selPeer,
 			Addr: netip.AddrPortFrom(host, 30041),
 			IfID: 1,
@@ -1656,7 +1814,7 @@ func TestEchoRTTEndsWithItsContext(t *testing.T) {
 	// The run's deadline is set after start: a wait the end does not cut
 	// short holds the probe a full ProbeWait.
 	if held := time.Since(start); held >= ProbeWait {
-		t.Errorf("echoRTT returned after %v, want under ProbeWait", held)
+		t.Errorf("the echoes returned after %v, want under ProbeWait", held)
 	}
 }
 
@@ -1689,12 +1847,12 @@ func interfaceDownAnswer(quoted []byte) ([]byte, error) {
 	return buffer.Bytes(), err
 }
 
-// TestEchoRTTEndsAtTheInterfaceDownSignal checks the refused run: a router
+// TestEchoesEndAtTheInterfaceDownSignal checks the refused run: a router
 // answering every request with an interface-down signal quoting it — the
 // data plane refusing a down egress — ends each run at once, so the probe
 // reports no round trip well inside one ProbeWait rather than after
 // ProbeRuns of them.
-func TestEchoRTTEndsAtTheInterfaceDownSignal(t *testing.T) {
+func TestEchoesEndAtTheInterfaceDownSignal(t *testing.T) {
 	host := netip.MustParseAddr("127.0.0.1")
 	router, err := net.ListenUDP("udp", net.UDPAddrFromAddrPort(netip.AddrPortFrom(host, 0)))
 	if err != nil {
@@ -1733,7 +1891,7 @@ func TestEchoRTTEndsAtTheInterfaceDownSignal(t *testing.T) {
 		}
 	}()
 	start := time.Now()
-	rtt := s.echoRTT(context.Background(), &scion.Addr{
+	rtts := s.echoes(context.Background(), &scion.Addr{
 		IA:   selPeer,
 		Addr: netip.AddrPortFrom(host, 30041),
 		IfID: 1,
@@ -1743,11 +1901,11 @@ func TestEchoRTTEndsAtTheInterfaceDownSignal(t *testing.T) {
 	if err := <-refused; err != nil {
 		t.Fatal(err)
 	}
-	if rtt != 0 {
-		t.Errorf("echoRTT = %v over refused runs, want no round trip", rtt)
+	if len(rtts) != 0 {
+		t.Errorf("the echoes = %v over refused runs, want no round trip", rtts)
 	}
 	if held >= ProbeWait {
-		t.Errorf("echoRTT returned after %v, want under one ProbeWait", held)
+		t.Errorf("the echoes returned after %v, want under one ProbeWait", held)
 	}
 }
 
@@ -1794,14 +1952,14 @@ func TestProbeSendsNothingOverAnUnusableLink(t *testing.T) {
 	}}
 
 	start := time.Now()
-	sm := s.probe(context.Background(),
+	_, _, rtts := s.probe(context.Background(),
 		target{IA: selPeer, ControlAddr: netip.AddrPortFrom(host, 30042)},
 		&links.Link{NeighborIA: selPeer, IfID: 1, State: links.StateEstablished})
 	if held := time.Since(start); held >= ProbeWait {
 		t.Errorf("the probe returned after %v, want under one ProbeWait", held)
 	}
-	if sm.direct != 0 {
-		t.Errorf("direct sample = %v, want none for the down neighbor", sm.direct)
+	if len(rtts) != 0 {
+		t.Errorf("round trips = %v, want none for the down neighbor", rtts)
 	}
 	// A request the probe sent is queued at the router by now; the deadline
 	// bounds the read when none was.
@@ -1891,11 +2049,14 @@ func TestProbeEchoesTheHostThePeerResolves(t *testing.T) {
 		},
 	}}
 	external := netip.MustParseAddr("192.0.2.1")
-	sm := s.probe(t.Context(),
+	_, by, rtts := s.probe(t.Context(),
 		target{IA: selPeer, ControlAddr: netip.AddrPortFrom(external, 30042)},
 		&links.Link{NeighborIA: selPeer, IfID: dataplanetest.IfID, State: links.StateEstablished})
-	if sm.direct <= 0 {
-		t.Errorf("direct sample = %v, want the round trip to the resolved host", sm.direct)
+	if len(rtts) != ProbeRuns {
+		t.Errorf("round trips = %v, want ProbeRuns echoes' to the resolved host", rtts)
+	}
+	if want := (instrument{ia: selPeer, ifID: dataplanetest.IfID}); by != want {
+		t.Errorf("instrument = %+v, want the link's %+v", by, want)
 	}
 	if got := s.hosts[selPeer]; got != q.ControlIP {
 		t.Errorf("the window's host of the peer = %v, want the resolved %v", got, q.ControlIP)
@@ -2010,9 +2171,12 @@ func TestProbeRendezvousRecordsNothing(t *testing.T) {
 		},
 	}}
 
-	sm := s.probe(t.Context(), targetOf(selB, f.addr.String()), nil)
-	if sm.direct <= 0 {
-		t.Errorf("direct sample = %v, want the binding request's round trip", sm.direct)
+	_, by, rtts := s.probe(t.Context(), targetOf(selB, f.addr.String()), nil)
+	if len(rtts) != ProbeRuns {
+		t.Errorf("round trips = %v, want ProbeRuns binding requests' answered", rtts)
+	}
+	if want := (instrument{ia: selB, at: f.addr}); by != want {
+		t.Errorf("instrument = %+v, want the address's %+v", by, want)
 	}
 	candidate := &links.Link{NeighborIA: selB, Rendezvous: f.addr, State: links.StateCandidate}
 	if !s.candidateAlive(t.Context(), candidate) {
@@ -2024,6 +2188,54 @@ func TestProbeRendezvousRecordsNothing(t *testing.T) {
 	}
 	if len(entries) != 0 {
 		t.Errorf("the candidate's acceptor recorded %v, want nothing", entries)
+	}
+}
+
+// readingPaths answers every enumeration with its routes.
+type readingPaths []scion.Candidate
+
+func (p readingPaths) Enumerate(context.Context, addr.IA) ([]scion.Candidate, error) {
+	return slices.Clone(p), nil
+}
+
+// TestProbeReadsTheCandidate checks a candidate's window probe: up to
+// ProbeRuns binding requests to its address, the first unanswered one ending
+// them, and the routes to it each priced by its reading rather than its
+// cost.
+func TestProbeReadsTheCandidate(t *testing.T) {
+	ms := time.Millisecond
+	cost, reading := 10*ms, 25*ms
+	for _, tc := range []struct {
+		name    string
+		answers []bool
+		want    []time.Duration
+		asked   int
+	}{
+		{"every request answered", []bool{true, true, true}, []time.Duration{ms, 2 * ms, 3 * ms}, 3},
+		{"the second unanswered", []bool{true, false, true}, []time.Duration{ms}, 2},
+	} {
+		asked := 0
+		s := &selection{
+			cfg: SelectionConfig{Paths: readingPaths{{ID: "route", Cost: &cost, Reading: &reading}}},
+			rendezvousFn: func(context.Context, netip.AddrPort) (time.Duration, error) {
+				asked++
+				if !tc.answers[asked-1] {
+					return 0, errors.New("no answer")
+				}
+				return time.Duration(asked) * ms, nil
+			},
+		}
+		sm, by, rtts := s.probe(t.Context(), targetOf(selB, "192.0.2.1:30043"), nil)
+		if !slices.Equal(rtts, tc.want) || asked != tc.asked {
+			t.Errorf("%s: round trips = %v over %d requests, want %v over %d", tc.name, rtts, asked,
+				tc.want, tc.asked)
+		}
+		if want := (instrument{ia: selB, at: netip.MustParseAddrPort("192.0.2.1:30043")}); by != want {
+			t.Errorf("%s: instrument = %+v, want %+v", tc.name, by, want)
+		}
+		if len(sm.candidates) != 1 || sm.candidates[0].Cost == nil || *sm.candidates[0].Cost != reading {
+			t.Errorf("%s: routes = %+v, want the route priced at its reading %v", tc.name, sm.candidates, reading)
+		}
 	}
 }
 

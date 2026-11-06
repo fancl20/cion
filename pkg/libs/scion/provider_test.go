@@ -1589,3 +1589,38 @@ func tableTopic(table map[uint16]addr.IA) *bus.Topic[bus.LinkState] {
 	t.Publish(tableState(table))
 	return t
 }
+
+// TestReading checks the reading of round trips: their 80th percentile by
+// nearest rank — the highest of up to four, then one a fifth of the others
+// may exceed — zero for none, and the round trips left in their order.
+func TestReading(t *testing.T) {
+	ms := time.Millisecond
+	of := func(low, high int) []time.Duration {
+		return append(slices.Repeat([]time.Duration{30 * ms}, high), slices.Repeat([]time.Duration{10 * ms}, low)...)
+	}
+	for _, tc := range []struct {
+		name string
+		rtts []time.Duration
+		want time.Duration
+	}{
+		{"none", nil, 0},
+		{"one", of(1, 0), 10 * ms},
+		{"the highest of two", of(1, 1), 30 * ms},
+		{"the highest of four", of(3, 1), 30 * ms},
+		{"one high in five", of(4, 1), 10 * ms},
+		{"one low in five", of(1, 4), 30 * ms},
+		{"two high in five", of(3, 2), 30 * ms},
+		{"two high in ten", of(8, 2), 10 * ms},
+		{"three high in ten", of(7, 3), 30 * ms},
+		{"six high in thirty", of(24, 6), 10 * ms},
+		{"seven high in thirty", of(23, 7), 30 * ms},
+	} {
+		rtts := slices.Clone(tc.rtts)
+		if got := Reading(rtts); got != tc.want {
+			t.Errorf("%s: Reading = %v, want %v", tc.name, got, tc.want)
+		}
+		if !slices.Equal(rtts, tc.rtts) {
+			t.Errorf("%s: Reading reordered the round trips to %v", tc.name, rtts)
+		}
+	}
+}

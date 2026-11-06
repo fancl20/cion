@@ -148,7 +148,8 @@ func (r PathRequests) All() iter.Seq[PathRequest] {
 	}
 }
 
-// PathSamples is how many probes a path's record keeps.
+// PathSamples is how many of a path's last probes its record keeps at least:
+// the probes the path library's health, loss, and cost read.
 const PathSamples = 20
 
 // PathSample is one probe's outcome.
@@ -167,9 +168,10 @@ type PathRecord struct {
 	Dst addr.IA
 	// Links are the (ISD-AS, interface) pairs the path's packets cross.
 	Links []segment.LinkID
-	// Samples are the path's last probes, oldest first, at most
-	// PathSamples. The first answer after a lost burst restarts them: the
-	// probes lost before it describe an outage that ended.
+	// Samples are the path's last probes, oldest first: every probe sent
+	// within the readings' span, and at least the last PathSamples. The
+	// first answer after a lost burst restarts them: the probes lost before
+	// it describe an outage that ended.
 	Samples []PathSample
 	// LastAnswer is when the path last answered; zero while it has not.
 	LastAnswer time.Time

@@ -125,3 +125,74 @@ the request it answers, whichever attempt drew it.
     a fifth of the span moves nothing, a lucky sample promotes nothing.
 *   **The labs.** The labs pass, and the benchmarks, the unstable delay ones
     of proposal 0116 included, run against the commit before.
+
+## Implementation history
+
+*   **A change of instrument.** Without the carry-over, the regions jitter
+    sweep changed links 164 and 130 times, and 26 of 49 links promoted for a
+    beaten price retired as useless within five minutes, against 14 of 36
+    and 5 of 26 in proposal 0116's runs. The stranded sweep changed links 21
+    times and left a level unsettled, against 10 and none. In the bursts,
+    the regions network retired a link and promoted it back about a minute
+    later: the candidate's fresh binding requests, quiet between bursts,
+    read low for the two windows a promotion counts.
+*   **The sweep's price side.** An instrumented regions jitter sweep,
+    without the carry-over, logged each priced decision. After the first
+    half hour, 25 of 40 promotions for a beaten price stood at 1.25 to 1.32
+    times the direct reading, and most of the 38 useless retirements at
+    1.06 to 1.23: within a tenth of the threshold the two tests share. The
+    direct readings rested on about 27 samples each, while the price was a
+    declared prior in 11 promotions and read from fewer than five probes in
+    12, and the survivor was a prior in 16 retirements and read from fewer
+    than five probes in 5.
+*   **Test adaptations.** `TestSelectionFlappingCandidate` breaks its
+    streak with an unanswered window: a slow window now holds the reading,
+    which `TestSelectionReadingDamps` checks. The selection's test seam
+    counts its direct side as one sample a window.
+*   **Left as they are.** The address chosen among a peer's addresses still
+    compares one binding request each. The punch probe keeps one nonce per
+    probe, its echo carrying no sequence number, so a reply later than its
+    run's one-second wait times the next run.
+*   Mutations: 44 of 44 killed.
+*   The pipeline passed. A run before the carry-over failed once on
+    `TestStaticLineWithoutMemberships`, a static lab's wait for reach under
+    the race detector, as it did on 2026-11-02; alone, it passed five runs
+    of five.
+*   Benchmarks against the commit before, two or three runs each:
+    *   The regions lab settled after 15 changes within 4.8 and 5.2
+        minutes, against 14 and 17 within 4.5 and 10.5, its worst pair at
+        1.05 and 1.11 times the reference, against 1.11.
+    *   After the regions cut, reach held from 10 seconds in all three
+        runs, as before, and the links settled within 50 to 70 seconds,
+        against 10 to 120; the worst pair stood at 1.16 to 1.18 times the
+        reference, against 1.16 to 1.23.
+    *   After the stranded cut, the links settled within 10 to 80 seconds,
+        against 10 to 310; after the restore, two of three runs kept their
+        links and the third settled after 170 seconds, against one to three
+        changes within 120 to 280.
+    *   The site lab joined both ways settled after 8 to 10 changes within
+        4.3 to 10.8 minutes, against 6 or 7 within 4.3 to 5.5; one run of
+        three left one pair unreached, as at the commit before. Joined
+        inside or outside, it settled as before.
+    *   The NAT lab settled after 9 and 11 changes within 3.8 and 4.8
+        minutes, against 9 and 10 within 4.3 and 4.8; its founder-down nodes
+        survived in 15.5 and 15.7 seconds and returned in 201 and 225,
+        against 1.6 and 16.1, and 216 and 219.
+*   Proposal 0116's benchmarks, one run each but the regions jitter sweep's
+    two:
+    *   The regions jitter sweep changed links 126 and 139 times, four and
+        five levels unsettled, against 122 and 95 with five and four; 13 of
+        36 and 12 of 43 links promoted for a beaten price retired as useless
+        within five minutes. The stranded sweep changed none and settled
+        every level, against 10 changes.
+    *   In the bursts, the regions network changed its links 3 times, every
+        read reaching all 72 pairs, against 3 and 7 with a read at 58; the
+        stranded network changed none, as before.
+*   The delay changes, against the commit before with proposal 0116's lab:
+    *   A lowered pair linked after 270 seconds in the regions lab and 280
+        in the stranded one, against 50 and 70; its link retired after the
+        restore within 170 to 180 seconds, against 190 and 130 to 140.
+    *   A used link's delay tripled: the regions network moved off it from
+        60 seconds and settled after six changes within 280, at the same
+        worst pair, 1.17, where the commit before changed nothing; the
+        stranded network changed nothing in either.

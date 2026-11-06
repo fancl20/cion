@@ -181,6 +181,23 @@ func bestOf(candidates []Candidate) *Candidate {
 // beaconing selects others.
 const StaleAfter = 5 * time.Minute
 
+// ReadingSpan is how far back a reading reads its round trips: StaleAfter,
+// the horizon in which a link change plays out in every node's segments.
+const ReadingSpan = StaleAfter
+
+// Reading returns the reading of the round trips, what a measurement over
+// them reports: their 80th percentile by nearest rank, the round trip a
+// fifth of the others exceed and the highest of up to four; zero for none.
+// Up to a fifth of the round trips may stand high and the reading holds,
+// while no one low lowers it.
+func Reading(rtts []time.Duration) time.Duration {
+	if len(rtts) == 0 {
+		return 0
+	}
+	sorted := slices.Sorted(slices.Values(rtts))
+	return sorted[(4*len(sorted)+4)/5-1]
+}
+
 // TransitPenalty is what each AS a path crosses between its ends adds to its
 // one-way price: the forwarding a transit costs, and one more failure on the
 // way. The picks, the leases, and the topology selection charge it alike.
@@ -233,6 +250,11 @@ type Candidate struct {
 	// Cost is the path's round trip: its measured cost, else twice its
 	// declared one-way sum; nil when it has neither.
 	Cost *time.Duration
+	// Reading is the path's round trip as the topology selection compares
+	// it: the reading of its probes answered within ReadingSpan, divided by
+	// their delivery rate, else twice its declared one-way sum; nil when it
+	// has neither.
+	Reading *time.Duration
 }
 
 // Price returns what the picks and the leases rank the path by: its cost

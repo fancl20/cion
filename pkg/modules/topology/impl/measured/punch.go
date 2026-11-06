@@ -133,11 +133,11 @@ func answerProbe(ctx context.Context, conn underlay.UDPConn, theirs netip.AddrPo
 }
 
 // probeRTT sends ProbeRuns packets toward the peer's reflexive address,
-// each awaiting its echo for ProbeWait, and returns the median of the
-// answered round trips.
+// each awaiting its echo for ProbeWait, and returns the answered round
+// trips.
 func probeRTT(
 	ctx context.Context, conn underlay.UDPConn, theirs netip.AddrPort, nonce [16]byte,
-) (time.Duration, error) {
+) ([]time.Duration, error) {
 
 	stop := context.AfterFunc(ctx, func() { _ = conn.SetReadDeadline(time.Now()) })
 	defer stop()
@@ -146,14 +146,14 @@ func probeRTT(
 	var rtts []time.Duration
 	for range ProbeRuns {
 		if err := conn.SetReadDeadline(time.Now().Add(ProbeWait)); err != nil {
-			return 0, err
+			return nil, err
 		}
 		if err := ctx.Err(); err != nil {
-			return 0, err
+			return nil, err
 		}
 		sent := time.Now()
 		if _, err := conn.WriteToUDP(open, udpAddr(theirs)); err != nil {
-			return 0, err
+			return nil, err
 		}
 		for {
 			n, _, err := conn.ReadFromUDP(buf)
@@ -167,9 +167,9 @@ func probeRTT(
 		}
 	}
 	if len(rtts) == 0 {
-		return 0, fmt.Errorf("no punch echo from %s", theirs)
+		return nil, fmt.Errorf("no punch echo from %s", theirs)
 	}
-	return median(rtts), nil
+	return rtts, nil
 }
 
 // newNonce draws a punch's nonce.
@@ -395,10 +395,10 @@ func (s *LinkService) punchEntry(ctx context.Context, peer addr.IA, remoteIfID u
 // Puncher reaches the candidates whose published rendezvous address answers
 // nothing; the measured provider's puncher satisfies it.
 type Puncher interface {
-	// Probe measures the round trip to the peer over a punched pair of
+	// Probe measures the round trips to the peer over a punched pair of
 	// ephemeral sockets, each side's reflexive address as the peers of the
-	// directory the ID names see it.
-	Probe(ctx context.Context, peer addr.IA, id bus.DirectoryID) (time.Duration, error)
+	// directory the ID names see it, and returns those answered.
+	Probe(ctx context.Context, peer addr.IA, id bus.DirectoryID) ([]time.Duration, error)
 	// Establish punches from the entry's own link address, each side's
 	// reflexive address as the peers of the directory the ID names see it,
 	// and answers the peer's reflexive address and interface ID, the
@@ -490,29 +490,29 @@ func (p *puncher) learn(
 	return reflexiveAddr(ctx, conn, reflector)
 }
 
-// Probe measures the round trip to the peer over a punched pair of
+// Probe measures the round trips to the peer over a punched pair of
 // ephemeral sockets, the peer's answering for as long as the probe's
 // stream stays open, each side's reflexive address as the directory's peers
-// see it.
-func (p *puncher) Probe(ctx context.Context, peer addr.IA, id bus.DirectoryID) (time.Duration, error) {
+// see it, and returns those answered.
+func (p *puncher) Probe(ctx context.Context, peer addr.IA, id bus.DirectoryID) ([]time.Duration, error) {
 	clt, release, err := p.client(ctx, peer)
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
 	defer release()
 	conn, err := p.sockets.NewUDP(net.UDPAddrFromAddrPort(netip.AddrPortFrom(p.host, 0)),
 		netip.AddrPort{})
 	if err != nil {
-		return 0, fmt.Errorf("binding the probe socket: %w", err)
+		return nil, fmt.Errorf("binding the probe socket: %w", err)
 	}
 	defer func() { _ = conn.Close() }()
 	mine, err := p.learn(ctx, conn, id)
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
 	nonce, err := newNonce()
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -522,16 +522,16 @@ func (p *puncher) Probe(ctx context.Context, peer addr.IA, id bus.DirectoryID) (
 		Directory:     id[:],
 	})
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
 	defer func() { _ = stream.Close() }()
 	reply, err := stream.Receive()
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
 	theirs, err := netip.ParseAddrPort(reply.ReflexiveAddr)
 	if err != nil {
-		return 0, fmt.Errorf("parsing the peer's reflexive address: %w", err)
+		return nil, fmt.Errorf("parsing the peer's reflexive address: %w", err)
 	}
 	return probeRTT(ctx, conn, theirs, nonce)
 }

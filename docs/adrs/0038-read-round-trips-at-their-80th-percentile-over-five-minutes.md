@@ -1,6 +1,6 @@
 # Read Round Trips at Their 80th Percentile over Five Minutes
 
-*   Status: proposed
+*   Status: accepted
 *   Date: 2026-11-06
 
 [TOC]

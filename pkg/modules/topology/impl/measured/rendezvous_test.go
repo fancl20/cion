@@ -5,9 +5,11 @@ import (
 	"errors"
 	"net"
 	"net/netip"
+	"os"
 	"slices"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/scionproto/scion/pkg/addr"
@@ -645,6 +647,64 @@ func TestRendezvousEchoEndsWithItsContext(t *testing.T) {
 	if held := time.Since(start); held >= RendezvousAttemptWait {
 		t.Errorf("RendezvousEcho returned after %v, want under RendezvousAttemptWait", held)
 	}
+}
+
+// lateConn is a socket whose acceptor answers the request of each attempt
+// after that attempt's delay, in a bubble's fake time, the reply echoing the
+// request's nonce.
+type lateConn struct {
+	underlay.UDPConn
+	delays   []time.Duration
+	replies  chan []byte
+	deadline time.Time
+}
+
+func (c *lateConn) WriteToUDP(b []byte, _ *net.UDPAddr) (int, error) {
+	req, err := ParseRendezvousRequest(b)
+	if err != nil {
+		return 0, err
+	}
+	reply, err := RendezvousReply{Nonce: req.Nonce, IA: rendezvousIA}.Marshal()
+	if err != nil {
+		return 0, err
+	}
+	delay := c.delays[0]
+	c.delays = c.delays[1:]
+	time.AfterFunc(delay, func() { c.replies <- reply })
+	return len(b), nil
+}
+
+func (c *lateConn) SetReadDeadline(t time.Time) error {
+	c.deadline = t
+	return nil
+}
+
+func (c *lateConn) ReadFromUDP(b []byte) (int, *net.UDPAddr, error) {
+	select {
+	case reply := <-c.replies:
+		return copy(b, reply), net.UDPAddrFromAddrPort(netip.MustParseAddrPort("192.0.2.1:30043")), nil
+	case <-time.After(time.Until(c.deadline)):
+		return 0, nil, os.ErrDeadlineExceeded
+	}
+}
+
+// TestEchoOnTimesALateReplyFromItsRequest checks a reply that misses its
+// attempt's wait: arriving during the next attempt, it answers the run, its
+// round trip timed from its own request — neither from the next request,
+// which would read it short, nor dropped for the next reply.
+func TestEchoOnTimesALateReplyFromItsRequest(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		late := RendezvousAttemptWait + 100*time.Millisecond
+		conn := &lateConn{
+			delays:  []time.Duration{late, 300 * time.Millisecond, 300 * time.Millisecond},
+			replies: make(chan []byte, RendezvousAttempts),
+		}
+		_, _, rtt, err := echoOn(t.Context(), conn, netip.MustParseAddrPort("192.0.2.1:30043"),
+			RendezvousRequest{Binding: true})
+		if err != nil || rtt != late {
+			t.Errorf("echoOn = %v (%v), want the late reply's %v", rtt, err, late)
+		}
+	})
 }
 
 // TestRendezvousEchoSpeaksForTheLink checks an answered dial: before the

@@ -240,6 +240,60 @@ func TestProberPacesByPick(t *testing.T) {
 	})
 }
 
+// TestProberKeepsTheSpan checks a record's samples over six minutes of a
+// path in use, picked every half minute and so probed every heartbeat: past
+// the last bus.PathSamples, every probe sent within the readings' span, and
+// none of the first minute's.
+func TestProberKeepsTheSpan(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		e, r := newFakeEcho(), &fakeResolver{}
+		hot := &spath.Decoded{}
+		e.rtt[hot] = 10 * time.Millisecond
+		prober(t, e, r, func(b *bus.Bus) {
+			start := time.Now()
+			for range 12 {
+				request(b, dstA, entryOf("hot", dstA, hot, bus.PathInUse, time.Now()))
+				time.Sleep(30 * time.Second)
+			}
+			synctest.Wait()
+			rec, _ := record(b, "hot")
+			if len(rec.Samples) <= bus.PathSamples {
+				t.Errorf("the record holds %d samples, want past the last %d", len(rec.Samples), bus.PathSamples)
+			}
+			if oldest := rec.Samples[0].At; oldest.Sub(start) < time.Minute {
+				t.Errorf("the oldest sample was sent %v in, want none of the first minute's", oldest.Sub(start))
+			}
+		})
+	})
+}
+
+// TestKept checks the samples a record keeps: every one sent within the
+// readings' span, the one at its edge among them, and at least the last
+// bus.PathSamples.
+func TestKept(t *testing.T) {
+	now := time.Now()
+	every := func(n int, gap time.Duration) []bus.PathSample {
+		samples := make([]bus.PathSample, n)
+		for i := range samples {
+			samples[i] = bus.PathSample{At: now.Add(-time.Duration(n-1-i) * gap)}
+		}
+		return samples
+	}
+	for _, tc := range []struct {
+		name    string
+		samples []bus.PathSample
+		want    int
+	}{
+		{"fewer than the last ones", every(10, 5*time.Second), 10},
+		{"the last ones past the span", every(30, 30*time.Second), bus.PathSamples},
+		{"more within the span", every(100, 5*time.Second), 61},
+	} {
+		if got := kept(tc.samples, now); !slices.Equal(got, tc.samples[len(tc.samples)-tc.want:]) {
+			t.Errorf("%s: kept %d samples, want the last %d", tc.name, len(got), tc.want)
+		}
+	}
+}
+
 // TestProberBurstsOnLoss checks that a lost heartbeat calls a burst, that a
 // burst lost whole counts in the record, that the destination's host is
 // resolved again after it, and that the first answer after it restarts the

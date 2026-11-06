@@ -94,7 +94,8 @@ func (r report) lostSince(since, within time.Time) int {
 // healthy, for an answer within the trust window; suspect, for stale
 // segments or a crossed link its failed paths share; unknown. An ejected
 // candidate is due its half-open probe its backoff after its last loss. Its
-// cost is its measured cost, else twice its declared one-way sum.
+// cost is its measured cost, and its reading its measured reading, each
+// else twice its declared one-way sum.
 func (v view) assess(c *Candidate) {
 	r, measured := v.measured.Of(c.ID)
 	rep := v.reports[c.ID]
@@ -120,6 +121,12 @@ func (v view) assess(c *Candidate) {
 		prior := 2 * *c.Latency
 		c.Cost = &prior
 	}
+	if reading, ok := measuredReading(r, v.now); ok {
+		c.Reading = &reading
+	} else if c.Latency != nil {
+		prior := 2 * *c.Latency
+		c.Reading = &prior
+	}
 }
 
 // signaledSince reports whether a signal standing on one of the links
@@ -133,19 +140,27 @@ func (v view) signaledSince(links []segment.LinkID, since time.Time) bool {
 	return false
 }
 
+// recent returns the record's last bus.PathSamples probes, the ones its
+// health, loss, and cost read.
+func recent(r bus.PathRecord) []bus.PathSample {
+	return r.Samples[max(0, len(r.Samples)-bus.PathSamples):]
+}
+
 // ejected reports whether the record ejects its path: a burst lost whole
-// since its last answer, or ejectShare of at least ejectSamples probes lost.
+// since its last answer, or ejectShare of at least ejectSamples of its
+// recent probes lost.
 func ejected(r bus.PathRecord) bool {
 	if r.LostBursts > 0 {
 		return true
 	}
-	return len(r.Samples) >= ejectSamples && float64(lost(r))/float64(len(r.Samples)) >= ejectShare
+	samples := recent(r)
+	return len(samples) >= ejectSamples && float64(lost(samples))/float64(len(samples)) >= ejectShare
 }
 
-// lost counts the record's lost probes.
-func lost(r bus.PathRecord) int {
+// lost counts the lost probes among the samples.
+func lost(samples []bus.PathSample) int {
 	n := 0
-	for _, s := range r.Samples {
+	for _, s := range samples {
 		if s.Lost {
 			n++
 		}
@@ -153,23 +168,48 @@ func lost(r bus.PathRecord) int {
 	return n
 }
 
-// measuredCost returns the record's median answered round trip divided by
-// its delivery rate, its loss counted up to lossCap; false when no probe
-// answered.
-func measuredCost(r bus.PathRecord) (time.Duration, bool) {
+// rttsOf returns the round trips of the samples answered.
+func rttsOf(samples []bus.PathSample) []time.Duration {
 	var rtts []time.Duration
-	for _, s := range r.Samples {
+	for _, s := range samples {
 		if !s.Lost {
 			rtts = append(rtts, s.RTT)
 		}
 	}
+	return rtts
+}
+
+// measuredCost returns the median round trip of the record's recent probes
+// answered, divided by their delivery rate, the loss counted up to lossCap;
+// false when none answered.
+func measuredCost(r bus.PathRecord) (time.Duration, bool) {
+	samples := recent(r)
+	rtts := rttsOf(samples)
 	if len(rtts) == 0 {
 		return 0, false
 	}
 	slices.Sort(rtts)
 	median := rtts[len(rtts)/2]
-	loss := min(float64(len(r.Samples)-len(rtts))/float64(len(r.Samples)), lossCap)
+	loss := min(float64(len(samples)-len(rtts))/float64(len(samples)), lossCap)
 	return time.Duration(float64(median) / (1 - loss)), true
+}
+
+// measuredReading returns the reading of the record's probes sent within
+// ReadingSpan of now and answered, divided by their delivery rate, the loss
+// counted up to lossCap; false when none of them answered.
+func measuredReading(r bus.PathRecord, now time.Time) (time.Duration, bool) {
+	var samples []bus.PathSample
+	for _, s := range r.Samples {
+		if now.Sub(s.At) <= ReadingSpan {
+			samples = append(samples, s)
+		}
+	}
+	rtts := rttsOf(samples)
+	if len(rtts) == 0 {
+		return 0, false
+	}
+	loss := min(float64(len(samples)-len(rtts))/float64(len(samples)), lossCap)
+	return time.Duration(float64(Reading(rtts)) / (1 - loss)), true
 }
 
 // suspectLinks returns the links the records' failed paths share: each link
