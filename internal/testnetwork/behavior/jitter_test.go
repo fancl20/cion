@@ -123,9 +123,9 @@ func reportJitter(t *testing.T, name string, spreads []spread) {
 		changes += sp.changes
 		t.Logf("%s %s at jitter %v: %d link-set changes, settled %v; %v",
 			name, dir, sp.mean, sp.changes, sp.settled, sp.grading)
-		fmt.Printf("Benchmark%s/dir=%s/jitter=%v 1 %d changes %d settled %d reached %d pairs "+
+		fmt.Printf("Benchmark%s/dir=%s/jitter=%v 1 %d changes %d settled %d links %d reached %d pairs "+
 			"%g ratio-mean %g ratio-max\n",
-			name, dir, sp.mean, sp.changes, settled, sp.grading.reached, sp.grading.pairs,
+			name, dir, sp.mean, sp.changes, settled, sp.grading.links, sp.grading.reached, sp.grading.pairs,
 			sp.grading.ratio.mean, sp.grading.ratio.max)
 	}
 	fmt.Printf("Benchmark%s/summary 1 %d changes %d unsettled\n", name, changes, unsettled)

@@ -212,37 +212,25 @@ the one seam every consumer uses, the control endpoint's transport included.
 
 ### Topology and liveness
 
-The topology source meets candidate peers at the rendezvous exchange — first
-contact, admission probe, and a joiner's establishment in one — and learns
-of them from the directory of each scope the node is in: a node groups its
-links by the host each peer sees it at, and the groups that links join form
-a scope. Each node signs its own entry in each of its directories; linked
-nodes flood new entries to each other and exchange summaries to catch up,
-each entry only over the links of its scope
-([ADR-0032](/docs/adrs/0032-replicate-the-node-directory-on-every-node.md)).
-It reaches a candidate that reports itself undialable, such as a node behind
-a NAT, by punch instead: over a request both chains authenticate, each side
-learns its socket's reflexive address from a dialable neighbor in the
-scope and sends toward the other's.
-Admitted links enter the neighbor table; the selection loop then measures
-every peer and keeps a link for what it adds into the region beyond its peer
-— a cheaper route or an independent one, judged by the end that dialed the
-link — holding a resilience floor and changing slowly, because every change
-reshapes paths network-wide. It reads every round trip at its 80th
-percentile over five minutes, so no lone sample or short burst moves a link
+The topology source meets candidate peers at the rendezvous exchange and
+learns of them from the directory of each scope it is in, which linked nodes
+replicate by flooding signed entries
+([ADR-0032](/docs/adrs/0032-replicate-the-node-directory-on-every-node.md));
+it punches through to an undialable candidate, such as a node behind a NAT.
+Beyond a resilience floor, it keeps a link for the cheaper or independent
+routes it adds, on round trips read at their 80th percentile over five
+minutes
 ([ADR-0038](/docs/adrs/0038-read-round-trips-at-their-80th-percentile-over-five-minutes.md)).
-Directory entries carry each node's measured round trips, links, and announced
-changes, and a change waits while another node's would serve or undo it
+Every link change reshapes paths network-wide, so paths react within seconds
+and links change only on lasting evidence
+([ADR-0039](/docs/adrs/0039-let-paths-react-links-settle-and-clusters-hold-still.md)),
+and a change waits while another node's, announced in the directory, would
+serve or undo it
 ([ADR-0037](/docs/adrs/0037-coordinate-link-changes-through-the-node-directory.md)).
-Membership changes land as generation swaps:
-the new data plane is built from the neighbor table's snapshot and the old
-one retires. Liveness runs beside the source: a session per link feeds the
-monitor, whose verdict stops forwarding on a dead link and resumes it on
-recovery — a state flip within the same generation, faster and reversible
-where membership changes are damped. The node publishes its link state on
-its bus whenever the table, a verdict, or a link's observation changes:
-beaconing, path composition, the sockets, and the topology source read the
-links there.
+A new link set lands as a new data plane generation built from the neighbor
+table; within a generation, the liveness verdict stops and resumes
+forwarding on a link. The node bus carries link state to beaconing, path
+composition, the sockets, and the topology source.
 
 ### Endhost service
 

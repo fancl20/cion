@@ -95,7 +95,9 @@ func (r report) lostSince(since, within time.Time) int {
 // segments or a crossed link its failed paths share; unknown. An ejected
 // candidate is due its half-open probe its backoff after its last loss. Its
 // cost is its measured cost, and its reading its measured reading, each
-// else twice its declared one-way sum.
+// else twice its declared one-way sum; the reading is read once
+// ReadingSamples of its probes answered, and bounded where its probes give
+// bounds.
 func (v view) assess(c *Candidate) {
 	r, measured := v.measured.Of(c.ID)
 	rep := v.reports[c.ID]
@@ -121,11 +123,17 @@ func (v view) assess(c *Candidate) {
 		prior := 2 * *c.Latency
 		c.Cost = &prior
 	}
-	if reading, ok := measuredReading(r, v.now); ok {
-		c.Reading = &reading
+	if reading, answered := measuredReading(r, v.now); answered > 0 {
+		c.Reading, c.Read = &reading, answered >= ReadingSamples
 	} else if c.Latency != nil {
 		prior := 2 * *c.Latency
 		c.Reading = &prior
+	}
+	if lo, hi := measuredBounds(r, v.now); lo > 0 {
+		c.Low = &lo
+		if hi > 0 {
+			c.High = &hi
+		}
 	}
 }
 
@@ -196,8 +204,9 @@ func measuredCost(r bus.PathRecord) (time.Duration, bool) {
 
 // measuredReading returns the reading of the record's probes sent within
 // ReadingSpan of now and answered, divided by their delivery rate, the loss
-// counted up to lossCap; false when none of them answered.
-func measuredReading(r bus.PathRecord, now time.Time) (time.Duration, bool) {
+// counted up to lossCap, beside how many of them answered; none when none
+// did.
+func measuredReading(r bus.PathRecord, now time.Time) (time.Duration, int) {
 	var samples []bus.PathSample
 	for _, s := range r.Samples {
 		if now.Sub(s.At) <= ReadingSpan {
@@ -206,10 +215,29 @@ func measuredReading(r bus.PathRecord, now time.Time) (time.Duration, bool) {
 	}
 	rtts := rttsOf(samples)
 	if len(rtts) == 0 {
-		return 0, false
+		return 0, 0
 	}
 	loss := min(float64(len(samples)-len(rtts))/float64(len(samples)), lossCap)
-	return time.Duration(float64(Reading(rtts)) / (1 - loss)), true
+	return time.Duration(float64(Reading(rtts)) / (1 - loss)), len(rtts)
+}
+
+// measuredBounds returns the bounds of the record's probes sent within
+// BoundSpan of now and answered, each divided by their delivery rate, the
+// loss counted up to lossCap; zero for a bound they do not give.
+func measuredBounds(r bus.PathRecord, now time.Time) (lo, hi time.Duration) {
+	var samples []bus.PathSample
+	for _, s := range r.Samples {
+		if now.Sub(s.At) <= BoundSpan {
+			samples = append(samples, s)
+		}
+	}
+	rtts := rttsOf(samples)
+	if len(rtts) == 0 {
+		return 0, 0
+	}
+	delivery := 1 - min(float64(len(samples)-len(rtts))/float64(len(samples)), lossCap)
+	lo, hi = ReadingBounds(rtts)
+	return time.Duration(float64(lo) / delivery), time.Duration(float64(hi) / delivery)
 }
 
 // suspectLinks returns the links the records' failed paths share: each link
@@ -257,7 +285,7 @@ func ranksAbove(a, b *Candidate) bool {
 	}
 	pa, aPriced := a.Price()
 	pb, bPriced := b.Price()
-	if aPriced && bPriced && beyondBand(pa, pb) {
+	if aPriced && bPriced && BeyondBand(pa, pb) {
 		return pa < pb
 	}
 	return a.Outranks(b)
@@ -276,8 +304,9 @@ func tier(h Health) int {
 	}
 }
 
-// beyondBand reports whether two prices differ by the band or more.
-func beyondBand(a, b time.Duration) bool {
+// BeyondBand reports whether two prices differ by the band or more: by what
+// the picks rank by and what moves a lease.
+func BeyondBand(a, b time.Duration) bool {
 	d := a - b
 	if d < 0 {
 		d = -d

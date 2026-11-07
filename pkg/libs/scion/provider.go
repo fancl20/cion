@@ -3,6 +3,7 @@ package scion
 import (
 	"context"
 	"fmt"
+	"math"
 	"slices"
 	"sync"
 	"time"
@@ -185,6 +186,20 @@ const StaleAfter = 5 * time.Minute
 // the horizon in which a link change plays out in every node's segments.
 const ReadingSpan = StaleAfter
 
+// ReadingSamples is the fewest round trips a reading decides on: the fewest
+// of which a fifth may stand high and the reading hold, so that no one round
+// trip sets it.
+const ReadingSamples = 5
+
+// BoundSpan is how far back a reading's bounds read its round trips: three
+// StaleAfter horizons, so that a route probed every half minute holds thirty
+// probes, enough that its upper bound tolerates two standing high, and a
+// lasting change moves the bound it crosses after about one horizon.
+const BoundSpan = 3 * StaleAfter
+
+// BoundConfidence is the one-sided confidence of a reading's bounds.
+const BoundConfidence = 0.95
+
 // Reading returns the reading of the round trips, what a measurement over
 // them reports: their 80th percentile by nearest rank, the round trip a
 // fifth of the others exceed and the highest of up to four; zero for none.
@@ -196,6 +211,48 @@ func Reading(rtts []time.Duration) time.Duration {
 	}
 	sorted := slices.Sorted(slices.Values(rtts))
 	return sorted[(4*len(sorted)+4)/5-1]
+}
+
+// ReadingBounds returns the bounds of the 80th percentile the round trips
+// sample, each with BoundConfidence: lo, the round trip it lies at or above,
+// and hi, the one it lies at or below. Each is the order statistic the count
+// of round trips below the percentile, binomial over them, reaches with that
+// confidence, so the bounds assume nothing of how the round trips spread. A
+// bound too few round trips give is zero: lo takes two, hi fourteen.
+func ReadingBounds(rtts []time.Duration) (lo, hi time.Duration) {
+	n := len(rtts)
+	sorted := slices.Sorted(slices.Values(rtts))
+	below := binomialCDF(n, 0.8)
+	for u := 1; u <= n; u++ {
+		if below[u-1] >= BoundConfidence {
+			hi = sorted[u-1]
+			break
+		}
+	}
+	for l := n; l >= 1; l-- {
+		if 1-below[l-1] >= BoundConfidence {
+			lo = sorted[l-1]
+			break
+		}
+	}
+	return lo, hi
+}
+
+// binomialCDF returns P(B <= k) for k from 0 to n, B binomial over n trials
+// of probability p.
+func binomialCDF(n int, p float64) []float64 {
+	logFactorial := func(k int) float64 {
+		v, _ := math.Lgamma(float64(k + 1))
+		return v
+	}
+	cdf := make([]float64, n+1)
+	sum := 0.0
+	for k := range cdf {
+		sum += math.Exp(logFactorial(n) - logFactorial(k) - logFactorial(n-k) +
+			float64(k)*math.Log(p) + float64(n-k)*math.Log(1-p))
+		cdf[k] = sum
+	}
+	return cdf
 }
 
 // TransitPenalty is what each AS a path crosses between its ends adds to its
@@ -253,8 +310,14 @@ type Candidate struct {
 	// Reading is the path's round trip as the topology selection compares
 	// it: the reading of its probes answered within ReadingSpan, divided by
 	// their delivery rate, else twice its declared one-way sum; nil when it
-	// has neither.
+	// has neither. Read reports that it rests on at least ReadingSamples
+	// answered probes, the readings a decision takes.
 	Reading *time.Duration
+	Read    bool
+	// Low and High bound the round trip the reading estimates: the bounds
+	// of the path's probes answered within BoundSpan, divided by their
+	// delivery rate; nil where the probes give none.
+	Low, High *time.Duration
 }
 
 // Price returns what the picks and the leases rank the path by: its cost
@@ -264,11 +327,17 @@ func (c *Candidate) Price() (time.Duration, bool) {
 	if c.Cost == nil {
 		return 0, false
 	}
+	return *c.Cost + c.Charge(), true
+}
+
+// Charge returns what a price adds to the path's round trip: TransitPenalty
+// for every AS it crosses between its ends, each way.
+func (c *Candidate) Charge() time.Duration {
 	ases := make(map[addr.IA]bool, len(c.Links))
 	for _, l := range c.Links {
 		ases[l.IA] = true
 	}
-	return *c.Cost + 2*TransitPenalty*time.Duration(max(0, len(ases)-2)), true
+	return 2 * TransitPenalty * time.Duration(max(0, len(ases)-2))
 }
 
 // Outranks reports whether c outranks o by the prior order, the one the picks

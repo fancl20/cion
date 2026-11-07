@@ -160,3 +160,85 @@ Nothing changes on the wire or in configuration.
 *   **The labs.** The labs pass, and the benchmarks, the unstable delay
     ones included, run against the commit before, reporting the formed
     links.
+
+## Implementation history
+
+*   **The useless test, four ways.** Before the promotion on the history,
+    the labs ran four realizations of the useless test: the line to keep at
+    any lead on the readings alone, and at any lead, at the band, or at the
+    line to buy on the readings and the bounds. Over one to four runs of
+    each lab, the commit before retired 89 links as useless. Any lead on the
+    readings alone retired 8, and its bursts changed links 8 times, a read
+    reaching 71 of 72 pairs; with the bounds, 4, and 2 times, every read
+    reaching 72. At the line to buy, links cycled: two labs never settled,
+    and 63 links retired as useless. At the band, the lowered-delay lab's
+    worst pair stood at 1.23 times the reference after the restore, against
+    1.16. Bounds over five minutes never ran: a route probed every half
+    minute holds ten probes in them, short of the fourteen an upper bound
+    needs.
+*   **The readings and the bounds.** A first run on the bounds alone judged
+    three links useless in one window, just after they became the fastest
+    routes: fifteen minutes of history lag a change by up to ten. The
+    useless test reads both since.
+*   **The promotion on the history** came last. The band's cap is one
+    transit's price, so a direct link that skips a node gains the band once
+    its history confirms, however long the route: the regions lab linked
+    every pair, 36 links, against 23 and 24 with the promotion by a fifth
+    alone, and stored 106 and 117 up segments, against 62 to 64.
+*   **Test adaptations.** The retirement tests pass a window more before the
+    link turns useless: a direct side of one round trip has no lower bound,
+    so the history confirms nothing. The fixtures that priced a member by a
+    declared route measure it instead. In `TestSelectionEquilibrium`, R2's
+    round trip is 11ms, so its link gains it less than the band and the cap
+    may take it.
+*   **Left as it is.** Once links that skip a node gain the band, nearly
+    every link would earn its place today, so at the cap the eviction rarely
+    finds a victim, and a node keeps the links it bought first, however much
+    a candidate would gain. The labs never reach the cap.
+*   Mutations: 64 of 64 killed.
+*   The pipeline passed but for two labs' waits under the race detector:
+    `TestBFDStaticLabEpisode`, as in proposal 0116's runs, and
+    `TestNodeDirectoryOnEveryNode`. Alone, each passed five runs of five,
+    and the directory lab twenty more.
+*   Benchmarks against the commit before, two or three runs each:
+    *   The regions lab settled after 23 and 25 changes within 8.8 and 9
+        minutes, against 15 within 4.8 and 5.2, with every pair linked and
+        its worst pair at 1.00 times the reference, against 1.05 and 1.11.
+        It stored 106 and 117 up segments, against 77 and 82.
+    *   After the regions cut, reach held from 10 seconds in all three runs,
+        as before, and the links settled within 10 seconds, against 50 to
+        70, the worst pair at 1.00, against 1.16 to 1.18. After the restore,
+        each run linked the cut pair again within 40 to 60 seconds, where
+        the commit before kept its links.
+    *   After the stranded cut, the links settled within 10 seconds in two
+        runs, against 10 to 80. The third never settled: the cut left a node
+        one link and no candidate it could reach, as in proposal 0114's
+        runs. After the restore, each run changed one link within 20 to 70
+        seconds, where the commit before kept its links in two runs and
+        changed one within 170 seconds in the third.
+    *   The site lab joined both ways settled after 9 or 10 changes within 5
+        minutes, against 8 to 10 within 4.3 to 10.8, reaching every pair in
+        every run, against 41 of 42 in one. Joined inside or outside, it
+        settled after 5 to 8 changes within 2.5 to 4 minutes, against 5 or 6
+        within 1.8 to 2.5.
+    *   The NAT lab settled after 8 and 10 changes within 4.3 and 4.2
+        minutes, against 9 and 11 within 3.8 and 4.8, on 21 links; its
+        founder-down nodes survived in 15.6 and 15.8 seconds and returned in
+        205 and 229, against 15.5 and 15.7, and 201 and 225.
+*   Proposal 0116's benchmarks, one run each but the regions jitter sweep's
+    two:
+    *   The regions jitter sweep changed no link and left no level
+        unsettled, on 36 links throughout, against 126 and 139 changes with
+        four and five levels unsettled. The stranded sweep changed none, as
+        before.
+    *   In the bursts, neither network changed its links, and every read
+        reached every pair, against 3 changes in the regions network.
+    *   The lowered-delay benchmarks found every pair that could link linked
+        in both labs, so none was lowered, against a link after 270 and 280
+        seconds.
+    *   A used link's delay tripled: neither network changed a link, and
+        every regions pair stood at the reference once the links held,
+        against six changes within 280 seconds, reach regained after 250,
+        and a worst pair at 1.17. After the restore, the regions network
+        retired one link within 150 seconds, its worst pair at 1.06, where
+        the commit before changed nothing.

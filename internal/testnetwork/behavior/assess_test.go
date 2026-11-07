@@ -58,8 +58,9 @@ type grading struct {
 	// penalty is the cost each transit node adds to a path.
 	penalty time.Duration
 	// pairs counts the ordered pairs; reached, those whose chosen path
-	// crosses only formed links to its destination.
-	pairs, reached int
+	// crosses only formed links to its destination; links, the formed
+	// links.
+	pairs, reached, links int
 	// ratio and excess grade each reached pair's chosen path against the
 	// global reference: its cost over the reference's, and the
 	// milliseconds above it.
@@ -78,8 +79,8 @@ type grading struct {
 }
 
 func (g grading) String() string {
-	return fmt.Sprintf("reached %d of %d pairs; cost over the reference %v; excess ms %v; "+
-		"topology %v; choice %v", g.reached, g.pairs, g.ratio, g.excess, g.topology, g.choice)
+	return fmt.Sprintf("%d links; reached %d of %d pairs; cost over the reference %v; excess ms %v; "+
+		"topology %v; choice %v", g.links, g.reached, g.pairs, g.ratio, g.excess, g.topology, g.choice)
 }
 
 // summary is a distribution's mean, 95th percentile, and maximum.
@@ -201,7 +202,7 @@ func (r paths) grade(n *network, p time.Duration) grading {
 	size := len(n.nodes)
 	reference := penalizedShortest(size, n.delay, p)
 	shortest := penalizedShortest(size, r.formed.delay(n), p)
-	g := grading{penalty: p, surfaced: r.candidates}
+	g := grading{penalty: p, surfaced: r.candidates, links: len(r.formed.edges)}
 	var ratio, excess, topology, choice, best []float64
 	for s := range size {
 		for d := range size {

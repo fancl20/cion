@@ -62,6 +62,7 @@ func metrics(a assessment, s settling) string {
 	values := []benchValue{
 		{float64(a.reached), "reached"},
 		{float64(a.pairs), "pairs"},
+		{float64(a.links), "links"},
 		{a.ratio.mean, "ratio-mean"},
 		{a.ratio.p95, "ratio-p95"},
 		{a.ratio.max, "ratio-max"},

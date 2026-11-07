@@ -1624,3 +1624,43 @@ func TestReading(t *testing.T) {
 		}
 	}
 }
+
+// TestReadingBounds checks the bounds of the 80th percentile the round
+// trips sample: the order statistics the binomial count reaches with
+// BoundConfidence, the lower from two round trips and the upper from
+// fourteen, a few ranks either side of the reading, in whatever order the
+// round trips come; zeros for none.
+func TestReadingBounds(t *testing.T) {
+	ms := time.Millisecond
+	// ranks returns 1ms, 2ms, ... up to n, shuffled, so each bound names
+	// its rank.
+	ranks := func(n int) []time.Duration {
+		rtts := make([]time.Duration, n)
+		for i := range rtts {
+			rtts[i] = time.Duration((i*11)%n+1) * ms
+		}
+		return rtts
+	}
+	for _, tc := range []struct {
+		n      int
+		lo, hi time.Duration
+	}{
+		{0, 0, 0},
+		{1, 0, 0},
+		{2, ms, 0},
+		{13, 8 * ms, 0},
+		{14, 9 * ms, 14 * ms},
+		{30, 20 * ms, 28 * ms},
+		{90, 66 * ms, 79 * ms},
+		{180, 135 * ms, 154 * ms},
+	} {
+		rtts := ranks(tc.n)
+		in := slices.Clone(rtts)
+		if lo, hi := ReadingBounds(rtts); lo != tc.lo || hi != tc.hi {
+			t.Errorf("%d round trips: ReadingBounds = %v, %v, want %v, %v", tc.n, lo, hi, tc.lo, tc.hi)
+		}
+		if !slices.Equal(rtts, in) {
+			t.Errorf("%d round trips: ReadingBounds reordered them", tc.n)
+		}
+	}
+}

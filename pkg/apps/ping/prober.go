@@ -424,10 +424,11 @@ func (p *Prober) settle(ps *probed, pr probe, rtt time.Duration, lost bool, now 
 }
 
 // kept returns the samples a record keeps: the last bus.PathSamples, and
-// every older one sent within scion.ReadingSpan of now.
+// every older one sent within scion.BoundSpan of now, the furthest a
+// reading's bounds read.
 func kept(samples []bus.PathSample, now time.Time) []bus.PathSample {
 	cut := len(samples) - bus.PathSamples
-	for cut > 0 && now.Sub(samples[cut-1].At) <= scion.ReadingSpan {
+	for cut > 0 && now.Sub(samples[cut-1].At) <= scion.BoundSpan {
 		cut--
 	}
 	return samples[max(0, cut):]

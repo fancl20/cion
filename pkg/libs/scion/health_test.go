@@ -379,9 +379,9 @@ func TestHealth(t *testing.T) {
 }
 
 // TestCandidateReading checks the reading a candidate carries beside its
-// cost: its record's reading over ReadingSpan, else twice its declared
-// one-way sum — while its health and cost read its last bus.PathSamples
-// probes alone.
+// cost: its record's reading over ReadingSpan, read once ReadingSamples of
+// its probes answered, else twice its declared one-way sum, never read —
+// while its health and cost read its last bus.PathSamples probes alone.
 func TestCandidateReading(t *testing.T) {
 	ms := time.Millisecond
 	probes := func(at time.Time, n int, rtt time.Duration, lost bool) []bus.PathSample {
@@ -392,16 +392,27 @@ func TestCandidateReading(t *testing.T) {
 		return samples
 	}
 	for _, tc := range []struct {
-		name    string
-		record  func(now time.Time) bus.PathRecord
-		health  Health
-		cost    time.Duration
-		reading time.Duration
+		name      string
+		record    func(now time.Time) bus.PathRecord
+		health    Health
+		cost      time.Duration
+		reading   time.Duration
+		read      bool
+		low, high time.Duration
 	}{{
 		name:    "unmeasured",
 		health:  HealthUnknown,
 		cost:    30 * ms,
 		reading: 30 * ms, // twice the declared 15ms
+	}, {
+		name: "four answered",
+		record: func(now time.Time) bus.PathRecord {
+			return answered(now.Add(-time.Minute), 10*ms, 10*ms, 10*ms, 10*ms)
+		},
+		health:  HealthHealthy,
+		cost:    10 * ms,
+		reading: 10 * ms,
+		low:     10 * ms, // too few for an upper bound
 	}, {
 		name: "answered lately",
 		record: func(now time.Time) bus.PathRecord {
@@ -412,6 +423,7 @@ func TestCandidateReading(t *testing.T) {
 		health:  HealthHealthy,
 		cost:    16 * ms, // the median 12ms over a delivery of three in four
 		reading: 40 * ms, // the highest of three, 30ms, over the same delivery
+		low:     40 * ms / 3,
 	}, {
 		name: "answered before the five minutes",
 		record: func(now time.Time) bus.PathRecord {
@@ -430,6 +442,9 @@ func TestCandidateReading(t *testing.T) {
 		health:  HealthHealthy,
 		cost:    10 * ms,
 		reading: 50 * ms,
+		read:    true,
+		low:     50 * ms, // the 31st of 45, past the twenty fast ones
+		high:    50 * ms,
 	}, {
 		name: "losses before the last probes",
 		record: func(now time.Time) bus.PathRecord {
@@ -442,6 +457,8 @@ func TestCandidateReading(t *testing.T) {
 		health:  HealthHealthy, // three in four of its last probes lost
 		cost:    40 * ms,       // 10ms over a delivery of one in four
 		reading: 100 * ms,      // 10ms over the delivery of one in ten
+		read:    true,          // five answered
+		low:     100 * ms,
 	}} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newMeasuredFixture(t, time.Minute)
@@ -459,17 +476,28 @@ func TestCandidateReading(t *testing.T) {
 			if c.Cost == nil || *c.Cost != tc.cost {
 				t.Errorf("cost = %v, want %v", c.Cost, tc.cost)
 			}
-			if c.Reading == nil || *c.Reading != tc.reading {
-				t.Errorf("reading = %v, want %v", c.Reading, tc.reading)
+			if c.Reading == nil || *c.Reading != tc.reading || c.Read != tc.read {
+				t.Errorf("reading = %v, read %v, want %v, read %v", c.Reading, c.Read, tc.reading, tc.read)
+			}
+			if low, high := deref(c.Low), deref(c.High); low != tc.low || high != tc.high {
+				t.Errorf("bounds = %v, %v, want %v, %v", low, high, tc.low, tc.high)
 			}
 		})
 	}
 }
 
+// deref returns the duration pointed at, zero for nil.
+func deref(d *time.Duration) time.Duration {
+	if d == nil {
+		return 0
+	}
+	return *d
+}
+
 // TestMeasuredReading checks a record's reading: the reading of its probes
 // sent within ReadingSpan of now, the one at the span's edge among them,
-// divided by their delivery rate, the loss counted up to lossCap; none when
-// none of them answered.
+// divided by their delivery rate, the loss counted up to lossCap, beside how
+// many answered; none when none of them did.
 func TestMeasuredReading(t *testing.T) {
 	ms := time.Millisecond
 	now := time.Now()
@@ -481,23 +509,67 @@ func TestMeasuredReading(t *testing.T) {
 	}
 	past := ReadingSpan + time.Nanosecond
 	for _, tc := range []struct {
+		name     string
+		samples  []bus.PathSample
+		want     time.Duration
+		answered int
+	}{
+		{"none", nil, 0, 0},
+		{"lost alone", []bus.PathSample{lost(0)}, 0, 0},
+		{"answered past the span", []bus.PathSample{at(past, 10*ms), lost(0)}, 0, 0},
+		{"at the span's edge", []bus.PathSample{at(past, 90*ms), at(ReadingSpan, 20*ms), at(0, 10*ms)}, 20 * ms, 2},
+		{"a loss within the span", []bus.PathSample{lost(past), at(time.Minute, 30*ms), lost(30 * time.Second),
+			at(0, 10*ms), at(0, 10*ms)}, 40 * ms, 3},
+		{"losses past the cap", append([]bus.PathSample{at(0, 10*ms)}, slices.Repeat([]bus.PathSample{lost(0)}, 19)...),
+			100 * ms, 1},
+	} {
+		got, answered := measuredReading(bus.PathRecord{Samples: tc.samples}, now)
+		if got != tc.want || answered != tc.answered {
+			t.Errorf("%s: measuredReading = %v over %d, want %v over %d", tc.name, got, answered, tc.want, tc.answered)
+		}
+	}
+}
+
+// TestMeasuredBounds checks a record's bounds: those of its probes sent
+// within BoundSpan of now, the one at the span's edge among them, each
+// divided by their delivery rate, the loss counted up to lossCap; zero for a
+// bound they do not give.
+func TestMeasuredBounds(t *testing.T) {
+	ms := time.Millisecond
+	now := time.Now()
+	at := func(ago, rtt time.Duration) bus.PathSample {
+		return bus.PathSample{At: now.Add(-ago), RTT: rtt}
+	}
+	lost := func(ago time.Duration) bus.PathSample {
+		return bus.PathSample{At: now.Add(-ago), Lost: true}
+	}
+	past := BoundSpan + time.Nanosecond
+	// thirty returns thirty probes within the span, 1ms to 30ms.
+	thirty := func() []bus.PathSample {
+		samples := make([]bus.PathSample, 30)
+		for i := range samples {
+			samples[i] = at(ReadingSpan+time.Duration(i)*time.Second, time.Duration(i+1)*ms)
+		}
+		return samples
+	}
+	for _, tc := range []struct {
 		name    string
 		samples []bus.PathSample
-		want    time.Duration
-		ok      bool
+		lo, hi  time.Duration
 	}{
-		{"none", nil, 0, false},
-		{"lost alone", []bus.PathSample{lost(0)}, 0, false},
-		{"answered past the span", []bus.PathSample{at(past, 10*ms), lost(0)}, 0, false},
-		{"at the span's edge", []bus.PathSample{at(past, 90*ms), at(ReadingSpan, 20*ms), at(0, 10*ms)}, 20 * ms, true},
-		{"a loss within the span", []bus.PathSample{lost(past), at(time.Minute, 30*ms), lost(30 * time.Second),
-			at(0, 10*ms), at(0, 10*ms)}, 40 * ms, true},
-		{"losses past the cap", append([]bus.PathSample{at(0, 10*ms)}, slices.Repeat([]bus.PathSample{lost(0)}, 19)...),
-			100 * ms, true},
+		{"none", nil, 0, 0},
+		{"one answered", []bus.PathSample{at(0, 10*ms)}, 0, 0},
+		{"two answered, one past the span", []bus.PathSample{at(past, ms), at(BoundSpan, 10*ms), at(0, 20*ms)}, 10 * ms, 0},
+		{"two answered fourteen minutes ago, two sixteen", []bus.PathSample{at(16*time.Minute, ms), at(16*time.Minute, ms),
+			at(14*time.Minute, 10*ms), at(14*time.Minute, 10*ms)}, 10 * ms, 0},
+		{"thirty answered, past the readings' span", thirty(), 20 * ms, 28 * ms},
+		{"thirty answered, six lost", append(thirty(), slices.Repeat([]bus.PathSample{lost(0)}, 6)...),
+			24 * ms, 33600 * time.Microsecond},
+		{"losses past the cap", append([]bus.PathSample{at(0, 10*ms), at(0, 10*ms)},
+			slices.Repeat([]bus.PathSample{lost(0)}, 38)...), 100 * ms, 0},
 	} {
-		got, ok := measuredReading(bus.PathRecord{Samples: tc.samples}, now)
-		if got != tc.want || ok != tc.ok {
-			t.Errorf("%s: measuredReading = %v, %v, want %v, %v", tc.name, got, ok, tc.want, tc.ok)
+		if lo, hi := measuredBounds(bus.PathRecord{Samples: tc.samples}, now); lo != tc.lo || hi != tc.hi {
+			t.Errorf("%s: measuredBounds = %v, %v, want %v, %v", tc.name, lo, hi, tc.lo, tc.hi)
 		}
 	}
 }
@@ -720,11 +792,11 @@ func TestBand(t *testing.T) {
 		{a: 200 * ms, b: 209 * ms, beyond: false},          // within the cap
 		{a: 200 * ms, b: 210 * ms, beyond: true},           // at the cap
 	} {
-		if got := beyondBand(tc.a, tc.b); got != tc.beyond {
-			t.Errorf("beyondBand(%v, %v) = %v, want %v", tc.a, tc.b, got, tc.beyond)
+		if got := BeyondBand(tc.a, tc.b); got != tc.beyond {
+			t.Errorf("BeyondBand(%v, %v) = %v, want %v", tc.a, tc.b, got, tc.beyond)
 		}
-		if got := beyondBand(tc.b, tc.a); got != tc.beyond {
-			t.Errorf("beyondBand(%v, %v) = %v, want %v", tc.b, tc.a, got, tc.beyond)
+		if got := BeyondBand(tc.b, tc.a); got != tc.beyond {
+			t.Errorf("BeyondBand(%v, %v) = %v, want %v", tc.b, tc.a, got, tc.beyond)
 		}
 	}
 }

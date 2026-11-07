@@ -218,5 +218,5 @@ func (l *Lease) freshest(candidates []Candidate) *Candidate {
 func cheaper(a, b *Candidate) bool {
 	pa, aPriced := a.Price()
 	pb, bPriced := b.Price()
-	return aPriced && bPriced && pa < pb && beyondBand(pa, pb)
+	return aPriced && bPriced && pa < pb && BeyondBand(pa, pb)
 }

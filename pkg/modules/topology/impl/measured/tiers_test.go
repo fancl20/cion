@@ -1,6 +1,7 @@
 package measured
 
 import (
+	"maps"
 	"testing"
 	"time"
 
@@ -73,13 +74,14 @@ func TestDeriveTiers(t *testing.T) {
 }
 
 // TestWindowTierFacts checks what one helper turns a tier into: up links
-// from the verdicts alone; the price of the cheapest clean route at its cost
-// — a declared route under a measured one sets it, while an ejected route
-// and one over a local down interface price nothing; each member's own price
-// over its own routes, beside the route it is, a member no route prices
-// absent; the route count reading the clean candidates alone; and
-// strandedness, once no up link reaches a tier and the measurements doubt
-// every route into it.
+// from the verdicts alone; the price of the cheapest clean read route at
+// its cost — a declared route under a measured one prices nothing, nor do an
+// ejected route and one over a local down interface; each member's own price
+// over its own read routes, beside its cheapest route, read or not, which
+// the window requests; the lowest lower bound of the read routes, the tier's
+// at their costs and each member's at their prices; the route count reading
+// the clean candidates alone; and strandedness, once no up link reaches a
+// tier and the measurements doubt every route into it.
 func TestWindowTierFacts(t *testing.T) {
 	verdicts := map[uint16]bool{3: true, 4: false, 7: false} // B's link down, the node's own 7 dead
 	up := &links.Link{NeighborIA: selA, IfID: 3, State: links.StateEstablished}
@@ -90,14 +92,21 @@ func TestWindowTierFacts(t *testing.T) {
 		Links: verdictTopic(verdicts),
 	}}
 	// One fast tier of three measured peers: A up, its route measured at
-	// 20ms beside a clean route declaring 8ms one way; B verdict-down, its
+	// 20ms, bounded below at 18ms, beside a clean route declaring 8ms one
+	// way, bounded below at 5ms by too few probes to read, and a measured
+	// route through D at 30ms, bounded below at 14ms; B verdict-down, its
 	// route over the down link; C a candidate whose route over the node's
 	// own dead interface declares 1ms, beside one clean undeclared route.
 	// And a slow tier of two: D, whose one route declares 2ms but was
 	// ejected, and E, whose one route is suspect.
+	bounded := func(c scion.Candidate, low time.Duration) scion.Candidate {
+		c.Low = &low
+		return c
+	}
 	a := sm(5,
-		measured(route(0, 0, local(3), link(selA)), 20*time.Millisecond),
-		route(-time.Minute, 8*time.Millisecond, link(selX), link(selA)),
+		bounded(measured(route(0, 0, local(3), link(selA)), 20*time.Millisecond), 18*time.Millisecond),
+		bounded(route(-time.Minute, 8*time.Millisecond, link(selX), link(selA)), 5*time.Millisecond),
+		bounded(measured(route(0, 0, local(3), link(selD), link(selA)), 30*time.Millisecond), 14*time.Millisecond),
 	)
 	b := sm(6, route(0, time.Millisecond, local(4), link(selB)))
 	c := sm(7,
@@ -117,17 +126,26 @@ func TestWindowTierFacts(t *testing.T) {
 	if len(fast.upLinks) != 1 || fast.upLinks[0] != local(3) {
 		t.Errorf("up links = %v, want the verdict-up link alone", fast.upLinks)
 	}
-	if fast.price != 16*time.Millisecond {
-		t.Errorf("price = %v, want the declared route's doubled 16ms", fast.price)
+	if fast.price != 20*time.Millisecond {
+		t.Errorf("price = %v, want the measured route's 20ms", fast.price)
 	}
-	// A's declared route undercuts its measured 20ms route; B's and C's
-	// routes are dirty or undeclared.
-	wantPrices := map[addr.IA]time.Duration{selA: 16 * time.Millisecond}
+	// A's declared route undercuts its measured 20ms route but is read by
+	// nothing; B's and C's routes are dirty or undeclared.
+	wantPrices := map[addr.IA]time.Duration{selA: 20 * time.Millisecond}
 	if diff := cmp.Diff(wantPrices, fast.prices); diff != "" {
 		t.Errorf("member prices (-want +got):\n%s", diff)
 	}
 	if len(fast.cheapest) != 1 || fast.cheapest[selA].ID != a.candidates[1].ID {
-		t.Errorf("the routes the members are priced by = %v, want A's declared route", fast.cheapest)
+		t.Errorf("the members' cheapest routes = %v, want A's declared route", fast.cheapest)
+	}
+	// The route through D bounds the tier at its cost, 14ms, but A at its
+	// price, 24ms with its transit, above the direct route's 18ms; the
+	// declared route bounds nothing.
+	if fast.low != 14*time.Millisecond {
+		t.Errorf("low = %v, want the route through D's 14ms", fast.low)
+	}
+	if diff := cmp.Diff(map[addr.IA]time.Duration{selA: 18 * time.Millisecond}, fast.lows); diff != "" {
+		t.Errorf("member lows (-want +got):\n%s", diff)
 	}
 	// The up link beside a clean route that avoids it: the declared route
 	// and C's clean route share no link with the up link.
@@ -142,14 +160,14 @@ func TestWindowTierFacts(t *testing.T) {
 	}
 
 	// The slow tier: D's one route was ejected, and E's suspect one counts
-	// and prices, but no up link reaches the tier and the measurements doubt
-	// its one route — stranded.
+	// though its declaration prices nothing, but no up link reaches the tier
+	// and the measurements doubt its one route — stranded.
 	if slow.routes != 1 || !slow.stranded {
 		t.Errorf("the slow tier = %d routes, stranded %v; want E's one and stranded",
 			slow.routes, slow.stranded)
 	}
-	if slow.price != 6*time.Millisecond {
-		t.Errorf("the stranded tier's price = %v, want E's declared 6ms", slow.price)
+	if slow.price != 0 {
+		t.Errorf("the stranded tier's price = %v, want none: E's route is declared alone", slow.price)
 	}
 
 	// An up link to D: the slow tier is not stranded, though the
@@ -249,9 +267,10 @@ func TestExcludedCheapestSurvivors(t *testing.T) {
 }
 
 // TestWindowTiersWithoutMeasurements checks a window nothing measured, every
-// route unknown, as on a node without the ping application: routes price by
-// their declarations, a tier with no up link is not stranded while a clean
-// route composes into it, and no up link's useless test decides.
+// route unknown, as on a node without the ping application: no route
+// prices, though each member's cheapest by its declaration is requested, a
+// tier with no up link is not stranded while a clean route composes into it,
+// and no up link's useless test decides.
 func TestWindowTiersWithoutMeasurements(t *testing.T) {
 	ms := time.Millisecond
 	verdicts := map[uint16]bool{3: true, 5: true}
@@ -272,8 +291,11 @@ func TestWindowTiersWithoutMeasurements(t *testing.T) {
 		t.Fatalf("tiers = %d, want A's and B's, and C's", len(ts))
 	}
 	fast, slow := &ts[0], &ts[1]
-	if fast.price != 12*ms || slow.price != 60*ms {
-		t.Errorf("prices = %v and %v, want the declared 12ms and 60ms", fast.price, slow.price)
+	if fast.price != 0 || slow.price != 0 {
+		t.Errorf("prices = %v and %v, want none", fast.price, slow.price)
+	}
+	if c := slow.cheapest[selC]; c == nil || *c.Cost != 60*ms {
+		t.Errorf("C's cheapest route = %v, want its declared 60ms one", c)
 	}
 	if slow.stranded {
 		t.Error("a tier a clean route reaches is stranded")
@@ -324,127 +346,215 @@ func TestMemberRoute(t *testing.T) {
 	}
 }
 
-// TestTierQualifies checks the priced admission cases: a direct round trip
-// beating the member's own price by the promotion ratio qualifies however
-// cheap the tier's price, one short of the ratio or beating the price by
-// less than the margin floor does not, a member no route prices takes the
-// tier's price, a single-route tier admits within the demotion ratio of its
-// price, and an unpriced tier qualifies nothing.
+// TestTierQualifies checks the priced admission cases. On the readings, a
+// direct round trip beating the member's own price by the promotion ratio
+// qualifies however cheap the tier's price, one short of the ratio or
+// beating the price by less than the margin floor does not, a member no
+// route prices takes the tier's price, and one whose routes none read beats
+// nothing. Confirmed, a round trip short of the ratio qualifies where it and
+// its upper bound both gain on the price and on its lower bound by the band
+// the path policy moves a lease for: a fifth of the smaller below the cap,
+// the cap itself on a long path. A single-route tier admits within
+// SecondRouteRatio of its price, and an unpriced tier qualifies nothing.
 func TestTierQualifies(t *testing.T) {
 	ms := time.Millisecond
+	unread := route(0, 30*ms, link(selX), link(selD))
 	priced := tier{
-		price:  10 * ms,
-		prices: map[addr.IA]time.Duration{selA: 30 * ms, selB: 9 * ms},
-		routes: 2,
+		price:    10 * ms,
+		prices:   map[addr.IA]time.Duration{selA: 30 * ms, selB: 9 * ms, selE: 200 * ms},
+		low:      9 * ms,
+		lows:     map[addr.IA]time.Duration{selA: 29600 * time.Microsecond, selB: 8 * ms, selE: 199 * ms},
+		cheapest: map[addr.IA]*scion.Candidate{selD: &unread},
+		routes:   2,
 	}
 	single := tier{price: 10 * ms, routes: 1}
+	long := tier{price: 200 * ms, low: 199 * ms, routes: 2}
 
 	for _, tc := range []struct {
-		name   string
-		tier   tier
-		ia     addr.IA
-		direct time.Duration
-		want   bool
+		name         string
+		tier         tier
+		ia           addr.IA
+		direct, high time.Duration
+		want         bool
 	}{
-		{"beating its own price", priced, selA, 20 * ms, true},
-		{"short of the promotion ratio", priced, selA, 25 * ms, false},
-		{"within the margin floor", priced, selB, 7100 * time.Microsecond, false},
-		{"past the margin floor", priced, selB, 6900 * time.Microsecond, true},
-		{"beating the tier's price", priced, selC, 7 * ms, true},
-		{"short of the tier's price", priced, selC, 9 * ms, false},
-		{"a second route within the demotion ratio", single, selC, 12 * ms, true},
-		{"a second route past it", single, selC, 13 * ms, false},
-		{"an unpriced tier", tier{routes: 1}, selC, ms, false},
+		{"beating its own price", priced, selA, 20 * ms, 0, true},
+		{"short of the promotion ratio", priced, selA, 25 * ms, 26 * ms, false},
+		{"within the margin floor", priced, selB, 7100 * time.Microsecond, 7100 * time.Microsecond, false},
+		{"past the margin floor", priced, selB, 6900 * time.Microsecond, 0, true},
+		{"beating the tier's price", priced, selC, 7 * ms, 0, true},
+		{"short of the tier's price", priced, selC, 9 * ms, 9 * ms, false},
+		{"its routes none read", priced, selD, ms, ms, false},
+		{"short of the ratio, confirmed past the band", priced, selA, 24500 * time.Microsecond, 24600 * time.Microsecond, true},
+		{"short of the ratio, its bound within the band", priced, selA, 24500 * time.Microsecond, 25 * ms, false},
+		{"short of the ratio, unbounded", priced, selA, 24500 * time.Microsecond, 0, false},
+		{"a long path, confirmed past the cap", priced, selE, 185 * ms, 187 * ms, true},
+		{"a long path, its bound within the cap", priced, selE, 185 * ms, 190 * ms, false},
+		{"a long path, its reading within the cap", priced, selE, 191 * ms, 185 * ms, false},
+		{"no route pricing the member, confirmed against a long tier's", long, selC, 185 * ms, 187 * ms, true},
+		{"a second route within SecondRouteRatio", single, selC, 12 * ms, 0, true},
+		{"a second route past it", single, selC, 13 * ms, 0, false},
+		{"an unpriced tier", tier{routes: 1}, selC, ms, ms, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := tc.tier.qualifies(tc.ia, tc.direct); got != tc.want {
+			if got := tc.tier.qualifies(tc.ia, tc.direct, tc.high); got != tc.want {
 				t.Errorf("qualifies = %v, want %v", got, tc.want)
 			}
 		})
 	}
 }
 
-// TestJudge checks the useless test: with the tier's route count and price
-// held, a link is useless only while every member keeps a route within the
-// demotion ratio of its own price — the link's own neighbor of its direct
-// round trip. A priced member the survivors reach but none prices leaves the
-// window undecided, unless another member decides the link useful; a
-// survivor of a member no route prices counts for nothing, and a member cut
-// off, priced or not, decides the link useful. A tier nothing prices, or a
-// survivor that did not answer, decides nothing.
+// TestJudge checks the useless test and the eviction's. With the tier's
+// route count held, the useless test finds a link useless only while its
+// exclusion raises no price — the tier's, each priced member's, the link's
+// own neighbor's against its direct round trip — and the bounds confirm it:
+// for the tier and for each member a route over the link reaches, the
+// survivors' upper bound no higher than the link's lower bound, the
+// neighbor's by its direct side's. The eviction's finds a link weak while
+// its exclusion raises no price by promotion's fifth and its floor, and the
+// bounds confirm it gains no one the band. A member the survivors reach but
+// no read survivor prices, or one whose routes none read, leaves the window
+// undecided, unless another member decides the link useful; a survivor of a
+// member no route prices counts for nothing, and a member cut off, priced or
+// not, decides the link useful, as does a bound missing. A tier no read
+// route prices, or a survivor that did not answer, decides nothing.
 func TestJudge(t *testing.T) {
 	ms := time.Millisecond
 	type prices = map[addr.IA]time.Duration
 	// The link is A's, its round trip 10ms and its own price 16ms. B prices
-	// at 20ms, and no route prices C.
+	// at 20ms over a route crossing the link, and no route reaches C.
 	tierWith := func(ex excludedSample) *tier {
 		return &tier{
 			members: []member{
-				{ia: selA, direct: 10 * ms},
+				{ia: selA, direct: 10 * ms, low: 10 * ms},
 				{ia: selB, direct: 12 * ms},
 				{ia: selC, direct: 14 * ms},
 			},
 			price:    20 * ms,
 			prices:   prices{selA: 16 * ms, selB: 20 * ms},
+			cheapest: make(map[addr.IA]*scion.Candidate),
 			routes:   2,
 			excluded: map[addr.IA]excludedSample{selA: ex},
 		}
 	}
-	// held is an excluded measurement that holds the tier's route count and
-	// price, the members given cut off.
-	held := func(p prices, cutOff ...addr.IA) excludedSample {
+	// held is an excluded measurement of the tier's route count, priced as
+	// given, the members given cut off, its bounds those of steady routes:
+	// the tier's and B's routes over the link at 20ms, the survivors at
+	// their prices.
+	held := func(price time.Duration, p prices, cutOff ...addr.IA) excludedSample {
 		ex := excludedSample{
 			answered: true,
-			price:    22 * ms,
+			price:    price,
 			routes:   2,
 			prices:   p,
 			cutOff:   make(map[addr.IA]bool),
+			crossed:  true,
+			low:      20 * ms,
+			high:     price,
+			lows:     prices{selB: 20 * ms},
+			highs:    maps.Clone(p),
 		}
 		for _, ia := range cutOff {
 			ex.cutOff[ia] = true
 		}
 		return ex
 	}
-	within := prices{selA: 12 * ms, selB: 24 * ms}
+	// bounded returns the measurement with its bounds changed.
+	bounded := func(ex excludedSample, change func(ex *excludedSample)) excludedSample {
+		ex.lows, ex.highs = maps.Clone(ex.lows), maps.Clone(ex.highs)
+		change(&ex)
+		return ex
+	}
+	none := prices{selA: 10 * ms, selB: 20 * ms}
+	band := prices{selA: 11900 * time.Microsecond, selB: 23900 * time.Microsecond}
+	fifth := prices{selA: 12 * ms, selB: 25 * ms}
 
 	for _, tc := range []struct {
-		name    string
-		ex      excludedSample
-		decided bool
-		useless bool
+		name          string
+		ex            excludedSample
+		decided, idle bool
+		yields        bool
 	}{
-		{"every member within the ratio", held(within), true, true},
-		{"the neighbor past the ratio of its round trip",
-			held(prices{selA: 13 * ms, selB: 24 * ms}), true, false},
-		{"another member past the ratio of its price",
-			held(prices{selA: 12 * ms, selB: 26 * ms}), true, false},
-		{"a member no survivor prices", held(prices{selA: 12 * ms}), false, false},
-		{"the neighbor no survivor prices", held(prices{selB: 24 * ms}), false, false},
-		{"a member no survivor prices, another past the ratio",
-			held(prices{selA: 13 * ms}), true, false},
-		{"a member cut off", held(prices{selA: 12 * ms}, selB), true, false},
-		{"a member no route prices, cut off", held(within, selC), true, false},
-		{"a survivor of a member no route prices",
-			held(prices{selA: 12 * ms, selB: 24 * ms, selC: 100 * ms}), true, true},
-		{"the tier's price past the ratio",
-			excludedSample{answered: true, price: 26 * ms, routes: 2, prices: within}, true, false},
-		{"a route lost",
-			excludedSample{answered: true, price: 22 * ms, routes: 1, prices: within}, true, false},
-		{"the survivor unanswered",
-			excludedSample{price: 22 * ms, routes: 2, prices: within}, false, false},
+		{"no price rises", held(20*ms, none), true, true, true},
+		{"the neighbor's survivors slower than its round trip",
+			held(20*ms, prices{selA: 11 * ms, selB: 20 * ms}), true, false, true},
+		{"another member's price rises", held(20*ms, prices{selA: 10 * ms, selB: 21 * ms}), true, false, true},
+		{"the tier's price rises", held(21*ms, none), true, false, true},
+		{"every price within the band", held(23900*time.Microsecond, band), true, false, true},
+		{"every price within the fifth, past the band", held(25*ms, fifth), true, false, false},
+		{"the neighbor's past the fifth", held(25*ms, prices{selA: 13 * ms, selB: 25 * ms}), true, false, false},
+		{"another member's past the fifth", held(25*ms, prices{selA: 12 * ms, selB: 26 * ms}), true, false, false},
+		{"the tier's past the fifth", held(26*ms, fifth), true, false, false},
+		{"a member no survivor prices", held(20*ms, prices{selA: 10 * ms}), false, false, false},
+		{"the neighbor no survivor prices", held(20*ms, prices{selB: 20 * ms}), false, false, false},
+		{"a member no survivor prices, another past the fifth",
+			held(20*ms, prices{selA: 13 * ms}), true, false, false},
+		{"a member cut off", held(20*ms, none, selB), true, false, false},
+		{"a member no route reaches, cut off", held(20*ms, none, selC), true, false, false},
+		{"a survivor of a member no route reaches",
+			held(20*ms, prices{selA: 10 * ms, selB: 20 * ms, selC: 100 * ms}), true, true, true},
+		{"a route lost", excludedSample{answered: true, price: 20 * ms, routes: 1, prices: none}, true, false, false},
+		{"the survivor unanswered", excludedSample{price: 20 * ms, routes: 2, prices: none}, false, false, false},
+		{"a member's survivors bounded above the link's routes",
+			bounded(held(20*ms, none), func(ex *excludedSample) { ex.highs[selB] = 22 * ms }), true, false, true},
+		{"a member's survivors bounded past the band",
+			bounded(held(20*ms, none), func(ex *excludedSample) { ex.highs[selB] = 25 * ms }), true, false, false},
+		{"the tier's survivors bounded above its routes",
+			bounded(held(20*ms, none), func(ex *excludedSample) { ex.high = 22 * ms }), true, false, true},
+		{"the neighbor's survivors bounded above its round trip",
+			bounded(held(20*ms, none), func(ex *excludedSample) { ex.highs[selA] = 11 * ms }), true, false, true},
+		{"a member's survivors unbounded",
+			bounded(held(20*ms, none), func(ex *excludedSample) { delete(ex.highs, selB) }), true, false, false},
+		{"the tier's survivors unbounded",
+			bounded(held(20*ms, none), func(ex *excludedSample) { ex.high = 0 }), true, false, false},
+		{"the readings showing a rise the history does not",
+			bounded(held(20*ms, prices{selA: 11 * ms, selB: 20 * ms}), func(ex *excludedSample) { ex.highs[selA] = 10 * ms }),
+			true, false, true},
+		{"the tier's price rising on the readings alone",
+			bounded(held(21*ms, none), func(ex *excludedSample) { ex.high = 20 * ms }), true, false, true},
+		{"no route crossing the link but the neighbor's",
+			bounded(held(20*ms, none), func(ex *excludedSample) {
+				ex.crossed, ex.low, ex.high = false, 0, 0
+				delete(ex.lows, selB)
+				delete(ex.highs, selB)
+			}), true, true, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			decided, useless := judge(tierWith(tc.ex), selA)
-			if decided != tc.decided || useless != tc.useless {
-				t.Errorf("judge = (%v, %v), want (%v, %v)",
-					decided, useless, tc.decided, tc.useless)
+			if decided != tc.decided || useless != tc.idle {
+				t.Errorf("judge = (%v, %v), want (%v, %v)", decided, useless, tc.decided, tc.idle)
+			}
+			decided, weak := yields(tierWith(tc.ex), selA)
+			if want := tc.decided || tc.yields; decided != want || weak != tc.yields {
+				t.Errorf("yields = (%v, %v), want (%v, %v)", decided, weak, want, tc.yields)
 			}
 		})
 	}
 
-	unpriced := tierWith(held(within))
+	// A fast neighbor's survivor past the fifth of its 4ms round trip by less
+	// than the margin floor: its link would not earn its place.
+	fast := tierWith(held(20*ms, prices{selA: 5200 * time.Microsecond, selB: 20 * ms}))
+	fast.members[0].direct, fast.members[0].low = 4*ms, 4*ms
+	if decided, weak := yields(fast, selA); !decided || !weak {
+		t.Errorf("yields within the margin floor = (%v, %v), want (true, true)", decided, weak)
+	}
+	unbounded := tierWith(held(20*ms, none))
+	unbounded.members[0].low = 0
+	if decided, useless := judge(unbounded, selA); !decided || useless {
+		t.Errorf("judge without the neighbor's bound = (%v, %v), want (true, false)", decided, useless)
+	}
+
+	unread := route(-time.Hour, 10*ms, link(selX), link(selC))
+	readless := tierWith(held(20*ms, none))
+	readless.cheapest[selC] = &unread
+	if decided, _ := judge(readless, selA); decided {
+		t.Error("the useless test decided while C's routes none read")
+	}
+	if decided, _ := yields(readless, selA); decided {
+		t.Error("the eviction's test decided while C's routes none read")
+	}
+	unpriced := tierWith(held(20*ms, none))
 	unpriced.price = 0
 	if decided, _ := judge(unpriced, selA); decided {
-		t.Error("a tier nothing prices decided a link")
+		t.Error("a tier no read route prices decided a link")
 	}
 }

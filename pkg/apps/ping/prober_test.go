@@ -218,12 +218,13 @@ func TestProberPacesByPick(t *testing.T) {
 				t.Errorf("dstA resolved %d times, want once for all its paths", got)
 			}
 
-			// Warm from 1m, the hot path draws a probe a minute, past the
-			// samples a record keeps, until its lapse at 10m.
+			// Warm from 1m, the hot path draws a probe a minute until its
+			// lapse at 10m, and its record keeps every probe, all within the
+			// bounds' span.
 			time.Sleep(bus.RequestLapse - time.Second - 59*time.Second)
 			synctest.Wait()
-			if rec, _ := record(b, "hot-use"); len(rec.Samples) != bus.PathSamples {
-				t.Errorf("the hot path's record holds %d samples, want the last %d", len(rec.Samples), bus.PathSamples)
+			if rec, _ := record(b, "hot-use"); len(rec.Samples) != 21 {
+				t.Errorf("the hot path's record holds %d samples, want all 21", len(rec.Samples))
 			}
 			time.Sleep(time.Second)
 			synctest.Wait()
@@ -240,10 +241,10 @@ func TestProberPacesByPick(t *testing.T) {
 	})
 }
 
-// TestProberKeepsTheSpan checks a record's samples over six minutes of a
-// path in use, picked every half minute and so probed every heartbeat: past
-// the last bus.PathSamples, every probe sent within the readings' span, and
-// none of the first minute's.
+// TestProberKeepsTheSpan checks a record's samples over sixteen minutes of
+// a path in use, picked every half minute and so probed every heartbeat:
+// past the last bus.PathSamples, every probe sent within the bounds' span,
+// and none of the first minute's.
 func TestProberKeepsTheSpan(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		e, r := newFakeEcho(), &fakeResolver{}
@@ -251,7 +252,7 @@ func TestProberKeepsTheSpan(t *testing.T) {
 		e.rtt[hot] = 10 * time.Millisecond
 		prober(t, e, r, func(b *bus.Bus) {
 			start := time.Now()
-			for range 12 {
+			for range 32 {
 				request(b, dstA, entryOf("hot", dstA, hot, bus.PathInUse, time.Now()))
 				time.Sleep(30 * time.Second)
 			}
@@ -268,7 +269,7 @@ func TestProberKeepsTheSpan(t *testing.T) {
 }
 
 // TestKept checks the samples a record keeps: every one sent within the
-// readings' span, the one at its edge among them, and at least the last
+// bounds' span, the one at its edge among them, and at least the last
 // bus.PathSamples.
 func TestKept(t *testing.T) {
 	now := time.Now()
@@ -285,8 +286,8 @@ func TestKept(t *testing.T) {
 		want    int
 	}{
 		{"fewer than the last ones", every(10, 5*time.Second), 10},
-		{"the last ones past the span", every(30, 30*time.Second), bus.PathSamples},
-		{"more within the span", every(100, 5*time.Second), 61},
+		{"the last ones past the span", every(30, time.Minute), bus.PathSamples},
+		{"more within the span", every(300, 5*time.Second), 181},
 	} {
 		if got := kept(tc.samples, now); !slices.Equal(got, tc.samples[len(tc.samples)-tc.want:]) {
 			t.Errorf("%s: kept %d samples, want the last %d", tc.name, len(got), tc.want)

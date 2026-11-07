@@ -29,9 +29,12 @@ import (
 // The selection loop's constants (no operator tuning). A node keeps at least
 // NeighborFloor up links no single failure can partition it from, caps the
 // count to bound beaconing fan-out, promotes a candidate whose direct link
-// earns its place against its own price, demotes a neighbor whose exclusion
-// serves its tier and every member no worse, and damp both directions to
-// sustained evidence — every link change re-shapes segments network-wide.
+// beats its own price by a fifth on its readings, or by what the path policy
+// moves a lease for once the history bounds it, demotes a neighbor whose
+// exclusion serves its tier and every member no worse on its readings and
+// its history — a pair between the two keeps what it has — and damps both
+// directions to sustained evidence: every link change re-shapes segments
+// network-wide.
 const (
 	// SelectionInterval is the evaluation window.
 	SelectionInterval = 30 * time.Second
@@ -41,11 +44,14 @@ const (
 	NeighborFloor = 2
 	// MaxNeighbors caps the neighbor count.
 	MaxNeighbors = 8
-	// PromotionRatio: a direct link must beat its peer's price by it.
+	// PromotionRatio: on its readings alone, a direct link must beat its
+	// peer's price by it — the room the readings' error takes beside what
+	// the path policy moves a lease for.
 	PromotionRatio = 0.8
-	// DemotionRatio: a route may lose to the price it is judged against —
-	// the tier's, a member's, or the neighbor's direct round trip — by it.
-	DemotionRatio = 1.25
+	// SecondRouteRatio: a second route for a single-route tier may lose to
+	// the tier's price by it — redundancy purchased at a bounded latency
+	// price.
+	SecondRouteRatio = 1.25
 	// MarginFloor is the least a direct round trip must beat its peer's
 	// price by to promote: a smaller gain is jitter on a fast link.
 	MarginFloor = 2 * time.Millisecond
@@ -208,8 +214,8 @@ type selection struct {
 	// coord is the coordination's state across windows.
 	coord coordState
 	// history holds the round trips each instrument took of its peer within
-	// scion.ReadingSpan, oldest first, and last names the instrument that
-	// read each peer last.
+	// scion.BoundSpan, oldest first, and last names the instrument that read
+	// each peer last.
 	history map[instrument][]heard
 	last    map[addr.IA]instrument
 	// probeFn, aliveFn, establishFn, and rendezvousFn override the
@@ -275,6 +281,10 @@ type sample struct {
 	// probe for a candidate no binding request reaches. Zero when the
 	// window's probes went unanswered.
 	direct time.Duration
+	// lo and hi bound the direct side's round trip over the instrument's
+	// round trips within scion.BoundSpan; zero where they give no bound,
+	// and when the window's probes went unanswered.
+	lo, hi time.Duration
 	// candidates are the routes to the peer, each one's cost its reading.
 	candidates []scion.Candidate
 	// baseline points into candidates at the peer's freshest clean route,
@@ -551,10 +561,10 @@ func (s *selection) choose(ctx context.Context, p peer) target {
 }
 
 // measure runs the window's probe of one peer — a nil neighbor entry means
-// a candidate — through the test seam when set, and reads its direct side
-// over the samples of the instrument that probed it. The seam's direct side
-// is one sample, of the link's echoes for a neighbor and of the binding
-// requests to the target's address for a candidate.
+// a candidate — through the test seam when set, and reads and bounds its
+// direct side over the samples of the instrument that probed it. The seam's
+// direct side is one sample, of the link's echoes for a neighbor and of the
+// binding requests to the target's address for a candidate.
 func (s *selection) measure(
 	ctx context.Context, e target, l *links.Link,
 ) sample {
@@ -572,25 +582,27 @@ func (s *selection) measure(
 	} else {
 		sm, by, rtts = s.probe(ctx, e, l)
 	}
-	sm.direct = s.read(by, rtts, time.Now())
+	sm.direct, sm.lo, sm.hi = s.read(by, rtts, time.Now())
 	return sm
 }
 
 // read adds the window's answered round trips to the instrument's samples,
-// drops those taken more than scion.ReadingSpan before now, and returns the
-// samples' reading; zero when the window's probes went unanswered. An
-// instrument holding no sample within the span starts from those of the
+// drops those taken more than scion.BoundSpan before now, and returns the
+// reading of the samples within scion.ReadingSpan beside the bounds of all
+// it keeps; zeros when the window's probes went unanswered. An instrument
+// holding no sample within the reading's span starts from those of the
 // instrument that read the peer last, round trips of the same peer: a link
 // reads on from the binding requests that promoted it, and a retired link's
 // peer from the link's echoes, rather than from one window's samples alone.
-func (s *selection) read(by instrument, rtts []time.Duration, now time.Time) time.Duration {
+func (s *selection) read(by instrument, rtts []time.Duration, now time.Time) (reading, lo, hi time.Duration) {
 	if s.history == nil {
 		s.history = make(map[instrument][]heard)
 		s.last = make(map[addr.IA]instrument)
 	}
-	stale := func(h heard) bool { return now.Sub(h.at) > scion.ReadingSpan }
+	stale := func(h heard) bool { return now.Sub(h.at) > scion.BoundSpan }
+	recent := func(h heard) bool { return now.Sub(h.at) <= scion.ReadingSpan }
 	kept := slices.DeleteFunc(slices.Clone(s.history[by]), stale)
-	if len(kept) == 0 {
+	if !slices.ContainsFunc(kept, recent) {
 		kept = slices.DeleteFunc(slices.Clone(s.history[s.last[by.ia]]), stale)
 	}
 	s.last[by.ia] = by
@@ -603,21 +615,25 @@ func (s *selection) read(by instrument, rtts []time.Duration, now time.Time) tim
 		s.history[by] = kept
 	}
 	if len(rtts) == 0 {
-		return 0
+		return 0, 0, 0
 	}
-	all := make([]time.Duration, len(kept))
-	for i, h := range kept {
-		all[i] = h.rtt
+	var all, read []time.Duration
+	for _, h := range kept {
+		all = append(all, h.rtt)
+		if recent(h) {
+			read = append(read, h.rtt)
+		}
 	}
-	return scion.Reading(all)
+	lo, hi = scion.ReadingBounds(all)
+	return scion.Reading(read), lo, hi
 }
 
 // forget drops the instruments whose samples all lie more than
-// scion.ReadingSpan before now — the instruments of retired links and of
+// scion.BoundSpan before now — the instruments of retired links and of
 // addresses no longer probed — and the peers whose last instrument went.
 func (s *selection) forget(now time.Time) {
 	for by, hs := range s.history {
-		if now.Sub(hs[len(hs)-1].at) > scion.ReadingSpan {
+		if now.Sub(hs[len(hs)-1].at) > scion.BoundSpan {
 			delete(s.history, by)
 		}
 	}
@@ -932,7 +948,7 @@ func (s *selection) promote(
 			continue
 		}
 		if s.streak(e.IA).promote >= promoteWindows(s.cfg.IA, e.IA) &&
-			samples[e.IA].direct <= ratioOf(t.price, DemotionRatio) {
+			samples[e.IA].direct <= ratioOf(t.price, SecondRouteRatio) {
 			s.admit(ctx, entries, neighbors, ts, samples, e, "a second route for its tier")
 			return
 		}
@@ -972,7 +988,7 @@ func (s *selection) qualifies(ia addr.IA, samples map[addr.IA]sample, ts []tier)
 		return false
 	}
 	t := tierOf(ts, ia)
-	return t != nil && t.qualifies(ia, sm.direct)
+	return t != nil && t.qualifies(ia, sm.direct, sm.hi)
 }
 
 // beatsPrice reports whether the candidate's sample beats its own price this
@@ -983,7 +999,7 @@ func (s *selection) beatsPrice(ia addr.IA, samples map[addr.IA]sample, ts []tier
 		return false
 	}
 	t := tierOf(ts, ia)
-	return t != nil && t.beats(ia, sm.direct)
+	return t != nil && t.beats(ia, sm.direct, sm.hi)
 }
 
 // promoteWindows returns the consecutive good windows the node's
@@ -1033,7 +1049,8 @@ func (s *selection) admit(
 
 // evict returns the cap's victim among the retirement-qualified neighbors:
 // a down link whose down count reached DemoteWindows, at no harm, and an up
-// link this window decides useless while up links exceed the floor. The
+// link this window decides weak — one that would not earn its place today —
+// while up links exceed the floor. The
 // victim is the one whose exclusion moves its tier's price least, ties to
 // the slower direct sample. Nil when none qualifies — no promotion happens
 // and the cap stands, so displacement cannot evict a link the policy must
@@ -1059,7 +1076,7 @@ func (s *selection) evict(
 				continue // an up link leaves only while up links exceed the floor
 			}
 			t := tierOf(ts, ia)
-			if decided, useless := judge(t, ia); !decided || !useless {
+			if decided, weak := yields(t, ia); !decided || !weak {
 				continue
 			}
 			cost = harm(t, ia)
@@ -1127,10 +1144,9 @@ func (s *selection) count(neighbors map[addr.IA]*links.Link, ts []tier) {
 // retirement guards, so a link a node accepted cannot free it to shed a
 // link it dialed for its own floor. The useless test is measured each
 // window and decides only when a route avoiding the link answered, so a
-// cut-critical link never retires as useless; it and promotion's priced
-// cases read the same price with hysteresis between the thresholds — one
-// test serving both directions, each correcting the other's estimation
-// error.
+// cut-critical link never retires as useless; it reads the prices
+// promotion's priced cases read, against the line to keep rather than the
+// line to buy, and waits for the history to confirm what the readings show.
 func (s *selection) prune(
 	ctx context.Context,
 	entries []*links.Link,
