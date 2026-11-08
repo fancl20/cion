@@ -308,6 +308,29 @@ func judge(t *tier, ia addr.IA) (decided, useless bool) {
 	return true, confirmed(t, ia, func(low, high time.Duration) bool { return high <= low })
 }
 
+// judgeOutside reads the useless test of an up link the clustering does not
+// allow, whatever its prices: decided once a survivor answered, useless
+// when the link's exclusion keeps the tier's route count and cuts no member
+// off, and joined reports that a chosen pair links the two units.
+func judgeOutside(t *tier, ia addr.IA, joined bool) (decided, useless bool) {
+	if t == nil {
+		return false, false
+	}
+	ex, ok := t.excluded[ia]
+	if !ok || !ex.answered {
+		return false, false
+	}
+	if !joined || ex.routes != t.routes {
+		return true, false
+	}
+	for _, m := range t.members {
+		if ex.cutOff[m.ia] {
+			return true, false
+		}
+	}
+	return true, true
+}
+
 // yields reads an up link's eviction test off its tier this window: judge's,
 // with each price the link holds down weighed as promotion weighs a direct
 // round trip — the link helps where its reading would earn its place, by

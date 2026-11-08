@@ -58,15 +58,18 @@ func coHerd() map[addr.IA][]bus.PeerReport {
 }
 
 // TestCoordViewReadsReports checks the view: a pair weighs the larger of its
-// ends' round trips, it is linked when an end reports a link and none
-// reports none, the paths charge each transit, and the announcements read
-// as reported.
+// ends' round trips, and is bounded by the larger of their lower and of
+// their upper bounds; it is linked when an end reports a link and none
+// reports none, the paths charge each transit, the announcements read as
+// reported, and each signer's cluster is its latest entry's.
 func TestCoordViewReadsReports(t *testing.T) {
 	reports := make(map[addr.IA][]bus.PeerReport)
 	coLink(reports, coS, 1, coM, 1, 10*time.Millisecond)
 	coLink(reports, coM, 2, coT, 1, 20*time.Millisecond)
-	reports[coS] = append(reports[coS], bus.PeerReport{IA: coT, RTT: 25 * time.Millisecond, Promoting: true})
-	reports[coT] = append(reports[coT], bus.PeerReport{IA: coS, RTT: 27 * time.Millisecond})
+	reports[coS] = append(reports[coS], bus.PeerReport{IA: coT, RTT: 25 * time.Millisecond,
+		Low: 22 * time.Millisecond, High: 26 * time.Millisecond, Promoting: true})
+	reports[coT] = append(reports[coT], bus.PeerReport{IA: coS, RTT: 27 * time.Millisecond,
+		Low: 21 * time.Millisecond, High: 30 * time.Millisecond})
 	// O reports a link to P, which reports none: the link is down.
 	reports[coO] = append(reports[coO], bus.PeerReport{IA: coP, RTT: 3 * time.Millisecond, IfID: 4})
 	reports[coP] = append(reports[coP], bus.PeerReport{IA: coO, RTT: 3 * time.Millisecond,
@@ -92,6 +95,21 @@ func TestCoordViewReadsReports(t *testing.T) {
 	if r := v.retiring[pairOf(coO, coP)]; r.by != coP || len(r.relies) != 1 {
 		t.Errorf("retirement of O-P = %+v, want P's with its reliance", r)
 	}
+	if low, high := v.low[pairOf(coS, coT)], v.high[pairOf(coS, coT)]; low != 22*time.Millisecond ||
+		high != 30*time.Millisecond {
+		t.Errorf("bounds of S-T = %v, %v; want the larger ends' 22ms and 30ms", low, high)
+	}
+
+	// S's later entry, in another scope, names its cluster.
+	early := bus.DirectoryEntry{IA: coS, Published: time.Unix(1, 0)}
+	late := bus.DirectoryEntry{IA: coS, Cluster: coM, Published: time.Unix(2, 0)}
+	for _, order := range [][2]bus.DirectoryEntry{{early, late}, {late, early}} {
+		d := bus.NewDirectory(nil, bus.NewScope(bus.DirectoryID{1}, order[0]),
+			bus.NewScope(bus.DirectoryID{2}, order[1]))
+		if got := newCoordView(d).clusters[coS]; got != coM {
+			t.Errorf("S's cluster = %v, want its latest entry's %v", got, coM)
+		}
+	}
 }
 
 // TestCoordViewViolates checks the violation test over the published links:
@@ -114,6 +132,18 @@ func TestCoordViewViolates(t *testing.T) {
 	}
 	if !violatesAt(time.Second, 0, false) {
 		t.Error("a pair no path joins does not violate")
+	}
+	// S, O, and M name one cluster and T stands alone: M's 5ms and O's
+	// 20ms choose the pairs to T, so S-T is not a pair the clustering
+	// allows, and O-T is.
+	clustered := newCoordView(coReports(coHerd()))
+	clustered.clusters[coO], clustered.clusters[coM] = coS, coS
+	clustered.units = newUnits(clustered, coS, coS)
+	if clustered.violates(pairOf(coS, coT)) {
+		t.Error("S-T violates, though the clustering does not allow it")
+	}
+	if !clustered.violates(pairOf(coO, coT)) {
+		t.Error("O-T does not violate, though the clustering chose it")
 	}
 	for _, tc := range []struct {
 		w, path time.Duration
@@ -380,6 +410,22 @@ func TestReportRTT(t *testing.T) {
 	} {
 		if got := c.reportRTT(coT, tc.measured); got != tc.want {
 			t.Errorf("reportRTT(%v) = %v, want %v", tc.measured, got, tc.want)
+		}
+	}
+}
+
+// TestReportBounds checks the reported bounds' hysteresis: each steps as a
+// round trip does, apart.
+func TestReportBounds(t *testing.T) {
+	c := &coordState{lows: make(map[addr.IA]time.Duration), highs: make(map[addr.IA]time.Duration)}
+	for _, tc := range []struct{ low, high, wantLow, wantHigh time.Duration }{
+		{18 * time.Millisecond, 22 * time.Millisecond, 18 * time.Millisecond, 22 * time.Millisecond},
+		{19 * time.Millisecond, 26 * time.Millisecond, 18 * time.Millisecond, 26 * time.Millisecond},
+		{0, 26 * time.Millisecond, 0, 26 * time.Millisecond},
+	} {
+		if low, high := c.reportBounds(coT, tc.low, tc.high); low != tc.wantLow || high != tc.wantHigh {
+			t.Errorf("reportBounds(%v, %v) = %v, %v, want %v, %v",
+				tc.low, tc.high, low, high, tc.wantLow, tc.wantHigh)
 		}
 	}
 }

@@ -68,17 +68,23 @@ type retirement struct {
 }
 
 // coordView is the window's reading of the published reports: every pair a
-// node reported, weighed by the larger of the round trips its ends report;
-// the pairs linked, each end's interface on them; the announced changes;
-// and the path cost between every two nodes over the linked pairs.
+// node reported, weighed by the larger of the round trips its ends report,
+// and bounded by the larger of their lower and of their upper bounds; the
+// pairs linked, each end's interface on them; the announced changes; the
+// cluster each signer joined; the path cost between every two nodes over
+// the linked pairs; and the window's units, which a node set for its own
+// clustering.
 type coordView struct {
 	weight    map[pair]time.Duration
+	low, high map[pair]time.Duration
 	linked    map[pair]bool
 	ends      map[pair][]segment.LinkID
 	promoting map[pair]addr.IA
 	retiring  map[pair]retirement
+	clusters  map[addr.IA]addr.IA
 	index     map[addr.IA]int
 	dist      [][]time.Duration
+	units     *units
 }
 
 // newCoordView reads the directory's reports. A pair is linked when an end
@@ -87,10 +93,13 @@ type coordView struct {
 func newCoordView(d bus.Directory) *coordView {
 	v := &coordView{
 		weight:    make(map[pair]time.Duration),
+		low:       make(map[pair]time.Duration),
+		high:      make(map[pair]time.Duration),
 		linked:    make(map[pair]bool),
 		ends:      make(map[pair][]segment.LinkID),
 		promoting: make(map[pair]addr.IA),
 		retiring:  make(map[pair]retirement),
+		clusters:  make(map[addr.IA]addr.IA),
 		index:     make(map[addr.IA]int),
 	}
 	type report struct {
@@ -98,9 +107,13 @@ func newCoordView(d bus.Directory) *coordView {
 		bus.PeerReport
 	}
 	seen := make(map[[2]addr.IA]bool)
+	signed := make(map[addr.IA]time.Time)
 	var reports []report
 	for _, s := range d.Scopes() {
 		for _, e := range s.Entries() {
+			if at, ok := signed[e.IA]; !ok || e.Published.After(at) {
+				signed[e.IA], v.clusters[e.IA] = e.Published, e.Cluster
+			}
 			for _, r := range e.Peers {
 				if r.IA == e.IA || seen[[2]addr.IA{e.IA, r.IA}] {
 					continue
@@ -114,6 +127,7 @@ func newCoordView(d bus.Directory) *coordView {
 	for _, r := range reports {
 		p := pairOf(r.signer, r.IA)
 		v.weight[p] = max(v.weight[p], r.RTT)
+		v.low[p], v.high[p] = max(v.low[p], r.Low), max(v.high[p], r.High)
 		if r.IfID != 0 {
 			v.ends[p] = append(v.ends[p], segment.LinkID{IA: r.signer, IfID: r.IfID})
 		} else {
@@ -245,9 +259,10 @@ func violatesAt(w, path time.Duration, joined bool) bool {
 	return !joined || w < ratioOf(path, PromotionRatio) && path-w >= MarginFloor
 }
 
-// violates reports whether an unlinked pair beats the path between its ends.
+// violates reports whether an unlinked pair the clustering allows beats the
+// path between its ends.
 func (v *coordView) violates(p pair) bool {
-	if v.linked[p] {
+	if v.linked[p] || v.units != nil && !v.units.allowed(v, p.lo, p.hi) {
 		return false
 	}
 	path, joined := v.cost(p.lo, p.hi)
@@ -297,8 +312,9 @@ type coordState struct {
 	promote addr.IA
 	// retiring holds the node's announced retirements, by peer.
 	retiring map[addr.IA]ownRetirement
-	// rtts holds the round trip the node last reported per peer.
-	rtts map[addr.IA]time.Duration
+	// rtts, lows, and highs hold the round trip and the bounds the node
+	// last reported per peer.
+	rtts, lows, highs map[addr.IA]time.Duration
 }
 
 // observe advances the state to the window's view: a violating pair gets its
@@ -314,6 +330,8 @@ func (c *coordState) observe(v *coordView, now time.Time) {
 		c.predicted = make(map[pair]int)
 		c.announced = make(map[pair]int)
 		c.rtts = make(map[addr.IA]time.Duration)
+		c.lows = make(map[addr.IA]time.Duration)
+		c.highs = make(map[addr.IA]time.Duration)
 	}
 	for p := range v.weight {
 		if !v.violates(p) {
@@ -458,16 +476,29 @@ func (c *coordState) waitsToRetire(v *coordView, self, peer addr.IA, relies []se
 // reportRTT returns the round trip to report for the peer: the one last
 // reported unless the measurement moved past rttStep of it and rttFloor.
 func (c *coordState) reportRTT(ia addr.IA, measured time.Duration) time.Duration {
-	last, ok := c.rtts[ia]
-	moved := measured - last
+	return stepped(c.rtts, ia, measured)
+}
+
+// reportBounds returns the bounds to report for the peer, each stepped as
+// round trips are.
+func (c *coordState) reportBounds(ia addr.IA, low, high time.Duration) (time.Duration, time.Duration) {
+	return stepped(c.lows, ia, low), stepped(c.highs, ia, high)
+}
+
+// stepped returns the value to report for the peer, and records it: the
+// one last reported unless the measured one moved past rttStep of it and
+// rttFloor.
+func stepped(last map[addr.IA]time.Duration, ia addr.IA, measured time.Duration) time.Duration {
+	prev, ok := last[ia]
+	moved := measured - prev
 	if moved < 0 {
 		moved = -moved
 	}
-	if !ok || moved > max(time.Duration(float64(last)*rttStep), rttFloor) {
-		c.rtts[ia] = measured
+	if !ok || moved > max(time.Duration(float64(prev)*rttStep), rttFloor) {
+		last[ia] = measured
 		return measured
 	}
-	return last
+	return prev
 }
 
 // reliance returns the links the routes an excluded measurement judged its

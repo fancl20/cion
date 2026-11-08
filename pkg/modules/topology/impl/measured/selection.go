@@ -122,6 +122,11 @@ type SelectionConfig struct {
 	// neighbor's echo round trip halved — for the beaconer's entries to
 	// declare; nil publishes none.
 	Latencies *bus.Topic[bus.LinkLatencies]
+	// Cluster is the node's cluster topic, which the selection publishes
+	// each window's cluster on — the members of the node's unit, none while
+	// it names no cluster — for the beaconer to carry the routes into it;
+	// nil publishes none.
+	Cluster *bus.Topic[bus.Cluster]
 	// Paths composes the routes to each peer, with each one's health and
 	// reading.
 	Paths SelectionPaths
@@ -155,9 +160,10 @@ type SelectionConfig struct {
 	// MaxLinks caps the neighbor count; zero uses MaxNeighbors.
 	MaxLinks int
 	// Report publishes each window's reports for the node's directory
-	// entries, by directory: every peer measured there and the changes the
+	// entries: the cluster the node joined, and by directory every peer
+	// measured there, with the round trip's bounds, and the changes the
 	// node announced, naming no link; nil reports nothing.
-	Report func(map[bus.DirectoryID][]bus.PeerReport)
+	Report func(cluster addr.IA, peers map[bus.DirectoryID][]bus.PeerReport)
 	// Interval and Window override the evaluation window and the candidate
 	// window; zero keeps them. Tests pace the loop with them.
 	Interval time.Duration
@@ -213,6 +219,8 @@ type selection struct {
 	hosts map[addr.IA]netip.Addr
 	// coord is the coordination's state across windows.
 	coord coordState
+	// cluster names the cluster the node joined, zero for none.
+	cluster addr.IA
 	// history holds the round trips each instrument took of its peer within
 	// scion.BoundSpan, oldest first, and last names the instrument that read
 	// each peer last.
@@ -346,7 +354,22 @@ func (s *selection) pass(ctx context.Context) {
 		// it knows.
 		s.cfg.Stranded.Store(s.upCount(neighbors) < NeighborFloor && !reachable)
 	}
-	s.count(neighbors, ts)
+	var directory bus.Directory
+	if s.cfg.Directory != nil {
+		directory = s.cfg.Directory.Latest()
+	}
+	v := newCoordView(directory)
+	if joined := joinCluster(v, s.cfg.IA, s.cluster); joined != s.cluster {
+		if joined == 0 {
+			slog.Info("Left the cluster", "cluster", s.cluster)
+		} else {
+			slog.Info("Joined a cluster", "cluster", joined)
+		}
+		s.cluster = joined
+	}
+	v.units = newUnits(v, s.cfg.IA, s.cluster)
+	s.publishCluster(v.units)
+	s.count(v, neighbors, ts)
 	// Damp the promotions: a candidate is promoted on sustained evidence
 	// only, a flapping one never.
 	for _, e := range candidates {
@@ -356,11 +379,6 @@ func (s *selection) pass(ctx context.Context) {
 			s.streak(e.IA).promote = 0
 		}
 	}
-	var directory bus.Directory
-	if s.cfg.Directory != nil {
-		directory = s.cfg.Directory.Latest()
-	}
-	v := newCoordView(directory)
 	s.coord.observe(v, time.Now())
 	s.upLeft = false
 	s.promote(ctx, entries, neighbors, candidates, samples, ts, v)
@@ -821,6 +839,19 @@ func (s *selection) recovering(sm sample) *scion.Candidate {
 	return out
 }
 
+// publishCluster publishes the window's cluster: the members of the node's
+// unit while it names a cluster, none otherwise.
+func (s *selection) publishCluster(u *units) {
+	if s.cfg.Cluster == nil {
+		return
+	}
+	if s.cluster == 0 {
+		s.cfg.Cluster.Publish(bus.Cluster{})
+		return
+	}
+	s.cfg.Cluster.Publish(bus.NewCluster(u.members[u.of[s.cfg.IA]]...))
+}
+
 // declare publishes the window's per-link one-way estimates, which the
 // beaconer's entries declare: each neighbor's echo round trip halved — half
 // a round trip is the node's estimate of the one-way delay the extension
@@ -874,17 +905,18 @@ func (s *selection) echoes(ctx context.Context, dst *scion.Addr) []time.Duration
 // that fires establishing one link — every link change reshapes segments
 // network-wide, so the window's budget is one establishment, as today.
 // Below the floor of up links, reachability alone admits, the fastest
-// reachable candidate. A stranded tier admits a reachable member at once,
-// no streak — the clause that keeps every cut transient, for no up link
+// reachable candidate the clustering allows, else the fastest. A stranded
+// tier admits a reachable member at once, no streak, by the same
+// preference — the clause that keeps every cut transient, for no up link
 // reaches the tier and the measurements doubt every route into it, and the
 // establishment rides the rendezvous exchange that reaches where no path
-// does. A single-route tier admits a second member within the demotion
+// does. A single-route tier admits a second member within the second-route
 // ratio of the price, and a candidate whose direct round trip beats its own
 // price by the promotion ratio and the margin floor is admitted — the priced
 // cases sustained for the pair's own windows, the sustained winner the
-// fastest direct sample among qualifiers. At the cap every case requires an
-// eviction that qualifies under retirement, the floor and stranded cases
-// included.
+// fastest direct sample among qualifiers, and only among the candidates the
+// clustering allows. At the cap every case requires an eviction that
+// qualifies under retirement, the floor and stranded cases included.
 func (s *selection) promote(
 	ctx context.Context,
 	entries []*links.Link,
@@ -919,37 +951,35 @@ func (s *selection) promote(
 			}
 			return
 		}
-		s.admit(ctx, entries, neighbors, ts, samples, reachable[0], "the redundancy floor")
+		s.admit(ctx, entries, neighbors, ts, samples, v, s.preferAllowed(v, reachable, nil), "the redundancy floor")
 		return
 	}
 
-	// A stranded tier: its fastest reachable member, at once. The fastest
-	// candidate overall that a stranded tier holds is that member, for the
-	// ranking is global.
-	var rescue *target
-	for i, e := range reachable {
-		if t := tierOf(ts, e.IA); t != nil && t.stranded {
-			rescue = &reachable[i]
-			break
-		}
+	// A stranded tier: its fastest reachable member, at once — the fastest
+	// the clustering allows, else the fastest. The fastest candidate
+	// overall that a stranded tier holds is that member, for the ranking is
+	// global.
+	stranded := func(e target) bool {
+		t := tierOf(ts, e.IA)
+		return t != nil && t.stranded
 	}
-	if rescue != nil {
-		s.admit(ctx, entries, neighbors, ts, samples, *rescue, "its stranded tier")
+	if slices.ContainsFunc(reachable, stranded) {
+		s.admit(ctx, entries, neighbors, ts, samples, v, s.preferAllowed(v, reachable, stranded), "its stranded tier")
 		return
 	}
 
-	// The priced cases — a second route for a single-route tier first,
-	// redundancy purchased at a bounded latency price, sustained for the
-	// pair's drawn windows, then any beaten price — the fastest winner
-	// either way.
+	// The priced cases, among the candidates the clustering allows — a
+	// second route for a single-route tier first, redundancy purchased at a
+	// bounded latency price, sustained for the pair's drawn windows, then
+	// any beaten price — the fastest winner either way.
 	for _, e := range reachable {
 		t := tierOf(ts, e.IA)
-		if t == nil || t.routes != 1 || t.price == 0 {
+		if t == nil || t.routes != 1 || t.price == 0 || !s.allowed(v, e.IA) {
 			continue
 		}
 		if s.streak(e.IA).promote >= promoteWindows(s.cfg.IA, e.IA) &&
 			samples[e.IA].direct <= ratioOf(t.price, SecondRouteRatio) {
-			s.admit(ctx, entries, neighbors, ts, samples, e, "a second route for its tier")
+			s.admit(ctx, entries, neighbors, ts, samples, v, e, "a second route for its tier")
 			return
 		}
 	}
@@ -958,7 +988,7 @@ func (s *selection) promote(
 	// promoted at a later window once its streak holds — every node
 	// reading the announcement first.
 	for _, e := range reachable {
-		if !s.beatsPrice(e.IA, samples, ts) {
+		if !s.allowed(v, e.IA) || !s.beatsPrice(e.IA, samples, ts) {
 			continue
 		}
 		if s.coord.waitsToPromote(v, s.cfg.IA, e.IA, samples[e.IA].candidates, time.Now()) {
@@ -971,11 +1001,54 @@ func (s *selection) promote(
 			return
 		}
 		if s.streak(e.IA).promote >= PromoteWindows {
-			s.admit(ctx, entries, neighbors, ts, samples, e, "its direct link beats its own price")
+			s.admit(ctx, entries, neighbors, ts, samples, v, e, "its direct link beats its own price")
 		}
 		return
 	}
 	s.coord.promote = 0
+}
+
+// allowed reports whether the window's clustering allows a link to the
+// peer.
+func (s *selection) allowed(v *coordView, ia addr.IA) bool {
+	return v.units.allowed(v, s.cfg.IA, ia)
+}
+
+// preferAllowed returns the first candidate that takes, among those the
+// clustering allows, else among all; nil takes every candidate. The
+// candidates are ranked and at least one takes.
+func (s *selection) preferAllowed(v *coordView, ranked []target, takes func(target) bool) target {
+	first := -1
+	for i, e := range ranked {
+		if takes != nil && !takes(e) {
+			continue
+		}
+		if s.allowed(v, e.IA) {
+			return e
+		}
+		if first < 0 {
+			first = i
+		}
+	}
+	return ranked[first]
+}
+
+// judge reads an up link's useless test: the clustering's for a link it
+// does not allow, else the priced test.
+func (s *selection) judge(v *coordView, t *tier, ia addr.IA) (decided, useless bool) {
+	if !s.allowed(v, ia) {
+		return judgeOutside(t, ia, v.units.joined(v, s.cfg.IA, ia))
+	}
+	return judge(t, ia)
+}
+
+// yields reads an up link's eviction test: the clustering's useless test
+// for a link it does not allow, else the priced test.
+func (s *selection) yields(v *coordView, t *tier, ia addr.IA) (decided, weak bool) {
+	if !s.allowed(v, ia) {
+		return judgeOutside(t, ia, v.units.joined(v, s.cfg.IA, ia))
+	}
+	return yields(t, ia)
 }
 
 // qualifies reports whether the candidate's sample earns promotion under
@@ -1025,6 +1098,7 @@ func (s *selection) admit(
 	neighbors map[addr.IA]*links.Link,
 	ts []tier,
 	samples map[addr.IA]sample,
+	v *coordView,
 	e target,
 	why string,
 ) {
@@ -1034,7 +1108,7 @@ func (s *selection) admit(
 		cap = MaxNeighbors
 	}
 	if namedLive(entries) >= cap {
-		victim := s.evict(neighbors, ts, samples)
+		victim := s.evict(neighbors, ts, samples, v)
 		if victim == nil {
 			return
 		}
@@ -1049,8 +1123,9 @@ func (s *selection) admit(
 
 // evict returns the cap's victim among the retirement-qualified neighbors:
 // a down link whose down count reached DemoteWindows, at no harm, and an up
-// link this window decides weak — one that would not earn its place today —
-// while up links exceed the floor. The
+// link this window decides weak — one that would not earn its place today,
+// or one the clustering does not allow that the clustering's test judges
+// useless — while up links exceed the floor. The
 // victim is the one whose exclusion moves its tier's price least, ties to
 // the slower direct sample. Nil when none qualifies — no promotion happens
 // and the cap stands, so displacement cannot evict a link the policy must
@@ -1061,6 +1136,7 @@ func (s *selection) evict(
 	neighbors map[addr.IA]*links.Link,
 	ts []tier,
 	samples map[addr.IA]sample,
+	v *coordView,
 ) *links.Link {
 	up := s.upCount(neighbors)
 	var worst *links.Link
@@ -1076,7 +1152,7 @@ func (s *selection) evict(
 				continue // an up link leaves only while up links exceed the floor
 			}
 			t := tierOf(ts, ia)
-			if decided, weak := yields(t, ia); !decided || !weak {
+			if decided, weak := s.yields(v, t, ia); !decided || !weak {
 				continue
 			}
 			cost = harm(t, ia)
@@ -1109,7 +1185,7 @@ func slower(a, b time.Duration) bool {
 // that decides the link useless, resets in one that decides it useful, and
 // holds in a window that decides nothing — a down one included: no
 // evidence, no change.
-func (s *selection) count(neighbors map[addr.IA]*links.Link, ts []tier) {
+func (s *selection) count(v *coordView, neighbors map[addr.IA]*links.Link, ts []tier) {
 	for ia, l := range neighbors {
 		st := s.streak(ia)
 		if !s.linkUp(l.IfID) {
@@ -1117,7 +1193,7 @@ func (s *selection) count(neighbors map[addr.IA]*links.Link, ts []tier) {
 			continue
 		}
 		st.down = 0
-		switch decided, useless := judge(tierOf(ts, ia), ia); {
+		switch decided, useless := s.judge(v, tierOf(ts, ia), ia); {
 		case decided && useless:
 			st.useless++
 		case decided:
@@ -1147,6 +1223,8 @@ func (s *selection) count(neighbors map[addr.IA]*links.Link, ts []tier) {
 // cut-critical link never retires as useless; it reads the prices
 // promotion's priced cases read, against the line to keep rather than the
 // line to buy, and waits for the history to confirm what the readings show.
+// A link the clustering does not allow is judged by the clustering's test
+// instead, whatever its prices.
 func (s *selection) prune(
 	ctx context.Context,
 	entries []*links.Link,
@@ -1183,7 +1261,7 @@ func (s *selection) prune(
 			continue
 		}
 		t := tierOf(ts, ia)
-		decided, useless := judge(t, ia)
+		decided, useless := s.judge(v, t, ia)
 		r, ok := s.coord.retiring[ia]
 		if !ok {
 			r.since = s.coord.window
@@ -1210,7 +1288,11 @@ func (s *selection) prune(
 			worst, worstHarm, worstDirect = l, cost, direct
 		}
 	}
-	if worst != nil && s.retire(ctx, worst, "its tier served no worse without it") {
+	why := "its tier served no worse without it"
+	if worst != nil && !s.allowed(v, worst.NeighborIA) {
+		why = "the clusters link its units elsewhere"
+	}
+	if worst != nil && s.retire(ctx, worst, why) {
 		s.upLeft = true
 		delete(announced, worst.NeighborIA)
 	}
@@ -1248,6 +1330,7 @@ func (s *selection) report(
 			continue
 		}
 		r := bus.PeerReport{IA: ia, RTT: s.coord.reportRTT(ia, sm.direct), Promoting: ia == s.coord.promote}
+		r.Low, r.High = s.coord.reportBounds(ia, sm.lo, sm.hi)
 		if a, ok := s.coord.retiring[ia]; ok {
 			r.Retiring, r.Relies = true, a.relies
 		}
@@ -1262,7 +1345,7 @@ func (s *selection) report(
 	for id := range out {
 		slices.SortFunc(out[id], func(a, b bus.PeerReport) int { return cmp.Compare(a.IA, b.IA) })
 	}
-	s.cfg.Report(out)
+	s.cfg.Report(s.cluster, out)
 }
 
 // dialed reports whether this node dialed the link: the entries it dials

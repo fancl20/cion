@@ -10,6 +10,7 @@ import (
 	"github.com/scionproto/scion/pkg/addr"
 	"github.com/scionproto/scion/pkg/slayers/path"
 
+	"github.com/fancl20/cion/pkg/libs/bus"
 	"github.com/fancl20/cion/pkg/libs/scion"
 	"github.com/fancl20/cion/pkg/libs/segment"
 )
@@ -149,11 +150,11 @@ func TestPickSetCoversEveryOrigin(t *testing.T) {
 	}
 	ranked := rankRoutes(routes.all())
 	if diff := cmp.Diff([]string{"founder", "other"},
-		routes.names(pickSet(ranked, selF))); diff != "" {
+		routes.names(pickSet(ranked, selF, bus.Cluster{}))); diff != "" {
 		t.Errorf("set with the founder (-want +got):\n%s", diff)
 	}
 	if diff := cmp.Diff([]string{"other", "founder"},
-		routes.names(pickSet(ranked, 0))); diff != "" {
+		routes.names(pickSet(ranked, 0, bus.Cluster{}))); diff != "" {
 		t.Errorf("set without a founder (-want +got):\n%s", diff)
 	}
 
@@ -166,7 +167,7 @@ func TestPickSetCoversEveryOrigin(t *testing.T) {
 			hopSpec{selO, 0, 6, 9 * ms}, hopSpec{selM, 7, 3, ms}),
 	}
 	if diff := cmp.Diff([]string{"founder", "other"},
-		oneLink.names(pickSet(rankRoutes(oneLink.all()), selF))); diff != "" {
+		oneLink.names(pickSet(rankRoutes(oneLink.all()), selF, bus.Cluster{}))); diff != "" {
 		t.Errorf("set over one link (-want +got):\n%s", diff)
 	}
 }
@@ -187,13 +188,13 @@ func TestPickSetAddsBackups(t *testing.T) {
 		"around F's link": rawRoute(9, now,
 			hopSpec{selF, 0, 6, ms}, hopSpec{selN, 7, 8, ms}, hopSpec{selK, 10, 5, 3 * ms}),
 	}
-	got := routes.names(pickSet(rankRoutes(routes.all()), selF))
+	got := routes.names(pickSet(rankRoutes(routes.all()), selF, bus.Cluster{}))
 	if diff := cmp.Diff([]string{"cheapest", "around M's link", "around F's link"}, got); diff != "" {
 		t.Errorf("set (-want +got):\n%s", diff)
 	}
 	alone := labeled{"cheapest": routes["cheapest"]}
 	if diff := cmp.Diff([]string{"cheapest"},
-		alone.names(pickSet(rankRoutes(alone.all()), selF))); diff != "" {
+		alone.names(pickSet(rankRoutes(alone.all()), selF, bus.Cluster{}))); diff != "" {
 		t.Errorf("set of a lone route (-want +got):\n%s", diff)
 	}
 }
@@ -216,9 +217,40 @@ func TestPickSetCoversEveryInterface(t *testing.T) {
 		"via K and N": rawRoute(3, now,
 			hopSpec{selF, 0, 14, ms}, hopSpec{selK, 15, 16, ms}, hopSpec{selN, 17, 6, ms}),
 	}
-	got := routes.names(pickSet(rankRoutes(routes.all()), selF))
+	got := routes.names(pickSet(rankRoutes(routes.all()), selF, bus.Cluster{}))
 	if diff := cmp.Diff([]string{"direct", "via M", "via N"}, got); diff != "" {
 		t.Errorf("set (-want +got):\n%s", diff)
+	}
+}
+
+// TestPickSetCoversEveryLinkIntoTheCluster checks the picks for a cluster:
+// each link into the cluster with routes of which none was picked adds its
+// cheapest, whichever member the route reaches the node through. M is the
+// node's fellow member. F's direct route leads and the route through M is
+// its backup; the routes through M that entered the cluster from N and from
+// K add one each, and the dearer second route from N, over the same link
+// into the cluster, stays out. In no cluster, the routes through M add none.
+func TestPickSetCoversEveryLinkIntoTheCluster(t *testing.T) {
+	now := time.Now()
+	routes := labeled{
+		"direct": rawRoute(1, now, hopSpec{selF, 0, 1, ms}),
+		"via M": rawRoute(2, now,
+			hopSpec{selF, 0, 2, ms}, hopSpec{selM, 3, 4, ms}),
+		"from N": rawRoute(2, now,
+			hopSpec{selF, 0, 5, ms}, hopSpec{selN, 6, 7, ms}, hopSpec{selM, 8, 4, ms}),
+		"from K": rawRoute(2, now,
+			hopSpec{selF, 0, 9, ms}, hopSpec{selK, 10, 11, 2 * ms}, hopSpec{selM, 12, 4, ms}),
+		"from N again": rawRoute(2, now,
+			hopSpec{selF, 0, 13, ms}, hopSpec{selK, 14, 15, ms}, hopSpec{selN, 16, 7, ms},
+			hopSpec{selM, 8, 4, ms}),
+	}
+	ranked := rankRoutes(routes.all())
+	got := routes.names(pickSet(ranked, selF, bus.NewCluster(selM)))
+	if diff := cmp.Diff([]string{"direct", "via M", "from N", "from K"}, got); diff != "" {
+		t.Errorf("set in the cluster (-want +got):\n%s", diff)
+	}
+	if diff := cmp.Diff([]string{"direct", "via M"}, routes.names(pickSet(ranked, selF, bus.Cluster{}))); diff != "" {
+		t.Errorf("set in no cluster (-want +got):\n%s", diff)
 	}
 }
 
@@ -232,7 +264,7 @@ func TestPickSetKeepsItsFirstPicks(t *testing.T) {
 		cands = append(cands, rawRoute(uint16(i+1), now,
 			hopSpec{origin, 0, 1, time.Duration(i+1) * ms}))
 	}
-	set := pickSet(rankRoutes(cands), selF)
+	set := pickSet(rankRoutes(cands), selF, bus.Cluster{})
 	if len(set) != maxSetSize {
 		t.Fatalf("set holds %d routes, want %d", len(set), maxSetSize)
 	}
@@ -242,7 +274,7 @@ func TestPickSetKeepsItsFirstPicks(t *testing.T) {
 				k, c.Ingress, k+1)
 		}
 	}
-	if got := pickSet(nil, selF); len(got) != 0 {
+	if got := pickSet(nil, selF, bus.Cluster{}); len(got) != 0 {
 		t.Errorf("set of no routes = %d routes, want none", len(got))
 	}
 }

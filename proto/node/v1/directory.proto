@@ -8,7 +8,8 @@ option go_package = "github.com/fancl20/cion/proto/node/v1;nodev1";
 
 // Entry is one node's statement in one of the directories it holds: the
 // addresses that directory's peers reach it at, its report of how they
-// reach each, and the round trips it measured to them. It travels as the
+// reach each, the round trips it measured to them, and the cluster it
+// joined. It travels as the
 // body of a SCION signed message its node signed, as a beacon's AS entry
 // does: the header names the signer's ISD-AS, its subject key, the TRC its
 // chain verifies under, and the signing time. An entry naming no address
@@ -23,16 +24,25 @@ message Entry {
   // peers are the directory's peers the signer measured, ordered by ISD-AS:
   // every node of the directory it reached, linked or not.
   repeated Peer peers = 3;
+  // cluster is the ISD-AS naming the cluster the signer joined, zero for
+  // none.
+  uint64 cluster = 4;
 }
 
-// Peer is one peer a node measured, as the node reports it: the round trip,
-// the link it holds to the peer, and the changes it announced there.
+// Peer is one peer a node measured, as the node reports it: the round trip
+// and its bounds, the link it holds to the peer, and the changes it
+// announced there.
 message Peer {
   // isd_as is the peer's ISD-AS.
   uint64 isd_as = 1;
   // rtt_us is the round trip the node measured to the peer, in
   // microseconds.
   uint32 rtt_us = 2;
+  // rtt_low_us and rtt_high_us bound the node's round trips to the peer
+  // over the history its decisions read, in microseconds, zero where its
+  // probes give no bound.
+  uint32 rtt_low_us = 7;
+  uint32 rtt_high_us = 8;
   // if_id is the node's interface of its established link to the peer
   // whose verdict is up, zero for none.
   uint32 if_id = 3;

@@ -24,7 +24,8 @@ const (
 
 // Entry is one node's statement in one of the directories it holds: the
 // addresses that directory's peers reach it at, its report of how they
-// reach each, and the round trips it measured to them. It travels as the
+// reach each, the round trips it measured to them, and the cluster it
+// joined. It travels as the
 // body of a SCION signed message its node signed, as a beacon's AS entry
 // does: the header names the signer's ISD-AS, its subject key, the TRC its
 // chain verifies under, and the signing time. An entry naming no address
@@ -39,7 +40,10 @@ type Entry struct {
 	Addresses []*Address `protobuf:"bytes,2,rep,name=addresses,proto3" json:"addresses,omitempty"`
 	// peers are the directory's peers the signer measured, ordered by ISD-AS:
 	// every node of the directory it reached, linked or not.
-	Peers         []*Peer `protobuf:"bytes,3,rep,name=peers,proto3" json:"peers,omitempty"`
+	Peers []*Peer `protobuf:"bytes,3,rep,name=peers,proto3" json:"peers,omitempty"`
+	// cluster is the ISD-AS naming the cluster the signer joined, zero for
+	// none.
+	Cluster       uint64 `protobuf:"varint,4,opt,name=cluster,proto3" json:"cluster,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -95,8 +99,16 @@ func (x *Entry) GetPeers() []*Peer {
 	return nil
 }
 
-// Peer is one peer a node measured, as the node reports it: the round trip,
-// the link it holds to the peer, and the changes it announced there.
+func (x *Entry) GetCluster() uint64 {
+	if x != nil {
+		return x.Cluster
+	}
+	return 0
+}
+
+// Peer is one peer a node measured, as the node reports it: the round trip
+// and its bounds, the link it holds to the peer, and the changes it
+// announced there.
 type Peer struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// isd_as is the peer's ISD-AS.
@@ -104,6 +116,11 @@ type Peer struct {
 	// rtt_us is the round trip the node measured to the peer, in
 	// microseconds.
 	RttUs uint32 `protobuf:"varint,2,opt,name=rtt_us,json=rttUs,proto3" json:"rtt_us,omitempty"`
+	// rtt_low_us and rtt_high_us bound the node's round trips to the peer
+	// over the history its decisions read, in microseconds, zero where its
+	// probes give no bound.
+	RttLowUs  uint32 `protobuf:"varint,7,opt,name=rtt_low_us,json=rttLowUs,proto3" json:"rtt_low_us,omitempty"`
+	RttHighUs uint32 `protobuf:"varint,8,opt,name=rtt_high_us,json=rttHighUs,proto3" json:"rtt_high_us,omitempty"`
 	// if_id is the node's interface of its established link to the peer
 	// whose verdict is up, zero for none.
 	IfId uint32 `protobuf:"varint,3,opt,name=if_id,json=ifId,proto3" json:"if_id,omitempty"`
@@ -158,6 +175,20 @@ func (x *Peer) GetIsdAs() uint64 {
 func (x *Peer) GetRttUs() uint32 {
 	if x != nil {
 		return x.RttUs
+	}
+	return 0
+}
+
+func (x *Peer) GetRttLowUs() uint32 {
+	if x != nil {
+		return x.RttLowUs
+	}
+	return 0
+}
+
+func (x *Peer) GetRttHighUs() uint32 {
+	if x != nil {
+		return x.RttHighUs
 	}
 	return 0
 }
@@ -612,14 +643,18 @@ var File_proto_node_v1_directory_proto protoreflect.FileDescriptor
 
 const file_proto_node_v1_directory_proto_rawDesc = "" +
 	"\n" +
-	"\x1dproto/node/v1/directory.proto\x12\anode.v1\x1a\x1cproto/crypto/v1/signed.proto\"s\n" +
+	"\x1dproto/node/v1/directory.proto\x12\anode.v1\x1a\x1cproto/crypto/v1/signed.proto\"\x8d\x01\n" +
 	"\x05Entry\x12\x15\n" +
 	"\x06isd_as\x18\x01 \x01(\x04R\x05isdAs\x12.\n" +
 	"\taddresses\x18\x02 \x03(\v2\x10.node.v1.AddressR\taddresses\x12#\n" +
-	"\x05peers\x18\x03 \x03(\v2\r.node.v1.PeerR\x05peers\"\xad\x01\n" +
+	"\x05peers\x18\x03 \x03(\v2\r.node.v1.PeerR\x05peers\x12\x18\n" +
+	"\acluster\x18\x04 \x01(\x04R\acluster\"\xeb\x01\n" +
 	"\x04Peer\x12\x15\n" +
 	"\x06isd_as\x18\x01 \x01(\x04R\x05isdAs\x12\x15\n" +
-	"\x06rtt_us\x18\x02 \x01(\rR\x05rttUs\x12\x13\n" +
+	"\x06rtt_us\x18\x02 \x01(\rR\x05rttUs\x12\x1c\n" +
+	"\n" +
+	"rtt_low_us\x18\a \x01(\rR\brttLowUs\x12\x1e\n" +
+	"\vrtt_high_us\x18\b \x01(\rR\trttHighUs\x12\x13\n" +
 	"\x05if_id\x18\x03 \x01(\rR\x04ifId\x12\x1c\n" +
 	"\tpromoting\x18\x04 \x01(\bR\tpromoting\x12\x1a\n" +
 	"\bretiring\x18\x05 \x01(\bR\bretiring\x12(\n" +

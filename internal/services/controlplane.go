@@ -481,6 +481,7 @@ func (n *node) buildBeaconing() error {
 		DB:                   n.pathDB,
 		Links:                n.bus.Links(),
 		Latencies:            n.bus.Latencies(),
+		Cluster:              n.bus.Cluster(),
 		Sender:               n.peerClt,
 		Core:                 coreTier,
 		PropagationInterval:  n.cfg.Pacing.Propagation,

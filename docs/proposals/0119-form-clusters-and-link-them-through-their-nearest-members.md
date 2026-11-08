@@ -227,3 +227,108 @@ carry no routes into a cluster, so it beacons as before.
     the routes into the cluster, a neighbor outside does not.
 *   **The labs.** The labs pass, and the benchmarks run against the commit
     before, the metros lab included.
+
+## Implementation history
+
+*   **Paths between clusters.** The first realization left beaconing as it
+    was. In the metros lab, a cut between two metros left the members other
+    than the cut link's ends routing through the founder's metro: 18 pairs
+    above 1.1 times the path the links allowed six minutes on, 8 still at
+    1.7 times sixteen minutes on, and the cut benchmark's worst pair at 2.52
+    times the reference in both runs, the better paths never surfacing. A
+    link's routes travel one hop on, so only a link's two ends held segments
+    over it; the settled labs never showed it, most likely because the
+    segments the joins registered crossed the same links. The beacons now
+    carry the routes into the cluster, and sixteen minutes after the same
+    cut no pair stood above 1.1 times.
+*   **Kept pairs.** Recomputed from the readings each window, the chosen
+    pairs flipped whenever another pair read lighter: the metros lab's
+    raised delay changed three links. Kept until another pair's reading beat
+    the linked one by the line to buy, the regions lab's bursts still
+    changed links nine times, one read reaching 70 of 72 pairs: a burst
+    longer than a minute moves a five-minute 80th percentile. The new pair's
+    reading must now also beat the linked pair's lower bound, and the bursts
+    change nothing. A stricter test, the new pair's upper bound against the
+    linked pair's lower bound, would wait for a pair brought near until its
+    history turned, about fifteen minutes; it never ran.
+*   **The prediction** went through the first chosen pair, so a kept pair
+    that slowed could have split a cluster a better pair would serve; it
+    runs through the closest members.
+*   **Where the beaconer learns its cluster.** The beaconer first read the
+    cluster names from the directory, so the node's core read the topology
+    module's data, and computed the membership a second time beside the
+    selection's. The selection publishes the cluster it computed on the
+    bus instead, as it publishes the links' delays, and a topology source
+    without clusters publishes none.
+*   **A pair brought near.** The generic lowered-delay benchmark stops five
+    quiet minutes after the change, before a clustered network reacts, so
+    the metros lab times the link from the fall instead. Graded on one read
+    of the leases, three of nine runs found the pair on its old path ten
+    minutes after its link came up, the direct route healthy and ten times
+    cheaper among its candidates: a lease read last before the fall moves
+    only on an evaluation past `LeaseSwitchHold`, so the benchmark reads the
+    leases twice, the hold apart.
+*   **Test adaptations.** The clusters' view builder reports links; the
+    selection's report test seeds the history its bounds read.
+*   **Left as it is.**
+    *   Jitter widens small diameters' upper bounds, so a jittery group may
+        never cluster, and network-wide jitter of 10 to 20ms dissolved the
+        stranded lab's clusters.
+*   **What it takes to pay.** Here the clusters choose links and carry
+    routes, and save links only where groups stand apart; a network
+    without groups gains nothing, and pays the bounds its entries carry and
+    the clusters every node computes each window. The costs ADR-0039 groups
+    nodes for stay as they were: every node still measures every peer,
+    holds every entry, and computes over the whole directory, its
+    coordination's shortest paths and its clusters' dendrogram growing with
+    the cube of the network. They fall only once clusters become scopes
+    (principle 10): members measure and hold each other, and nodes outside
+    see only the members that hold links out. That proposal comes next,
+    after a lab of fifty to a hundred nodes shows where the flat costs
+    begin to bind; below that, the clusters' worth is the links they save.
+*   Mutations: 65 of 65 killed, after three conditions they showed
+    redundant were removed.
+*   The pipeline passed but for `TestPingSkipsExpiredPath` under the race
+    detector, which waits two seconds of real time for its replies; alone,
+    it passed ten runs of ten, and the run before the cluster topic passed
+    whole.
+*   Benchmarks against the commit before, two runs each but one for the
+    bursts, jitter, and delay labs, and four for the pair brought near:
+    *   The metros lab settled on 26 links in three clusters after 17 and
+        16 changes within 9 and 10.3 minutes, against 40 links after 15
+        within 6.8 and 7.8, its worst pair at 1.07 and 1.06 times the
+        reference, against 1.04 and 1.03; it stored 113 and 114 up
+        segments, against 87 and 84. After a cut between two metros, every
+        better path surfaced at once and the links settled within 10 seconds
+        after one change, the worst pair at the clusters' own 1.52 with the
+        transit penalty, where the commit before surfaced its paths after
+        190 seconds in one run and never in the other, and kept a pair at
+        14.4 after the restore. A used link's delay tripled changed no link,
+        against two. A pair across two metros brought near linked within 360
+        to 430 seconds over four runs, no node leaving its cluster and the
+        worst pair then at 1.21 or 1.22, against about 280 seconds.
+    *   The regions lab settled on 30 links, one cluster, after 19 and 18
+        changes within 7 and 6.8 minutes, against 36 links after 23 and 25
+        within 9 and 8.8, its worst pair at 1.007, against 1.00. After a
+        cut, reach held from 10 seconds and the links settled within 10 and
+        20 seconds, the worst pair at 1.06, against 1.00; after the restore,
+        within 50 and 200 seconds, against 40 to 60.
+    *   After the stranded cut, one run settled within 10 seconds, its worst
+        pair at 1.15; the other never settled, the cut leaving a node one
+        link and no candidate it could reach, as in proposal 0114's runs.
+    *   The site lab joined both ways settled on 15 and 16 links after 11
+        and 9 changes within 6.5 and 5.8 minutes, against 21 after 9 or 10
+        within 5, one run reaching 41 of 42 pairs at the instant, the stale
+        lease of proposal 0115's runs. Joined inside or outside, as before.
+    *   The NAT lab settled on 15 and 16 links after 14 and 15 changes
+        within 12.8 and 6.5 minutes, against 21 after 10 and 8 within 4.2
+        and 4.3, one run reaching 38 of 42 pairs at the instant, its choice
+        ratio at 30 as the commit before's reaches. Its founder-down nodes
+        survived in 0.76 seconds in both runs and returned in 225 and 209,
+        against 15.6 and 15.8, and 205 and 229.
+    *   In the bursts, neither network changed its links, every read
+        reaching every pair, as before. The regions jitter sweep changed no
+        link, as before; the stranded sweep changed one, its clusters
+        dissolving at 10 to 20ms, against none. A used link's delay tripled
+        changed no link in either lab; the generic lowered-delay benchmark
+        saw no reaction in the regions lab within its five quiet minutes.

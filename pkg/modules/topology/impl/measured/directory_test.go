@@ -698,15 +698,16 @@ func TestDirectoryEntryAddresses(t *testing.T) {
 	}
 }
 
-// TestDirectoryEntryPeers checks the entry's peer reports: they read back as
-// signed, and an entry naming an interface no hop field could carry — its
-// link's or one a retirement relies on — is refused.
+// TestDirectoryEntryPeers checks the entry's peer reports and its cluster:
+// they read back as signed, and an entry naming an interface no hop field
+// could carry — its link's or one a retirement relies on — is refused.
 func TestDirectoryEntryPeers(t *testing.T) {
 	now := time.Now()
 	signer := func(n uint64) addr.IA { return addr.MustIAFrom(20, addr.AS(0xfd0000000500+n)) }
 	good := bodyAt(signer(1), "192.0.2.1")
+	good.Cluster = uint64(signer(2))
 	good.Peers = []*nodev1.Peer{
-		{IsdAs: uint64(signer(2)), RttUs: 1500, IfId: 3, Promoting: true},
+		{IsdAs: uint64(signer(2)), RttUs: 1500, RttLowUs: 1200, RttHighUs: 1900, IfId: 3, Promoting: true},
 		{IsdAs: uint64(signer(3)), RttUs: 20000, Retiring: true,
 			Relies: []*nodev1.LinkRef{{IsdAs: uint64(signer(2)), IfId: 7}}},
 	}
@@ -726,7 +727,8 @@ func TestDirectoryEntryPeers(t *testing.T) {
 		t.Fatalf("merged %d, want the well-formed entry alone", n)
 	}
 	want := []bus.PeerReport{
-		{IA: signer(2), RTT: 1500 * time.Microsecond, IfID: 3, Promoting: true},
+		{IA: signer(2), RTT: 1500 * time.Microsecond, Low: 1200 * time.Microsecond, High: 1900 * time.Microsecond,
+			IfID: 3, Promoting: true},
 		{IA: signer(3), RTT: 20 * time.Millisecond, Retiring: true,
 			Relies: []segment.LinkID{{IA: signer(2), IfID: 7}}},
 	}
@@ -737,11 +739,14 @@ func TestDirectoryEntryPeers(t *testing.T) {
 	if diff := cmp.Diff(want, e.entry.Peers); diff != "" {
 		t.Errorf("peers (-want +got):\n%s", diff)
 	}
+	if e.entry.Cluster != signer(2) {
+		t.Errorf("cluster %v, want %v", e.entry.Cluster, signer(2))
+	}
 }
 
 // TestSameChanges checks what signs a node's entry again at once: a peer's
-// link or announcements, a peer one report omits naming none; round trips,
-// and peers that name neither, wait for the refresh.
+// link or announcements, a peer one report omits naming none; round trips
+// and their bounds, and peers that name neither, wait for the refresh.
 func TestSameChanges(t *testing.T) {
 	a, b := addr.MustIAFrom(20, 0xfd0000000601), addr.MustIAFrom(20, 0xfd0000000602)
 	held := []bus.PeerReport{
@@ -756,6 +761,10 @@ func TestSameChanges(t *testing.T) {
 	}{
 		{"round trips moved", []bus.PeerReport{
 			{IA: a, RTT: 7 * time.Millisecond, IfID: 2}, {IA: b, RTT: 40 * time.Millisecond},
+		}, true},
+		{"bounds moved", []bus.PeerReport{
+			{IA: a, RTT: 5 * time.Millisecond, Low: 4 * time.Millisecond, High: 6 * time.Millisecond, IfID: 2},
+			{IA: b, RTT: 30 * time.Millisecond, Low: 28 * time.Millisecond},
 		}, true},
 		{"an unlinked peer left", []bus.PeerReport{{IA: a, RTT: 5 * time.Millisecond, IfID: 2}}, true},
 		{"an unlinked peer joined", append(slices.Clone(held),
@@ -1925,11 +1934,11 @@ func TestDirectoryIDsConverge(t *testing.T) {
 // TestDirectorySignsItsOwnEntry checks the node's own signing: it signs in
 // the directory its link attaches to once it holds a chain, naming the host
 // the link's peer reports; again when that host changes — at the instant of
-// the last signing, once its clock passed it — and when its addresses' report
-// changes; one entry naming both hosts once a second link attaches at
-// another host of the directory; again every refresh interval with no
-// change; and, holding an entry of its own signed ahead of its clock, once
-// the clock passes it.
+// the last signing, once its clock passed it — when its addresses' report
+// changes, and when its cluster changes; one entry naming both hosts once a
+// second link attaches at another host of the directory; again every
+// refresh interval with no change; and, holding an entry of its own signed
+// ahead of its clock, once the clock passes it.
 func TestDirectorySignsItsOwnEntry(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		founder := newFounded(t)
@@ -1943,6 +1952,7 @@ func TestDirectorySignsItsOwnEntry(t *testing.T) {
 		// the node's peer reports.
 		var silent atomic.Pointer[netip.Addr]
 		var peers atomic.Pointer[[]*nodev1.Peer]
+		var cluster atomic.Uint64
 		verdicts := new(bus.Topic[bus.LinkState])
 		d := NewNodeDirectory(NodeDirectoryConfig{
 			IA: directoryIA, Trust: engine,
@@ -1961,7 +1971,8 @@ func TestDirectorySignsItsOwnEntry(t *testing.T) {
 				}
 				return nil
 			},
-			Links: verdicts,
+			Cluster: func() addr.IA { return addr.IA(cluster.Load()) },
+			Links:   verdicts,
 		})
 		d.mint = counterIDs(0xf0)
 		ctx, cancel := context.WithCancel(t.Context())
@@ -2021,6 +2032,16 @@ func TestDirectorySignsItsOwnEntry(t *testing.T) {
 		synctest.Wait()
 		if _, e := own(); len(e.Addresses) != 1 || !e.Addresses[0].Reach.RendezvousUnanswered {
 			t.Errorf("after the echo went unanswered the entry = %+v, want its report", e)
+		}
+
+		reported, _ := own()
+		cluster.Store(uint64(founderIA))
+		d.resign()
+		time.Sleep(time.Nanosecond)
+		synctest.Wait()
+		if at, e := own(); !at.After(reported) || e.Cluster != founderIA {
+			t.Errorf("after the cluster changed the entry names %v at %v, want %v after %v",
+				e.Cluster, at, founderIA, reported)
 		}
 
 		// A peer report the link state changes signs again at the link

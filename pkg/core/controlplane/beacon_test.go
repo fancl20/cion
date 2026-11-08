@@ -1295,6 +1295,88 @@ func TestPropagateOncePicksEachNeighborsSetAmongTheRoutesItCanTake(t *testing.T)
 	}
 }
 
+// TestBeaconingCarriesTheRoutesIntoTheCluster checks the routes into the
+// node's cluster, which its cluster topic names: B and its neighbors C and
+// E; F, also B's neighbor, and D lie outside. Over C, B holds [A, C] and
+// [A, D, C], the route that entered the cluster from D; over A, it holds
+// [A]. B's own set and E's take [A, D, C] beside [A] and its backup [A, C];
+// F, outside the cluster, takes only [A] and [A, C]. With no cluster topic,
+// B keeps [A, D, C] to itself.
+func TestBeaconingCarriesTheRoutesIntoTheCluster(t *testing.T) {
+	iaLineE := addr.MustIAFrom(20, 0xff0000000006)
+	iaLineF := addr.MustIAFrom(20, 0xff0000000007)
+	cluster := new(bus.Topic[bus.Cluster])
+	cluster.Publish(bus.NewCluster(nodeIATest, iaLineC, iaLineE))
+	for _, tc := range []struct {
+		name    string
+		cluster *bus.Topic[bus.Cluster]
+		wantOwn [][]addr.IA
+		wantE   [][]addr.IA
+	}{
+		{"in the cluster", cluster,
+			[][]addr.IA{{coreIATest}, {coreIATest, iaLineC}, {coreIATest, iaLineD, iaLineC}},
+			[][]addr.IA{{coreIATest, nodeIATest}, {coreIATest, iaLineC, nodeIATest},
+				{coreIATest, iaLineD, iaLineC, nodeIATest}}},
+		{"with no cluster topic", nil,
+			[][]addr.IA{{coreIATest}, {coreIATest, iaLineC}},
+			[][]addr.IA{{coreIATest, nodeIATest}, {coreIATest, iaLineC, nodeIATest}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newBeaconFixture(t)
+			ctx := context.Background()
+			for _, ia := range []addr.IA{iaLineE, iaLineF} {
+				f.engines[ia] = f.founder.Engine(t, ia)
+			}
+			b, err := NewBeaconer(BeaconerConfig{
+				IA:      nodeIATest,
+				Engine:  f.engines[nodeIATest],
+				MACKey:  []byte(testMACKey),
+				Store:   f.store,
+				DB:      f.pathDB,
+				Links:   tableTopic(map[uint16]addr.IA{1: coreIATest, 2: iaLineC, 4: iaLineE, 5: iaLineF}),
+				Cluster: tc.cluster,
+				Sender:  f.sender,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			now := time.Now()
+			for _, held := range []struct {
+				ingress uint16
+				pcb     *segment.PCB
+			}{
+				{1, declaredBeacon(t, f, now, hopSpec{coreIATest, 0, 1, ms})},
+				{2, declaredBeacon(t, f, now,
+					hopSpec{coreIATest, 0, 2, ms}, hopSpec{iaLineC, 3, 4, ms})},
+				{2, declaredBeacon(t, f, now,
+					hopSpec{coreIATest, 0, 5, ms}, hopSpec{iaLineD, 6, 7, ms}, hopSpec{iaLineC, 8, 4, ms})},
+			} {
+				if err := b.HandleBeacon(ctx, held.pcb, held.ingress); err != nil {
+					t.Fatal(err)
+				}
+			}
+			own, err := b.ownSet()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if diff := cmp.Diff(tc.wantOwn, hopsOf(own)); diff != "" {
+				t.Errorf("own set (-want +got):\n%s", diff)
+			}
+
+			b.propagateOnce(ctx)
+			b.sends.Wait()
+			want := map[addr.IA][][]addr.IA{
+				iaLineC: {{coreIATest, nodeIATest}},
+				iaLineE: tc.wantE,
+				iaLineF: {{coreIATest, nodeIATest}, {coreIATest, iaLineC, nodeIATest}},
+			}
+			if diff := cmp.Diff(want, propagatedHops(t, f)); diff != "" {
+				t.Errorf("propagated hops by peer (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
 // TestBeaconingDropsARouteWhoseBeaconsStopped checks the window on the
 // passes: B holds [A] over link 1, which C receives and B registers until
 // three propagation intervals pass without a fresher origination; then C

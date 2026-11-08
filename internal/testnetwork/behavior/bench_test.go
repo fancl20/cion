@@ -78,6 +78,7 @@ func metrics(a assessment, s settling) string {
 		{float64(a.downChosen), "down-chosen"},
 		{float64(a.downStored), "down-stored"},
 		{float64(len(a.cuts)), "single-cuts"},
+		{float64(len(a.clusters)), "clusters"},
 		{float64(s.changes), "changes"},
 		{s.at.Minutes(), "settle-min"},
 	}

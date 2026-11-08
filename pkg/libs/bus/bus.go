@@ -23,6 +23,7 @@ type Bus struct {
 	links        Topic[LinkState]
 	ifDown       Topic[InterfaceDownState]
 	latencies    Topic[LinkLatencies]
+	cluster      Topic[Cluster]
 	self         Topic[SelfState]
 	directory    Topic[Directory]
 	tailnet      Topic[TailnetState]
@@ -54,6 +55,13 @@ func (b *Bus) InterfaceDown() *Topic[InterfaceDownState] {
 // selection publishes on it once per window; the beaconer reads it.
 func (b *Bus) Latencies() *Topic[LinkLatencies] {
 	return &b.latencies
+}
+
+// Cluster returns the topic of the cluster the node joined. The topology
+// provider's selection publishes on it once per window; the beaconer reads
+// it.
+func (b *Bus) Cluster() *Topic[Cluster] {
+	return &b.cluster
 }
 
 // Self returns the topic of the node's own state. The topology provider

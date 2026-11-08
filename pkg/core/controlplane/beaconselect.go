@@ -7,6 +7,7 @@ import (
 
 	"github.com/scionproto/scion/pkg/addr"
 
+	"github.com/fancl20/cion/pkg/libs/bus"
 	"github.com/fancl20/cion/pkg/libs/scion"
 	"github.com/fancl20/cion/pkg/libs/segment"
 )
@@ -93,12 +94,28 @@ func priceOf(pcb *segment.PCB) (time.Duration, bool) {
 	return 2*oneWay + 2*scion.TransitPenalty*transits, true
 }
 
+// entry returns the link over which the route entered the node's cluster at
+// another member: the link out of its last entry outside the cluster. False
+// when that entry is the route's last, so the route entered over the node's
+// own link, and when every entry lies inside.
+func (r route) entry(cluster bus.Cluster) (segment.LinkID, bool) {
+	last := len(r.PCB.Entries) - 1
+	for i := last; i >= 0; i-- {
+		if !cluster.Has(r.PCB.Entries[i].IA) {
+			return r.links[i], i < last
+		}
+	}
+	return segment.LinkID{}, false
+}
+
 // pickSet picks a set among the ranked routes: each origin's cheapest
 // route, the founder's first; then, while some link is crossed by every
 // route picked and an unpicked route avoids one such link, the cheapest such
 // route; then, for each interface with routes of which none was picked, its
-// cheapest route. The set keeps its first maxSetSize picks, in pick order.
-func pickSet(ranked []route, founder addr.IA) []Candidate {
+// cheapest route; then, for each link into the node's cluster at another
+// member with routes of which none was picked, its cheapest route. The set
+// keeps its first maxSetSize picks, in pick order.
+func pickSet(ranked []route, founder addr.IA, cluster bus.Cluster) []Candidate {
 	picked := make([]bool, len(ranked))
 	var picks []int
 	pick := func(i int) {
@@ -151,6 +168,19 @@ func pickSet(ranked []route, founder addr.IA) []Candidate {
 	for i, r := range ranked {
 		if !covered[r.Ingress] {
 			covered[r.Ingress] = true
+			pick(i)
+		}
+	}
+
+	entered := make(map[segment.LinkID]bool)
+	for _, p := range picks {
+		if l, ok := ranked[p].entry(cluster); ok {
+			entered[l] = true
+		}
+	}
+	for i, r := range ranked {
+		if l, ok := r.entry(cluster); ok && !entered[l] {
+			entered[l] = true
 			pick(i)
 		}
 	}

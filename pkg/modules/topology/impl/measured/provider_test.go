@@ -957,7 +957,8 @@ func TestProviderAddresses(t *testing.T) {
 // node's established link to its peer whose verdict is up, the lowest
 // interface where several reach it, as the link state stands at the
 // signing — none for a down link, a candidate, or a peer with no link — and
-// a new report wakes the signing.
+// the round trip's bounds; the cluster reported is the one signed, and a
+// new report wakes the signing.
 func TestProviderPeers(t *testing.T) {
 	z, err := New(Config{ControlHost: netip.MustParseAddr("0.0.0.0")})
 	if err != nil {
@@ -979,8 +980,8 @@ func TestProviderPeers(t *testing.T) {
 	))
 	id := bus.DirectoryID{1}
 	reliance := []segment.LinkID{{IA: selC, IfID: 3}}
-	z.report(map[bus.DirectoryID][]bus.PeerReport{id: {
-		{IA: selA, RTT: 5 * time.Millisecond, Promoting: true},
+	z.report(selB, map[bus.DirectoryID][]bus.PeerReport{id: {
+		{IA: selA, RTT: 5 * time.Millisecond, Low: 4 * time.Millisecond, High: 6 * time.Millisecond, Promoting: true},
 		{IA: selB, RTT: 7 * time.Millisecond, Retiring: true, Relies: reliance},
 		{IA: selC, RTT: 9 * time.Millisecond},
 		{IA: selD, RTT: 11 * time.Millisecond},
@@ -999,13 +1000,17 @@ func TestProviderPeers(t *testing.T) {
 		got = append(got, r)
 	}
 	want := []bus.PeerReport{
-		{IA: selA, RTT: 5 * time.Millisecond, IfID: 4, Promoting: true},
+		{IA: selA, RTT: 5 * time.Millisecond, Low: 4 * time.Millisecond, High: 6 * time.Millisecond, IfID: 4,
+			Promoting: true},
 		{IA: selB, RTT: 7 * time.Millisecond, IfID: 3, Retiring: true, Relies: reliance},
 		{IA: selC, RTT: 9 * time.Millisecond},
 		{IA: selD, RTT: 11 * time.Millisecond},
 	}
 	if diff := cmp.Diff(want, got); diff != "" {
 		t.Errorf("the signed reports (-want +got):\n%s", diff)
+	}
+	if got := z.cluster(); got != selB {
+		t.Errorf("signed cluster %v, want the reported %v", got, selB)
 	}
 	if len(z.peers(bus.DirectoryID{2})) != 0 {
 		t.Error("a directory with no reports reports peers")

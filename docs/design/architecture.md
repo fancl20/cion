@@ -205,10 +205,12 @@ Cores originate beacons; each AS appends a signed entry and forwards them,
 and receivers verify every entry against the TRC. A node sends each
 neighbor, among the routes it can take, each core's cheapest route, backups,
 and each link's cheapest route
-([ADR-0036](/docs/adrs/0036-select-beacons-per-origin-and-link.md)), and
-registers its own selection: up segments locally, down segments at the
-originating core. The path provider composes segments into end-to-end paths,
-the one seam every consumer uses, the control endpoint's transport included.
+([ADR-0036](/docs/adrs/0036-select-beacons-per-origin-and-link.md)), its
+fellow cluster members also the cheapest route over each link into their
+cluster, and registers its own selection: up segments locally, down
+segments at the originating core. The path provider composes segments into
+end-to-end paths, the one seam every consumer uses, the control endpoint's
+transport included.
 
 ### Topology and liveness
 
@@ -227,6 +229,10 @@ and links change only on lasting evidence
 and a change waits while another node's, announced in the directory, would
 serve or undo it
 ([ADR-0037](/docs/adrs/0037-coordinate-link-changes-through-the-node-directory.md)).
+Nodes far closer to one another than to the rest form a cluster, which every
+node computes from the round trips and bounds the directory publishes;
+outside its cluster, a node links only through the member pairs the round
+trips choose.
 A new link set lands as a new data plane generation built from the neighbor
 table; within a generation, the liveness verdict stops and resumes
 forwarding on a link. The node bus carries link state to beaconing, path

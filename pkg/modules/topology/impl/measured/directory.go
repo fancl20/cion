@@ -113,6 +113,10 @@ type NodeDirectoryConfig struct {
 	// publication of Links signs again where a reported peer's link or
 	// announcements changed.
 	Peers func(id bus.DirectoryID) []*nodev1.Peer
+	// Cluster returns, at each signing, the ISD-AS naming the cluster the
+	// node joined, zero for none; nil names none. A changed cluster signs
+	// again at once.
+	Cluster func() addr.IA
 	// Trust signs the node's entries and verifies its neighbors'; nil signs
 	// and accepts none.
 	Trust DirectoryTrust
@@ -361,7 +365,7 @@ func (e *signedEntry) read(body *nodev1.Entry) error {
 		return fmt.Errorf("the body names %v, signed by %v", ia, e.signer)
 	}
 	e.withdrawn = len(body.Addresses) == 0
-	e.entry = bus.DirectoryEntry{IA: e.signer, Published: e.key.signedAt}
+	e.entry = bus.DirectoryEntry{IA: e.signer, Cluster: addr.IA(body.Cluster), Published: e.key.signedAt}
 	for _, a := range body.Addresses {
 		control, err := netip.ParseAddrPort(a.ControlAddr)
 		if err != nil {
@@ -400,6 +404,8 @@ func readPeer(p *nodev1.Peer) (bus.PeerReport, error) {
 	report := bus.PeerReport{
 		IA:        addr.IA(p.IsdAs),
 		RTT:       time.Duration(p.RttUs) * time.Microsecond,
+		Low:       time.Duration(p.RttLowUs) * time.Microsecond,
+		High:      time.Duration(p.RttHighUs) * time.Microsecond,
 		IfID:      ifID,
 		Promoting: p.Promoting,
 		Retiring:  p.Retiring,
@@ -720,13 +726,16 @@ func (d *NodeDirectory) ownBodies() (map[bus.DirectoryID]*nodev1.Entry, error) {
 		if d.cfg.Peers != nil {
 			bodies[id].Peers = d.cfg.Peers(id)
 		}
+		if d.cfg.Cluster != nil {
+			bodies[id].Cluster = uint64(d.cfg.Cluster())
+		}
 	}
 	return bodies, nil
 }
 
 // ownHeld returns the signing time of the node's entry the directory
 // holds, and whether that entry is no withdrawal and names the body's
-// addresses and its peers' links and announcements.
+// addresses, its peers' links and announcements, and its cluster.
 func (d *NodeDirectory) ownHeld(id bus.DirectoryID, body *nodev1.Entry) (time.Time, bool) {
 	want := signedEntry{signer: d.cfg.IA}
 	if want.read(body) != nil {
@@ -744,20 +753,22 @@ func (d *NodeDirectory) ownHeld(id bus.DirectoryID, body *nodev1.Entry) (time.Ti
 	}
 	return held.key.signedAt, !held.withdrawn &&
 		slices.Equal(held.entry.Addresses, want.entry.Addresses) &&
-		sameChanges(held.entry.Peers, want.entry.Peers)
+		sameChanges(held.entry.Peers, want.entry.Peers) &&
+		held.entry.Cluster == want.entry.Cluster
 }
 
 // sameChanges reports whether two peer reports name the same links and
 // announcements: each peer's interface, promotion, retirement, and
-// reliance, a peer one report omits naming none. Round trips, and peers
-// that name neither, may differ: every signing carries the whole report,
-// so they wait for the entry's next signing, at the latest its refresh.
+// reliance, a peer one report omits naming none. Round trips and their
+// bounds, and peers that name neither, may differ: every signing carries
+// the whole report, so they wait for the entry's next signing, at the
+// latest its refresh.
 func sameChanges(a, b []bus.PeerReport) bool {
 	changes := func(reports []bus.PeerReport) map[addr.IA]bus.PeerReport {
 		out := make(map[addr.IA]bus.PeerReport, len(reports))
 		for _, r := range reports {
 			if r.IfID != 0 || r.Promoting || r.Retiring {
-				r.RTT = 0
+				r.RTT, r.Low, r.High = 0, 0, 0
 				out[r.IA] = r
 			}
 		}

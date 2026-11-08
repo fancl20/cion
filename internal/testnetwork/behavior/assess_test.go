@@ -45,11 +45,13 @@ type assessment struct {
 	// cuts are the formed links whose removal would leave some node
 	// unreachable over the rest.
 	cuts [][2]int
+	// clusters are the clusters the nodes joined.
+	clusters [][]int
 }
 
 func (a assessment) String() string {
-	return fmt.Sprintf("%v; up segments chosen %d of %d, down %d of %d; single cuts %v",
-		a.grading, a.upChosen, a.upStored, a.downChosen, a.downStored, a.cuts)
+	return fmt.Sprintf("%v; up segments chosen %d of %d, down %d of %d; single cuts %v; clusters %v",
+		a.grading, a.upChosen, a.upStored, a.downChosen, a.downStored, a.cuts, a.clusters)
 }
 
 // grading grades one read of a network's paths at one penalty against the
@@ -116,12 +118,13 @@ func assess(t *testing.T, n *network, penalties ...time.Duration) []assessment {
 	upChosen, upStored := countChosen(t, n.nodes[1:], pathdb.SegmentTypeUp, r.routes)
 	downChosen, downStored := countChosen(t, n.nodes[:1], pathdb.SegmentTypeDown, r.routes)
 	cuts := singleCuts(len(n.nodes), r.formed.edges)
+	joined := clusters(n)
 	var out []assessment
 	for _, p := range penalties {
 		out = append(out, assessment{
 			grading:  r.grade(n, p),
 			upChosen: upChosen, upStored: upStored, downChosen: downChosen, downStored: downStored,
-			cuts: cuts,
+			cuts: cuts, clusters: joined,
 		})
 	}
 	return out

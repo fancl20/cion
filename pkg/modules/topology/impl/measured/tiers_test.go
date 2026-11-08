@@ -403,6 +403,52 @@ func TestTierQualifies(t *testing.T) {
 	}
 }
 
+// TestJudgeOutside checks the useless test of a link the clustering does
+// not allow: decided once a survivor answered, whatever the prices; useful
+// while the exclusion would drop the route count or cut a member off, or no
+// chosen pair links the units; useless otherwise.
+func TestJudgeOutside(t *testing.T) {
+	ms := time.Millisecond
+	tierWith := func(ex excludedSample) *tier {
+		return &tier{
+			members:  []member{{ia: selA, direct: 10 * ms}, {ia: selB, direct: 12 * ms}},
+			price:    20 * ms,
+			prices:   map[addr.IA]time.Duration{selA: 16 * ms, selB: 20 * ms},
+			routes:   2,
+			excluded: map[addr.IA]excludedSample{selA: ex},
+		}
+	}
+	// held keeps the routes and cuts nobody off, at prices far above the
+	// link's: a priced test would keep the link.
+	held := excludedSample{answered: true, price: 90 * ms, routes: 2, cutOff: map[addr.IA]bool{}}
+	unanswered := held
+	unanswered.answered = false
+	fewer := held
+	fewer.routes = 1
+	cut := held
+	cut.cutOff = map[addr.IA]bool{selB: true}
+	for _, tc := range []struct {
+		name             string
+		ex               excludedSample
+		joined           bool
+		decided, useless bool
+	}{
+		{"covered", held, true, true, true},
+		{"no survivor answered", unanswered, true, false, false},
+		{"a route lost", fewer, true, true, false},
+		{"a member cut off", cut, true, true, false},
+		{"no chosen pair linked", held, false, true, false},
+	} {
+		decided, useless := judgeOutside(tierWith(tc.ex), selA, tc.joined)
+		if decided != tc.decided || useless != tc.useless {
+			t.Errorf("%s: judgeOutside = %v, %v, want %v, %v", tc.name, decided, useless, tc.decided, tc.useless)
+		}
+	}
+	if decided, _ := judgeOutside(nil, selA, true); decided {
+		t.Error("an unclassed link decided")
+	}
+}
+
 // TestJudge checks the useless test and the eviction's. With the tier's
 // route count held, the useless test finds a link useless only while its
 // exclusion raises no price — the tier's, each priced member's, the link's

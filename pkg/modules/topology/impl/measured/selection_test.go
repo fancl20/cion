@@ -56,8 +56,10 @@ type selFixture struct {
 	probed      map[addr.IA]bool
 	probedAt    map[addr.IA]netip.AddrPort
 	established []addr.IA // the promoted candidates, in order
-	// reports holds the last window's reports, by directory.
+	// reports holds the last window's reports, by directory, and cluster
+	// the cluster it named.
 	reports map[bus.DirectoryID][]bus.PeerReport
+	cluster addr.IA
 	// writes counts the loop's own writes, signaled through its store as
 	// the node's store signals them; the fixture's writes bypass it.
 	writes int
@@ -170,7 +172,7 @@ func newSelFixture(t *testing.T, neighbors ...addr.IA) *selFixture {
 	}
 	f.sel.cfg.Directory = f.directoryTopic
 	f.sel.cfg.Links = f.links
-	f.sel.cfg.Report = func(r map[bus.DirectoryID][]bus.PeerReport) { f.reports = r }
+	f.sel.cfg.Report = func(c addr.IA, r map[bus.DirectoryID][]bus.PeerReport) { f.cluster, f.reports = c, r }
 	f.sel.aliveFn = func(l *links.Link) bool { return f.alive[l.NeighborIA] }
 	f.refresh()
 	return f
@@ -1064,6 +1066,196 @@ func TestSelectionStableState(t *testing.T) {
 	}
 	if f.state(t, selA) != links.StateRetired {
 		t.Error("the cap's eviction passed over the link that helps by less than a fifth")
+	}
+}
+
+// name sets the cluster the peer's directory entry names.
+func (f *selFixture) name(ia, cluster addr.IA) {
+	for i := range f.directory {
+		if f.directory[i].IA == ia {
+			f.directory[i].Cluster = cluster
+		}
+	}
+}
+
+// clustered puts the node in the cluster of Peer and B, named by Peer, and
+// reports the round trips that choose the pairs linking it to A and to D,
+// each a unit of one: Peer's 8ms and B's 12ms to A, beside the node's 18ms,
+// choose Peer and B; the node's 9ms to D, beside Peer's 30ms and B's 31ms,
+// chooses the node and Peer. Peer reports its link to A when linked is set.
+func (f *selFixture) clustered(linked bool) {
+	for _, ia := range []addr.IA{selPeer, selB, selA, selD} {
+		if !slices.ContainsFunc(f.directory, func(e bus.DirectoryEntry) bool { return e.IA == ia }) {
+			f.directory = append(f.directory, entryOf(ia))
+		}
+	}
+	f.sel.cluster = selPeer
+	f.name(selPeer, selPeer)
+	f.name(selB, selPeer)
+	peerToA := bus.PeerReport{IA: selA, RTT: 8 * time.Millisecond}
+	if linked {
+		peerToA.IfID = 1
+	}
+	f.report(selPeer, peerToA, bus.PeerReport{IA: selD, RTT: 30 * time.Millisecond})
+	f.report(selB, bus.PeerReport{IA: selA, RTT: 12 * time.Millisecond},
+		bus.PeerReport{IA: selD, RTT: 31 * time.Millisecond})
+	f.report(selA, bus.PeerReport{IA: selIA, RTT: 18 * time.Millisecond})
+	f.report(selD, bus.PeerReport{IA: selIA, RTT: 9 * time.Millisecond})
+}
+
+// TestSelectionPromotesThroughChosenPairs checks the candidates outside the
+// node's cluster: A beats its price fastest, but the pairs linking the
+// cluster to A are Peer's and B's, so D, whose pair the node holds, is the
+// one promoted.
+func TestSelectionPromotesThroughChosenPairs(t *testing.T) {
+	f := newSelFixture(t, selPeer, selB)
+	f.candidate(selA, 5*time.Millisecond, 30*time.Millisecond)
+	f.candidate(selD, 6*time.Millisecond, 30*time.Millisecond)
+	f.clustered(false)
+	for range 8 {
+		f.pass(t)
+	}
+	if !slices.Equal(f.established, []addr.IA{selD}) {
+		t.Errorf("promoted %v, want D alone", f.established)
+	}
+}
+
+// TestSelectionSecondRouteThroughChosenPairs checks the redundancy purchase
+// outside the node's cluster: A's tier of one route would admit A within
+// SecondRouteRatio of its price, but the pairs linking the cluster to A are
+// Peer's and B's, so A stays a candidate.
+func TestSelectionSecondRouteThroughChosenPairs(t *testing.T) {
+	f := newSelFixture(t, selPeer, selB) // at the floor
+	f.candidate(selA, 21*time.Millisecond, 20*time.Millisecond, cand(link(selX)))
+	f.clustered(false)
+	for range promoteWindows(selIA, selA) + 1 {
+		f.pass(t)
+	}
+	if len(f.established) != 0 {
+		t.Errorf("promoted %v, want none", f.established)
+	}
+}
+
+// TestSelectionStrandedTakesAnyReachable checks a stranded tier outside the
+// node's cluster: no route reaches A's tier, so A is promoted at once though
+// the pairs linking the cluster to A are Peer's and B's, ahead of the faster
+// C, whose tier a route reaches.
+func TestSelectionStrandedTakesAnyReachable(t *testing.T) {
+	f := newSelFixture(t, selPeer, selB) // at the floor
+	f.candidate(selC, 3*time.Millisecond, 30*time.Millisecond)
+	f.candidate(selA, 22*time.Millisecond, 0)
+	f.clustered(false)
+	f.pass(t)
+	if !slices.Equal(f.established, []addr.IA{selA}) {
+		t.Errorf("promoted %v, want the stranded A", f.established)
+	}
+}
+
+// TestSelectionPublishesItsCluster checks the cluster topic: the node's
+// unit while it names a cluster — Peer, B, and the node itself, not A — and
+// no member once no other node names it and the node names none.
+func TestSelectionPublishesItsCluster(t *testing.T) {
+	f := newSelFixture(t, selPeer, selB)
+	topic := new(bus.Topic[bus.Cluster])
+	f.sel.cfg.Cluster = topic
+	f.clustered(false)
+	f.pass(t)
+	for ia, want := range map[addr.IA]bool{selIA: true, selPeer: true, selB: true, selA: false} {
+		if got := topic.Latest().Has(ia); got != want {
+			t.Errorf("published %v as a member: %v, want %v", ia, got, want)
+		}
+	}
+	f.name(selPeer, 0)
+	f.name(selB, 0)
+	f.pass(t)
+	if topic.Latest().Has(selIA) {
+		t.Error("a node in no cluster published itself a member")
+	}
+}
+
+// TestSelectionReportsTheClusterAndBounds checks the report: the cluster the
+// node named this window, and each peer's bounds beside its round trip, here
+// Peer's twenty-one round trips of 10ms.
+func TestSelectionReportsTheClusterAndBounds(t *testing.T) {
+	f := newSelFixture(t, selPeer, selB)
+	f.clustered(false)
+	by := instrument{ia: selPeer, ifID: f.ifID(t, selPeer)}
+	f.sel.history = map[instrument][]heard{
+		by: slices.Repeat([]heard{{at: time.Now().Add(-time.Minute), rtt: 10 * time.Millisecond}}, 20),
+	}
+	f.sel.last = map[addr.IA]instrument{selPeer: by}
+	f.pass(t)
+	if f.cluster != selPeer {
+		t.Errorf("reported the cluster %v, want %v", f.cluster, selPeer)
+	}
+	if r, _ := f.reported(selPeer); r.Low != 10*time.Millisecond || r.High != 10*time.Millisecond {
+		t.Errorf("reported Peer's bounds %v and %v, want 10ms", r.Low, r.High)
+	}
+}
+
+// TestSelectionFloorPrefersChosenPairs checks the floor: below it, the
+// fastest candidate the clustering allows goes first, D before the faster
+// A; with no such candidate reachable, any reachable one.
+func TestSelectionFloorPrefersChosenPairs(t *testing.T) {
+	f := newSelFixture(t)
+	f.candidate(selA, 3*time.Millisecond, 30*time.Millisecond)
+	f.candidate(selD, 8*time.Millisecond, 30*time.Millisecond)
+	f.clustered(false)
+	f.pass(t)
+	if !slices.Equal(f.established, []addr.IA{selD}) {
+		t.Errorf("below the floor promoted %v, want D", f.established)
+	}
+
+	f = newSelFixture(t)
+	f.candidate(selA, 3*time.Millisecond, 30*time.Millisecond)
+	f.candidate(selD, 0, 0)
+	f.clustered(false)
+	f.pass(t)
+	if !slices.Equal(f.established, []addr.IA{selA}) {
+		t.Errorf("below the floor with D unreachable promoted %v, want A", f.established)
+	}
+}
+
+// TestSelectionRetiresLinksOutsideTheClusters checks a link the clustering
+// does not allow: A's helps, its route through Peer slower than its round
+// trip, yet it retires once Peer's link to A joins the units, and stands
+// while none does.
+func TestSelectionRetiresLinksOutsideTheClusters(t *testing.T) {
+	for _, linked := range []bool{false, true} {
+		f := newSelFixture(t, selPeer, selA, selB) // above the floor of two
+		f.carried(selA, 18*time.Millisecond, 10*time.Millisecond, f.via(t, selPeer, 0, selPeer, selA))
+		f.clustered(linked)
+		for range 2 * DemoteWindows {
+			f.pass(t)
+		}
+		if got := f.state(t, selA) == links.StateRetired; got != linked {
+			t.Errorf("with Peer's link to A reported %v: A's link retired %v, want %v", linked, got, linked)
+		}
+		if f.state(t, selPeer) != links.StateEstablished || f.state(t, selB) != links.StateEstablished {
+			t.Errorf("with Peer's link to A reported %v: a link inside the cluster retired", linked)
+		}
+	}
+}
+
+// TestSelectionEvictsOutsideLinksFirst checks the cap: A's link earns its
+// place, its route through Peer slower by more than a fifth, but the
+// clustering does not allow it, so D, whose pair the node holds, takes its
+// slot.
+func TestSelectionEvictsOutsideLinksFirst(t *testing.T) {
+	f := newSelFixture(t, selPeer, selA, selB)
+	f.accept(t, selB) // two dialed up links: the floor holds the useless retirement back
+	f.sel.cfg.MaxLinks = 3
+	f.carried(selA, 18*time.Millisecond, 30*time.Millisecond, f.via(t, selPeer, 0, selPeer, selA))
+	f.candidate(selD, 6*time.Millisecond, 30*time.Millisecond)
+	f.clustered(true)
+	for range 8 {
+		f.pass(t)
+	}
+	if !slices.Equal(f.established, []addr.IA{selD}) {
+		t.Errorf("promoted %v, want D", f.established)
+	}
+	if f.state(t, selA) != links.StateRetired {
+		t.Error("the cap's eviction passed over the link the clustering does not allow")
 	}
 }
 

@@ -132,9 +132,11 @@ type Provider struct {
 	reach    map[netip.Addr]bool
 
 	// reports holds the selection's last reports for the node's directory
-	// entries, by directory; reportMtx guards it.
+	// entries, by directory, and joined the cluster it last reported;
+	// reportMtx guards both.
 	reportMtx sync.Mutex
 	reports   map[bus.DirectoryID][]bus.PeerReport
+	joined    addr.IA
 
 	// mtx guards the one-time assembly of the serving machinery.
 	mtx sync.Mutex
@@ -571,6 +573,7 @@ func (z *Provider) assemble() error {
 		IA:            z.env.IA,
 		Addresses:     z.addresses,
 		Peers:         z.peers,
+		Cluster:       z.cluster,
 		Links:         z.linkState,
 		Peer:          z.env.Peer,
 		Directory:     z.directoryState,
@@ -741,6 +744,7 @@ func (z *Provider) selectionConfig() SelectionConfig {
 		Directory:   z.directoryState,
 		Links:       z.linkState,
 		Latencies:   z.env.Bus.Latencies(),
+		Cluster:     z.env.Bus.Cluster(),
 		Paths:       z.env.Paths,
 		Requests:    z.env.Bus.PathRequests(),
 		Conn:        z.probeConn,
@@ -757,14 +761,21 @@ func (z *Provider) selectionConfig() SelectionConfig {
 }
 
 // report holds the selection's reports for the node's directory entries and
-// wakes the signing: an entry whose peers' links or announcements they
-// change signs again at once, one whose round trips alone change at its
-// refresh.
-func (z *Provider) report(reports map[bus.DirectoryID][]bus.PeerReport) {
+// wakes the signing: an entry whose cluster, or whose peers' links or
+// announcements, they change signs again at once, one whose round trips
+// alone change at its refresh.
+func (z *Provider) report(cluster addr.IA, reports map[bus.DirectoryID][]bus.PeerReport) {
 	z.reportMtx.Lock()
-	z.reports = reports
+	z.reports, z.joined = reports, cluster
 	z.reportMtx.Unlock()
 	z.directory.resign()
+}
+
+// cluster returns the cluster the selection last reported the node joined.
+func (z *Provider) cluster() addr.IA {
+	z.reportMtx.Lock()
+	defer z.reportMtx.Unlock()
+	return z.joined
 }
 
 // peers returns the node's reports in the directory the ID names, each
@@ -788,6 +799,8 @@ func (z *Provider) peers(id bus.DirectoryID) []*nodev1.Peer {
 		p := &nodev1.Peer{
 			IsdAs:     uint64(r.IA),
 			RttUs:     uint32(r.RTT / time.Microsecond),
+			RttLowUs:  uint32(r.Low / time.Microsecond),
+			RttHighUs: uint32(r.High / time.Microsecond),
 			IfId:      uint32(linked[r.IA]),
 			Promoting: r.Promoting,
 			Retiring:  r.Retiring,
