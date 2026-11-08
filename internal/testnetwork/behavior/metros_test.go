@@ -120,15 +120,10 @@ func TestBenchMetrosDelayLowered(t *testing.T) {
 		}
 		old := n.oneWay[unlinked[0]][unlinked[1]]
 		n.setDelay(unlinked[0], unlinked[1], cost/10)
-		lowered := metrosPhase(t, n, isLinked, each)
-		// A lease moves to a cheaper path once its evaluations found it
-		// cheaper for scion.LeaseSwitchHold, and the leases were read last
-		// before the fall: read them once, then grade them past the hold.
-		readPaths(t, n, false)
-		time.Sleep(scion.LeaseSwitchHold + scion.LeaseEvaluation)
-		worst := readPaths(t, n, false).grade(n, 0)
+		lowered := watchPhase(t, n, isLinked, each)
+		worst := readMoved(t, n).grade(n, 0)
 		n.setDelay(unlinked[0], unlinked[1], old)
-		restored := metrosPhase(t, n, func() bool { return true }, each)
+		restored := watchPhase(t, n, func() bool { return true }, each)
 		held := 0.0
 		if formed() {
 			held = 1
@@ -146,14 +141,25 @@ func TestBenchMetrosDelayLowered(t *testing.T) {
 	})
 }
 
-// metrosWatch bounds the wait for a phase's condition in virtual time.
-const metrosWatch = 45 * time.Minute
+// readMoved reads the leases once, and again past the hold a lease keeps a
+// cheaper path waiting, and returns the second read: a lease moves to a
+// cheaper path once its evaluations found it cheaper for
+// scion.LeaseSwitchHold, and a phase reads no lease before it ends.
+func readMoved(t *testing.T, n *network) paths {
+	t.Helper()
+	readPaths(t, n, false)
+	time.Sleep(scion.LeaseSwitchHold + scion.LeaseEvaluation)
+	return readPaths(t, n, false)
+}
 
-// metrosPhase reads the network every settleSample, calling each at every
-// read once the bubble has parked, until the condition held or metrosWatch
+// phaseWatch bounds the wait for a phase's condition in virtual time.
+const phaseWatch = 45 * time.Minute
+
+// watchPhase reads the network every settleSample, calling each at every
+// read once the bubble has parked, until the condition held or phaseWatch
 // passed and the link set then held for settleQuiet. It returns the
 // link-set changes and when the last came, from its start.
-func metrosPhase(t *testing.T, n *network, cond func() bool, each func()) settling {
+func watchPhase(t *testing.T, n *network, cond func() bool, each func()) settling {
 	t.Helper()
 	ctx := t.Context()
 	start := time.Now()
@@ -166,7 +172,7 @@ func metrosPhase(t *testing.T, n *network, cond func() bool, each func()) settli
 			last, changed = now, time.Now()
 			s.changes++
 		}
-		ready := cond() || time.Since(start) >= metrosWatch
+		ready := cond() || time.Since(start) >= phaseWatch
 		if ready && time.Since(changed) >= settleQuiet && settled(ctx, n.nodes) {
 			s.at = changed.Sub(start)
 			return s

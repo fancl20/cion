@@ -128,3 +128,81 @@ before.
     more; the cap's other tests hold.
 *   **The labs.** The labs pass, and the benchmarks run against the commit
     before, the ring lab included.
+
+## Implementation history
+
+*   **Either test.** Weighed against the candidate's gain alone, a link that
+    would not earn its place today keeps its slot whenever it saves near
+    what the candidate gains, and a candidate that gains nothing on its
+    price, a second route or a stranded tier's member, displaces nothing.
+    The eviction takes a link either test yields.
+*   **A retry.** A displacement whose far end refuses leaves the candidate's
+    entry live, holding the slot the displacement freed, for as long as the
+    far end answers binding requests: a far end at the cap answers no claim
+    it holds no entry for. The cap counted that entry, so each window that
+    ran the establishment again needed, and with the savings test found,
+    another victim. The candidate's own entry now holds its slot. The
+    retries run each window, as they do below the cap: in the ring lab, a
+    run with a pair brought near refused 176 to 332 exchanges, against 118
+    and 120, each logging a warning.
+*   **The sure gain.** A first realization weighed each saving at its bounds
+    against the gain on the price's reading. In the ring lab's bursts, a
+    burst that tripled one link's delay for 76 seconds moved the five-minute
+    readings of the routes across it, and the gain a candidate then showed
+    on such a route displaced a link, the candidate's far end at the cap
+    refusing it: one change, where the commit before made none. Weighed
+    against the gain on the price's lower bound, which a burst moves only
+    once it lasts, the same bursts changed no link, but the jitter sweep
+    changed three on its way down, at 1ms, where the commit before changed
+    none: a lower bound stays up a while after jitter that lasted, while the
+    readings have recovered. The bounds now weigh each saving against the
+    gain on the lower of the price's reading and its lower bound, and the
+    same bursts and sweep change no link.
+*   **What a pair brought near sets off.** In the ring lab, the ends of the
+    unlinked pair across the ring that held the cap displaced a link each,
+    and over three runs the pair linked 270 to 280 seconds after its delay
+    fell, the readings' five minutes bounding the wait. Each victim, a slot
+    free, bought a link in turn, and the far ends of those links made room
+    in turn, every step a gain by the line to buy: the links changed six or
+    seven times, the last 13 to 17 minutes after the fall. The worst pair
+    then stood at 1.54 times the reference with the transit penalty, where
+    the commit before never linked the pair and held it at 10 times.
+    Restored, two runs changed no link and the third two within four
+    minutes. Before the sure gain, two runs changed links 8 and 9 times.
+*   **Test adaptations.** The cap's fixture comments give each link's
+    savings against the candidate's gain.
+*   **Left as it is.**
+    *   A displacement whose far end never makes room leaves the displacing
+        node a link short while the far end lives.
+    *   Each refused retry logs a warning.
+*   Mutations: 19 of 19 killed, after a row of the savings test that
+    reads a saving the history does not show.
+*   The pipeline passed, the race detector's run with the ring lab in the
+    behavior suite. Run twice, that suite outlasted its twenty minutes, so
+    the ring lab runs as benchmarks alone, and the suite then passed within
+    17 minutes.
+*   Benchmarks against the commit before, one to three runs each:
+    *   The ring settled on 44 to 46 links after 21 or 22 changes within
+        6.7 to 7 minutes, 6 to 10 of its 12 nodes at the cap, its worst pair
+        at 1.31 to 1.62 times the reference with the transit penalty,
+        against 47 and 46 links after 23 changes within 7.2 and 7.7
+        minutes, 10 and 8 nodes at the cap, at 1.31 and 1.42. No link was
+        displaced while it settled; the joins set the spread.
+    *   In the ring's bursts and its jitter sweep, no link changed, as at
+        the commit before.
+    *   The other labs ran before the sure gain, which moves only what the
+        cap displaces, and the cap binds in none of them but the metros lab,
+        where each version displaced one link while settling. The metros
+        and regions labs settled on 26 and 25, and 30 links, after 15 to 20
+        changes within 7.2 to 9.2 minutes, their worst pairs at 1.06 and
+        1.07, and at 1.007, as before. After their cuts, the metros,
+        regions, and stranded links settled within 10, 30, and 10 seconds,
+        and after the restores within 130, 200, and 300 seconds, against 30
+        to 120, 50 to 200, and 0 to 20. The site lab, the regions bursts,
+        and the pair across the metros, linked after 340 seconds, stood as
+        before.
+    *   One NAT run settled on 21 links with six retirements of links
+        outside its cluster announced at five minutes and never made before
+        the lab ended, where the commit before's two runs made theirs within
+        two minutes. The NAT lab never reaches the cap; the coordination's
+        waits are the follow-up's to read.

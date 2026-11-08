@@ -916,7 +916,7 @@ func (s *selection) echoes(ctx context.Context, dst *scion.Addr) []time.Duration
 // cases sustained for the pair's own windows, the sustained winner the
 // fastest direct sample among qualifiers, and only among the candidates the
 // clustering allows. At the cap every case requires an eviction that
-// qualifies under retirement, the floor and stranded cases included.
+// qualifies against the candidate, the floor and stranded cases included.
 func (s *selection) promote(
 	ctx context.Context,
 	entries []*links.Link,
@@ -1042,13 +1042,20 @@ func (s *selection) judge(v *coordView, t *tier, ia addr.IA) (decided, useless b
 	return judge(t, ia)
 }
 
-// yields reads an up link's eviction test: the clustering's useless test
-// for a link it does not allow, else the priced test.
-func (s *selection) yields(v *coordView, t *tier, ia addr.IA) (decided, weak bool) {
+// yields reads whether an up link yields its slot to a candidate gaining
+// gain on its price, and sure as the tier's gain has it: for a link the
+// clustering does not allow, its useless test; for any other, the priced
+// test or the savings test.
+func (s *selection) yields(v *coordView, t *tier, ia addr.IA, gain, sure time.Duration) bool {
 	if !s.allowed(v, ia) {
-		return judgeOutside(t, ia, v.units.joined(v, s.cfg.IA, ia))
+		decided, useless := judgeOutside(t, ia, v.units.joined(v, s.cfg.IA, ia))
+		return decided && useless
 	}
-	return yields(t, ia)
+	if decided, weak := yields(t, ia); decided && weak {
+		return true
+	}
+	decided, weak := outgained(t, ia, gain, sure)
+	return decided && weak
 }
 
 // qualifies reports whether the candidate's sample earns promotion under
@@ -1088,10 +1095,13 @@ func promoteWindows(self, peer addr.IA) int {
 }
 
 // admit lands a promotion, evicting at the cap first: the victim is the
-// retirement-qualified neighbor whose exclusion moves its tier's price
-// least, and none qualifying means no promotion — the cap bounds the set at
-// every instant. The cap counts the named live entries, as the acceptor's
-// does, so a candidate in flight holds its place.
+// neighbor qualifying against what the candidate's direct round trip gains
+// on its price, whose exclusion moves its tier's price least, and none
+// qualifying means no promotion: the cap bounds the set at every instant.
+// The cap counts the named live entries, as the acceptor's does, so a
+// candidate in flight holds its place — the candidate's own included: an
+// establishment its far end has not answered yet evicts nothing more when
+// it runs again.
 func (s *selection) admit(
 	ctx context.Context,
 	entries []*links.Link,
@@ -1107,8 +1117,9 @@ func (s *selection) admit(
 	if cap == 0 {
 		cap = MaxNeighbors
 	}
-	if namedLive(entries) >= cap {
-		victim := s.evict(neighbors, ts, samples, v)
+	if namedLive(entries) >= cap && !liveNeighbor(entries, e.IA) {
+		gain, sure := tierOf(ts, e.IA).gain(e.IA, samples[e.IA].direct)
+		victim := s.evict(neighbors, ts, samples, v, gain, sure)
 		if victim == nil {
 			return
 		}
@@ -1121,22 +1132,26 @@ func (s *selection) admit(
 	s.establish(ctx, e, why)
 }
 
-// evict returns the cap's victim among the retirement-qualified neighbors:
-// a down link whose down count reached DemoteWindows, at no harm, and an up
-// link this window decides weak — one that would not earn its place today,
-// or one the clustering does not allow that the clustering's test judges
-// useless — while up links exceed the floor. The
-// victim is the one whose exclusion moves its tier's price least, ties to
-// the slower direct sample. Nil when none qualifies — no promotion happens
-// and the cap stands, so displacement cannot evict a link the policy must
-// immediately re-recruit: the intra-regional mesh, whose exclusion changes
-// nothing, retires first, and the bridge, whose exclusion leaves its tier no
-// answered route, decides nothing and is not eligible at all.
+// evict returns the cap's victim among the qualifying neighbors: a down
+// link whose down count reached DemoteWindows, at no harm, and, while up
+// links exceed the floor, an up link this window decides yields to a
+// candidate gaining gain on its price, and sure as the tier's gain has it —
+// one that would not earn its place today, one whose every saving the gain
+// beats by the line to buy and the sure gain at the bounds, and one the
+// clustering does not allow that the clustering's test judges useless.
+// The victim is the one whose exclusion moves its tier's price least, ties
+// to the slower direct sample. Nil when none qualifies — no promotion
+// happens and the cap stands, so displacement cannot evict a link the
+// policy must immediately re-recruit: the intra-regional mesh, whose
+// exclusion changes nothing, retires first, and the bridge, whose exclusion
+// leaves its tier no answered route, decides nothing and is not eligible at
+// all.
 func (s *selection) evict(
 	neighbors map[addr.IA]*links.Link,
 	ts []tier,
 	samples map[addr.IA]sample,
 	v *coordView,
+	gain, sure time.Duration,
 ) *links.Link {
 	up := s.upCount(neighbors)
 	var worst *links.Link
@@ -1152,7 +1167,7 @@ func (s *selection) evict(
 				continue // an up link leaves only while up links exceed the floor
 			}
 			t := tierOf(ts, ia)
-			if decided, weak := s.yields(v, t, ia); !decided || !weak {
+			if !s.yields(v, t, ia, gain, sure) {
 				continue
 			}
 			cost = harm(t, ia)

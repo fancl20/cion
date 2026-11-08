@@ -1751,12 +1751,12 @@ func TestSelectionCutCritical(t *testing.T) {
 
 // capFixture builds the cap's fixture: Peer, A, B, and C at a cap of four in
 // one tier, and the candidate D, whose one route through Peer prices it at
-// 50ms. C's baseline rides A's link and sets the tier's price at 16ms:
-// excluding A's link raises it to 18ms, a harm of 2ms, and C keeps its route
-// through Peer. Excluding B's or C's link moves the price by nothing, and B
-// is the slower direct sample. Without any one of the three, every member
-// keeps a route within promotion's fifth of its own price, transits charged,
-// so each would yield its slot; without Peer's, A, B, and D keep none.
+// 50ms, its 24ms round trip gaining 26ms. C's baseline rides A's link and
+// sets the tier's price at 16ms: excluding A's link raises it to 18ms, a
+// harm of 2ms, and C keeps its route through Peer. Excluding B's or C's
+// link moves the price by nothing, and B is the slower direct sample. None
+// of the three saves any price more than 4ms, transits charged, so each
+// would yield its slot to D; without Peer's, A, B, and D keep no route.
 func capFixture(t *testing.T) *selFixture {
 	t.Helper()
 	neighbors := []addr.IA{selPeer, selA, selB, selC}
@@ -1775,8 +1775,8 @@ func capFixture(t *testing.T) *selFixture {
 }
 
 // TestSelectionCapEviction checks the cap: at it, an admission evicts the
-// retirement-qualified neighbor whose exclusion moves its tier's price
-// least, ties to the slower direct sample; none qualifying means no
+// neighbor qualifying against the candidate whose exclusion moves its tier's
+// price least, ties to the slower direct sample; none qualifying means no
 // promotion; the bridge, whose exclusion leaves no answered survivor, is
 // never evicted and the promotion waits; and a down link whose count
 // reached DemoteWindows goes at no harm.
@@ -1833,6 +1833,98 @@ func TestSelectionCapEviction(t *testing.T) {
 	}
 	if f.state(t, selC) != links.StateRetired || f.state(t, selB) != links.StateEstablished {
 		t.Error("the eviction took the bridge, or left the down link")
+	}
+}
+
+// TestSelectionCapWeighsGains checks displacement at the cap by worth: a
+// candidate whose gain on its price beats what a link saves by the line to
+// buy, on the readings and on the price's lower bound, displaces the link
+// though the link would earn its place today, the least harm first, ties to
+// the slower direct sample; one whose gain does not, or whose price's lower
+// bound does not confirm it, waits.
+func TestSelectionCapWeighsGains(t *testing.T) {
+	ms := time.Millisecond
+	for _, tc := range []struct {
+		name string
+		// price is what D's route through X prices it at, and low its lower
+		// bound, the price itself when zero.
+		price, low time.Duration
+		displaces  bool
+	}{
+		{"a gain beating every saving", 30 * ms, 0, true},
+		{"a gain short of them", 20 * ms, 0, false},
+		{"a gain the history does not confirm", 30 * ms, 20 * ms, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			neighbors := []addr.IA{selPeer, selA, selB, selC}
+			f := newSelFixture(t, neighbors...)
+			f.sel.cfg.MaxLinks = len(neighbors)
+			// Peer, far, sits alone in a tier no route prices. A, B, and C
+			// each reach over Peer's link at 20ms, the transit charged: each
+			// link saves its own neighbor 12ms, B's 11ms, past promotion's
+			// fifth, and moves the tier's price by nothing.
+			f.samples[selPeer] = sm(30 * ms)
+			f.carried(selA, 8*ms, 10*ms, f.via(t, selPeer, 0, selPeer, selA))
+			f.carried(selB, 9*ms, 10*ms, f.via(t, selPeer, 0, selPeer, selB))
+			f.carried(selC, 8*ms, 10*ms, f.via(t, selPeer, 0, selPeer, selC))
+			// D's 8ms round trip gains 22ms on its 30ms price, or 12ms on
+			// 20ms or on a 20ms lower bound: each beats the price.
+			viaX := measured(route(-time.Hour, 0, link(selX), link(selD)), tc.price)
+			if tc.low > 0 {
+				viaX.Low = &tc.low
+			}
+			f.candidate(selD, 8*ms, 0, viaX)
+			f.pass(t) // streak 1
+			f.pass(t) // streak 2
+			if !tc.displaces {
+				if len(f.established) != 0 || !f.sel.coord.promote.Equal(selD) {
+					t.Fatalf("promoted %v, announced %v; want the candidate announced and waiting",
+						f.established, f.sel.coord.promote)
+				}
+				return
+			}
+			if len(f.established) != 1 || !f.established[0].Equal(selD) {
+				t.Fatalf("promoted %v, want the candidate", f.established)
+			}
+			if f.state(t, selB) != links.StateRetired {
+				t.Error("the slower of the least-harm links was not displaced")
+			}
+			for _, ia := range []addr.IA{selPeer, selA, selC} {
+				if f.state(t, ia) != links.StateEstablished {
+					t.Errorf("displacement retired %s as well", ia)
+				}
+			}
+		})
+	}
+}
+
+// TestSelectionCapTakesWhatWouldNotEarnItsPlace checks the other way a link
+// yields its slot: one that would not earn its place today yields to a
+// candidate that earns a link, though it saves near what the candidate
+// gains.
+func TestSelectionCapTakesWhatWouldNotEarnItsPlace(t *testing.T) {
+	ms := time.Millisecond
+	neighbors := []addr.IA{selPeer, selA, selB, selC}
+	f := newSelFixture(t, neighbors...)
+	f.sel.cfg.MaxLinks = len(neighbors)
+	// Peer, far, sits alone in a tier no route prices. Over Peer's link, B
+	// and C price at 60ms, their 40ms round trips saving them 20ms, and A at
+	// 59ms, its 50ms round trip saving it 9ms: short of promotion's fifth,
+	// and within the band.
+	f.samples[selPeer] = sm(300 * ms)
+	f.carried(selA, 50*ms, 49*ms, f.via(t, selPeer, 0, selPeer, selA))
+	f.carried(selB, 40*ms, 50*ms, f.via(t, selPeer, 0, selPeer, selB))
+	f.carried(selC, 40*ms, 50*ms, f.via(t, selPeer, 0, selPeer, selC))
+	// D's 40ms round trip gains 11ms on its 51ms price: not A's 9ms by the
+	// line to buy.
+	f.candidate(selD, 40*ms, 51*ms)
+	f.pass(t) // streak 1
+	f.pass(t) // streak 2
+	if len(f.established) != 1 || !f.established[0].Equal(selD) {
+		t.Fatalf("promoted %v, want the candidate", f.established)
+	}
+	if f.state(t, selA) != links.StateRetired {
+		t.Error("the link that would not earn its place kept it")
 	}
 }
 
@@ -1963,6 +2055,38 @@ func TestSelectionCapCountsCandidates(t *testing.T) {
 	f.pass(t) // streak 2: at the cap, nothing qualifies for eviction
 	if len(f.established) != 0 {
 		t.Errorf("promoted %v past the candidate holding the cap's last place", f.established)
+	}
+}
+
+// TestSelectionCapRetryEvictsNothing checks an admission the far end does
+// not answer: the displacement frees one slot, the candidate's own entry
+// holds it, and the next window's retry evicts nothing more.
+func TestSelectionCapRetryEvictsNothing(t *testing.T) {
+	f := capFixture(t)
+	attempts := 0
+	f.sel.establishFn = func(_ context.Context, e target, _ string) bool {
+		attempts++
+		if !f.hasEntry(t, e.IA) {
+			if err := f.store.Insert(context.Background(),
+				neighborLink(e.IA, links.StateCandidate)); err != nil {
+				t.Error(err)
+			}
+		}
+		return false
+	}
+	f.pass(t) // streak 1
+	f.pass(t) // streak 2: evicts B, and the far end does not answer
+	f.pass(t) // the retry
+	if attempts != 2 {
+		t.Fatalf("establishments tried %d times, want 2", attempts)
+	}
+	if f.state(t, selB) != links.StateRetired {
+		t.Error("the displacement retired no link")
+	}
+	for _, ia := range []addr.IA{selPeer, selA, selC} {
+		if f.state(t, ia) != links.StateEstablished {
+			t.Errorf("the retry displaced %s as well", ia)
+		}
 	}
 }
 

@@ -403,6 +403,45 @@ func TestTierQualifies(t *testing.T) {
 	}
 }
 
+// TestTierGain checks what a candidate's direct round trip gains: its own
+// price less the round trip, the tier's price when no route prices the
+// member, and sure on the lower of the price and its lower bound; zero for
+// a member whose routes none read, for an unpriced tier, and for a round
+// trip that saves nothing, and the sure gain zero for a price no bound
+// bounds.
+func TestTierGain(t *testing.T) {
+	ms := time.Millisecond
+	unread := route(0, 30*ms, link(selX), link(selD))
+	priced := tier{
+		price:    10 * ms,
+		prices:   map[addr.IA]time.Duration{selA: 30 * ms, selB: 9 * ms, selE: 30 * ms, selPeer: 20 * ms},
+		low:      9 * ms,
+		lows:     map[addr.IA]time.Duration{selA: 24 * ms, selB: 8 * ms, selPeer: 26 * ms},
+		cheapest: map[addr.IA]*scion.Candidate{selD: &unread},
+	}
+	for _, tc := range []struct {
+		name       string
+		tier       tier
+		ia         addr.IA
+		direct     time.Duration
+		gain, sure time.Duration
+	}{
+		{"its own price", priced, selA, 20 * ms, 10 * ms, 4 * ms},
+		{"a round trip saving nothing", priced, selB, 12 * ms, 0, 0},
+		{"the tier's price", priced, selC, 7 * ms, 3 * ms, 2 * ms},
+		{"a price no bound bounds", priced, selE, 20 * ms, 10 * ms, 0},
+		{"a lower bound above the price", priced, selPeer, 10 * ms, 10 * ms, 10 * ms},
+		{"its routes none read", priced, selD, ms, 0, 0},
+		{"an unpriced tier", tier{}, selC, ms, 0, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if gain, sure := tc.tier.gain(tc.ia, tc.direct); gain != tc.gain || sure != tc.sure {
+				t.Errorf("gain = %v, %v, want %v, %v", gain, sure, tc.gain, tc.sure)
+			}
+		})
+	}
+}
+
 // TestJudgeOutside checks the useless test of a link the clustering does
 // not allow: decided once a survivor answered, whatever the prices; useful
 // while the exclusion would drop the route count or cut a member off, or no
@@ -602,5 +641,99 @@ func TestJudge(t *testing.T) {
 	unpriced.price = 0
 	if decided, _ := judge(unpriced, selA); decided {
 		t.Error("a tier no read route prices decided a link")
+	}
+}
+
+// TestOutgained checks the eviction's test against a candidate's gain: a
+// link yields its slot while every price it holds down — the tier's, each
+// priced member's, its own neighbor's against its direct round trip — saves
+// less than the gain by the promotion ratio and the margin floor, and the
+// bounds confirm it: the survivors' upper bound less the link's lower bound
+// beaten by the sure gain as well. A member cut off, a route lost, a bound
+// missing, or a gain the history does not confirm keeps the link its slot;
+// a member no survivor prices, or a survivor that did not answer, decides
+// nothing.
+func TestOutgained(t *testing.T) {
+	ms := time.Millisecond
+	type prices = map[addr.IA]time.Duration
+	// The link is A's, its round trip 10ms. B prices at 20ms over a route
+	// crossing the link, and so does the tier.
+	tierWith := func(ex excludedSample) *tier {
+		return &tier{
+			members:  []member{{ia: selA, direct: 10 * ms, low: 10 * ms}, {ia: selB, direct: 12 * ms}},
+			price:    20 * ms,
+			prices:   prices{selA: 16 * ms, selB: 20 * ms},
+			cheapest: make(map[addr.IA]*scion.Candidate),
+			routes:   2,
+			excluded: map[addr.IA]excludedSample{selA: ex},
+		}
+	}
+	// held is an excluded measurement saving the tier 5ms, A 8ms on its
+	// round trip, and B 6ms, its bounds those of steady routes; changed
+	// returns it changed.
+	held := func() excludedSample {
+		return excludedSample{
+			answered: true,
+			price:    25 * ms,
+			routes:   2,
+			prices:   prices{selA: 18 * ms, selB: 26 * ms},
+			cutOff:   make(map[addr.IA]bool),
+			crossed:  true,
+			low:      20 * ms,
+			high:     25 * ms,
+			lows:     prices{selB: 20 * ms},
+			highs:    prices{selA: 18 * ms, selB: 26 * ms},
+		}
+	}
+	changed := func(change func(ex *excludedSample)) excludedSample {
+		ex := held()
+		change(&ex)
+		return ex
+	}
+	// small saves A 2.5ms and nothing else.
+	small := changed(func(ex *excludedSample) {
+		ex.price, ex.high = 20*ms, 20*ms
+		ex.prices = prices{selA: 12500 * time.Microsecond, selB: 20 * ms}
+		ex.highs = maps.Clone(ex.prices)
+	})
+
+	for _, tc := range []struct {
+		name          string
+		ex            excludedSample
+		gain, sure    time.Duration
+		decided, weak bool
+	}{
+		{"every saving beaten", held(), 15 * ms, 15 * ms, true, true},
+		{"a gain the history does not confirm", held(), 15 * ms, 9 * ms, true, false},
+		{"a gain no bound confirms", held(), 15 * ms, 0, true, false},
+		{"the neighbor's saving within the ratio", held(), 9 * ms, 9 * ms, true, false},
+		{"the tier's saving within the ratio",
+			changed(func(ex *excludedSample) { ex.price, ex.high = 33*ms, 33*ms }), 15 * ms, 15 * ms, true, false},
+		{"another member's saving within the ratio",
+			changed(func(ex *excludedSample) { ex.prices[selB], ex.highs[selB] = 33*ms, 33*ms }), 15 * ms, 15 * ms, true, false},
+		{"past the margin floor", small, 5 * ms, 5 * ms, true, true},
+		{"within the margin floor", small, 4 * ms, 4 * ms, true, false},
+		{"no gain", held(), 0, 0, true, false},
+		{"the tier's saving bounded near the gain",
+			changed(func(ex *excludedSample) { ex.high = 33 * ms }), 15 * ms, 15 * ms, true, false},
+		{"a member's saving bounded near the gain",
+			changed(func(ex *excludedSample) { ex.highs[selB] = 33 * ms }), 15 * ms, 15 * ms, true, false},
+		{"the neighbor's saving bounded near the gain",
+			changed(func(ex *excludedSample) { ex.highs[selA] = 23 * ms }), 15 * ms, 15 * ms, true, false},
+		{"a saving the readings show and the history does not",
+			changed(func(ex *excludedSample) { ex.prices[selB] = 33 * ms }), 15 * ms, 15 * ms, true, false},
+		{"a bound missing", changed(func(ex *excludedSample) { delete(ex.highs, selB) }), 15 * ms, 15 * ms, true, false},
+		{"a member cut off", changed(func(ex *excludedSample) { ex.cutOff[selB] = true }), 15 * ms, 15 * ms, true, false},
+		{"a route lost", changed(func(ex *excludedSample) { ex.routes = 1 }), 15 * ms, 15 * ms, true, false},
+		{"a member no survivor prices",
+			changed(func(ex *excludedSample) { delete(ex.prices, selB) }), 15 * ms, 15 * ms, false, false},
+		{"the survivor unanswered", changed(func(ex *excludedSample) { ex.answered = false }), 15 * ms, 15 * ms, false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			decided, weak := outgained(tierWith(tc.ex), selA, tc.gain, tc.sure)
+			if decided != tc.decided || weak != tc.weak {
+				t.Errorf("outgained = (%v, %v), want (%v, %v)", decided, weak, tc.decided, tc.weak)
+			}
+		})
 	}
 }

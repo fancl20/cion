@@ -348,6 +348,24 @@ func yields(t *tier, ia addr.IA) (decided, weak bool) {
 	return true, confirmed(t, ia, func(low, high time.Duration) bool { return !gains(low, high) })
 }
 
+// outgained reads whether an up link yields its slot to a candidate gaining
+// gain on its price and sure as the tier's gain has it: judge's test,
+// with what the link saves each price it holds down — the price without it
+// less the price with it — beaten by the gain by the line to buy, and the
+// bounds confirming it: what the link saves at its lower bound against the
+// survivors' upper bound beaten by the sure gain as well. A link whose
+// saving noise holds near the gain keeps its slot.
+func outgained(t *tier, ia addr.IA, gain, sure time.Duration) (decided, weak bool) {
+	beaten := func(saving, gain time.Duration) bool {
+		return saving < ratioOf(gain, PromotionRatio) && gain-saving >= MarginFloor
+	}
+	decided, weak = weigh(t, ia, func(with, without time.Duration) bool { return !beaten(without-with, gain) })
+	if !decided || !weak {
+		return decided, weak
+	}
+	return true, confirmed(t, ia, func(low, high time.Duration) bool { return beaten(high-low, sure) })
+}
+
 // confirmed reports whether the history confirms a judgment of an up link:
 // for the tier, where a read route crosses the link, and for every member a
 // read route crossing the link reaches, the link's lower bound and the
@@ -464,6 +482,33 @@ func (t *tier) beats(ia addr.IA, direct, high time.Duration) bool {
 		return true
 	}
 	return gains(direct, price) && high > 0 && gains(high, low)
+}
+
+// gain returns what the member's direct round trip saves on its own price,
+// the tier's when no route prices the member, as beats reads the two: on
+// the price's reading, and sure, on the lower of the price's reading and
+// its lower bound. Noise raises round trips: a price's reading long before
+// its lower bound, which then stays up a while after the noise ends, and a
+// direct round trip only to shrink the gain, so the sure gain is the one
+// both the readings and the history confirm. Zero for an unpriced tier,
+// for a member whose routes none read, and for a direct side that saves
+// nothing; the sure gain zero as well for a lower bound the probes do not
+// give.
+func (t *tier) gain(ia addr.IA, direct time.Duration) (gain, sure time.Duration) {
+	if t.price == 0 {
+		return 0, 0
+	}
+	price, low := t.prices[ia], t.lows[ia]
+	if price == 0 {
+		if t.cheapest[ia] != nil {
+			return 0, 0
+		}
+		price, low = t.price, t.low
+	}
+	if low > 0 {
+		sure = max(min(price, low)-direct, 0)
+	}
+	return max(price-direct, 0), sure
 }
 
 // gains reports whether a round trip of to gains on one of from what the
