@@ -12,7 +12,6 @@ import (
 	"github.com/fancl20/cion/internal/testnetwork"
 	"github.com/fancl20/cion/internal/testnetwork/fabric"
 	"github.com/fancl20/cion/pkg/core/webpki/webpkitest"
-	"github.com/fancl20/cion/pkg/libs/scion"
 )
 
 // metrosOneWay is the metros lab's one-way delay matrix in microseconds.
@@ -139,17 +138,6 @@ func TestBenchMetrosDelayLowered(t *testing.T) {
 			benchValue{held, "formed"},
 		)
 	})
-}
-
-// readMoved reads the leases once, and again past the hold a lease keeps a
-// cheaper path waiting, and returns the second read: a lease moves to a
-// cheaper path once its evaluations found it cheaper for
-// scion.LeaseSwitchHold, and a phase reads no lease before it ends.
-func readMoved(t *testing.T, n *network) paths {
-	t.Helper()
-	readPaths(t, n, false)
-	time.Sleep(scion.LeaseSwitchHold + scion.LeaseEvaluation)
-	return readPaths(t, n, false)
 }
 
 // phaseWatch bounds the wait for a phase's condition in virtual time.

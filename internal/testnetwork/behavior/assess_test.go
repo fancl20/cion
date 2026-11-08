@@ -16,6 +16,7 @@ import (
 	spath "github.com/scionproto/scion/pkg/slayers/path/scion"
 
 	"github.com/fancl20/cion/internal/testnetwork"
+	"github.com/fancl20/cion/pkg/libs/scion"
 	"github.com/fancl20/cion/pkg/libs/segment"
 	"github.com/fancl20/cion/pkg/modules/links"
 	"github.com/fancl20/cion/pkg/modules/pathdb"
@@ -114,7 +115,7 @@ func summarize(xs []float64) summary {
 // would need. The founding core is the network's first node.
 func assess(t *testing.T, n *network, penalties ...time.Duration) []assessment {
 	t.Helper()
-	r := readPaths(t, n, false)
+	r := readMoved(t, n)
 	upChosen, upStored := countChosen(t, n.nodes[1:], pathdb.SegmentTypeUp, r.routes)
 	downChosen, downStored := countChosen(t, n.nodes[:1], pathdb.SegmentTypeDown, r.routes)
 	cuts := singleCuts(len(n.nodes), r.formed.edges)
@@ -197,6 +198,23 @@ func readPaths(t *testing.T, n *network, candidates bool) paths {
 		}
 	}
 	return r
+}
+
+// readMoved reads every ordered pair's chosen path as a flow that starts
+// reading its leases holds it once they had time to move, for a network
+// that read no lease for a while: a lease moves to a cheaper path once its
+// evaluations found the path healthy and cheaper for scion.LeaseSwitchHold,
+// and a destination nothing read lets its paths' probes lapse. The first
+// read requests the destinations' paths, which the prober probes at once;
+// the second finds a cheaper path healthy; the third, past the hold, finds
+// the lease moved. It returns the third read.
+func readMoved(t *testing.T, n *network) paths {
+	t.Helper()
+	for range 2 {
+		readPaths(t, n, false)
+		time.Sleep(scion.LeaseSwitchHold + scion.LeaseEvaluation)
+	}
+	return readPaths(t, n, false)
 }
 
 // grade grades the read at the penalty against the penalized shortest

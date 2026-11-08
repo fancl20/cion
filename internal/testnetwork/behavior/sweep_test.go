@@ -120,7 +120,7 @@ func sweep(t *testing.T, n *network, link [2]int, imp impairment) []level {
 			}
 		}
 		lv.stands = stands
-		read := readPaths(t, n, false)
+		read := readMoved(t, n)
 		lv.grading = read.grade(n, penalty)
 		for _, hops := range read.chosen {
 			if crosses(hops, link) {
@@ -180,7 +180,7 @@ func reportSweep(t *testing.T, name string, imp impairment, link [2]int, levels 
 // paths cross that no single cut needs.
 func benchSweep(t *testing.T, n *network, name string, imp impairment) {
 	t.Helper()
-	link, ok := mostCrossed(n, readPaths(t, n, false))
+	link, ok := mostCrossed(n, readMoved(t, n))
 	if !ok {
 		t.Skip("every formed link is a single cut")
 	}

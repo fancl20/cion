@@ -216,7 +216,7 @@ func reportResponse(t *testing.T, name string, r response, extra ...string) {
 // network's answer, lifts the cut, and measures the answer again.
 func benchCut(t *testing.T, n *network, name string) {
 	t.Helper()
-	before := readPaths(t, n, false)
+	before := readMoved(t, n)
 	target := before.grade(n, penalty).reached
 	link, ok := mostCrossed(n, before)
 	if !ok {
@@ -248,7 +248,7 @@ func benchCut(t *testing.T, n *network, name string) {
 // measures the answer again.
 func benchDelayRaised(t *testing.T, n *network, name string) {
 	t.Helper()
-	before := readPaths(t, n, false)
+	before := readMoved(t, n)
 	target := before.grade(n, penalty).reached
 	link, ok := mostCrossed(n, before)
 	if !ok {
@@ -268,7 +268,7 @@ func benchDelayRaised(t *testing.T, n *network, name string) {
 // measures the answer again.
 func benchDelayLowered(t *testing.T, n *network, name string) {
 	t.Helper()
-	before := readPaths(t, n, false)
+	before := readMoved(t, n)
 	target := before.grade(n, penalty).reached
 	unlinked, cost, ok := worstUnlinked(n, before)
 	if !ok {

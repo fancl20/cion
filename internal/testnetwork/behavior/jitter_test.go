@@ -96,7 +96,7 @@ func sweepJitter(t *testing.T, n *network) []spread {
 				break
 			}
 		}
-		sp.grading = readPaths(t, n, false).grade(n, penalty)
+		sp.grading = readMoved(t, n).grade(n, penalty)
 		spreads = append(spreads, sp)
 	}
 	set(0)
@@ -180,7 +180,7 @@ func compareLinks(a, b [2]int) int {
 // already bursting is skipped.
 func benchBursts(t *testing.T, n *network, name string) {
 	t.Helper()
-	before := readPaths(t, n, false)
+	before := readMoved(t, n)
 	target := before.grade(n, penalty).reached
 	schedule := burstSchedule()
 	// active holds the bursting links, each with its delay before the
