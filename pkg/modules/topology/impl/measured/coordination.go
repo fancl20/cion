@@ -1,6 +1,7 @@
 package measured
 
 import (
+	"maps"
 	"slices"
 	"time"
 
@@ -280,6 +281,44 @@ func (v *coordView) crosses(links []segment.LinkID, p pair) bool {
 	return false
 }
 
+// cycleOf returns the announced retirements that rest on the pair's and on
+// which it rests, each through announced retirements: a retirement rests on
+// another while the routes it judged its link by cross that link. The
+// pair's own rest on relies, whatever its announcement holds.
+func (v *coordView) cycleOf(mine pair, relies []segment.LinkID) map[pair]bool {
+	restsOn := func(p, q pair) bool {
+		if p == mine {
+			return v.crosses(relies, q)
+		}
+		return v.crosses(v.retiring[p].relies, q)
+	}
+	others := slices.DeleteFunc(slices.Collect(maps.Keys(v.retiring)), func(p pair) bool { return p == mine })
+	reach := func(from pair, edge func(a, b pair) bool) map[pair]bool {
+		seen := map[pair]bool{}
+		frontier := []pair{from}
+		for len(frontier) > 0 {
+			x := frontier[0]
+			frontier = frontier[1:]
+			for _, y := range others {
+				if !seen[y] && edge(x, y) {
+					seen[y] = true
+					frontier = append(frontier, y)
+				}
+			}
+		}
+		return seen
+	}
+	ahead := reach(mine, restsOn)
+	behind := reach(mine, func(a, b pair) bool { return restsOn(b, a) })
+	cycle := map[pair]bool{}
+	for p := range ahead {
+		if behind[p] {
+			cycle[p] = true
+		}
+	}
+	return cycle
+}
+
 // departedLink is a link that left after its node announced its
 // retirement: when, and its ends' interfaces.
 type departedLink struct {
@@ -445,17 +484,22 @@ func (c *coordState) lagging(
 
 // waitsToRetire reports whether the node's retirement of its link to the
 // peer waits on another node's: while the routes it judged the link by cross
-// a link another node announced to retire — unless that node's routes cross
-// this link too and this link is the heavier, which then goes first — or a
-// link whose announced retirement left the links within scion.StaleAfter,
-// whose routes the measurements may not have caught dead yet.
+// a link another node announced to retire — unless the two retirements rest
+// on each other, directly or through other announced retirements, and this
+// link is the heaviest of the cycle, which then goes first — or a link whose
+// announced retirement left the links within scion.StaleAfter, whose routes
+// the measurements may not have caught dead yet.
 func (c *coordState) waitsToRetire(v *coordView, self, peer addr.IA, relies []segment.LinkID) bool {
 	mine := pairOf(self, peer)
+	cycle := v.cycleOf(mine, relies)
+	heaviest := !slices.ContainsFunc(slices.Collect(maps.Keys(cycle)), func(p pair) bool {
+		return lighter(mine, v.weight[mine], p, v.weight[p])
+	})
 	for p, r := range v.retiring {
 		if r.by == self || p == mine || !v.crosses(relies, p) {
 			continue
 		}
-		if v.crosses(r.relies, mine) && lighter(p, v.weight[p], mine, v.weight[mine]) {
+		if cycle[p] && heaviest {
 			continue
 		}
 		return true

@@ -81,3 +81,24 @@ more, where the new rule's heaviest goes.
     links' waits hold.
 *   **The labs.** The labs pass, and the NAT lab's settled benchmark runs
     against the commit before, five runs each.
+
+## Implementation history
+
+*   **Finding the cycle.** An instrumented NAT run logged each retirement's
+    wait: four outside links' retirements rested on each other in a cycle,
+    each on the next, and two more on the cycle, none of them mutual, so
+    the heavier-first rule never applied, and the six links stayed until
+    the lab ended.
+*   Mutations: 5 of 5 killed.
+*   The pipeline passed.
+*   Benchmarks against the commit before:
+    *   The NAT lab settled on 16 or 17 links in eight runs of eight, after
+        10 to 13 changes within 5.5 to 7.5 minutes, every pair reached;
+        against two runs of eight that settled on 21 links with six
+        retirements announced and never made, and six on 15 to 17.
+    *   The regions lab settled on 30 links after 17 and 20 changes within
+        7.2 and 9 minutes, and the metros lab on 26 links after 19 within
+        10.2, their worst pairs at 1.01 and 1.06, as before. After a
+        regions cut, reach held from 10 seconds and the links settled
+        within 10, the worst pair at 1.06; after the restore, within 50,
+        as before.

@@ -308,9 +308,9 @@ func TestWaitsToPromoteLagging(t *testing.T) {
 }
 
 // TestWaitsToRetire checks the retirement waits: on an announced retirement
-// of a link the node's routes rely on, unless that node relies on the node's
-// link too and that link is the lighter; on a retired link the routes still
-// cross; and on nothing else.
+// of a link the node's routes rely on, unless the two rest on each other,
+// directly or through a third, and the node's link is the cycle's heaviest;
+// on a retired link the routes still cross; and on nothing else.
 func TestWaitsToRetire(t *testing.T) {
 	now := time.Now()
 	// S retires its link to M (10 ms); O announces retiring its link to P.
@@ -343,6 +343,47 @@ func TestWaitsToRetire(t *testing.T) {
 			v := newCoordView(coReports(tc.reports))
 			c.observe(v, now)
 			if got := c.waitsToRetire(v, coS, coM, tc.relies); got != tc.want {
+				t.Errorf("waits = %v, want %v", got, tc.want)
+			}
+		})
+	}
+
+	// A cycle of three: S rests on O's retirement, O on T's, and T, at the
+	// round trip given, on S's; or T on nothing, a chain.
+	cycle := func(tpRTT time.Duration, tRestsOnS bool) map[addr.IA][]bus.PeerReport {
+		reports := make(map[addr.IA][]bus.PeerReport)
+		coLink(reports, coS, 1, coM, 1, 10*time.Millisecond)
+		coLink(reports, coO, 2, coP, 2, 5*time.Millisecond)
+		coLink(reports, coT, 3, coP, 3, tpRTT)
+		announce := func(by, peer addr.IA, relies []segment.LinkID) {
+			for i, r := range reports[by] {
+				if r.IA == peer {
+					reports[by][i].Retiring, reports[by][i].Relies = true, relies
+				}
+			}
+		}
+		announce(coO, coP, []segment.LinkID{{IA: coT, IfID: 3}})
+		var tRelies []segment.LinkID
+		if tRestsOnS {
+			tRelies = mineCrossed
+		}
+		announce(coT, coP, tRelies)
+		return reports
+	}
+	for _, tc := range []struct {
+		name    string
+		reports map[addr.IA][]bus.PeerReport
+		want    bool
+	}{
+		{"a cycle, its link the heaviest", cycle(7*time.Millisecond, true), false},
+		{"a cycle, another link heavier", cycle(20*time.Millisecond, true), true},
+		{"a chain, its link the heaviest", cycle(7*time.Millisecond, false), true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := &coordState{}
+			v := newCoordView(coReports(tc.reports))
+			c.observe(v, now)
+			if got := c.waitsToRetire(v, coS, coM, relies); got != tc.want {
 				t.Errorf("waits = %v, want %v", got, tc.want)
 			}
 		})
