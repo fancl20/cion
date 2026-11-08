@@ -244,7 +244,10 @@ that a node's candidates are its cluster's members and the far ends of the
 links between clusters it holds; ADR-0032's decision 5, under which scopes
 follow addresses alone; ADR-0036's decision 4, so that a node's beacons also
 cover each link into its cluster; and ADR-0037's decision 1, so that an
-entry reports the round trips of its own scope.
+entry reports the round trips of its own scope. Links settle only where
+their retirements can go, so this narrows ADR-0037's decision 6 as well:
+retirements that rest on each other in a cycle let the cycle's heaviest link
+go first, as two that rest on each other do.
 
 ### Positive consequences
 
@@ -254,8 +257,9 @@ entry reports the round trips of its own scope.
 *   Each threshold traces to a cost or a worth the system defines, so a
     change to the path policy's band, or to what a link costs, carries
     through to the lines.
-*   A link that nothing chooses still goes, and a route that beats the
-    others by what a link costs still gets its link.
+*   A link that nothing chooses still goes, even when its retirement rests
+    on others in a cycle, and a route that beats the others by what a link
+    costs still gets its link.
 *   A gain the history confirms buys its link once the path policy would
     move for it, however small beside the price: a long path whose gain
     falls short of a reading's room for error still gets the link.
