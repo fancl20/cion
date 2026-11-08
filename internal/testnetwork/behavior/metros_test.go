@@ -62,13 +62,14 @@ func TestMetrosSettle(t *testing.T) {
 }
 
 // TestBenchMetrosSettled benchmarks the metros network once its clusters
-// formed and it settled.
+// formed and it settled, and the candidates' probes it sends after.
 func TestBenchMetrosSettled(t *testing.T) {
 	requireBench(t)
 	testnetwork.InBubble(t, func(t *testing.T, fab *fabric.Fabric, wpki *webpkitest.CA) {
 		n := bootMetros(t, fab, wpki)
 		s := awaitSettled(t, n, settleQuiet, metrosBudget)
 		report(t, "MetrosSettled", s, assess(t, n, penalty, 0))
+		reportProbes(t, n, "MetrosProbes", metrosGroups)
 	})
 }
 

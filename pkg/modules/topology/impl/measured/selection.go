@@ -73,6 +73,12 @@ const (
 	ProbeRuns = 3
 	// ProbeWait bounds the wait for each echo reply.
 	ProbeWait = time.Second
+	// SparseProbe is how often the window probes a candidate the clustering
+	// holds in reserve: a third of scion.ReadingSpan, so that each reading
+	// span holds two runs or more, past scion.ReadingSamples round trips,
+	// and each bound span the fourteen an upper bound needs, while a window
+	// lasts under a sixth of the reading span.
+	SparseProbe = scion.ReadingSpan / 3
 	// CandidateWindow is how long an unproven candidate lives: a peer whose
 	// confirm never lands within it retires.
 	CandidateWindow = time.Minute
@@ -172,11 +178,13 @@ type SelectionConfig struct {
 
 // RunSelection runs the topology loop until the context is canceled: each
 // evaluation window it sweeps the candidates, measures every peer the
-// directory names by its direct side, prices the routes into it by their
-// health and reading, requests the routes it prices measured, classes the
-// samples into tiers with their facts and excluded measurements, and lands
-// promotion and retirement decisions in the link store — each change a data
-// plane generation swap the node assembly's supervisor performs.
+// directory names by its direct side — a candidate the clustering holds in
+// reserve once per SparseProbe, from its history between — prices the
+// routes into it by their health and reading, requests the routes it prices
+// measured, classes the samples into tiers with their facts and excluded
+// measurements, and lands promotion and retirement decisions in the link
+// store — each change a data plane generation swap the node assembly's
+// supervisor performs.
 func RunSelection(ctx context.Context, cfg SelectionConfig) {
 	s := &selection{cfg: cfg}
 	interval := cfg.Interval
@@ -226,6 +234,11 @@ type selection struct {
 	// each peer last.
 	history map[instrument][]heard
 	last    map[addr.IA]instrument
+	// reserve holds the peers the last window's clustering holds in reserve
+	// — the node links them only for the floor or a stranded tier — and
+	// runs each candidate's last answered run.
+	reserve map[addr.IA]bool
+	runs    map[addr.IA]run
 	// failed holds each candidate's last establishment failure, so a
 	// failure repeating window after window warns once.
 	failed map[addr.IA]string
@@ -254,6 +267,13 @@ type instrument struct {
 type heard struct {
 	at  time.Time
 	rtt time.Duration
+}
+
+// run is a candidate's answered run: when it went, and the address it
+// probed.
+type run struct {
+	at time.Time
+	to target
 }
 
 // target is a peer as the window probes and dials it: its ISD-AS, and one
@@ -320,11 +340,14 @@ func (s *selection) pass(ctx context.Context) {
 
 	neighbors := s.neighbors(entries) // established, by IA
 	peers := s.peers()
+	belowFloor := s.upCount(neighbors) < NeighborFloor
 
 	// Probe every peer the views name — neighbor and candidate alike (the
 	// comparator never stops at admission) — each by its own carrier: the
 	// neighbor's direct side over the one-hop path, the candidate's by
 	// rendezvous echo at the address chosen among the ones its entries name.
+	// A candidate the window probes sparsely is read from its history
+	// between its runs.
 	samples := make(map[addr.IA]sample)
 	candidates := make([]target, 0, len(peers))
 	for _, p := range peers {
@@ -332,12 +355,19 @@ func (s *selection) pass(ctx context.Context) {
 			continue
 		}
 		if l, ok := neighbors[p.IA]; ok {
+			delete(s.runs, p.IA)
 			samples[p.IA] = s.measure(ctx, p.targets[0], l)
+			continue
+		}
+		if t, ok := s.sparse(p, belowFloor); ok {
+			candidates = append(candidates, t)
+			samples[p.IA] = s.held(ctx, t)
 			continue
 		}
 		t := s.choose(ctx, p)
 		candidates = append(candidates, t)
 		samples[p.IA] = s.measure(ctx, t, nil)
+		s.ran(t, samples[p.IA])
 	}
 	ts := s.windowTiers(neighbors, samples)
 	if ctx.Err() != nil {
@@ -371,6 +401,7 @@ func (s *selection) pass(ctx context.Context) {
 		s.cluster = joined
 	}
 	v.units = newUnits(v, s.cfg.IA, s.cluster)
+	s.reserve = s.reserved(v, samples)
 	s.publishCluster(v.units)
 	s.count(v, neighbors, ts)
 	// Damp the promotions: a candidate is promoted on sustained evidence
@@ -607,14 +638,51 @@ func (s *selection) measure(
 	return sm
 }
 
+// sparse returns the address of a candidate the window probes sparsely and
+// reads from its history now, and whether it is one: the last window's
+// clustering held the candidate in reserve, the node's up links meet the
+// floor, and the candidate's last run answered, less than SparseProbe ago,
+// at an address its entries still name.
+func (s *selection) sparse(p peer, belowFloor bool) (target, bool) {
+	r, ok := s.runs[p.IA]
+	if !ok || belowFloor || !s.reserve[p.IA] || time.Since(r.at) >= SparseProbe ||
+		!slices.Contains(p.targets, r.to) {
+		return target{}, false
+	}
+	return r.to, true
+}
+
+// ran records a candidate's run: an answered one starts its wait for the
+// next, and an unanswered one leaves it none, so the next window probes it
+// again.
+func (s *selection) ran(t target, sm sample) {
+	if sm.direct == 0 {
+		delete(s.runs, t.IA)
+		return
+	}
+	if s.runs == nil {
+		s.runs = make(map[addr.IA]run)
+	}
+	s.runs[t.IA] = run{at: time.Now(), to: t}
+}
+
+// held reads a candidate the window does not probe now: the reading and
+// bounds of the round trips its last instrument holds, beside the routes to
+// it as a probe enumerates them.
+func (s *selection) held(ctx context.Context, t target) sample {
+	sm := s.routes(ctx, t.IA)
+	sm.direct, sm.lo, sm.hi = readingOf(s.history[s.last[t.IA]], time.Now())
+	return sm
+}
+
 // read adds the window's answered round trips to the instrument's samples,
-// drops those taken more than scion.BoundSpan before now, and returns the
-// reading of the samples within scion.ReadingSpan beside the bounds of all
-// it keeps; zeros when the window's probes went unanswered. An instrument
-// holding no sample within the reading's span starts from those of the
-// instrument that read the peer last, round trips of the same peer: a link
-// reads on from the binding requests that promoted it, and a retired link's
-// peer from the link's echoes, rather than from one window's samples alone.
+// drops those taken more than scion.BoundSpan before now, and returns their
+// reading and bounds as readingOf returns them; zeros when the window's
+// probes went unanswered. An instrument holding no sample within the
+// reading's span starts from those of the instrument that read the peer
+// last, round trips of the same peer: a link reads on from the binding
+// requests that promoted it, and a retired link's peer from the link's
+// echoes, rather than from one window's samples alone.
 func (s *selection) read(by instrument, rtts []time.Duration, now time.Time) (reading, lo, hi time.Duration) {
 	if s.history == nil {
 		s.history = make(map[instrument][]heard)
@@ -638,12 +706,25 @@ func (s *selection) read(by instrument, rtts []time.Duration, now time.Time) (re
 	if len(rtts) == 0 {
 		return 0, 0, 0
 	}
+	return readingOf(kept, now)
+}
+
+// readingOf returns the reading of the round trips heard within
+// scion.ReadingSpan before now, beside the bounds of those heard within
+// scion.BoundSpan; zeros when none lies within the reading's span.
+func readingOf(hs []heard, now time.Time) (reading, lo, hi time.Duration) {
 	var all, read []time.Duration
-	for _, h := range kept {
+	for _, h := range hs {
+		if now.Sub(h.at) > scion.BoundSpan {
+			continue
+		}
 		all = append(all, h.rtt)
-		if recent(h) {
+		if now.Sub(h.at) <= scion.ReadingSpan {
 			read = append(read, h.rtt)
 		}
+	}
+	if len(read) == 0 {
+		return 0, 0, 0
 	}
 	lo, hi = scion.ReadingBounds(all)
 	return scion.Reading(read), lo, hi
@@ -652,7 +733,7 @@ func (s *selection) read(by instrument, rtts []time.Duration, now time.Time) (re
 // forget drops the instruments whose samples all lie more than
 // scion.BoundSpan before now — the instruments of retired links and of
 // addresses no longer probed — and the peers whose last instrument went,
-// with their last establishment failure.
+// with their last establishment failure and their last run.
 func (s *selection) forget(now time.Time) {
 	for by, hs := range s.history {
 		if now.Sub(hs[len(hs)-1].at) > scion.BoundSpan {
@@ -667,6 +748,11 @@ func (s *selection) forget(now time.Time) {
 	for ia := range s.failed {
 		if _, ok := s.last[ia]; !ok {
 			delete(s.failed, ia)
+		}
+	}
+	for ia := range s.runs {
+		if _, ok := s.last[ia]; !ok {
+			delete(s.runs, ia)
 		}
 	}
 }
@@ -706,10 +792,8 @@ func (s *selection) establish(ctx context.Context, e target, why string) bool {
 // send over — its verdict down — fails its writes at once, and answers
 // nothing. The binding requests record nothing at the candidate. It returns
 // the round trips answered and the instrument that took them, beside the
-// routes to the peer, each priced by its reading, its baseline the freshest
-// clean one.
+// routes to the peer.
 func (s *selection) probe(ctx context.Context, e target, l *links.Link) (sample, instrument, []time.Duration) {
-	var sm sample
 	var by instrument
 	var rtts []time.Duration
 	switch {
@@ -724,18 +808,25 @@ func (s *selection) probe(ctx context.Context, e target, l *links.Link) (sample,
 	default:
 		by, rtts = instrument{ia: e.IA, at: e.RendezvousAddr}, s.rendezvousSamples(ctx, e.RendezvousAddr)
 	}
+	return s.routes(ctx, e.IA), by, rtts
+}
+
+// routes enumerates the routes to the peer, each priced by its reading, its
+// baseline the freshest clean one; none when the enumeration fails.
+func (s *selection) routes(ctx context.Context, ia addr.IA) sample {
+	var sm sample
 	lookupCtx, cancel := context.WithTimeout(ctx, ProbeWait*ProbeRuns+time.Second)
 	defer cancel()
-	candidates, err := s.cfg.Paths.Enumerate(lookupCtx, e.IA)
+	candidates, err := s.cfg.Paths.Enumerate(lookupCtx, ia)
 	if err != nil {
-		return sm, by, rtts
+		return sm
 	}
 	for i := range candidates {
 		candidates[i].Cost = candidates[i].Reading
 	}
 	sm.candidates = candidates
 	sm.baseline = s.freshest(candidates)
-	return sm, by, rtts
+	return sm
 }
 
 // rendezvousSamples takes up to ProbeRuns binding requests to the
@@ -1037,6 +1128,18 @@ func (s *selection) promote(
 // peer.
 func (s *selection) allowed(v *coordView, ia addr.IA) bool {
 	return v.units.allowed(v, s.cfg.IA, ia)
+}
+
+// reserved returns the peers the window measured that its clustering holds
+// in reserve: the ones it does not let the node link.
+func (s *selection) reserved(v *coordView, samples map[addr.IA]sample) map[addr.IA]bool {
+	out := make(map[addr.IA]bool)
+	for ia := range samples {
+		if !s.allowed(v, ia) {
+			out[ia] = true
+		}
+	}
+	return out
 }
 
 // preferAllowed returns the first candidate that takes, among those the

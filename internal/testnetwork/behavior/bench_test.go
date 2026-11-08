@@ -2,13 +2,17 @@ package behavior
 
 import (
 	"fmt"
+	"net/netip"
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/fancl20/cion/internal/testnetwork"
 	"github.com/fancl20/cion/internal/testnetwork/fabric"
 	"github.com/fancl20/cion/pkg/core/webpki/webpkitest"
+	"github.com/fancl20/cion/pkg/libs/scion"
+	"github.com/fancl20/cion/pkg/modules/topology/impl/measured"
 )
 
 // requireBench skips a benchmark unless CION_BENCH asks for the
@@ -54,6 +58,45 @@ func reportValues(t *testing.T, name string, values ...benchValue) {
 	line := fields(values)
 	t.Logf("%s: %s", name, line)
 	fmt.Printf("Benchmark%s 1 %s\n", name, line)
+}
+
+// probeSpan is how long reportProbes tallies the probes: three reading
+// spans.
+const probeSpan = 3 * scion.ReadingSpan
+
+// reportProbes tallies the datagrams the nodes send to each other's
+// rendezvous sockets — the candidates' probes — over probeSpan, and reports
+// them per node and minute, between two nodes of one group and across two
+// groups.
+func reportProbes(t *testing.T, n *network, name string, groups [][]int) {
+	t.Helper()
+	counts := n.fab.Tally(measured.RendezvousPort)
+	time.Sleep(probeSpan)
+	group := make(map[netip.Addr]int)
+	for g, members := range groups {
+		for _, i := range members {
+			group[n.hosts[i]], group[n.wire[i]] = g, g
+		}
+	}
+	var inside, across int
+	for pair, c := range counts() {
+		from, ok := group[pair[0]]
+		to, ok2 := group[pair[1]]
+		switch {
+		case !ok || !ok2:
+		case from == to:
+			inside += c
+		default:
+			across += c
+		}
+	}
+	perNodeMinute := func(c int) float64 {
+		return float64(c) / float64(len(n.nodes)) / probeSpan.Minutes()
+	}
+	reportValues(t, name,
+		benchValue{perNodeMinute(inside), "inside-per-node-min"},
+		benchValue{perNodeMinute(across), "across-per-node-min"},
+	)
 }
 
 // metrics renders an assessment and the settling before it as a benchmark

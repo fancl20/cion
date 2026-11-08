@@ -1,6 +1,7 @@
 package fabric
 
 import (
+	"maps"
 	"net/netip"
 
 	"gvisor.dev/gvisor/pkg/tcpip/header"
@@ -11,6 +12,13 @@ import (
 type watch struct {
 	dst   netip.AddrPort
 	heard map[netip.Addr]bool
+}
+
+// tally is one drawn count: the port it counts at, and the UDP datagrams
+// the fabric delivered there, by their source and destination hosts.
+type tally struct {
+	port  uint16
+	count map[[2]netip.Addr]int
 }
 
 // Watch records the hosts whose UDP datagrams the fabric delivers to the
@@ -29,19 +37,42 @@ func (f *Fabric) Watch(dst netip.AddrPort) (heard func(src netip.Addr) bool) {
 	}
 }
 
+// Tally counts the UDP datagrams the fabric delivers to the port on any
+// host from now on, as the destinations receive them, after every NAT
+// between, by their source and destination hosts; the returned counts
+// reports the tally so far. The tally holds for the fabric's life.
+func (f *Fabric) Tally(port uint16) (counts func() map[[2]netip.Addr]int) {
+	t := &tally{port: port, count: make(map[[2]netip.Addr]int)}
+	f.mtx.Lock()
+	f.tallies = append(f.tallies, t)
+	f.mtx.Unlock()
+	return func() map[[2]netip.Addr]int {
+		f.mtx.Lock()
+		defer f.mtx.Unlock()
+		return maps.Clone(t.count)
+	}
+}
+
 // recordLocked notes the packet in the watches on the address it is
-// delivered to; the caller holds the fabric's lock.
+// delivered to and in the tallies on its port; the caller holds the
+// fabric's lock.
 func (f *Fabric) recordLocked(dst netip.Addr, pkt []byte) {
 	ip := header.IPv4(pkt)
-	if len(f.watches) == 0 || ip.TransportProtocol() != header.UDPProtocolNumber ||
+	if len(f.watches) == 0 && len(f.tallies) == 0 || ip.TransportProtocol() != header.UDPProtocolNumber ||
 		len(pkt) < int(ip.HeaderLength())+header.UDPMinimumSize {
 		return
 	}
-	to := netip.AddrPortFrom(dst, udpOf(pkt).DestinationPort())
+	port := udpOf(pkt).DestinationPort()
+	to := netip.AddrPortFrom(dst, port)
 	src := toNetip(ip.SourceAddress())
 	for _, w := range f.watches {
 		if w.dst == to {
 			w.heard[src] = true
+		}
+	}
+	for _, t := range f.tallies {
+		if t.port == port {
+			t.count[[2]netip.Addr{src, dst}]++
 		}
 	}
 }

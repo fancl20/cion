@@ -187,6 +187,46 @@ func TestWatchHearsDeliveredDatagrams(t *testing.T) {
 	}
 }
 
+// TestTallyCountsDeliveredDatagrams checks the fabric's tally: it counts
+// the datagrams delivered to its port by their source and destination
+// hosts, and none delivered before it was drawn, dropped by a tap, or
+// addressed to another port.
+func TestTallyCountsDeliveredDatagrams(t *testing.T) {
+	f := New(t)
+	a, b, s := f.Node(insideAddr), f.Node(upstreamAddr), f.Node(strangerAddr)
+	ca, _ := listen(t, a)
+	cs, _ := listen(t, s)
+	cb, tallied := listen(t, b)
+	co, other := listen(t, b)
+	arrives := func(from underlay.UDPConn, to netip.AddrPort, at underlay.UDPConn) bool {
+		send(t, from, to, "tallied")
+		got, _ := recv(t, at, testWait)
+		return got == "tallied"
+	}
+
+	if !arrives(ca, tallied, cb) {
+		t.Fatal("the datagram before the tally did not arrive")
+	}
+	counts := f.Tally(tallied.Port())
+	lift := f.Blackhole(strangerAddr, upstreamAddr)
+	if arrives(cs, tallied, cb) {
+		t.Fatal("the blackhole let a datagram through")
+	}
+	lift()
+	if !arrives(cs, other, co) {
+		t.Fatal("the datagram to the other port did not arrive")
+	}
+	for range 2 {
+		if !arrives(ca, tallied, cb) {
+			t.Fatal("a datagram to the tallied port did not arrive")
+		}
+	}
+	got := counts()
+	if len(got) != 1 || got[[2]netip.Addr{insideAddr, upstreamAddr}] != 2 {
+		t.Errorf("the tally counted %v, want the two datagrams from %v to %v", got, insideAddr, upstreamAddr)
+	}
+}
+
 // TestNamesResolveOnEveryStack checks the fabric's names: a name the lab
 // drew resolves to its host through every node's socket source, an IPv6
 // resolution of it answers nothing, and a name the lab never drew is refused

@@ -59,10 +59,10 @@ type Fabric struct {
 	wg     sync.WaitGroup
 
 	// mtx guards the drawn network: the stacks by host, the taps, the
-	// NATs, the names, and the watches, beside when the last packet of each
-	// jittered direction is due. A packet's walk from one stack to another
-	// reads it twice — once for the taps, once for the destination — so no
-	// tap draw or node boot waits on a packet in flight.
+	// NATs, the names, the watches, and the tallies, beside when the last
+	// packet of each jittered direction is due. A packet's walk from one
+	// stack to another reads it twice — once for the taps, once for the
+	// destination — so no tap draw or node boot waits on a packet in flight.
 	mtx     sync.Mutex
 	hosts   map[netip.Addr]*Node
 	taps    []*tap
@@ -70,6 +70,7 @@ type Fabric struct {
 	nats    []*NAT
 	names   map[string]netip.Addr
 	watches []*watch
+	tallies []*tally
 	closed  bool
 
 	// udpOnly boots every stack with the UDP transport alone.

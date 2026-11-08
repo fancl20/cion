@@ -172,10 +172,24 @@ func newSelFixture(t *testing.T, neighbors ...addr.IA) *selFixture {
 	}
 	f.sel.cfg.Directory = f.directoryTopic
 	f.sel.cfg.Links = f.links
+	f.sel.cfg.Paths = fixturePaths{f}
 	f.sel.cfg.Report = func(c addr.IA, r map[bus.DirectoryID][]bus.PeerReport) { f.cluster, f.reports = c, r }
 	f.sel.aliveFn = func(l *links.Link) bool { return f.alive[l.NeighborIA] }
 	f.refresh()
 	return f
+}
+
+// fixturePaths answers each enumeration with the routes of the peer's
+// sample, each read at its cost, so that a window that reads the peer from
+// its history prices the routes as its probe would.
+type fixturePaths struct{ f *selFixture }
+
+func (p fixturePaths) Enumerate(_ context.Context, ia addr.IA) ([]scion.Candidate, error) {
+	routes := slices.Clone(p.f.samples[ia].candidates)
+	for i := range routes {
+		routes[i].Reading = routes[i].Cost
+	}
+	return routes, nil
 }
 
 // refresh publishes the directory's entries, and the link state of the
@@ -975,6 +989,7 @@ func TestSelectionForgetsUnprobedInstruments(t *testing.T) {
 		kept: {{at: time.Now().Add(-scion.ReadingSpan - time.Second), rtt: time.Millisecond}},
 	}
 	f.sel.last = map[addr.IA]instrument{selX: gone, selD: kept}
+	f.sel.runs = map[addr.IA]run{selX: {}, selD: {}}
 	f.pass(t)
 	if _, ok := f.sel.history[gone]; ok {
 		t.Error("the window kept the samples of an instrument it no longer probes")
@@ -982,8 +997,14 @@ func TestSelectionForgetsUnprobedInstruments(t *testing.T) {
 	if _, ok := f.sel.last[selX]; ok {
 		t.Error("the window kept the peer whose last instrument went")
 	}
+	if _, ok := f.sel.runs[selX]; ok {
+		t.Error("the window kept the run of the peer whose last instrument went")
+	}
 	if _, ok := f.sel.history[kept]; !ok {
 		t.Error("the window forgot the samples the bounds still read")
+	}
+	if _, ok := f.sel.runs[selD]; !ok {
+		t.Error("the window forgot the run of a peer whose samples the bounds still read")
 	}
 	if len(f.sel.history) != 2 {
 		t.Errorf("the window keeps %d instruments, want the neighbor's link and the bounded one", len(f.sel.history))
@@ -1286,6 +1307,159 @@ func TestSelectionEvictsOutsideLinksFirst(t *testing.T) {
 	}
 	if f.state(t, selA) != links.StateRetired {
 		t.Error("the cap's eviction passed over the link the clustering does not allow")
+	}
+}
+
+// sparseFixture returns a fixture of the node in the cluster of Peer and B
+// beside the candidates A, whose pairs to the cluster are Peer's and B's, so
+// that the clustering holds A in reserve, and D, whose pair the node holds,
+// after its first window; it links neighbors alone, and establishes nothing.
+func sparseFixture(t *testing.T, neighbors ...addr.IA) *selFixture {
+	t.Helper()
+	f := newSelFixture(t, neighbors...)
+	f.candidate(selA, 18*time.Millisecond, 30*time.Millisecond)
+	f.candidate(selD, 9*time.Millisecond, 30*time.Millisecond)
+	f.clustered(false)
+	f.sel.establishFn = func(context.Context, target, string) bool { return false }
+	f.pass(t)
+	clear(f.probed)
+	return f
+}
+
+// ageRun makes the candidate's last run SparseProbe old.
+func (f *selFixture) ageRun(ia addr.IA) {
+	r := f.sel.runs[ia]
+	r.at = time.Now().Add(-SparseProbe)
+	f.sel.runs[ia] = r
+}
+
+// TestSelectionProbesTheReserveSparsely checks the sparse probes: the
+// clustering holds A in reserve and lets the node link D, so after the first
+// window A is read from its history while the neighbors and D are probed
+// every window, until A's run is SparseProbe old.
+func TestSelectionProbesTheReserveSparsely(t *testing.T) {
+	f := sparseFixture(t, selPeer, selB)
+	f.pass(t)
+	for ia, want := range map[addr.IA]bool{selPeer: true, selB: true, selD: true, selA: false} {
+		if f.probed[ia] != want {
+			t.Errorf("the second window probed %v: %v, want %v", ia, f.probed[ia], want)
+		}
+	}
+	if r, ok := f.reported(selA); !ok || r.RTT != 18*time.Millisecond {
+		t.Errorf("the second window reported A at %v (reported %v), want its history's 18ms", r.RTT, ok)
+	}
+	f.ageRun(selA)
+	f.pass(t)
+	if !f.probed[selA] {
+		t.Error("A was not probed once its run was SparseProbe old")
+	}
+}
+
+// TestSelectionProbesTheReserveAgain checks the windows that probe a
+// candidate in reserve though its last run is recent: A while the node
+// stands below the floor, after a run of A went unanswered, once the address
+// its run probed is gone, while the node holds a link to A, and once a link
+// the node held since A's run retired.
+func TestSelectionProbesTheReserveAgain(t *testing.T) {
+	answered := func(f *selFixture) sample {
+		return f.priced(selA, 18*time.Millisecond, 30*time.Millisecond)
+	}
+	for name, tc := range map[string]struct {
+		neighbors []addr.IA
+		between   func(t *testing.T, f *selFixture)
+	}{
+		"below the floor": {neighbors: []addr.IA{selPeer}},
+		"unanswered": {
+			neighbors: []addr.IA{selPeer, selB},
+			between: func(t *testing.T, f *selFixture) {
+				f.ageRun(selA)
+				f.samples[selA] = sm(0)
+				f.pass(t)
+				f.samples[selA] = answered(f)
+			},
+		},
+		"moved": {
+			neighbors: []addr.IA{selPeer, selB},
+			between: func(_ *testing.T, f *selFixture) {
+				for i := range f.directory {
+					if f.directory[i].IA == selA {
+						f.directory[i].Addresses[0].RendezvousAddr = netip.MustParseAddrPort("127.0.0.2:30043")
+					}
+				}
+			},
+		},
+		"linked": {neighbors: []addr.IA{selPeer, selB, selA}},
+		"retired": {
+			neighbors: []addr.IA{selPeer, selB},
+			between: func(t *testing.T, f *selFixture) {
+				if err := f.store.Insert(context.Background(),
+					neighborLink(selA, links.StateEstablished)); err != nil {
+					t.Fatal(err)
+				}
+				f.pass(t)
+				l, err := f.store.ByNeighbor(context.Background(), selA)
+				if err != nil || l == nil {
+					t.Fatalf("no live entry for A: %v", err)
+				}
+				l.State = links.StateRetired
+				if err := f.store.Update(context.Background(), l); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := sparseFixture(t, tc.neighbors...)
+			if !f.sel.reserve[selA] {
+				t.Fatal("the clustering does not hold A in reserve")
+			}
+			if tc.between != nil {
+				tc.between(t, f)
+			}
+			clear(f.probed)
+			f.pass(t)
+			if !f.probed[selA] {
+				t.Error("the window read A from its history")
+			}
+		})
+	}
+}
+
+// TestSelectionHeldReadsTheHistory checks a candidate the window does not
+// probe: it reads at the 80th percentile of the round trips its last
+// instrument holds within scion.ReadingSpan, within the bounds of those
+// within scion.BoundSpan, beside its routes enumerated anew, and reads
+// unreachable once none lies within the reading's span.
+func TestSelectionHeldReadsTheHistory(t *testing.T) {
+	ms := time.Millisecond
+	f := newSelFixture(t)
+	f.candidate(selA, 18*ms, 30*ms)
+	e := targetOf(selA, "127.0.0.1:30043")
+	by := instrument{ia: selA, at: e.RendezvousAddr}
+	now := time.Now()
+	stale := []heard{{at: now.Add(-scion.BoundSpan - time.Minute), rtt: 90 * ms}}
+	older := slices.Repeat([]heard{{at: now.Add(-10 * time.Minute), rtt: 30 * ms}}, 10)
+	recent := slices.Repeat([]heard{{at: now.Add(-time.Minute), rtt: 10 * ms}}, 10)
+	f.sel.history = map[instrument][]heard{
+		by:                            slices.Concat(stale, older, recent),
+		{ia: selA, ifID: 7}:           {{at: now, rtt: 50 * ms}},
+		{ia: selD, at: e.ControlAddr}: {{at: now, rtt: 60 * ms}},
+	}
+	f.sel.last = map[addr.IA]instrument{selA: by}
+	got := f.sel.held(context.Background(), e)
+	wantLo, wantHi := scion.ReadingBounds(slices.Concat(
+		slices.Repeat([]time.Duration{30 * ms}, 10), slices.Repeat([]time.Duration{10 * ms}, 10)))
+	if got.direct != 10*ms || got.lo != wantLo || got.hi != wantHi {
+		t.Errorf("read A at %v within %v..%v, want 10ms within %v..%v", got.direct, got.lo, got.hi, wantLo, wantHi)
+	}
+	if got.baseline == nil || len(got.candidates) != len(f.samples[selA].candidates) {
+		t.Errorf("read A's routes as %v with baseline %v, want its %d routes", got.candidates, got.baseline,
+			len(f.samples[selA].candidates))
+	}
+
+	f.sel.history[by] = older
+	if got := f.sel.held(context.Background(), e); got.direct != 0 || got.lo != 0 || got.hi != 0 {
+		t.Errorf("past the reading's span read A at %v within %v..%v, want zeros", got.direct, got.lo, got.hi)
 	}
 }
 

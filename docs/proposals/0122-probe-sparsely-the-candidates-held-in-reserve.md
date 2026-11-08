@@ -114,3 +114,50 @@ reserve's round trip and bounds as before, from fewer probes.
     or addressed to another port.
 *   **The labs.** The labs pass, and the benchmarks run against the commit
     before, the metros lab's probes included.
+
+## Implementation history
+
+*   **Test adaptations.** The selection's fixture answers each enumeration
+    with the routes its samples give, so a window that reads a candidate
+    from its history prices the routes as a probe would.
+*   Mutations: 16 of 16 killed. The first test of an unanswered run let one
+    live: a candidate with no earlier round trip loses its run anyway once
+    the window forgets its last instrument, so the test now lets a run go
+    unanswered after an answered one.
+*   The pipeline passed once two readiness labs of the ping application,
+    which waited two seconds for each reply and received none under the
+    race detector, waited five, as the expiry lab does.
+*   Benchmarks against the commit before: five runs each of the metros
+    lab's settled benchmark, six and four of the NAT lab's, two and one of
+    the metros cut, two each of the pair brought near, and one each of the
+    raised delay:
+    *   **The probes.** In the settled metros lab, each node sent the other
+        metros' nodes 9.2 to 9.6 probe datagrams a minute, against 35.2 to
+        36. Its metro mates are all its neighbors, whose links carry their
+        probes as before.
+    *   **Settling.** The metros lab settled on 25 to 27 links after 13 to
+        20 changes within 7.8 to 14.3 minutes, against 26 or 27 after 15 to
+        17 within 8.5 to 9.7, its worst pair at 1.06 or 1.07 times the
+        reference in both. The last changes of every run, before the change
+        and after, retired links outside the structure, among them links to
+        the founder that stranded nodes had dialed again. Three runs of five
+        after the change went one such round more, and one metros run
+        before it never settled within the hour, the founder linked to six
+        nodes at its end.
+    *   **NAT.** The NAT lab settled on 15 to 17 links after 10 to 16
+        changes within 5.5 to 8.7 minutes, against 15 to 17 after 11 to 15
+        within 6.7 to 8.7, every pair reached in every run.
+    *   **A cut.** After a cut between two metros, the better paths
+        surfaced at once and the links settled within 10 seconds after one
+        change, the worst pair at 1.52 and 1.62 times the reference with
+        the transit penalty, against 1.52; after the restore, within 40 and
+        50 seconds after one change, against 140 after three.
+    *   **A pair brought near** linked within 410 and 630 seconds, against
+        500 and 580, no node leaving its cluster, the worst pair then at
+        1.21 or 1.22 times the reference.
+    *   **A raised delay** changed no link, as before; its restore settled
+        after two changes within 320 seconds, against one within 50.
+    *   The regions lab settled on 31 links after 15 changes within 6.8
+        minutes, against 30 after 17 and 20 in proposal 0121's runs; the
+        site lab joined both ways on 15 links, and the stranded lab on 8,
+        as before.
