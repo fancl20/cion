@@ -214,9 +214,11 @@ clusters**, on these principles:
     between other members, so that no member's failure separates them: a
     cluster meets each other cluster through the members nearest it, and its
     links to different clusters may sit on different members. Outside its
-    cluster, a node links only as one of those members. The path policy
-    prices as it does, charging every member a path crosses, so forming
-    links and serving traffic still price a route the same way (ADR-0035).
+    cluster, a node links only as one of those members. Beacons carry the
+    routes over each link into a cluster on to all its members, so a path
+    between two clusters can start at any member. The path policy prices as
+    it does, charging every member a path crosses, so forming links and
+    serving traffic still price a route the same way (ADR-0035).
 10. **A cluster is a scope chosen by distance, one level deep.** Its
     members share a directory of their own, as a site's do. Outside, the
     cluster shows only the members that hold its links to other clusters,
@@ -237,8 +239,10 @@ ADR-0026's ratio pair (decision 3). ADR-0038's readings remain the evidence,
 and the records keep the longer history that confidence reads. The clusters
 narrow ADR-0017's decision 1, so that a node's candidates are its cluster's
 members and the far ends of the links between clusters it holds; ADR-0032's
-decision 5, under which scopes follow addresses alone; and ADR-0037's
-decision 1, so that an entry reports the round trips of its own scope.
+decision 5, under which scopes follow addresses alone; ADR-0036's decision
+4, so that a node's beacons also cover each link into its cluster; and
+ADR-0037's decision 1, so that an entry reports the round trips of its own
+scope.
 
 ### Positive consequences
 
@@ -280,6 +284,9 @@ decision 1, so that an entry reports the round trips of its own scope.
     confidence slows every change of membership.
 *   A node's place moves between scopes as it joins and leaves a cluster:
     its entry outside appears and withdraws, and its links change scope.
+*   A member forwards to its fellow members, and registers, a route over
+    each link into its cluster, so beaconing grows with the links between
+    clusters.
 *   One more layer to reason about: clusters, links, paths.
 *   The labs weigh little of this: their delays hold steadier than the
     Internet's, their caps never bind, and they hold three to nine nodes.
