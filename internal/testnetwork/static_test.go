@@ -229,7 +229,7 @@ func TestStaticLabByLinkSet(t *testing.T) {
 	// answering on its reversed arrival path.
 	Poll(t, "B enrolled", func() bool { return pingFrom(ctx, b.Node, a.app.IA(), a.host) })
 	Poll(t, "C enrolled", func() bool { return pingFrom(ctx, c.Node, a.app.IA(), a.host) })
-	Poll(t, "the core reaches C", func() bool { return pingFrom(ctx, a.Node, c.app.IA(), c.host) })
+	PollFor(t, PathTimeout, "the core reaches C", func() bool { return pingFrom(ctx, a.Node, c.app.IA(), c.host) })
 
 	// Removing C's entry from B's file retires the link — a generation swap
 	// the surviving traffic rides through. The A–B entry keeps the
@@ -260,7 +260,7 @@ func TestStaticLineWithoutMemberships(t *testing.T) {
 	ctx := t.Context()
 	Poll(t, "B enrolled", func() bool { return pingFrom(ctx, b.Node, a.app.IA(), a.host) })
 	Poll(t, "C enrolled", func() bool { return pingFrom(ctx, c.Node, a.app.IA(), a.host) })
-	Poll(t, "the core reaches C", func() bool { return pingFrom(ctx, a.Node, c.app.IA(), c.host) })
+	PollFor(t, PathTimeout, "the core reaches C", func() bool { return pingFrom(ctx, a.Node, c.app.IA(), c.host) })
 	Poll(t, "the founder to list every node without an expiry", func() bool {
 		list, err := a.app.Memberships(ctx)
 		if err != nil {

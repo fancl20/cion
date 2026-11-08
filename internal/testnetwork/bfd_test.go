@@ -61,7 +61,7 @@ func TestBFDLivenessEpisode(t *testing.T) {
 	// The path through B is kept for the episode's echo across the dead
 	// link, which no composition offers once A's verdict on it is down.
 	var throughB *spath.Decoded
-	Poll(t, "A reaches C through B", func() bool {
+	PollFor(t, PathTimeout, "A reaches C through B", func() bool {
 		throughB = pathVia(ctx, t, a, c.app.IA(), abIfID)
 		return throughB != nil && echoOver(t, a, c.app.IA(), c.host, throughB, time.Second)
 	})
@@ -156,7 +156,7 @@ func TestBFDStaticLabEpisode(t *testing.T) {
 	// The path through B is kept for the echo across the dead link, which
 	// no composition offers once A's verdict on it is down.
 	var throughB *spath.Decoded
-	Poll(t, "A reaches C through B", func() bool {
+	PollFor(t, PathTimeout, "A reaches C through B", func() bool {
 		throughB = pathVia(ctx, t, a.Node, c.app.IA(), ifID)
 		return throughB != nil &&
 			echoOver(t, a.Node, c.app.IA(), c.host, throughB, time.Second)

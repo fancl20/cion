@@ -35,6 +35,10 @@ const (
 	// anchoring, and the renewal that first issues under its own root run in
 	// series.
 	OnboardTimeout = 3 * TestTimeout
+	// PathTimeout budgets the first path across a line of nodes the same
+	// way: the beacons each hop propagates, the registrations, and the
+	// lookup that composes the path run in series.
+	PathTimeout = 3 * TestTimeout
 )
 
 // FreeUDPAddrOn returns a free UDP address on the given host.

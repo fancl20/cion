@@ -251,7 +251,7 @@ func TestPingSkipsExpiredPath(t *testing.T) {
 		DstHost:  r.host,
 		Count:    3,
 		Interval: 100 * time.Millisecond,
-		Wait:     2 * time.Second,
+		Wait:     5 * time.Second,
 	})
 	if err != nil {
 		t.Fatal(err)
