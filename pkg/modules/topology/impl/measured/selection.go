@@ -226,6 +226,9 @@ type selection struct {
 	// each peer last.
 	history map[instrument][]heard
 	last    map[addr.IA]instrument
+	// failed holds each candidate's last establishment failure, so a
+	// failure repeating window after window warns once.
+	failed map[addr.IA]string
 	// probeFn, aliveFn, establishFn, and rendezvousFn override the
 	// measurement, the candidate-grace probe, the establishment, and the
 	// binding request to a rendezvous socket in tests; nil uses the real
@@ -648,7 +651,8 @@ func (s *selection) read(by instrument, rtts []time.Duration, now time.Time) (re
 
 // forget drops the instruments whose samples all lie more than
 // scion.BoundSpan before now — the instruments of retired links and of
-// addresses no longer probed — and the peers whose last instrument went.
+// addresses no longer probed — and the peers whose last instrument went,
+// with their last establishment failure.
 func (s *selection) forget(now time.Time) {
 	for by, hs := range s.history {
 		if now.Sub(hs[len(hs)-1].at) > scion.BoundSpan {
@@ -660,6 +664,27 @@ func (s *selection) forget(now time.Time) {
 			delete(s.last, ia)
 		}
 	}
+	for ia := range s.failed {
+		if _, ok := s.last[ia]; !ok {
+			delete(s.failed, ia)
+		}
+	}
+}
+
+// establishFailed logs a candidate's failed establishment: a warning when
+// the failure differs from the candidate's last, a debug line while it
+// repeats.
+func (s *selection) establishFailed(ia addr.IA, msg string, err error) {
+	failure := msg + ": " + err.Error()
+	if s.failed[ia] == failure {
+		slog.Debug(msg, "neighbor", ia, "err", err)
+		return
+	}
+	if s.failed == nil {
+		s.failed = make(map[addr.IA]string)
+	}
+	s.failed[ia] = failure
+	slog.Warn(msg, "neighbor", ia, "err", err)
 }
 
 // establish lands a promotion, through the test seam when set.
@@ -1423,6 +1448,7 @@ func (s *selection) establishLink(ctx context.Context, e target, why string) boo
 		}
 	}
 	s.streak(e.IA).promote = 0
+	delete(s.failed, e.IA)
 	slog.Info("Link seeded", "neighbor", e.IA, "why", why, "punched", punched,
 		"interface", entry.IfID, "local", entry.Local, "remote", entry.Remote)
 	s.confirm(ctx, e, entry, why)
@@ -1445,7 +1471,7 @@ func (s *selection) establishByRendezvous(
 	reply, observed, _, err := RendezvousEcho(ctx, s.cfg.Sockets, entry.Local, e.RendezvousAddr,
 		s.cfg.IA, entry.Local)
 	if err != nil {
-		slog.Warn("The rendezvous establishment failed", "neighbor", e.IA, "err", err)
+		s.establishFailed(e.IA, "The rendezvous establishment failed", err)
 		return false
 	}
 	if !reply.IA.Equal(e.IA) {
@@ -1469,7 +1495,7 @@ func (s *selection) establishByRendezvous(
 func (s *selection) establishByPunch(ctx context.Context, e target, entry *links.Link) bool {
 	theirs, ifID, err := s.cfg.Punch.Establish(ctx, e.IA, e.Scope, entry)
 	if err != nil {
-		slog.Warn("The punch establishment failed", "neighbor", e.IA, "err", err)
+		s.establishFailed(e.IA, "The punch establishment failed", err)
 		return false
 	}
 	entry.Remote = theirs
@@ -1512,7 +1538,7 @@ func (s *selection) confirm(
 			return s.landConfirm(rpcCtx, e.IA, entry, reply, e.ControlAddr.Addr(), why)
 		}
 		if rpcCtx.Err() != nil {
-			slog.Warn("The link request did not answer", "neighbor", e.IA, "err", err)
+			s.establishFailed(e.IA, "The link request did not answer", err)
 			return false
 		}
 		if !loops.Sleep(rpcCtx, ConfirmRetryPause) {

@@ -515,6 +515,36 @@ func TestSelectionFloorWarning(t *testing.T) {
 	}
 }
 
+// TestSelectionEstablishFailedWarnsOnce checks the establishment's failure
+// log: a warning for a candidate's first failure, for a different one, and
+// for another candidate's, and none while the same failure repeats.
+func TestSelectionEstablishFailedWarnsOnce(t *testing.T) {
+	var logs bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	warnings := func() int { return strings.Count(logs.String(), "level=WARN") }
+
+	f := newSelFixture(t)
+	refused := errors.New("no rendezvous reply")
+	const msg = "The rendezvous establishment failed"
+	for _, step := range []struct {
+		ia   addr.IA
+		err  error
+		want int
+	}{
+		{selA, refused, 1},
+		{selA, refused, 1},
+		{selA, errors.New("the reply names another ISD-AS"), 2},
+		{selB, refused, 3},
+	} {
+		f.sel.establishFailed(step.ia, msg, step.err)
+		if got := warnings(); got != step.want {
+			t.Fatalf("after %v's %q: %d warnings, want %d", step.ia, step.err, got, step.want)
+		}
+	}
+}
+
 // TestSelectionStrandedPromotion checks the stranded clause: a tier no live
 // route resolves into admits its fastest reachable member at once, no
 // streak — the establishment riding the rendezvous path — though its pair
