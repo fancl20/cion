@@ -177,10 +177,12 @@ clusters**, on these principles:
         thin to tolerate a high sample, rank the routes to measure.
 6.  **Scarcity is priced at the cap.** Below the cap, a link that serves
     stays. At the cap, a candidate that earns a link displaces the link
-    worth least among those that would not earn their place today, and
-    waits when every link would. A displacement is a retirement, so it
-    waits for the same confidence: a link whose worth noise holds near the
-    line to buy keeps its slot.
+    worth least among those it outweighs: a link that would not earn its
+    place today, or one that saves less than the candidate gains by the
+    line to buy. It waits while every link holds its own. A displacement is
+    a retirement, so it waits for the same confidence, on both sides: a
+    link whose worth noise holds near the line keeps its slot, and a gain
+    that noise shows displaces nothing.
 7.  **A cluster is natural, and its cost is known before it forms.** Its
     members lie closer to one another than to any node outside, by a gap:
     its separation is a multiple of its diameter. Joined directly through
@@ -234,15 +236,15 @@ serves. This amends ADR-0017's decision 2, under which one test served both
 directions: promotion and retirement keep one comparator, the link's worth,
 but read it against two lines with different confidence. It amends
 ADR-0017's decisions 5 and 7 as well: the cap's victim no longer needs to
-qualify for retirement, only to fall short of the line to buy. It replaces
-ADR-0026's ratio pair (decision 3). ADR-0038's readings remain the evidence,
-and the records keep the longer history that confidence reads. The clusters
-narrow ADR-0017's decision 1, so that a node's candidates are its cluster's
-members and the far ends of the links between clusters it holds; ADR-0032's
-decision 5, under which scopes follow addresses alone; ADR-0036's decision
-4, so that a node's beacons also cover each link into its cluster; and
-ADR-0037's decision 1, so that an entry reports the round trips of its own
-scope.
+qualify for retirement, only to fall short of the line to buy, on its own or
+beside the candidate. It replaces ADR-0026's ratio pair (decision 3).
+ADR-0038's readings remain the evidence, and the records keep the longer
+history that confidence reads. The clusters narrow ADR-0017's decision 1, so
+that a node's candidates are its cluster's members and the far ends of the
+links between clusters it holds; ADR-0032's decision 5, under which scopes
+follow addresses alone; ADR-0036's decision 4, so that a node's beacons also
+cover each link into its cluster; and ADR-0037's decision 1, so that an
+entry reports the round trips of its own scope.
 
 ### Positive consequences
 
@@ -257,6 +259,8 @@ scope.
 *   A gain the history confirms buys its link once the path policy would
     move for it, however small beside the price: a long path whose gain
     falls short of a reading's room for error still gets the link.
+*   At the cap, slots follow worth, not the order the links formed in: a
+    candidate that gains more than a link saves takes its slot.
 *   A node's probes and directory grow with its cluster and the number of
     clusters, and its links follow the structure: dense inside a cluster,
     few between. The cap binds less.
@@ -289,7 +293,7 @@ scope.
     clusters.
 *   One more layer to reason about: clusters, links, paths.
 *   The labs weigh little of this: their delays hold steadier than the
-    Internet's, their caps never bind, and they hold three to nine nodes.
+    Internet's, and they hold three to twelve nodes.
     The principles rest on reasoning; the labs show how a realization's
     rules interact.
 
