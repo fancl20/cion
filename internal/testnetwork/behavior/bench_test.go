@@ -90,7 +90,7 @@ func TestBenchRegionsSettled(t *testing.T) {
 	requireBench(t)
 	testnetwork.InBubble(t, func(t *testing.T, fab *fabric.Fabric, wpki *webpkitest.CA) {
 		n := bootRegions(t, fab, wpki)
-		s := awaitSettled(t, n.nodes, settleQuiet, regionsBudget)
+		s := awaitSettled(t, n, settleQuiet, regionsBudget)
 		report(t, "RegionsSettled", s, assess(t, n, penalty, 0))
 	})
 }
@@ -101,7 +101,7 @@ func TestBenchStrandedSettled(t *testing.T) {
 	requireBench(t)
 	testnetwork.InBubble(t, func(t *testing.T, fab *fabric.Fabric, wpki *webpkitest.CA) {
 		n := healStranded(t, fab, wpki)
-		s := awaitSettled(t, n.nodes, settleQuiet, strandedBudget)
+		s := awaitSettled(t, n, settleQuiet, strandedBudget)
 		report(t, "StrandedSettled", s, assess(t, n, penalty, 0))
 	})
 }

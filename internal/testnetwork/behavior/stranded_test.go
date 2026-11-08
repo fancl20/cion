@@ -45,7 +45,7 @@ import (
 func TestStrandedTierHeals(t *testing.T) {
 	testnetwork.InBubble(t, func(t *testing.T, fab *fabric.Fabric, wpki *webpkitest.CA) {
 		n := healStranded(t, fab, wpki)
-		awaitSettled(t, n.nodes, settleQuiet, strandedBudget)
+		awaitSettled(t, n, settleQuiet, strandedBudget)
 		awaitReach(t, n, reachBudget)
 	})
 }
@@ -97,7 +97,7 @@ func healStranded(t *testing.T, fab *fabric.Fabric, wpki *webpkitest.CA) *networ
 	ctx := t.Context()
 
 	testnetwork.PollVirtual(t, strandedBudget, "each side to settle and the bridges to stand", func() bool {
-		return settled(ctx, near) && settled(ctx, far) &&
+		return n.settled(ctx, near) && n.settled(ctx, far) &&
 			meshed(ctx, []*testnetwork.Node{a, c}) && meshed(ctx, []*testnetwork.Node{a, d})
 	})
 
@@ -132,7 +132,7 @@ func healStranded(t *testing.T, fab *fabric.Fabric, wpki *webpkitest.CA) *networ
 		}
 	}
 	testnetwork.PollVirtual(t, strandedBudget, "the stranded clause to link the sides", func() bool {
-		return crossLink(ctx, near[1:], far, cut) != "" && settled(ctx, near) && settled(ctx, far)
+		return crossLink(ctx, near[1:], far, cut) != "" && n.settled(ctx, near) && n.settled(ctx, far)
 	})
 	return n
 }

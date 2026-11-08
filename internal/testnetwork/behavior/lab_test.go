@@ -234,18 +234,18 @@ type settling struct {
 	at      time.Duration
 }
 
-// awaitSettled reads the nodes' link set every settleSample until it holds
-// unchanged for quiet with the nodes settled, and fails the test once
-// budget passes first.
-func awaitSettled(t *testing.T, nodes []*testnetwork.Node, quiet, budget time.Duration) settling {
+// awaitSettled reads the network's link set every settleSample until it
+// holds unchanged for quiet with the network settled, and fails the test
+// once budget passes first.
+func awaitSettled(t *testing.T, n *network, quiet, budget time.Duration) settling {
 	t.Helper()
-	return awaitSettledEach(t, nodes, quiet, budget, func() {})
+	return awaitSettledEach(t, n, quiet, budget, func() {})
 }
 
 // awaitSettledEach is awaitSettled calling each at every read, once the
 // bubble has parked.
 func awaitSettledEach(
-	t *testing.T, nodes []*testnetwork.Node, quiet, budget time.Duration, each func(),
+	t *testing.T, n *network, quiet, budget time.Duration, each func(),
 ) settling {
 
 	t.Helper()
@@ -257,11 +257,11 @@ func awaitSettledEach(
 	for {
 		synctest.Wait()
 		each()
-		if now := linkSet(ctx, nodes); now != last {
+		if now := linkSet(ctx, n.nodes); now != last {
 			last, changed = now, time.Now()
 			s.changes++
 		}
-		if time.Since(changed) >= quiet && settled(ctx, nodes) {
+		if time.Since(changed) >= quiet && n.settled(ctx, n.nodes) {
 			s.at = changed.Sub(start)
 			return s
 		}
@@ -308,12 +308,12 @@ func awaitReach(t *testing.T, n *network, budget time.Duration) {
 }
 
 // settled reports whether every one of the nodes holds at least the floor
-// of up links — a link to each peer its directories name, where they name
-// fewer — and the up links established at both ends among them connect
-// them all.
-func settled(ctx context.Context, nodes []*testnetwork.Node) bool {
-	for _, n := range nodes {
-		if upLinks(ctx, n) < min(measured.NeighborFloor, namedPeers(n)) {
+// of up links — a link to each peer its directories name that the network
+// has not cut it from, where those are fewer — and the up links established
+// at both ends among them connect them all.
+func (n *network) settled(ctx context.Context, nodes []*testnetwork.Node) bool {
+	for _, x := range nodes {
+		if upLinks(ctx, x) < min(measured.NeighborFloor, n.reachablePeers(x)) {
 			return false
 		}
 	}
@@ -416,15 +416,22 @@ func linkDelays(t *testing.T, n *network, i int) (measured, drawn map[int]time.D
 	return measured, drawn
 }
 
-// namedPeers counts the peers the node's directories name.
-func namedPeers(n *testnetwork.Node) int {
-	self := n.App().IA()
+// reachablePeers counts the peers the node's directories name that the
+// network has not cut it from.
+func (n *network) reachablePeers(x *testnetwork.Node) int {
+	index := make(map[addr.IA]int, len(n.nodes))
+	for i, node := range n.nodes {
+		index[node.App().IA()] = i
+	}
+	self := x.App().IA()
+	i := index[self]
 	named := make(map[addr.IA]bool)
-	for _, s := range n.App().Bus().Directory().Latest().Scopes() {
+	for _, s := range x.App().Bus().Directory().Latest().Scopes() {
 		for _, e := range s.Entries() {
-			if !e.IA.Equal(self) {
-				named[e.IA] = true
+			if j, ok := index[e.IA]; e.IA.Equal(self) || ok && n.cut[pair(i, j)] {
+				continue
 			}
+			named[e.IA] = true
 		}
 	}
 	return len(named)

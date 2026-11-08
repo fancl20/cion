@@ -108,7 +108,7 @@ func TestSiteNetworkReaches(t *testing.T) {
 			testnetwork.InBubble(t, func(t *testing.T, fab *fabric.Fabric, wpki *webpkitest.CA) {
 				n, _ := bootSite(t, fab, wpki, joins.parents)
 				awaitPinned(t, n, allNodes(n)...)
-				awaitSettled(t, n.nodes, settleQuiet, natBudget)
+				awaitSettled(t, n, settleQuiet, natBudget)
 				awaitReach(t, n, reachBudget)
 				awaitPings(t, n, allNodes(n), reachBudget)
 				if inside := foundersInsideHosts(n); len(inside) != 0 {
@@ -185,7 +185,7 @@ func TestBenchSiteSettled(t *testing.T) {
 			testnetwork.InBubble(t, func(t *testing.T, fab *fabric.Fabric, wpki *webpkitest.CA) {
 				n, _ := bootSite(t, fab, wpki, joins.parents)
 				awaitPinned(t, n, allNodes(n)...)
-				s := awaitSettled(t, n.nodes, settleQuiet, natBudget)
+				s := awaitSettled(t, n, settleQuiet, natBudget)
 				report(t, "SiteSettled/joins="+joins.name, s, assess(t, n, penalty, 0))
 				reportLinks(t, "SiteLinks/joins="+joins.name, n)
 			})
@@ -297,7 +297,7 @@ func TestBenchSiteHosts(t *testing.T) {
 			testnetwork.InBubble(t, func(t *testing.T, fab *fabric.Fabric, wpki *webpkitest.CA) {
 				n, site := bootSite(t, fab, wpki, joins.parents)
 				reads := newSiteReads(n, site.Gateway())
-				awaitSettledEach(t, n.nodes, settleQuiet, natBudget, reads.read)
+				awaitSettledEach(t, n, settleQuiet, natBudget, reads.read)
 				reads.settled = true
 				watch := time.Now()
 				for time.Since(watch) < siteWatch {
@@ -395,7 +395,7 @@ func TestGatewaySiteReaches(t *testing.T) {
 	testnetwork.InBubble(t, func(t *testing.T, fab *fabric.Fabric, wpki *webpkitest.CA) {
 		n := bootGatewaySite(t, fab, wpki)
 		awaitPinned(t, n, allNodes(n)...)
-		awaitSettled(t, n.nodes, settleQuiet, natBudget)
+		awaitSettled(t, n, settleQuiet, natBudget)
 		awaitReach(t, n, reachBudget)
 		awaitPings(t, n, allNodes(n), reachBudget)
 		if measured, drawn := linkDelays(t, n, gatewayRouter); !maps.Equal(measured, drawn) {
@@ -479,7 +479,7 @@ func TestBenchGatewaySiteSettled(t *testing.T) {
 	testnetwork.InBubble(t, func(t *testing.T, fab *fabric.Fabric, wpki *webpkitest.CA) {
 		n := bootGatewaySite(t, fab, wpki)
 		awaitPinned(t, n, allNodes(n)...)
-		s := awaitSettled(t, n.nodes, settleQuiet, natBudget)
+		s := awaitSettled(t, n, settleQuiet, natBudget)
 		report(t, "GatewaySiteSettled", s, assess(t, n, penalty, 0))
 		reportLinks(t, "GatewaySiteLinks", n)
 	})

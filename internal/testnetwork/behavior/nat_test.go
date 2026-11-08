@@ -302,7 +302,7 @@ func TestNATNetworkReaches(t *testing.T) {
 	testnetwork.InBubble(t, func(t *testing.T, fab *fabric.Fabric, wpki *webpkitest.CA) {
 		n, _ := bootNAT(t, fab, wpki, coneNATs)
 		awaitPinned(t, n, allNodes(n)...)
-		awaitSettled(t, n.nodes, settleQuiet, natBudget)
+		awaitSettled(t, n, settleQuiet, natBudget)
 		awaitReach(t, n, reachBudget)
 		awaitPings(t, n, allNodes(n), reachBudget)
 		awaitNATLinks(t, n, []int{3, 4, 5, 6}, reachBudget)
@@ -326,7 +326,7 @@ func TestNATNetworkRecovers(t *testing.T) {
 		behaviors[6] = fabric.Symmetric
 		n, nats := bootNAT(t, fab, wpki, behaviors)
 		awaitPinned(t, n, allNodes(n)...)
-		awaitSettled(t, n.nodes, settleQuiet, natBudget)
+		awaitSettled(t, n, settleQuiet, natBudget)
 		awaitPings(t, n, allNodes(n), reachBudget)
 		awaitNATLinks(t, n, []int{3, 4, 5}, reachBudget)
 
@@ -403,7 +403,7 @@ func TestBenchNATSettled(t *testing.T) {
 	testnetwork.InBubble(t, func(t *testing.T, fab *fabric.Fabric, wpki *webpkitest.CA) {
 		n, _ := bootNAT(t, fab, wpki, coneNATs)
 		awaitPinned(t, n, allNodes(n)...)
-		s := awaitSettled(t, n.nodes, settleQuiet, natBudget)
+		s := awaitSettled(t, n, settleQuiet, natBudget)
 		report(t, "NATSettled", s, assess(t, n, penalty, 0))
 	})
 }
@@ -417,7 +417,7 @@ func TestBenchNATRebind(t *testing.T) {
 	testnetwork.InBubble(t, func(t *testing.T, fab *fabric.Fabric, wpki *webpkitest.CA) {
 		n, nats := bootNAT(t, fab, wpki, coneNATs)
 		awaitPinned(t, n, allNodes(n)...)
-		awaitSettled(t, n.nodes, settleQuiet, natBudget)
+		awaitSettled(t, n, settleQuiet, natBudget)
 		awaitPings(t, n, allNodes(n), reachBudget)
 		const rebound = 3
 		peers := len(n.nodes) - 1
@@ -547,7 +547,7 @@ func TestBenchNATFounderDown(t *testing.T) {
 	testnetwork.InBubble(t, func(t *testing.T, fab *fabric.Fabric, wpki *webpkitest.CA) {
 		n, _ := bootNAT(t, fab, wpki, coneNATs)
 		awaitPinned(t, n, allNodes(n)...)
-		awaitSettled(t, n.nodes, settleQuiet, natBudget)
+		awaitSettled(t, n, settleQuiet, natBudget)
 		awaitPings(t, n, allNodes(n), reachBudget)
 		survivors := allNodes(n)[1:]
 		for _, j := range survivors {
@@ -616,7 +616,7 @@ func TestBenchNATPeerRestart(t *testing.T) {
 	testnetwork.InBubble(t, func(t *testing.T, fab *fabric.Fabric, wpki *webpkitest.CA) {
 		n, _ := bootNAT(t, fab, wpki, coneNATs)
 		awaitPinned(t, n, allNodes(n)...)
-		awaitSettled(t, n.nodes, settleQuiet, natBudget)
+		awaitSettled(t, n, settleQuiet, natBudget)
 		awaitPings(t, n, allNodes(n), reachBudget)
 		const restarted = 2
 		restart(t, fab, wpki, n, restarted)

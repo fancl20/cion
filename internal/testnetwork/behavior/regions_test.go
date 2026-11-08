@@ -47,7 +47,7 @@ const regionsBudget = time.Hour
 func TestRegionsSettle(t *testing.T) {
 	testnetwork.InBubble(t, func(t *testing.T, fab *fabric.Fabric, wpki *webpkitest.CA) {
 		n := bootRegions(t, fab, wpki)
-		awaitSettled(t, n.nodes, settleQuiet, regionsBudget)
+		awaitSettled(t, n, settleQuiet, regionsBudget)
 		awaitReach(t, n, reachBudget)
 	})
 }

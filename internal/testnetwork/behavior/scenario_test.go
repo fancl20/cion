@@ -107,7 +107,7 @@ func respond(t *testing.T, n *network, before paths, target int, verdict func() 
 		if !r.surfaced && g.surfaced {
 			r.surface, r.surfaced = since, true
 		}
-		if time.Since(changed) >= changeQuiet && settled(t.Context(), n.nodes) {
+		if time.Since(changed) >= changeQuiet && n.settled(t.Context(), n.nodes) {
 			r.settle, r.settled = changed.Sub(start), true
 			r.final = g
 			return r
@@ -294,7 +294,7 @@ func benchDelayLowered(t *testing.T, n *network, name string) {
 func regionsSettled(t *testing.T, fab *fabric.Fabric, wpki *webpkitest.CA) *network {
 	t.Helper()
 	n := bootRegions(t, fab, wpki)
-	awaitSettled(t, n.nodes, settleQuiet, regionsBudget)
+	awaitSettled(t, n, settleQuiet, regionsBudget)
 	return n
 }
 
@@ -302,7 +302,7 @@ func regionsSettled(t *testing.T, fab *fabric.Fabric, wpki *webpkitest.CA) *netw
 func strandedSettled(t *testing.T, fab *fabric.Fabric, wpki *webpkitest.CA) *network {
 	t.Helper()
 	n := healStranded(t, fab, wpki)
-	awaitSettled(t, n.nodes, settleQuiet, strandedBudget)
+	awaitSettled(t, n, settleQuiet, strandedBudget)
 	return n
 }
 

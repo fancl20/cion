@@ -57,7 +57,7 @@ func TestMetrosSettle(t *testing.T) {
 	testnetwork.InBubble(t, func(t *testing.T, fab *fabric.Fabric, wpki *webpkitest.CA) {
 		n := bootMetros(t, fab, wpki)
 		awaitClusters(t, n, metrosGroups, metrosBudget)
-		awaitSettled(t, n.nodes, settleQuiet, metrosBudget)
+		awaitSettled(t, n, settleQuiet, metrosBudget)
 		awaitReach(t, n, reachBudget)
 	})
 }
@@ -68,7 +68,7 @@ func TestBenchMetrosSettled(t *testing.T) {
 	requireBench(t)
 	testnetwork.InBubble(t, func(t *testing.T, fab *fabric.Fabric, wpki *webpkitest.CA) {
 		n := bootMetros(t, fab, wpki)
-		s := awaitSettled(t, n.nodes, settleQuiet, metrosBudget)
+		s := awaitSettled(t, n, settleQuiet, metrosBudget)
 		report(t, "MetrosSettled", s, assess(t, n, penalty, 0))
 	})
 }
@@ -173,7 +173,7 @@ func watchPhase(t *testing.T, n *network, cond func() bool, each func()) settlin
 			s.changes++
 		}
 		ready := cond() || time.Since(start) >= phaseWatch
-		if ready && time.Since(changed) >= settleQuiet && settled(ctx, n.nodes) {
+		if ready && time.Since(changed) >= settleQuiet && n.settled(ctx, n.nodes) {
 			s.at = changed.Sub(start)
 			return s
 		}
@@ -185,7 +185,7 @@ func watchPhase(t *testing.T, n *network, cond func() bool, each func()) settlin
 func metrosSettled(t *testing.T, fab *fabric.Fabric, wpki *webpkitest.CA) *network {
 	t.Helper()
 	n := bootMetros(t, fab, wpki)
-	awaitSettled(t, n.nodes, settleQuiet, metrosBudget)
+	awaitSettled(t, n, settleQuiet, metrosBudget)
 	return n
 }
 

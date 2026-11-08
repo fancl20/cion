@@ -38,7 +38,7 @@ func TestBenchRingSettled(t *testing.T) {
 	requireBench(t)
 	testnetwork.InBubble(t, func(t *testing.T, fab *fabric.Fabric, wpki *webpkitest.CA) {
 		n := bootRing(t, fab, wpki)
-		s := awaitSettled(t, n.nodes, settleQuiet, ringBudget)
+		s := awaitSettled(t, n, settleQuiet, ringBudget)
 		if got := clusters(n); len(got) != 0 {
 			t.Errorf("the ring formed clusters %v, want none", got)
 		}
@@ -57,7 +57,7 @@ func TestBenchRingDelayLowered(t *testing.T) {
 	requireBench(t)
 	testnetwork.InBubble(t, func(t *testing.T, fab *fabric.Fabric, wpki *webpkitest.CA) {
 		n := bootRing(t, fab, wpki)
-		awaitSettled(t, n.nodes, settleQuiet, ringBudget)
+		awaitSettled(t, n, settleQuiet, ringBudget)
 		unlinked, cost, ok := worstUnlinked(n, readPaths(t, n, false))
 		if !ok {
 			t.Skip("every pair is linked")
@@ -101,7 +101,7 @@ func TestBenchRingBursts(t *testing.T) {
 	requireBench(t)
 	testnetwork.InBubble(t, func(t *testing.T, fab *fabric.Fabric, wpki *webpkitest.CA) {
 		n := bootRing(t, fab, wpki)
-		awaitSettled(t, n.nodes, settleQuiet, ringBudget)
+		awaitSettled(t, n, settleQuiet, ringBudget)
 		benchBursts(t, n, "RingBursts")
 	})
 }
@@ -112,7 +112,7 @@ func TestBenchRingJitter(t *testing.T) {
 	requireBench(t)
 	testnetwork.InBubble(t, func(t *testing.T, fab *fabric.Fabric, wpki *webpkitest.CA) {
 		n := bootRing(t, fab, wpki)
-		awaitSettled(t, n.nodes, settleQuiet, ringBudget)
+		awaitSettled(t, n, settleQuiet, ringBudget)
 		reportJitter(t, "RingJitter", sweepJitter(t, n))
 	})
 }
