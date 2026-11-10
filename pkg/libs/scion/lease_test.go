@@ -151,6 +151,69 @@ func TestLeaseIgnoresUnmeasuredChallengers(t *testing.T) {
 	})
 }
 
+// TestLeaseComparesPricesWithinTheSpan checks that a lease compares the
+// prices of ReadingSpan: a path fast only in probes past the span never takes
+// the lease, and a path left behind, slow only in probes past the span, takes
+// it back once its probes within the span beat the leased path's beyond the
+// band.
+func TestLeaseComparesPricesWithinTheSpan(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		ms := time.Millisecond
+		f := newMeasuredFixture(t, time.Minute)
+		probes := func(at time.Time, n int, rtt time.Duration) []bus.PathSample {
+			return slices.Repeat([]bus.PathSample{{At: at, RTT: rtt}}, n)
+		}
+		record := func(samples ...[]bus.PathSample) bus.PathRecord {
+			r := bus.PathRecord{Samples: slices.Concat(samples...)}
+			r.LastAnswer = r.Samples[len(r.Samples)-1].At
+			return r
+		}
+
+		now := time.Now()
+		f.measure(map[*Candidate]bus.PathRecord{
+			&f.direct: record(probes(now, bus.PathSamples, 50*ms)),
+			&f.viaMid: record(probes(now, 1, 200*ms)),
+		})
+		lease := f.p.Lease(iaDest)
+		if got := leased(t, lease).ID; got != f.direct.ID {
+			t.Fatalf("the first read leased %q, want the direct route %q", got, f.direct.ID)
+		}
+		f.measure(map[*Candidate]bus.PathRecord{
+			&f.direct: record(probes(now, bus.PathSamples, 50*ms)),
+			&f.viaMid: record(probes(now.Add(-2*ReadingSpan), bus.PathSamples-1, 5*ms), probes(now, 1, 200*ms)),
+		})
+		for range 3 * LeaseSwitchHold / LeaseEvaluation {
+			time.Sleep(LeaseEvaluation)
+			if got := leased(t, lease).ID; got != f.direct.ID {
+				t.Fatal("a path fast only past the span took the lease")
+			}
+		}
+
+		now = time.Now()
+		f.measure(map[*Candidate]bus.PathRecord{
+			&f.direct: record(probes(now, bus.PathSamples, 100*ms)),
+			&f.viaMid: record(probes(now, bus.PathSamples, 10*ms)),
+		})
+		time.Sleep(LeaseEvaluation)
+		leased(t, lease)
+		time.Sleep(LeaseSwitchHold)
+		if got := leased(t, lease).ID; got != f.viaMid.ID {
+			t.Fatalf("the lease holds %q, want the middle's %q", got, f.viaMid.ID)
+		}
+		now = time.Now()
+		f.measure(map[*Candidate]bus.PathRecord{
+			&f.direct: record(probes(now.Add(-2*ReadingSpan), 15, 300*ms), probes(now, 5, 10*ms)),
+			&f.viaMid: record(probes(now, bus.PathSamples, 40*ms)),
+		})
+		time.Sleep(LeaseEvaluation)
+		leased(t, lease)
+		time.Sleep(LeaseSwitchHold)
+		if got := leased(t, lease).ID; got != f.direct.ID {
+			t.Errorf("a path slow only past the span stayed behind, the lease on %q", got)
+		}
+	})
+}
+
 // TestLeaseRefreshesTheLeasedPath checks that an evaluation refreshes the
 // leased path to its freshest composition: a fresher origination of the
 // leased route replaces the one leased, and the lease names its segment.

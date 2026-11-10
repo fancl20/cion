@@ -48,8 +48,10 @@ type spread struct {
 	// the link set held for levelQuiet before levelBudget ran out.
 	changes int
 	settled bool
-	// grading grades the paths when the level ended.
-	grading grading
+	// grading grades the paths when the level ended, and latency grades
+	// them at no penalty, by their delays alone, the same yardstick
+	// whatever penalty the nodes charge.
+	grading, latency grading
 }
 
 // sweepJitter draws each of jitterLevels on every pair of the network, up
@@ -96,7 +98,8 @@ func sweepJitter(t *testing.T, n *network) []spread {
 				break
 			}
 		}
-		sp.grading = readMoved(t, n).grade(n, penalty)
+		read := readMoved(t, n)
+		sp.grading, sp.latency = read.grade(n, penalty), read.grade(n, 0)
 		spreads = append(spreads, sp)
 	}
 	set(0)
@@ -124,9 +127,9 @@ func reportJitter(t *testing.T, name string, spreads []spread) {
 		t.Logf("%s %s at jitter %v: %d link-set changes, settled %v; %v",
 			name, dir, sp.mean, sp.changes, sp.settled, sp.grading)
 		fmt.Printf("Benchmark%s/dir=%s/jitter=%v 1 %d changes %d settled %d links %d reached %d pairs "+
-			"%g ratio-mean %g ratio-max\n",
+			"%g ratio-mean %g ratio-max %g latency-ratio-mean %g latency-ratio-max\n",
 			name, dir, sp.mean, sp.changes, settled, sp.grading.links, sp.grading.reached, sp.grading.pairs,
-			sp.grading.ratio.mean, sp.grading.ratio.max)
+			sp.grading.ratio.mean, sp.grading.ratio.max, sp.latency.ratio.mean, sp.latency.ratio.max)
 	}
 	fmt.Printf("Benchmark%s/summary 1 %d changes %d unsettled\n", name, changes, unsettled)
 }

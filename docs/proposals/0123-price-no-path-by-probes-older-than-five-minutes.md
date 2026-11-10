@@ -120,3 +120,52 @@ their readings, as before.
 *   **The labs.** The labs pass, and the benchmarks run against the commit
     before: the jitter sweeps, the bursts, the delay changes, the cuts, the
     settled labs, and the founder down.
+
+## Implementation history
+
+*   **Test adaptations.** `TestCandidateReading`'s record answered six
+    minutes before the evaluation prices its candidate at the declared
+    prior, not at its probe.
+*   Mutations: 6 of 6 killed.
+*   The pipeline passed. Two earlier runs of the race detector each failed
+    one lab on a loaded runner: `TestLineTopology` timed out waiting for the
+    up segments at the line's far end, two hops of beacons, and
+    `TestPingReadyRetriesResolution` received two of its three replies.
+    Alone, they passed six runs of six and eight of eight; the line lab's
+    wait now takes `PathTimeout`, as the other line labs' first path does.
+*   Benchmarks against the commit before, one run each but the regions
+    jitter sweep's two, and instrumented sweeps logging every lease's moves:
+    six of the stranded lab, one each of the regions lab and the ring:
+    *   **Jitter.** The regions sweep's worst pair stood at 1.008 times its
+        direct route's delay at every level in both runs, against 1.50 at
+        20ms in both. The ring's stood at 1.00 and 1.40 at 10ms over two
+        runs, and at 1.40 and 1.50 at 20ms, against 1.40 and 3.00 in one,
+        its mean pair at 1.009 and 1.010 against 1.144; on the way down it
+        was back at 1.00 by 5ms and by 2ms, against 1ms. In the logged
+        regions sweep, the leases moved 12 times at 20ms, none onto a longer
+        route, against 26 times, 22 onto a longer route; in the six stranded
+        sweeps, 49 times, none onto a longer route, against 121, 26 onto
+        one.
+    *   **What jitter still moves.** A route a lease does not use holds two
+        or three probes within the span, and under 10 or 20ms of jitter on
+        every pair their median errs by more than the band. In the logged
+        ring sweep, the worst pairs rode a longer route priced by three to
+        seven fresh probes against a shorter one priced by two or three, or
+        by twenty through a busy link: 94.5ms over three probes against
+        104.8ms over twenty. One stranded sweep put a pair 1ms apart on its
+        sibling's 2ms route at 20ms.
+    *   **A raised delay restored.** The regions lab's worst pair stood at
+        1.063 times the reference with the transit penalty, against 1.683: a
+        lease the commit before left on the route it took during the raise,
+        its own route's probes still holding the raised delay.
+    *   **Cuts restored.** The regions lab's links settled within 50 seconds
+        after one change, against 180 after two, and the metros lab's within
+        60 after one, against 160 after two. The cuts themselves settled as
+        before.
+    *   **Settled, the same networks.** The regions lab settled on 30 links,
+        the metros lab on 25 against 26, the NAT lab on 16, the site lab on
+        16, 11, and 15 by its joins, the stranded lab on 8 and the ring on
+        45, every worst pair at no penalty where it stood before. The NAT
+        lab's founder-down nodes returned within 229 seconds, against 221.
+    *   **Bursts** changed no link either way, every read reaching every
+        pair.

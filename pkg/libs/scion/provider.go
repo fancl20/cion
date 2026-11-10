@@ -182,8 +182,9 @@ func bestOf(candidates []Candidate) *Candidate {
 // beaconing selects others.
 const StaleAfter = 5 * time.Minute
 
-// ReadingSpan is how far back a reading reads its round trips: StaleAfter,
-// the horizon in which a link change plays out in every node's segments.
+// ReadingSpan is how far back a reading, and a cost, read round trips:
+// StaleAfter, the horizon in which a link change plays out in every node's
+// segments.
 const ReadingSpan = StaleAfter
 
 // ReadingSamples is the fewest round trips a reading decides on: the fewest
@@ -304,8 +305,10 @@ type Candidate struct {
 	// Retry is when an ejected path is due its half-open probe; zero for
 	// the others.
 	Retry time.Time
-	// Cost is the path's round trip: its measured cost, else twice its
-	// declared one-way sum; nil when it has neither.
+	// Cost is the path's round trip as the picks and the leases compare it:
+	// the median of those of its last bus.PathSamples probes answered within
+	// ReadingSpan, divided by their delivery rate, else twice its declared
+	// one-way sum; nil when it has neither.
 	Cost *time.Duration
 	// Reading is the path's round trip as the topology selection compares
 	// it: the reading of its probes answered within ReadingSpan, divided by

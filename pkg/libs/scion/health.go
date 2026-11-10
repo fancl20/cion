@@ -117,7 +117,7 @@ func (v view) assess(c *Candidate) {
 	default:
 		c.Health = HealthUnknown
 	}
-	if cost, ok := measuredCost(r); ok {
+	if cost, ok := measuredCost(r, v.now); ok {
 		c.Cost = &cost
 	} else if c.Latency != nil {
 		prior := 2 * *c.Latency
@@ -148,10 +148,21 @@ func (v view) signaledSince(links []segment.LinkID, since time.Time) bool {
 	return false
 }
 
-// recent returns the record's last bus.PathSamples probes, the ones its
-// health, loss, and cost read.
+// recent returns the record's last bus.PathSamples probes: the ones its
+// ejection reads, and its cost reads within ReadingSpan.
 func recent(r bus.PathRecord) []bus.PathSample {
 	return r.Samples[max(0, len(r.Samples)-bus.PathSamples):]
+}
+
+// within returns the samples sent within span of now.
+func within(samples []bus.PathSample, now time.Time, span time.Duration) []bus.PathSample {
+	var out []bus.PathSample
+	for _, s := range samples {
+		if now.Sub(s.At) <= span {
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 // ejected reports whether the record ejects its path: a burst lost whole
@@ -188,10 +199,14 @@ func rttsOf(samples []bus.PathSample) []time.Duration {
 }
 
 // measuredCost returns the median round trip of the record's recent probes
-// answered, divided by their delivery rate, the loss counted up to lossCap;
-// false when none answered.
-func measuredCost(r bus.PathRecord) (time.Duration, bool) {
-	samples := recent(r)
+// sent within ReadingSpan of now and answered, divided by their delivery
+// rate, the loss counted up to lossCap; false when none answered. A path in
+// use is probed every few seconds and another a minute apart or less often,
+// so the recent probes alone span from under two minutes to far beyond the
+// span: the span keeps the prices the picks and the leases compare within
+// one horizon.
+func measuredCost(r bus.PathRecord, now time.Time) (time.Duration, bool) {
+	samples := within(recent(r), now, ReadingSpan)
 	rtts := rttsOf(samples)
 	if len(rtts) == 0 {
 		return 0, false
@@ -207,12 +222,7 @@ func measuredCost(r bus.PathRecord) (time.Duration, bool) {
 // counted up to lossCap, beside how many of them answered; none when none
 // did.
 func measuredReading(r bus.PathRecord, now time.Time) (time.Duration, int) {
-	var samples []bus.PathSample
-	for _, s := range r.Samples {
-		if now.Sub(s.At) <= ReadingSpan {
-			samples = append(samples, s)
-		}
-	}
+	samples := within(r.Samples, now, ReadingSpan)
 	rtts := rttsOf(samples)
 	if len(rtts) == 0 {
 		return 0, 0
@@ -225,12 +235,7 @@ func measuredReading(r bus.PathRecord, now time.Time) (time.Duration, int) {
 // BoundSpan of now and answered, each divided by their delivery rate, the
 // loss counted up to lossCap; zero for a bound they do not give.
 func measuredBounds(r bus.PathRecord, now time.Time) (lo, hi time.Duration) {
-	var samples []bus.PathSample
-	for _, s := range r.Samples {
-		if now.Sub(s.At) <= BoundSpan {
-			samples = append(samples, s)
-		}
-	}
+	samples := within(r.Samples, now, BoundSpan)
 	rtts := rttsOf(samples)
 	if len(rtts) == 0 {
 		return 0, 0
