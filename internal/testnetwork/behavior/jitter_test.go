@@ -13,6 +13,8 @@ import (
 	"github.com/fancl20/cion/internal/testnetwork"
 	"github.com/fancl20/cion/internal/testnetwork/fabric"
 	"github.com/fancl20/cion/pkg/core/webpki/webpkitest"
+	"github.com/fancl20/cion/pkg/libs/evidence"
+	"github.com/fancl20/cion/pkg/libs/scion"
 )
 
 // linkJitterSweep steps the link's jitter, its mean a multiple of the
@@ -48,6 +50,9 @@ type spread struct {
 	// the link set held for levelQuiet before levelBudget ran out.
 	changes int
 	settled bool
+	// moves counts the leases that moved over the level, first reads
+	// apart.
+	moves int
 	// grading grades the paths when the level ended, and latency grades
 	// them at no penalty, by their delays alone, the same yardstick
 	// whatever penalty the nodes charge.
@@ -83,6 +88,7 @@ func sweepJitter(t *testing.T, n *network) []spread {
 	for i, mean := range steps {
 		set(mean)
 		sp := spread{mean: mean, down: i >= len(jitterLevels)}
+		marks := changeMarks(n)
 		start := time.Now()
 		links := linkSet(t.Context(), n.nodes)
 		quiet := start
@@ -100,10 +106,36 @@ func sweepJitter(t *testing.T, n *network) []spread {
 		}
 		read := readMoved(t, n)
 		sp.grading, sp.latency = read.grade(n, penalty), read.grade(n, 0)
+		sp.moves = leaseMoves(n, marks)
 		spreads = append(spreads, sp)
 	}
 	set(0)
 	return spreads
+}
+
+// changeMarks returns the number each node's next change takes, where a
+// count of the changes made since starts.
+func changeMarks(n *network) []uint64 {
+	marks := make([]uint64, len(n.nodes))
+	for i, node := range n.nodes {
+		marks[i] = node.App().Bus().Changes().Next()
+	}
+	return marks
+}
+
+// leaseMoves counts the lease moves the nodes recorded from the marks on,
+// first reads apart.
+func leaseMoves(n *network, marks []uint64) int {
+	moves := 0
+	for i, node := range n.nodes {
+		changes, _ := node.App().Bus().Changes().Since(marks[i])
+		for _, c := range changes {
+			if r, ok := c.(evidence.Record); ok && r.Change == scion.LeaseMoved && r.From != "" {
+				moves++
+			}
+		}
+	}
+	return moves
 }
 
 // reportJitter logs every level of a network-wide jitter sweep and prints
@@ -124,11 +156,11 @@ func reportJitter(t *testing.T, name string, spreads []spread) {
 			unsettled++
 		}
 		changes += sp.changes
-		t.Logf("%s %s at jitter %v: %d link-set changes, settled %v; %v",
-			name, dir, sp.mean, sp.changes, sp.settled, sp.grading)
-		fmt.Printf("Benchmark%s/dir=%s/jitter=%v 1 %d changes %d settled %d links %d reached %d pairs "+
+		t.Logf("%s %s at jitter %v: %d link-set changes, settled %v, %d lease moves; %v",
+			name, dir, sp.mean, sp.changes, sp.settled, sp.moves, sp.grading)
+		fmt.Printf("Benchmark%s/dir=%s/jitter=%v 1 %d changes %d settled %d links %d reached %d pairs %d moves "+
 			"%g ratio-mean %g ratio-max %g latency-ratio-mean %g latency-ratio-max\n",
-			name, dir, sp.mean, sp.changes, settled, sp.grading.links, sp.grading.reached, sp.grading.pairs,
+			name, dir, sp.mean, sp.changes, settled, sp.grading.links, sp.grading.reached, sp.grading.pairs, sp.moves,
 			sp.grading.ratio.mean, sp.grading.ratio.max, sp.latency.ratio.mean, sp.latency.ratio.max)
 	}
 	fmt.Printf("Benchmark%s/summary 1 %d changes %d unsettled\n", name, changes, unsettled)

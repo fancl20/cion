@@ -86,6 +86,12 @@ run no loops of their own and hold no policy.
     and the path provider that composes paths from discovered segments and
     holds each destination's lease, the path every flow to it rides
     ([ADR-0035](/docs/adrs/0035-choose-paths-by-measured-health.md)).
+*   **Evidence** — how a decision weighs what the node measures: estimates
+    that carry the samples they rest on, comparisons that decide on their
+    bounds or answer undecided, holds, and the records of the changes the
+    decisions make
+    ([ADR-0040](/docs/adrs/0040-decide-from-measured-evidence-in-one-library-and-record-every-change.md)).
+    The leases decide through it.
 *   **SCION RPC** — the SCION-native channel: HTTP/3 over QUIC riding SCION
     paths, peers authenticated by their chains against the TRC, and the
     drafts' service resolution.
@@ -100,6 +106,8 @@ run no loops of their own and hold no policy.
     owns, and the components that depend on it subscribe to its changes or
     read its last event
     ([ADR-0031](/docs/adrs/0031-publish-node-state-as-events-on-a-node-bus.md)).
+    The bus also keeps a journal of the changes the node makes, such as a
+    lease's move, in order; the node logs each as one line.
 
 ### Modules
 

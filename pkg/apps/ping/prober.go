@@ -22,14 +22,15 @@ import (
 )
 
 // The prober's pacing. A destination is hot for HotWindow after its last
-// pick, use, or pricing: its path in use is probed every Heartbeat, its
-// priced routes every RouteProbe, and its standby and its suspect every
-// SlowProbe, each first at once. Until its requests lapse, its path in use is
-// probed every SlowProbe, its other paths not at all. A caller's confirmation
-// of a path counts as its routine probe. A lost probe of a path in use,
-// priced, or suspect, and a caller's doubt newer than a path's last answer,
-// call a burst, which decides the path: an answer keeps or clears it, a burst
-// lost whole ejects it.
+// pick, use, or pricing: its path in use and the path its lease weighs are
+// probed every Heartbeat, its priced routes every RouteProbe, and its
+// standby and its suspect every SlowProbe, each first at once. Until its
+// requests lapse, its path in use and the path its lease weighs are probed
+// every SlowProbe, its other paths not at all. A caller's confirmation of a
+// path counts as its routine probe.
+// A lost probe of a path in use, weighed, priced, or suspect, and a caller's
+// doubt newer than a path's last answer, call a burst, which decides the
+// path: an answer keeps or clears it, a burst lost whole ejects it.
 const (
 	// Heartbeat bounds how long a silent failure of a path in use goes
 	// unseen, a burst's second beside it.
@@ -152,8 +153,8 @@ type probe struct {
 	id    bus.PathID
 	sent  time.Time
 	burst bool
-	// confirm reports whether the path was in use, priced, or suspect when
-	// the probe went: its routine probe's loss calls a burst.
+	// confirm reports whether the path was in use, weighed, priced, or
+	// suspect when the probe went: its routine probe's loss calls a burst.
 	confirm bool
 }
 
@@ -545,7 +546,7 @@ func (p *Prober) dispatch(now time.Time) time.Duration {
 func (p *Prober) interval(ps *probed, now time.Time) time.Duration {
 	hot := now.Sub(ps.req.Picked) < HotWindow
 	switch ps.req.Role {
-	case bus.PathInUse:
+	case bus.PathInUse, bus.PathWeighed:
 		if hot {
 			return Heartbeat
 		}
@@ -605,7 +606,8 @@ func (p *Prober) resolutionPaths(dst addr.IA) []*spath.Decoded {
 func (p *Prober) send(d due, host netip.Addr, now time.Time) {
 	p.seq++
 	pr := probe{id: d.id, sent: now, burst: d.class == 0,
-		confirm: slices.Contains([]bus.PathRole{bus.PathInUse, bus.PathPriced, bus.PathSuspect}, d.ps.req.Role)}
+		confirm: slices.Contains([]bus.PathRole{bus.PathInUse, bus.PathWeighed, bus.PathPriced, bus.PathSuspect},
+			d.ps.req.Role)}
 	p.tokens--
 	if pr.burst {
 		d.ps.burstLeft--

@@ -91,11 +91,12 @@ func TestTopicUpdate(t *testing.T) {
 }
 
 // taken receives the subscription's pending event, if one is pending.
-func taken(s <-chan int) (int, bool) {
+func taken[T any](s <-chan T) (T, bool) {
 	select {
 	case e, ok := <-s:
 		return e, ok
 	default:
-		return 0, false
+		var zero T
+		return zero, false
 	}
 }

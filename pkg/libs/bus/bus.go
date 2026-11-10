@@ -1,16 +1,18 @@
 // Package bus is a node's event bus: a component publishes events about the
 // state it owns, and the components that depend on that state subscribe.
-// Every event carries the full state it describes, so a topic remembers its
-// last event: a subscriber that starts late starts from the state as it
+// A topic's event carries the full state it describes, so a topic remembers
+// its last event: a subscriber that starts late starts from the state as it
 // stands, and a subscriber slower than the publisher skips to the latest
 // event, the ones it missed carrying nothing the latest does not; a
-// component that reads the state on demand reads the last event. A bus
-// belongs to one node — the node's assembly builds it and hands it to the
-// components it wires — and runs no loop of its own; no subscriber's code
-// runs under a publisher's lock.
+// component that reads the state on demand reads the last event. A
+// journal's entry carries one change instead, so a journal keeps its
+// entries in order, and a reader reads each, learning how many it missed. A
+// bus belongs to one node — the node's assembly builds it and hands it to
+// the components it wires — and runs no loop of its own; no subscriber's
+// code runs under a publisher's lock.
 //
-// Every topic is declared here: the bus's accessor names the topic's event,
-// its publisher, and its readers.
+// Every topic and journal is declared here: the bus's accessor names its
+// event or entry, its publisher, and its readers.
 package bus
 
 import (
@@ -18,7 +20,7 @@ import (
 	"sync"
 )
 
-// Bus is one node's topics.
+// Bus is one node's topics and journal.
 type Bus struct {
 	links        Topic[LinkState]
 	ifDown       Topic[InterfaceDownState]
@@ -29,6 +31,7 @@ type Bus struct {
 	tailnet      Topic[TailnetState]
 	requests     Topic[PathRequests]
 	measurements Topic[PathMeasurements]
+	changes      Journal[Change]
 }
 
 // New returns a bus nothing has been published on.
@@ -98,6 +101,13 @@ func (b *Bus) PathRequests() *Topic[PathRequests] {
 // library's path picks read it.
 func (b *Bus) PathMeasurements() *Topic[PathMeasurements] {
 	return &b.measurements
+}
+
+// Changes returns the node's journal of the changes it makes to its state.
+// The SCION library's leases append the records of their moves; the node's
+// assembly logs each change, and the labs read them.
+func (b *Bus) Changes() *Journal[Change] {
+	return &b.changes
 }
 
 // Topic carries one kind of event and remembers the last one published. Its

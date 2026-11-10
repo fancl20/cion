@@ -184,3 +184,84 @@ before.
 *   **The labs.** The labs pass, and the benchmarks run against the commit
     before: the jitter sweeps with their moves, the cuts, the delay changes,
     the bursts, the settled labs, and the founder down.
+
+## Implementation history
+
+*   **The journal of changes.** The records go to the node's journal of
+    changes, `Bus.Changes`, not to a `Bus.Decisions` topic. A topic's event
+    carries state, and a subscriber slower than its publisher skips to the
+    latest, so a log of every change needed its records numbered inside the
+    event. A journal is the bus's primitive for changes instead
+    ([journal.go](/pkg/libs/bus/journal.go)): it keeps its entries in order,
+    the last `bus.JournalKept`, and a reader reads from the number it reached
+    and learns how many it missed. Each kind of change renders its own line,
+    so the node's change log logs every kind once, at Info. The line groups
+    the estimates weighed under `weighed`, apart from the record's own `from`
+    and `to`.
+*   **An idle lease.** In the founder-down benchmark, the survivors took 13.5
+    and 17.4 seconds over two runs to answer every ping, against 0.76.
+    Logging every evaluation showed leases read in the first two minutes,
+    then not for fourteen and a half. The cheaper path's verdict first stood
+    at the second read, and the hold waited for a third; the commit before,
+    counting its hold from the first sighting, moved at the second. By the
+    read before the cut, the leased route through the founder had no probe
+    left, its requests lapsed, so the comparison stayed undecided even
+    against a direct route at 4ms over ten probes. Two changes answer it. A
+    lease no caller used for `bus.RequestLapse` takes a healthy path cheaper
+    beyond the band at once, recorded beside both prices' estimates: no flow
+    rides it to pay for a wrong move, and its lapsed requests left its own
+    path unprobed. And the weighed path is probed as often as the path in
+    use once its destination cools too, every minute until the requests
+    lapse, so a lease used every few minutes keeps the evidence its hold
+    needs.
+*   **A bound of zero.** A round trip in the virtual-time labs can measure
+    exactly zero, so an estimate flags each bound it has rather than reading
+    zero as none. Before the flags, `TestPathsFollowMeasuredHealth` timed out
+    with A's lease never returning to B's link.
+*   **Test adaptations.** The lease tests feed five heartbeats of each path,
+    since one probe no longer moves a lease, and a fresh probe of each during
+    the hold. `TestPathsFollowMeasuredHealth` waits a burst and a heartbeat
+    more for the lease's return, whose hold needs a fresh probe of each
+    branch. The cost's median by nearest rank takes the lower of two middle
+    probes, so `TestCostKind`'s case at the span's edge prices at 10ms, not
+    20ms.
+*   **Left for later.** A path that answers few of its probes gets no
+    bounds, as bounds count answered probes: after the founder's cut, a
+    leased path answering 3 of 20 stayed undecided against a healthy one
+    until a burst ejected it. And a link's address another socket holds
+    keeps the link from serving for a whole run: `TestRegionsSettle` failed
+    once that way, its link set never holding, and the warning shows in the
+    benchmarks of the commit before as well.
+*   `architecture.md` lists the evidence library among the shared libraries
+    and the journal beside the node bus.
+*   ADR-0040 stays `proposed`: the selection's decisions and the records of
+    link and cluster changes land in later proposals.
+*   Mutations: 30 of 30 killed.
+*   The pipeline passed, the behavior labs on a second run after the held
+    address above.
+*   Benchmarks against the commit before, one run each but the regions
+    jitter sweep's two and the stranded sweep's three:
+    *   **Jitter.** The ring's worst pair stood at 1.00 times its shortest
+        route at every level, against 1.50 at 20ms; the regions sweep's at
+        1.007 in both runs and the stranded sweep's at 1.025 at most, as
+        before. The leases moved 11 times over the ring's sweep, 1 over the
+        regions sweeps, and 12 over the stranded ones. Before the idle rule
+        and the cold probes, one regions run stood at 1.204 for a level: a
+        retired link forced a lease onto a detour, and the shorter route's
+        bounds parted from the detour's only at the next level.
+    *   **The founder down.** The survivors answered every ping within 0.76
+        seconds and the restarted node returned within 169 seconds, as
+        before.
+    *   **Cuts and delay changes.** The regions cut settled within 40 seconds
+        after two changes, against 10 after one, and its restore within 60
+        after one, against 220 after two; the metros restore within 30,
+        against 70, and its delay restore within 40, against 100, one change
+        each. The regions delay restore retired a link its tier served no
+        worse without and promoted it back four minutes later, against no
+        change.
+    *   **Settled and bursts.** The regions lab settled on 30 links, the
+        metros lab on 26 against 27, the NAT lab on 16 against 17, the site
+        lab on 15, 11, and 15 by its joins against 15, 11, and 16, the
+        stranded lab on 9, and the ring on 46 against 45, every worst pair at
+        no penalty within 0.005 of where it stood. The bursts changed no link
+        either way, every read reaching every pair.

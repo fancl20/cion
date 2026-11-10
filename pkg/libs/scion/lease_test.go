@@ -13,9 +13,20 @@ import (
 	spath "github.com/scionproto/scion/pkg/slayers/path/scion"
 
 	"github.com/fancl20/cion/pkg/libs/bus"
+	"github.com/fancl20/cion/pkg/libs/evidence"
 	"github.com/fancl20/cion/pkg/libs/segment"
 	"github.com/fancl20/cion/pkg/modules/pathdb"
 )
+
+// heartbeats returns a record of n probes of the round trip, a second apart,
+// the last sent at at.
+func heartbeats(at time.Time, n int, rtt time.Duration) bus.PathRecord {
+	r := bus.PathRecord{LastAnswer: at}
+	for i := n - 1; i >= 0; i-- {
+		r.Samples = append(r.Samples, bus.PathSample{At: at.Add(-time.Duration(i) * time.Second), RTT: rtt})
+	}
+	return r
+}
 
 // leased reads the lease.
 func leased(t *testing.T, l *Lease) Leased {
@@ -30,8 +41,9 @@ func leased(t *testing.T, l *Lease) Leased {
 // TestLeaseKeepsAndMoves checks what keeps and moves a lease: the first read
 // leases the best path; a suspect leased path stays; an ejected one is left
 // at once, but for another ejected one; a path within the band never takes
-// over; a healthy path cheaper beyond the band takes over at the first
-// evaluation LeaseSwitchHold after the first that found it so.
+// over; a healthy path cheaper beyond the band takes over only once both
+// prices' bounds stand and part by the band, and that verdict has stood for
+// LeaseSwitchHold with a fresh probe of each path.
 func TestLeaseKeepsAndMoves(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		ms := time.Millisecond
@@ -83,18 +95,33 @@ func TestLeaseKeepsAndMoves(t *testing.T) {
 		}
 
 		f.measure(map[*Candidate]bus.PathRecord{
-			&f.viaMid: answered(time.Now(), 5*ms),
-			&f.direct: answered(time.Now(), 50*ms),
+			&f.viaMid: heartbeats(time.Now(), ReadingSamples-1, 5*ms),
+			&f.direct: heartbeats(time.Now(), ReadingSamples, 50*ms),
+		})
+		for range 3 * LeaseSwitchHold / LeaseEvaluation {
+			time.Sleep(LeaseEvaluation)
+			if got := leased(t, lease).ID; got != f.direct.ID {
+				t.Fatal("a cheaper path too few probes bound took the lease")
+			}
+		}
+
+		f.measure(map[*Candidate]bus.PathRecord{
+			&f.viaMid: heartbeats(time.Now(), ReadingSamples, 5*ms),
+			&f.direct: heartbeats(time.Now(), ReadingSamples, 50*ms),
 		})
 		for range LeaseSwitchHold / LeaseEvaluation {
 			time.Sleep(LeaseEvaluation)
 			if got := leased(t, lease).ID; got != f.direct.ID {
-				t.Fatalf("the cheaper path took the lease before %v", LeaseSwitchHold)
+				t.Fatal("the cheaper path took the lease without a fresh probe of each path")
 			}
 		}
+		f.measure(map[*Candidate]bus.PathRecord{
+			&f.viaMid: heartbeats(time.Now(), ReadingSamples, 5*ms),
+			&f.direct: heartbeats(time.Now(), ReadingSamples, 50*ms),
+		})
 		time.Sleep(LeaseEvaluation)
 		if got := leased(t, lease).ID; got != f.viaMid.ID {
-			t.Errorf("the cheaper path led for %v, the lease still on %q", LeaseSwitchHold, got)
+			t.Errorf("the cheaper path stood its hold, the lease still on %q", got)
 		}
 	})
 }
@@ -107,23 +134,234 @@ func TestLeaseMovesForATransit(t *testing.T) {
 		ms := time.Millisecond
 		f := newMeasuredFixture(t, time.Minute)
 		f.measure(map[*Candidate]bus.PathRecord{
-			&f.viaMid: answered(time.Now(), 100*ms),
-			&f.direct: answered(time.Now(), 200*ms),
+			&f.viaMid: heartbeats(time.Now(), ReadingSamples, 100*ms),
+			&f.direct: heartbeats(time.Now(), ReadingSamples, 200*ms),
 		})
 		lease := f.p.Lease(iaDest)
 		if got := leased(t, lease).ID; got != f.viaMid.ID {
 			t.Fatalf("the first read leased %q, want the middle's %q", got, f.viaMid.ID)
 		}
-		// 205ms through the middle prices at 225ms, 200ms direct at 210ms.
-		f.measure(map[*Candidate]bus.PathRecord{
-			&f.viaMid: answered(time.Now(), 205*ms),
-			&f.direct: answered(time.Now(), 200*ms),
-		})
+		// 205ms through the middle prices at 205ms and two transits' charge,
+		// 200ms direct at 200ms and one's.
+		slow := func() {
+			f.measure(map[*Candidate]bus.PathRecord{
+				&f.viaMid: heartbeats(time.Now(), ReadingSamples, 205*ms),
+				&f.direct: heartbeats(time.Now(), ReadingSamples, 200*ms),
+			})
+		}
+		slow()
 		time.Sleep(LeaseEvaluation)
 		leased(t, lease)
 		time.Sleep(LeaseSwitchHold)
+		slow()
 		if got := leased(t, lease).ID; got != f.direct.ID {
 			t.Errorf("the lease holds %q, want the direct route, a transit's price cheaper", got)
+		}
+	})
+}
+
+// TestLeaseHoldsAgainstSpreadProbes checks that a path cheaper by its median
+// but whose probes spread, its bounds straddling the leased path's price,
+// never takes the lease, however long its probes keep coming.
+func TestLeaseHoldsAgainstSpreadProbes(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		ms := time.Millisecond
+		f := newMeasuredFixture(t, time.Minute)
+		spread := func(at time.Time) bus.PathRecord {
+			r := bus.PathRecord{LastAnswer: at}
+			for i, rtt := range []time.Duration{300 * ms, 10 * ms, 15 * ms, 20 * ms, 25 * ms} {
+				r.Samples = append(r.Samples, bus.PathSample{At: at.Add(time.Duration(i-4) * time.Second), RTT: rtt})
+			}
+			return r
+		}
+		measure := func() {
+			f.measure(map[*Candidate]bus.PathRecord{
+				&f.viaMid: spread(time.Now()),
+				&f.direct: heartbeats(time.Now(), ReadingSamples, 60*ms),
+			})
+		}
+		f.measure(map[*Candidate]bus.PathRecord{
+			&f.viaMid: ejectedAt(time.Now()),
+			&f.direct: heartbeats(time.Now(), ReadingSamples, 60*ms),
+		})
+		lease := f.p.Lease(iaDest)
+		if got := leased(t, lease).ID; got != f.direct.ID {
+			t.Fatalf("the first read leased %q, want the direct route %q", got, f.direct.ID)
+		}
+		for range 6 * LeaseSwitchHold / LeaseEvaluation {
+			measure()
+			time.Sleep(LeaseEvaluation)
+			if got := leased(t, lease).ID; got != f.direct.ID {
+				t.Fatal("a path whose bounds straddle the leased path's price took the lease")
+			}
+		}
+	})
+}
+
+// TestLeaseHoldEndsWithItsVerdict checks that a verdict that lapses ends
+// the hold: a cheaper path whose bounds part from the leased path's starts
+// it, a spread of its probes ends it, and once its bounds part again the
+// hold starts over, however long ago the first began.
+func TestLeaseHoldEndsWithItsVerdict(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		ms := time.Millisecond
+		f := newMeasuredFixture(t, time.Minute)
+		measure := func(mid bus.PathRecord) {
+			f.measure(map[*Candidate]bus.PathRecord{
+				&f.viaMid: mid,
+				&f.direct: heartbeats(time.Now(), ReadingSamples, 60*ms),
+			})
+		}
+		spread := func(at time.Time) bus.PathRecord {
+			r := heartbeats(at, ReadingSamples, 10*ms)
+			r.Samples[0].RTT = 300 * ms
+			return r
+		}
+		measure(ejectedAt(time.Now()))
+		lease := f.p.Lease(iaDest)
+		if got := leased(t, lease).ID; got != f.direct.ID {
+			t.Fatalf("the first read leased %q, want the direct route %q", got, f.direct.ID)
+		}
+		measure(heartbeats(time.Now(), ReadingSamples, 10*ms))
+		time.Sleep(LeaseEvaluation)
+		leased(t, lease)
+		measure(spread(time.Now()))
+		time.Sleep(LeaseEvaluation)
+		leased(t, lease)
+		time.Sleep(LeaseSwitchHold)
+		measure(heartbeats(time.Now(), ReadingSamples, 10*ms))
+		if got := leased(t, lease).ID; got != f.direct.ID {
+			t.Fatal("the cheaper path took the lease on a hold its lapsed verdict began")
+		}
+		time.Sleep(LeaseSwitchHold)
+		measure(heartbeats(time.Now(), ReadingSamples, 10*ms))
+		if got := leased(t, lease).ID; got != f.viaMid.ID {
+			t.Errorf("the cheaper path stood its new hold, the lease still on %q", got)
+		}
+	})
+}
+
+// TestLeaseRecordsItsMoves checks the record each change of a lease's path
+// appends to the journal of changes: the first read's, an ejection's, and a
+// cheaper path's beside the band and both prices' estimates.
+func TestLeaseRecordsItsMoves(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		ms := time.Millisecond
+		f := newMeasuredFixture(t, time.Minute)
+		f.p.Changes = new(bus.Journal[bus.Change])
+		f.measure(map[*Candidate]bus.PathRecord{
+			&f.viaMid: heartbeats(time.Now(), ReadingSamples, 100*ms),
+			&f.direct: heartbeats(time.Now(), ReadingSamples, 200*ms),
+		})
+		lease := f.p.Lease(iaDest)
+		leased(t, lease)
+		f.measure(map[*Candidate]bus.PathRecord{
+			&f.viaMid: ejectedAt(time.Now()),
+			&f.direct: heartbeats(time.Now(), ReadingSamples, 200*ms),
+		})
+		time.Sleep(LeaseEvaluation)
+		leased(t, lease)
+		recovered := func() {
+			f.measure(map[*Candidate]bus.PathRecord{
+				&f.viaMid: heartbeats(time.Now(), ReadingSamples, 10*ms),
+				&f.direct: heartbeats(time.Now(), ReadingSamples, 200*ms),
+			})
+		}
+		recovered()
+		time.Sleep(LeaseEvaluation)
+		leased(t, lease)
+		time.Sleep(LeaseSwitchHold)
+		recovered()
+		if got := leased(t, lease).ID; got != f.viaMid.ID {
+			t.Fatalf("the lease holds %q, want the recovered middle's %q", got, f.viaMid.ID)
+		}
+
+		changes, _ := f.p.Changes.Since(0)
+		type move struct{ from, to, why string }
+		var records []evidence.Record
+		var got []move
+		for _, c := range changes {
+			r, ok := c.(evidence.Record)
+			if !ok || r.Change != LeaseMoved || r.Subject != iaDest.String() {
+				t.Errorf("change %+v is no record of the lease's move", c)
+				continue
+			}
+			records = append(records, r)
+			got = append(got, move{r.From, r.To, r.Why})
+		}
+		mid, direct := string(f.viaMid.ID), string(f.direct.ID)
+		want := []move{{"", mid, whyFirst}, {mid, direct, whyEjected}, {direct, mid, whyCheaper}}
+		if diff := cmp.Diff(want, got, cmp.AllowUnexported(move{})); diff != "" {
+			t.Fatalf("records (-want +got):\n%s", diff)
+		}
+		cheaper := records[2]
+		from, to := cheaper.Weighed[0], cheaper.Weighed[1]
+		// 200ms direct prices at 210ms, 10ms through the middle at 30ms.
+		if cheaper.Line != band(30*ms, 210*ms) || from.Name != "from" || to.Name != "to" ||
+			from.Value != 210*ms || from.Lo != 210*ms || to.Value != 30*ms || to.Hi != 30*ms ||
+			to.Answered != ReadingSamples {
+			t.Errorf("the cheaper path's record weighed %+v and %+v over %v", from, to, cheaper.Line)
+		}
+	})
+}
+
+// TestLeaseIdleTakesACheaperPath checks an idle lease: a healthy path cheaper
+// beyond the band that one probe prices never takes a lease in use, but takes
+// the lease at once at a read that finds it unused for bus.RequestLapse, and
+// the move's record names both prices' estimates; a lease no caller ever
+// used takes such a path at once too.
+func TestLeaseIdleTakesACheaperPath(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		ms := time.Millisecond
+		f := newMeasuredFixture(t, time.Minute)
+		f.p.Changes = new(bus.Journal[bus.Change])
+		f.measure(map[*Candidate]bus.PathRecord{
+			&f.viaMid: ejectedAt(time.Now()),
+			&f.direct: heartbeats(time.Now(), ReadingSamples, 200*ms),
+		})
+		lease := f.p.Lease(iaDest)
+		if got := leased(t, lease).ID; got != f.direct.ID {
+			t.Fatalf("the first read leased %q, want the direct %q", got, f.direct.ID)
+		}
+		recovered := func(f measuredFixture) {
+			f.measure(map[*Candidate]bus.PathRecord{
+				&f.viaMid: answered(time.Now(), 10*ms),
+				&f.direct: heartbeats(time.Now(), ReadingSamples, 200*ms),
+			})
+		}
+		recovered(f)
+		for range 3 * LeaseSwitchHold / LeaseEvaluation {
+			time.Sleep(LeaseEvaluation)
+			if got := leased(t, lease).ID; got != f.direct.ID {
+				t.Fatalf("a path one probe prices took the lease in use, now on %q", got)
+			}
+		}
+
+		time.Sleep(bus.RequestLapse)
+		recovered(f)
+		if got := leased(t, lease).ID; got != f.viaMid.ID {
+			t.Fatalf("the idle lease kept %q, want the cheaper %q at once", got, f.viaMid.ID)
+		}
+		changes, _ := f.p.Changes.Since(0)
+		r, ok := changes[len(changes)-1].(evidence.Record)
+		if !ok || r.Why != whyIdle || r.From != string(f.direct.ID) || r.To != string(f.viaMid.ID) || r.Line == 0 ||
+			len(r.Weighed) != 2 || r.Weighed[0].Answered != ReadingSamples || r.Weighed[1].Answered != 1 {
+			t.Errorf("the idle move recorded %+v", changes[len(changes)-1])
+		}
+
+		g := newMeasuredFixture(t, time.Minute)
+		g.measure(map[*Candidate]bus.PathRecord{
+			&g.viaMid: ejectedAt(time.Now()),
+			&g.direct: heartbeats(time.Now(), ReadingSamples, 200*ms),
+		})
+		unused := g.p.Lease(iaDest)
+		if got, err := unused.Peek(); err != nil || got.ID != g.direct.ID {
+			t.Fatalf("the unused lease's first read leased %q (%v), want the direct %q", got.ID, err, g.direct.ID)
+		}
+		recovered(g)
+		time.Sleep(LeaseEvaluation)
+		if got, err := unused.Peek(); err != nil || got.ID != g.viaMid.ID {
+			t.Errorf("a lease no caller used kept %q (%v), want the cheaper %q at once", got.ID, err, g.viaMid.ID)
 		}
 	})
 }
@@ -189,25 +427,35 @@ func TestLeaseComparesPricesWithinTheSpan(t *testing.T) {
 			}
 		}
 
-		now = time.Now()
-		f.measure(map[*Candidate]bus.PathRecord{
-			&f.direct: record(probes(now, bus.PathSamples, 100*ms)),
-			&f.viaMid: record(probes(now, bus.PathSamples, 10*ms)),
-		})
+		// Each phase measures twice, so that a fresh probe of each path
+		// answers within the hold.
+		slowDirect := func() {
+			now := time.Now()
+			f.measure(map[*Candidate]bus.PathRecord{
+				&f.direct: record(probes(now, bus.PathSamples, 100*ms)),
+				&f.viaMid: record(probes(now, bus.PathSamples, 10*ms)),
+			})
+		}
+		slowDirect()
 		time.Sleep(LeaseEvaluation)
 		leased(t, lease)
 		time.Sleep(LeaseSwitchHold)
+		slowDirect()
 		if got := leased(t, lease).ID; got != f.viaMid.ID {
 			t.Fatalf("the lease holds %q, want the middle's %q", got, f.viaMid.ID)
 		}
-		now = time.Now()
-		f.measure(map[*Candidate]bus.PathRecord{
-			&f.direct: record(probes(now.Add(-2*ReadingSpan), 15, 300*ms), probes(now, 5, 10*ms)),
-			&f.viaMid: record(probes(now, bus.PathSamples, 40*ms)),
-		})
+		fastAgain := func() {
+			now := time.Now()
+			f.measure(map[*Candidate]bus.PathRecord{
+				&f.direct: record(probes(now.Add(-2*ReadingSpan), 15, 300*ms), probes(now, 5, 10*ms)),
+				&f.viaMid: record(probes(now, bus.PathSamples, 40*ms)),
+			})
+		}
+		fastAgain()
 		time.Sleep(LeaseEvaluation)
 		leased(t, lease)
 		time.Sleep(LeaseSwitchHold)
+		fastAgain()
 		if got := leased(t, lease).ID; got != f.direct.ID {
 			t.Errorf("a path slow only past the span stayed behind, the lease on %q", got)
 		}
@@ -390,7 +638,7 @@ func TestLeaseRequests(t *testing.T) {
 // TestLeaseRequestsItsChallenger checks that a lease measures the path it
 // would move to: an unmeasured path ranking above the leased one, sharing a
 // link with it so that another path is the disjoint standby, is requested
-// standby beside that one.
+// weighed beside that one.
 func TestLeaseRequestsItsChallenger(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		f := newMeasuredFixture(t, time.Minute)
@@ -441,7 +689,7 @@ func TestLeaseRequestsItsChallenger(t *testing.T) {
 			roles[r.ID] = r.Role
 		}
 		want := map[bus.PathID]bus.PathRole{
-			viaSecond.ID: bus.PathInUse, direct.ID: bus.PathStandby, first.ID: bus.PathStandby,
+			viaSecond.ID: bus.PathInUse, direct.ID: bus.PathStandby, first.ID: bus.PathWeighed,
 		}
 		if diff := cmp.Diff(want, roles); diff != "" {
 			t.Errorf("requests (-want +got):\n%s", diff)

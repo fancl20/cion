@@ -16,6 +16,7 @@ import (
 	spath "github.com/scionproto/scion/pkg/slayers/path/scion"
 
 	"github.com/fancl20/cion/internal/testnetwork"
+	"github.com/fancl20/cion/pkg/apps/ping"
 	"github.com/fancl20/cion/pkg/libs/scion"
 	"github.com/fancl20/cion/pkg/libs/segment"
 	"github.com/fancl20/cion/pkg/modules/links"
@@ -202,17 +203,22 @@ func readPaths(t *testing.T, n *network, candidates bool) paths {
 
 // readMoved reads every ordered pair's chosen path as a flow that starts
 // reading its leases holds it once they had time to move, for a network
-// that read no lease for a while: a lease moves to a cheaper path once its
-// evaluations found the path healthy and cheaper for scion.LeaseSwitchHold,
-// and a destination nothing read lets its paths' probes lapse. The first
-// read requests the destinations' paths, which the prober probes at once;
-// the second finds a cheaper path healthy; the third, past the hold, finds
-// the lease moved. It returns the third read.
+// that read no lease for a while: a lease moves to a cheaper path once the
+// bounds of both paths' prices part by the band and that verdict stood for
+// scion.LeaseSwitchHold across a probe of each, and a destination nothing
+// read lets its paths' probes lapse. The first read requests the
+// destinations' paths, which the prober probes at once and every heartbeat
+// while they are read; the weighed path's bounds stand after
+// scion.ReadingSamples heartbeats, the next read finds them apart and holds,
+// the one after, past the hold, moves the lease, and the last finds it moved.
+// It reads every hold and evaluation and returns the last read.
 func readMoved(t *testing.T, n *network) paths {
 	t.Helper()
-	for range 2 {
+	every := scion.LeaseSwitchHold + scion.LeaseEvaluation
+	gather := time.Duration(scion.ReadingSamples) * ping.Heartbeat
+	for range int((gather+every-1)/every) + 2 {
 		readPaths(t, n, false)
-		time.Sleep(scion.LeaseSwitchHold + scion.LeaseEvaluation)
+		time.Sleep(every)
 	}
 	return readPaths(t, n, false)
 }

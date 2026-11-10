@@ -11,6 +11,7 @@ import (
 	"github.com/scionproto/scion/pkg/addr"
 	spath "github.com/scionproto/scion/pkg/slayers/path/scion"
 
+	"github.com/fancl20/cion/pkg/libs/evidence"
 	"github.com/fancl20/cion/pkg/libs/segment"
 )
 
@@ -41,6 +42,9 @@ type PathRole uint8
 const (
 	// PathInUse is the path a destination's pick or lease holds.
 	PathInUse PathRole = iota
+	// PathWeighed is a path a lease weighs against the one in use, measured
+	// as often until the comparison decides.
+	PathWeighed
 	// PathPriced is a route a requester prices by its measurements.
 	PathPriced
 	// PathStandby is the path the one in use would fail over to.
@@ -152,15 +156,9 @@ func (r PathRequests) All() iter.Seq[PathRequest] {
 // the probes the path library's health, loss, and cost read.
 const PathSamples = 20
 
-// PathSample is one probe's outcome.
-type PathSample struct {
-	// At is when the probe was sent.
-	At time.Time
-	// RTT is the probe's round trip, zero when it was lost.
-	RTT time.Duration
-	// Lost reports whether the probe went unanswered.
-	Lost bool
-}
+// PathSample is one probe's outcome, a sample the path library's estimates
+// read.
+type PathSample = evidence.Sample
 
 // PathRecord is one path's measurements.
 type PathRecord struct {

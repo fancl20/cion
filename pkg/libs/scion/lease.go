@@ -12,6 +12,7 @@ import (
 	spath "github.com/scionproto/scion/pkg/slayers/path/scion"
 
 	"github.com/fancl20/cion/pkg/libs/bus"
+	"github.com/fancl20/cion/pkg/libs/evidence"
 	"github.com/fancl20/cion/pkg/modules/pathdb"
 )
 
@@ -20,15 +21,31 @@ const (
 	// LeaseEvaluation spaces a lease's evaluations: the reads within it share
 	// the last one.
 	LeaseEvaluation = time.Second
-	// LeaseSwitchHold is how long a cheaper path must stay cheaper beyond the
-	// band before a lease moves to it: a heartbeat of the ping application,
-	// so a probe of each path speaks in between.
+	// LeaseSwitchHold is how long a lease's verdict that a cheaper path beats
+	// its own must stand, a probe of each path answered meanwhile, before the
+	// lease moves: a heartbeat of the ping application, so that a probe of
+	// each path speaks in between.
 	LeaseSwitchHold = 5 * time.Second
 	// LeaseExpiryMargin is how close to its hop fields' expiry a path no
 	// longer serves: one that lapses within it is left before it fails.
 	LeaseExpiryMargin = 30 * time.Second
 	// leasesRequester names the leases' entries among the path requests.
 	leasesRequester = "leases"
+)
+
+// LeaseMoved is the change a lease's records name.
+const LeaseMoved = "Lease moved"
+
+// The reasons a lease's record gives for a change of its path.
+const (
+	whyFirst     = "the first read"
+	whyCheaper   = "a cheaper path, confident beyond the band"
+	whyIdle      = "a cheaper path, taken at once by an idle lease"
+	whyEjected   = "the leased path was ejected"
+	whyExpiring  = "the leased path nears its hop fields' expiry"
+	whyGone      = "the leased path no longer composes"
+	whyBootstrap = "no path composes, so the bootstrap route stands in"
+	whyComposes  = "a path composes where the bootstrap route stood"
 )
 
 // held is a done context: a lookup given it serves the answers it holds and
@@ -50,8 +67,12 @@ type Leased struct {
 // Lease is the path every flow to one destination rides. It keeps its path
 // while the path composes and is not ejected, moves at once when it is
 // ejected, no longer composes, or nears its hop fields' expiry, and moves to
-// a healthy path whose price beats its own beyond the band once that path
-// stayed so for LeaseSwitchHold. Its methods are safe for concurrent use.
+// a healthy path cheaper beyond the band once confident of it: the bounds of
+// the two paths' prices part by the band, and that verdict stands for
+// LeaseSwitchHold across a probe of each path. An idle lease, one no caller
+// used for bus.RequestLapse, takes such a path at once. Each change of its
+// path appends a record to the provider's journal of changes. Its methods
+// are safe for concurrent use.
 type Lease struct {
 	p   *PathProvider
 	dst addr.IA
@@ -66,10 +87,8 @@ type Lease struct {
 	evaluated time.Time
 	// used is when a caller last read the lease for payload.
 	used time.Time
-	// challenger names the path cheaper beyond the band than the leased one,
-	// and since is when it first was.
-	challenger bus.PathID
-	since      time.Time
+	// hold holds the verdict that a cheaper path beats the leased one.
+	hold evidence.Hold
 }
 
 // Lease returns the destination's lease, the one every caller shares. Once a
@@ -139,17 +158,19 @@ func (l *Lease) Lost(id bus.PathID) {
 }
 
 // get reads the lease, evaluating it when an evaluation is due, and counts a
-// use when use is set.
+// use when use is set. The lease is idle for the evaluation when no caller
+// used it for bus.RequestLapse before the read.
 func (l *Lease) get(use bool) (Leased, error) {
 	now := time.Now()
 	l.read.Store(now.UnixNano())
 	l.mtx.Lock()
 	defer l.mtx.Unlock()
+	idle := now.Sub(l.used) >= bus.RequestLapse
 	if use {
 		l.used = now
 	}
 	if now.Sub(l.evaluated) >= LeaseEvaluation {
-		if err := l.evaluate(now); err != nil {
+		if err := l.evaluate(now, idle); err != nil {
 			return Leased{}, err
 		}
 	}
@@ -161,42 +182,106 @@ func (l *Lease) get(use bool) (Leased, error) {
 
 // evaluate composes the destination's candidates and keeps, refreshes, or
 // moves the leased path, the bootstrap route standing in while nothing
-// composes. While the destination is in use, it updates the leases' requests
-// for it. The caller holds l.mtx.
-func (l *Lease) evaluate(now time.Time) error {
+// composes, and records each change of the path; idle reports the lease
+// idle. While the destination is in use, it updates the leases' requests for
+// it. The caller holds l.mtx.
+func (l *Lease) evaluate(now time.Time, idle bool) error {
 	l.evaluated = now
 	v := l.p.view()
 	candidates, err := l.p.enumerate(held, l.dst, v)
 	if err != nil {
 		return err
 	}
+	prev := l.cur
+	expiring := false
 	candidates = slices.DeleteFunc(candidates, func(c Candidate) bool {
-		return PathExpiry(c.Path).Sub(v.now) < LeaseExpiryMargin
+		late := PathExpiry(c.Path).Sub(v.now) < LeaseExpiryMargin
+		expiring = expiring || late && prev != nil && prev.ID != "" && c.ID == prev.ID
+		return late
 	})
 	best := bestOf(candidates)
 	if best == nil {
-		l.cur, l.challenger = l.p.bootstrap(l.dst, v), ""
+		l.cur = l.p.bootstrap(l.dst, v)
+		l.hold.Release()
+		l.record(prev, whyBootstrap, 0, nil, now)
 		return nil
 	}
 	cur := l.freshest(candidates)
 	switch {
-	case cur == nil || cur.Health == HealthEjected && best.Health != HealthEjected:
-		l.cur, l.challenger = best, ""
+	case cur == nil:
+		l.cur = best
+		l.hold.Release()
+		why := whyGone
+		switch {
+		case prev == nil:
+			why = whyFirst
+		case prev.ID == "":
+			why = whyComposes
+		case expiring:
+			why = whyExpiring
+		}
+		l.record(prev, why, 0, nil, now)
+	case cur.Health == HealthEjected && best.Health != HealthEjected:
+		l.cur = best
+		l.hold.Release()
+		l.record(prev, whyEjected, 0, nil, now)
 	case best.ID != cur.ID && best.Health == HealthHealthy && cheaper(best, cur):
-		if l.challenger != best.ID {
-			l.challenger, l.since = best.ID, now
-		}
 		l.cur = cur
-		if now.Sub(l.since) >= LeaseSwitchHold {
-			l.cur, l.challenger = best, ""
+		price, own := best.PriceEstimate(), cur.PriceEstimate()
+		pa, _ := best.Price()
+		pb, _ := cur.Price()
+		line := band(pa, pb)
+		// No flow rides an idle lease to pay for a wrong move, and its
+		// lapsed requests left its path unprobed: it moves at once. A lease
+		// in use moves once the evidence decides and the verdict stands.
+		why := whyIdle
+		if !idle {
+			if evidence.Beats(price, own, line) != evidence.Better {
+				l.hold.Release()
+				break
+			}
+			if !l.hold.Stands(string(best.ID), price, own, LeaseSwitchHold, now) {
+				break
+			}
+			why = whyCheaper
 		}
+		l.cur = best
+		l.hold.Release()
+		weighed := []evidence.Weighed{{Name: "from", Estimate: own}, {Name: "to", Estimate: price}}
+		l.record(prev, why, line, weighed, now)
 	default:
-		l.cur, l.challenger = cur, ""
+		l.cur = cur
+		l.hold.Release()
 	}
 	if !l.used.IsZero() && now.Sub(l.used) < bus.RequestLapse {
 		l.p.request(leasesRequester, l.dst, l.cur, l.used, candidates, v)
 	}
 	return nil
+}
+
+// record appends to the provider's journal of changes the record of the
+// lease's move from prev to its path, why, the line, and the estimates it
+// weighed; nothing when its path is prev's.
+func (l *Lease) record(prev *Candidate, why string, line time.Duration, weighed []evidence.Weighed, now time.Time) {
+	from, to := leaseName(prev), leaseName(l.cur)
+	if l.p.Changes == nil || from == to {
+		return
+	}
+	l.p.Changes.Append(evidence.Record{At: now, Change: LeaseMoved, Subject: l.dst.String(), From: from, To: to,
+		Why: why, Line: line, Weighed: weighed})
+}
+
+// leaseName names a leased path in a record: its identity, the bootstrap
+// route, or nothing for none.
+func leaseName(c *Candidate) string {
+	switch {
+	case c == nil:
+		return ""
+	case c.ID == "":
+		return "the bootstrap route"
+	default:
+		return string(c.ID)
+	}
 }
 
 // freshest returns the freshest composition of the leased path among the

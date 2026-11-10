@@ -502,6 +502,7 @@ func (n *node) buildBeaconing() error {
 		Links:         n.bus.Links(),
 		Measurements:  n.bus.PathMeasurements(),
 		Requests:      n.bus.PathRequests(),
+		Changes:       n.bus.Changes(),
 	}
 	return nil
 }

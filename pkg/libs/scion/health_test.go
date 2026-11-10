@@ -495,11 +495,11 @@ func deref(d *time.Duration) time.Duration {
 	return *d
 }
 
-// TestMeasuredCost checks a record's cost: the median of its last
-// bus.PathSamples probes sent within ReadingSpan of now, the one at the
-// span's edge among them, divided by their delivery rate, the loss counted
-// up to lossCap; none when none of them answered.
-func TestMeasuredCost(t *testing.T) {
+// TestCostKind checks a record's cost estimate: the median by nearest rank
+// of its last bus.PathSamples probes sent within ReadingSpan of now, the one
+// at the span's edge among them, divided by their delivery rate, the loss
+// counted up to nine in ten; none when none of them answered.
+func TestCostKind(t *testing.T) {
 	ms := time.Millisecond
 	now := time.Now()
 	at := func(ago, rtt time.Duration) bus.PathSample {
@@ -518,7 +518,7 @@ func TestMeasuredCost(t *testing.T) {
 		{"none", nil, 0, false},
 		{"lost alone", []bus.PathSample{lost(0)}, 0, false},
 		{"answered past the span", []bus.PathSample{at(past, 10*ms), lost(0)}, 0, false},
-		{"at the span's edge", []bus.PathSample{at(past, 90*ms), at(ReadingSpan, 20*ms), at(0, 10*ms)}, 20 * ms, true},
+		{"at the span's edge", []bus.PathSample{at(past, 90*ms), at(ReadingSpan, 20*ms), at(0, 10*ms)}, 10 * ms, true},
 		{"the last ones past the span among them", append(slices.Repeat([]bus.PathSample{at(past, 10*ms)}, 18),
 			at(time.Minute, 40*ms), at(0, 40*ms)), 40 * ms, true},
 		{"more within the span than the last ones", append(slices.Repeat([]bus.PathSample{at(2*time.Minute, 50*ms)}, 25),
@@ -528,18 +528,18 @@ func TestMeasuredCost(t *testing.T) {
 		{"losses past the cap", append([]bus.PathSample{at(0, 10*ms)}, slices.Repeat([]bus.PathSample{lost(0)}, 19)...),
 			100 * ms, true},
 	} {
-		got, ok := measuredCost(bus.PathRecord{Samples: tc.samples}, now)
-		if got != tc.want || ok != tc.ok {
-			t.Errorf("%s: measuredCost = %v, %v, want %v, %v", tc.name, got, ok, tc.want, tc.ok)
+		e := costKind.Of(tc.samples, now)
+		if got, ok := e.Value, e.Answered > 0; got != tc.want || ok != tc.ok {
+			t.Errorf("%s: cost %v, answered %v, want %v, %v", tc.name, got, ok, tc.want, tc.ok)
 		}
 	}
 }
 
-// TestMeasuredReading checks a record's reading: the reading of its probes
-// sent within ReadingSpan of now, the one at the span's edge among them,
-// divided by their delivery rate, the loss counted up to lossCap, beside how
-// many answered; none when none of them did.
-func TestMeasuredReading(t *testing.T) {
+// TestReadingKind checks a record's reading estimate: the reading of its
+// probes sent within ReadingSpan of now, the one at the span's edge among
+// them, divided by their delivery rate, the loss counted up to nine in ten,
+// beside how many answered; none when none of them did.
+func TestReadingKind(t *testing.T) {
 	ms := time.Millisecond
 	now := time.Now()
 	at := func(ago, rtt time.Duration) bus.PathSample {
@@ -564,18 +564,18 @@ func TestMeasuredReading(t *testing.T) {
 		{"losses past the cap", append([]bus.PathSample{at(0, 10*ms)}, slices.Repeat([]bus.PathSample{lost(0)}, 19)...),
 			100 * ms, 1},
 	} {
-		got, answered := measuredReading(bus.PathRecord{Samples: tc.samples}, now)
-		if got != tc.want || answered != tc.answered {
-			t.Errorf("%s: measuredReading = %v over %d, want %v over %d", tc.name, got, answered, tc.want, tc.answered)
+		e := readingKind.Of(tc.samples, now)
+		if e.Value != tc.want || e.Answered != tc.answered {
+			t.Errorf("%s: reading %v over %d, want %v over %d", tc.name, e.Value, e.Answered, tc.want, tc.answered)
 		}
 	}
 }
 
-// TestMeasuredBounds checks a record's bounds: those of its probes sent
+// TestBoundKind checks a record's reading bounds: those of its probes sent
 // within BoundSpan of now, the one at the span's edge among them, each
-// divided by their delivery rate, the loss counted up to lossCap; zero for a
-// bound they do not give.
-func TestMeasuredBounds(t *testing.T) {
+// divided by their delivery rate, the loss counted up to nine in ten; zero
+// for a bound they do not give.
+func TestBoundKind(t *testing.T) {
 	ms := time.Millisecond
 	now := time.Now()
 	at := func(ago, rtt time.Duration) bus.PathSample {
@@ -609,8 +609,8 @@ func TestMeasuredBounds(t *testing.T) {
 		{"losses past the cap", append([]bus.PathSample{at(0, 10*ms), at(0, 10*ms)},
 			slices.Repeat([]bus.PathSample{lost(0)}, 38)...), 100 * ms, 0},
 	} {
-		if lo, hi := measuredBounds(bus.PathRecord{Samples: tc.samples}, now); lo != tc.lo || hi != tc.hi {
-			t.Errorf("%s: measuredBounds = %v, %v, want %v, %v", tc.name, lo, hi, tc.lo, tc.hi)
+		if e := boundKind.Of(tc.samples, now); e.Lo != tc.lo || e.Hi != tc.hi {
+			t.Errorf("%s: bounds %v, %v, want %v, %v", tc.name, e.Lo, e.Hi, tc.lo, tc.hi)
 		}
 	}
 }

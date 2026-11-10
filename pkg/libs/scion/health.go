@@ -7,6 +7,7 @@ import (
 	"github.com/scionproto/scion/pkg/addr"
 
 	"github.com/fancl20/cion/pkg/libs/bus"
+	"github.com/fancl20/cion/pkg/libs/evidence"
 	"github.com/fancl20/cion/pkg/libs/segment"
 )
 
@@ -39,23 +40,38 @@ const (
 	// callerLosses ejects a path whose callers reported that many losses
 	// within the trust window since its last answer.
 	callerLosses = 3
-	// lossCap bounds the loss a cost counts, so a lossy path's cost stays
-	// finite.
-	lossCap = 0.9
 	// backoffBase and backoffCap space an ejected path's half-open probes:
 	// backoffBase after its first lost burst, doubling with each, at most
 	// backoffCap.
 	backoffBase = 10 * time.Second
 	backoffCap  = time.Minute
-	// bandShare, bandFloor, and bandCap make the band two prices tie
-	// within: bandShare of the smaller, at least bandFloor — jitter on a
-	// fast path — and at most bandCap, one transit's price, so a path that
-	// saves a transit takes over however long the path.
+	// bandShare, bandFloor, and bandCap make the band, which two prices
+	// ranked by their values tie within and a lease's move must clear:
+	// bandShare of the smaller, at least bandFloor — jitter on a fast path —
+	// and at most bandCap, one transit's price, so a path that saves a
+	// transit takes over however long the path.
 	bandShare = 0.2
 	bandFloor = 2 * time.Millisecond
 	bandCap   = 2 * TransitPenalty
 	// picksRequester names the picks' entries among the path requests.
 	picksRequester = "picks"
+)
+
+// The kinds of estimate a candidate carries, each over its record's probes
+// and bounded at BoundConfidence: its cost's, the median of the last
+// bus.PathSamples sent within ReadingSpan, its reading's, the 80th
+// percentile of every probe within ReadingSpan, and its reading's bounds',
+// that percentile over BoundSpan. A path in use is probed every few seconds
+// and another a minute apart or less often, so the count alone would span
+// from under two minutes to far beyond the span: the span keeps the prices
+// the picks and the leases compare within one horizon. At BoundConfidence, a
+// median's bounds stand from ReadingSamples probes, each missing it with odds
+// of one in 32.
+var (
+	costKind = evidence.Kind{Quantile: 0.5, Confidence: BoundConfidence, Span: ReadingSpan,
+		Count: bus.PathSamples}
+	readingKind = evidence.Kind{Quantile: readingQuantile, Confidence: BoundConfidence, Span: ReadingSpan}
+	boundKind   = evidence.Kind{Quantile: readingQuantile, Confidence: BoundConfidence, Span: BoundSpan}
 )
 
 // report is what callers' traffic saw of one path: when it last delivered,
@@ -93,11 +109,11 @@ func (r report) lostSince(since, within time.Time) int {
 // suspect, signaled or for a caller's loss newer than its last answer;
 // healthy, for an answer within the trust window; suspect, for stale
 // segments or a crossed link its failed paths share; unknown. An ejected
-// candidate is due its half-open probe its backoff after its last loss. Its
-// cost is its measured cost, and its reading its measured reading, each
-// else twice its declared one-way sum; the reading is read once
-// ReadingSamples of its probes answered, and bounded where its probes give
-// bounds.
+// candidate is due its half-open probe its backoff after its last loss. It
+// carries its cost's estimate; its cost is that estimate's value, and its
+// reading its reading estimate's, each else twice its declared one-way sum.
+// The reading is read once ReadingSamples of its probes answered, and
+// bounded where its probes give bounds.
 func (v view) assess(c *Candidate) {
 	r, measured := v.measured.Of(c.ID)
 	rep := v.reports[c.ID]
@@ -117,22 +133,24 @@ func (v view) assess(c *Candidate) {
 	default:
 		c.Health = HealthUnknown
 	}
-	if cost, ok := measuredCost(r, v.now); ok {
+	c.Evidence = costKind.Of(r.Samples, v.now)
+	if c.Evidence.Answered > 0 {
+		cost := c.Evidence.Value
 		c.Cost = &cost
 	} else if c.Latency != nil {
 		prior := 2 * *c.Latency
 		c.Cost = &prior
 	}
-	if reading, answered := measuredReading(r, v.now); answered > 0 {
-		c.Reading, c.Read = &reading, answered >= ReadingSamples
+	if reading := readingKind.Of(r.Samples, v.now); reading.Answered > 0 {
+		c.Reading, c.Read = &reading.Value, reading.Answered >= ReadingSamples
 	} else if c.Latency != nil {
 		prior := 2 * *c.Latency
 		c.Reading = &prior
 	}
-	if lo, hi := measuredBounds(r, v.now); lo > 0 {
-		c.Low = &lo
-		if hi > 0 {
-			c.High = &hi
+	if bounds := boundKind.Of(r.Samples, v.now); bounds.HasLo && bounds.Lo > 0 {
+		c.Low = &bounds.Lo
+		if bounds.HasHi && bounds.Hi > 0 {
+			c.High = &bounds.Hi
 		}
 	}
 }
@@ -148,21 +166,10 @@ func (v view) signaledSince(links []segment.LinkID, since time.Time) bool {
 	return false
 }
 
-// recent returns the record's last bus.PathSamples probes: the ones its
-// ejection reads, and its cost reads within ReadingSpan.
+// recent returns the record's last bus.PathSamples probes, the ones its
+// ejection reads.
 func recent(r bus.PathRecord) []bus.PathSample {
 	return r.Samples[max(0, len(r.Samples)-bus.PathSamples):]
-}
-
-// within returns the samples sent within span of now.
-func within(samples []bus.PathSample, now time.Time, span time.Duration) []bus.PathSample {
-	var out []bus.PathSample
-	for _, s := range samples {
-		if now.Sub(s.At) <= span {
-			out = append(out, s)
-		}
-	}
-	return out
 }
 
 // ejected reports whether the record ejects its path: a burst lost whole
@@ -185,64 +192,6 @@ func lost(samples []bus.PathSample) int {
 		}
 	}
 	return n
-}
-
-// rttsOf returns the round trips of the samples answered.
-func rttsOf(samples []bus.PathSample) []time.Duration {
-	var rtts []time.Duration
-	for _, s := range samples {
-		if !s.Lost {
-			rtts = append(rtts, s.RTT)
-		}
-	}
-	return rtts
-}
-
-// measuredCost returns the median round trip of the record's recent probes
-// sent within ReadingSpan of now and answered, divided by their delivery
-// rate, the loss counted up to lossCap; false when none answered. A path in
-// use is probed every few seconds and another a minute apart or less often,
-// so the recent probes alone span from under two minutes to far beyond the
-// span: the span keeps the prices the picks and the leases compare within
-// one horizon.
-func measuredCost(r bus.PathRecord, now time.Time) (time.Duration, bool) {
-	samples := within(recent(r), now, ReadingSpan)
-	rtts := rttsOf(samples)
-	if len(rtts) == 0 {
-		return 0, false
-	}
-	slices.Sort(rtts)
-	median := rtts[len(rtts)/2]
-	loss := min(float64(len(samples)-len(rtts))/float64(len(samples)), lossCap)
-	return time.Duration(float64(median) / (1 - loss)), true
-}
-
-// measuredReading returns the reading of the record's probes sent within
-// ReadingSpan of now and answered, divided by their delivery rate, the loss
-// counted up to lossCap, beside how many of them answered; none when none
-// did.
-func measuredReading(r bus.PathRecord, now time.Time) (time.Duration, int) {
-	samples := within(r.Samples, now, ReadingSpan)
-	rtts := rttsOf(samples)
-	if len(rtts) == 0 {
-		return 0, 0
-	}
-	loss := min(float64(len(samples)-len(rtts))/float64(len(samples)), lossCap)
-	return time.Duration(float64(Reading(rtts)) / (1 - loss)), len(rtts)
-}
-
-// measuredBounds returns the bounds of the record's probes sent within
-// BoundSpan of now and answered, each divided by their delivery rate, the
-// loss counted up to lossCap; zero for a bound they do not give.
-func measuredBounds(r bus.PathRecord, now time.Time) (lo, hi time.Duration) {
-	samples := within(r.Samples, now, BoundSpan)
-	rtts := rttsOf(samples)
-	if len(rtts) == 0 {
-		return 0, 0
-	}
-	delivery := 1 - min(float64(len(samples)-len(rtts))/float64(len(samples)), lossCap)
-	lo, hi = ReadingBounds(rtts)
-	return time.Duration(float64(lo) / delivery), time.Duration(float64(hi) / delivery)
 }
 
 // suspectLinks returns the links the records' failed paths share: each link
@@ -310,13 +259,19 @@ func tier(h Health) int {
 }
 
 // BeyondBand reports whether two prices differ by the band or more: by what
-// the picks rank by and what moves a lease.
+// the picks rank by and what has a lease weigh a path.
 func BeyondBand(a, b time.Duration) bool {
 	d := a - b
 	if d < 0 {
 		d = -d
 	}
-	return d >= max(bandFloor, min(time.Duration(bandShare*float64(min(a, b))), bandCap))
+	return d >= band(a, b)
+}
+
+// band returns the band of two prices: bandShare of the smaller, at least
+// bandFloor and at most bandCap.
+func band(a, b time.Duration) time.Duration {
+	return max(bandFloor, min(time.Duration(bandShare*float64(min(a, b))), bandCap))
 }
 
 // backoff returns how long after its last loss an ejected path is due for a
@@ -331,16 +286,16 @@ func backoff(lostBursts int) time.Duration {
 }
 
 // request updates the requester's entries for the destination about the
-// path in use: that path; the best other candidate crossing none of its
-// links, else the best other, standby; the best other too when it ranks
-// above the one in use, standby, so a lease measures the path it would move
-// to; the best suspect candidate besides those whose prior order beats the
-// one in use, suspect, for the verification that decides; and the best
-// ejected candidate whose prior order beats the one in use, half-open once
-// its backoff elapses. Each entry carries the destination's last pick or
-// use, and when callers last confirmed and doubted its path. A provider
-// without the requests topic, and a path in use without an identity, request
-// nothing.
+// path in use: that path; the best other when it ranks above the one in use,
+// weighed, so a lease measures the path it would move to as often as its
+// own; the best other candidate crossing none of its links, else the best
+// other, standby unless weighed; the best suspect candidate besides those
+// whose prior order beats the one in use, suspect, for the verification
+// that decides; and the best ejected candidate whose prior order beats the
+// one in use, half-open once its backoff elapses. Each entry carries the
+// destination's last pick or use, and when callers last confirmed and
+// doubted its path. A provider without the requests topic, and a path in use
+// without an identity, request nothing.
 func (p *PathProvider) request(requester string, dst addr.IA, inUse *Candidate, picked time.Time,
 	candidates []Candidate, v view) {
 
@@ -371,18 +326,18 @@ func (p *PathProvider) request(requester string, dst addr.IA, inUse *Candidate, 
 	if disjoint != nil {
 		standby = disjoint
 	}
-	if standby != nil {
-		entries = append(entries, v.entry(dst, standby, bus.PathStandby, time.Time{}, picked))
+	var weighed *Candidate
+	if best != nil && ranksAbove(best, inUse) {
+		weighed = best
+		entries = append(entries, v.entry(dst, weighed, bus.PathWeighed, time.Time{}, picked))
 	}
-	var challenger *Candidate
-	if best != nil && best != standby && ranksAbove(best, inUse) {
-		challenger = best
-		entries = append(entries, v.entry(dst, challenger, bus.PathStandby, time.Time{}, picked))
+	if standby != nil && standby != weighed {
+		entries = append(entries, v.entry(dst, standby, bus.PathStandby, time.Time{}, picked))
 	}
 	var suspect *Candidate
 	for i := range candidates {
 		c := &candidates[i]
-		if c.ID == "" || c.ID == inUse.ID || c == standby || c == challenger || c.Health != HealthSuspect ||
+		if c.ID == "" || c.ID == inUse.ID || c == standby || c == weighed || c.Health != HealthSuspect ||
 			!c.Outranks(inUse) {
 			continue
 		}

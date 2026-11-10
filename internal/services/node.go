@@ -297,12 +297,12 @@ func setupNode(
 // core's — the data plane serving the generation boot built, the link state
 // publisher, the BFD health monitor, beaconing, the control endpoint, the
 // SCMP echo responder — and the HTTPS server under Fatal, a failure stopping
-// the node; the loaded topology provider's, the membership method's, and the
-// resident applications under Degrade, a failure logged and the node serving
-// on; and the role's own loops under the policies its case in setupTrustRole
-// gave them. The topology provider's drain runs on a stop, while the loops
-// still serve. Nothing serves before start, so assembly and serving stay
-// separate lifecycles.
+// the node; the loaded topology provider's, the membership method's, the
+// change log, and the resident applications under Degrade, a failure logged
+// and the node serving on; and the role's own loops under the policies its
+// case in setupTrustRole gave them. The topology provider's drain runs on a
+// stop, while the loops still serve. Nothing serves before start, so
+// assembly and serving stay separate lifecycles.
 func (n *node) start(gen *generation) {
 	g := n.group
 	g.Go("data plane", supervise.Fatal, func(ctx context.Context) error {
@@ -337,6 +337,10 @@ func (n *node) start(gen *generation) {
 	g.Drain("topology provider", n.topology.Drain)
 	g.Go("membership", supervise.Degrade, func(ctx context.Context) error {
 		n.members.Run(ctx)
+		return nil
+	})
+	g.Go("change log", supervise.Degrade, func(ctx context.Context) error {
+		logChanges(ctx, n.bus.Changes(), slog.Default())
 		return nil
 	})
 	slog.Info("Serving control endpoint", "port", scionrpc.EndpointPort)

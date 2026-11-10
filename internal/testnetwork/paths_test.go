@@ -241,9 +241,10 @@ func TestPathsFollowMeasuredHealth(t *testing.T) {
 	// With the ping application measuring the pick, the lease, and their
 	// standby, a cut of B's link to D moves both around B within a heartbeat
 	// and a burst, and both stay there while the link is cut. Once the link
-	// is up again, the pick returns at the next half-open probe, and the
-	// lease LeaseSwitchHold after it: the branch through B prices a transit
-	// less.
+	// is up again, the pick returns at the next half-open probe, whose burst
+	// bounds the branch through B's price, and the lease once its hold
+	// stands, LeaseSwitchHold later and past a fresh probe of each branch:
+	// the branch through B prices a transit less.
 	t.Run("measured", func(t *testing.T) {
 		InBubble(t, func(t *testing.T, f *fabric.Fabric, wpki *webpkitest.CA) {
 			n := bootBranches(t, f, wpki, nil)
@@ -257,7 +258,7 @@ func TestPathsFollowMeasuredHealth(t *testing.T) {
 					t.Fatalf("A's lease returned %v after the pick, within the hold", time.Since(returned))
 				}
 			}
-			PollVirtual(t, scion.LeaseEvaluation+virtualPollInterval,
+			PollVirtual(t, ping.BurstProbes*ping.BurstSpacing+ping.Heartbeat+scion.LeaseEvaluation+virtualPollInterval,
 				"A's lease to return to B's link to D", func() bool {
 					n.throughB()
 					return n.leasedThroughB()

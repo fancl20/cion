@@ -241,6 +241,38 @@ func TestProberPacesByPick(t *testing.T) {
 	})
 }
 
+// TestProberProbesWeighedPaths checks a weighed path's cadence, the path in
+// use's: every heartbeat while its destination is hot, first at once, once a
+// minute while it is warm, and a lost heartbeat calling a burst.
+func TestProberProbesWeighedPaths(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		e, r := newFakeEcho(), &fakeResolver{}
+		hot, warm := &spath.Decoded{}, &spath.Decoded{}
+		prober(t, e, r, func(b *bus.Bus) {
+			request(b, dstA, entryOf("hot", dstA, hot, bus.PathWeighed, time.Now()))
+			request(b, dstB, entryOf("warm", dstB, warm, bus.PathWeighed, time.Now().Add(-2*time.Minute)))
+			time.Sleep(59 * time.Second)
+			synctest.Wait()
+			if got := e.sends(hot); got != 12 {
+				t.Errorf("the hot weighed path drew %d probes in 59s, want 12", got)
+			}
+			if got := e.sends(warm); got != 1 {
+				t.Errorf("the warm weighed path drew %d probes in 59s, want 1", got)
+			}
+			request(b, dstA, entryOf("hot", dstA, hot, bus.PathWeighed, time.Now()))
+			e.lose(hot)
+			time.Sleep(4 * time.Second) // the heartbeat at 60s lost at 61s; the burst settles by 62.8s
+			synctest.Wait()
+			if got := e.sends(hot); got != 13+BurstProbes {
+				t.Errorf("probes = %d, want thirteen heartbeats and a burst of %d", got, BurstProbes)
+			}
+			if got := e.sends(warm); got != 2 {
+				t.Errorf("the warm weighed path drew %d probes in 63s, want 2", got)
+			}
+		})
+	})
+}
+
 // TestProberKeepsTheSpan checks a record's samples over sixteen minutes of
 // a path in use, picked every half minute and so probed every heartbeat:
 // past the last bus.PathSamples, every probe sent within the bounds' span,

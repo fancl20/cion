@@ -3,7 +3,6 @@ package scion
 import (
 	"context"
 	"fmt"
-	"math"
 	"slices"
 	"sync"
 	"time"
@@ -13,6 +12,7 @@ import (
 	spath "github.com/scionproto/scion/pkg/slayers/path/scion"
 
 	"github.com/fancl20/cion/pkg/libs/bus"
+	"github.com/fancl20/cion/pkg/libs/evidence"
 	"github.com/fancl20/cion/pkg/libs/segment"
 	"github.com/fancl20/cion/pkg/modules/pathdb"
 )
@@ -61,6 +61,9 @@ type PathProvider struct {
 	// each lease update the paths their destination needs measured. A nil
 	// topic requests nothing.
 	Requests *bus.Topic[bus.PathRequests]
+	// Changes is the node's journal of changes, to which each lease appends
+	// the record of each change of its path. A nil journal records nothing.
+	Changes *bus.Journal[bus.Change]
 
 	// mtx guards the leases, their sweep, and the callers' reports.
 	mtx     sync.Mutex
@@ -201,17 +204,16 @@ const BoundSpan = 3 * StaleAfter
 // BoundConfidence is the one-sided confidence of a reading's bounds.
 const BoundConfidence = 0.95
 
+// readingQuantile is the quantile a reading reads.
+const readingQuantile = 0.8
+
 // Reading returns the reading of the round trips, what a measurement over
 // them reports: their 80th percentile by nearest rank, the round trip a
 // fifth of the others exceed and the highest of up to four; zero for none.
 // Up to a fifth of the round trips may stand high and the reading holds,
 // while no one low lowers it.
 func Reading(rtts []time.Duration) time.Duration {
-	if len(rtts) == 0 {
-		return 0
-	}
-	sorted := slices.Sorted(slices.Values(rtts))
-	return sorted[(4*len(sorted)+4)/5-1]
+	return evidence.Quantile(slices.Sorted(slices.Values(rtts)), readingQuantile)
 }
 
 // ReadingBounds returns the bounds of the 80th percentile the round trips
@@ -221,39 +223,15 @@ func Reading(rtts []time.Duration) time.Duration {
 // confidence, so the bounds assume nothing of how the round trips spread. A
 // bound too few round trips give is zero: lo takes two, hi fourteen.
 func ReadingBounds(rtts []time.Duration) (lo, hi time.Duration) {
-	n := len(rtts)
 	sorted := slices.Sorted(slices.Values(rtts))
-	below := binomialCDF(n, 0.8)
-	for u := 1; u <= n; u++ {
-		if below[u-1] >= BoundConfidence {
-			hi = sorted[u-1]
-			break
-		}
+	l, h := evidence.BoundRanks(len(sorted), readingQuantile, BoundConfidence)
+	if l >= 0 {
+		lo = sorted[l]
 	}
-	for l := n; l >= 1; l-- {
-		if 1-below[l-1] >= BoundConfidence {
-			lo = sorted[l-1]
-			break
-		}
+	if h >= 0 {
+		hi = sorted[h]
 	}
 	return lo, hi
-}
-
-// binomialCDF returns P(B <= k) for k from 0 to n, B binomial over n trials
-// of probability p.
-func binomialCDF(n int, p float64) []float64 {
-	logFactorial := func(k int) float64 {
-		v, _ := math.Lgamma(float64(k + 1))
-		return v
-	}
-	cdf := make([]float64, n+1)
-	sum := 0.0
-	for k := range cdf {
-		sum += math.Exp(logFactorial(n) - logFactorial(k) - logFactorial(n-k) +
-			float64(k)*math.Log(p) + float64(n-k)*math.Log(1-p))
-		cdf[k] = sum
-	}
-	return cdf
 }
 
 // TransitPenalty is what each AS a path crosses between its ends adds to its
@@ -305,11 +283,15 @@ type Candidate struct {
 	// Retry is when an ejected path is due its half-open probe; zero for
 	// the others.
 	Retry time.Time
-	// Cost is the path's round trip as the picks and the leases compare it:
-	// the median of those of its last bus.PathSamples probes answered within
-	// ReadingSpan, divided by their delivery rate, else twice its declared
-	// one-way sum; nil when it has neither.
+	// Cost is the path's round trip as the picks and the leases rank it:
+	// its estimate's value, else twice its declared one-way sum; nil when it
+	// has neither.
 	Cost *time.Duration
+	// Evidence is the estimate its cost rests on: the median of those of its
+	// last bus.PathSamples probes answered within ReadingSpan, divided by
+	// their delivery rate, with its bounds and the probes it reads; zero
+	// without a measurement.
+	Evidence evidence.Estimate
 	// Reading is the path's round trip as the topology selection compares
 	// it: the reading of its probes answered within ReadingSpan, divided by
 	// their delivery rate, else twice its declared one-way sum; nil when it
@@ -331,6 +313,13 @@ func (c *Candidate) Price() (time.Duration, bool) {
 		return 0, false
 	}
 	return *c.Cost + c.Charge(), true
+}
+
+// PriceEstimate returns the estimate the leases weigh the path's price by:
+// its cost's estimate charged TransitPenalty for every AS it crosses between
+// its ends, each way.
+func (c *Candidate) PriceEstimate() evidence.Estimate {
+	return c.Evidence.Plus(c.Charge())
 }
 
 // Charge returns what a price adds to the path's round trip: TransitPenalty
