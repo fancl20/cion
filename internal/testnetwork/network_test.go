@@ -34,7 +34,7 @@ func TestLineTopology(t *testing.T) {
 	// Beacons propagate A→B→C with signatures verified at each hop: a path
 	// database holds only verified segments, and B and C each keep the up
 	// segments they terminate.
-	Poll(t, "up segments at C", func() bool { return holdsUpSegments(ctx, c.Node) })
+	PollFor(t, PathTimeout, "up segments at C", func() bool { return holdsUpSegments(ctx, c.Node) })
 	Poll(t, "up segments at B", func() bool { return holdsUpSegments(ctx, b.Node) })
 
 	// C enrolls through the reversed beacon over B: no direct A–C link
