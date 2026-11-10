@@ -236,8 +236,10 @@ func ReadingBounds(rtts []time.Duration) (lo, hi time.Duration) {
 
 // TransitPenalty is what each AS a path crosses between its ends adds to its
 // one-way price: the forwarding a transit costs, and one more failure on the
-// way. The picks, the leases, and the topology selection charge it alike.
-const TransitPenalty = 5 * time.Millisecond
+// way. It is the band's floor, the least difference a price tells from
+// jitter, so a transit weighs a round trip two floors, one each way. The
+// picks, the leases, and the topology selection charge it alike.
+const TransitPenalty = bandFloor
 
 // Candidate is one composed path beside the facts composition holds on its
 // way to ranking it.

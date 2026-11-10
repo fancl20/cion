@@ -114,7 +114,7 @@ func TestPriceOf(t *testing.T) {
 func TestRankRoutes(t *testing.T) {
 	now := time.Now()
 	routes := labeled{
-		"direct": rawRoute(1, now, hopSpec{selF, 0, 1, 5 * ms}),
+		"direct": rawRoute(1, now, hopSpec{selF, 0, 1, 3 * ms}),
 		"through M": rawRoute(2, now,
 			hopSpec{selF, 0, 2, ms}, hopSpec{selM, 3, 4, ms}),
 		"unpriced short": rawRoute(3, now, hopSpec{selF, 0, 5, 0}),
@@ -127,7 +127,8 @@ func TestRankRoutes(t *testing.T) {
 	for _, r := range rankRoutes(routes.all()) {
 		got = append(got, r.Candidate)
 	}
-	// The direct route's 10ms beats the 4ms through M, charged 10ms for M.
+	// The direct route's 6ms beats the 4ms through M, charged twice the
+	// transit penalty for M.
 	want := []string{"direct", "through M", "unpriced short", "unpriced newer", "unpriced older"}
 	if diff := cmp.Diff(want, routes.names(got)); diff != "" {
 		t.Errorf("rank (-want +got):\n%s", diff)

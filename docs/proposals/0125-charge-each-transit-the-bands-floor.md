@@ -80,3 +80,38 @@ side.
     routes hold at 2ms and at 5ms alike.
 *   **The labs.** The labs pass, and every lab's settled, cut, delay,
     burst, and jitter benchmarks run at 2ms against 5ms.
+
+## Implementation history
+
+*   **Test adaptations.** The tests that price routes state their
+    expectations by the penalty: `TestPrice` and `TestBand`, the leases'
+    `TestLeaseRecordsItsMoves`, the beacons' `TestRankRoutes`, and the
+    coordination's, the queries', the selection's, and the tiers' tests.
+    They pass at 2ms and at 5ms alike.
+*   The pipeline passed.
+*   Benchmarks against the commit before, one run each but the regions
+    jitter sweep's two and the stranded sweep's three, the same commit at
+    5ms:
+    *   **Jitter.** The ring held its shortest routes at every level, and
+        the stranded sweep stood at 1.025 at most, as at 5ms. One regions
+        run stood at 1.054 from 10ms of jitter on the way up to 2ms on the
+        way down: a link the clusters linked elsewhere retired, its lease
+        took the best-ranked detour, and a detour about 5% shorter parted
+        from it by the band only at 1ms. The other run stood at 1.008,
+        against 1.007 in both.
+    *   **Settled.** Every lab's worst pair at no penalty stood where it
+        stood at 5ms. The metros lab settled on 25 links after 10 changes
+        within 8.3 minutes, against 26 after 20 within 11.2; the regions lab
+        on 31 against 30, the ring on 45 against 46, and the NAT, site, and
+        stranded labs on the same links.
+    *   **Cuts and delay changes.** The regions cut settled within 10
+        seconds after one change, against 40 after two, and its restore
+        within 50, against 60; the metros restore within 70, against 30, and
+        its delay restore within 100, against 40, one change each; the
+        regions delay restore changed nothing, against a link retired and
+        promoted back.
+    *   **The founder down.** The survivors answered every ping within 0.76
+        seconds, as at 5ms, and the restarted node returned within 92,
+        against 169.
+    *   **Bursts** changed no link either way, every read reaching every
+        pair.

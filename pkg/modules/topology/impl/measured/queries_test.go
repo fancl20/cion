@@ -216,17 +216,18 @@ func TestMeasureExcluded(t *testing.T) {
 	// Excluding A's link: B's measured route is the freshest survivor,
 	// answered, and A's surviving route at 22ms the price. B's link and the
 	// declared third route keep two routes. A's own price rides B's link,
-	// one transit: 22ms and 10ms more. No read route crosses A's link.
+	// one transit: 22ms and its charge. No read route crosses A's link.
+	viaB := 22*time.Millisecond + transitCost
 	want := excludedSample{
 		survivor: &b.candidates[0],
 		dst:      selB,
 		answered: true,
 		price:    22 * time.Millisecond,
 		routes:   2,
-		prices:   map[addr.IA]time.Duration{selA: 32 * time.Millisecond, selB: 26 * time.Millisecond},
+		prices:   map[addr.IA]time.Duration{selA: viaB, selB: 26 * time.Millisecond},
 		cheapest: map[addr.IA]*scion.Candidate{selA: &a.candidates[0], selB: &b.candidates[0]},
 		high:     22 * time.Millisecond,
-		highs:    map[addr.IA]time.Duration{selA: 32 * time.Millisecond, selB: 26 * time.Millisecond},
+		highs:    map[addr.IA]time.Duration{selA: viaB, selB: 26 * time.Millisecond},
 	}
 	if diff := cmp.Diff(want, fast.excluded[selA], opts...); diff != "" {
 		t.Errorf("A's excluded measurement (-want +got):\n%s", diff)
@@ -242,7 +243,7 @@ func TestMeasureExcluded(t *testing.T) {
 		cheapest: map[addr.IA]*scion.Candidate{selB: &b.candidates[1]},
 		crossed:  true,
 		low:      22 * time.Millisecond,
-		lows:     map[addr.IA]time.Duration{selA: 32 * time.Millisecond, selB: 26 * time.Millisecond},
+		lows:     map[addr.IA]time.Duration{selA: viaB, selB: 26 * time.Millisecond},
 	}
 	if diff := cmp.Diff(want, fast.excluded[selB], opts...); diff != "" {
 		t.Errorf("B's excluded measurement (-want +got):\n%s", diff)

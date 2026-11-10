@@ -24,8 +24,9 @@ import (
 )
 
 // penalty is the cost a path pays for each node it crosses between its
-// ends, unless a benchmark sets its own.
-const penalty = 5 * time.Millisecond
+// ends, the transit penalty the nodes charge, unless a benchmark sets its
+// own.
+const penalty = scion.TransitPenalty
 
 // unreachable is the cost between nodes no sequence of edges joins.
 const unreachable = time.Duration(math.MaxInt64 / 4)

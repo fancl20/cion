@@ -443,14 +443,15 @@ func TestSelectionRequestsEachMembersCheapest(t *testing.T) {
 	f := newSelFixture(t, selPeer, selA)
 	requests := new(bus.Topic[bus.PathRequests])
 	f.sel.cfg.Requests = requests
-	// B's freshest route rides Peer's link at 30ms, 40ms with its transit.
+	// B's freshest route rides Peer's link at 30ms, its transit charged.
 	// Around Peer's link: through A at 40ms, the freshest there; at 20ms,
-	// 30ms with its transit, B's cheapest; and through A and X at 15ms, 35ms
-	// with its two transits.
+	// B's cheapest once its transit is charged; and through A and X at half
+	// a transit's charge less, the cheapest at its cost, dearer once its
+	// two transits are charged.
 	viaPeer := measured(f.via(t, selPeer, 0, selPeer, selB), 30*ms)
 	freshest := measured(f.via(t, selA, -time.Minute, selA, selB), 40*ms)
 	cheapest := measured(f.via(t, selA, -2*time.Minute, selA, selB), 20*ms)
-	viaAX := measured(f.via(t, selA, -3*time.Minute, selA, selX, selB), 15*ms)
+	viaAX := measured(f.via(t, selA, -3*time.Minute, selA, selX, selB), 20*ms-transitCost/2)
 	f.candidate(selB, 12*ms, 0, viaPeer, freshest, cheapest, viaAX)
 	// C's cheapest route rides Peer's link at 20ms, 30ms with its transit;
 	// around it, through A at 30ms, 40ms with its transit, staler than B's
@@ -1094,7 +1095,7 @@ func TestSelectionStableState(t *testing.T) {
 	f := newSelFixture(t, neighbors...) // above the floor of two
 	// A's route through Peer prices it at 20ms with its transit, slower than
 	// its 18ms round trip by less than a fifth.
-	f.carried(selA, 18*time.Millisecond, 10*time.Millisecond, f.via(t, selPeer, 0, selPeer, selA))
+	f.carried(selA, 18*time.Millisecond, 20*time.Millisecond-transitCost, f.via(t, selPeer, 0, selPeer, selA))
 	for range 2 * DemoteWindows {
 		f.pass(t)
 	}
@@ -1477,7 +1478,7 @@ func TestSelectionRetirementWaitsForTheHistory(t *testing.T) {
 	f.sel.last = map[addr.IA]instrument{selA: by}
 	// A's route through Peer prices it at 14ms with its transit, beside its
 	// own round trip of 20ms now, which keeps A in its tier.
-	f.carried(selA, 20*time.Millisecond, 4*time.Millisecond, f.via(t, selPeer, 0, selPeer, selA))
+	f.carried(selA, 20*time.Millisecond, 14*time.Millisecond-transitCost, f.via(t, selPeer, 0, selPeer, selA))
 	for window := 1; window <= 12; window++ {
 		f.pass(t)
 		if f.state(t, selA) != links.StateEstablished {
@@ -1506,7 +1507,7 @@ func TestSelectionConfidentPromotion(t *testing.T) {
 		promotes bool
 	}{
 		{"past the band", 185 * ms, true},
-		{"within the band", 191 * ms, false},
+		{"within the band", 200*ms - transitCost + ms, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newSelFixture(t, selPeer, selA) // at the floor
@@ -2068,9 +2069,9 @@ func TestSelectionCapWeighsGains(t *testing.T) {
 			// link saves its own neighbor 12ms, B's 11ms, past promotion's
 			// fifth, and moves the tier's price by nothing.
 			f.samples[selPeer] = sm(30 * ms)
-			f.carried(selA, 8*ms, 10*ms, f.via(t, selPeer, 0, selPeer, selA))
-			f.carried(selB, 9*ms, 10*ms, f.via(t, selPeer, 0, selPeer, selB))
-			f.carried(selC, 8*ms, 10*ms, f.via(t, selPeer, 0, selPeer, selC))
+			f.carried(selA, 8*ms, 20*ms-transitCost, f.via(t, selPeer, 0, selPeer, selA))
+			f.carried(selB, 9*ms, 20*ms-transitCost, f.via(t, selPeer, 0, selPeer, selB))
+			f.carried(selC, 8*ms, 20*ms-transitCost, f.via(t, selPeer, 0, selPeer, selC))
 			// D's 8ms round trip gains 22ms on its 30ms price, or 12ms on
 			// 20ms or on a 20ms lower bound: each beats the price.
 			viaX := measured(route(-time.Hour, 0, link(selX), link(selD)), tc.price)

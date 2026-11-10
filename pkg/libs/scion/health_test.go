@@ -808,7 +808,10 @@ func TestPrice(t *testing.T) {
 	}
 	// The direct route crosses the core, the middle's the middle too; the
 	// middle's cost is its declared 15ms doubled.
-	want := map[bus.PathID]time.Duration{f.direct.ID: 20 * ms, f.viaMid.ID: 50 * ms}
+	want := map[bus.PathID]time.Duration{
+		f.direct.ID: 10*ms + 2*TransitPenalty,
+		f.viaMid.ID: 30*ms + 4*TransitPenalty,
+	}
 	if diff := cmp.Diff(want, prices); diff != "" {
 		t.Errorf("prices (-want +got):\n%s", diff)
 	}
@@ -826,12 +829,12 @@ func TestBand(t *testing.T) {
 		a, b   time.Duration
 		beyond bool
 	}{
-		{a: ms, b: 2500 * time.Microsecond, beyond: false}, // within the floor
-		{a: 5 * ms, b: 7 * ms, beyond: true},               // at the floor
-		{a: 40 * ms, b: 47 * ms, beyond: false},            // within a fifth
-		{a: 40 * ms, b: 48 * ms, beyond: true},             // at a fifth
-		{a: 200 * ms, b: 209 * ms, beyond: false},          // within the cap
-		{a: 200 * ms, b: 210 * ms, beyond: true},           // at the cap
+		{a: ms, b: 2500 * time.Microsecond, beyond: false},       // within the floor
+		{a: 5 * ms, b: 7 * ms, beyond: true},                     // at the floor
+		{a: 15 * ms, b: 17900 * time.Microsecond, beyond: false}, // within a fifth
+		{a: 15 * ms, b: 18 * ms, beyond: true},                   // at a fifth
+		{a: 200 * ms, b: 200*ms + bandCap - ms, beyond: false},   // within the cap
+		{a: 200 * ms, b: 200*ms + bandCap, beyond: true},         // at the cap
 	} {
 		if got := BeyondBand(tc.a, tc.b); got != tc.beyond {
 			t.Errorf("BeyondBand(%v, %v) = %v, want %v", tc.a, tc.b, got, tc.beyond)

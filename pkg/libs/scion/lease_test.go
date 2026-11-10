@@ -296,9 +296,11 @@ func TestLeaseRecordsItsMoves(t *testing.T) {
 		}
 		cheaper := records[2]
 		from, to := cheaper.Weighed[0], cheaper.Weighed[1]
-		// 200ms direct prices at 210ms, 10ms through the middle at 30ms.
-		if cheaper.Line != band(30*ms, 210*ms) || from.Name != "from" || to.Name != "to" ||
-			from.Value != 210*ms || from.Lo != 210*ms || to.Value != 30*ms || to.Hi != 30*ms ||
+		// The direct route prices its 200ms beside a transit, the middle's its
+		// 10ms beside two.
+		ownPrice, midPrice := 200*ms+2*TransitPenalty, 10*ms+4*TransitPenalty
+		if cheaper.Line != band(midPrice, ownPrice) || from.Name != "from" || to.Name != "to" ||
+			from.Value != ownPrice || from.Lo != ownPrice || to.Value != midPrice || to.Hi != midPrice ||
 			to.Answered != ReadingSamples {
 			t.Errorf("the cheaper path's record weighed %+v and %+v over %v", from, to, cheaper.Line)
 		}

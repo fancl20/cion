@@ -44,9 +44,10 @@ func coLink(reports map[addr.IA][]bus.PeerReport, a addr.IA, ai uint16, b addr.I
 }
 
 // coHerd returns the reports of the herd the coordination exists for: S
-// reaches T over O and M, at 5, 50, and 5 ms, so its path to T costs 80 ms
-// with two transits; S measures T at 30 ms and O measures T at 20 ms, so
-// both pairs violate, and O's link to T would serve S at 35 ms.
+// reaches T over O and M, at 5, 50, and 5 ms, so its path to T costs 60 ms
+// beside two transits; S measures T at 30 ms and O measures T at 20 ms, so
+// both pairs violate, and O's link to T would serve S at 25 ms beside a
+// transit.
 func coHerd() map[addr.IA][]bus.PeerReport {
 	reports := make(map[addr.IA][]bus.PeerReport)
 	coLink(reports, coS, 1, coO, 1, 5*time.Millisecond)
@@ -83,8 +84,8 @@ func TestCoordViewReadsReports(t *testing.T) {
 	if diff := cmp.Diff(want, v.linked, cmp.AllowUnexported(pair{})); diff != "" {
 		t.Errorf("linked (-want +got):\n%s", diff)
 	}
-	if got, ok := v.cost(coS, coT); !ok || got != 40*time.Millisecond {
-		t.Errorf("cost S-T = %v, %v; want 40ms, the transit at M charged", got, ok)
+	if got, ok := v.cost(coS, coT); !ok || got != 30*time.Millisecond+transitCost {
+		t.Errorf("cost S-T = %v, %v; want 30ms and the transit at M charged", got, ok)
 	}
 	if _, ok := v.cost(coS, coO); ok {
 		t.Error("S joined to O, which no up link reaches")
@@ -119,16 +120,16 @@ func TestCoordViewReadsReports(t *testing.T) {
 func TestCoordViewViolates(t *testing.T) {
 	v := newCoordView(coReports(coHerd()))
 	if !v.violates(pairOf(coS, coT)) || !v.violates(pairOf(coO, coT)) {
-		t.Error("S-T and O-T beat their 80 and 65 ms paths, want both violating")
+		t.Error("S-T and O-T beat their paths, want both violating")
 	}
 	if v.violates(pairOf(coS, coO)) {
 		t.Error("the linked S-O violates")
 	}
-	if got, ok := v.costWith(coS, coT, pairOf(coO, coT)); !ok || got != 35*time.Millisecond {
-		t.Errorf("cost S-T with O-T linked = %v, %v; want 35ms", got, ok)
+	if got, ok := v.costWith(coS, coT, pairOf(coO, coT)); !ok || got != 25*time.Millisecond+transitCost {
+		t.Errorf("cost S-T with O-T linked = %v, %v; want 25ms and the transit at O charged", got, ok)
 	}
-	if got, ok := v.costWith(coS, coM, pairOf(coO, coT)); !ok || got != 50*time.Millisecond {
-		t.Errorf("cost S-M with O-T linked = %v, %v; want 50ms, the transits at O and T charged", got, ok)
+	if got, ok := v.costWith(coS, coM, pairOf(coO, coT)); !ok || got != 30*time.Millisecond+2*transitCost {
+		t.Errorf("cost S-M with O-T linked = %v, %v; want 30ms and the transits at O and T charged", got, ok)
 	}
 	if !violatesAt(time.Second, 0, false) {
 		t.Error("a pair no path joins does not violate")

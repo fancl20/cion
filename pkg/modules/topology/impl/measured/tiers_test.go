@@ -326,12 +326,13 @@ func TestMemberRoute(t *testing.T) {
 		wantRoute bus.PathID
 	}{
 		{"a measured route at its cost", ptrs(direct), 20 * ms, direct.ID},
-		{"a measured route's transit charged", ptrs(measured(oneTransit, 20*ms)), 30 * ms, oneTransit.ID},
-		{"a declared route, its transit charged", ptrs(oneTransit), 28 * ms, oneTransit.ID},
-		{"two transits charged", ptrs(twoTransits), 26 * ms, twoTransits.ID},
+		{"a measured route's transit charged", ptrs(measured(oneTransit, 20*ms)), 20*ms + transitCost, oneTransit.ID},
+		{"a declared route, its transit charged", ptrs(oneTransit), 18*ms + transitCost, oneTransit.ID},
+		{"two transits charged", ptrs(twoTransits), 6*ms + 2*transitCost, twoTransits.ID},
 		{"an undeclared route", ptrs(undeclared), 0, ""},
 		{"a zero cost, its transit uncharged", ptrs(measured(oneTransit, 0)), 0, ""},
-		{"the cheapest", ptrs(measured(direct, 30*ms), oneTransit, twoTransits, undeclared), 26 * ms, twoTransits.ID},
+		{"the cheapest", ptrs(measured(direct, 30*ms), oneTransit, twoTransits, undeclared),
+			6*ms + 2*transitCost, twoTransits.ID},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			c, price := memberRoute(tc.routes)
@@ -353,9 +354,9 @@ func TestMemberRoute(t *testing.T) {
 // route prices takes the tier's price, and one whose routes none read beats
 // nothing. Confirmed, a round trip short of the ratio qualifies where it and
 // its upper bound both gain on the price and on its lower bound by the band
-// the path policy moves a lease for: a fifth of the smaller below the cap,
-// the cap itself on a long path. A single-route tier admits within
-// SecondRouteRatio of its price, and an unpriced tier qualifies nothing.
+// the path policy moves a lease for, at most one transit's charge on a long
+// path. A single-route tier admits within SecondRouteRatio of its price, and
+// an unpriced tier qualifies nothing.
 func TestTierQualifies(t *testing.T) {
 	ms := time.Millisecond
 	unread := route(0, 30*ms, link(selX), link(selD))
@@ -385,11 +386,11 @@ func TestTierQualifies(t *testing.T) {
 		{"short of the tier's price", priced, selC, 9 * ms, 9 * ms, false},
 		{"its routes none read", priced, selD, ms, ms, false},
 		{"short of the ratio, confirmed past the band", priced, selA, 24500 * time.Microsecond, 24600 * time.Microsecond, true},
-		{"short of the ratio, its bound within the band", priced, selA, 24500 * time.Microsecond, 25 * ms, false},
+		{"short of the ratio, its bound within the band", priced, selA, 24500 * time.Microsecond, 26 * ms, false},
 		{"short of the ratio, unbounded", priced, selA, 24500 * time.Microsecond, 0, false},
 		{"a long path, confirmed past the cap", priced, selE, 185 * ms, 187 * ms, true},
-		{"a long path, its bound within the cap", priced, selE, 185 * ms, 190 * ms, false},
-		{"a long path, its reading within the cap", priced, selE, 191 * ms, 185 * ms, false},
+		{"a long path, its bound within the cap", priced, selE, 185 * ms, 199*ms - transitCost + ms, false},
+		{"a long path, its reading within the cap", priced, selE, 200*ms - transitCost + ms, 185 * ms, false},
 		{"no route pricing the member, confirmed against a long tier's", long, selC, 185 * ms, 187 * ms, true},
 		{"a second route within SecondRouteRatio", single, selC, 12 * ms, 0, true},
 		{"a second route past it", single, selC, 13 * ms, 0, false},
