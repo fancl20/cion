@@ -1,6 +1,6 @@
 # Describe Nodes by Tags Their Sources Apply
 
-*   Status: proposed
+*   Status: accepted
 *   Date: 2026-11-08
 
 [TOC]

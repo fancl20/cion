@@ -214,8 +214,8 @@ and receivers verify every entry against the TRC. A node sends each
 neighbor, among the routes it can take, each core's cheapest route, backups,
 and each link's cheapest route
 ([ADR-0036](/docs/adrs/0036-select-beacons-per-origin-and-link.md)), its
-fellow cluster members also the cheapest route over each link into their
-cluster, and registers its own selection: up segments locally, down
+fellow group members also the cheapest route over each link into their
+group, and registers its own selection: up segments locally, down
 segments at the originating core. The path provider composes segments into
 end-to-end paths, the one seam every consumer uses, the control endpoint's
 transport included.
@@ -240,7 +240,9 @@ serve or undo it
 Nodes far closer to one another than to the rest form a cluster, which every
 node computes from the round trips and bounds the directory publishes;
 outside its cluster, a node links only through the member pairs the round
-trips choose.
+trips choose. The topology source names each cluster's members a group in
+the node tags, which beaconing reads
+([ADR-0041](/docs/adrs/0041-describe-nodes-by-tags-their-sources-apply.md)).
 A new link set lands as a new data plane generation built from the neighbor
 table; within a generation, the liveness verdict stops and resumes
 forwarding on a link. The node bus carries link state to beaconing, path

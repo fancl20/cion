@@ -25,7 +25,7 @@ type Bus struct {
 	links        Topic[LinkState]
 	ifDown       Topic[InterfaceDownState]
 	latencies    Topic[LinkLatencies]
-	cluster      Topic[Cluster]
+	nodeTags     Topic[NodeTags]
 	self         Topic[SelfState]
 	directory    Topic[Directory]
 	tailnet      Topic[TailnetState]
@@ -60,11 +60,11 @@ func (b *Bus) Latencies() *Topic[LinkLatencies] {
 	return &b.latencies
 }
 
-// Cluster returns the topic of the cluster the node joined. The topology
-// provider's selection publishes on it once per window; the beaconer reads
-// it.
-func (b *Bus) Cluster() *Topic[Cluster] {
-	return &b.cluster
+// NodeTags returns the topic of the tags of the nodes the node knows. The
+// topology provider's selection applies their groups once per window; the
+// beaconer reads it.
+func (b *Bus) NodeTags() *Topic[NodeTags] {
+	return &b.nodeTags
 }
 
 // Self returns the topic of the node's own state. The topology provider

@@ -128,11 +128,10 @@ type SelectionConfig struct {
 	// neighbor's echo round trip halved — for the beaconer's entries to
 	// declare; nil publishes none.
 	Latencies *bus.Topic[bus.LinkLatencies]
-	// Cluster is the node's cluster topic, which the selection publishes
-	// each window's cluster on — the members of the node's unit, none while
-	// it names no cluster — for the beaconer to carry the routes into it;
-	// nil publishes none.
-	Cluster *bus.Topic[bus.Cluster]
+	// NodeTags is the node tags topic, on which each window applies every
+	// node's group — the members of a cluster share its name — for the
+	// beaconer to carry the routes into it; nil applies none.
+	NodeTags *bus.Topic[bus.NodeTags]
 	// Paths composes the routes to each peer, with each one's health and
 	// reading.
 	Paths SelectionPaths
@@ -402,7 +401,7 @@ func (s *selection) pass(ctx context.Context) {
 	}
 	v.units = newUnits(v, s.cfg.IA, s.cluster)
 	s.reserve = s.reserved(v, samples)
-	s.publishCluster(v.units)
+	s.tagGroups(v)
 	s.count(v, neighbors, ts)
 	// Damp the promotions: a candidate is promoted on sustained evidence
 	// only, a flapping one never.
@@ -955,17 +954,25 @@ func (s *selection) recovering(sm sample) *scion.Candidate {
 	return out
 }
 
-// publishCluster publishes the window's cluster: the members of the node's
-// unit while it names a cluster, none otherwise.
-func (s *selection) publishCluster(u *units) {
-	if s.cfg.Cluster == nil {
+// tagGroups applies the window's groups to the node tags: each node the view
+// holds, and the node itself, by the cluster it names — the node's own by
+// the window's naming, every other by its entry — a node naming none in no
+// group.
+func (s *selection) tagGroups(v *coordView) {
+	if s.cfg.NodeTags == nil {
 		return
 	}
-	if s.cluster == 0 {
-		s.cfg.Cluster.Publish(bus.Cluster{})
-		return
+	groups := make(map[addr.IA]string, len(v.index)+1)
+	for ia := range v.index {
+		if c := v.clusters[ia]; c != 0 {
+			groups[ia] = c.String()
+		}
 	}
-	s.cfg.Cluster.Publish(bus.NewCluster(u.members[u.of[s.cfg.IA]]...))
+	delete(groups, s.cfg.IA)
+	if s.cluster != 0 {
+		groups[s.cfg.IA] = s.cluster.String()
+	}
+	s.cfg.NodeTags.Update(func(t bus.NodeTags) bus.NodeTags { return t.With(bus.TagGroup, groups) })
 }
 
 // declare publishes the window's per-link one-way estimates, which the

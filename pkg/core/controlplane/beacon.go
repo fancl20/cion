@@ -85,7 +85,7 @@ type Beaconer struct {
 	db           pathdb.DB
 	links        *bus.Topic[bus.LinkState]
 	latencies    *bus.Topic[bus.LinkLatencies]
-	cluster      *bus.Topic[bus.Cluster]
+	nodeTags     *bus.Topic[bus.NodeTags]
 	sender       SegmentSender
 	core         bool
 	propagation  time.Duration
@@ -154,9 +154,9 @@ type BeaconerConfig struct {
 	// estimates the entries the beaconer signs declare. A nil topic declares
 	// nothing.
 	Latencies *bus.Topic[bus.LinkLatencies]
-	// Cluster is the node's cluster topic, whose last event names the
-	// members of the cluster the node joined. A nil topic names none.
-	Cluster *bus.Topic[bus.Cluster]
+	// NodeTags is the node tags topic, whose last event's group tags name
+	// the members of the node's group. A nil topic names none.
+	NodeTags *bus.Topic[bus.NodeTags]
 	// Sender sends beacon and registration RPCs over the SCION-native
 	// channel.
 	Sender SegmentSender
@@ -195,7 +195,7 @@ func NewBeaconer(cfg BeaconerConfig) (*Beaconer, error) {
 		db:               cfg.DB,
 		links:            cfg.Links,
 		latencies:        cfg.Latencies,
-		cluster:          cfg.Cluster,
+		nodeTags:         cfg.NodeTags,
 		sender:           cfg.Sender,
 		core:             cfg.Core,
 		propagation:      propagation,
@@ -631,8 +631,8 @@ func (b *Beaconer) originateOnce(ctx context.Context) {
 // non-cores, which carry beacons both ways, any neighbor it passed on its way
 // here. A neighbor that has not enrolled receives a set picked among the
 // founder's routes alone, and a probe that records its enrollment once it
-// has. A neighbor in the node's cluster also receives the routes into the
-// cluster; a neighbor outside it receives none of them. The propagation
+// has. A neighbor in the node's group also receives the routes into the
+// group; a neighbor outside it receives none of them. The propagation
 // targets are the neighbors' control services as service destinations on
 // the one-hop paths. Each neighbor's beacons go out off the loop in pick
 // order, until a call fails short of the neighbor's answer — a refused or
@@ -653,7 +653,7 @@ func (b *Beaconer) propagateOnce(ctx context.Context) {
 	}
 	state := b.links.Latest()
 	ranked := rankRoutes(b.qualifying(state))
-	cluster := b.joined()
+	members := groupOf(b.nodeTags.Latest(), b.ia)
 	for egress, neighborIA := range state.Table() {
 		if neighborIA.IsZero() {
 			continue // a link whose neighbor establishment has not named
@@ -682,9 +682,9 @@ func (b *Beaconer) propagateOnce(ctx context.Context) {
 				takeable = append(takeable, r)
 			}
 		}
-		var into bus.Cluster
-		if cluster.Has(neighborIA) {
-			into = cluster
+		var into group
+		if members.has(neighborIA) {
+			into = members
 		}
 		var beacons []*control_plane.PathSegment
 		for _, cand := range pickSet(takeable, founder, into) {
@@ -823,23 +823,15 @@ func (b *Beaconer) qualifying(state bus.LinkState) []Candidate {
 }
 
 // ownSet returns the set the node terminates: picked among every qualifying
-// route, the founder's cheapest first, the routes into the node's cluster
+// route, the founder's cheapest first, the routes into the node's group
 // included.
 func (b *Beaconer) ownSet() ([]Candidate, error) {
 	founder, err := b.engine.FounderAS(b.ia.ISD())
 	if err != nil {
 		return nil, err
 	}
-	return pickSet(rankRoutes(b.qualifying(b.links.Latest())), founder, b.joined()), nil
-}
-
-// joined returns the cluster the node joined, as its cluster topic names it
-// last; none without a topic.
-func (b *Beaconer) joined() bus.Cluster {
-	if b.cluster == nil {
-		return bus.Cluster{}
-	}
-	return b.cluster.Latest()
+	return pickSet(rankRoutes(b.qualifying(b.links.Latest())), founder,
+		groupOf(b.nodeTags.Latest(), b.ia)), nil
 }
 
 // probe sends the peer the sender's probe off the loop, unless the previous

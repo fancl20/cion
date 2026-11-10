@@ -744,7 +744,7 @@ func (z *Provider) selectionConfig() SelectionConfig {
 		Directory:   z.directoryState,
 		Links:       z.linkState,
 		Latencies:   z.env.Bus.Latencies(),
-		Cluster:     z.env.Bus.Cluster(),
+		NodeTags:    z.env.Bus.NodeTags(),
 		Paths:       z.env.Paths,
 		Requests:    z.env.Bus.PathRequests(),
 		Conn:        z.probeConn,

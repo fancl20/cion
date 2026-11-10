@@ -1203,25 +1203,38 @@ func TestSelectionStrandedTakesAnyReachable(t *testing.T) {
 	}
 }
 
-// TestSelectionPublishesItsCluster checks the cluster topic: the node's
-// unit while it names a cluster — Peer, B, and the node itself, not A — and
-// no member once no other node names it and the node names none.
-func TestSelectionPublishesItsCluster(t *testing.T) {
+// TestSelectionTagsTheGroups checks the group tags: each node of the
+// cluster the node joined — Peer, B, and the node itself — carries the
+// cluster's name, and A, in no cluster, none; once no other node names the
+// cluster and the node names none, no node carries a group, the node's own
+// entry naming the cluster still, and the tags other sources applied stay.
+func TestSelectionTagsTheGroups(t *testing.T) {
 	f := newSelFixture(t, selPeer, selB)
-	topic := new(bus.Topic[bus.Cluster])
-	f.sel.cfg.Cluster = topic
+	const other = "other"
+	topic := new(bus.Topic[bus.NodeTags])
+	topic.Publish(bus.NodeTags{}.With(other, map[addr.IA]string{selPeer: "v"}))
+	f.sel.cfg.NodeTags = topic
 	f.clustered(false)
 	f.pass(t)
-	for ia, want := range map[addr.IA]bool{selIA: true, selPeer: true, selB: true, selA: false} {
-		if got := topic.Latest().Has(ia); got != want {
-			t.Errorf("published %v as a member: %v, want %v", ia, got, want)
+	name := selPeer.String()
+	for ia, want := range map[addr.IA]string{selIA: name, selPeer: name, selB: name, selA: ""} {
+		if got := topic.Latest().Tag(ia, bus.TagGroup); got != want {
+			t.Errorf("%v's group = %q, want %q", ia, got, want)
 		}
 	}
+	// The node's own entry still names the cluster, which the window no
+	// longer names.
 	f.name(selPeer, 0)
 	f.name(selB, 0)
+	f.directory = append(f.directory, bus.DirectoryEntry{IA: selIA, Cluster: selPeer})
 	f.pass(t)
-	if topic.Latest().Has(selIA) {
-		t.Error("a node in no cluster published itself a member")
+	for _, ia := range []addr.IA{selIA, selPeer, selB} {
+		if got := topic.Latest().Tag(ia, bus.TagGroup); got != "" {
+			t.Errorf("%v's group in no cluster = %q, want none", ia, got)
+		}
+	}
+	if got := topic.Latest().Tag(selPeer, other); got != "v" {
+		t.Errorf("Peer's other tag = %q, want the v another source applied", got)
 	}
 }
 

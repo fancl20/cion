@@ -94,14 +94,32 @@ func priceOf(pcb *segment.PCB) (time.Duration, bool) {
 	return 2*oneWay + 2*scion.TransitPenalty*transits, true
 }
 
-// entry returns the link over which the route entered the node's cluster at
-// another member: the link out of its last entry outside the cluster. False
+// group is the node's group as the node tags name it: the nodes whose group
+// tag is the node's own. The zero group holds no node.
+type group struct {
+	tags bus.NodeTags
+	name string
+}
+
+// groupOf returns the node's group in the tags: none while the node carries
+// no group tag.
+func groupOf(tags bus.NodeTags, ia addr.IA) group {
+	return group{tags: tags, name: tags.Tag(ia, bus.TagGroup)}
+}
+
+// has reports whether the node is one of the group's.
+func (g group) has(ia addr.IA) bool {
+	return g.name != "" && g.tags.Tag(ia, bus.TagGroup) == g.name
+}
+
+// entry returns the link over which the route entered the node's group at
+// another member: the link out of its last entry outside the group. False
 // when that entry is the route's last, so the route entered over the node's
 // own link, and when every entry lies inside.
-func (r route) entry(cluster bus.Cluster) (segment.LinkID, bool) {
+func (r route) entry(g group) (segment.LinkID, bool) {
 	last := len(r.PCB.Entries) - 1
 	for i := last; i >= 0; i-- {
-		if !cluster.Has(r.PCB.Entries[i].IA) {
+		if !g.has(r.PCB.Entries[i].IA) {
 			return r.links[i], i < last
 		}
 	}
@@ -112,10 +130,10 @@ func (r route) entry(cluster bus.Cluster) (segment.LinkID, bool) {
 // route, the founder's first; then, while some link is crossed by every
 // route picked and an unpicked route avoids one such link, the cheapest such
 // route; then, for each interface with routes of which none was picked, its
-// cheapest route; then, for each link into the node's cluster at another
+// cheapest route; then, for each link into the node's group at another
 // member with routes of which none was picked, its cheapest route. The set
 // keeps its first maxSetSize picks, in pick order.
-func pickSet(ranked []route, founder addr.IA, cluster bus.Cluster) []Candidate {
+func pickSet(ranked []route, founder addr.IA, g group) []Candidate {
 	picked := make([]bool, len(ranked))
 	var picks []int
 	pick := func(i int) {
@@ -174,12 +192,12 @@ func pickSet(ranked []route, founder addr.IA, cluster bus.Cluster) []Candidate {
 
 	entered := make(map[segment.LinkID]bool)
 	for _, p := range picks {
-		if l, ok := ranked[p].entry(cluster); ok {
+		if l, ok := ranked[p].entry(g); ok {
 			entered[l] = true
 		}
 	}
 	for i, r := range ranked {
-		if l, ok := r.entry(cluster); ok && !entered[l] {
+		if l, ok := r.entry(g); ok && !entered[l] {
 			entered[l] = true
 			pick(i)
 		}

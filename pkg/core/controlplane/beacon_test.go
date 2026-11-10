@@ -1295,29 +1295,31 @@ func TestPropagateOncePicksEachNeighborsSetAmongTheRoutesItCanTake(t *testing.T)
 	}
 }
 
-// TestBeaconingCarriesTheRoutesIntoTheCluster checks the routes into the
-// node's cluster, which its cluster topic names: B and its neighbors C and
-// E; F, also B's neighbor, and D lie outside. Over C, B holds [A, C] and
-// [A, D, C], the route that entered the cluster from D; over A, it holds
-// [A]. B's own set and E's take [A, D, C] beside [A] and its backup [A, C];
-// F, outside the cluster, takes only [A] and [A, C]. With no cluster topic,
-// B keeps [A, D, C] to itself.
-func TestBeaconingCarriesTheRoutesIntoTheCluster(t *testing.T) {
+// TestBeaconingCarriesTheRoutesIntoTheGroup checks the routes into the
+// node's group, which the node tags name: B and its neighbors C and E; F,
+// also B's neighbor, in another group, and D in none, lie outside. Over C, B
+// holds [A, C] and [A, D, C], the route that entered the group from D; over
+// A, it holds [A]. B's own set and E's take [A, D, C] beside [A] and its
+// backup [A, C]; F, outside the group, takes only [A] and [A, C]. With no
+// node tags topic, B keeps [A, D, C] to itself.
+func TestBeaconingCarriesTheRoutesIntoTheGroup(t *testing.T) {
 	iaLineE := addr.MustIAFrom(20, 0xff0000000006)
 	iaLineF := addr.MustIAFrom(20, 0xff0000000007)
-	cluster := new(bus.Topic[bus.Cluster])
-	cluster.Publish(bus.NewCluster(nodeIATest, iaLineC, iaLineE))
+	tags := new(bus.Topic[bus.NodeTags])
+	tags.Publish(bus.NodeTags{}.With(bus.TagGroup, map[addr.IA]string{
+		nodeIATest: "g", iaLineC: "g", iaLineE: "g", iaLineF: "h",
+	}))
 	for _, tc := range []struct {
 		name    string
-		cluster *bus.Topic[bus.Cluster]
+		tags    *bus.Topic[bus.NodeTags]
 		wantOwn [][]addr.IA
 		wantE   [][]addr.IA
 	}{
-		{"in the cluster", cluster,
+		{"in the group", tags,
 			[][]addr.IA{{coreIATest}, {coreIATest, iaLineC}, {coreIATest, iaLineD, iaLineC}},
 			[][]addr.IA{{coreIATest, nodeIATest}, {coreIATest, iaLineC, nodeIATest},
 				{coreIATest, iaLineD, iaLineC, nodeIATest}}},
-		{"with no cluster topic", nil,
+		{"with no node tags topic", nil,
 			[][]addr.IA{{coreIATest}, {coreIATest, iaLineC}},
 			[][]addr.IA{{coreIATest, nodeIATest}, {coreIATest, iaLineC, nodeIATest}}},
 	} {
@@ -1328,14 +1330,14 @@ func TestBeaconingCarriesTheRoutesIntoTheCluster(t *testing.T) {
 				f.engines[ia] = f.founder.Engine(t, ia)
 			}
 			b, err := NewBeaconer(BeaconerConfig{
-				IA:      nodeIATest,
-				Engine:  f.engines[nodeIATest],
-				MACKey:  []byte(testMACKey),
-				Store:   f.store,
-				DB:      f.pathDB,
-				Links:   tableTopic(map[uint16]addr.IA{1: coreIATest, 2: iaLineC, 4: iaLineE, 5: iaLineF}),
-				Cluster: tc.cluster,
-				Sender:  f.sender,
+				IA:       nodeIATest,
+				Engine:   f.engines[nodeIATest],
+				MACKey:   []byte(testMACKey),
+				Store:    f.store,
+				DB:       f.pathDB,
+				Links:    tableTopic(map[uint16]addr.IA{1: coreIATest, 2: iaLineC, 4: iaLineE, 5: iaLineF}),
+				NodeTags: tc.tags,
+				Sender:   f.sender,
 			})
 			if err != nil {
 				t.Fatal(err)

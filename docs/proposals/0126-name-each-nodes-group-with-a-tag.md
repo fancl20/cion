@@ -83,3 +83,25 @@ the same neighbors.
     routes, a neighbor in another group or in none does not.
 *   **The labs.** The labs pass, and the metros benchmarks run against the
     commit before.
+
+## Implementation history
+
+*   **The role.** The first draft tagged each node's role as well, from the
+    pinned TRC, for the portal to read. The portal's role decides which
+    removal the console offers, and refuses the founder's, so it reads the
+    TRC; a role tag waits for a reader that only describes.
+*   Mutations: 10 of 10 killed. The first run let two live: a node in no
+    group read every untagged node as its fellow beside another group's
+    members, and the node's own entry, still naming a cluster the window no
+    longer names, could stand for the node. The tests now cover both.
+*   The pipeline passed. One run of the race detector failed
+    `TestWireguardMeshExchange`, whose reply missed its wall-clock wait on a
+    loaded runner; alone, it passed six runs of six, and the run after
+    passed whole.
+*   Benchmarks against the commit before, one run each: the metros lab
+    settled on 25 links after 14 changes within 9.3 minutes, against 25
+    after 10 within 8.3, its worst pair at 1.059 times the reference,
+    against 1.068, each node probing the other metros 9.6 times a minute,
+    against 9.5; after a cut between two metros, the better paths surfaced
+    at once and the links settled within 10 seconds after one change, as
+    before, and within 40 after the restore, against 70.
