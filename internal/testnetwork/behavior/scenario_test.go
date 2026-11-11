@@ -13,13 +13,8 @@ import (
 	"github.com/fancl20/cion/pkg/core/webpki/webpkitest"
 )
 
-const (
-	// changeQuiet is how long a link set must hold unchanged after a change
-	// to count as settled again.
-	changeQuiet = 5 * time.Minute
-	// changeBudget bounds a network's answer to one change in virtual time.
-	changeBudget = 30 * time.Minute
-)
+// changeBudget bounds a network's answer to one change in virtual time.
+const changeBudget = 30 * time.Minute
 
 // response is how a network answered one change.
 type response struct {
@@ -43,8 +38,8 @@ type response struct {
 	surface  time.Duration
 	surfaced bool
 	// settle is how long until the last link-set change before the link set
-	// held for changeQuiet, and changes counts the link-set changes on the
-	// way.
+	// held for settleQuiet, as a booting network's settles, and changes
+	// counts the link-set changes on the way.
 	settle  time.Duration
 	settled bool
 	changes int
@@ -107,7 +102,7 @@ func respond(t *testing.T, n *network, before paths, target int, verdict func() 
 		if !r.surfaced && g.surfaced {
 			r.surface, r.surfaced = since, true
 		}
-		if time.Since(changed) >= changeQuiet && n.settled(t.Context(), n.nodes) {
+		if time.Since(changed) >= settleQuiet && n.settled(t.Context(), n.nodes) {
 			r.settle, r.settled = changed.Sub(start), true
 			r.final = g
 			return r
