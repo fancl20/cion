@@ -86,13 +86,10 @@ run no loops of their own and hold no policy.
     and the path provider that composes paths from discovered segments and
     holds each destination's lease, the path every flow to it rides
     ([ADR-0035](/docs/adrs/0035-choose-paths-by-measured-health.md)).
-*   **Evidence** — how a decision weighs what the node measures: estimates
-    that carry the samples they rest on, comparisons that decide on their
-    bounds or answer undecided, holds, and the records of the changes the
-    decisions make
+*   **Evidence** — how the paths and the topology source weigh what the node
+    measures: estimates that carry their samples, comparisons that decide on
+    their bounds or answer undecided, holds, and a record of every change
     ([ADR-0040](/docs/adrs/0040-decide-from-measured-evidence-in-one-library-and-record-every-change.md)).
-    The leases decide through it, and so do the topology source's link
-    changes, its clusters, and its waits on other nodes' changes.
 *   **SCION RPC** — the SCION-native channel: HTTP/3 over QUIC riding SCION
     paths, peers authenticated by their chains against the TRC, and the
     drafts' service resolution.

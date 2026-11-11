@@ -699,7 +699,7 @@ func (p *PathProvider) view() view {
 }
 
 // record adds a caller's outcome on the path to its report: a delivery
-// replaces the report, a loss joins its latest callerLosses losses. A path
+// replaces the report, a loss joins its latest reportedLosses losses. A path
 // without an identity records nothing.
 func (p *PathProvider) record(id bus.PathID, delivered bool, now time.Time) {
 	if id == "" {
@@ -714,7 +714,7 @@ func (p *PathProvider) record(id bus.PathID, delivered bool, now time.Time) {
 	if delivered {
 		r = report{delivered: now}
 	} else {
-		r.losses = append(r.losses[max(0, len(r.losses)-callerLosses+1):len(r.losses):len(r.losses)], now)
+		r.losses = append(r.losses[max(0, len(r.losses)-reportedLosses+1):len(r.losses):len(r.losses)], now)
 	}
 	p.reports[id] = r
 }

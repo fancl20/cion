@@ -74,6 +74,9 @@ func TestLeaseKeepsAndMoves(t *testing.T) {
 
 		slow := answered(time.Now().Add(-time.Minute), 50*ms)
 		slow.LastLoss, slow.LostBursts = time.Now(), 2
+		for range 2 * 5 {
+			slow.Samples = append(slow.Samples, bus.PathSample{At: time.Now(), Lost: true})
+		}
 		f.measure(map[*Candidate]bus.PathRecord{
 			&f.viaMid: ejectedAt(time.Now()),
 			&f.direct: slow,

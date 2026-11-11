@@ -268,6 +268,47 @@ func Published(k Kind, value, lo, hi time.Duration) Estimate {
 	return Estimate{Kind: k, Value: value, Lo: lo, Hi: hi, HasLo: lo > 0, HasHi: hi > 0, Answered: 1, Sent: 1}
 }
 
+// Share is the share of a window's samples answered: the samples answered
+// and sent, and the one-sided confidence of its bounds, the binomial's exact
+// bounds — the share under which the answers seen, or fewer, would come
+// with no more than the odds the confidence leaves, and the one over which
+// they, or more, would.
+type Share struct {
+	Answered, Sent int
+	Confidence     float64
+}
+
+// ShareOf returns the share of the samples answered, bounded at confidence
+// c.
+func ShareOf(samples []Sample, c float64) Share {
+	s := Share{Sent: len(samples), Confidence: c}
+	for _, x := range samples {
+		if !x.Lost {
+			s.Answered++
+		}
+	}
+	return s
+}
+
+// Under weighs whether the share lies under the line, a share strictly
+// between zero and one: Better when its upper bound does, NotBetter when its
+// lower bound reaches the line, Undecided otherwise and for a share of no
+// sample.
+func (s Share) Under(line float64) Verdict {
+	if s.Sent == 0 {
+		return Undecided
+	}
+	cdf := binomialCDF(s.Sent, line)
+	switch {
+	case cdf[s.Answered] < 1-s.Confidence:
+		return Better
+	case s.Answered > 0 && cdf[s.Answered-1] >= s.Confidence:
+		return NotBetter
+	default:
+		return Undecided
+	}
+}
+
 // Quantile returns the q-quantile of the sorted round trips by nearest rank:
 // the first that at least a q share of them lie at or below. Zero for none.
 func Quantile(sorted []time.Duration, q float64) time.Duration {

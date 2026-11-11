@@ -73,10 +73,28 @@ func answered(at time.Time, rtts ...time.Duration) bus.PathRecord {
 }
 
 // ejectedAt returns a record that answered a minute before now and lost two
-// bursts since.
+// bursts since, each probe sent at now.
 func ejectedAt(now time.Time) bus.PathRecord {
 	r := answered(now.Add(-time.Minute), 10*time.Millisecond)
 	r.LastLoss, r.LostBursts = now, 2
+	for range 2 * 5 {
+		r.Samples = append(r.Samples, bus.PathSample{At: now, Lost: true})
+	}
+	return r
+}
+
+// interleaved returns a record of twenty probes sent at at, the given
+// number of them, which divides twenty, answered at 10ms, spread evenly
+// among the lost, the last answered.
+func interleaved(at time.Time, answered int) bus.PathRecord {
+	r := bus.PathRecord{LastAnswer: at, LastLoss: at}
+	for i := range 20 {
+		s := bus.PathSample{At: at, Lost: true}
+		if (20-1-i)%(20/answered) == 0 {
+			s = bus.PathSample{At: at, RTT: 10 * time.Millisecond}
+		}
+		r.Samples = append(r.Samples, s)
+	}
 	return r
 }
 
@@ -169,11 +187,43 @@ func TestHealth(t *testing.T) {
 		midAge: time.Minute,
 		setup: func(f measuredFixture, now time.Time) {
 			r := answered(now.Add(-time.Minute), 10*ms)
-			r.LostBursts = 1
+			r.LastLoss, r.LostBursts = now, 1
+			for range 5 {
+				r.Samples = append(r.Samples, bus.PathSample{At: now, Lost: true})
+			}
 			f.measure(map[*Candidate]bus.PathRecord{&f.viaMid: r})
 		},
 		health: HealthEjected,
-		cost:   10 * ms,
+		cost:   60 * ms, // its delivery one in six
+	}, {
+		name:   "four probes lost in a row",
+		midAge: time.Minute,
+		setup: func(f measuredFixture, now time.Time) {
+			r := answered(now.Add(-time.Minute), 10*ms, 10*ms, 10*ms, 10*ms)
+			r.LastLoss = now
+			for range 4 {
+				r.Samples = append(r.Samples, bus.PathSample{At: now, Lost: true})
+			}
+			f.measure(map[*Candidate]bus.PathRecord{&f.viaMid: r})
+		},
+		health: HealthHealthy,
+		cost:   20 * ms, // its delivery one in two
+	}, {
+		name:   "five answers of twenty",
+		midAge: time.Minute,
+		setup: func(f measuredFixture, now time.Time) {
+			f.measure(map[*Candidate]bus.PathRecord{&f.viaMid: interleaved(now, 5)})
+		},
+		health: HealthEjected,
+		cost:   40 * ms, // its delivery one in four
+	}, {
+		name:   "ten answers of twenty",
+		midAge: time.Minute,
+		setup: func(f measuredFixture, now time.Time) {
+			f.measure(map[*Candidate]bus.PathRecord{&f.viaMid: interleaved(now, 10)})
+		},
+		health: HealthHealthy,
+		cost:   20 * ms, // its delivery one in two
 	}, {
 		name:   "nearly every probe lost",
 		midAge: time.Minute,
@@ -297,7 +347,7 @@ func TestHealth(t *testing.T) {
 			f.p.record(f.viaMid.ID, true, now.Add(-5*time.Second))
 		},
 		health: HealthHealthy,
-		cost:   10 * ms,
+		cost:   100 * ms, // the bursts' losses counted to nine in ten
 	}, {
 		name:   "a caller's loss since the last answer",
 		midAge: time.Minute,
@@ -312,23 +362,39 @@ func TestHealth(t *testing.T) {
 		midAge: time.Minute,
 		setup: func(f measuredFixture, now time.Time) {
 			f.measure(map[*Candidate]bus.PathRecord{&f.viaMid: answered(now.Add(-2*time.Minute), 10*ms)})
-			for _, ago := range []time.Duration{90, 60, 30} {
+			for _, ago := range []time.Duration{100, 80, 60, 40, 20} {
 				f.p.record(f.viaMid.ID, false, now.Add(-ago*time.Second))
 			}
 		},
 		health: HealthEjected,
 		cost:   10 * ms,
 	}, {
-		name:   "two callers' losses within the trust window",
+		name:   "four callers' losses within the trust window",
 		midAge: time.Minute,
 		setup: func(f measuredFixture, now time.Time) {
 			f.measure(map[*Candidate]bus.PathRecord{&f.viaMid: answered(now.Add(-2*time.Minute), 10*ms)})
-			for _, ago := range []time.Duration{60, 30} {
+			for _, ago := range []time.Duration{80, 60, 40, 20} {
 				f.p.record(f.viaMid.ID, false, now.Add(-ago*time.Second))
 			}
 		},
 		health: HealthSuspect,
 		cost:   10 * ms,
+	}, {
+		name:   "callers' losses beside its probes'",
+		midAge: time.Minute,
+		setup: func(f measuredFixture, now time.Time) {
+			r := answered(now.Add(-2*time.Minute), 10*ms, 10*ms, 10*ms)
+			r.LastLoss = now.Add(-90 * time.Second)
+			for range 3 {
+				r.Samples = append(r.Samples, bus.PathSample{At: now.Add(-90 * time.Second), Lost: true})
+			}
+			f.measure(map[*Candidate]bus.PathRecord{&f.viaMid: r})
+			for _, ago := range []time.Duration{60, 30} {
+				f.p.record(f.viaMid.ID, false, now.Add(-ago*time.Second))
+			}
+		},
+		health: HealthEjected,
+		cost:   20 * ms, // its delivery one in two
 	}, {
 		name:   "callers' losses before the last answer",
 		midAge: time.Minute,
@@ -344,7 +410,7 @@ func TestHealth(t *testing.T) {
 		name:   "callers' losses past the trust window",
 		midAge: time.Minute,
 		setup: func(f measuredFixture, now time.Time) {
-			for _, ago := range []time.Duration{240, 200, 30} {
+			for _, ago := range []time.Duration{240, 220, 200, 30, 20} {
 				f.p.record(f.viaMid.ID, false, now.Add(-ago*time.Second))
 			}
 		},
@@ -461,7 +527,7 @@ func TestCandidateReading(t *testing.T) {
 			samples = append(samples, probes(last, 15, 0, true)...)
 			return bus.PathRecord{Samples: samples, LastAnswer: last}
 		},
-		health:   HealthHealthy, // three in four of its last probes lost
+		health:   HealthEjected, // fifteen probes lost in a row since its last answer
 		cost:     40 * ms,       // 10ms over a delivery of one in four
 		reading:  100 * ms,      // 10ms over the delivery of one in ten
 		read:     true,          // five answered
@@ -798,9 +864,7 @@ func TestPicksFollowHealth(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		r := answered(time.Now(), 5*ms)
-		r.LostBursts = 1
-		f.measure(map[*Candidate]bus.PathRecord{mid: r})
+		f.measure(map[*Candidate]bus.PathRecord{mid: ejectedAt(time.Now())})
 		pick, err := f.p.local(iaCore)
 		if err != nil {
 			t.Fatal(err)

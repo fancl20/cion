@@ -24,8 +24,7 @@ const (
 	// caller's loss newer than its last answer, stale segments, or a link it
 	// shares with failed paths.
 	HealthSuspect
-	// HealthEjected is a path that lost a burst whole since its last answer,
-	// nearly every recent probe, or callerLosses of its callers' exchanges.
+	// HealthEjected is a path whose delivery lies under ejectLine.
 	HealthEjected
 )
 
@@ -33,13 +32,14 @@ const (
 	// trustWindow is how long a path's last answer counts it healthy: three
 	// of the ping application's slowest probes.
 	trustWindow = 3 * time.Minute
-	// ejectSamples and ejectShare eject a path whose records hold at least
-	// ejectSamples probes, ejectShare of them lost.
-	ejectSamples = 10
-	ejectShare   = 0.9
-	// callerLosses ejects a path whose callers reported that many losses
-	// within the trust window since its last answer.
-	callerLosses = 3
+	// ejectLine is the delivery under which a path is ejected: one that
+	// delivers less than half of what it carries costs each exchange more
+	// than two attempts.
+	ejectLine = 0.5
+	// reportedLosses is how many of its latest losses a caller's report of
+	// a path keeps: more than the losses in a row that put a delivery under
+	// ejectLine.
+	reportedLosses = bus.PathSamples
 	// backoffBase and backoffCap space an ejected path's half-open probes:
 	// backoffBase after its first lost burst, doubling with each, at most
 	// backoffCap.
@@ -76,7 +76,7 @@ var (
 )
 
 // report is what callers' traffic saw of one path: when it last delivered,
-// and its losses since, the latest callerLosses of them.
+// and its losses since, the latest reportedLosses of them.
 type report struct {
 	delivered time.Time
 	losses    []time.Time
@@ -105,10 +105,9 @@ func (r report) lostSince(since, within time.Time) int {
 // assess gives the candidate its health and cost by what the view holds; its
 // last answer is the later of its probes' and its callers' last delivery. It
 // is signaled while a signal on a link it crosses arrived after its last
-// answer. Its health is the first of: ejected, by its record unless a caller
-// delivered since its last loss, or by callerLosses of its callers' losses;
-// suspect, signaled or for a caller's loss newer than its last answer;
-// healthy, for an answer within the trust window; suspect, for stale
+// answer. Its health is the first of: ejected, for a delivery under
+// ejectLine; suspect, signaled or for a caller's loss newer than its last
+// answer; healthy, for an answer within the trust window; suspect, for stale
 // segments or a crossed link its failed paths share; unknown. An ejected
 // candidate is due its half-open probe its backoff after its last loss. It
 // carries the estimates of its cost, its reading, and its bounds; its cost
@@ -117,13 +116,12 @@ func (r report) lostSince(since, within time.Time) int {
 // ReadingSamples of its probes answered, and bounded where its probes give
 // bounds.
 func (v view) assess(c *Candidate) {
-	r, measured := v.measured.Of(c.ID)
+	r, _ := v.measured.Of(c.ID)
 	rep := v.reports[c.ID]
 	answered := later(r.LastAnswer, rep.delivered)
 	c.Signaled = v.signaledSince(c.Crossed, answered)
 	switch {
-	case measured && ejected(r) && !rep.delivered.After(r.LastLoss),
-		rep.lostSince(answered, v.now.Add(-trustWindow)) >= callerLosses:
+	case ejected(r, rep, v.now):
 		c.Health = HealthEjected
 		c.Retry = r.LastLoss.Add(backoff(r.LostBursts))
 	case c.Signaled, rep.doubted().After(answered):
@@ -178,26 +176,20 @@ func recent(r bus.PathRecord) []bus.PathSample {
 	return r.Samples[max(0, len(r.Samples)-bus.PathSamples):]
 }
 
-// ejected reports whether the record ejects its path: a burst lost whole
-// since its last answer, or ejectShare of at least ejectSamples of its
-// recent probes lost.
-func ejected(r bus.PathRecord) bool {
-	if r.LostBursts > 0 {
-		return true
+// ejected reports whether a path's delivery lies under ejectLine at
+// BoundConfidence by its record and its callers' report: over its losses
+// since its last answer — the probes lost in a row at its record's end, sent
+// since its callers' last delivery, beside its callers' losses since its
+// probes' last answer within the trust window — or over its recent probes,
+// unless a caller delivered since its last loss.
+func ejected(r bus.PathRecord, rep report, now time.Time) bool {
+	lost := rep.lostSince(r.LastAnswer, now.Add(-trustWindow))
+	for i := len(r.Samples) - 1; i >= 0 && r.Samples[i].Lost && r.Samples[i].At.After(rep.delivered); i-- {
+		lost++
 	}
-	samples := recent(r)
-	return len(samples) >= ejectSamples && float64(lost(samples))/float64(len(samples)) >= ejectShare
-}
-
-// lost counts the lost probes among the samples.
-func lost(samples []bus.PathSample) int {
-	n := 0
-	for _, s := range samples {
-		if s.Lost {
-			n++
-		}
-	}
-	return n
+	under := func(s evidence.Share) bool { return s.Under(ejectLine) == evidence.Better }
+	return under(evidence.Share{Sent: lost, Confidence: BoundConfidence}) ||
+		!rep.delivered.After(r.LastLoss) && under(evidence.ShareOf(recent(r), BoundConfidence))
 }
 
 // suspectLinks returns the links the records' failed paths share: each link
@@ -209,7 +201,7 @@ func suspectLinks(m bus.PathMeasurements, now time.Time) map[segment.LinkID]bool
 	answering := false
 	for _, r := range m.All() {
 		switch {
-		case ejected(r):
+		case ejected(r, report{}, now):
 			for _, l := range r.Links {
 				failed[l] = true
 			}

@@ -362,6 +362,43 @@ func TestBeats(t *testing.T) {
 	Beats(bounded(10*ms, 20*ms), Estimate{Kind: other}, 0)
 }
 
+// TestShare checks a share of answers against a line at its edges: under
+// one half at 0.95 once five samples in a row went unanswered, not at four;
+// at five answers of twenty, not at six; at or over it from fifteen of
+// twenty, not at fourteen; undecided for no sample.
+func TestShare(t *testing.T) {
+	samples := func(answered, lost int) []Sample {
+		var out []Sample
+		for range answered {
+			out = append(out, Sample{RTT: ms})
+		}
+		for range lost {
+			out = append(out, Sample{Lost: true})
+		}
+		return out
+	}
+	for _, tc := range []struct {
+		answered, lost int
+		want           Verdict
+	}{
+		{0, 5, Better},
+		{0, 4, Undecided},
+		{5, 15, Better},
+		{6, 14, Undecided},
+		{14, 6, Undecided},
+		{15, 5, NotBetter},
+		{0, 0, Undecided},
+	} {
+		s := ShareOf(samples(tc.answered, tc.lost), 0.95)
+		if s.Answered != tc.answered || s.Sent != tc.answered+tc.lost {
+			t.Errorf("%d answered, %d lost: share of %d of %d", tc.answered, tc.lost, s.Answered, s.Sent)
+		}
+		if got := s.Under(0.5); got != tc.want {
+			t.Errorf("%d answered, %d lost: under one half = %v, want %v", tc.answered, tc.lost, got, tc.want)
+		}
+	}
+}
+
 // TestHold checks that a hold stands once it has held its duration with a
 // sample of each side answered since it began, and starts over for another
 // subject and after a release.

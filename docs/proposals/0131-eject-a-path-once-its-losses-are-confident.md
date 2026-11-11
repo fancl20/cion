@@ -97,3 +97,33 @@ its last answer, where three did.
 *   **The labs.** The labs pass, and the benchmarks run against the commit
     before: the founder-down lab, the settled labs, the cuts, the loss
     sweeps, and the bursts.
+
+## Implementation history
+
+*   **The share's verdict.** `Share.Under` weighs the binomial at the line
+    itself: the share's upper bound lies under the line where the answers
+    seen, or fewer, would come under it with no more than the odds the
+    confidence leaves. It computes no bound it does not weigh.
+*   **The ejection's windows.** The probes lost in a row at a record's end
+    count from the callers' last delivery, so a loss a caller's delivery
+    outran counts nothing; the callers' losses count from the probes' last
+    answer within the trust window, and a report keeps its latest
+    `bus.PathSamples` of them. A lost burst still spaces an ejected path's
+    half-open probes.
+*   **The tests' ejected records** carry the lost probes their bursts sent,
+    as the prober records them; a record of lost bursts without its lost
+    probes no longer ejects.
+*   `architecture.md` says in one sentence what the evidence library is and
+    who decides through it: the paths and the topology source.
+*   Mutations: 10 of 10 killed. The first run let one live, the callers'
+    losses past the trust window counted, which three losses could not
+    tell from none; the case now reports five.
+*   The pipeline passed.
+*   Benchmarks against the commit before, interleaved, one run each: under
+    heavy loss the confident ejection held the link sets (the stranded
+    lab's 50% loss 17 link changes against 127, the regions lab's 0 against
+    39), one unsettled level each against two; the regions jitter runs
+    changed no link, the ring three at 20ms, its pairs at their best
+    latency; the settled labs reached every pair, their links within one;
+    founder-down's survivors answered within 0.75 s; the regions cut's
+    restore as the commit before's.
