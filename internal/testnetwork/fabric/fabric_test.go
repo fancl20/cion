@@ -356,6 +356,33 @@ func TestUDPOnlyRefusesTCP(t *testing.T) {
 	})
 }
 
+// TestEphemeralPortsLieAboveTheBands checks the range a bind of port zero
+// draws from, on a host's stack and on a NAT router's: the Linux kernel's
+// default, above every band the labs and the nodes bind by number, so a
+// port-zero socket never holds a link's address.
+func TestEphemeralPortsLieAboveTheBands(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		f := New(t, UDPOnly())
+		host := f.Node(insideAddr)
+		router := f.NAT(PortRestricted, gatewayAddr, routerInside).Router(routerInside)
+		for _, n := range []*Node{host, router} {
+			if first, last := n.stack.PortRange(); first != ephemeralFirst || last != ephemeralLast {
+				t.Errorf("%v draws ephemeral ports from %d-%d, want %d-%d", n.host, first, last,
+					ephemeralFirst, ephemeralLast)
+			}
+		}
+		c, err := host.Sockets().NewUDP(net.UDPAddrFromAddrPort(netip.AddrPortFrom(insideAddr, 0)),
+			netip.AddrPort{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = c.Close() }()
+		if port := c.LocalAddr().AddrPort().Port(); port < ephemeralFirst || port > ephemeralLast {
+			t.Errorf("a bind of port zero took port %d, outside %d-%d", port, ephemeralFirst, ephemeralLast)
+		}
+	})
+}
+
 // TestDrawPortStaysBelowTheEphemeralRange checks the port draws: each draw
 // is a fresh port below the stack's ephemeral range, and the drawn port
 // binds.

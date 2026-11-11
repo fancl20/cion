@@ -187,11 +187,7 @@ func (b *NAT) Router(inside netip.Addr) *Node {
 			Destination: oneHost(host), NIC: 1, SourceHint: tcpip.AddrFrom4(inside.As4()),
 		})
 	}
-	n := f.bootLocked([]netip.Addr{b.gateway, inside}, routes)
-	if err := n.stack.SetPortRange(mappingPortBase+mappingPortSpan, math.MaxUint16); err != nil {
-		f.t.Fatalf("lifting the router's ephemeral ports above the mapping band: %v", err)
-	}
-	return n
+	return f.bootLocked([]netip.Addr{b.gateway, inside}, routes)
 }
 
 // egress applies the NAT's rules to a packet leaving one of its inside

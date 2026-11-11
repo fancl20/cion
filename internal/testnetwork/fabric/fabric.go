@@ -48,6 +48,15 @@ const queueDepth = 512
 // and no fixed port the node binds.
 const drawnPortBase = 10000
 
+// The ephemeral range every stack draws a bind of port zero from: the
+// Linux kernel's default, which the node's fixed ports, its link band, the
+// labs' pinned band, and the NATs' mapping band all lie below, as on the
+// hosts the node runs on. The stack's own default reaches down to 16000.
+const (
+	ephemeralFirst = 32768
+	ephemeralLast  = 60999
+)
+
 // Fabric is the userspace network a lab draws: the stacks it booted, the
 // taps it drew between them, the NATs it placed, the host names it
 // drew, and the one clock they all read. It stops with the test.
@@ -204,6 +213,9 @@ func (f *Fabric) bootLocked(hosts []netip.Addr, routes []tcpip.Route) *Node {
 		TransportProtocols: transports,
 		Clock:              f.clock,
 	})
+	if err := s.SetPortRange(ephemeralFirst, ephemeralLast); err != nil {
+		f.t.Fatalf("setting %v's ephemeral ports: %v", hosts[0], err)
+	}
 	n := &Node{
 		f:     f,
 		host:  hosts[0],
