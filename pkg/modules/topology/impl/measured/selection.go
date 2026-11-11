@@ -235,9 +235,9 @@ type selection struct {
 	coord coordState
 	// cluster names the cluster the node joined, zero for none.
 	cluster addr.IA
-	// history holds the round trips each instrument took of its peer within
-	// scion.BoundSpan, oldest first, and last names the instrument that read
-	// each peer last.
+	// history holds the outcomes of each instrument's probes of its peer
+	// within scion.BoundSpan, oldest first, and last names the instrument
+	// that read each peer last.
 	history map[instrument][]heard
 	last    map[addr.IA]instrument
 	// reserve holds the peers the last window's clustering holds in reserve
@@ -269,10 +269,19 @@ type instrument struct {
 	at      netip.AddrPort
 }
 
-// heard is one round trip a probe took, beside when.
+// heard is one probe's outcome, beside when: the round trip it took, or
+// lost when no answer came.
 type heard struct {
-	at  time.Time
-	rtt time.Duration
+	at   time.Time
+	rtt  time.Duration
+	lost bool
+}
+
+// outcomes is what one window's probes of a peer heard: the round trips
+// answered, and how many probes no answer came for.
+type outcomes struct {
+	rtts []time.Duration
+	lost int
 }
 
 // run is a candidate's answered run: when it went, and the address it
@@ -311,21 +320,21 @@ type peerStreak struct {
 // sample is one peer's window record: its direct side beside the routes to
 // it, whose health and readings the tier's route counts and prices read.
 type sample struct {
-	// direct is the direct side's reading: the reading of the round trips
-	// the peer answered within scion.ReadingSpan to the instrument that
-	// probed it this window — the SCMP echo over the one-hop path for an
-	// established neighbor, the binding request for a candidate, the punch
-	// probe for a candidate no binding request reaches. Zero when the
-	// window's probes went unanswered.
+	// direct is the direct side's reading: the reading of the probes of
+	// the instrument that probed the peer this window within
+	// scion.ReadingSpan, divided by their delivery — the SCMP echo over the
+	// one-hop path for an established neighbor, the binding request for a
+	// candidate, the punch probe for a candidate no binding request
+	// reaches. Zero when none of the window's probes answered.
 	direct time.Duration
 	// lo and hi bound the direct side's round trip over the instrument's
-	// round trips within scion.BoundSpan; zero where they give no bound,
-	// and when the window's probes went unanswered.
+	// probes within scion.BoundSpan; zero where they give no bound, and
+	// when none of the window's probes answered.
 	lo, hi time.Duration
 	// reading and bounds are the estimates the direct side's reading and
 	// its bounds come from, as scion.ReadingEstimate and
-	// scion.BoundsEstimate read the instrument's round trips; zero when the
-	// window's probes went unanswered.
+	// scion.BoundsEstimate read the instrument's probes; zero when none of
+	// the window's probes answered.
 	reading, bounds evidence.Estimate
 	// candidates are the routes to the peer, each one's cost its reading.
 	candidates []scion.Candidate
@@ -626,26 +635,28 @@ func (s *selection) choose(ctx context.Context, p peer) target {
 // measure runs the window's probe of one peer — a nil neighbor entry means
 // a candidate — through the test seam when set, and reads and bounds its
 // direct side over the samples of the instrument that probed it. The seam's
-// direct side is one sample, of the link's echoes for a neighbor and of the
-// binding requests to the target's address for a candidate.
+// direct side is one probe, of the link's echoes for a neighbor and of the
+// binding requests to the target's address for a candidate: answered at the
+// seam's round trip, lost where it is zero.
 func (s *selection) measure(
 	ctx context.Context, e target, l *links.Link,
 ) sample {
 	var sm sample
 	var by instrument
-	var rtts []time.Duration
+	var got outcomes
 	if s.probeFn != nil {
 		sm, by = s.probeFn(ctx, e, l), instrument{ia: e.IA, at: e.RendezvousAddr}
 		if l != nil {
 			by = instrument{ia: e.IA, ifID: l.IfID}
 		}
+		got.lost = 1
 		if sm.direct > 0 {
-			rtts = []time.Duration{sm.direct}
+			got = outcomes{rtts: []time.Duration{sm.direct}}
 		}
 	} else {
-		sm, by, rtts = s.probe(ctx, e, l)
+		sm, by, got = s.probe(ctx, e, l)
 	}
-	sm.readDirect(s.read(by, rtts, time.Now()))
+	sm.readDirect(s.read(by, got, time.Now()))
 	return sm
 }
 
@@ -678,23 +689,23 @@ func (s *selection) ran(t target, sm sample) {
 }
 
 // held reads a candidate the window does not probe now: the reading and
-// bounds of the round trips its last instrument holds, beside the routes to
-// it as a probe enumerates them.
+// bounds of the probes its last instrument holds, beside the routes to it
+// as a probe enumerates them.
 func (s *selection) held(ctx context.Context, t target) sample {
 	sm := s.routes(ctx, t.IA)
 	sm.readDirect(readingOf(s.history[s.last[t.IA]], time.Now()))
 	return sm
 }
 
-// read adds the window's answered round trips to the instrument's samples,
-// drops those taken more than scion.BoundSpan before now, and returns their
-// estimates as readingOf returns them; zeros when the window's probes went
-// unanswered. An instrument holding no sample within the reading's span
-// starts from those of the instrument that read the peer last, round trips
-// of the same peer: a link reads on from the binding requests that promoted
-// it, and a retired link's peer from the link's echoes, rather than from one
-// window's samples alone.
-func (s *selection) read(by instrument, rtts []time.Duration, now time.Time) (reading, bounds evidence.Estimate) {
+// read adds the window's outcomes to the instrument's samples, its round
+// trips and its losses, drops those taken more than scion.BoundSpan before
+// now, and returns their estimates as readingOf returns them; zeros when
+// none of the window's probes answered. An instrument holding no sample
+// within the reading's span starts from those of the instrument that read
+// the peer last, samples of the same peer: a link reads on from the binding
+// requests that promoted it, and a retired link's peer from the link's
+// echoes, rather than from one window's samples alone.
+func (s *selection) read(by instrument, got outcomes, now time.Time) (reading, bounds evidence.Estimate) {
 	if s.history == nil {
 		s.history = make(map[instrument][]heard)
 		s.last = make(map[addr.IA]instrument)
@@ -706,28 +717,32 @@ func (s *selection) read(by instrument, rtts []time.Duration, now time.Time) (re
 		kept = slices.DeleteFunc(slices.Clone(s.history[s.last[by.ia]]), stale)
 	}
 	s.last[by.ia] = by
-	for _, rtt := range rtts {
+	for _, rtt := range got.rtts {
 		kept = append(kept, heard{at: now, rtt: rtt})
+	}
+	for range got.lost {
+		kept = append(kept, heard{at: now, lost: true})
 	}
 	if len(kept) == 0 {
 		delete(s.history, by)
 	} else {
 		s.history[by] = kept
 	}
-	if len(rtts) == 0 {
+	if len(got.rtts) == 0 {
 		return evidence.Estimate{}, evidence.Estimate{}
 	}
 	return readingOf(kept, now)
 }
 
 // readingOf returns the estimates the direct side's reading and bounds come
-// from over the round trips heard before now: the reading's, over those
-// within scion.ReadingSpan, and the bounds', over those within
-// scion.BoundSpan; zeros when none lies within the reading's span.
+// from over the outcomes heard before now, each divided by the delivery of
+// its samples: the reading's, over those within scion.ReadingSpan, and the
+// bounds', over those within scion.BoundSpan; zeros when no round trip lies
+// within the reading's span.
 func readingOf(hs []heard, now time.Time) (reading, bounds evidence.Estimate) {
 	samples := make([]bus.PathSample, len(hs))
 	for i, h := range hs {
-		samples[i] = bus.PathSample{At: h.at, RTT: h.rtt}
+		samples[i] = bus.PathSample{At: h.at, RTT: h.rtt, Lost: h.lost}
 	}
 	if reading = scion.ReadingEstimate(samples, now); reading.Answered == 0 {
 		return evidence.Estimate{}, evidence.Estimate{}
@@ -814,24 +829,27 @@ func (s *selection) establish(ctx context.Context, e target, why string) *links.
 // punch that opens both NATs between. A neighbor whose link the conn cannot
 // send over — its verdict down — fails its writes at once, and answers
 // nothing. The binding requests record nothing at the candidate. It returns
-// the round trips answered and the instrument that took them, beside the
-// routes to the peer.
-func (s *selection) probe(ctx context.Context, e target, l *links.Link) (sample, instrument, []time.Duration) {
+// the probes' outcomes and the instrument that took them, beside the routes
+// to the peer; a punch probe that failed heard nothing, and one that ran
+// lost the echoes of its ProbeRuns that never came.
+func (s *selection) probe(ctx context.Context, e target, l *links.Link) (sample, instrument, outcomes) {
 	var by instrument
-	var rtts []time.Duration
+	var got outcomes
 	switch {
 	case l != nil:
-		by, rtts = instrument{ia: e.IA, ifID: l.IfID}, s.peerEchoes(ctx, e.IA)
+		by, got = instrument{ia: e.IA, ifID: l.IfID}, s.peerEchoes(ctx, e.IA)
 	case s.punched(e):
 		by = instrument{ia: e.IA, punched: true}
-		var err error
-		if rtts, err = s.cfg.Punch.Probe(ctx, e.IA, e.Scope); err != nil {
+		rtts, err := s.cfg.Punch.Probe(ctx, e.IA, e.Scope)
+		if err != nil {
 			slog.Debug("The punch probe did not answer", "peer", e.IA, "err", err)
+			break
 		}
+		got = outcomes{rtts: rtts, lost: ProbeRuns - len(rtts)}
 	default:
-		by, rtts = instrument{ia: e.IA, at: e.RendezvousAddr}, s.rendezvousSamples(ctx, e.RendezvousAddr)
+		by, got = instrument{ia: e.IA, at: e.RendezvousAddr}, s.rendezvousSamples(ctx, e.RendezvousAddr)
 	}
-	return s.routes(ctx, e.IA), by, rtts
+	return s.routes(ctx, e.IA), by, got
 }
 
 // routes enumerates the routes to the peer, each priced by its reading, its
@@ -853,31 +871,35 @@ func (s *selection) routes(ctx context.Context, ia addr.IA) sample {
 }
 
 // rendezvousSamples takes up to ProbeRuns binding requests to the
-// rendezvous socket, the first unanswered one ending them, and returns the
-// round trips answered.
-func (s *selection) rendezvousSamples(ctx context.Context, socket netip.AddrPort) []time.Duration {
-	var rtts []time.Duration
+// rendezvous socket, the first unanswered one ending them, and returns their
+// outcomes: the round trips answered, and the unanswered one lost. A request
+// that failed before an answer could come ends them unrecorded.
+func (s *selection) rendezvousSamples(ctx context.Context, socket netip.AddrPort) outcomes {
+	var got outcomes
 	for range ProbeRuns {
 		rtt, err := s.probeRendezvous(ctx, socket)
+		if errors.Is(err, errUnanswered) {
+			got.lost++
+		}
 		if err != nil {
 			break
 		}
-		rtts = append(rtts, rtt)
+		got.rtts = append(got.rtts, rtt)
 	}
-	return rtts
+	return got
 }
 
-// peerEchoes takes the SCMP echo round trips to the neighbor over the
-// one-hop path the conn resolves, addressed to the host the neighbor's own
-// resolution names, at the endhost port its responder binds beside the
-// endpoint. A neighbor whose resolution goes unanswered measures nothing.
-func (s *selection) peerEchoes(ctx context.Context, ia addr.IA) []time.Duration {
+// peerEchoes takes the SCMP echoes to the neighbor over the one-hop path
+// the conn resolves, addressed to the host the neighbor's own resolution
+// names, at the endhost port its responder binds beside the endpoint. A
+// neighbor whose resolution goes unanswered measures nothing.
+func (s *selection) peerEchoes(ctx context.Context, ia addr.IA) outcomes {
 	if s.cfg.Conn == nil {
-		return nil
+		return outcomes{}
 	}
 	host, ok := s.peerHost(ctx, ia)
 	if !ok {
-		return nil
+		return outcomes{}
 	}
 	return s.echoes(ctx, &scion.Addr{
 		IA:   ia,
@@ -1015,19 +1037,20 @@ func (s *selection) declare(neighbors map[addr.IA]*links.Link, samples map[addr.
 }
 
 // echoes takes ProbeRuns SCMP echoes to the destination over the one-hop
-// path the conn resolves and returns the round trips answered; none without
-// a probe conn. A run whose request a router refuses with an interface-down
-// signal is lost at the signal rather than at ProbeWait. The context's end
-// moves the read deadline to the past, ending a wait in flight; each run
-// reads the context after setting its own deadline, so no run overrides the
-// move unseen.
-func (s *selection) echoes(ctx context.Context, dst *scion.Addr) []time.Duration {
+// path the conn resolves and returns their outcomes; none without a probe
+// conn. A run whose request the conn cannot send, as over a link whose
+// verdict is down, is lost at once, and one whose request a router refuses
+// with an interface-down signal at the signal rather than at ProbeWait. The
+// context's end moves the read deadline to the past, ending a wait in
+// flight; each run reads the context after setting its own deadline, so no
+// run overrides the move unseen.
+func (s *selection) echoes(ctx context.Context, dst *scion.Addr) outcomes {
+	var got outcomes
 	if s.cfg.Conn == nil {
-		return nil
+		return got
 	}
 	stop := context.AfterFunc(ctx, func() { _ = s.cfg.Conn.SetReadDeadline(time.Now()) })
 	defer stop()
-	var rtts []time.Duration
 	for seq := range uint16(ProbeRuns) {
 		if err := s.cfg.Conn.SetReadDeadline(time.Now().Add(ProbeWait)); err != nil {
 			continue
@@ -1037,15 +1060,18 @@ func (s *selection) echoes(ctx context.Context, dst *scion.Addr) []time.Duration
 		}
 		sent := time.Now()
 		if err := s.cfg.Conn.WriteEchoRequestTo(dst, seq, nil); err != nil {
+			got.lost++
 			continue
 		}
 		// The wait elapsing, the context ending, or a router refusing the
 		// request loses the run.
-		if _, _, err := s.cfg.Conn.ReadEchoReply(seq); err == nil {
-			rtts = append(rtts, time.Since(sent))
+		if _, _, err := s.cfg.Conn.ReadEchoReply(seq); err != nil {
+			got.lost++
+			continue
 		}
+		got.rtts = append(got.rtts, time.Since(sent))
 	}
-	return rtts
+	return got
 }
 
 // promote applies the four admission cases in order, the first

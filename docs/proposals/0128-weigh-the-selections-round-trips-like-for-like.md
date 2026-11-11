@@ -107,3 +107,37 @@ it.
 *   **The labs.** The labs pass, and the benchmarks run against the commit
     before: the loss sweeps, the settled labs, the cuts, the delay changes,
     and the jitter sweeps.
+
+## Implementation history
+
+*   **The outcomes.** A window's probe returns its outcomes, the round trips
+    answered beside the probes lost, and the instrument's history keeps
+    each outcome. The echoes lose a run whose write fails, as over a link
+    whose verdict is down, or whose reply never comes; the binding requests
+    lose the request no reply answered, which the rendezvous client returns
+    as `errUnanswered`, and end unrecorded on any other failure; the punch
+    prober's `Probe` returns the echoes answered of its `ProbeRuns`, and
+    nothing when it fails. A down link's echoes find no host for their peer
+    and send nothing, so an outage piles up no losses.
+*   **The seam.** A seam's direct side of zero is one lost probe.
+*   **The prices.** `cheapest` returns the route a set of routes is priced
+    by at its price, for the tiers and the excluded measurement alike; it
+    replaces the tiers' member-route helper and the cost-ranked helper of
+    the same name, which nothing else read. The records read a route's
+    reading and bounds at its price.
+*   A test's loss-adjusted expectation reads its loss at run time, as the
+    estimates do: the constant two thirds rounds the other way.
+*   Mutations: 15 of 15 killed. The first run let one live: an echo whose
+    write failed went unrecorded, which no test sent;
+    `TestEchoesLoseRunsTheConnCannotSend` now does.
+*   The pipeline passed.
+*   Benchmarks against the commit before, interleaved, one run each: the
+    settled labs reached every pair, their links within one of the commit
+    before's (metros 27 against 26, the ring 45 against 44); the regions
+    loss sweep churned less at 50% loss (113 link changes against 182 on the
+    way up, 0 against 63 down) and more at 20% (32 against 8), the stranded
+    lab's more at 50% (244 against 92); one regions jitter run promoted
+    eight links at 20ms, its worst pair at 1.42 until they landed, the other
+    none; founder-down's survivors answered within 0.76 s; the regions cut's
+    restore settled in 410 s against 180 s, the restored link's direct side
+    waiting for the cut's lost probes to leave its reading.

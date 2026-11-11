@@ -397,7 +397,8 @@ func (s *LinkService) punchEntry(ctx context.Context, peer addr.IA, remoteIfID u
 type Puncher interface {
 	// Probe measures the round trips to the peer over a punched pair of
 	// ephemeral sockets, each side's reflexive address as the peers of the
-	// directory the ID names see it, and returns those answered.
+	// directory the ID names see it, and returns those answered of the
+	// ProbeRuns it sends; none with an error.
 	Probe(ctx context.Context, peer addr.IA, id bus.DirectoryID) ([]time.Duration, error)
 	// Establish punches from the entry's own link address, each side's
 	// reflexive address as the peers of the directory the ID names see it,

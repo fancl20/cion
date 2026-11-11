@@ -27,27 +27,26 @@ type tier struct {
 	// route count's first term — one link ID per link: every composed path
 	// over an up segment of the node names the interface it leaves through.
 	upLinks []segment.LinkID
-	// price is the cheapest clean read route into the tier at its cost, and
+	// price is the cheapest clean read route into the tier at its price, and
 	// priceRoute that route. Zero and nil when no read route prices the
 	// tier, and no priced rule fires on it.
 	price      time.Duration
 	priceRoute *scion.Candidate
 	// prices is each member's own price: the cheapest clean read route into
-	// the member, priced as memberRoute prices routes, and priceRoutes that
-	// route. A member no read route prices is absent.
+	// the member at its price, and priceRoutes that route. A member no read
+	// route prices is absent.
 	prices      map[addr.IA]time.Duration
 	priceRoutes map[addr.IA]*scion.Candidate
-	// low is the lowest lower bound of the tier's clean read routes at
-	// their costs, and lows each member's over its own at their prices: what
-	// the member's price stays above with confidence; lowRoute and lowRoutes
-	// are the routes they come from. Zero, or absent, where no read route
-	// bounds it.
+	// low is the lowest lower bound of the tier's clean read routes, and
+	// lows each member's over its own, each at their prices: what the
+	// price stays above with confidence; lowRoute and lowRoutes are the
+	// routes they come from. Zero, or absent, where no read route bounds it.
 	low       time.Duration
 	lowRoute  *scion.Candidate
 	lows      map[addr.IA]time.Duration
 	lowRoutes map[addr.IA]*scion.Candidate
-	// cheapest holds each member's cheapest clean route at its cost, read or
-	// not, requested priced so it is read, and one through a dead link is
+	// cheapest holds each member's cheapest clean route at its price, read
+	// or not, requested priced so it is read, and one through a dead link is
 	// ejected and the price rises to the routes that serve. A member no
 	// route prices is absent.
 	cheapest map[addr.IA]*scion.Candidate
@@ -81,17 +80,17 @@ type excludedSample struct {
 	// measurements heard it within the trust window, and nothing doubted it
 	// since. Otherwise the window decides nothing about the link.
 	answered bool
-	// price is the cheapest read survivor at its cost, and priceRoute that
+	// price is the cheapest read survivor at its price, and priceRoute that
 	// survivor. Zero and nil when no read survivor prices the tier.
 	price      time.Duration
 	priceRoute *scion.Candidate
 	// routes is the tier's route count without the link: its other up links
 	// beside the survivors, saturated at two.
 	routes int
-	// prices is each member's price over its read survivors, priced as
-	// memberRoute prices routes. A member no read survivor prices is absent.
+	// prices is each member's price over its read survivors, each at its
+	// price. A member no read survivor prices is absent.
 	prices map[addr.IA]time.Duration
-	// cheapest holds each member's cheapest survivor at its cost, read or
+	// cheapest holds each member's cheapest survivor at its price, read or
 	// not, requested priced so it is read, and one through a dead link is
 	// ejected before its price retires the link. A member no survivor
 	// prices is absent.
@@ -100,14 +99,14 @@ type excludedSample struct {
 	// the link reaches: the link's own neighbor, which the link reaches
 	// whatever composes, is cut off unless a survivor reaches it.
 	cutOff map[addr.IA]bool
-	// The bounds the history confirms a judgment by. crossed reports that a
-	// clean read route into the tier crosses the link; low is the lowest
-	// lower bound of those routes and high the lowest upper bound of the
-	// read survivors, at their costs. lows holds each member a read route
-	// crossing the link reaches, at the lowest lower bound of those routes,
-	// and highs each member's lowest upper bound over its read survivors,
-	// each at its price. A bound the probes do not give is zero. lowRoute
-	// and highRoute are the routes low and high come from.
+	// The bounds the history confirms a judgment by, each at its price.
+	// crossed reports that a clean read route into the tier crosses the
+	// link; low is the lowest lower bound of those routes and high the
+	// lowest upper bound of the read survivors. lows holds each member a
+	// read route crossing the link reaches, at the lowest lower bound of
+	// those routes, and highs each member's lowest upper bound over its read
+	// survivors. A bound the probes do not give is zero. lowRoute and
+	// highRoute are the routes low and high come from.
 	crossed             bool
 	low, high           time.Duration
 	lowRoute, highRoute *scion.Candidate
@@ -184,15 +183,15 @@ func (s *selection) windowTiers(
 		t.lowRoutes = make(map[addr.IA]*scion.Candidate, len(t.members))
 		t.cheapest = make(map[addr.IA]*scion.Candidate, len(t.members))
 		for _, c := range readRoutes(routes) {
-			if c.Low != nil && *c.Low > 0 && (t.low == 0 || *c.Low < t.low) {
-				t.low, t.lowRoute = *c.Low, c
+			if lo, _ := boundsOf(c); lo > 0 && (t.low == 0 || lo < t.low) {
+				t.low, t.lowRoute = lo, c
 			}
 		}
 		for _, m := range t.members {
-			if c, _ := memberRoute(clean[m.ia]); c != nil {
+			if c, _ := cheapest(clean[m.ia]); c != nil {
 				t.cheapest[m.ia] = c
 			}
-			if c, price := memberRoute(readRoutes(clean[m.ia])); price > 0 {
+			if c, price := cheapest(readRoutes(clean[m.ia])); price > 0 {
 				t.prices[m.ia], t.priceRoutes[m.ia] = price, c
 			}
 			for _, c := range readRoutes(clean[m.ia]) {
@@ -261,16 +260,16 @@ func measureExcluded(
 			if slices.Contains(survivors, c) {
 				if hi > 0 {
 					ex.highs[m.ia] = lower(ex.highs[m.ia], hi)
-					if *c.High > 0 && (ex.high == 0 || *c.High < ex.high) {
-						ex.high, ex.highRoute = *c.High, c
+					if ex.high == 0 || hi < ex.high {
+						ex.high, ex.highRoute = hi, c
 					}
 				}
 				continue
 			}
 			ex.crossed = true
 			ex.lows[m.ia] = lower(ex.lows[m.ia], lo)
-			if c.Low != nil && *c.Low > 0 && (ex.low == 0 || *c.Low < ex.low) {
-				ex.low, ex.lowRoute = *c.Low, c
+			if lo > 0 && (ex.low == 0 || lo < ex.low) {
+				ex.low, ex.lowRoute = lo, c
 			}
 		}
 	}
@@ -285,10 +284,10 @@ func measureExcluded(
 			ex.cutOff[m.ia] = true
 			continue
 		}
-		if c, _ := memberRoute(own); c != nil {
+		if c, _ := cheapest(own); c != nil {
 			ex.cheapest[m.ia] = c
 		}
-		if _, price := memberRoute(readRoutes(own)); price > 0 {
+		if _, price := cheapest(readRoutes(own)); price > 0 {
 			ex.prices[m.ia] = price
 		}
 	}
@@ -547,12 +546,14 @@ func readRoutes(routes []*scion.Candidate) []*scion.Candidate {
 	return slices.DeleteFunc(slices.Clone(routes), func(c *scion.Candidate) bool { return !c.Read })
 }
 
-// memberRoute returns the route a member's routes price it by, and that
-// price: the cheapest of them, each at its price, the picks' own — its cost
-// charged scion.TransitPenalty for every AS it crosses between its ends,
-// each way — the first of the cheapest. A route without a cost, or with a
-// zero one, prices nothing. Nil and zero when nothing prices the member.
-func memberRoute(routes []*scion.Candidate) (*scion.Candidate, time.Duration) {
+// cheapest returns the route a set of routes is priced by, and that price:
+// the cheapest of them, each at its price, the picks' own — its cost, the
+// measured round trip or else its declared one-way sum doubled, charged
+// scion.TransitPenalty for every AS it crosses between its ends, each way —
+// the first of the cheapest. A route without a cost, or with a zero one,
+// prices nothing: an undeclared edge is unknown, not free. Nil and zero when
+// nothing prices the set.
+func cheapest(routes []*scion.Candidate) (*scion.Candidate, time.Duration) {
 	var out *scion.Candidate
 	var price time.Duration
 	for _, c := range routes {

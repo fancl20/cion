@@ -476,7 +476,8 @@ func (p *stubPuncher) Establish(
 // TestProbePunchesUnansweredCandidates checks the probe's carrier for a
 // candidate whose own report says its rendezvous address answers nothing:
 // the punch measures it, in the directory that names the address, and its
-// round trips are the punch probe's own samples.
+// outcomes are the punch probe's own: the round trips answered, and the rest
+// of its ProbeRuns lost.
 func TestProbePunchesUnansweredCandidates(t *testing.T) {
 	punch := &stubPuncher{rtts: []time.Duration{7 * time.Millisecond, 9 * time.Millisecond}}
 	s := &selection{cfg: SelectionConfig{
@@ -490,9 +491,9 @@ func TestProbePunchesUnansweredCandidates(t *testing.T) {
 	e := target{IA: selPeer, Scope: bus.DirectoryID{7},
 		RendezvousAddr: netip.MustParseAddrPort("192.0.2.9:30043"),
 		Reach:          bus.Reach{RendezvousUnanswered: true}}
-	_, by, rtts := s.probe(context.Background(), e, nil)
-	if !slices.Equal(rtts, punch.rtts) {
-		t.Errorf("round trips = %v, want the punch's %v", rtts, punch.rtts)
+	_, by, got := s.probe(context.Background(), e, nil)
+	if !slices.Equal(got.rtts, punch.rtts) || got.lost != ProbeRuns-len(punch.rtts) {
+		t.Errorf("outcomes = %+v, want the punch's %v beside %d lost", got, punch.rtts, ProbeRuns-len(punch.rtts))
 	}
 	if want := (instrument{ia: selPeer, punched: true}); by != want {
 		t.Errorf("instrument = %+v, want %+v", by, want)

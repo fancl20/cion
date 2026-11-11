@@ -2,15 +2,14 @@ package measured
 
 import (
 	"slices"
-	"time"
 
 	"github.com/fancl20/cion/pkg/libs/scion"
 	"github.com/fancl20/cion/pkg/libs/segment"
 )
 
 // The comparator's queries over the enumerated candidates, answered beside
-// the selection loop that owns them: the baseline, the route count into a
-// tier, and the price of the cheapest route.
+// the selection loop that owns them: the baseline and the route count into
+// a tier.
 
 // freshest returns the freshest clean candidate of an enumeration: the
 // peer's baseline, the route the window requests priced for it. Freshness
@@ -108,21 +107,4 @@ func edgeDisjoint(a, b *scion.Candidate) bool {
 		}
 	}
 	return true
-}
-
-// cheapest prices a set of routes by the cheapest of them, each at its cost:
-// the measured round trip raised by loss, else its declared one-way sum
-// doubled to meet the round trips it is judged against, and returns that
-// route, the first of the cheapest. A route with neither prices nothing: an
-// undeclared edge is unknown, not free. Nil and zero when nothing prices the
-// set.
-func cheapest(routes []*scion.Candidate) (*scion.Candidate, time.Duration) {
-	var out *scion.Candidate
-	var price time.Duration
-	for _, c := range routes {
-		if c.Cost != nil && *c.Cost > 0 && (price == 0 || *c.Cost < price) {
-			out, price = c, *c.Cost
-		}
-	}
-	return out, price
 }

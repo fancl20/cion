@@ -75,13 +75,13 @@ func TestDeriveTiers(t *testing.T) {
 
 // TestWindowTierFacts checks what one helper turns a tier into: up links
 // from the verdicts alone; the price of the cheapest clean read route at
-// its cost — a declared route under a measured one prices nothing, nor do an
-// ejected route and one over a local down interface; each member's own price
-// over its own read routes, beside its cheapest route, read or not, which
-// the window requests; the lowest lower bound of the read routes, the tier's
-// at their costs and each member's at their prices; the route count reading
-// the clean candidates alone; and strandedness, once no up link reaches a
-// tier and the measurements doubt every route into it.
+// its price — a declared route under a measured one prices nothing, nor do
+// an ejected route and one over a local down interface; each member's own
+// price over its own read routes, beside its cheapest route, read or not,
+// which the window requests; the lowest lower bound of the read routes, the
+// tier's and each member's, at their prices; the route count reading the
+// clean candidates alone; and strandedness, once no up link reaches a tier
+// and the measurements doubt every route into it.
 func TestWindowTierFacts(t *testing.T) {
 	verdicts := map[uint16]bool{3: true, 4: false, 7: false} // B's link down, the node's own 7 dead
 	up := &links.Link{NeighborIA: selA, IfID: 3, State: links.StateEstablished}
@@ -94,9 +94,10 @@ func TestWindowTierFacts(t *testing.T) {
 	// One fast tier of three measured peers: A up, its route measured at
 	// 20ms, bounded below at 18ms, beside a clean route declaring 8ms one
 	// way, bounded below at 5ms by too few probes to read, and a measured
-	// route through D at 30ms, bounded below at 14ms; B verdict-down, its
-	// route over the down link; C a candidate whose route over the node's
-	// own dead interface declares 1ms, beside one clean undeclared route.
+	// route through D at 17ms, bounded below at 14ms — 21ms and 18ms with
+	// its transit; B verdict-down, its route over the down link; C a
+	// candidate whose route over the node's own dead interface declares 1ms,
+	// beside one clean undeclared route.
 	// And a slow tier of two: D, whose one route declares 2ms but was
 	// ejected, and E, whose one route is suspect.
 	bounded := func(c scion.Candidate, low time.Duration) scion.Candidate {
@@ -106,7 +107,7 @@ func TestWindowTierFacts(t *testing.T) {
 	a := sm(5,
 		bounded(measured(route(0, 0, local(3), link(selA)), 20*time.Millisecond), 18*time.Millisecond),
 		bounded(route(-time.Minute, 8*time.Millisecond, link(selX), link(selA)), 5*time.Millisecond),
-		bounded(measured(route(0, 0, local(3), link(selD), link(selA)), 30*time.Millisecond), 14*time.Millisecond),
+		bounded(measured(route(0, 0, local(3), link(selD), link(selA)), 17*time.Millisecond), 14*time.Millisecond),
 	)
 	b := sm(6, route(0, time.Millisecond, local(4), link(selB)))
 	c := sm(7,
@@ -126,8 +127,9 @@ func TestWindowTierFacts(t *testing.T) {
 	if len(fast.upLinks) != 1 || fast.upLinks[0] != local(3) {
 		t.Errorf("up links = %v, want the verdict-up link alone", fast.upLinks)
 	}
+	// The route through D, cheaper at its cost, is dearer at its price.
 	if fast.price != 20*time.Millisecond {
-		t.Errorf("price = %v, want the measured route's 20ms", fast.price)
+		t.Errorf("price = %v, want A's own route's 20ms", fast.price)
 	}
 	// A's declared route undercuts its measured 20ms route but is read by
 	// nothing; B's and C's routes are dirty or undeclared.
@@ -138,21 +140,20 @@ func TestWindowTierFacts(t *testing.T) {
 	if len(fast.cheapest) != 1 || fast.cheapest[selA].ID != a.candidates[1].ID {
 		t.Errorf("the members' cheapest routes = %v, want A's declared route", fast.cheapest)
 	}
-	// The route through D bounds the tier at its cost, 14ms, but A at its
-	// price, 24ms with its transit, above the direct route's 18ms; the
-	// declared route bounds nothing.
-	if fast.low != 14*time.Millisecond {
-		t.Errorf("low = %v, want the route through D's 14ms", fast.low)
+	// The route through D bounds the tier and A at its price no lower than
+	// A's own route, 18ms, which comes first; the declared route bounds
+	// nothing.
+	if fast.low != 18*time.Millisecond {
+		t.Errorf("low = %v, want A's own route's 18ms", fast.low)
 	}
 	if diff := cmp.Diff(map[addr.IA]time.Duration{selA: 18 * time.Millisecond}, fast.lows); diff != "" {
 		t.Errorf("member lows (-want +got):\n%s", diff)
 	}
 	// Each price and bound keeps the route it comes from.
 	if fast.priceRoute != &a.candidates[0] || fast.priceRoutes[selA] != &a.candidates[0] ||
-		fast.lowRoute != &a.candidates[2] || fast.lowRoutes[selA] != &a.candidates[0] {
-		t.Errorf("the routes of the price, A's price, the low, and A's low = %p, %p, %p, %p, want %p, %p, %p, %p",
-			fast.priceRoute, fast.priceRoutes[selA], fast.lowRoute, fast.lowRoutes[selA],
-			&a.candidates[0], &a.candidates[0], &a.candidates[2], &a.candidates[0])
+		fast.lowRoute != &a.candidates[0] || fast.lowRoutes[selA] != &a.candidates[0] {
+		t.Errorf("the routes of the price, A's price, the low, and A's low = %p, %p, %p, %p, want A's own %p",
+			fast.priceRoute, fast.priceRoutes[selA], fast.lowRoute, fast.lowRoutes[selA], &a.candidates[0])
 	}
 	// The up link beside a clean route that avoids it: the declared route
 	// and C's clean route share no link with the up link.
@@ -314,12 +315,12 @@ func TestWindowTiersWithoutMeasurements(t *testing.T) {
 	}
 }
 
-// TestMemberRoute checks the route a member is priced by: each route at its
-// cost, the measured round trip or else the declared sum doubled, an
+// TestCheapest checks the route a set of routes is priced by: each route at
+// its cost, the measured round trip or else the declared sum doubled, an
 // undeclared and unmeasured one, or one measured at zero, pricing nothing;
 // each route charged the transit penalty for every AS it crosses between its
 // ends, each way; the cheapest winning.
-func TestMemberRoute(t *testing.T) {
+func TestCheapest(t *testing.T) {
 	ms := time.Millisecond
 	direct := measured(route(0, ms, local(1), link(selA)), 20*ms)
 	oneTransit := route(0, 9*ms, local(2), link(selB), link(selA))
@@ -342,7 +343,7 @@ func TestMemberRoute(t *testing.T) {
 			6*ms + 2*transitCost, twoTransits.ID},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			c, price := memberRoute(tc.routes)
+			c, price := cheapest(tc.routes)
 			var got bus.PathID
 			if c != nil {
 				got = c.ID

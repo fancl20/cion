@@ -151,52 +151,18 @@ func TestRouteCount(t *testing.T) {
 	}
 }
 
-// TestCheapest checks the price of a set of routes: each at its cost, the
-// measured round trip or else the declared sum doubled, a route with neither
-// pricing nothing, and the cheapest winning, the route returned beside it.
-func TestCheapest(t *testing.T) {
-	ms := time.Millisecond
-	slow := measured(cand(), 30*ms)
-	fast := measured(cand(), 12*ms)
-	declared := route(0, 8*ms)
-	for _, tc := range []struct {
-		name   string
-		routes []*scion.Candidate
-		want   time.Duration
-		route  int
-	}{
-		{"a declaration under a measurement", ptrs(slow, declared, cand()), 16 * ms, 1},
-		{"a measurement under a declaration", ptrs(fast, declared), 12 * ms, 0},
-		{"routes without a cost", ptrs(cand(), cand()), 0, -1},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			c, got := cheapest(tc.routes)
-			if got != tc.want {
-				t.Errorf("price = %v, want %v", got, tc.want)
-			}
-			var want *scion.Candidate
-			if tc.route >= 0 {
-				want = tc.routes[tc.route]
-			}
-			if c != want {
-				t.Errorf("route = %p, want %p", c, want)
-			}
-		})
-	}
-}
-
 // TestMeasureExcluded checks each up link's excluded measurement over the
 // window's candidates: the survivors are the clean candidates that traverse
 // the link nowhere, the freshest of them the window's survivor, answered
-// when healthy; the price is the cheapest read survivor at its cost; each
-// member's price is the same over its own read survivors, each route charged
-// the transit penalty per AS it crosses, beside its cheapest survivor, read
-// or not; the route count reads the tier's other up links beside the
+// when healthy; the price is the cheapest read survivor at its price, each
+// route charged the transit penalty per AS it crosses; each member's price
+// is the same over its own read survivors, beside its cheapest survivor,
+// read or not; the route count reads the tier's other up links beside the
 // survivors; the bounds read the read routes alone, the survivors' upper
-// bounds and the lower bounds of the routes crossing the link, the tier's at
-// their costs and each member's at their prices; the tier's price and bounds
-// keep the routes they come from; a link every route crosses leaves no
-// survivor and no price; and a down link takes no measurement.
+// bounds and the lower bounds of the routes crossing the link, each at its
+// price; the tier's price and bounds keep the routes they come from; a link
+// every route crosses leaves no survivor and no price; and a down link takes
+// no measurement.
 func TestMeasureExcluded(t *testing.T) {
 	verdicts := map[uint16]bool{1: true, 2: true, 4: false, 5: true}
 	neighbors := map[addr.IA]*links.Link{
@@ -233,20 +199,21 @@ func TestMeasureExcluded(t *testing.T) {
 
 	opts := []cmp.Option{cmp.AllowUnexported(excludedSample{}), cmpopts.EquateEmpty()}
 	// Excluding A's link: B's measured route is the freshest survivor,
-	// answered, and A's surviving route at 22ms the price. B's link and the
-	// declared third route keep two routes. A's own price rides B's link,
-	// one transit: 22ms and its charge. No read route crosses A's link.
+	// answered, and A's surviving route the price, riding B's link, one
+	// transit: 22ms and its charge, no dearer than B's own 26ms, which comes
+	// after. B's link and the declared third route keep two routes. No read
+	// route crosses A's link.
 	viaB := 22*time.Millisecond + transitCost
 	want := excludedSample{
 		survivor:   &b.candidates[0],
 		dst:        selB,
 		answered:   true,
-		price:      22 * time.Millisecond,
+		price:      viaB,
 		priceRoute: &a.candidates[0],
 		routes:     2,
 		prices:     map[addr.IA]time.Duration{selA: viaB, selB: 26 * time.Millisecond},
 		cheapest:   map[addr.IA]*scion.Candidate{selA: &a.candidates[0], selB: &b.candidates[0]},
-		high:       22 * time.Millisecond,
+		high:       viaB,
 		highRoute:  &a.candidates[0],
 		highs:      map[addr.IA]time.Duration{selA: viaB, selB: 26 * time.Millisecond},
 	}
@@ -263,7 +230,7 @@ func TestMeasureExcluded(t *testing.T) {
 		routes:   2,
 		cheapest: map[addr.IA]*scion.Candidate{selB: &b.candidates[1]},
 		crossed:  true,
-		low:      22 * time.Millisecond,
+		low:      viaB,
 		lowRoute: &a.candidates[0],
 		lows:     map[addr.IA]time.Duration{selA: viaB, selB: 26 * time.Millisecond},
 	}

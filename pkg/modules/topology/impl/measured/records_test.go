@@ -171,8 +171,8 @@ func TestSelectionRecordsPromotions(t *testing.T) {
 		neighbors: []addr.IA{selPeer, selA},
 		run: func(t *testing.T, f *selFixture) addr.IA {
 			// Peer's route over A's link prices the tier at 16ms, its
-			// transit uncharged at the tier's level.
-			f.carried(selPeer, 10*ms, 16*ms, f.via(t, selA, 0, selA, selPeer))
+			// 12ms beside its transit's charge.
+			f.carried(selPeer, 10*ms, 12*ms, f.via(t, selA, 0, selA, selPeer))
 			f.candidate(selB, 8*ms, 0)
 			for range PromoteWindows {
 				f.pass(t)
@@ -295,8 +295,8 @@ func TestSelectionRecordsRetirements(t *testing.T) {
 		},
 		want: func(t *testing.T, f *selFixture) []recorded {
 			// D's one route prices it at 44ms with its transit, the ratio
-			// asking a gain of 8.8ms; B's exclusion leaves its tier's 16ms
-			// price.
+			// asking a gain of 8.8ms; B's exclusion leaves its tier's price,
+			// C's route over A's link at 16ms and its transit's charge.
 			beaten := "its direct link beats its own price on its readings"
 			price := readingAt("price", 44*ms, scion.ReadingSamples)
 			return []recorded{
@@ -305,15 +305,16 @@ func TestSelectionRecordsRetirements(t *testing.T) {
 				{Change: LinkRetired, Subject: selB.String(), From: linkName(f.ifID(t, selB)),
 					Why: "displaced by the least-harm eviction for " + selD.String(),
 					Weighed: []weighedAt{readingAt("direct", 24*ms, 2), price,
-						readingAt("with", 16*ms, scion.ReadingSamples),
-						readingAt("without", 16*ms, scion.ReadingSamples)}},
+						readingAt("with", 16*ms+transitCost, scion.ReadingSamples),
+						readingAt("without", 16*ms+transitCost, scion.ReadingSamples)}},
 				{Change: LinkPromoted, Subject: selD.String(), To: linkName(f.ifID(t, selD)), Why: beaten,
 					Line: 8800 * time.Microsecond, Weighed: []weighedAt{readingAt("direct", 24*ms, 2), price}},
 				// C reaches over A's link at 16ms, 20ms with the transit,
 				// below its own 30ms: useless once the history bounds its
 				// direct side.
 				{Change: RetirementAnnounced, Subject: selC.String(), Why: useless,
-					Weighed: []weighedAt{boundsAt("direct", 30*ms, 2), boundsAt("survivors", 16*ms, steadyBounds)}},
+					Weighed: []weighedAt{boundsAt("direct", 30*ms, 2),
+						boundsAt("survivors", 16*ms+transitCost, steadyBounds)}},
 			}
 		},
 	}, {
@@ -346,8 +347,8 @@ func TestSelectionRecordsRetirements(t *testing.T) {
 			return f
 		},
 		want: func(t *testing.T, f *selFixture) []recorded {
-			crossing := boundsAt("crossing", 30*ms, steadyBounds)
-			survivors := boundsAt("survivors", 8*ms, steadyBounds)
+			crossing := boundsAt("crossing", 30*ms+transitCost, steadyBounds)
+			survivors := boundsAt("survivors", 8*ms+transitCost, steadyBounds)
 			return []recorded{
 				{Change: RetirementAnnounced, Subject: selA.String(), Why: useless,
 					Weighed: []weighedAt{boundsAt("direct", 18*ms, 2), crossing, survivors}},
@@ -370,7 +371,8 @@ func TestSelectionRecordsRetirements(t *testing.T) {
 		want: func(t *testing.T, f *selFixture) []recorded {
 			return []recorded{
 				{Change: RetirementAnnounced, Subject: selA.String(), Why: useless,
-					Weighed: []weighedAt{boundsAt("direct", 18*ms, 1), boundsAt("survivors", 10*ms, steadyBounds)}},
+					Weighed: []weighedAt{boundsAt("direct", 18*ms, 1),
+						boundsAt("survivors", 10*ms+transitCost, steadyBounds)}},
 				{Change: LinkRetired, Subject: selA.String(), From: linkName(f.ifID(t, selA)),
 					Why: "the clusters link its units elsewhere"},
 			}
@@ -408,7 +410,7 @@ func TestSelectionRecordsWithdrawals(t *testing.T) {
 	// announcedA is the announcement of A's useless link.
 	announcedA := recorded{Change: RetirementAnnounced, Subject: selA.String(),
 		Why: "a window found its link useless", Weighed: []weighedAt{
-			boundsAt("direct", 18*ms, 2), boundsAt("survivors", 8*ms, steadyBounds)}}
+			boundsAt("direct", 18*ms, 2), boundsAt("survivors", 8*ms+transitCost, steadyBounds)}}
 	withdrawn := func(change string, ia addr.IA, why string) recorded {
 		return recorded{Change: change, Subject: ia.String(), Why: why}
 	}

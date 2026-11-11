@@ -563,6 +563,10 @@ func bindingEcho(
 	return reply, rtt, err
 }
 
+// errUnanswered is a request run no reply answered within its attempts: a
+// probe the path lost.
+var errUnanswered = errors.New("no rendezvous reply")
+
 // echoOn sends one request run from a socket the caller holds — the request
 // given, each attempt under a fresh nonce — and returns the first reply to
 // any attempt with the round trip from that attempt's send, and the address
@@ -618,7 +622,7 @@ func echoOn(
 		}
 	}
 	return RendezvousReply{}, netip.AddrPort{}, 0,
-		fmt.Errorf("no rendezvous reply from %s%s", target, rendezvousSilenceHint(target))
+		fmt.Errorf("%w from %s%s", errUnanswered, target, rendezvousSilenceHint(target))
 }
 
 func udpAddr(ap netip.AddrPort) *net.UDPAddr {

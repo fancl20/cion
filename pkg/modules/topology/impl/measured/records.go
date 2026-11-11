@@ -71,7 +71,7 @@ func secondRouteVerdict(t *tier, sm sample) verdict {
 		line: ratioOf(t.price, SecondRouteRatio) - t.price,
 		weighed: []evidence.Weighed{
 			{Name: "direct", Estimate: sm.reading},
-			{Name: "price", Estimate: readingOfRoute(t.priceRoute, false)},
+			{Name: "price", Estimate: readingOfRoute(t.priceRoute)},
 		},
 	}
 }
@@ -83,10 +83,10 @@ func secondRouteVerdict(t *tier, sm sample) verdict {
 // weighed.
 func beatenVerdict(t *tier, ia addr.IA, sm sample) verdict {
 	price, low := t.prices[ia], t.lows[ia]
-	priceRoute, lowRoute, charged := t.priceRoutes[ia], t.lowRoutes[ia], true
+	priceRoute, lowRoute := t.priceRoutes[ia], t.lowRoutes[ia]
 	if price == 0 {
 		price, low = t.price, t.low
-		priceRoute, lowRoute, charged = t.priceRoute, t.lowRoute, false
+		priceRoute, lowRoute = t.priceRoute, t.lowRoute
 	}
 	if sm.direct < ratioOf(price, PromotionRatio) && price-sm.direct >= MarginFloor {
 		return verdict{
@@ -94,7 +94,7 @@ func beatenVerdict(t *tier, ia addr.IA, sm sample) verdict {
 			line: max(price-ratioOf(price, PromotionRatio), MarginFloor),
 			weighed: []evidence.Weighed{
 				{Name: "direct", Estimate: sm.reading},
-				{Name: "price", Estimate: readingOfRoute(priceRoute, charged)},
+				{Name: "price", Estimate: readingOfRoute(priceRoute)},
 			},
 		}
 	}
@@ -103,7 +103,7 @@ func beatenVerdict(t *tier, ia addr.IA, sm sample) verdict {
 		line: scion.Band(sm.hi, low),
 		weighed: []evidence.Weighed{
 			{Name: "direct", Estimate: sm.bounds},
-			{Name: "price", Estimate: boundsOfRoute(lowRoute, charged)},
+			{Name: "price", Estimate: boundsOfRoute(lowRoute)},
 		},
 	}
 }
@@ -122,8 +122,8 @@ func evictedVerdict(e target, admitted verdict, victim *links.Link, ts []tier) v
 	}
 	if ex, ok := t.excluded[victim.NeighborIA]; ok && t.priceRoute != nil && ex.priceRoute != nil {
 		v.weighed = append(v.weighed,
-			evidence.Weighed{Name: "with", Estimate: readingOfRoute(t.priceRoute, false)},
-			evidence.Weighed{Name: "without", Estimate: readingOfRoute(ex.priceRoute, false)})
+			evidence.Weighed{Name: "with", Estimate: readingOfRoute(t.priceRoute)},
+			evidence.Weighed{Name: "without", Estimate: readingOfRoute(ex.priceRoute)})
 	}
 	return v
 }
@@ -139,28 +139,22 @@ func uselessWeighed(t *tier, ia addr.IA, sm sample) []evidence.Weighed {
 	}
 	ex := t.excluded[ia]
 	if ex.lowRoute != nil {
-		weighed = append(weighed, evidence.Weighed{Name: "crossing", Estimate: boundsOfRoute(ex.lowRoute, false)})
+		weighed = append(weighed, evidence.Weighed{Name: "crossing", Estimate: boundsOfRoute(ex.lowRoute)})
 	}
 	if ex.highRoute != nil {
-		weighed = append(weighed, evidence.Weighed{Name: "survivors", Estimate: boundsOfRoute(ex.highRoute, false)})
+		weighed = append(weighed, evidence.Weighed{Name: "survivors", Estimate: boundsOfRoute(ex.highRoute)})
 	}
 	return weighed
 }
 
 // readingOfRoute returns the estimate a route's reading comes from, at its
-// price when charged, at its cost otherwise.
-func readingOfRoute(c *scion.Candidate, charged bool) evidence.Estimate {
-	if charged {
-		return c.ReadingEvidence.Plus(c.Charge())
-	}
-	return c.ReadingEvidence
+// price.
+func readingOfRoute(c *scion.Candidate) evidence.Estimate {
+	return c.ReadingEvidence.Plus(c.Charge())
 }
 
 // boundsOfRoute returns the estimate a route's bounds come from, at its
-// price when charged, at its cost otherwise.
-func boundsOfRoute(c *scion.Candidate, charged bool) evidence.Estimate {
-	if charged {
-		return c.BoundsEvidence.Plus(c.Charge())
-	}
-	return c.BoundsEvidence
+// price.
+func boundsOfRoute(c *scion.Candidate) evidence.Estimate {
+	return c.BoundsEvidence.Plus(c.Charge())
 }
