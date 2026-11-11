@@ -67,13 +67,15 @@ type Fabric struct {
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
 
-	// mtx guards the drawn network: the stacks by host, the taps, the
-	// NATs, the names, the watches, and the tallies, beside when the last
-	// packet of each jittered direction is due. A packet's walk from one
-	// stack to another reads it twice — once for the taps, once for the
-	// destination — so no tap draw or node boot waits on a packet in flight.
+	// mtx guards the drawn network: the stacks by host, the uplinks by the
+	// hosts they carry, the taps, the NATs, the names, the watches, and the
+	// tallies, beside when the last packet of each jittered direction is
+	// due. A packet's walk from one stack to another reads it twice — once
+	// for the uplink and the taps, once for the destination — so no tap draw
+	// or node boot waits on a packet in flight.
 	mtx     sync.Mutex
 	hosts   map[netip.Addr]*Node
+	uplinks map[netip.Addr]*Uplink
 	taps    []*tap
 	due     map[[2]netip.Addr]tcpip.MonotonicTime
 	nats    []*NAT
@@ -106,13 +108,14 @@ func New(t *testing.T, opts ...Option) *Fabric {
 	t.Helper()
 	ctx, cancel := context.WithCancel(t.Context())
 	f := &Fabric{
-		t:      t,
-		clock:  tcpip.NewStdClock(),
-		ctx:    ctx,
-		cancel: cancel,
-		hosts:  make(map[netip.Addr]*Node),
-		due:    make(map[[2]netip.Addr]tcpip.MonotonicTime),
-		names:  make(map[string]netip.Addr),
+		t:       t,
+		clock:   tcpip.NewStdClock(),
+		ctx:     ctx,
+		cancel:  cancel,
+		hosts:   make(map[netip.Addr]*Node),
+		uplinks: make(map[netip.Addr]*Uplink),
+		due:     make(map[[2]netip.Addr]tcpip.MonotonicTime),
+		names:   make(map[string]netip.Addr),
 	}
 	for _, opt := range opts {
 		opt(f)
@@ -412,16 +415,17 @@ func (f *Fabric) forward(n *Node) {
 	}
 }
 
-// carry moves one wire packet the forwarder drained: the taps shape its
-// pair, the NATs translate it, and the destination's stack receives
-// it. A packet held by a delay tap re-enters here on the fabric's clock.
+// carry moves one wire packet the forwarder drained: its source's uplink
+// and the taps shape it, the NATs translate it, and the destination's stack
+// receives it. A packet the uplink or a delay tap holds goes on to the NATs
+// on the fabric's clock.
 func (f *Fabric) carry(pkt []byte) {
 	if len(pkt) < header.IPv4MinimumSize || pkt[0]>>4 != 4 {
 		return
 	}
 	src := header.IPv4(pkt).SourceAddress()
 	dst := header.IPv4(pkt).DestinationAddress()
-	drop, delay := f.shape(toNetip(src), toNetip(dst))
+	drop, delay := f.shape(toNetip(src), toNetip(dst), len(pkt))
 	if drop {
 		return
 	}

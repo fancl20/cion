@@ -87,13 +87,23 @@ func (f *Fabric) draw(t *tap) func() {
 	}
 }
 
-// shape reads the taps covering the packet's pair, reporting whether the
-// packet falls and how long the pair's taps hold it in sum. A jittered
-// direction keeps its packets in order: each is held at least until just
-// after the one before it.
-func (f *Fabric) shape(src, dst netip.Addr) (drop bool, delay time.Duration) {
+// shape takes a packet of size bytes onto its source's uplink, when one
+// carries the source and not the destination, and reads the taps covering
+// its pair, reporting whether the packet falls and how long the uplink and
+// the pair's taps hold it in sum: the taps hold it from its departure. A
+// jittered direction keeps its packets in order: each is held at least
+// until just after the one before it.
+func (f *Fabric) shape(src, dst netip.Addr, size int) (drop bool, delay time.Duration) {
 	f.mtx.Lock()
 	defer f.mtx.Unlock()
+	now := f.clock.NowMonotonic()
+	if u := f.uplinks[src]; u != nil && !u.hosts[dst] {
+		held, ok := u.depart(now, size)
+		if !ok {
+			return true, 0
+		}
+		delay = held
+	}
 	jittered := false
 	for _, t := range f.taps {
 		if !t.covers(src, dst) {
@@ -108,7 +118,6 @@ func (f *Fabric) shape(src, dst netip.Addr) (drop bool, delay time.Duration) {
 	if drop || !jittered {
 		return drop, delay
 	}
-	now := f.clock.NowMonotonic()
 	due := now.Add(delay)
 	dir := [2]netip.Addr{src, dst}
 	if last, ok := f.due[dir]; ok && !due.After(last) {

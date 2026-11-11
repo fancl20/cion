@@ -171,3 +171,45 @@ unbounded uplink holds no packet.
     Mbit/s flow beside it delivers a share of what both offer, each
     datagram after the standing queue, while the uplink drops the rest.
 *   **The hub lab's benchmarks** run on demand; the history records them.
+
+## Implementation history
+
+*   **Flows arrive at random.** The first flows sent on a fixed tick: two of
+    them at one drop-tail queue locked in step, and the smaller lost 97% of
+    its datagrams. Poisson arrivals share a queue by rate.
+*   **A flow asks for its path again each second:** `Lease.Await` looks the
+    path up once, and a flow started before its node held a path delivered
+    nothing. Under congestion the path library ejects the only path about
+    one window in six, reading the queue's drops as the path's losses; the
+    flow counts what it offers meanwhile as offered and unsent.
+*   **The flow lab loads a third of the line.** At half the line, the flow
+    that fits lost 1.1% of its datagrams to its own random bursts past the
+    queue. At a third, it delivers at least 97% while the uplink drops at
+    most 2%; past the line, the flows deliver between 15 and 60 percent of
+    what they offer, the ejections included.
+*   **The hub's own flow goes to the founder,** which links to every node,
+    since each joins through it: the flow leaves the hub over its own link.
+*   **A rate change applies from the next packet the forwarder takes;** the
+    fabric's test lets the bubble settle before it changes the rate.
+*   **An uplink keeps its rate:** a flow past the line over one link with
+    nothing else on it measured 501.7 kbit/s on a 500 kbit/s uplink.
+*   Mutations: 11 of 11 killed. The first run left one live, the flow's
+    delays left unsorted; the flow lab now checks that a window holds them
+    in order.
+*   The pipeline passed.
+*   **The hub benchmarks,** one run each, today's network under load:
+    *   **Steady load.** The lab settled at 11 links, the hub's uplink
+        waiting at most 62ms on its own control traffic. Under the load, the
+        hub's own flow arrived whole, at a median of 42ms and a 95th
+        percentile of 158ms, and the transit flows 99.9%, at 20ms and 87ms;
+        the uplink dropped 0.01%, waiting 41ms on average and 250ms at most;
+        8 leases moved, and 8 changes raised the links to 21, paths at 1.50
+        times their best. Ten minutes after the load, 20 links stood, paths
+        at 1.13.
+    *   **A rate that falls.** The lab settled in 17.8 minutes. While the
+        load fit, the hub's own flow arrived at a 95th percentile of 61ms
+        and the transit flows whole, the uplink waiting 22ms on average,
+        while 4 changes raised the links to 21. At 400 kbit/s, the hub's own
+        flow delivered 98% at a 95th percentile of 254ms, the uplink dropped
+        5%, and 14 leases moved, the transit flows' 95th percentile falling
+        to their direct 20ms; no link changed. Restored, the 21 links stood.
