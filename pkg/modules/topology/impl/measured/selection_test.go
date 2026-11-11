@@ -230,21 +230,24 @@ func (p fixturePaths) Enumerate(_ context.Context, ia addr.IA) ([]scion.Candidat
 	return routes, nil
 }
 
-// refresh publishes the directory's entries, and the link state of the
-// established entries, the down ones' verdicts down.
+// refresh publishes the directory's entries, each established entry's link
+// joining it, and the link state of the established entries, the down
+// ones' verdicts down.
 func (f *selFixture) refresh() {
-	f.directoryTopic.Publish(bus.NewDirectory(nil, bus.NewScope(selScope, slices.Clone(f.directory)...)))
 	entries, err := f.store.All(context.Background())
 	if err != nil {
 		return
 	}
+	joins := make(map[uint16]bus.DirectoryID)
 	var ls []bus.Link
 	for _, l := range entries {
 		if l.State != links.StateEstablished {
 			continue
 		}
+		joins[l.IfID] = selScope
 		ls = append(ls, bus.Link{Entry: *l, Down: f.down[l.NeighborIA]})
 	}
+	f.directoryTopic.Publish(bus.NewDirectory(joins, bus.NewScope(selScope, slices.Clone(f.directory)...)))
 	f.links.Publish(bus.NewLinkState(ls...))
 }
 
@@ -1271,6 +1274,20 @@ func (f *selFixture) name(ia, cluster addr.IA) {
 	}
 }
 
+// undialable makes the peers' directory entries report every rendezvous
+// address unanswered, as a node behind a NAT's do.
+func (f *selFixture) undialable(ias ...addr.IA) {
+	for i := range f.directory {
+		if !slices.Contains(ias, f.directory[i].IA) {
+			continue
+		}
+		f.directory[i].Addresses = slices.Clone(f.directory[i].Addresses)
+		for j := range f.directory[i].Addresses {
+			f.directory[i].Addresses[j].Reach = bus.Reach{BehindNAT: true, RendezvousUnanswered: true}
+		}
+	}
+}
+
 // clustered puts the node in the cluster of Peer and B, named by Peer, and
 // reports the round trips that choose the pairs linking it to A and to D,
 // each a unit of one: Peer's 8ms and B's 12ms to A, beside the node's 18ms,
@@ -1484,6 +1501,122 @@ func TestSelectionEvictsOutsideLinksFirst(t *testing.T) {
 	if f.state(t, selA) != links.StateRetired {
 		t.Error("the cap's eviction passed over the link the clustering does not allow")
 	}
+}
+
+// TestLastReflectors checks the links kept as the node's last reflectors:
+// in a directory that holds an entry reporting no rendezvous address
+// answering, the one link to a dialable neighbor established, up, and
+// joining it; none beside a second, nor in a directory every entry of which
+// answers.
+func TestLastReflectors(t *testing.T) {
+	entry := func(ia addr.IA, ifID uint16, state links.State) *links.Link {
+		l := liveLink(ia, 40090+ifID)
+		l.IfID, l.State = ifID, state
+		return l
+	}
+	id, open := bus.DirectoryID{5}, bus.DirectoryID{6}
+	view := bus.NewDirectory(map[uint16]bus.DirectoryID{1: id, 2: id, 3: id, 4: open},
+		bus.NewScope(id,
+			reported(linkIA, "192.0.2.1:30043", false),
+			reported(linkIA2, "192.0.2.2:30043", false),
+			reported(rendezvousIA, "192.0.2.3:30043", true)),
+		bus.NewScope(open, reported(selPeer, "198.51.100.4:30043", false)))
+	for _, tc := range []struct {
+		name     string
+		entries  []*links.Link
+		verdicts map[uint16]bool
+		want     map[addr.IA]bool
+	}{
+		{"the one dialable neighbor", []*links.Link{entry(linkIA, 1, links.StateEstablished),
+			entry(rendezvousIA, 3, links.StateEstablished)}, nil, map[addr.IA]bool{linkIA: true}},
+		{"two dialable neighbors", []*links.Link{entry(linkIA, 1, links.StateEstablished),
+			entry(linkIA2, 2, links.StateEstablished)}, nil, map[addr.IA]bool{}},
+		{"one up beside one down", []*links.Link{entry(linkIA, 1, links.StateEstablished),
+			entry(linkIA2, 2, links.StateEstablished)}, map[uint16]bool{1: false}, map[addr.IA]bool{linkIA2: true}},
+		{"one established beside a candidate", []*links.Link{entry(linkIA, 1, links.StateCandidate),
+			entry(linkIA2, 2, links.StateEstablished)}, nil, map[addr.IA]bool{linkIA2: true}},
+		{"a directory every entry of which answers", []*links.Link{entry(selPeer, 4, links.StateEstablished)},
+			nil, map[addr.IA]bool{}},
+	} {
+		s := &selection{cfg: SelectionConfig{Links: verdictTopic(tc.verdicts)}}
+		if diff := cmp.Diff(tc.want, s.lastReflectors(tc.entries, view)); diff != "" {
+			t.Errorf("%s: kept (-want +got):\n%s", tc.name, diff)
+		}
+	}
+}
+
+// TestSelectionKeepsTheLastReflector checks the link every punch needs:
+// with Peer reporting itself undialable, A's link, which the clustering
+// does not allow, retires beside B's, both dialable, but stands as the
+// node's one link to a dialable neighbor once B reports itself undialable
+// too — its announced retirement withdrawn — and the cap's eviction passes
+// over it.
+func TestSelectionKeepsTheLastReflector(t *testing.T) {
+	ms := time.Millisecond
+	outside := func(t *testing.T) *selFixture {
+		f := newSelFixture(t, selPeer, selA, selB)
+		f.carried(selA, 18*ms, 10*ms, f.via(t, selPeer, 0, selPeer, selA))
+		f.clustered(true)
+		f.undialable(selPeer)
+		return f
+	}
+	t.Run("beside a second", func(t *testing.T) {
+		f := outside(t)
+		for range 2 * DemoteWindows {
+			f.pass(t)
+		}
+		if f.state(t, selA) != links.StateRetired {
+			t.Error("A's link stood beside B's, both dialable")
+		}
+	})
+	t.Run("the last", func(t *testing.T) {
+		f := outside(t)
+		f.undialable(selB)
+		for range 2 * DemoteWindows {
+			f.pass(t)
+		}
+		if f.state(t, selA) != links.StateEstablished {
+			t.Error("the node's last reflector retired")
+		}
+		if recs := f.records(t); len(recs) != 0 {
+			t.Errorf("records = %+v, want none", recs)
+		}
+	})
+	t.Run("the last once announced", func(t *testing.T) {
+		f := outside(t)
+		f.pass(t)
+		f.undialable(selB)
+		for range 2 * DemoteWindows {
+			f.pass(t)
+		}
+		if f.state(t, selA) != links.StateEstablished {
+			t.Error("the node's last reflector retired")
+		}
+		var got []string
+		for _, r := range f.records(t) {
+			got = append(got, r.Change+": "+r.Why)
+		}
+		want := []string{RetirementAnnounced + ": a window found its link useless",
+			RetirementWithdrawn + ": its link is the node's last reflector"}
+		if diff := cmp.Diff(want, got); diff != "" {
+			t.Errorf("records (-want +got):\n%s", diff)
+		}
+	})
+	t.Run("at the cap", func(t *testing.T) {
+		f := newSelFixture(t, selPeer, selA, selB)
+		f.accept(t, selB) // two dialed up links: the floor holds the useless retirement back
+		f.sel.cfg.MaxLinks = 3
+		f.carried(selA, 18*ms, 30*ms, f.via(t, selPeer, 0, selPeer, selA))
+		f.candidate(selD, 6*ms, 30*ms)
+		f.clustered(true)
+		f.undialable(selPeer, selB)
+		for range 8 {
+			f.pass(t)
+		}
+		if f.state(t, selA) != links.StateEstablished {
+			t.Error("the cap evicted the node's last reflector")
+		}
+	})
 }
 
 // sparseFixture returns a fixture of the node in the cluster of Peer and B

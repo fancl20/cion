@@ -239,6 +239,10 @@ type selection struct {
 	// tiers holds the last window's tiers as its walk classed them, their
 	// members alone, from which the next walk keeps each peer's side.
 	tiers []tier
+	// reflectors holds the neighbors whose links the window keeps as the
+	// node's last reflectors, which no retirement but a down verdict's
+	// takes.
+	reflectors map[addr.IA]bool
 	// upLeft records that an up link left this window, by retirement or
 	// eviction: each departure changes the routes every other exclusion was
 	// measured against, so one up link leaves per window.
@@ -443,6 +447,7 @@ func (s *selection) pass(ctx context.Context) {
 		directory = s.cfg.Directory.Latest()
 	}
 	v := newCoordView(directory)
+	s.reflectors = s.lastReflectors(entries, directory)
 	if joined, why := joinCluster(v, s.cfg.IA, s.cluster); joined != s.cluster {
 		change := ClusterJoined
 		if joined == 0 {
@@ -1428,7 +1433,8 @@ func (s *selection) admit(
 // links exceed the floor, an up link this window decides yields to a
 // candidate gaining gain on its price — one that would not earn its place
 // today, one whose every saving the gain beats by the band, and one the
-// clustering does not allow that the clustering's test judges useless.
+// clustering does not allow that the clustering's test judges useless —
+// unless the window keeps it as the node's last reflector.
 // The victim is the one whose exclusion moves its tier's price least, ties
 // to the slower direct sample. Nil when none qualifies — no promotion
 // happens and the cap stands, so displacement cannot evict a link the
@@ -1455,6 +1461,9 @@ func (s *selection) evict(
 		} else {
 			if up <= NeighborFloor {
 				continue // an up link leaves only while up links exceed the floor
+			}
+			if s.reflectors[ia] {
+				continue
 			}
 			t := tierOf(ts, ia)
 			if !s.yields(v, t, ia, samples[ia].bounds, gain) {
@@ -1533,7 +1542,9 @@ func (s *selection) count(v *coordView, neighbors map[addr.IA]*links.Link, sampl
 // a cut-critical link never retires as useless; it weighs the prices
 // promotion's priced cases weigh, against the line to keep rather than the
 // line to buy. A link the clustering does not allow is judged by the
-// clustering's test instead, whatever its prices.
+// clustering's test instead, whatever its prices. A link the window keeps as
+// the node's last reflector is neither announced nor retired as useless,
+// and a retirement of it announced before is withdrawn.
 func (s *selection) prune(
 	ctx context.Context,
 	entries []*links.Link,
@@ -1568,6 +1579,13 @@ func (s *selection) prune(
 	for _, l := range entries {
 		ia := l.NeighborIA
 		if l.State != links.StateEstablished || !dialed(l) {
+			continue
+		}
+		if s.reflectors[ia] {
+			if _, ok := s.coord.retiring[ia]; ok {
+				s.record(RetirementWithdrawn, ia.String(), "", "", verdict{why: "its link is the node's last reflector"})
+				delete(s.coord.retiring, ia)
+			}
 			continue
 		}
 		u := s.useless[ia]
@@ -1813,6 +1831,25 @@ func (s *selection) establishByPunch(ctx context.Context, e target, entry *links
 // report says its published rendezvous address answers nothing.
 func (s *selection) punched(e target) bool {
 	return s.cfg.Punch != nil && e.Reach.RendezvousUnanswered
+}
+
+// lastReflectors returns the neighbors the node keeps as its last
+// reflectors: in each directory a punch runs in — one holding an entry that
+// reports no rendezvous address answering, the node's own, which its peers
+// punch toward, or a peer's, which it punches toward — the one node that can
+// serve it as a reflector there, when it holds one alone. Every punch needs
+// a reflector at both ends.
+func (s *selection) lastReflectors(entries []*links.Link, view bus.Directory) map[addr.IA]bool {
+	out := make(map[addr.IA]bool)
+	for _, sc := range view.Scopes() {
+		if !slices.ContainsFunc(sc.Entries(), func(e bus.DirectoryEntry) bool { return !answers(e) }) {
+			continue
+		}
+		if rs := reflectors(entries, s.linkUp, view, sc.ID()); len(rs) == 1 {
+			out[rs[0].IA] = true
+		}
+	}
+	return out
 }
 
 // confirm sends the entry's link request over the one-hop path of the link

@@ -670,16 +670,33 @@ func (z *Provider) reflector(ctx context.Context, id bus.DirectoryID) (netip.Add
 }
 
 // pickReflector returns the first answering rendezvous address of the first
-// entry in the directory the ID names whose node holds an established link
-// to this node that joins the directory and whose verdict, as linkUp
-// reports it, is up.
+// reflector the node holds in the directory the ID names.
 func pickReflector(
 	entries []*links.Link, linkUp func(ifID uint16) bool, view bus.Directory, id bus.DirectoryID,
 ) (netip.AddrPort, bool) {
 
+	for _, e := range reflectors(entries, linkUp, view, id) {
+		for _, a := range e.Addresses {
+			if !a.Reach.RendezvousUnanswered {
+				return a.RendezvousAddr, true
+			}
+		}
+	}
+	return netip.AddrPort{}, false
+}
+
+// reflectors returns, in the directory's order, the entries of the nodes
+// that can serve this node as a reflector in the directory the ID names:
+// each holds an established link to this node that joins the directory and
+// whose verdict, as linkUp reports it, is up, and reports a rendezvous
+// address answering there.
+func reflectors(
+	entries []*links.Link, linkUp func(ifID uint16) bool, view bus.Directory, id bus.DirectoryID,
+) []bus.DirectoryEntry {
+
 	s, ok := view.Scope(id)
 	if !ok {
-		return netip.AddrPort{}, false
+		return nil
 	}
 	up := make(map[addr.IA]bool, len(entries))
 	for _, l := range entries {
@@ -688,17 +705,13 @@ func pickReflector(
 			up[l.NeighborIA] = true
 		}
 	}
+	var out []bus.DirectoryEntry
 	for _, e := range s.Entries() {
-		if !up[e.IA] {
-			continue
-		}
-		for _, a := range e.Addresses {
-			if !a.Reach.RendezvousUnanswered {
-				return a.RendezvousAddr, true
-			}
+		if up[e.IA] && answers(e) {
+			out = append(out, e)
 		}
 	}
-	return netip.AddrPort{}, false
+	return out
 }
 
 // Drain withdraws the node's directory entry from its neighbors while its

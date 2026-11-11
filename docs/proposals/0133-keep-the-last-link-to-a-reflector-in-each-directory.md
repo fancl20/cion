@@ -107,3 +107,20 @@ rendezvous exchange keeps nothing.
     cap's eviction passes over it.
 *   **The labs.** The labs pass, and the NAT benchmarks run against the
     commit before.
+
+## Implementation history
+
+*   **One definition of a reflector.** `reflectors` returns, in a
+    directory's order, the entries of the nodes that can serve the node as
+    a reflector there; `pickReflector` takes the first of them, as before,
+    and the selection counts them.
+*   **The withdrawal's reason.** A retirement announced before its link
+    became the node's last reflector is withdrawn as "its link is the
+    node's last reflector", not as a window finding it useful.
+*   **The fixture's links join its directory**, so the selection's tests
+    read reflectors, and a test can make a peer's entry report itself
+    behind a NAT.
+*   `architecture.md` names the kept reflector among the topology source's
+    rules.
+*   Mutations: 10 of 10 killed.
+*   The pipeline passed.

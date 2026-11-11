@@ -225,7 +225,10 @@ The topology source meets candidate peers at the rendezvous exchange and
 learns of them from the directory of each scope it is in, which linked nodes
 replicate by flooding signed entries
 ([ADR-0032](/docs/adrs/0032-replicate-the-node-directory-on-every-node.md));
-it punches through to an undialable candidate, such as a node behind a NAT.
+it punches through to an undialable candidate, such as a node behind a NAT,
+and keeps, in each directory a punch runs in, its last link to a node that
+answers the rendezvous exchange: the reflector every punch needs at both
+ends.
 Beyond a resilience floor, it keeps a link for the cheaper or independent
 routes it adds, on round trips read at their 80th percentile over five
 minutes
