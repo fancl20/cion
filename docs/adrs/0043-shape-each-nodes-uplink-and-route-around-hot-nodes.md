@@ -59,6 +59,10 @@ and how should the senders whose paths cross it learn of it and react?
     senders move (data-plane draft, Section 7.4).
 *   **No stampede:** the senders crossing a hot node leave it over time, not
     at once, and do not all return when it cools.
+*   **Links follow lasting demand:** the links carry the demand that lasts;
+    a link is bought for what the network offers or for demand that outlasts
+    the path policy's answer, and goes once its traffic fits elsewhere
+    (ADR-0039, principle 1).
 *   **Spec-native:** the signals the drafts define, and no new message.
 *   **Judged where bandwidth is scarce:** a lab with links of unequal and
     varying capacity.
@@ -112,26 +116,51 @@ Chosen option: **local control, endpoints react**, realized as follows:
     returns to a path only by the margin ADR-0035 sets (decision 5), and
     only once the path has cooled. A destination with no other path leaves
     the slowing to its transports.
-6.  **A node that stays hot sheds load slowly.** Its link policy admits no
-    new link, and its beacon policy
+6.  **A node that stays hot sheds transit, and takes it back slowly.** Its
+    link policy admits no new link, and its beacon policy
     ([ADR-0042](/docs/adrs/0042-file-the-beacon-policy-as-a-module.md))
-    carries fewer transit routes through it, never its own routes nor a
-    receiver's last. Both read the node's own load, which no other node is
-    told.
-7.  **Load stays local.** No directory entry, tag, or beacon declares it;
+    cuts the transit routes it carries while the node stays hot, and
+    restores them one at a time, far apart, while it stays cool; a route
+    restored that heats the node again goes at once. It never sheds its own
+    routes nor a receiver's last. Both read the node's own load, which no
+    other node is told.
+7.  **Prices stay unloaded; lasting shortage buys capacity.** The link
+    policy reads only the probes that return cool, so the readings ADR-0038
+    defines carry no more queueing than a cool path holds, and no busy hour
+    moves a price; a route that stays hot gives it no reading until it
+    cools, and the decisions that need one wait. Capacity is a worth of its
+    own, beside the peers and the independent routes a link gives (ADR-0039,
+    principle 2): a node whose traffic to a destination stays marked while
+    every path to it is hot, for longer than the path policy takes to
+    answer, buys a link that opens a route around the hot hops, announced
+    and staggered as ADR-0037 has every promotion. Until the link stands,
+    the flow has nowhere else to go, and its transports slow on the marks.
+8.  **A link that carries traffic leaves only after a drain.** Before
+    retiring a link that a lease rode since its last drain, the node drains
+    it: the link stays up, its leases move to other paths, and it takes no
+    new ones. A drain lasts a day, the cycle most load repeats on, so it
+    meets the busy hour whenever it starts. The link retires once the paths
+    that took its traffic stay cool through the drain; if any turns hot, the
+    drain ends, the link stays, and the next drain waits twice as long. A
+    link no lease rode since its last drain is judged by its unloaded prices
+    alone.
+9.  **Load stays local.** No directory entry, tag, or beacon declares it;
     each node learns of another's load from the marks and delays its own
     packets meet.
-8.  **Hop-by-hop flow control waits for the lab.** Pause or credit between
+10. **Hop-by-hop flow control waits for the lab.** Pause or credit between
     neighbors is weighed once the shaper, the order, the marks, and the
     leases stand there.
-9.  **A lab with bandwidth judges it.** The fabric gains links with a
+11. **A lab with bandwidth judges it.** The fabric gains links with a
     bandwidth limit and a finite queue, their rate varying, and the labs
     show a thin, well-placed node keeping its own traffic while transit
     moves off it.
 
 This is the later decision ADR-0035 left load to. It narrows that record's
-decision 6, so that probes queue as data, and its decision 5, so that a hot
-path repels the leases on it. The cap on a node's links stays as ADR-0017
+decision 6, so that probes queue as data and the link policy reads those
+that return cool, and its decision 5, so that a hot path
+repels the leases on it. It extends ADR-0039's principle 2, so that a link is
+also worth the capacity it adds, and its principle 5, so that a link that
+carries traffic retires on a drain. The cap on a node's links stays as ADR-0017
 and ADR-0039 set it; raising it, with a cost for keeping a link and
 beaconing that scales with links, is a decision of its own, once this one
 stands in the lab.
@@ -146,6 +175,12 @@ stands in the lab.
     packets already flowing.
 *   Transit leaves a hot node over time and returns as it cools, and a
     neighbor that ignores the marks gains only its fair share.
+*   Demand that outlasts the path policy's answer gets capacity: a link
+    opens a route around a hot node, and stays while its traffic would not
+    fit elsewhere.
+*   A link leaves only once its traffic has fit elsewhere, at the load it
+    served, so a busy hour neither prices links nor retires one bought for
+    it.
 *   A thin node stops being a hazard that only the cap contains.
 
 ### Negative consequences
@@ -162,6 +197,14 @@ stands in the lab.
 *   Each packet costs more work in the data plane: shaping, ordering, and
     marking.
 *   Probes spend more of the prober's budget, sampling paths no lease rides.
+*   A route that stays hot leaves the link policy without a reading of it
+    until it cools.
+*   Capacity is bought on marks, not on a measured headroom: the route a new
+    link opens may prove hot too, and leaves by its own drain.
+*   A drain that fails moves its leases twice, a handshake for each of their
+    connections each way.
+*   A link that served is held through a day's drain before it retires, its
+    upkeep paid meanwhile.
 *   Marks reach only the hosts' transports that negotiate ECN; the others
     meet drops.
 
