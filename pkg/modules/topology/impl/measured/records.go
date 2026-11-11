@@ -63,15 +63,13 @@ func reachedVerdict(why string, sm sample) verdict {
 }
 
 // secondRouteVerdict returns the verdict of a candidate promoted as a second
-// route for its tier: the room the ratio leaves above the tier's price, a
-// negative margin, and the direct side and that price weighed.
+// route for its tier: the direct side and the tier's ceiling weighed.
 func secondRouteVerdict(t *tier, sm sample) verdict {
 	return verdict{
-		why:  "a second route for its tier",
-		line: secondRouteLine(t.estimate),
+		why: "a second route for its tier",
 		weighed: []evidence.Weighed{
 			{Name: "direct", Estimate: sm.bounds},
-			{Name: "price", Estimate: t.estimate},
+			{Name: "ceiling", Estimate: secondRouteCeiling(t.estimate)},
 		},
 	}
 }
@@ -130,29 +128,30 @@ func uselessWeighed(t *tier, ia addr.IA, sm sample) []evidence.Weighed {
 }
 
 // naturalVerdict returns the verdict of a node the natural cluster holds:
-// the cluster's line, and its diameter and separation weighed.
+// the cluster's separation floor and its separation weighed.
 func naturalVerdict(v *coordView, c []addr.IA) verdict {
 	diameter, separation, _ := spread(v, c)
 	return verdict{
-		why:  "a natural cluster holds the node",
-		line: clusterLine(diameter),
+		why: "a natural cluster holds the node",
 		weighed: []evidence.Weighed{
-			{Name: "diameter", Estimate: diameter},
+			{Name: "floor", Estimate: separationFloor(diameter)},
 			{Name: "separation", Estimate: separation},
 		},
 	}
 }
 
 // brokenVerdict returns the verdict of a node whose unit breaks the budget
-// for a pair across its edge: the line to buy against the round trip
-// through the clusters, and the pair's direct round trip and that round
-// trip weighed.
+// for a pair across its edge, as buys weighs it: MarginFloor, the line the
+// pair's direct round trip beats the round trip through the clusters by,
+// and the direct round trip, the buy ceiling of the round trip through the
+// clusters, and that round trip weighed.
 func brokenVerdict(direct, through evidence.Estimate) verdict {
 	return verdict{
 		why:  "a pair across its unit's edge breaks the budget",
-		line: buyLine(through),
+		line: MarginFloor,
 		weighed: []evidence.Weighed{
 			{Name: "direct", Estimate: direct},
+			{Name: "ceiling", Estimate: buyCeiling(through)},
 			{Name: "through", Estimate: through},
 		},
 	}

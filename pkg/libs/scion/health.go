@@ -187,9 +187,9 @@ func ejected(r bus.PathRecord, rep report, now time.Time) bool {
 	for i := len(r.Samples) - 1; i >= 0 && r.Samples[i].Lost && r.Samples[i].At.After(rep.delivered); i-- {
 		lost++
 	}
-	under := func(s evidence.Share) bool { return s.Under(ejectLine) == evidence.Better }
-	return under(evidence.Share{Sent: lost, Confidence: BoundConfidence}) ||
-		!rep.delivered.After(r.LastLoss) && under(evidence.ShareOf(recent(r), BoundConfidence))
+	under := func(s evidence.Proportion) bool { return s.Under(ejectLine) == evidence.Better }
+	return under(evidence.Proportion{Sent: lost, Confidence: BoundConfidence}) ||
+		!rep.delivered.After(r.LastLoss) && under(evidence.ProportionOf(recent(r), BoundConfidence))
 }
 
 // suspectLinks returns the links the records' failed paths share: each link

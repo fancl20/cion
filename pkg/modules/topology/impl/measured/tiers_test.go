@@ -132,11 +132,24 @@ func TestDeriveTiersKeepsSides(t *testing.T) {
 		last:    [][]addr.IA{{selA, selB, selC}},
 		want:    [][]addr.IA{{selA, selB}, {selC}},
 	}, {
-		// B's upper bound at 11ms puts the line's far side at 21ms.
+		// B's upper bound at 11ms puts twice it at 22ms.
 		name:    "the median's bounds count",
 		samples: map[addr.IA]sample{selA: a, selB: boundedSm(10*ms, 9*ms, 11*ms), selC: past},
 		last:    [][]addr.IA{{selA, selB, selC}},
 		want:    [][]addr.IA{{selA, selB, selC}},
+	}, {
+		// Twice B's bounds run from 18ms to 22ms.
+		name: "a peer within twice the median's bounds keeps its tier",
+		samples: map[addr.IA]sample{selA: a, selB: boundedSm(10*ms, 9*ms, 11*ms),
+			selC: boundedSm(25*ms, 21500*time.Microsecond, 30*ms)},
+		last: [][]addr.IA{{selA, selB, selC}},
+		want: [][]addr.IA{{selA, selB, selC}},
+	}, {
+		name: "a peer past twice the median's upper bound opens the next tier",
+		samples: map[addr.IA]sample{selA: a, selB: boundedSm(10*ms, 9*ms, 11*ms),
+			selC: boundedSm(25*ms, 22*ms, 30*ms)},
+		last: [][]addr.IA{{selA, selB, selC}},
+		want: [][]addr.IA{{selA, selB}, {selC}},
 	}, {
 		name:    "a peer from above keeps out while its bounds straddle the line",
 		samples: map[addr.IA]sample{selA: a, selB: b, selC: boundedSm(15*ms, 12*ms, 25*ms)},
@@ -309,7 +322,7 @@ func TestWindowTierFacts(t *testing.T) {
 	// lower bound 18ms, as low as the route through D's at its price. A's
 	// declared route undercuts its measured 20ms route but is read by
 	// nothing; B's and C's routes are dirty or undeclared.
-	price := evidence.Least(priceBounds(&a.candidates[0]), priceBounds(&a.candidates[2]))
+	price := evidence.Min(priceBounds(&a.candidates[0]), priceBounds(&a.candidates[2]))
 	if price.Value != 20*time.Millisecond || price.Lo != 18*time.Millisecond {
 		t.Errorf("the least of A's routes = %+v, want 20ms bounded below at 18ms", price)
 	}
@@ -544,7 +557,8 @@ func steadyAt(rtt time.Duration) evidence.Estimate {
 // a bound it needs — at most one transit's charge on a long path. A member
 // no route prices weighs the tier's price, one whose routes none read
 // weighs nothing, and an unpriced tier weighs nothing. A tier of one route
-// takes a second within the room SecondRouteRatio leaves above its price.
+// takes a second under its ceiling, its price scaled by SecondRouteRatio,
+// undecided within the ceiling's bounds.
 func TestTierBeats(t *testing.T) {
 	ms := time.Millisecond
 	unread := route(0, 30*ms, link(selX), link(selD))
@@ -556,6 +570,7 @@ func TestTierBeats(t *testing.T) {
 		routes:   2,
 	}
 	single := tier{estimate: steadyAt(20 * ms), routes: 1}
+	spread := tier{estimate: estimateOf(20*ms, 18*ms, 22*ms), routes: 1}
 	for _, tc := range []struct {
 		name          string
 		tier          tier
@@ -590,6 +605,10 @@ func TestTierBeats(t *testing.T) {
 			single.estimate},
 		{"a second route past it", single, selC, steadyAt(26 * ms), evidence.NotBetter, evidence.NotBetter,
 			single.estimate},
+		{"a second route under the ceiling's lower bound", spread, selC, steadyAt(22500 * time.Microsecond),
+			evidence.NotBetter, evidence.Better, spread.estimate},
+		{"a second route within the ceiling's bounds", spread, selC, steadyAt(23 * ms), evidence.NotBetter,
+			evidence.Undecided, spread.estimate},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			beats, price := tc.tier.beats(tc.ia, tc.direct)

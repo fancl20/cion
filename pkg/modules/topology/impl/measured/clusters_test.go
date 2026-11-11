@@ -107,17 +107,27 @@ func TestClusterGap(t *testing.T) {
 }
 
 // TestNaturalClusters checks the natural clusters: two metros apart by far
-// more than the gap; one whose separation's lower bound lies at its
-// diameter's upper bound beside seven diameters at its value, and one a
-// microsecond short of it; a missing bound inside, or to a node outside a
-// report weighs, and a pair inside no report weighs; the most separated of
-// nested clusters; and an even spread.
+// more than the gap; a pair whose separation's lower bound lies at eight
+// times its diameter's upper bound, and short of it, a microsecond below or
+// within eight times the diameter's bounds; a missing bound inside, or to a
+// node outside a report weighs, and a pair inside no report weighs; the most
+// separated of nested clusters; and an even spread.
 func TestNaturalClusters(t *testing.T) {
 	ms := time.Millisecond
 	atGap := func(short time.Duration) []clPair {
 		return []clPair{
 			{a: 0, b: 1, rtt: 2 * ms, low: 2 * ms, high: 2 * ms},
 			{a: 0, b: 2, rtt: 20 * ms, low: 16*ms - short, high: 20 * ms},
+			{a: 1, b: 2, rtt: 20 * ms, low: 17 * ms, high: 20 * ms},
+		}
+	}
+	// atSpread puts the pair inside at 2ms, bounded a twentieth around, so
+	// that eight diameters run from 15.2ms to 16.8ms, and the separation's
+	// lower bound at low.
+	atSpread := func(low time.Duration) []clPair {
+		return []clPair{
+			clTight(0, 1, 2*ms),
+			{a: 0, b: 2, rtt: 20 * ms, low: low, high: 20 * ms},
 			{a: 1, b: 2, rtt: 20 * ms, low: 17 * ms, high: 20 * ms},
 		}
 	}
@@ -156,6 +166,8 @@ func TestNaturalClusters(t *testing.T) {
 		{"two metros", clMetros(), [][]addr.IA{clIAs(0, 1, 2), clIAs(3, 4, 5)}},
 		{"at the gap", atGap(0), [][]addr.IA{clIAs(0, 1)}},
 		{"short of the gap", atGap(time.Microsecond), nil},
+		{"at the scaled diameter's upper bound", atSpread(16800 * time.Microsecond), [][]addr.IA{clIAs(0, 1)}},
+		{"within the scaled diameter's bounds", atSpread(16700 * time.Microsecond), nil},
 		{"a missing upper bound inside", noHigh, [][]addr.IA{clIAs(3, 4, 5)}},
 		{"a missing lower bound outside", noLow, nil},
 		{"a pair inside no report weighs", unweighed, [][]addr.IA{clIAs(3, 4, 5)}},
@@ -432,20 +444,19 @@ func TestJoinCluster(t *testing.T) {
 }
 
 // TestJoinClusterWeighs checks what a cluster change weighs: a natural
-// cluster its diameter and separation beside its line, and a broken budget
-// the pair's direct round trip and the round trip through the clusters
-// beside the line to buy.
+// cluster its separation floor and its separation, and a broken budget the
+// pair's direct round trip, the buy ceiling of the round trip through the
+// clusters, and that round trip, beside the margin floor.
 func TestJoinClusterWeighs(t *testing.T) {
 	ms := time.Millisecond
 	_, natural := joinCluster(clView(clMetros(), nil), clNodes[1], 0)
 	two := scion.PublishedEstimate(2*ms, 2*ms-2*ms/20, 2*ms+2*ms/20)
 	forty := scion.PublishedEstimate(40*ms, 40*ms-2*ms, 40*ms+2*ms)
 	want := verdict{
-		why:  "a natural cluster holds the node",
-		line: 14 * ms,
+		why: "a natural cluster holds the node",
 		weighed: []evidence.Weighed{
-			{Name: "diameter", Estimate: evidence.Most(two, two, two)},
-			{Name: "separation", Estimate: evidence.Least(slices.Repeat([]evidence.Estimate{forty}, 9)...)},
+			{Name: "floor", Estimate: evidence.Max(two, two, two).Mul(ClusterGap)},
+			{Name: "separation", Estimate: evidence.Min(slices.Repeat([]evidence.Estimate{forty}, 9)...)},
 		},
 	}
 	if diff := cmp.Diff(want, natural, cmp.AllowUnexported(verdict{})); diff != "" {
@@ -461,9 +472,10 @@ func TestJoinClusterWeighs(t *testing.T) {
 		scion.PublishedEstimate(20*ms, 19500*time.Microsecond, 22*ms))
 	want = verdict{
 		why:  "a pair across its unit's edge breaks the budget",
-		line: 6 * ms,
+		line: MarginFloor,
 		weighed: []evidence.Weighed{
 			{Name: "direct", Estimate: scion.PublishedEstimate(21*ms, 19*ms, 22*ms)},
+			{Name: "ceiling", Estimate: through.Mul(PromotionRatio)},
 			{Name: "through", Estimate: through},
 		},
 	}

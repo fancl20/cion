@@ -177,7 +177,7 @@ func newCoordView(d bus.Directory) *coordView {
 // linked pairs a report weighs: each path's estimate the sum of its pairs',
 // charged transitCost for every node between the ends, as evidence.Sum has
 // it — a missing lower bound counting zero, a missing upper bound leaving
-// the path none — and the least of the paths' as evidence.Least has it,
+// the path none — and the least of the paths' as evidence.Min has it,
 // each of the value and the bounds over its own paths.
 func (v *coordView) cheapestPaths() paths {
 	n := len(v.index)
@@ -265,10 +265,10 @@ func (v *coordView) through(a, b addr.IA, q pair) (evidence.Estimate, bool) {
 			parts, charge = append(parts, c), charge+transitCost
 		}
 		if way := evidence.Sum(parts...); way.Answered > 0 {
-			ways = append(ways, way.Plus(charge))
+			ways = append(ways, way.Add(charge))
 		}
 	}
-	way := evidence.Least(ways...)
+	way := evidence.Min(ways...)
 	return way, way.Answered > 0
 }
 
@@ -277,7 +277,7 @@ func (v *coordView) through(a, b addr.IA, q pair) (evidence.Estimate, bool) {
 func (v *coordView) costWith(a, b addr.IA, q pair) (evidence.Estimate, bool) {
 	path, _ := v.cost(a, b)
 	with, _ := v.through(a, b, q)
-	least := evidence.Least(path, with)
+	least := evidence.Min(path, with)
 	return least, least.Answered > 0
 }
 
@@ -289,20 +289,31 @@ func (v *coordView) onPath(a, b addr.IA, p pair) bool {
 	return joined && ok && c.Value == path.Value
 }
 
-// beatsPath weighs whether a pair beats the cheapest path between its ends,
-// by buyLine: better for a pair no path joins.
+// beatsPath weighs whether a pair beats the cheapest path between its ends
+// as buys weighs it: better for a pair no path joins.
 func beatsPath(w, path evidence.Estimate, joined bool) evidence.Verdict {
 	if !joined {
 		return evidence.Better
 	}
-	return evidence.Beats(w, path, buyLine(path))
+	return buys(w, path)
 }
 
-// buyLine returns the line a pair clears to buy a link on the reports
-// against a round trip it would replace: the share PromotionRatio leaves of
-// the round trip's value, at least MarginFloor.
-func buyLine(e evidence.Estimate) time.Duration {
-	return max(e.Value-ratioOf(e.Value, PromotionRatio), MarginFloor)
+// buys weighs whether a pair's round trip a buys a link on the reports
+// against the round trip b it would replace: a beats b's buy ceiling, and
+// beats b by MarginFloor, a smaller gain being jitter on a fast link. Both
+// must hold.
+func buys(a, b evidence.Estimate) evidence.Verdict {
+	return fold([]evidence.Verdict{
+		evidence.Beats(a, buyCeiling(b), 0),
+		evidence.Beats(a, b, MarginFloor),
+	})
+}
+
+// buyCeiling returns the most a pair's round trip may be to buy a link
+// against a round trip it would replace: that round trip scaled by
+// PromotionRatio.
+func buyCeiling(e evidence.Estimate) evidence.Estimate {
+	return e.Mul(PromotionRatio)
 }
 
 // violates reports whether an unlinked pair the clustering allows beats the

@@ -99,9 +99,9 @@ type excludedSample struct {
 }
 
 // deriveTiers classes the window's samples by direct round trip, walked
-// ascending, from the last window's tiers: at each peer, the median member
-// of the current tier as walked weighs against it by TierGap less one times
-// the median's value, over the two bounds estimates, and the peer
+// ascending, from the last window's tiers: at each peer, the bounds estimate
+// of the median member of the current tier as walked, scaled by TierGap,
+// weighs against the peer's, and the peer
 //
 //   - opens the next tier on better, and joins the current one on not
 //     better;
@@ -173,7 +173,7 @@ func step(m, med member, prev map[addr.IA]int, cur int) (opens, kept bool) {
 	if !ok {
 		return m.direct > ratioOf(med.direct, TierGap), false
 	}
-	switch compare(med.bounds, m.bounds, ratioOf(med.bounds.Value, TierGap-1)) {
+	switch compare(med.bounds.Mul(TierGap), m.bounds, 0) {
 	case evidence.Better:
 		return true, false
 	case evidence.NotBetter:
@@ -407,14 +407,14 @@ func outgained(t *tier, ia addr.IA, direct, gain evidence.Estimate) bool {
 		return false
 	}
 	beaten := func(saving evidence.Estimate) bool { return byBand(saving, gain) == evidence.Better }
-	if !beaten(ex.survivorsOf[ia].Minus(direct)) {
+	if !beaten(ex.survivorsOf[ia].Sub(direct)) {
 		return false
 	}
-	if ex.crossing.Answered > 0 && !beaten(ex.survivors.Minus(ex.crossing)) {
+	if ex.crossing.Answered > 0 && !beaten(ex.survivors.Sub(ex.crossing)) {
 		return false
 	}
 	for m, crossing := range ex.crossingOf {
-		if !beaten(ex.survivorsOf[m].Minus(crossing)) {
+		if !beaten(ex.survivorsOf[m].Sub(crossing)) {
 			return false
 		}
 	}
@@ -495,22 +495,21 @@ func (t *tier) beats(ia addr.IA, direct evidence.Estimate) (evidence.Verdict, ev
 	return byBand(direct, price), price
 }
 
-// secondRoute weighs the member's direct side against the price of a tier
-// of one route, by the room SecondRouteRatio leaves above the price's value:
-// better when the direct link, the tier's second route, costs no more than
-// that — redundancy purchased at a bounded latency price. A tier of other
-// than one route weighs nothing.
+// secondRoute weighs the member's direct side against the ceiling of a tier
+// of one route: better when the direct link, the tier's second route, costs
+// no more than that — redundancy purchased at a bounded latency price. A
+// tier of other than one route weighs nothing.
 func (t *tier) secondRoute(direct evidence.Estimate) evidence.Verdict {
 	if t.routes != 1 {
 		return evidence.Undecided
 	}
-	return compare(direct, t.estimate, secondRouteLine(t.estimate))
+	return compare(direct, secondRouteCeiling(t.estimate), 0)
 }
 
-// secondRouteLine returns the line a second route clears against the price:
-// the room SecondRouteRatio leaves above its value, a negative margin.
-func secondRouteLine(price evidence.Estimate) time.Duration {
-	return price.Value - ratioOf(price.Value, SecondRouteRatio)
+// secondRouteCeiling returns the most a second route may cost against the
+// price: the price scaled by SecondRouteRatio.
+func secondRouteCeiling(price evidence.Estimate) evidence.Estimate {
+	return price.Mul(SecondRouteRatio)
 }
 
 // gain returns what the member's direct side saves on its price as beats
@@ -518,7 +517,7 @@ func secondRouteLine(price evidence.Estimate) time.Duration {
 // estimate where beats weighs nothing.
 func (t *tier) gain(ia addr.IA, direct evidence.Estimate) evidence.Estimate {
 	_, price := t.beats(ia, direct)
-	return price.Minus(direct)
+	return price.Sub(direct)
 }
 
 // compare weighs whether a beats b by the line, as evidence.Beats does;
@@ -558,14 +557,14 @@ func leastPrice(routes []*scion.Candidate) evidence.Estimate {
 	for i, c := range routes {
 		prices[i] = priceBounds(c)
 	}
-	return evidence.Least(prices...)
+	return evidence.Min(prices...)
 }
 
 // priceBounds returns the estimate a route's price and its bounds come from:
 // its bounds' estimate, charged scion.TransitPenalty for every AS it crosses
 // between its ends, each way.
 func priceBounds(c *scion.Candidate) evidence.Estimate {
-	return c.BoundsEvidence.Plus(c.Charge())
+	return c.BoundsEvidence.Add(c.Charge())
 }
 
 // readRoutes returns the routes whose readings decide: those resting on at

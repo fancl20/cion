@@ -130,25 +130,58 @@ func TestQuantileAndBounds(t *testing.T) {
 	}
 }
 
-// TestPlus checks that a charge moves an estimate's value and each bound it
+// TestAdd checks that a charge moves an estimate's value and each bound it
 // has, and leaves an estimate without an answer as it was.
-func TestPlus(t *testing.T) {
+func TestAdd(t *testing.T) {
 	e := Estimate{Kind: median, Value: 10 * ms, Hi: 20 * ms, HasHi: true, Answered: 3, Sent: 3}
 	want := Estimate{Kind: median, Value: 14 * ms, Hi: 24 * ms, HasHi: true, Answered: 3, Sent: 3}
-	if diff := cmp.Diff(want, e.Plus(4*ms)); diff != "" {
-		t.Errorf("Plus (-want +got):\n%s", diff)
+	if diff := cmp.Diff(want, e.Add(4*ms)); diff != "" {
+		t.Errorf("Add (-want +got):\n%s", diff)
 	}
-	if got := (Estimate{Kind: median, Sent: 2}).Plus(4 * ms); got.Value != 0 {
+	if got := (Estimate{Kind: median, Sent: 2}).Add(4 * ms); got.Value != 0 {
 		t.Errorf("an estimate without an answer took the charge: %v", got.Value)
 	}
 }
 
-// TestLeast checks the least of estimates: the least value, the least lower
+// TestMul checks that a ratio scales an estimate's value and each bound it
+// has, keeping its samples; leaves an estimate without an answer as it was;
+// and panics at a ratio not above zero.
+func TestMul(t *testing.T) {
+	now := time.Now()
+	e := Estimate{Kind: median, Value: 10 * ms, Lo: 9 * ms, Hi: 11 * ms, HasLo: true, HasHi: true,
+		Answered: 3, Sent: 4, Newest: now}
+	want := Estimate{Kind: median, Value: 20 * ms, Lo: 18 * ms, Hi: 22 * ms, HasLo: true, HasHi: true,
+		Answered: 3, Sent: 4, Newest: now}
+	if diff := cmp.Diff(want, e.Mul(2)); diff != "" {
+		t.Errorf("twice (-want +got):\n%s", diff)
+	}
+	lo := Estimate{Kind: median, Value: 10 * ms, Lo: 9 * ms, HasLo: true, Answered: 2, Sent: 2}
+	wantLo := Estimate{Kind: median, Value: 8 * ms, Lo: 7200 * time.Microsecond, HasLo: true,
+		Answered: 2, Sent: 2}
+	if diff := cmp.Diff(wantLo, lo.Mul(0.8)); diff != "" {
+		t.Errorf("0.8 of an estimate with a lower bound alone (-want +got):\n%s", diff)
+	}
+	if got := (Estimate{Kind: median, Sent: 2}).Mul(2); got.Value != 0 || got.HasLo || got.HasHi {
+		t.Errorf("an estimate without an answer took the ratio: %+v", got)
+	}
+	for _, r := range []float64{0, -1} {
+		func() {
+			defer func() {
+				if recover() == nil {
+					t.Errorf("scaling by %v did not panic", r)
+				}
+			}()
+			e.Mul(r)
+		}()
+	}
+}
+
+// TestMin checks the least of estimates: the least value, the least lower
 // bound only where every estimate gives one, the least upper bound of those
 // giving one, the samples across them, the newest answered of any; one
 // without an answer takes no part, none answered leaves nothing, and
 // estimates of different kinds panic.
-func TestLeast(t *testing.T) {
+func TestMin(t *testing.T) {
 	now := time.Now()
 	a := Estimate{Kind: median, Value: 20 * ms, Lo: 18 * ms, Hi: 30 * ms, HasLo: true, HasHi: true,
 		Answered: 5, Sent: 6, Newest: now.Add(-time.Second)}
@@ -170,8 +203,8 @@ func TestLeast(t *testing.T) {
 		{"one unanswered", []Estimate{silent, a}, a},
 		{"none answered", []Estimate{silent}, Estimate{}},
 	} {
-		if diff := cmp.Diff(tc.want, Least(tc.es...)); diff != "" {
-			t.Errorf("%s: Least (-want +got):\n%s", tc.name, diff)
+		if diff := cmp.Diff(tc.want, Min(tc.es...)); diff != "" {
+			t.Errorf("%s: Min (-want +got):\n%s", tc.name, diff)
 		}
 	}
 	defer func() {
@@ -181,14 +214,14 @@ func TestLeast(t *testing.T) {
 	}()
 	other := median
 	other.Quantile = 0.8
-	Least(a, Estimate{Kind: other, Value: ms, Answered: 1, Sent: 1})
+	Min(a, Estimate{Kind: other, Value: ms, Answered: 1, Sent: 1})
 }
 
-// TestMinus checks a difference of estimates: the values' difference, each
+// TestSub checks a difference of estimates: the values' difference, each
 // bound against the other side's opposite bound where both stand, the
 // samples of the side resting on fewer, the staler side's newest; a side
 // without an answer leaves nothing, and estimates of different kinds panic.
-func TestMinus(t *testing.T) {
+func TestSub(t *testing.T) {
 	now := time.Now()
 	price := Estimate{Kind: median, Value: 40 * ms, Lo: 38 * ms, Hi: 44 * ms, HasLo: true, HasHi: true,
 		Answered: 20, Sent: 20, Newest: now}
@@ -206,8 +239,8 @@ func TestMinus(t *testing.T) {
 			HasHi: true, Answered: 3, Sent: 3, Newest: now}},
 		{"a side unanswered", price, Estimate{Kind: median, Sent: 2}, Estimate{}},
 	} {
-		if diff := cmp.Diff(tc.want, tc.a.Minus(tc.b)); diff != "" {
-			t.Errorf("%s: Minus (-want +got):\n%s", tc.name, diff)
+		if diff := cmp.Diff(tc.want, tc.a.Sub(tc.b)); diff != "" {
+			t.Errorf("%s: Sub (-want +got):\n%s", tc.name, diff)
 		}
 	}
 	defer func() {
@@ -217,14 +250,14 @@ func TestMinus(t *testing.T) {
 	}()
 	other := median
 	other.Quantile = 0.8
-	price.Minus(Estimate{Kind: other, Value: ms, Answered: 1, Sent: 1})
+	price.Sub(Estimate{Kind: other, Value: ms, Answered: 1, Sent: 1})
 }
 
-// TestMost checks the most of estimates: the most value, the most lower
+// TestMax checks the most of estimates: the most value, the most lower
 // bound of those giving one, the most upper bound only with every one, the
 // samples across them, and the newest; an unanswered estimate takes no part,
 // and estimates of different kinds panic.
-func TestMost(t *testing.T) {
+func TestMax(t *testing.T) {
 	now := time.Now()
 	a := Estimate{Kind: median, Value: 20 * ms, Lo: 18 * ms, Hi: 30 * ms, HasLo: true, HasHi: true,
 		Answered: 5, Sent: 6, Newest: now.Add(-time.Second)}
@@ -247,8 +280,8 @@ func TestMost(t *testing.T) {
 		{"one unanswered", []Estimate{silent, a}, a},
 		{"none answered", []Estimate{silent}, Estimate{}},
 	} {
-		if diff := cmp.Diff(tc.want, Most(tc.es...)); diff != "" {
-			t.Errorf("%s: Most (-want +got):\n%s", tc.name, diff)
+		if diff := cmp.Diff(tc.want, Max(tc.es...)); diff != "" {
+			t.Errorf("%s: Max (-want +got):\n%s", tc.name, diff)
 		}
 	}
 	defer func() {
@@ -258,7 +291,7 @@ func TestMost(t *testing.T) {
 	}()
 	other := median
 	other.Quantile = 0.8
-	Most(a, Estimate{Kind: other, Value: ms, Answered: 1, Sent: 1})
+	Max(a, Estimate{Kind: other, Value: ms, Answered: 1, Sent: 1})
 }
 
 // TestSum checks a sum of estimates: the values' sum, the lower bounds' sum
@@ -362,11 +395,11 @@ func TestBeats(t *testing.T) {
 	Beats(bounded(10*ms, 20*ms), Estimate{Kind: other}, 0)
 }
 
-// TestShare checks a share of answers against a line at its edges: under
-// one half at 0.95 once five samples in a row went unanswered, not at four;
-// at five answers of twenty, not at six; at or over it from fifteen of
-// twenty, not at fourteen; undecided for no sample.
-func TestShare(t *testing.T) {
+// TestProportion checks a proportion of answers against a line at its
+// edges: under one half at 0.95 once five samples in a row went unanswered,
+// not at four; at five answers of twenty, not at six; at or over it from
+// fifteen of twenty, not at fourteen; undecided for no sample.
+func TestProportion(t *testing.T) {
 	samples := func(answered, lost int) []Sample {
 		var out []Sample
 		for range answered {
@@ -389,9 +422,9 @@ func TestShare(t *testing.T) {
 		{15, 5, NotBetter},
 		{0, 0, Undecided},
 	} {
-		s := ShareOf(samples(tc.answered, tc.lost), 0.95)
+		s := ProportionOf(samples(tc.answered, tc.lost), 0.95)
 		if s.Answered != tc.answered || s.Sent != tc.answered+tc.lost {
-			t.Errorf("%d answered, %d lost: share of %d of %d", tc.answered, tc.lost, s.Answered, s.Sent)
+			t.Errorf("%d answered, %d lost: proportion of %d of %d", tc.answered, tc.lost, s.Answered, s.Sent)
 		}
 		if got := s.Under(0.5); got != tc.want {
 			t.Errorf("%d answered, %d lost: under one half = %v, want %v", tc.answered, tc.lost, got, tc.want)

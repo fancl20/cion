@@ -330,7 +330,7 @@ func (c *Candidate) Price() (time.Duration, bool) {
 // its cost's estimate charged TransitPenalty for every AS it crosses between
 // its ends, each way.
 func (c *Candidate) PriceEstimate() evidence.Estimate {
-	return c.Evidence.Plus(c.Charge())
+	return c.Evidence.Add(c.Charge())
 }
 
 // Charge returns what a price adds to the path's round trip: TransitPenalty

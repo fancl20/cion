@@ -126,12 +126,12 @@ func TestSelectionRecordsPromotions(t *testing.T) {
 			return selB
 		},
 		want: func(promoted string) []recorded {
-			// The ratio leaves 5ms above the tier's 20ms price, the least of
-			// B's and C's routes: a negative line.
+			// The tier's ceiling: its 20ms price, the least of B's and C's
+			// routes, scaled by the ratio.
 			return []recorded{{Change: LinkPromoted, Subject: selB.String(), To: promoted,
-				Why: "a second route for its tier", Line: -5 * ms, Weighed: []weighedAt{
+				Why: "a second route for its tier", Weighed: []weighedAt{
 					direct(22 * ms),
-					boundsAt("price", 20*ms, 2*steadyBounds),
+					boundsAt("ceiling", 25*ms, 2*steadyBounds),
 				}}}
 		},
 	}, {
@@ -521,15 +521,14 @@ func TestSelectionRecordsClusterChanges(t *testing.T) {
 	cluster := selPeer.String()
 	ms := time.Millisecond
 	// The metro's three pairs at 2ms, and the nine to the other metro at
-	// 40ms, each bounded a twentieth around: the line seven diameters at
-	// its value.
+	// 40ms, each bounded a twentieth around: the floor eight diameters.
 	published := func(name string, rtt time.Duration, pairs int) weighedAt {
 		return weighedAt{Name: name, Span: scion.BoundSpan, Value: rtt, Lo: rtt - rtt/20, Hi: rtt + rtt/20,
 			Answered: pairs}
 	}
 	want := []recorded{
 		{Change: ClusterJoined, Subject: selIA.String(), To: cluster, Why: "a natural cluster holds the node",
-			Line: 14 * ms, Weighed: []weighedAt{published("diameter", 2*ms, 3), published("separation", 40*ms, 9)}},
+			Weighed: []weighedAt{published("floor", 16*ms, 3), published("separation", 40*ms, 9)}},
 		{Change: ClusterLeft, Subject: selIA.String(), From: cluster, Why: "its unit fell below two members"},
 	}
 	if diff := cmp.Diff(want, f.records(t)); diff != "" {

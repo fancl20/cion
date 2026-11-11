@@ -175,10 +175,10 @@ func TestCoordViewViolates(t *testing.T) {
 	}
 }
 
-// TestBeatsPath checks the comparison against a path at its edges: the line
-// to buy, the share the promotion ratio leaves of the path's value at least
-// the margin floor, the pair's upper bound against the path's lower bound;
-// undecided where the bounds overlap; better where no path joins.
+// TestBeatsPath checks the comparison against a path at its edges: the
+// pair's upper bound under the path's lower bound scaled by the promotion
+// ratio, and under the path's lower bound by the margin floor, both of which
+// must hold; undecided where the bounds overlap; better where no path joins.
 func TestBeatsPath(t *testing.T) {
 	ms := time.Millisecond
 	point := func(d time.Duration) evidence.Estimate { return scion.PublishedEstimate(d, d, d) }
@@ -193,6 +193,10 @@ func TestBeatsPath(t *testing.T) {
 		{"by the ratio", point(16 * ms), point(20 * ms), evidence.Better},
 		{"overlapping", scion.PublishedEstimate(16*ms, 15*ms, 17*ms),
 			scion.PublishedEstimate(20*ms, 19*ms, 21*ms), evidence.Undecided},
+		{"by the ratio within the path's spread", point(14400 * time.Microsecond),
+			scion.PublishedEstimate(20*ms, 18*ms, 22*ms), evidence.Better},
+		{"past the ratio within the path's spread", point(14500 * time.Microsecond),
+			scion.PublishedEstimate(20*ms, 18*ms, 22*ms), evidence.Undecided},
 		{"no upper bound", scion.PublishedEstimate(10*ms, 9*ms, 0), point(20 * ms), evidence.Undecided},
 	} {
 		if got := beatsPath(tc.w, tc.path, true); got != tc.want {

@@ -213,8 +213,8 @@ func TestMeasureExcluded(t *testing.T) {
 		answered:    true,
 		price:       22*time.Millisecond + transitCost,
 		routes:      2,
-		survivors:   evidence.Least(viaA, ownB),
-		survivorsOf: map[addr.IA]evidence.Estimate{selA: evidence.Least(viaA), selB: evidence.Least(ownB)},
+		survivors:   evidence.Min(viaA, ownB),
+		survivorsOf: map[addr.IA]evidence.Estimate{selA: evidence.Min(viaA), selB: evidence.Min(ownB)},
 		cheapest:    map[addr.IA]*scion.Candidate{selA: &a.candidates[0], selB: &b.candidates[0]},
 	}
 	if diff := cmp.Diff(want, fast.excluded[selA], opts...); diff != "" {
@@ -228,8 +228,8 @@ func TestMeasureExcluded(t *testing.T) {
 		survivor:   &a.candidates[1],
 		dst:        selA,
 		routes:     2,
-		crossing:   evidence.Least(viaA, ownB),
-		crossingOf: map[addr.IA]evidence.Estimate{selA: evidence.Least(viaA), selB: evidence.Least(ownB)},
+		crossing:   evidence.Min(viaA, ownB),
+		crossingOf: map[addr.IA]evidence.Estimate{selA: evidence.Min(viaA), selB: evidence.Min(ownB)},
 		cheapest:   map[addr.IA]*scion.Candidate{selB: &b.candidates[1]},
 	}
 	if diff := cmp.Diff(want, fast.excluded[selB], opts...); diff != "" {

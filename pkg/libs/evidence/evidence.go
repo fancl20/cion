@@ -86,9 +86,9 @@ func (k Kind) Of(samples []Sample, now time.Time) Estimate {
 	return e
 }
 
-// Plus returns the estimate with d added to its value and to each bound it
+// Add returns the estimate with d added to its value and to each bound it
 // has: a charge a price carries beside the round trip.
-func (e Estimate) Plus(d time.Duration) Estimate {
+func (e Estimate) Add(d time.Duration) Estimate {
 	if e.Answered == 0 {
 		return e
 	}
@@ -102,7 +102,25 @@ func (e Estimate) Plus(d time.Duration) Estimate {
 	return e
 }
 
-// Least returns the estimate of the least of the subjects the estimates
+// Mul returns the estimate with its value and each bound it has scaled by
+// r: a multiple or a fraction of what it states, such as a ratio a decision
+// weighs it at. A ratio not above zero is a caller's mistake.
+func (e Estimate) Mul(r float64) Estimate {
+	if r <= 0 {
+		panic(fmt.Sprintf("evidence: an estimate scaled by %v", r))
+	}
+	scale := func(d time.Duration) time.Duration { return time.Duration(r * float64(d)) }
+	e.Value = scale(e.Value)
+	if e.HasLo {
+		e.Lo = scale(e.Lo)
+	}
+	if e.HasHi {
+		e.Hi = scale(e.Hi)
+	}
+	return e
+}
+
+// Min returns the estimate of the least of the subjects the estimates
 // read: the least value; the least lower bound, which needs every
 // estimate's, for the least of several lies above the least of their lower
 // bounds only where each has one; the least upper bound of those giving one;
@@ -110,7 +128,7 @@ func (e Estimate) Plus(d time.Duration) Estimate {
 // of any. An estimate without an answered sample states nothing and takes
 // no part; none answered leaves the zero estimate. Estimates of different
 // kinds are a caller's mistake.
-func Least(es ...Estimate) Estimate {
+func Min(es ...Estimate) Estimate {
 	var out Estimate
 	allLo := true
 	for _, e := range es {
@@ -145,14 +163,14 @@ func Least(es ...Estimate) Estimate {
 	return out
 }
 
-// Minus returns the estimate of the difference between the subject e reads
+// Sub returns the estimate of the difference between the subject e reads
 // and the one o reads: the values' difference; the lower bound e's lower
 // bound less o's upper, and the upper bound e's upper bound less o's lower,
 // each where both stand; the samples answered and sent of the side resting
 // on fewer; and the staler side's newest answered sample. A side without an
 // answered sample leaves the zero estimate. Estimates of different kinds are
 // a caller's mistake.
-func (e Estimate) Minus(o Estimate) Estimate {
+func (e Estimate) Sub(o Estimate) Estimate {
 	if e.Answered == 0 || o.Answered == 0 {
 		return Estimate{}
 	}
@@ -173,7 +191,7 @@ func (e Estimate) Minus(o Estimate) Estimate {
 	return d
 }
 
-// Most returns the estimate of the most of the subjects the estimates read:
+// Max returns the estimate of the most of the subjects the estimates read:
 // the most value; the most lower bound of those giving one; the most upper
 // bound, which needs every estimate's, for the most of several lies below
 // the most of their upper bounds only where each has one; the samples
@@ -181,7 +199,7 @@ func (e Estimate) Minus(o Estimate) Estimate {
 // estimate without an answered sample states nothing and takes no part;
 // none answered leaves the zero estimate. Estimates of different kinds are
 // a caller's mistake.
-func Most(es ...Estimate) Estimate {
+func Max(es ...Estimate) Estimate {
 	var out Estimate
 	allHi := true
 	for _, e := range es {
@@ -268,20 +286,20 @@ func Published(k Kind, value, lo, hi time.Duration) Estimate {
 	return Estimate{Kind: k, Value: value, Lo: lo, Hi: hi, HasLo: lo > 0, HasHi: hi > 0, Answered: 1, Sent: 1}
 }
 
-// Share is the share of a window's samples answered: the samples answered
-// and sent, and the one-sided confidence of its bounds, the binomial's exact
-// bounds — the share under which the answers seen, or fewer, would come
-// with no more than the odds the confidence leaves, and the one over which
-// they, or more, would.
-type Share struct {
+// Proportion is the proportion of a window's samples answered: the samples
+// answered and sent, and the one-sided confidence of its bounds, the
+// binomial's exact bounds — the proportion under which the answers seen, or
+// fewer, would come with no more than the odds the confidence leaves, and
+// the one over which they, or more, would.
+type Proportion struct {
 	Answered, Sent int
 	Confidence     float64
 }
 
-// ShareOf returns the share of the samples answered, bounded at confidence
-// c.
-func ShareOf(samples []Sample, c float64) Share {
-	s := Share{Sent: len(samples), Confidence: c}
+// ProportionOf returns the proportion of the samples answered, bounded at
+// confidence c.
+func ProportionOf(samples []Sample, c float64) Proportion {
+	s := Proportion{Sent: len(samples), Confidence: c}
 	for _, x := range samples {
 		if !x.Lost {
 			s.Answered++
@@ -290,11 +308,11 @@ func ShareOf(samples []Sample, c float64) Share {
 	return s
 }
 
-// Under weighs whether the share lies under the line, a share strictly
-// between zero and one: Better when its upper bound does, NotBetter when its
-// lower bound reaches the line, Undecided otherwise and for a share of no
-// sample.
-func (s Share) Under(line float64) Verdict {
+// Under weighs whether the proportion lies under the line, a proportion
+// strictly between zero and one: Better when its upper bound does, NotBetter
+// when its lower bound reaches the line, Undecided otherwise and for a
+// proportion of no sample.
+func (s Proportion) Under(line float64) Verdict {
 	if s.Sent == 0 {
 		return Undecided
 	}

@@ -32,10 +32,10 @@ type edge struct {
 // naturalClusters returns the clusters the reports confirm, each its
 // members ascending: the single-linkage dendrogram joins the pairs an upper
 // bound weighs, lightest first, ties to the lesser pair, and a dendrogram
-// cluster of two nodes or more, short of all, is natural when its diameter
-// beats its separation by clusterLine. Of overlapping natural clusters, the
-// one whose separation's lower bound is the greatest multiple of its
-// diameter's upper bound stands, ties to the least member.
+// cluster of two nodes or more, short of all, is natural when its diameter,
+// scaled by ClusterGap, beats its separation. Of overlapping natural
+// clusters, the one whose separation's lower bound is the greatest multiple
+// of its diameter's upper bound stands, ties to the least member.
 func naturalClusters(v *coordView) [][]addr.IA {
 	nodes := make([]addr.IA, 0, len(v.index))
 	for ia := range v.index {
@@ -85,7 +85,7 @@ func naturalClusters(v *coordView) [][]addr.IA {
 		members[a] = joined
 		delete(members, b)
 		diameter, separation, ok := spread(v, joined)
-		if !ok || evidence.Beats(diameter, separation, clusterLine(diameter)) != evidence.Better {
+		if !ok || evidence.Beats(separationFloor(diameter), separation, 0) != evidence.Better {
 			continue
 		}
 		cands = append(cands, candidate{
@@ -114,10 +114,10 @@ func naturalClusters(v *coordView) [][]addr.IA {
 	return out
 }
 
-// clusterLine returns the line a cluster's diameter beats its separation
-// by: ClusterGap less one times the diameter's value.
-func clusterLine(diameter evidence.Estimate) time.Duration {
-	return time.Duration((ClusterGap - 1) * float64(diameter.Value))
+// separationFloor returns the least separation a natural cluster of the
+// diameter has: the diameter scaled by ClusterGap.
+func separationFloor(diameter evidence.Estimate) evidence.Estimate {
+	return diameter.Mul(ClusterGap)
 }
 
 // spread returns a node set's diameter, the most of the estimates of the
@@ -144,7 +144,7 @@ func spread(v *coordView, set []addr.IA) (diameter, separation evidence.Estimate
 			out = append(out, e)
 		}
 	}
-	return evidence.Most(in...), evidence.Least(out...), len(in) > 0 && len(out) > 0
+	return evidence.Max(in...), evidence.Min(out...), len(in) > 0 && len(out) > 0
 }
 
 // units are the window's units: the nodes naming one cluster form one, and
@@ -245,9 +245,10 @@ func keptPair(v *coordView, xs, ys []addr.IA, skip map[addr.IA]bool) (pair, bool
 	return best, true
 }
 
-// outruns reports whether one pair beats another by buyLine.
+// outruns reports whether one pair's round trip buys a link against
+// another's, as buys weighs it.
 func outruns(v *coordView, p, q pair) bool {
-	return evidence.Beats(v.rtts[p], v.rtts[q], buyLine(v.rtts[q])) == evidence.Better
+	return buys(v.rtts[p], v.rtts[q]) == evidence.Better
 }
 
 // lightestPair returns the pair across two member sets that the lightest
@@ -331,9 +332,9 @@ func (u *units) predict(v *coordView, a, b addr.IA) (evidence.Estimate, bool) {
 }
 
 // broken returns the first pair across the unit's edge whose direct round
-// trip beats the round trip through the clusters by buyLine, beside the
-// two estimates weighed: the unit breaks the budget for it. False when no
-// pair breaks it.
+// trip buys a link against the round trip through the clusters, as buys
+// weighs it, beside the two estimates weighed: the unit breaks the budget
+// for it. False when no pair breaks it.
 func (u *units) broken(v *coordView, unit int) (direct, through evidence.Estimate, ok bool) {
 	for _, a := range u.members[unit] {
 		for b, y := range u.of {
@@ -345,7 +346,7 @@ func (u *units) broken(v *coordView, unit int) (direct, through evidence.Estimat
 				continue
 			}
 			through, ok := u.predict(v, a, b)
-			if ok && evidence.Beats(direct, through, buyLine(through)) == evidence.Better {
+			if ok && buys(direct, through) == evidence.Better {
 				return direct, through, true
 			}
 		}

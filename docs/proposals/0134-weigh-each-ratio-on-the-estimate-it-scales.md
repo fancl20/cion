@@ -103,3 +103,42 @@ its own.
     share falls under it.
 *   **The labs.** The labs pass, and the benchmarks run against the commit
     before.
+
+## Implementation history
+
+*   **One comparison to buy.** `buys` weighs a pair against the round trip
+    it would replace, both conditions folded, for the coordination's
+    violation, the lighter pair, and the budget. `secondRouteCeiling`,
+    `buyCeiling`, and `separationFloor` name the scaled estimates.
+*   **The records' names.** A second route's record weighs the direct side
+    and the tier's `ceiling`, the price scaled; a natural cluster's, its
+    `floor`, the diameter scaled, beside its separation; a broken budget's,
+    the direct round trip, the `ceiling` of the round trip through the
+    clusters, and that round trip, with `MarginFloor` as its line.
+*   **`Mul` needs no case for an estimate without an answered sample:** it
+    states nothing, and scaling leaves it so.
+*   Mutations: 11 of 11 killed.
+*   The pipeline passed but for `TestJoinByEnrollAuthTelegramRestart` under
+    the race detector, which timed out waiting for the joiner to enroll
+    after the core's restart; alone, it passed six runs of six.
+*   **The labs of fixed delays decide as before.** Their estimates carry no
+    spread, so a ratio weighs alike scaled and as a line: 30 runs of the
+    NAT lab and 2 of the metros lab weighed every ratio both ways, and no
+    decision differed. Two verdicts did, both buys in the metros lab: not
+    better where the line leaves undecided, which every caller of `buys`
+    treats alike.
+*   Benchmarks against the commit before: every lab reached every pair, its
+    worst pair as the commit before's. The NAT lab, fourteen runs each,
+    settled at 15 or 16 links within a median 6.8 minutes against 6.5;
+    three runs took 12.5 to 15 minutes, against the commit before's longest
+    9.2, as one instrumented run of thirty did: two nodes announce
+    retirements of links to public nodes and wait on each other, and once
+    the first retires, the second waits the five minutes the departed
+    link's routes take to go stale. The metros lab, three runs each,
+    settled at 24 links against 25, as an instrumented run with no verdict
+    differing did, within 5.2 to 7.3 minutes against 5.5 to 6.8. One run
+    each: the regions lab at 30 links within 7.7 minutes against 8.0; the
+    ring at 46 links within 8.8 minutes against 45 within 8.2; the site
+    placements on the same links within 4.5 to 4.8 minutes against 5.2 to
+    9.3; the metros and regions cuts recovered within 10 seconds, as the
+    commit before's.
