@@ -233,6 +233,12 @@ func BoundsEstimate(samples []bus.PathSample, now time.Time) evidence.Estimate {
 	return boundKind.Of(samples, now)
 }
 
+// PublishedEstimate returns the estimate a round trip and its bounds
+// published as values state, BoundsEstimate's read back from them.
+func PublishedEstimate(rtt, low, high time.Duration) evidence.Estimate {
+	return evidence.Published(boundKind, rtt, low, high)
+}
+
 // TransitPenalty is what each AS a path crosses between its ends adds to its
 // one-way price: the forwarding a transit costs, and one more failure on the
 // way. It is the band's floor, the least difference a price tells from

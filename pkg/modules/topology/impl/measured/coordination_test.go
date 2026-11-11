@@ -10,6 +10,7 @@ import (
 	"github.com/scionproto/scion/pkg/addr"
 
 	"github.com/fancl20/cion/pkg/libs/bus"
+	"github.com/fancl20/cion/pkg/libs/evidence"
 	"github.com/fancl20/cion/pkg/libs/scion"
 	"github.com/fancl20/cion/pkg/libs/segment"
 )
@@ -34,35 +35,43 @@ func coReports(reports map[addr.IA][]bus.PeerReport) bus.Directory {
 	return bus.NewDirectory(nil, bus.NewScope(bus.DirectoryID{1}, entries...))
 }
 
+// coTight returns a report of the peer at a round trip, its bounds a
+// twentieth around it.
+func coTight(ia addr.IA, rtt time.Duration) bus.PeerReport {
+	return bus.PeerReport{IA: ia, RTT: rtt, Low: rtt - rtt/20, High: rtt + rtt/20}
+}
+
 // coLink returns the reports of a link between two nodes at a round trip,
-// each end on the given interface.
+// bounded tightly, each end on the given interface.
 func coLink(reports map[addr.IA][]bus.PeerReport, a addr.IA, ai uint16, b addr.IA, bi uint16,
 	rtt time.Duration) {
 
-	reports[a] = append(reports[a], bus.PeerReport{IA: b, RTT: rtt, IfID: ai})
-	reports[b] = append(reports[b], bus.PeerReport{IA: a, RTT: rtt, IfID: bi})
+	ra, rb := coTight(b, rtt), coTight(a, rtt)
+	ra.IfID, rb.IfID = ai, bi
+	reports[a] = append(reports[a], ra)
+	reports[b] = append(reports[b], rb)
 }
 
 // coHerd returns the reports of the herd the coordination exists for: S
 // reaches T over O and M, at 5, 50, and 5 ms, so its path to T costs 60 ms
 // beside two transits; S measures T at 30 ms and O measures T at 20 ms, so
 // both pairs violate, and O's link to T would serve S at 25 ms beside a
-// transit.
+// transit. Every round trip is bounded tightly.
 func coHerd() map[addr.IA][]bus.PeerReport {
 	reports := make(map[addr.IA][]bus.PeerReport)
 	coLink(reports, coS, 1, coO, 1, 5*time.Millisecond)
 	coLink(reports, coO, 2, coM, 1, 50*time.Millisecond)
 	coLink(reports, coM, 2, coT, 1, 5*time.Millisecond)
-	reports[coS] = append(reports[coS], bus.PeerReport{IA: coT, RTT: 30 * time.Millisecond})
-	reports[coO] = append(reports[coO], bus.PeerReport{IA: coT, RTT: 20 * time.Millisecond})
+	reports[coS] = append(reports[coS], coTight(coT, 30*time.Millisecond))
+	reports[coO] = append(reports[coO], coTight(coT, 20*time.Millisecond))
 	return reports
 }
 
-// TestCoordViewReadsReports checks the view: a pair weighs the larger of its
-// ends' round trips, and is bounded by the larger of their lower and of
-// their upper bounds; it is linked when an end reports a link and none
-// reports none, the paths charge each transit, the announcements read as
-// reported, and each signer's cluster is its latest entry's.
+// TestCoordViewReadsReports checks the view: a pair's estimate is the
+// larger of its ends' round trips, of their lower bounds, and of their upper
+// bounds; it is linked when an end reports a link and none reports none,
+// the paths charge each transit, the announcements read as reported, and
+// each signer's cluster is its latest entry's.
 func TestCoordViewReadsReports(t *testing.T) {
 	reports := make(map[addr.IA][]bus.PeerReport)
 	coLink(reports, coS, 1, coM, 1, 10*time.Millisecond)
@@ -77,15 +86,19 @@ func TestCoordViewReadsReports(t *testing.T) {
 		Retiring: true, Relies: []segment.LinkID{{IA: coM, IfID: 2}}})
 	v := newCoordView(coReports(reports))
 
-	if got := v.weight[pairOf(coS, coT)]; got != 27*time.Millisecond {
-		t.Errorf("weight of S-T = %v, want the larger end's 27ms", got)
+	if diff := cmp.Diff(scion.PublishedEstimate(27*time.Millisecond, 22*time.Millisecond, 30*time.Millisecond),
+		v.rtts[pairOf(coS, coT)]); diff != "" {
+		t.Errorf("S-T, want the larger ends' 27ms, 22ms, and 30ms (-want +got):\n%s", diff)
 	}
 	want := map[pair]bool{pairOf(coS, coM): true, pairOf(coM, coT): true}
 	if diff := cmp.Diff(want, v.linked, cmp.AllowUnexported(pair{})); diff != "" {
 		t.Errorf("linked (-want +got):\n%s", diff)
 	}
-	if got, ok := v.cost(coS, coT); !ok || got != 30*time.Millisecond+transitCost {
-		t.Errorf("cost S-T = %v, %v; want 30ms and the transit at M charged", got, ok)
+	// S-M 10ms and M-T 20ms, each bounded a twentieth around.
+	want30 := scion.PublishedEstimate(30*time.Millisecond+transitCost, 28500*time.Microsecond+transitCost,
+		31500*time.Microsecond+transitCost)
+	if got, ok := v.cost(coS, coT); !ok || !cmp.Equal(got, want30) {
+		t.Errorf("cost S-T = %+v, %v; want %+v, the transit at M charged", got, ok, want30)
 	}
 	if _, ok := v.cost(coS, coO); ok {
 		t.Error("S joined to O, which no up link reaches")
@@ -96,9 +109,16 @@ func TestCoordViewReadsReports(t *testing.T) {
 	if r := v.retiring[pairOf(coO, coP)]; r.by != coP || len(r.relies) != 1 {
 		t.Errorf("retirement of O-P = %+v, want P's with its reliance", r)
 	}
-	if low, high := v.low[pairOf(coS, coT)], v.high[pairOf(coS, coT)]; low != 22*time.Millisecond ||
-		high != 30*time.Millisecond {
-		t.Errorf("bounds of S-T = %v, %v; want the larger ends' 22ms and 30ms", low, high)
+
+	// A pair without an upper bound leaves every path across it none.
+	open := make(map[addr.IA][]bus.PeerReport)
+	coLink(open, coS, 1, coM, 1, 10*time.Millisecond)
+	open[coM] = append(open[coM], bus.PeerReport{IA: coT, RTT: 20 * time.Millisecond,
+		Low: 19 * time.Millisecond, IfID: 2})
+	open[coT] = append(open[coT], bus.PeerReport{IA: coM, RTT: 20 * time.Millisecond,
+		Low: 19 * time.Millisecond, IfID: 1})
+	if got, ok := newCoordView(coReports(open)).cost(coS, coT); !ok || got.HasHi {
+		t.Errorf("cost S-T across a pair without an upper bound = %+v, %v; want no upper bound", got, ok)
 	}
 
 	// S's later entry, in another scope, names its cluster.
@@ -114,9 +134,9 @@ func TestCoordViewReadsReports(t *testing.T) {
 }
 
 // TestCoordViewViolates checks the violation test over the published links:
-// a pair violates when its weight beats the path between its ends by the
-// promotion ratio and the margin floor, or when no path joins them, and
-// costWith prices the path were a pair linked.
+// a pair violates when it beats the cheapest path between its ends by the
+// line to buy, or when no path joins them, and costWith prices the path
+// were a pair linked.
 func TestCoordViewViolates(t *testing.T) {
 	v := newCoordView(coReports(coHerd()))
 	if !v.violates(pairOf(coS, coT)) || !v.violates(pairOf(coO, coT)) {
@@ -125,14 +145,21 @@ func TestCoordViewViolates(t *testing.T) {
 	if v.violates(pairOf(coS, coO)) {
 		t.Error("the linked S-O violates")
 	}
-	if got, ok := v.costWith(coS, coT, pairOf(coO, coT)); !ok || got != 25*time.Millisecond+transitCost {
-		t.Errorf("cost S-T with O-T linked = %v, %v; want 25ms and the transit at O charged", got, ok)
+	if got, ok := v.costWith(coS, coT, pairOf(coO, coT)); !ok || got.Value != 25*time.Millisecond+transitCost {
+		t.Errorf("cost S-T with O-T linked = %v, %v; want 25ms and the transit at O charged", got.Value, ok)
 	}
-	if got, ok := v.costWith(coS, coM, pairOf(coO, coT)); !ok || got != 30*time.Millisecond+2*transitCost {
-		t.Errorf("cost S-M with O-T linked = %v, %v; want 30ms and the transits at O and T charged", got, ok)
+	if got, ok := v.costWith(coS, coM, pairOf(coO, coT)); !ok || got.Value != 30*time.Millisecond+2*transitCost {
+		t.Errorf("cost S-M with O-T linked = %v, %v; want 30ms and the transits at O and T charged", got.Value, ok)
 	}
-	if !violatesAt(time.Second, 0, false) {
-		t.Error("a pair no path joins does not violate")
+	// Without its bounds, S-T decides nothing against its path.
+	unbounded := coHerd()
+	for i, r := range unbounded[coS] {
+		if r.IA == coT {
+			unbounded[coS][i].Low, unbounded[coS][i].High = 0, 0
+		}
+	}
+	if newCoordView(coReports(unbounded)).violates(pairOf(coS, coT)) {
+		t.Error("S-T without bounds violates")
 	}
 	// S, O, and M name one cluster and T stands alone: M's 5ms and O's
 	// 20ms choose the pairs to T, so S-T is not a pair the clustering
@@ -146,18 +173,34 @@ func TestCoordViewViolates(t *testing.T) {
 	if !clustered.violates(pairOf(coO, coT)) {
 		t.Error("O-T does not violate, though the clustering chose it")
 	}
+}
+
+// TestBeatsPath checks the comparison against a path at its edges: the line
+// to buy, the share the promotion ratio leaves of the path's value at least
+// the margin floor, the pair's upper bound against the path's lower bound;
+// undecided where the bounds overlap; better where no path joins.
+func TestBeatsPath(t *testing.T) {
+	ms := time.Millisecond
+	point := func(d time.Duration) evidence.Estimate { return scion.PublishedEstimate(d, d, d) }
 	for _, tc := range []struct {
-		w, path time.Duration
-		want    bool
+		name    string
+		w, path evidence.Estimate
+		want    evidence.Verdict
 	}{
-		{7 * time.Millisecond, 9 * time.Millisecond, true},      // within the ratio by the floor
-		{7100 * time.Microsecond, 9 * time.Millisecond, false},  // within the ratio, short of the floor
-		{17 * time.Millisecond, 20 * time.Millisecond, false},   // past the floor, short of the ratio
-		{15900 * time.Microsecond, 20 * time.Millisecond, true}, // within both
+		{"by the floor", point(7 * ms), point(9 * ms), evidence.Better},
+		{"short of the floor", point(7100 * time.Microsecond), point(9 * ms), evidence.NotBetter},
+		{"past the floor, short of the ratio", point(17 * ms), point(20 * ms), evidence.NotBetter},
+		{"by the ratio", point(16 * ms), point(20 * ms), evidence.Better},
+		{"overlapping", scion.PublishedEstimate(16*ms, 15*ms, 17*ms),
+			scion.PublishedEstimate(20*ms, 19*ms, 21*ms), evidence.Undecided},
+		{"no upper bound", scion.PublishedEstimate(10*ms, 9*ms, 0), point(20 * ms), evidence.Undecided},
 	} {
-		if got := violatesAt(tc.w, tc.path, true); got != tc.want {
-			t.Errorf("violatesAt(%v, %v) = %v, want %v", tc.w, tc.path, got, tc.want)
+		if got := beatsPath(tc.w, tc.path, true); got != tc.want {
+			t.Errorf("%s: beatsPath = %v, want %v", tc.name, got, tc.want)
 		}
+	}
+	if got := beatsPath(point(time.Second), evidence.Estimate{}, false); got != evidence.Better {
+		t.Errorf("a pair no path joins: beatsPath = %v, want better", got)
 	}
 }
 
@@ -195,7 +238,8 @@ func coAnnounce(reports map[addr.IA][]bus.PeerReport, by, peer addr.IA) map[addr
 // that would serve it: a predicted pair holds it for runnerUpWindows
 // windows after its prediction, an announced one as long after its
 // announcement first shows, and a pair that serves it not, or that is
-// heavier, holds nothing.
+// heavier, or that the node's pair, undecided against its path, would not
+// wait for, holds nothing.
 func TestWaitsToPromote(t *testing.T) {
 	now := time.Now()
 	c := &coordState{}
@@ -222,7 +266,7 @@ func TestWaitsToPromote(t *testing.T) {
 	// at 25ms, but the node orders its own promotions.
 	own := coHerd()
 	own[coO] = slices.DeleteFunc(own[coO], func(r bus.PeerReport) bool { return r.IA == coT })
-	own[coS] = append(own[coS], bus.PeerReport{IA: coM, RTT: 10 * time.Millisecond})
+	own[coS] = append(own[coS], coTight(coM, 10*time.Millisecond))
 	c = &coordState{}
 	ownView := newCoordView(coReports(own))
 	c.observe(ownView, now)
@@ -237,8 +281,8 @@ func TestWaitsToPromote(t *testing.T) {
 	coLink(heavy, coS, 1, coO, 1, 5*time.Millisecond)
 	coLink(heavy, coO, 2, coM, 1, 200*time.Millisecond)
 	coLink(heavy, coM, 2, coT, 1, 5*time.Millisecond)
-	heavy[coS] = append(heavy[coS], bus.PeerReport{IA: coT, RTT: 100 * time.Millisecond})
-	heavy[coO] = append(heavy[coO], bus.PeerReport{IA: coT, RTT: 110 * time.Millisecond})
+	heavy[coS] = append(heavy[coS], coTight(coT, 100*time.Millisecond))
+	heavy[coO] = append(heavy[coO], coTight(coT, 110*time.Millisecond))
 	c = &coordState{}
 	heavyView := newCoordView(coReports(heavy))
 	c.observe(heavyView, now)
@@ -253,6 +297,24 @@ func TestWaitsToPromote(t *testing.T) {
 		t.Error("O's lighter promotion waits on S's heavier one")
 	}
 
+	// S's pair without bounds decides nothing against the published path:
+	// it waits on no lighter pair, only on a link its routes do not see,
+	// and its routes cross every one.
+	unbounded := coHerd()
+	for i, r := range unbounded[coS] {
+		if r.IA == coT {
+			unbounded[coS][i].Low, unbounded[coS][i].High = 0, 0
+		}
+	}
+	c = &coordState{}
+	uv := newCoordView(coReports(unbounded))
+	c.observe(uv, now)
+	seen := scion.Candidate{Links: []segment.LinkID{{IA: coS, IfID: 1}, {IA: coO, IfID: 1},
+		{IA: coO, IfID: 2}, {IA: coM, IfID: 1}, {IA: coM, IfID: 2}, {IA: coT, IfID: 1}}}
+	if c.waitsToPromote(uv, coS, coT, []scion.Candidate{seen}, now) {
+		t.Error("S's undecided pair waits on O's lighter one")
+	}
+
 	// A lighter candidate that serves S not holds nothing back: P–M, far
 	// from S's path, linking nothing S needs.
 	far := coHerd()
@@ -263,7 +325,7 @@ func TestWaitsToPromote(t *testing.T) {
 		}
 	}
 	coLink(far, coP, 1, coT, 3, 40*time.Millisecond)
-	far[coP] = append(far[coP], bus.PeerReport{IA: coM, RTT: time.Millisecond})
+	far[coP] = append(far[coP], coTight(coM, time.Millisecond))
 	c = &coordState{}
 	v := newCoordView(coReports(far))
 	c.observe(v, now)

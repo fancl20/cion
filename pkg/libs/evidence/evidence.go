@@ -173,6 +173,101 @@ func (e Estimate) Minus(o Estimate) Estimate {
 	return d
 }
 
+// Most returns the estimate of the most of the subjects the estimates read:
+// the most value; the most lower bound of those giving one; the most upper
+// bound, which needs every estimate's, for the most of several lies below
+// the most of their upper bounds only where each has one; the samples
+// answered and sent across them; and the newest answered sample of any. An
+// estimate without an answered sample states nothing and takes no part;
+// none answered leaves the zero estimate. Estimates of different kinds are
+// a caller's mistake.
+func Most(es ...Estimate) Estimate {
+	var out Estimate
+	allHi := true
+	for _, e := range es {
+		if e.Answered == 0 {
+			continue
+		}
+		if out.Answered == 0 {
+			out = Estimate{Kind: e.Kind, Value: e.Value, Lo: e.Lo, HasLo: e.HasLo, Hi: e.Hi}
+		} else if e.Kind != out.Kind {
+			panic(fmt.Sprintf("evidence: the most of a %+v estimate and a %+v one", out.Kind, e.Kind))
+		}
+		out.Value = max(out.Value, e.Value)
+		if e.HasLo && (!out.HasLo || e.Lo > out.Lo) {
+			out.Lo, out.HasLo = e.Lo, true
+		}
+		allHi = allHi && e.HasHi
+		if e.HasHi {
+			out.Hi = max(out.Hi, e.Hi)
+		}
+		out.Answered += e.Answered
+		out.Sent += e.Sent
+		if e.Newest.After(out.Newest) {
+			out.Newest = e.Newest
+		}
+	}
+	if out.HasHi = out.Answered > 0 && allHi; !out.HasHi {
+		out.Hi = 0
+	}
+	if !out.HasLo {
+		out.Lo = 0
+	}
+	return out
+}
+
+// Sum returns the estimate of the sum of the round trips the estimates
+// read: the values' sum; the lower bounds' sum wherever any estimate gives
+// one, a missing one counting zero, for no round trip is shorter; the upper
+// bounds' sum, which needs every estimate's; the samples answered and sent
+// of the estimate resting on fewest; and the stalest estimate's newest
+// answered sample. An estimate without an answered sample leaves the zero
+// estimate, as does none. Estimates of different kinds are a caller's
+// mistake.
+func Sum(es ...Estimate) Estimate {
+	if len(es) == 0 {
+		return Estimate{}
+	}
+	out := Estimate{Kind: es[0].Kind, HasHi: true, Answered: es[0].Answered, Sent: es[0].Sent,
+		Newest: es[0].Newest}
+	for _, e := range es {
+		if e.Answered == 0 {
+			return Estimate{}
+		}
+		if e.Kind != out.Kind {
+			panic(fmt.Sprintf("evidence: the sum of a %+v estimate and a %+v one", out.Kind, e.Kind))
+		}
+		out.Value += e.Value
+		if e.HasLo {
+			out.Lo, out.HasLo = out.Lo+e.Lo, true
+		}
+		if out.HasHi = out.HasHi && e.HasHi; out.HasHi {
+			out.Hi += e.Hi
+		}
+		out.Answered = min(out.Answered, e.Answered)
+		out.Sent = min(out.Sent, e.Sent)
+		if e.Newest.Before(out.Newest) {
+			out.Newest = e.Newest
+		}
+	}
+	if !out.HasHi {
+		out.Hi = 0
+	}
+	return out
+}
+
+// Published returns the estimate a published value and its bounds state,
+// for a reader that holds the values and not the samples they rest on: the
+// value, each bound given, a zero one giving none, and one answered sample,
+// sent when the reader does not know, standing for the publisher's. A zero
+// value states nothing.
+func Published(k Kind, value, lo, hi time.Duration) Estimate {
+	if value == 0 {
+		return Estimate{}
+	}
+	return Estimate{Kind: k, Value: value, Lo: lo, Hi: hi, HasLo: lo > 0, HasHi: hi > 0, Answered: 1, Sent: 1}
+}
+
 // Quantile returns the q-quantile of the sorted round trips by nearest rank:
 // the first that at least a q share of them lie at or below. Zero for none.
 func Quantile(sorted []time.Duration, q float64) time.Duration {

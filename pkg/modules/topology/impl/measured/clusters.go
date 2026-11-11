@@ -6,11 +6,12 @@ import (
 	"time"
 
 	"github.com/scionproto/scion/pkg/addr"
+
+	"github.com/fancl20/cion/pkg/libs/evidence"
 )
 
-// The clusters of nearby nodes. Every node computes them from the round
-// trips and bounds the directory publishes, so nodes holding the same
-// entries agree. A node names the cluster it joined in its entries; the
+// The clusters of nearby nodes. Every node computes them from the estimates
+// the directory's reports state, so nodes holding the same entries agree. A node names the cluster it joined in its entries; the
 // nodes naming one cluster form one unit, and every other node is a unit of
 // one. Members are each other's candidates; between two units, links run
 // only between the member pairs the round trips choose.
@@ -19,7 +20,7 @@ import (
 // reaches. Joined through their clusters' closest members, two nodes in
 // different clusters travel at most the two diameters beyond their round
 // trip, so at this gap the share stays within the line to buy on the
-// readings: no more than 1/PromotionRatio of the round trip.
+// reports: no more than 1/PromotionRatio of the round trip.
 const ClusterGap = 2 / (1/PromotionRatio - 1)
 
 // edge is a pair of nodes with the bound that orders it.
@@ -28,15 +29,13 @@ type edge struct {
 	w time.Duration
 }
 
-// naturalClusters returns the clusters the bounds confirm, each its members
-// ascending: the single-linkage dendrogram joins the pairs an upper bound
-// weighs, lightest first, ties to the lesser pair, and a dendrogram cluster
-// of two nodes or more, short of all, is natural when every pair inside it
-// has an upper bound and every node outside that a reading reaches has a
-// lower bound, the least of them at least ClusterGap times the greatest
-// upper bound inside. Of overlapping natural clusters, the one whose
-// separation is the greatest multiple of its diameter stands, ties to the
-// least member.
+// naturalClusters returns the clusters the reports confirm, each its
+// members ascending: the single-linkage dendrogram joins the pairs an upper
+// bound weighs, lightest first, ties to the lesser pair, and a dendrogram
+// cluster of two nodes or more, short of all, is natural when its diameter
+// beats its separation by clusterLine. Of overlapping natural clusters, the
+// one whose separation's lower bound is the greatest multiple of its
+// diameter's upper bound stands, ties to the least member.
 func naturalClusters(v *coordView) [][]addr.IA {
 	nodes := make([]addr.IA, 0, len(v.index))
 	for ia := range v.index {
@@ -44,9 +43,9 @@ func naturalClusters(v *coordView) [][]addr.IA {
 	}
 	slices.Sort(nodes)
 	var edges []edge
-	for p, h := range v.high {
-		if h > 0 {
-			edges = append(edges, edge{p: p, w: h})
+	for p, e := range v.rtts {
+		if e.HasHi {
+			edges = append(edges, edge{p: p, w: e.Hi})
 		}
 	}
 	slices.SortFunc(edges, func(a, b edge) int {
@@ -86,12 +85,12 @@ func naturalClusters(v *coordView) [][]addr.IA {
 		members[a] = joined
 		delete(members, b)
 		diameter, separation, ok := spread(v, joined)
-		if !ok || float64(separation) < ClusterGap*float64(diameter) {
+		if !ok || evidence.Beats(diameter, separation, clusterLine(diameter)) != evidence.Better {
 			continue
 		}
 		cands = append(cands, candidate{
 			members: slices.Clone(joined),
-			gap:     float64(separation) / float64(diameter),
+			gap:     float64(separation.Lo) / float64(diameter.Hi),
 		})
 	}
 	slices.SortStableFunc(cands, func(a, b candidate) int {
@@ -115,37 +114,37 @@ func naturalClusters(v *coordView) [][]addr.IA {
 	return out
 }
 
-// spread returns a node set's diameter, the greatest upper bound inside it,
-// and its separation, the least lower bound to a node outside, with whether
-// the bounds give both: every pair inside bounded above, and every pair to
-// a node outside that a reading weighs bounded below, at least one of them.
-func spread(v *coordView, set []addr.IA) (diameter, separation time.Duration, ok bool) {
+// clusterLine returns the line a cluster's diameter beats its separation
+// by: ClusterGap less one times the diameter's value.
+func clusterLine(diameter evidence.Estimate) time.Duration {
+	return time.Duration((ClusterGap - 1) * float64(diameter.Value))
+}
+
+// spread returns a node set's diameter, the most of the estimates of the
+// pairs inside it, and its separation, the least of those of the pairs from
+// it to the nodes outside that a report weighs, with whether the reports
+// weigh both: every pair inside, and at least one pair to a node outside.
+func spread(v *coordView, set []addr.IA) (diameter, separation evidence.Estimate, ok bool) {
 	inside := make(map[addr.IA]bool, len(set))
 	for _, ia := range set {
 		inside[ia] = true
 	}
+	var in, out []evidence.Estimate
 	for i, a := range set {
 		for _, b := range set[i+1:] {
-			h := v.high[pairOf(a, b)]
-			if h == 0 {
-				return 0, 0, false
+			e, ok := v.rtts[pairOf(a, b)]
+			if !ok {
+				return evidence.Estimate{}, evidence.Estimate{}, false
 			}
-			diameter = max(diameter, h)
+			in = append(in, e)
 		}
 	}
-	for p, w := range v.weight {
-		if w == 0 || inside[p.lo] == inside[p.hi] {
-			continue
-		}
-		l := v.low[p]
-		if l == 0 {
-			return 0, 0, false
-		}
-		if separation == 0 || l < separation {
-			separation = l
+	for p, e := range v.rtts {
+		if inside[p.lo] != inside[p.hi] {
+			out = append(out, e)
 		}
 	}
-	return diameter, separation, separation > 0 && diameter > 0
+	return evidence.Most(in...), evidence.Least(out...), len(in) > 0 && len(out) > 0
 }
 
 // units are the window's units: the nodes naming one cluster form one, and
@@ -246,16 +245,14 @@ func keptPair(v *coordView, xs, ys []addr.IA, skip map[addr.IA]bool) (pair, bool
 	return best, true
 }
 
-// outruns reports whether one pair's reading beats another's by the line to
-// buy both at the other's reading and at its lower bound: the history
-// confirms the other has not been that fast.
+// outruns reports whether one pair beats another by buyLine.
 func outruns(v *coordView, p, q pair) bool {
-	return violatesAt(v.weight[p], v.weight[q], true) && violatesAt(v.weight[p], v.low[q], true)
+	return evidence.Beats(v.rtts[p], v.rtts[q], buyLine(v.rtts[q])) == evidence.Better
 }
 
 // lightestPair returns the pair across two member sets that the lightest
-// reading weighs, ties to the lesser pair, neither end skipped, and linked
-// in the view where asked.
+// round trip weighs, ties to the lesser pair, neither end skipped, and
+// linked in the view where asked.
 func lightestPair(v *coordView, xs, ys []addr.IA, skip map[addr.IA]bool, linked bool) (pair, bool) {
 	var best pair
 	var bestW time.Duration
@@ -269,12 +266,12 @@ func lightestPair(v *coordView, xs, ys []addr.IA, skip map[addr.IA]bool, linked 
 				continue
 			}
 			p := pairOf(a, b)
-			w := v.weight[p]
-			if w == 0 || linked && !v.linked[p] {
+			e, ok := v.rtts[p]
+			if !ok || linked && !v.linked[p] {
 				continue
 			}
-			if !found || lighter(p, w, best, bestW) {
-				best, bestW, found = p, w, true
+			if !found || lighter(p, e.Value, best, bestW) {
+				best, bestW, found = p, e.Value, true
 			}
 		}
 	}
@@ -283,7 +280,7 @@ func lightestPair(v *coordView, xs, ys []addr.IA, skip map[addr.IA]bool, linked 
 
 // allowed reports whether a link between two nodes belongs to the
 // clustering: both in one unit, a chosen pair of their units — their own,
-// for two units of one — or any pair of two units no reading joins. A node
+// for two units of one — or any pair of two units no report joins. A node
 // the view does not hold is allowed everywhere.
 func (u *units) allowed(v *coordView, a, b addr.IA) bool {
 	x, ok := u.of[a]
@@ -306,95 +303,81 @@ func (u *units) joined(v *coordView, a, b addr.IA) bool {
 	return slices.ContainsFunc(u.chosen(v, x, y), func(p pair) bool { return v.linked[p] })
 }
 
-// predict returns the round trip between two nodes in different units
-// through their units' closest members, the lightest pair between them by
-// reading, each hop at the weight given — a hop from a node to itself weighs
-// nothing — and whether every hop is weighed.
-func (u *units) predict(v *coordView, a, b addr.IA, weigh func(pair) time.Duration) (time.Duration, bool) {
+// predict returns the estimate of the round trip between two nodes in
+// different units through their units' closest members, the lightest pair
+// between them by round trip: the sum of its hops' estimates — a hop from a
+// node to itself weighs nothing — and whether a report weighs every hop.
+func (u *units) predict(v *coordView, a, b addr.IA) (evidence.Estimate, bool) {
 	closest, ok := lightestPair(v, u.members[u.of[a]], u.members[u.of[b]], nil, false)
 	if !ok {
-		return 0, false
+		return evidence.Estimate{}, false
 	}
 	near, far := closest.lo, closest.hi
 	if u.of[near] != u.of[a] {
 		near, far = far, near
 	}
-	var total time.Duration
+	var hops []evidence.Estimate
 	for _, hop := range [][2]addr.IA{{a, near}, {near, far}, {far, b}} {
 		if hop[0] == hop[1] {
 			continue
 		}
-		w := weigh(pairOf(hop[0], hop[1]))
-		if w == 0 {
-			return 0, false
+		e, ok := v.rtts[pairOf(hop[0], hop[1])]
+		if !ok {
+			return evidence.Estimate{}, false
 		}
-		total += w
+		hops = append(hops, e)
 	}
-	return total, true
+	return evidence.Sum(hops...), true
 }
 
-// withinBudget reports whether a round trip through the clusters stays
-// within the line to buy on the readings of the direct round trip: a direct
-// round trip that beats it by PromotionRatio and MarginFloor would buy a
-// link.
-func withinBudget(through, direct time.Duration) bool {
-	return !violatesAt(direct, through, true)
-}
-
-// broken reports whether the history confirms that the unit breaks the
-// budget for a pair across its edge: the readings' prediction beyond the
-// budget of the direct reading, and the prediction at lower bounds beyond
-// the budget of the direct upper bound.
-func (u *units) broken(v *coordView, unit int) bool {
-	reading := func(p pair) time.Duration { return v.weight[p] }
-	low := func(p pair) time.Duration { return v.low[p] }
+// broken returns the first pair across the unit's edge whose direct round
+// trip beats the round trip through the clusters by buyLine, beside the
+// two estimates weighed: the unit breaks the budget for it. False when no
+// pair breaks it.
+func (u *units) broken(v *coordView, unit int) (direct, through evidence.Estimate, ok bool) {
 	for _, a := range u.members[unit] {
 		for b, y := range u.of {
 			if y == unit {
 				continue
 			}
-			p := pairOf(a, b)
-			direct, high := v.weight[p], v.high[p]
-			if direct == 0 || high == 0 {
+			direct, ok := v.rtts[pairOf(a, b)]
+			if !ok {
 				continue
 			}
-			through, ok := u.predict(v, a, b, reading)
-			if !ok || withinBudget(through, direct) {
-				continue
-			}
-			if floor, ok := u.predict(v, a, b, low); ok && !withinBudget(floor, high) {
-				return true
+			through, ok := u.predict(v, a, b)
+			if ok && evidence.Beats(direct, through, buyLine(through)) == evidence.Better {
+				return direct, through, true
 			}
 		}
 	}
-	return false
+	return evidence.Estimate{}, evidence.Estimate{}, false
 }
 
-// joinCluster returns the cluster the node names this window, beside why:
-// the natural cluster holding it, named as an existing member names it
-// where every node naming that cluster lies inside, else by its least
-// ISD-AS; otherwise the cluster it named, while another node names it too
-// and the history confirms no break of the budget; otherwise none, for its
-// unit fell below two members or its history confirms a break.
-func joinCluster(v *coordView, self, named addr.IA) (addr.IA, string) {
+// joinCluster returns the cluster the node names this window, beside the
+// verdict that names it: the natural cluster holding it, named as an
+// existing member names it where every node naming that cluster lies
+// inside, else by its least ISD-AS; otherwise the cluster it named, while
+// another node names it too and no pair across the unit's edge breaks the
+// budget; otherwise none, for its unit fell below two members or a pair
+// broke the budget.
+func joinCluster(v *coordView, self, named addr.IA) (addr.IA, verdict) {
 	for _, c := range naturalClusters(v) {
 		if slices.Contains(c, self) {
-			return clusterName(v, c, self, named), "a natural cluster holds the node"
+			return clusterName(v, c, self, named), naturalVerdict(v, c)
 		}
 	}
 	if named == 0 {
-		return 0, ""
+		return 0, verdict{}
 	}
 	u := newUnits(v, self, named)
 	unit := u.of[self]
-	switch {
-	case len(u.members[unit]) < 2:
-		return 0, "its unit fell below two members"
-	case u.broken(v, unit):
-		return 0, "its history confirms a break of the budget"
-	default:
-		return named, "its unit holds"
+	if len(u.members[unit]) < 2 {
+		return 0, verdict{why: "its unit fell below two members"}
 	}
+	if direct, through, ok := u.broken(v, unit); ok {
+		return 0, brokenVerdict(direct, through)
+	}
+	return named, verdict{why: "its unit holds"}
 }
 
 // clusterName returns the name a natural cluster takes: the least name one

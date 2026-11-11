@@ -128,3 +128,32 @@ func uselessWeighed(t *tier, ia addr.IA, sm sample) []evidence.Weighed {
 	}
 	return weighed
 }
+
+// naturalVerdict returns the verdict of a node the natural cluster holds:
+// the cluster's line, and its diameter and separation weighed.
+func naturalVerdict(v *coordView, c []addr.IA) verdict {
+	diameter, separation, _ := spread(v, c)
+	return verdict{
+		why:  "a natural cluster holds the node",
+		line: clusterLine(diameter),
+		weighed: []evidence.Weighed{
+			{Name: "diameter", Estimate: diameter},
+			{Name: "separation", Estimate: separation},
+		},
+	}
+}
+
+// brokenVerdict returns the verdict of a node whose unit breaks the budget
+// for a pair across its edge: the line to buy against the round trip
+// through the clusters, and the pair's direct round trip and that round
+// trip weighed.
+func brokenVerdict(direct, through evidence.Estimate) verdict {
+	return verdict{
+		why:  "a pair across its unit's edge breaks the budget",
+		line: buyLine(through),
+		weighed: []evidence.Weighed{
+			{Name: "direct", Estimate: direct},
+			{Name: "through", Estimate: through},
+		},
+	}
+}

@@ -220,6 +220,110 @@ func TestMinus(t *testing.T) {
 	price.Minus(Estimate{Kind: other, Value: ms, Answered: 1, Sent: 1})
 }
 
+// TestMost checks the most of estimates: the most value, the most lower
+// bound of those giving one, the most upper bound only with every one, the
+// samples across them, and the newest; an unanswered estimate takes no part,
+// and estimates of different kinds panic.
+func TestMost(t *testing.T) {
+	now := time.Now()
+	a := Estimate{Kind: median, Value: 20 * ms, Lo: 18 * ms, Hi: 30 * ms, HasLo: true, HasHi: true,
+		Answered: 5, Sent: 6, Newest: now.Add(-time.Second)}
+	b := Estimate{Kind: median, Value: 15 * ms, Lo: 12 * ms, Hi: 40 * ms, HasLo: true, HasHi: true,
+		Answered: 7, Sent: 7, Newest: now}
+	thin := Estimate{Kind: median, Value: 25 * ms, Lo: 19 * ms, HasLo: true, Answered: 2, Sent: 2,
+		Newest: now.Add(-time.Minute)}
+	silent := Estimate{Kind: median, Sent: 3}
+	for _, tc := range []struct {
+		name string
+		es   []Estimate
+		want Estimate
+	}{
+		{"none", nil, Estimate{}},
+		{"one", []Estimate{a}, a},
+		{"two bounded", []Estimate{a, b}, Estimate{Kind: median, Value: 20 * ms, Lo: 18 * ms, Hi: 40 * ms,
+			HasLo: true, HasHi: true, Answered: 12, Sent: 13, Newest: now}},
+		{"one without an upper bound", []Estimate{a, thin}, Estimate{Kind: median, Value: 25 * ms,
+			Lo: 19 * ms, HasLo: true, Answered: 7, Sent: 8, Newest: now.Add(-time.Second)}},
+		{"one unanswered", []Estimate{silent, a}, a},
+		{"none answered", []Estimate{silent}, Estimate{}},
+	} {
+		if diff := cmp.Diff(tc.want, Most(tc.es...)); diff != "" {
+			t.Errorf("%s: Most (-want +got):\n%s", tc.name, diff)
+		}
+	}
+	defer func() {
+		if recover() == nil {
+			t.Error("the most of estimates of different kinds did not panic")
+		}
+	}()
+	other := median
+	other.Quantile = 0.8
+	Most(a, Estimate{Kind: other, Value: ms, Answered: 1, Sent: 1})
+}
+
+// TestSum checks a sum of estimates: the values' sum, the lower bounds' sum
+// wherever one stands, a missing one counting zero, the upper bounds' sum
+// only with every one, the samples of the estimate resting on fewest, the
+// stalest newest; an unanswered estimate leaves nothing, and estimates of
+// different kinds panic.
+func TestSum(t *testing.T) {
+	now := time.Now()
+	a := Estimate{Kind: median, Value: 20 * ms, Lo: 18 * ms, Hi: 30 * ms, HasLo: true, HasHi: true,
+		Answered: 5, Sent: 6, Newest: now.Add(-time.Second)}
+	b := Estimate{Kind: median, Value: 15 * ms, Lo: 12 * ms, Hi: 40 * ms, HasLo: true, HasHi: true,
+		Answered: 7, Sent: 7, Newest: now}
+	thin := Estimate{Kind: median, Value: 10 * ms, Answered: 1, Sent: 2, Newest: now.Add(-time.Minute)}
+	for _, tc := range []struct {
+		name string
+		es   []Estimate
+		want Estimate
+	}{
+		{"none", nil, Estimate{}},
+		{"one", []Estimate{a}, a},
+		{"two bounded", []Estimate{a, b}, Estimate{Kind: median, Value: 35 * ms, Lo: 30 * ms, Hi: 70 * ms,
+			HasLo: true, HasHi: true, Answered: 5, Sent: 6, Newest: now.Add(-time.Second)}},
+		{"one without bounds", []Estimate{a, thin}, Estimate{Kind: median, Value: 30 * ms, Lo: 18 * ms,
+			HasLo: true, Answered: 1, Sent: 2, Newest: now.Add(-time.Minute)}},
+		{"none bounded", []Estimate{thin, thin}, Estimate{Kind: median, Value: 20 * ms, Answered: 1, Sent: 2,
+			Newest: now.Add(-time.Minute)}},
+		{"one unanswered", []Estimate{a, {Kind: median, Sent: 3}}, Estimate{}},
+	} {
+		if diff := cmp.Diff(tc.want, Sum(tc.es...)); diff != "" {
+			t.Errorf("%s: Sum (-want +got):\n%s", tc.name, diff)
+		}
+	}
+	defer func() {
+		if recover() == nil {
+			t.Error("the sum of estimates of different kinds did not panic")
+		}
+	}()
+	other := median
+	other.Quantile = 0.8
+	Sum(a, Estimate{Kind: other, Value: ms, Answered: 1, Sent: 1})
+}
+
+// TestPublished checks a published estimate: the value and each bound
+// given, a zero bound giving none, and one answered sample; a zero value
+// states nothing.
+func TestPublished(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		value, lo, hi time.Duration
+		want          Estimate
+	}{
+		{"bounded", 20 * ms, 18 * ms, 25 * ms, Estimate{Kind: median, Value: 20 * ms, Lo: 18 * ms,
+			Hi: 25 * ms, HasLo: true, HasHi: true, Answered: 1, Sent: 1}},
+		{"bounded below", 20 * ms, 18 * ms, 0, Estimate{Kind: median, Value: 20 * ms, Lo: 18 * ms,
+			HasLo: true, Answered: 1, Sent: 1}},
+		{"unbounded", 20 * ms, 0, 0, Estimate{Kind: median, Value: 20 * ms, Answered: 1, Sent: 1}},
+		{"no value", 0, 18 * ms, 25 * ms, Estimate{}},
+	} {
+		if diff := cmp.Diff(tc.want, Published(median, tc.value, tc.lo, tc.hi)); diff != "" {
+			t.Errorf("%s: Published (-want +got):\n%s", tc.name, diff)
+		}
+	}
+}
+
 // TestBeats checks a comparison's verdicts at their edges, undecided where a
 // bound is missing.
 func TestBeats(t *testing.T) {

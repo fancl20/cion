@@ -1399,6 +1399,27 @@ func TestSelectionReportsTheClusterAndBounds(t *testing.T) {
 	}
 }
 
+// TestSelectionReportsTheBoundsEstimate checks what a report states: the
+// direct side's bounds estimate, over its last samples within the bounds'
+// span, not the reading over the shorter one.
+func TestSelectionReportsTheBoundsEstimate(t *testing.T) {
+	ms := time.Millisecond
+	f := newSelFixture(t, selPeer, selA)
+	f.historic = true
+	by := instrument{ia: selPeer, ifID: f.ifID(t, selPeer)}
+	// Twenty samples at 10ms ten minutes ago, past the reading's span and
+	// within the bounds'; the window's probe answers at 20ms.
+	f.sel.history = map[instrument][]heard{
+		by: slices.Repeat([]heard{{at: time.Now().Add(-10 * time.Minute), rtt: 10 * ms}}, 20),
+	}
+	f.sel.last = map[addr.IA]instrument{selPeer: by}
+	f.samples[selPeer] = sm(20 * ms)
+	f.pass(t)
+	if r, _ := f.reported(selPeer); r.RTT != 10*ms {
+		t.Errorf("reported %v, want the bounds' 80th percentile of the twenty-one, 10ms", r.RTT)
+	}
+}
+
 // TestSelectionFloorPrefersChosenPairs checks the floor: below it, the
 // fastest candidate the clustering allows goes first, D before the faster
 // A; with no such candidate reachable, any reachable one.

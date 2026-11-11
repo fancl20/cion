@@ -15,6 +15,7 @@ import (
 	spath "github.com/scionproto/scion/pkg/slayers/path/scion"
 
 	"github.com/fancl20/cion/pkg/libs/bus"
+	"github.com/fancl20/cion/pkg/libs/evidence"
 	"github.com/fancl20/cion/pkg/libs/segment"
 	"github.com/fancl20/cion/pkg/modules/links"
 	"github.com/fancl20/cion/pkg/modules/pathdb"
@@ -1681,5 +1682,22 @@ func TestBoundsEstimate(t *testing.T) {
 	if e := BoundsEstimate(samples, now); e.Lo != 20*ms || e.Hi != 28*ms || e.Answered != BoundSamples {
 		t.Errorf("ninety round trips: bounds %v, %v over %d, want 20ms, 28ms over the last %d",
 			e.Lo, e.Hi, e.Answered, BoundSamples)
+	}
+}
+
+// TestPublishedEstimate checks the estimate a published round trip states:
+// the values published, of the bounds' own kind, so that it weighs against
+// a bounds estimate read from samples.
+func TestPublishedEstimate(t *testing.T) {
+	ms := time.Millisecond
+	now := time.Now()
+	got := PublishedEstimate(20*ms, 18*ms, 25*ms)
+	want := evidence.Published(BoundsEstimate(nil, now).Kind, 20*ms, 18*ms, 25*ms)
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("PublishedEstimate (-want +got):\n%s", diff)
+	}
+	measured := BoundsEstimate(heardAt(now, slices.Repeat([]time.Duration{10 * ms}, 30)), now)
+	if v := evidence.Beats(measured, got, 0); v != evidence.Better {
+		t.Errorf("a measured 10ms against a published 20ms: %v, want better", v)
 	}
 }

@@ -156,3 +156,35 @@ cleared `ClusterGap` upper bounds.
 *   **The labs.** The labs pass, and the benchmarks run against the commit
     before: the settled labs, the cuts, the delay changes, the jitter and
     loss sweeps, and the bursts.
+
+## Implementation history
+
+*   **The paths.** The cheapest published path between two nodes comes of
+    three walks over the linked pairs, of the values, the lower bounds, and
+    the upper bounds, each the least over its own paths as `evidence.Least`
+    has them: folding the estimates through `Least` and `Sum` would count a
+    pair's sample once for every path through it.
+*   **A published estimate** stands for its publisher's with one answered
+    sample and states no instant, for nothing that weighs a report holds it.
+*   **A ratio's line** is computed at the value of the estimate it scales:
+    the promotion ratio's share of the path's value, at least the margin
+    floor, and `ClusterGap` less one diameters at the diameter's value.
+*   **The coordination's tests** report every round trip bounded a
+    twentieth around it; a report without bounds decides nothing.
+*   `architecture.md` names the clusters and the waits among the decisions
+    the library takes.
+*   Mutations: 24 of 24 killed. The first run let four live: a pair
+    undecided against its path waiting on a lighter pair, a path across a
+    pair without an upper bound given one, a cluster missing a pair inside
+    weighed on the rest, and the reports at the reading. `TestWaitsToPromote`,
+    `TestCoordViewReadsReports`, `TestNaturalClusters`, and
+    `TestSelectionReportsTheBoundsEstimate` now hold each.
+*   The pipeline passed.
+*   Benchmarks against the commit before, interleaved, one run each: the
+    settled labs reached every pair, their links within three (regions 31
+    against 30, the ring 44 against 47); the regions loss sweep churned more
+    at 20% and 50% loss (35 and 39 link changes against 10 and 0) and left
+    two levels unsettled against none, the stranded lab's as before; the
+    regions jitter runs changed 2 and 20 links against 18 and 8, one pair at
+    1.30 while eight landed at 10ms; the regions cut's restore as the commit
+    before's.

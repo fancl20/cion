@@ -10,6 +10,8 @@ import (
 	"github.com/scionproto/scion/pkg/addr"
 
 	"github.com/fancl20/cion/pkg/libs/bus"
+	"github.com/fancl20/cion/pkg/libs/evidence"
+	"github.com/fancl20/cion/pkg/libs/scion"
 )
 
 // clNodes are the nodes of the clusters' tests, ascending.
@@ -105,9 +107,11 @@ func TestClusterGap(t *testing.T) {
 }
 
 // TestNaturalClusters checks the natural clusters: two metros apart by far
-// more than the gap; one at the gap on its bounds, and one a microsecond
-// short of it; a missing bound inside, or to a node outside a reading
-// weighs; the most separated of nested clusters; and an even spread.
+// more than the gap; one whose separation's lower bound lies at its
+// diameter's upper bound beside seven diameters at its value, and one a
+// microsecond short of it; a missing bound inside, or to a node outside a
+// report weighs, and a pair inside no report weighs; the most separated of
+// nested clusters; and an even spread.
 func TestNaturalClusters(t *testing.T) {
 	ms := time.Millisecond
 	atGap := func(short time.Duration) []clPair {
@@ -125,6 +129,7 @@ func TestNaturalClusters(t *testing.T) {
 			noLow[i].low = 0
 		}
 	}
+	unweighed := slices.DeleteFunc(clMetros(), func(p clPair) bool { return p.a == 0 && p.b == 1 })
 	// Nodes 0 and 1 sit apart by the inner round trip inside the metro 0
 	// to 2, 6ms across, and the other metro sits the outer round trip away.
 	nested := func(inner, outer time.Duration) []clPair {
@@ -153,6 +158,7 @@ func TestNaturalClusters(t *testing.T) {
 		{"short of the gap", atGap(time.Microsecond), nil},
 		{"a missing upper bound inside", noHigh, [][]addr.IA{clIAs(3, 4, 5)}},
 		{"a missing lower bound outside", noLow, nil},
+		{"a pair inside no report weighs", unweighed, [][]addr.IA{clIAs(3, 4, 5)}},
 		{"nested, the metro standing out", nested(ms/2, 100*ms), [][]addr.IA{clIAs(0, 1, 2), clIAs(3, 4, 5)}},
 		{"nested, the pair standing out", nested(ms/5, 60*ms), [][]addr.IA{clIAs(0, 1), clIAs(3, 4, 5)}},
 		{"an even spread", even, nil},
@@ -222,9 +228,10 @@ func TestChosenPairs(t *testing.T) {
 }
 
 // TestChosenPairsKeepTheirLinks checks the line to buy between pairs: in
-// either place, a linked pair stays chosen until the lightest pair's reading
-// beats it by the line to buy at its reading and at its lower bound, and
-// gives way once it does; neither alone moves it, nor a missing lower bound.
+// either place, a linked pair stays chosen until the lightest pair beats it
+// by the line to buy, the lightest pair's upper bound against the linked
+// pair's lower bound, and gives way once it does; the value alone moves
+// nothing, nor a missing bound.
 func TestChosenPairsKeepTheirLinks(t *testing.T) {
 	ms := time.Millisecond
 	// Across the clusters, pair a-b weighs 40+a+b ms, bounded a twentieth
@@ -249,6 +256,12 @@ func TestChosenPairsKeepTheirLinks(t *testing.T) {
 		return pairs
 	}
 	p := func(a, b int) pair { return pairOf(clNodes[a], clNodes[b]) }
+	unbounded := mesh(80*ms, 76*ms, [2]int{2, 5})
+	for i, q := range unbounded {
+		if q.a == 0 && q.b == 3 {
+			unbounded[i].high = 0
+		}
+	}
 	for _, tc := range []struct {
 		name  string
 		pairs []clPair
@@ -257,12 +270,12 @@ func TestChosenPairsKeepTheirLinks(t *testing.T) {
 		{"none linked", mesh(47*ms, 45*ms), []pair{p(0, 3), p(1, 4)}},
 		{"a linked pair within the line", mesh(47*ms, 45*ms, [2]int{2, 5}), []pair{p(2, 5), p(0, 3)}},
 		{"a linked pair beyond it", mesh(80*ms, 76*ms, [2]int{2, 5}), []pair{p(0, 3), p(1, 4)}},
-		{"beyond it at its reading alone", mesh(80*ms, 40*ms, [2]int{2, 5}), []pair{p(2, 5), p(0, 3)}},
-		{"beyond it at its lower bound alone", mesh(50*ms, 60*ms, [2]int{2, 5}), []pair{p(2, 5), p(0, 3)}},
+		{"beyond it at its value alone", mesh(80*ms, 40*ms, [2]int{2, 5}), []pair{p(2, 5), p(0, 3)}},
 		{"a linked pair without a lower bound", mesh(80*ms, 0, [2]int{2, 5}), []pair{p(2, 5), p(0, 3)}},
+		{"the lightest pair without an upper bound", unbounded, []pair{p(2, 5), p(0, 3)}},
 		{"the second within the line", mesh(47*ms, 45*ms, [2]int{0, 3}, [2]int{2, 5}), []pair{p(0, 3), p(2, 5)}},
 		{"the second beyond it", mesh(80*ms, 76*ms, [2]int{0, 3}, [2]int{2, 5}), []pair{p(0, 3), p(1, 4)}},
-		{"the second beyond it at its reading alone", mesh(80*ms, 40*ms, [2]int{0, 3}, [2]int{2, 5}),
+		{"the second beyond it at its value alone", mesh(80*ms, 40*ms, [2]int{0, 3}, [2]int{2, 5}),
 			[]pair{p(0, 3), p(2, 5)}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -305,8 +318,8 @@ func TestAllowedLinks(t *testing.T) {
 }
 
 // TestPredict checks the prediction: through the closest members, whatever
-// pair the links keep, a hop from a node to itself weighing nothing, and
-// none where a reading misses.
+// pair the links keep, the sum of its hops' estimates, a hop from a node to
+// itself weighing nothing, and none where a report misses.
 func TestPredict(t *testing.T) {
 	ms := time.Millisecond
 	pairs := []clPair{
@@ -315,67 +328,52 @@ func TestPredict(t *testing.T) {
 	}
 	v := clView(pairs, map[int]int{0: 0, 1: 0, 2: 2, 3: 2})
 	u := newUnits(v, clNodes[0], clNodes[0])
-	reading := func(p pair) time.Duration { return v.weight[p] }
+	// tight is the sum of the round trips given, each bounded a twentieth
+	// around it.
+	tight := func(rtts ...time.Duration) evidence.Estimate {
+		var hops []evidence.Estimate
+		for _, rtt := range rtts {
+			hops = append(hops, scion.PublishedEstimate(rtt, rtt-rtt/20, rtt+rtt/20))
+		}
+		return evidence.Sum(hops...)
+	}
 	for _, tc := range []struct {
 		a, b int
-		want time.Duration
-		ok   bool
+		want evidence.Estimate
 	}{
-		{1, 3, 2*ms + 40*ms + 3*ms, true},
-		{0, 2, 40 * ms, true},
-		{1, 2, 42 * ms, true},
+		{1, 3, tight(2*ms, 40*ms, 3*ms)},
+		{0, 2, tight(40 * ms)},
+		{1, 2, tight(2*ms, 40*ms)},
 	} {
-		got, ok := u.predict(v, clNodes[tc.a], clNodes[tc.b], reading)
-		if got != tc.want || ok != tc.ok {
-			t.Errorf("predict(%d, %d) = %v, %v, want %v, %v", tc.a, tc.b, got, ok, tc.want, tc.ok)
+		got, ok := u.predict(v, clNodes[tc.a], clNodes[tc.b])
+		if diff := cmp.Diff(tc.want, got); !ok || diff != "" {
+			t.Errorf("predict(%d, %d) = %v (-want +got):\n%s", tc.a, tc.b, ok, diff)
 		}
 	}
 	kept := slices.Clone(pairs)
 	kept[4].linked = true // 0-3, chosen over 0-2 within the line to buy
 	kv := clView(kept, map[int]int{0: 0, 1: 0, 2: 2, 3: 2})
-	keptReading := func(p pair) time.Duration { return kv.weight[p] }
-	if got, _ := newUnits(kv, clNodes[0], clNodes[0]).predict(kv, clNodes[1], clNodes[2], keptReading); got != 42*ms {
-		t.Errorf("predict(1, 2) beside the linked 0-3 = %v, want 42ms", got)
+	if got, _ := newUnits(kv, clNodes[0], clNodes[0]).predict(kv, clNodes[1], clNodes[2]); got.Value != 42*ms {
+		t.Errorf("predict(1, 2) beside the linked 0-3 = %v, want 42ms", got.Value)
 	}
 	missing := clView(pairs[2:], map[int]int{0: 0, 1: 0, 2: 2, 3: 2})
-	missed := func(p pair) time.Duration { return missing.weight[p] }
-	if _, ok := newUnits(missing, clNodes[0], clNodes[0]).predict(missing, clNodes[1], clNodes[3], missed); ok {
-		t.Error("predicted a pair a reading misses")
-	}
-}
-
-// TestWithinBudget checks the budget at its edges: the line to buy on the
-// readings, and the margin floor.
-func TestWithinBudget(t *testing.T) {
-	ms := time.Millisecond
-	for _, tc := range []struct {
-		through, direct time.Duration
-		want            bool
-	}{
-		{25 * ms, 20 * ms, true},
-		{25*ms + time.Microsecond, 20 * ms, false},
-		{5*ms - time.Microsecond, 3 * ms, true}, // short of the margin floor
-		{5 * ms, 3 * ms, false},
-		{2500 * time.Microsecond, time.Millisecond, true},
-	} {
-		if got := withinBudget(tc.through, tc.direct); got != tc.want {
-			t.Errorf("withinBudget(%v, %v) = %v, want %v", tc.through, tc.direct, got, tc.want)
-		}
+	if _, ok := newUnits(missing, clNodes[0], clNodes[0]).predict(missing, clNodes[1], clNodes[3]); ok {
+		t.Error("predicted a pair a report misses")
 	}
 }
 
 // TestJoinCluster checks the cluster a node names, beside why: the natural
 // cluster holding it, by its least member or by the name its members use,
 // never a name a node outside uses; the cluster it named, while another node
-// names it and no break is confirmed; and none on a confirmed break, or when
-// no other node names it.
+// names it and no pair breaks the budget; and none once a pair breaks it,
+// or when no other node names it.
 func TestJoinCluster(t *testing.T) {
 	ms := time.Millisecond
 	// A pair 10ms apart and a node 20 and 21ms from it: no natural
-	// cluster. Through 0, node 1 reaches 2 at 30ms against 21ms direct:
-	// the readings break the budget. At the lower bounds, 28ms through 0
-	// breaks it against the direct reading but not against the direct
-	// upper bound, 30ms; confirmed, 29ms breaks it against 22ms.
+	// cluster. Through 0, node 1 reaches 2 at 30ms against 21ms direct,
+	// beyond the line to buy, 6ms, at the values; at the bounds, 28ms
+	// through 0 against the direct upper bound, 30ms, decides nothing.
+	// Confirmed, 29ms through 0 clears 22ms by the line.
 	broken := func(confirmed bool) []clPair {
 		ps := []clPair{
 			{a: 0, b: 1, rtt: 10 * ms, low: 9 * ms, high: 12 * ms},
@@ -387,19 +385,14 @@ func TestJoinCluster(t *testing.T) {
 		}
 		return ps
 	}
+	// The confirmed break, the direct round trip without an upper bound.
+	unbounded := broken(true)
+	unbounded[2].high = 0
 	// The same pair 3ms apart: 2 is reached through 0 within the budget.
 	holds := []clPair{
 		{a: 0, b: 1, rtt: 3 * ms, low: 2 * ms, high: 4 * ms},
 		{a: 0, b: 2, rtt: 21 * ms, low: 20 * ms, high: 22 * ms},
 		{a: 1, b: 2, rtt: 22 * ms, low: 21 * ms, high: 23 * ms},
-	}
-	// The pair just came 3ms apart, its history still slower: at the lower
-	// bounds, 28.5ms through 0 breaks the budget against 22ms, but the
-	// readings, 23ms against 22ms, no longer do.
-	recovered := []clPair{
-		{a: 0, b: 1, rtt: 3 * ms, low: 9 * ms, high: 10 * ms},
-		{a: 0, b: 2, rtt: 20 * ms, low: 19500 * time.Microsecond, high: 22 * ms},
-		{a: 1, b: 2, rtt: 22 * ms, low: 21 * ms, high: 22 * ms},
 	}
 	natural := "a natural cluster holds the node"
 	unitHolds := "its unit holds"
@@ -418,8 +411,9 @@ func TestJoinCluster(t *testing.T) {
 		{"kept while the budget holds", holds, map[int]int{0: 0}, 1, 0, 0, unitHolds},
 		{"alone", holds, nil, 1, 0, -1, "its unit fell below two members"},
 		{"a break the bounds do not confirm", broken(false), map[int]int{0: 0}, 1, 0, 0, unitHolds},
-		{"a break the readings no longer show", recovered, map[int]int{0: 0}, 1, 0, 0, unitHolds},
-		{"a confirmed break", broken(true), map[int]int{0: 0}, 1, 0, -1, "its history confirms a break of the budget"},
+		{"a break without the direct upper bound", unbounded, map[int]int{0: 0}, 1, 0, 0, unitHolds},
+		{"a confirmed break", broken(true), map[int]int{0: 0}, 1, 0, -1,
+			"a pair across its unit's edge breaks the budget"},
 		{"none named", holds, nil, 1, -1, -1, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -429,10 +423,51 @@ func TestJoinCluster(t *testing.T) {
 				}
 				return clNodes[i]
 			}
-			got, why := joinCluster(clView(tc.pairs, tc.names), clNodes[tc.self], ia(tc.named))
-			if got != ia(tc.want) || why != tc.why {
-				t.Errorf("joinCluster = %v, %q, want %v, %q", got, why, ia(tc.want), tc.why)
+			got, v := joinCluster(clView(tc.pairs, tc.names), clNodes[tc.self], ia(tc.named))
+			if got != ia(tc.want) || v.why != tc.why {
+				t.Errorf("joinCluster = %v, %q, want %v, %q", got, v.why, ia(tc.want), tc.why)
 			}
 		})
+	}
+}
+
+// TestJoinClusterWeighs checks what a cluster change weighs: a natural
+// cluster its diameter and separation beside its line, and a broken budget
+// the pair's direct round trip and the round trip through the clusters
+// beside the line to buy.
+func TestJoinClusterWeighs(t *testing.T) {
+	ms := time.Millisecond
+	_, natural := joinCluster(clView(clMetros(), nil), clNodes[1], 0)
+	two := scion.PublishedEstimate(2*ms, 2*ms-2*ms/20, 2*ms+2*ms/20)
+	forty := scion.PublishedEstimate(40*ms, 40*ms-2*ms, 40*ms+2*ms)
+	want := verdict{
+		why:  "a natural cluster holds the node",
+		line: 14 * ms,
+		weighed: []evidence.Weighed{
+			{Name: "diameter", Estimate: evidence.Most(two, two, two)},
+			{Name: "separation", Estimate: evidence.Least(slices.Repeat([]evidence.Estimate{forty}, 9)...)},
+		},
+	}
+	if diff := cmp.Diff(want, natural, cmp.AllowUnexported(verdict{})); diff != "" {
+		t.Errorf("natural cluster verdict (-want +got):\n%s", diff)
+	}
+	pairs := []clPair{
+		{a: 0, b: 1, rtt: 10 * ms, low: 9500 * time.Microsecond, high: 12 * ms},
+		{a: 0, b: 2, rtt: 20 * ms, low: 19500 * time.Microsecond, high: 22 * ms},
+		{a: 1, b: 2, rtt: 21 * ms, low: 19 * ms, high: 22 * ms},
+	}
+	_, broken := joinCluster(clView(pairs, map[int]int{0: 0}), clNodes[1], clNodes[0])
+	through := evidence.Sum(scion.PublishedEstimate(10*ms, 9500*time.Microsecond, 12*ms),
+		scion.PublishedEstimate(20*ms, 19500*time.Microsecond, 22*ms))
+	want = verdict{
+		why:  "a pair across its unit's edge breaks the budget",
+		line: 6 * ms,
+		weighed: []evidence.Weighed{
+			{Name: "direct", Estimate: scion.PublishedEstimate(21*ms, 19*ms, 22*ms)},
+			{Name: "through", Estimate: through},
+		},
+	}
+	if diff := cmp.Diff(want, broken, cmp.AllowUnexported(verdict{})); diff != "" {
+		t.Errorf("broken budget verdict (-want +got):\n%s", diff)
 	}
 }

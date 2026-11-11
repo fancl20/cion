@@ -445,7 +445,7 @@ func (s *selection) pass(ctx context.Context) {
 		if joined == 0 {
 			change = ClusterLeft
 		}
-		s.record(change, s.cfg.IA.String(), clusterLabel(s.cluster), clusterLabel(joined), verdict{why: why})
+		s.record(change, s.cfg.IA.String(), clusterLabel(s.cluster), clusterLabel(joined), why)
 		s.cluster = joined
 	}
 	v.units = newUnits(v, s.cfg.IA, s.cluster)
@@ -1635,10 +1635,11 @@ func (s *selection) withdrawRetirements(entries []*links.Link, kept map[addr.IA]
 
 // report publishes the window's reports, by directory: every peer the
 // window measured, under the directory its link joins — else the one whose
-// entry named the address the window probed — at the round trip last
-// reported unless the measurement moved past the step, beside the changes
-// the node announced there. The reports name no link: the provider names
-// each from the link state at the signing.
+// entry named the address the window probed — at its direct side's bounds
+// estimate, each of the value and the bounds the one last reported unless
+// the measurement moved past the step, beside the changes the node
+// announced there. The reports name no link: the provider names each from
+// the link state at the signing.
 func (s *selection) report(
 	directory bus.Directory,
 	peers []peer,
@@ -1663,7 +1664,7 @@ func (s *selection) report(
 		if sm.direct == 0 {
 			continue
 		}
-		r := bus.PeerReport{IA: ia, RTT: s.coord.reportRTT(ia, sm.direct), Promoting: ia == s.coord.promote}
+		r := bus.PeerReport{IA: ia, RTT: s.coord.reportRTT(ia, sm.bounds.Value), Promoting: ia == s.coord.promote}
 		r.Low, r.High = s.coord.reportBounds(ia, sm.lo, sm.hi)
 		if a, ok := s.coord.retiring[ia]; ok {
 			r.Retiring, r.Relies = true, a.relies
