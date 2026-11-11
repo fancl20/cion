@@ -364,11 +364,11 @@ func TestWithinBudget(t *testing.T) {
 	}
 }
 
-// TestJoinCluster checks the cluster a node names: the natural cluster
-// holding it, by its least member or by the name its members use, never a
-// name a node outside uses; the cluster it named, while another node names
-// it and no break is confirmed; and none on a confirmed break, or when no
-// other node names it.
+// TestJoinCluster checks the cluster a node names, beside why: the natural
+// cluster holding it, by its least member or by the name its members use,
+// never a name a node outside uses; the cluster it named, while another node
+// names it and no break is confirmed; and none on a confirmed break, or when
+// no other node names it.
 func TestJoinCluster(t *testing.T) {
 	ms := time.Millisecond
 	// A pair 10ms apart and a node 20 and 21ms from it: no natural
@@ -401,6 +401,8 @@ func TestJoinCluster(t *testing.T) {
 		{a: 0, b: 2, rtt: 20 * ms, low: 19500 * time.Microsecond, high: 22 * ms},
 		{a: 1, b: 2, rtt: 22 * ms, low: 21 * ms, high: 22 * ms},
 	}
+	natural := "a natural cluster holds the node"
+	unitHolds := "its unit holds"
 	for _, tc := range []struct {
 		name  string
 		pairs []clPair
@@ -408,15 +410,17 @@ func TestJoinCluster(t *testing.T) {
 		self  int
 		named int
 		want  int
+		why   string
 	}{
-		{"a fresh natural cluster", clMetros(), nil, 1, -1, 0},
-		{"its members' name", clMetros(), map[int]int{2: 2, 0: 2}, 1, -1, 2},
-		{"a name used outside", clMetros(), map[int]int{2: 2, 4: 2, 0: 0, 3: 0}, 1, -1, 1},
-		{"kept while the budget holds", holds, map[int]int{0: 0}, 1, 0, 0},
-		{"alone", holds, nil, 1, 0, -1},
-		{"a break the bounds do not confirm", broken(false), map[int]int{0: 0}, 1, 0, 0},
-		{"a break the readings no longer show", recovered, map[int]int{0: 0}, 1, 0, 0},
-		{"a confirmed break", broken(true), map[int]int{0: 0}, 1, 0, -1},
+		{"a fresh natural cluster", clMetros(), nil, 1, -1, 0, natural},
+		{"its members' name", clMetros(), map[int]int{2: 2, 0: 2}, 1, -1, 2, natural},
+		{"a name used outside", clMetros(), map[int]int{2: 2, 4: 2, 0: 0, 3: 0}, 1, -1, 1, natural},
+		{"kept while the budget holds", holds, map[int]int{0: 0}, 1, 0, 0, unitHolds},
+		{"alone", holds, nil, 1, 0, -1, "its unit fell below two members"},
+		{"a break the bounds do not confirm", broken(false), map[int]int{0: 0}, 1, 0, 0, unitHolds},
+		{"a break the readings no longer show", recovered, map[int]int{0: 0}, 1, 0, 0, unitHolds},
+		{"a confirmed break", broken(true), map[int]int{0: 0}, 1, 0, -1, "its history confirms a break of the budget"},
+		{"none named", holds, nil, 1, -1, -1, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ia := func(i int) addr.IA {
@@ -425,9 +429,9 @@ func TestJoinCluster(t *testing.T) {
 				}
 				return clNodes[i]
 			}
-			got := joinCluster(clView(tc.pairs, tc.names), clNodes[tc.self], ia(tc.named))
-			if got != ia(tc.want) {
-				t.Errorf("joinCluster = %v, want %v", got, ia(tc.want))
+			got, why := joinCluster(clView(tc.pairs, tc.names), clNodes[tc.self], ia(tc.named))
+			if got != ia(tc.want) || why != tc.why {
+				t.Errorf("joinCluster = %v, %q, want %v, %q", got, why, ia(tc.want), tc.why)
 			}
 		})
 	}

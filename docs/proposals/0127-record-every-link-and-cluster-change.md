@@ -121,3 +121,41 @@ lines read as records.
 *   **The labs.** The labs pass, and the benchmarks run against the commit
     before: the settled labs, the cuts, the delay changes, and the jitter
     sweeps, each as before.
+
+## Implementation history
+
+*   **The library's readings.** `scion.Reading` and `scion.ReadingBounds`,
+    which read bare round trips, give way to `ReadingEstimate` and
+    `BoundsEstimate`, which read samples, so the direct side and every
+    candidate take their estimates from one place. `scion.Band` is exported
+    for the records' lines.
+*   **The promotion's interface.** The establishment returns the entry it
+    seeded, so the record of a promotion names the interface the link took.
+*   **A peer in no tier.** A link whose useless count runs while the window
+    classes its peer into no tier is announced beside its direct side's
+    bounds alone.
+*   **The aggregates' routes.** The tiers' minima keep the route each comes
+    from, the first of the least, and skip a zero bound as before, so every
+    value the decisions read stands.
+*   `TestLineCutHeals` reads the journal: one end's promotion of the healing
+    link at the floor, and the dead link's retirement on its verdict.
+*   `architecture.md` names the links' and the cluster's changes among the
+    journal's.
+*   ADR-0040 stays `proposed`.
+*   Mutations: 46 of 46 killed. The first run let two live: a candidate's
+    reading estimate left unset, which the test checked only where set, and
+    the selection's journal left unwired, which no unit test reads.
+    `TestCandidateReading` now checks the probes each reading rests on, and
+    `TestLineCutHeals` the journal.
+*   The pipeline passed.
+*   Benchmarks against the commit before, interleaved, one run each: the
+    jitter sweeps held their worst pairs (regions 1.007 against 1.007 to
+    1.008, stranded at most 1.025 against 1.050, the ring 1.00) with no more
+    lease moves; the settled labs reached every pair, their links within one
+    of the commit before's, as reruns of both spread (metros 24 to 25
+    against 25 to 26, NAT 15 to 16 against 15 to 16, stranded 8 against 8
+    to 9); founder-down's survivors answered within 0.76 s; the cuts, the
+    delay raises, and the bursts recovered alike, their worst pairs within
+    0.03 of the commit before's or better, the regions cut's restore
+    settling in 150 s against 50 s on one link change more, as earlier runs
+    of the commit before spread from 50 s to 220 s.

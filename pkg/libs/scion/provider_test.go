@@ -1590,11 +1590,22 @@ func tableTopic(table map[uint16]addr.IA) *bus.Topic[bus.LinkState] {
 	return t
 }
 
-// TestReading checks the reading of round trips: their 80th percentile by
-// nearest rank — the highest of up to four, then one a fifth of the others
-// may exceed — zero for none, and the round trips left in their order.
-func TestReading(t *testing.T) {
+// heardAt returns samples answered at now, one per round trip, in order.
+func heardAt(now time.Time, rtts []time.Duration) []bus.PathSample {
+	samples := make([]bus.PathSample, len(rtts))
+	for i, rtt := range rtts {
+		samples[i] = bus.PathSample{At: now, RTT: rtt}
+	}
+	return samples
+}
+
+// TestReadingEstimate checks the reading of round trips: their 80th
+// percentile by nearest rank — the highest of up to four, then one a fifth
+// of the others may exceed — none for no round trip, and the samples left
+// in their order.
+func TestReadingEstimate(t *testing.T) {
 	ms := time.Millisecond
+	now := time.Now()
 	of := func(low, high int) []time.Duration {
 		return append(slices.Repeat([]time.Duration{30 * ms}, high), slices.Repeat([]time.Duration{10 * ms}, low)...)
 	}
@@ -1615,23 +1626,25 @@ func TestReading(t *testing.T) {
 		{"six high in thirty", of(24, 6), 10 * ms},
 		{"seven high in thirty", of(23, 7), 30 * ms},
 	} {
-		rtts := slices.Clone(tc.rtts)
-		if got := Reading(rtts); got != tc.want {
-			t.Errorf("%s: Reading = %v, want %v", tc.name, got, tc.want)
+		samples := heardAt(now, tc.rtts)
+		in := slices.Clone(samples)
+		if got := ReadingEstimate(samples, now); got.Value != tc.want || got.Answered != len(tc.rtts) {
+			t.Errorf("%s: reading %v over %d, want %v over %d", tc.name, got.Value, got.Answered, tc.want, len(tc.rtts))
 		}
-		if !slices.Equal(rtts, tc.rtts) {
-			t.Errorf("%s: Reading reordered the round trips to %v", tc.name, rtts)
+		if !slices.Equal(samples, in) {
+			t.Errorf("%s: the reading reordered the samples", tc.name)
 		}
 	}
 }
 
-// TestReadingBounds checks the bounds of the 80th percentile the round
+// TestBoundsEstimate checks the bounds of the 80th percentile the round
 // trips sample: the order statistics the binomial count reaches with
 // BoundConfidence, the lower from two round trips and the upper from
 // fourteen, a few ranks either side of the reading, in whatever order the
-// round trips come; zeros for none.
-func TestReadingBounds(t *testing.T) {
+// round trips come; none for too few.
+func TestBoundsEstimate(t *testing.T) {
 	ms := time.Millisecond
+	now := time.Now()
 	// ranks returns 1ms, 2ms, ... up to n, shuffled, so each bound names
 	// its rank.
 	ranks := func(n int) []time.Duration {
@@ -1654,13 +1667,15 @@ func TestReadingBounds(t *testing.T) {
 		{90, 66 * ms, 79 * ms},
 		{180, 135 * ms, 154 * ms},
 	} {
-		rtts := ranks(tc.n)
-		in := slices.Clone(rtts)
-		if lo, hi := ReadingBounds(rtts); lo != tc.lo || hi != tc.hi {
-			t.Errorf("%d round trips: ReadingBounds = %v, %v, want %v, %v", tc.n, lo, hi, tc.lo, tc.hi)
+		samples := heardAt(now, ranks(tc.n))
+		in := slices.Clone(samples)
+		e := BoundsEstimate(samples, now)
+		if e.HasLo != (tc.lo > 0) || e.Lo != tc.lo || e.HasHi != (tc.hi > 0) || e.Hi != tc.hi {
+			t.Errorf("%d round trips: bounds %v (%v), %v (%v), want %v, %v", tc.n, e.Lo, e.HasLo, e.Hi, e.HasHi,
+				tc.lo, tc.hi)
 		}
-		if !slices.Equal(rtts, in) {
-			t.Errorf("%d round trips: ReadingBounds reordered them", tc.n)
+		if !slices.Equal(samples, in) {
+			t.Errorf("%d round trips: the bounds reordered the samples", tc.n)
 		}
 	}
 }

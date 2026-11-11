@@ -107,7 +107,8 @@ run no loops of their own and hold no policy.
     read its last event
     ([ADR-0031](/docs/adrs/0031-publish-node-state-as-events-on-a-node-bus.md)).
     The bus also keeps a journal of the changes the node makes, such as a
-    lease's move, in order; the node logs each as one line.
+    lease's move, a link's promotion or retirement, or a change of the
+    cluster it joined, in order; the node logs each as one line.
 
 ### Modules
 

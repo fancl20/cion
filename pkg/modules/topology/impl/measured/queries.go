@@ -112,15 +112,17 @@ func edgeDisjoint(a, b *scion.Candidate) bool {
 
 // cheapest prices a set of routes by the cheapest of them, each at its cost:
 // the measured round trip raised by loss, else its declared one-way sum
-// doubled to meet the round trips it is judged against. A route with
-// neither prices nothing: an undeclared edge is unknown, not free. Zero when
-// nothing prices the set.
-func cheapest(routes []*scion.Candidate) time.Duration {
+// doubled to meet the round trips it is judged against, and returns that
+// route, the first of the cheapest. A route with neither prices nothing: an
+// undeclared edge is unknown, not free. Nil and zero when nothing prices the
+// set.
+func cheapest(routes []*scion.Candidate) (*scion.Candidate, time.Duration) {
+	var out *scion.Candidate
 	var price time.Duration
 	for _, c := range routes {
-		if c.Cost != nil {
-			price = lower(price, *c.Cost)
+		if c.Cost != nil && *c.Cost > 0 && (price == 0 || *c.Cost < price) {
+			out, price = c, *c.Cost
 		}
 	}
-	return price
+	return out, price
 }

@@ -382,7 +382,8 @@ func TestHealth(t *testing.T) {
 // cost: its record's reading over ReadingSpan, read once ReadingSamples of
 // its probes answered, else twice its declared one-way sum, never read —
 // while its health reads its last bus.PathSamples probes, and its cost those
-// of them within ReadingSpan.
+// of them within ReadingSpan — and the estimates its reading and its bounds
+// come from.
 func TestCandidateReading(t *testing.T) {
 	ms := time.Millisecond
 	probes := func(at time.Time, n int, rtt time.Duration, lost bool) []bus.PathSample {
@@ -400,6 +401,8 @@ func TestCandidateReading(t *testing.T) {
 		reading   time.Duration
 		read      bool
 		low, high time.Duration
+		// answered is the probes the reading's estimate rests on.
+		answered int
 	}{{
 		name:    "unmeasured",
 		health:  HealthUnknown,
@@ -410,10 +413,11 @@ func TestCandidateReading(t *testing.T) {
 		record: func(now time.Time) bus.PathRecord {
 			return answered(now.Add(-time.Minute), 10*ms, 10*ms, 10*ms, 10*ms)
 		},
-		health:  HealthHealthy,
-		cost:    10 * ms,
-		reading: 10 * ms,
-		low:     10 * ms, // too few for an upper bound
+		health:   HealthHealthy,
+		cost:     10 * ms,
+		reading:  10 * ms,
+		low:      10 * ms, // too few for an upper bound
+		answered: 4,
 	}, {
 		name: "answered lately",
 		record: func(now time.Time) bus.PathRecord {
@@ -421,10 +425,11 @@ func TestCandidateReading(t *testing.T) {
 			r.Samples = append(r.Samples, bus.PathSample{At: now, Lost: true})
 			return r
 		},
-		health:  HealthHealthy,
-		cost:    16 * ms, // the median 12ms over a delivery of three in four
-		reading: 40 * ms, // the highest of three, 30ms, over the same delivery
-		low:     40 * ms / 3,
+		health:   HealthHealthy,
+		cost:     16 * ms, // the median 12ms over a delivery of three in four
+		reading:  40 * ms, // the highest of three, 30ms, over the same delivery
+		low:      40 * ms / 3,
+		answered: 3,
 	}, {
 		name: "answered before the five minutes",
 		record: func(now time.Time) bus.PathRecord {
@@ -440,12 +445,13 @@ func TestCandidateReading(t *testing.T) {
 			samples := append(probes(now.Add(-4*time.Minute), 25, 50*ms, false), probes(last, 20, 10*ms, false)...)
 			return bus.PathRecord{Samples: samples, LastAnswer: last}
 		},
-		health:  HealthHealthy,
-		cost:    10 * ms,
-		reading: 50 * ms,
-		read:    true,
-		low:     50 * ms, // the 31st of 45, past the twenty fast ones
-		high:    50 * ms,
+		health:   HealthHealthy,
+		cost:     10 * ms,
+		reading:  50 * ms,
+		read:     true,
+		low:      50 * ms, // the 31st of 45, past the twenty fast ones
+		high:     50 * ms,
+		answered: 45,
 	}, {
 		name: "losses before the last probes",
 		record: func(now time.Time) bus.PathRecord {
@@ -455,11 +461,12 @@ func TestCandidateReading(t *testing.T) {
 			samples = append(samples, probes(last, 15, 0, true)...)
 			return bus.PathRecord{Samples: samples, LastAnswer: last}
 		},
-		health:  HealthHealthy, // three in four of its last probes lost
-		cost:    40 * ms,       // 10ms over a delivery of one in four
-		reading: 100 * ms,      // 10ms over the delivery of one in ten
-		read:    true,          // five answered
-		low:     100 * ms,
+		health:   HealthHealthy, // three in four of its last probes lost
+		cost:     40 * ms,       // 10ms over a delivery of one in four
+		reading:  100 * ms,      // 10ms over the delivery of one in ten
+		read:     true,          // five answered
+		low:      100 * ms,
+		answered: 5,
 	}} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newMeasuredFixture(t, time.Minute)
@@ -482,6 +489,14 @@ func TestCandidateReading(t *testing.T) {
 			}
 			if low, high := deref(c.Low), deref(c.High); low != tc.low || high != tc.high {
 				t.Errorf("bounds = %v, %v, want %v, %v", low, high, tc.low, tc.high)
+			}
+			if r := c.ReadingEvidence; r.Answered != tc.answered || tc.answered > 0 && r.Value != tc.reading {
+				t.Errorf("the reading's estimate %+v, want its value at %v over %d answered",
+					r, tc.reading, tc.answered)
+			}
+			if b := c.BoundsEvidence; b.HasLo != (tc.low > 0) || b.Lo != tc.low || b.HasHi != (tc.high > 0) ||
+				b.Hi != tc.high {
+				t.Errorf("the bounds' estimate %+v, want its bounds at %v, %v", b, tc.low, tc.high)
 			}
 		})
 	}

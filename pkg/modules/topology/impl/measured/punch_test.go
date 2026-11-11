@@ -540,7 +540,7 @@ func TestEstablishmentPunchesUnansweredCandidates(t *testing.T) {
 		ControlAddr:    netip.MustParseAddrPort("192.0.2.9:30042"),
 		RendezvousAddr: netip.MustParseAddrPort("192.0.2.9:30043"),
 		Reach:          bus.Reach{BehindNAT: true, RendezvousUnanswered: true}}
-	if !s.establishLink(context.Background(), e, "the test") {
+	if s.establishLink(context.Background(), e, "the test") == nil {
 		t.Fatal("the establishment failed")
 	}
 	if want := []addr.IA{selB}; !slices.Equal(punch.established, want) {
@@ -564,7 +564,7 @@ func TestEstablishmentPunchesUnansweredCandidates(t *testing.T) {
 	punch.reflexive = netip.AddrPort{}
 	other := e
 	other.IA = selA
-	if s.establishLink(context.Background(), other, "the test") {
+	if s.establishLink(context.Background(), other, "the test") != nil {
 		t.Error("an establishment whose punch failed landed")
 	}
 	if l, err := store.ByNeighbor(context.Background(), selA); err != nil || l == nil ||

@@ -207,31 +207,25 @@ const BoundConfidence = 0.95
 // readingQuantile is the quantile a reading reads.
 const readingQuantile = 0.8
 
-// Reading returns the reading of the round trips, what a measurement over
-// them reports: their 80th percentile by nearest rank, the round trip a
-// fifth of the others exceed and the highest of up to four; zero for none.
-// Up to a fifth of the round trips may stand high and the reading holds,
-// while no one low lowers it.
-func Reading(rtts []time.Duration) time.Duration {
-	return evidence.Quantile(slices.Sorted(slices.Values(rtts)), readingQuantile)
+// ReadingEstimate returns the reading the samples give at now, what a
+// measurement over them reports: the 80th percentile by nearest rank of
+// those within ReadingSpan, the round trip a fifth of the others exceed and
+// the highest of up to four, divided by their delivery rate, with its bounds
+// at BoundConfidence. Up to a fifth of the round trips may stand high and
+// the reading holds, while no one low lowers it.
+func ReadingEstimate(samples []bus.PathSample, now time.Time) evidence.Estimate {
+	return readingKind.Of(samples, now)
 }
 
-// ReadingBounds returns the bounds of the 80th percentile the round trips
-// sample, each with BoundConfidence: lo, the round trip it lies at or above,
-// and hi, the one it lies at or below. Each is the order statistic the count
-// of round trips below the percentile, binomial over them, reaches with that
-// confidence, so the bounds assume nothing of how the round trips spread. A
-// bound too few round trips give is zero: lo takes two, hi fourteen.
-func ReadingBounds(rtts []time.Duration) (lo, hi time.Duration) {
-	sorted := slices.Sorted(slices.Values(rtts))
-	l, h := evidence.BoundRanks(len(sorted), readingQuantile, BoundConfidence)
-	if l >= 0 {
-		lo = sorted[l]
-	}
-	if h >= 0 {
-		hi = sorted[h]
-	}
-	return lo, hi
+// BoundsEstimate returns the estimate a reading's bounds come from at now:
+// the 80th percentile of the samples within BoundSpan, divided by their
+// delivery rate, with its bounds at BoundConfidence. Each bound is the order
+// statistic the count of round trips below the percentile, binomial over
+// them, reaches with that confidence, so the bounds assume nothing of how
+// the round trips spread: the lower takes two answered samples, the upper
+// fourteen.
+func BoundsEstimate(samples []bus.PathSample, now time.Time) evidence.Estimate {
+	return boundKind.Of(samples, now)
 }
 
 // TransitPenalty is what each AS a path crosses between its ends adds to its
@@ -305,6 +299,10 @@ type Candidate struct {
 	// of the path's probes answered within BoundSpan, divided by their
 	// delivery rate; nil where the probes give none.
 	Low, High *time.Duration
+	// ReadingEvidence and BoundsEvidence are the estimates its reading and
+	// its bounds come from, as ReadingEstimate and BoundsEstimate read its
+	// probes; zero without a measurement.
+	ReadingEvidence, BoundsEvidence evidence.Estimate
 }
 
 // Price returns what the picks and the leases rank the path by: its cost

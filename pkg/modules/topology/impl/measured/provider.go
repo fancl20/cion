@@ -755,6 +755,7 @@ func (z *Provider) selectionConfig() SelectionConfig {
 		Punch:       z.puncher,
 		Stranded:    &z.stranded,
 		Report:      z.report,
+		Changes:     z.env.Bus.Changes(),
 		Interval:    z.cfg.Pacing.Selection,
 		Window:      z.cfg.Pacing.CandidateWindow,
 	}

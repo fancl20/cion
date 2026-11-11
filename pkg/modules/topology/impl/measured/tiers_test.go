@@ -147,6 +147,13 @@ func TestWindowTierFacts(t *testing.T) {
 	if diff := cmp.Diff(map[addr.IA]time.Duration{selA: 18 * time.Millisecond}, fast.lows); diff != "" {
 		t.Errorf("member lows (-want +got):\n%s", diff)
 	}
+	// Each price and bound keeps the route it comes from.
+	if fast.priceRoute != &a.candidates[0] || fast.priceRoutes[selA] != &a.candidates[0] ||
+		fast.lowRoute != &a.candidates[2] || fast.lowRoutes[selA] != &a.candidates[0] {
+		t.Errorf("the routes of the price, A's price, the low, and A's low = %p, %p, %p, %p, want %p, %p, %p, %p",
+			fast.priceRoute, fast.priceRoutes[selA], fast.lowRoute, fast.lowRoutes[selA],
+			&a.candidates[0], &a.candidates[0], &a.candidates[2], &a.candidates[0])
+	}
 	// The up link beside a clean route that avoids it: the declared route
 	// and C's clean route share no link with the up link.
 	if fast.routes != 2 {

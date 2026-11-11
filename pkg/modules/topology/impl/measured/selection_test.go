@@ -151,6 +151,7 @@ func newSelFixture(t *testing.T, neighbors ...addr.IA) *selFixture {
 			Store:       links.Notifying(f.store, func() { f.writes++ }),
 			Window:      time.Hour, // the candidate sweep never retires in these
 			ControlHost: netip.MustParseAddr("127.0.0.1"),
+			Changes:     new(bus.Journal[bus.Change]),
 		},
 		streaks: make(map[addr.IA]*peerStreak),
 		probeFn: func(_ context.Context, e target, _ *links.Link) sample {
@@ -160,14 +161,14 @@ func newSelFixture(t *testing.T, neighbors ...addr.IA) *selFixture {
 			sm.baseline = f.sel.freshest(sm.candidates)
 			return sm
 		},
-		establishFn: func(_ context.Context, e target, _ string) bool {
-			if err := f.store.Insert(context.Background(),
-				neighborLink(e.IA, links.StateEstablished)); err != nil {
+		establishFn: func(_ context.Context, e target, _ string) *links.Link {
+			l := neighborLink(e.IA, links.StateEstablished)
+			if err := f.store.Insert(context.Background(), l); err != nil {
 				t.Error(err)
-				return false
+				return nil
 			}
 			f.established = append(f.established, e.IA)
-			return true
+			return l
 		},
 	}
 	f.sel.cfg.Directory = f.directoryTopic
@@ -918,8 +919,10 @@ func TestSelectionRead(t *testing.T) {
 		{link, []time.Duration{20 * ms}, scion.BoundSpan + time.Nanosecond, 10 * ms,
 			slices.Concat([]time.Duration{10 * ms, 10 * ms, 9 * ms, 9 * ms}, ten, []time.Duration{20 * ms})},
 	} {
-		got, lo, hi := s.read(step.by, step.rtts, start.Add(step.after))
-		wantLo, wantHi := scion.ReadingBounds(step.bounded)
+		var sm sample
+		sm.readDirect(s.read(step.by, step.rtts, start.Add(step.after)))
+		got, lo, hi := sm.direct, sm.lo, sm.hi
+		wantLo, wantHi := readingBounds(step.bounded)
 		if got != step.want || lo != wantLo || hi != wantHi {
 			t.Errorf("step %d: read %v within %v..%v, want %v within %v..%v", i, got, lo, hi, step.want, wantLo, wantHi)
 		}
@@ -932,8 +935,8 @@ func TestSelectionRead(t *testing.T) {
 		t.Error("forgot the instrument with samples within the span")
 	}
 	later := start.Add(time.Hour)
-	if got, lo, hi := s.read(link, nil, later); got != 0 || lo != 0 || hi != 0 {
-		t.Errorf("an unanswered window past every sample read %v within %v..%v, want zeros", got, lo, hi)
+	if reading, bounds := s.read(link, nil, later); reading.Sent != 0 || bounds.Sent != 0 {
+		t.Errorf("an unanswered window past every sample read %+v and %+v, want none", reading, bounds)
 	}
 	if _, ok := s.history[link]; ok {
 		t.Error("kept the instrument whose samples all dropped out")
@@ -966,8 +969,8 @@ func TestSelectionReadCarriesThePeer(t *testing.T) {
 		{rendezvous, []time.Duration{5 * ms}, scion.ReadingSpan + 30*time.Second, 11 * ms},
 		{other, []time.Duration{50 * ms}, scion.ReadingSpan + 30*time.Second, 50 * ms},
 	} {
-		if got, _, _ := s.read(step.by, step.rtts, start.Add(step.after)); got != step.want {
-			t.Errorf("step %d: read %v, want %v", i, got, step.want)
+		if got, _ := s.read(step.by, step.rtts, start.Add(step.after)); got.Value != step.want {
+			t.Errorf("step %d: read %v, want %v", i, got.Value, step.want)
 		}
 	}
 	s.forget(start.Add(time.Hour))
@@ -1334,7 +1337,7 @@ func sparseFixture(t *testing.T, neighbors ...addr.IA) *selFixture {
 	f.candidate(selA, 18*time.Millisecond, 30*time.Millisecond)
 	f.candidate(selD, 9*time.Millisecond, 30*time.Millisecond)
 	f.clustered(false)
-	f.sel.establishFn = func(context.Context, target, string) bool { return false }
+	f.sel.establishFn = func(context.Context, target, string) *links.Link { return nil }
 	f.pass(t)
 	clear(f.probed)
 	return f
@@ -1439,6 +1442,24 @@ func TestSelectionProbesTheReserveAgain(t *testing.T) {
 	}
 }
 
+// readingBounds returns the bounds the round trips give, all heard now, zero
+// where they give none.
+func readingBounds(rtts []time.Duration) (lo, hi time.Duration) {
+	now := time.Now()
+	samples := make([]bus.PathSample, len(rtts))
+	for i, rtt := range rtts {
+		samples[i] = bus.PathSample{At: now, RTT: rtt}
+	}
+	e := scion.BoundsEstimate(samples, now)
+	if e.HasLo {
+		lo = e.Lo
+	}
+	if e.HasHi {
+		hi = e.Hi
+	}
+	return lo, hi
+}
+
 // TestSelectionHeldReadsTheHistory checks a candidate the window does not
 // probe: it reads at the 80th percentile of the round trips its last
 // instrument holds within scion.ReadingSpan, within the bounds of those
@@ -1461,7 +1482,7 @@ func TestSelectionHeldReadsTheHistory(t *testing.T) {
 	}
 	f.sel.last = map[addr.IA]instrument{selA: by}
 	got := f.sel.held(context.Background(), e)
-	wantLo, wantHi := scion.ReadingBounds(slices.Concat(
+	wantLo, wantHi := readingBounds(slices.Concat(
 		slices.Repeat([]time.Duration{30 * ms}, 10), slices.Repeat([]time.Duration{10 * ms}, 10)))
 	if got.direct != 10*ms || got.lo != wantLo || got.hi != wantHi {
 		t.Errorf("read A at %v within %v..%v, want 10ms within %v..%v", got.direct, got.lo, got.hi, wantLo, wantHi)
@@ -2221,7 +2242,7 @@ func TestSelectionStrandedFlag(t *testing.T) {
 	var stranded atomic.Bool
 	f.sel.cfg.Stranded = &stranded
 	// The establishments fail, so the windows below keep the table as set.
-	f.sel.establishFn = func(context.Context, target, string) bool { return false }
+	f.sel.establishFn = func(context.Context, target, string) *links.Link { return nil }
 
 	// At the floor, every directory peer a neighbor: no candidate answers,
 	// and still the node is not stranded.
@@ -2282,7 +2303,7 @@ func TestSelectionCapCountsCandidates(t *testing.T) {
 func TestSelectionCapRetryEvictsNothing(t *testing.T) {
 	f := capFixture(t)
 	attempts := 0
-	f.sel.establishFn = func(_ context.Context, e target, _ string) bool {
+	f.sel.establishFn = func(_ context.Context, e target, _ string) *links.Link {
 		attempts++
 		if !f.hasEntry(t, e.IA) {
 			if err := f.store.Insert(context.Background(),
@@ -2290,7 +2311,7 @@ func TestSelectionCapRetryEvictsNothing(t *testing.T) {
 				t.Error(err)
 			}
 		}
-		return false
+		return nil
 	}
 	f.pass(t) // streak 1
 	f.pass(t) // streak 2: evicts B, and the far end does not answer
@@ -3033,7 +3054,7 @@ func TestEstablishmentSeedsAndConfirms(t *testing.T) {
 	e := target{IA: selB, Scope: selScope,
 		ControlAddr:    netip.AddrPortFrom(published, 30042),
 		RendezvousAddr: netip.AddrPortFrom(netip.MustParseAddr("127.0.0.1"), f.addr.Port())}
-	if !s.establishLink(context.Background(), e, "the test") {
+	if s.establishLink(context.Background(), e, "the test") == nil {
 		t.Fatal("the establishment failed")
 	}
 	entry, err := store.ByNeighbor(context.Background(), selB)
@@ -3081,7 +3102,7 @@ func TestEstablishmentSeedsAndConfirms(t *testing.T) {
 	// A reply naming a host records it verbatim, the entry already holding
 	// its remote: the exchange is skipped, the confirm re-run alone.
 	claimed = "127.0.0.1:4343"
-	if !s.establishLink(context.Background(), e, "the test") {
+	if s.establishLink(context.Background(), e, "the test") == nil {
 		t.Fatal("the re-establishment failed")
 	}
 	entry, err = store.ByNeighbor(context.Background(), selB)

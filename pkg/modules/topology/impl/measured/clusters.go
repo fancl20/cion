@@ -370,26 +370,31 @@ func (u *units) broken(v *coordView, unit int) bool {
 	return false
 }
 
-// joinCluster returns the cluster the node names this window: the natural
-// cluster holding it, named as an existing member names it where every node
-// naming that cluster lies inside, else by its least ISD-AS; otherwise the
-// cluster it named, while another node names it too and the history
-// confirms no break of the budget; otherwise none.
-func joinCluster(v *coordView, self, named addr.IA) addr.IA {
+// joinCluster returns the cluster the node names this window, beside why:
+// the natural cluster holding it, named as an existing member names it
+// where every node naming that cluster lies inside, else by its least
+// ISD-AS; otherwise the cluster it named, while another node names it too
+// and the history confirms no break of the budget; otherwise none, for its
+// unit fell below two members or its history confirms a break.
+func joinCluster(v *coordView, self, named addr.IA) (addr.IA, string) {
 	for _, c := range naturalClusters(v) {
 		if slices.Contains(c, self) {
-			return clusterName(v, c, self, named)
+			return clusterName(v, c, self, named), "a natural cluster holds the node"
 		}
 	}
 	if named == 0 {
-		return 0
+		return 0, ""
 	}
 	u := newUnits(v, self, named)
 	unit := u.of[self]
-	if len(u.members[unit]) < 2 || u.broken(v, unit) {
-		return 0
+	switch {
+	case len(u.members[unit]) < 2:
+		return 0, "its unit fell below two members"
+	case u.broken(v, unit):
+		return 0, "its history confirms a break of the budget"
+	default:
+		return named, "its unit holds"
 	}
-	return named
 }
 
 // clusterName returns the name a natural cluster takes: the least name one

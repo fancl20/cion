@@ -16,6 +16,7 @@ import (
 	"github.com/fancl20/cion/pkg/apps/ping"
 	"github.com/fancl20/cion/pkg/core/trust"
 	"github.com/fancl20/cion/pkg/core/webpki/webpkitest"
+	"github.com/fancl20/cion/pkg/libs/evidence"
 	"github.com/fancl20/cion/pkg/libs/scion"
 	"github.com/fancl20/cion/pkg/libs/underlay"
 	"github.com/fancl20/cion/pkg/modules/links"
@@ -432,6 +433,30 @@ func TestLineCutHeals(t *testing.T) {
 		e := entryOf(ctx, c, b.app.IA())
 		return e != nil && e.State == links.StateRetired
 	})
+
+	// The changes leave their records: one end's promotion of the link
+	// between A and C at the floor — each end below it, either may dial
+	// first — and C's retirement of the dead link on its verdict.
+	floor := "the redundancy floor"
+	if !journaled(c, measured.LinkPromoted, a.app.IA(), floor) &&
+		!journaled(a, measured.LinkPromoted, c.app.IA(), floor) {
+		t.Error("neither end recorded promoting the link between A and C at the floor")
+	}
+	if !journaled(c, measured.LinkRetired, b.app.IA(), "its verdict stayed down") {
+		t.Error("C recorded no retirement of the dead link on its verdict")
+	}
+}
+
+// journaled reports whether the node's journal of changes holds a record of
+// the change to the peer beside the reason.
+func journaled(n *Node, change string, peer addr.IA, why string) bool {
+	changes, _ := n.app.Bus().Changes().Since(0)
+	for _, c := range changes {
+		if r, ok := c.(evidence.Record); ok && r.Change == change && r.Subject == peer.String() && r.Why == why {
+			return true
+		}
+	}
+	return false
 }
 
 // TestBootstrapWithoutAnswer checks the negative: a first start whose

@@ -110,10 +110,11 @@ func (r report) lostSince(since, within time.Time) int {
 // healthy, for an answer within the trust window; suspect, for stale
 // segments or a crossed link its failed paths share; unknown. An ejected
 // candidate is due its half-open probe its backoff after its last loss. It
-// carries its cost's estimate; its cost is that estimate's value, and its
-// reading its reading estimate's, each else twice its declared one-way sum.
-// The reading is read once ReadingSamples of its probes answered, and
-// bounded where its probes give bounds.
+// carries the estimates of its cost, its reading, and its bounds; its cost
+// is the cost estimate's value, and its reading the reading estimate's, each
+// else twice its declared one-way sum. The reading is read once
+// ReadingSamples of its probes answered, and bounded where its probes give
+// bounds.
 func (v view) assess(c *Candidate) {
 	r, measured := v.measured.Of(c.ID)
 	rep := v.reports[c.ID]
@@ -141,13 +142,17 @@ func (v view) assess(c *Candidate) {
 		prior := 2 * *c.Latency
 		c.Cost = &prior
 	}
-	if reading := readingKind.Of(r.Samples, v.now); reading.Answered > 0 {
+	reading := readingKind.Of(r.Samples, v.now)
+	c.ReadingEvidence = reading
+	if reading.Answered > 0 {
 		c.Reading, c.Read = &reading.Value, reading.Answered >= ReadingSamples
 	} else if c.Latency != nil {
 		prior := 2 * *c.Latency
 		c.Reading = &prior
 	}
-	if bounds := boundKind.Of(r.Samples, v.now); bounds.HasLo && bounds.Lo > 0 {
+	bounds := boundKind.Of(r.Samples, v.now)
+	c.BoundsEvidence = bounds
+	if bounds.HasLo && bounds.Lo > 0 {
 		c.Low = &bounds.Lo
 		if bounds.HasHi && bounds.Hi > 0 {
 			c.High = &bounds.Hi
@@ -265,12 +270,12 @@ func BeyondBand(a, b time.Duration) bool {
 	if d < 0 {
 		d = -d
 	}
-	return d >= band(a, b)
+	return d >= Band(a, b)
 }
 
-// band returns the band of two prices: bandShare of the smaller, at least
+// Band returns the band of two prices: bandShare of the smaller, at least
 // bandFloor and at most bandCap.
-func band(a, b time.Duration) time.Duration {
+func Band(a, b time.Duration) time.Duration {
 	return max(bandFloor, min(time.Duration(bandShare*float64(min(a, b))), bandCap))
 }
 

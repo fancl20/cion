@@ -104,8 +104,9 @@ func (b *Bus) PathMeasurements() *Topic[PathMeasurements] {
 }
 
 // Changes returns the node's journal of the changes it makes to its state.
-// The SCION library's leases append the records of their moves; the node's
-// assembly logs each change, and the labs read them.
+// The SCION library's leases append the records of their moves, and the
+// topology selection those of its links' and its cluster's changes; the
+// node's assembly logs each change, and the labs read them.
 func (b *Bus) Changes() *Journal[Change] {
 	return &b.changes
 }

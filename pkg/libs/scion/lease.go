@@ -230,7 +230,7 @@ func (l *Lease) evaluate(now time.Time, idle bool) error {
 		price, own := best.PriceEstimate(), cur.PriceEstimate()
 		pa, _ := best.Price()
 		pb, _ := cur.Price()
-		line := band(pa, pb)
+		line := Band(pa, pb)
 		// No flow rides an idle lease to pay for a wrong move, and its
 		// lapsed requests left its path unprobed: it moves at once. A lease
 		// in use moves once the evidence decides and the verdict stands.

@@ -18,6 +18,7 @@ import (
 	"github.com/scionproto/scion/pkg/addr"
 
 	"github.com/fancl20/cion/pkg/libs/bus"
+	"github.com/fancl20/cion/pkg/libs/evidence"
 	"github.com/fancl20/cion/pkg/libs/loops"
 	"github.com/fancl20/cion/pkg/libs/scion"
 	"github.com/fancl20/cion/pkg/libs/scionrpc"
@@ -69,7 +70,8 @@ const (
 	PromoteJitter = int(scion.StaleAfter / SelectionInterval)
 	// DemoteWindows is the consecutive bad windows a retirement needs.
 	DemoteWindows = 3
-	// ProbeRuns is the echoes per measurement run; the median is the sample.
+	// ProbeRuns is the probes per measurement run, each answered one a
+	// sample of the instrument that sent it.
 	ProbeRuns = 3
 	// ProbeWait bounds the wait for each echo reply.
 	ProbeWait = time.Second
@@ -169,6 +171,11 @@ type SelectionConfig struct {
 	// measured there, with the round trip's bounds, and the changes the
 	// node announced, naming no link; nil reports nothing.
 	Report func(cluster addr.IA, peers map[bus.DirectoryID][]bus.PeerReport)
+	// Changes is the node's journal of changes, to which the loop appends
+	// the record of each link it promotes or retires, each promotion and
+	// retirement it announces or withdraws, and each change of the cluster
+	// it joined; nil records nothing.
+	Changes *bus.Journal[bus.Change]
 	// Interval and Window override the evaluation window and the candidate
 	// window; zero keeps them. Tests pace the loop with them.
 	Interval time.Duration
@@ -247,7 +254,7 @@ type selection struct {
 	// ones.
 	probeFn      func(context.Context, target, *links.Link) sample
 	aliveFn      func(*links.Link) bool
-	establishFn  func(context.Context, target, string) bool
+	establishFn  func(context.Context, target, string) *links.Link
 	rendezvousFn func(context.Context, netip.AddrPort) (time.Duration, error)
 }
 
@@ -315,6 +322,11 @@ type sample struct {
 	// round trips within scion.BoundSpan; zero where they give no bound,
 	// and when the window's probes went unanswered.
 	lo, hi time.Duration
+	// reading and bounds are the estimates the direct side's reading and
+	// its bounds come from, as scion.ReadingEstimate and
+	// scion.BoundsEstimate read the instrument's round trips; zero when the
+	// window's probes went unanswered.
+	reading, bounds evidence.Estimate
 	// candidates are the routes to the peer, each one's cost its reading.
 	candidates []scion.Candidate
 	// baseline points into candidates at the peer's freshest clean route,
@@ -391,12 +403,12 @@ func (s *selection) pass(ctx context.Context) {
 		directory = s.cfg.Directory.Latest()
 	}
 	v := newCoordView(directory)
-	if joined := joinCluster(v, s.cfg.IA, s.cluster); joined != s.cluster {
+	if joined, why := joinCluster(v, s.cfg.IA, s.cluster); joined != s.cluster {
+		change := ClusterJoined
 		if joined == 0 {
-			slog.Info("Left the cluster", "cluster", s.cluster)
-		} else {
-			slog.Info("Joined a cluster", "cluster", joined)
+			change = ClusterLeft
 		}
+		s.record(change, s.cfg.IA.String(), clusterLabel(s.cluster), clusterLabel(joined), verdict{why: why})
 		s.cluster = joined
 	}
 	v.units = newUnits(v, s.cfg.IA, s.cluster)
@@ -448,7 +460,7 @@ func (s *selection) sweep(ctx context.Context, entries []*links.Link) {
 		if s.candidateAlive(ctx, l) || ctx.Err() != nil {
 			continue
 		}
-		s.retire(ctx, l, "candidate window elapsed without a confirmed link")
+		s.retire(ctx, l, verdict{why: "candidate window elapsed without a confirmed link"})
 	}
 }
 
@@ -633,7 +645,7 @@ func (s *selection) measure(
 	} else {
 		sm, by, rtts = s.probe(ctx, e, l)
 	}
-	sm.direct, sm.lo, sm.hi = s.read(by, rtts, time.Now())
+	sm.readDirect(s.read(by, rtts, time.Now()))
 	return sm
 }
 
@@ -670,19 +682,19 @@ func (s *selection) ran(t target, sm sample) {
 // it as a probe enumerates them.
 func (s *selection) held(ctx context.Context, t target) sample {
 	sm := s.routes(ctx, t.IA)
-	sm.direct, sm.lo, sm.hi = readingOf(s.history[s.last[t.IA]], time.Now())
+	sm.readDirect(readingOf(s.history[s.last[t.IA]], time.Now()))
 	return sm
 }
 
 // read adds the window's answered round trips to the instrument's samples,
 // drops those taken more than scion.BoundSpan before now, and returns their
-// reading and bounds as readingOf returns them; zeros when the window's
-// probes went unanswered. An instrument holding no sample within the
-// reading's span starts from those of the instrument that read the peer
-// last, round trips of the same peer: a link reads on from the binding
-// requests that promoted it, and a retired link's peer from the link's
-// echoes, rather than from one window's samples alone.
-func (s *selection) read(by instrument, rtts []time.Duration, now time.Time) (reading, lo, hi time.Duration) {
+// estimates as readingOf returns them; zeros when the window's probes went
+// unanswered. An instrument holding no sample within the reading's span
+// starts from those of the instrument that read the peer last, round trips
+// of the same peer: a link reads on from the binding requests that promoted
+// it, and a retired link's peer from the link's echoes, rather than from one
+// window's samples alone.
+func (s *selection) read(by instrument, rtts []time.Duration, now time.Time) (reading, bounds evidence.Estimate) {
 	if s.history == nil {
 		s.history = make(map[instrument][]heard)
 		s.last = make(map[addr.IA]instrument)
@@ -703,30 +715,41 @@ func (s *selection) read(by instrument, rtts []time.Duration, now time.Time) (re
 		s.history[by] = kept
 	}
 	if len(rtts) == 0 {
-		return 0, 0, 0
+		return evidence.Estimate{}, evidence.Estimate{}
 	}
 	return readingOf(kept, now)
 }
 
-// readingOf returns the reading of the round trips heard within
-// scion.ReadingSpan before now, beside the bounds of those heard within
+// readingOf returns the estimates the direct side's reading and bounds come
+// from over the round trips heard before now: the reading's, over those
+// within scion.ReadingSpan, and the bounds', over those within
 // scion.BoundSpan; zeros when none lies within the reading's span.
-func readingOf(hs []heard, now time.Time) (reading, lo, hi time.Duration) {
-	var all, read []time.Duration
-	for _, h := range hs {
-		if now.Sub(h.at) > scion.BoundSpan {
-			continue
-		}
-		all = append(all, h.rtt)
-		if now.Sub(h.at) <= scion.ReadingSpan {
-			read = append(read, h.rtt)
-		}
+func readingOf(hs []heard, now time.Time) (reading, bounds evidence.Estimate) {
+	samples := make([]bus.PathSample, len(hs))
+	for i, h := range hs {
+		samples[i] = bus.PathSample{At: h.at, RTT: h.rtt}
 	}
-	if len(read) == 0 {
-		return 0, 0, 0
+	if reading = scion.ReadingEstimate(samples, now); reading.Answered == 0 {
+		return evidence.Estimate{}, evidence.Estimate{}
 	}
-	lo, hi = scion.ReadingBounds(all)
-	return scion.Reading(read), lo, hi
+	return reading, scion.BoundsEstimate(samples, now)
+}
+
+// readDirect sets the direct side's estimates, and the reading and bounds
+// they give.
+func (sm *sample) readDirect(reading, bounds evidence.Estimate) {
+	sm.reading, sm.bounds = reading, bounds
+	sm.direct, sm.lo, sm.hi = 0, 0, 0
+	if reading.Answered == 0 {
+		return
+	}
+	sm.direct = reading.Value
+	if bounds.HasLo {
+		sm.lo = bounds.Lo
+	}
+	if bounds.HasHi {
+		sm.hi = bounds.Hi
+	}
 }
 
 // forget drops the instruments whose samples all lie more than
@@ -772,8 +795,9 @@ func (s *selection) establishFailed(ia addr.IA, msg string, err error) {
 	slog.Warn(msg, "neighbor", ia, "err", err)
 }
 
-// establish lands a promotion, through the test seam when set.
-func (s *selection) establish(ctx context.Context, e target, why string) bool {
+// establish lands a promotion, through the test seam when set, and returns
+// the entry it seeded; nil when the promotion did not land.
+func (s *selection) establish(ctx context.Context, e target, why string) *links.Link {
 	if s.establishFn != nil {
 		return s.establishFn(ctx, e, why)
 	}
@@ -1074,7 +1098,8 @@ func (s *selection) promote(
 			}
 			return
 		}
-		s.admit(ctx, entries, neighbors, ts, samples, v, s.preferAllowed(v, reachable, nil), "the redundancy floor")
+		e := s.preferAllowed(v, reachable, nil)
+		s.admit(ctx, entries, neighbors, ts, samples, v, e, reachedVerdict("the redundancy floor", samples[e.IA]))
 		return
 	}
 
@@ -1087,7 +1112,8 @@ func (s *selection) promote(
 		return t != nil && t.stranded
 	}
 	if slices.ContainsFunc(reachable, stranded) {
-		s.admit(ctx, entries, neighbors, ts, samples, v, s.preferAllowed(v, reachable, stranded), "its stranded tier")
+		e := s.preferAllowed(v, reachable, stranded)
+		s.admit(ctx, entries, neighbors, ts, samples, v, e, reachedVerdict("its stranded tier", samples[e.IA]))
 		return
 	}
 
@@ -1102,7 +1128,7 @@ func (s *selection) promote(
 		}
 		if s.streak(e.IA).promote >= promoteWindows(s.cfg.IA, e.IA) &&
 			samples[e.IA].direct <= ratioOf(t.price, SecondRouteRatio) {
-			s.admit(ctx, entries, neighbors, ts, samples, v, e, "a second route for its tier")
+			s.admit(ctx, entries, neighbors, ts, samples, v, e, secondRouteVerdict(t, samples[e.IA]))
 			return
 		}
 	}
@@ -1118,17 +1144,57 @@ func (s *selection) promote(
 			slog.Debug("Promotion waits on another node's change", "neighbor", e.IA)
 			continue
 		}
+		beaten := beatenVerdict(tierOf(ts, e.IA), e.IA, samples[e.IA])
 		if s.coord.promote != e.IA {
+			s.withdrawPromotion(neighbors, reachable, samples, ts, v, e.IA)
 			s.coord.promote = e.IA
-			slog.Info("Promotion announced", "neighbor", e.IA)
+			s.record(PromotionAnnounced, e.IA.String(), "", "", beaten)
 			return
 		}
 		if s.streak(e.IA).promote >= PromoteWindows {
-			s.admit(ctx, entries, neighbors, ts, samples, v, e, "its direct link beats its own price")
+			s.admit(ctx, entries, neighbors, ts, samples, v, e, beaten)
 		}
 		return
 	}
+	s.withdrawPromotion(neighbors, reachable, samples, ts, v, 0)
 	s.coord.promote = 0
+}
+
+// withdrawPromotion records the withdrawal of the promotion the node
+// announced, for one of next or for none, beside what ended it: its peer no
+// longer a reachable candidate, its link no longer allowed, its price no
+// longer beaten, a wait on another node's change, or a faster candidate. A
+// promotion that landed, its peer now a neighbor, ends without a record.
+func (s *selection) withdrawPromotion(
+	neighbors map[addr.IA]*links.Link,
+	reachable []target,
+	samples map[addr.IA]sample,
+	ts []tier,
+	v *coordView,
+	next addr.IA,
+) {
+
+	old := s.coord.promote
+	if old == 0 || old == next {
+		return
+	}
+	if _, ok := neighbors[old]; ok {
+		return
+	}
+	var why string
+	switch {
+	case !slices.ContainsFunc(reachable, func(e target) bool { return e.IA == old }):
+		why = "its peer is no longer a reachable candidate"
+	case !s.allowed(v, old):
+		why = "the clusters no longer allow its link"
+	case !s.beatsPrice(old, samples, ts):
+		why = "its direct link no longer beats its own price"
+	case s.coord.waitsToPromote(v, s.cfg.IA, old, samples[old].candidates, time.Now()):
+		why = "it waits on another node's change"
+	default:
+		why = "a faster candidate beats its own price"
+	}
+	s.record(PromotionWithdrawn, old.String(), "", "", verdict{why: why})
 }
 
 // allowed reports whether the window's clustering allows a link to the
@@ -1236,7 +1302,7 @@ func promoteWindows(self, peer addr.IA) int {
 // The cap counts the named live entries, as the acceptor's does, so a
 // candidate in flight holds its place — the candidate's own included: an
 // establishment its far end has not answered yet evicts nothing more when
-// it runs again.
+// it runs again. A promotion that lands is recorded beside its verdict.
 func (s *selection) admit(
 	ctx context.Context,
 	entries []*links.Link,
@@ -1245,7 +1311,7 @@ func (s *selection) admit(
 	samples map[addr.IA]sample,
 	v *coordView,
 	e target,
-	why string,
+	admitted verdict,
 ) {
 
 	cap := s.cfg.MaxLinks
@@ -1259,12 +1325,14 @@ func (s *selection) admit(
 			return
 		}
 		up := s.linkUp(victim.IfID)
-		if !s.retire(ctx, victim, "displaced by the least-harm eviction") {
+		if !s.retire(ctx, victim, evictedVerdict(e, admitted, victim, ts)) {
 			return
 		}
 		s.upLeft = s.upLeft || up
 	}
-	s.establish(ctx, e, why)
+	if l := s.establish(ctx, e, admitted.why); l != nil {
+		s.record(LinkPromoted, e.IA.String(), "", linkName(l.IfID), admitted)
+	}
 }
 
 // evict returns the cap's victim among the qualifying neighbors: a down
@@ -1395,10 +1463,11 @@ func (s *selection) prune(
 			continue
 		}
 		if s.streak(l.NeighborIA).down >= DemoteWindows {
-			s.retire(ctx, l, "its verdict stayed down")
+			s.retire(ctx, l, verdict{why: "its verdict stayed down"})
 		}
 	}
 	if dialedUp <= NeighborFloor {
+		s.withdrawRetirements(entries, nil, "the dialed links stand at the floor")
 		clear(s.coord.retiring)
 		return
 	}
@@ -1420,7 +1489,8 @@ func (s *selection) prune(
 			r.relies = reliance(t.excluded[ia])
 		}
 		if !ok {
-			slog.Info("Retirement announced", "neighbor", ia)
+			s.record(RetirementAnnounced, ia.String(), "", "",
+				verdict{why: "a window found its link useless", weighed: uselessWeighed(t, ia, samples[ia])})
 		}
 		announced[ia] = r
 		if s.upLeft || !s.linkUp(l.IfID) || s.streak(ia).useless < DemoteWindows ||
@@ -1438,15 +1508,39 @@ func (s *selection) prune(
 			worst, worstHarm, worstDirect = l, cost, direct
 		}
 	}
-	why := "its tier served no worse without it"
-	if worst != nil && !s.allowed(v, worst.NeighborIA) {
-		why = "the clusters link its units elsewhere"
+	if worst != nil {
+		ia := worst.NeighborIA
+		retired := verdict{
+			why:     "its tier served no worse without it",
+			weighed: uselessWeighed(tierOf(ts, ia), ia, samples[ia]),
+		}
+		if !s.allowed(v, ia) {
+			retired = verdict{why: "the clusters link its units elsewhere"}
+		}
+		if s.retire(ctx, worst, retired) {
+			s.upLeft = true
+			delete(announced, ia)
+		}
 	}
-	if worst != nil && s.retire(ctx, worst, why) {
-		s.upLeft = true
-		delete(announced, worst.NeighborIA)
-	}
+	s.withdrawRetirements(entries, announced, "a window found its link useful")
 	s.coord.retiring = announced
+}
+
+// withdrawRetirements records the withdrawal of each retirement the node
+// announced that kept leaves out, beside why it ended; a link retired
+// meanwhile, its entry no longer established, ends without a record.
+func (s *selection) withdrawRetirements(entries []*links.Link, kept map[addr.IA]ownRetirement, why string) {
+	for _, ia := range slices.Sorted(maps.Keys(s.coord.retiring)) {
+		if _, ok := kept[ia]; ok {
+			continue
+		}
+		if !slices.ContainsFunc(entries, func(l *links.Link) bool {
+			return l.NeighborIA == ia && l.State == links.StateEstablished
+		}) {
+			continue
+		}
+		s.record(RetirementWithdrawn, ia.String(), "", "", verdict{why: why})
+	}
 }
 
 // report publishes the window's reports, by directory: every peer the
@@ -1516,8 +1610,9 @@ func (s *selection) streak(ia addr.IA) *peerStreak {
 }
 
 // retire withdraws a link: its entry goes to retired, the interface ID held
-// back until no unexpired segment can reference it.
-func (s *selection) retire(ctx context.Context, l *links.Link, why string) bool {
+// back until no unexpired segment can reference it, and the retirement is
+// recorded beside its verdict.
+func (s *selection) retire(ctx context.Context, l *links.Link, v verdict) bool {
 	l.State = links.StateRetired
 	l.Retired = time.Now()
 	if err := s.cfg.Store.Update(ctx, l); err != nil {
@@ -1527,7 +1622,7 @@ func (s *selection) retire(ctx context.Context, l *links.Link, why string) bool 
 	// The damping starts over: a retired peer re-earns promotion from
 	// scratch, and its demotion evidence is spent.
 	delete(s.streaks, l.NeighborIA)
-	slog.Info("Link retired", "neighbor", l.NeighborIA, "interface", l.IfID, "why", why)
+	s.record(LinkRetired, l.NeighborIA.String(), linkName(l.IfID), "", v)
 	return true
 }
 
@@ -1539,13 +1634,14 @@ func (s *selection) retire(ctx context.Context, l *links.Link, why string) bool 
 // entry's one-hop path then establishes both sides, the peer's entry when the
 // request lands and this one when the reply answers. An entry already holding
 // its remote — seeded by an earlier window or the joiner's own dial — skips
-// the exchange: the seed taught both sides already.
-func (s *selection) establishLink(ctx context.Context, e target, why string) bool {
+// the exchange: the seed taught both sides already. It returns the entry it
+// seeded; nil where no seed landed.
+func (s *selection) establishLink(ctx context.Context, e target, why string) *links.Link {
 	entry, err := s.ownEntry(ctx, e)
 	if err != nil {
 		slog.Error("Recording the local side of a promoted candidate",
 			"neighbor", e.IA, "err", err)
-		return false
+		return nil
 	}
 	punched := s.punched(e)
 	if !entry.Remote.IsValid() {
@@ -1554,15 +1650,15 @@ func (s *selection) establishLink(ctx context.Context, e target, why string) boo
 			seed = s.establishByPunch
 		}
 		if !seed(ctx, e, entry) {
-			return false
+			return nil
 		}
 	}
 	s.streak(e.IA).promote = 0
 	delete(s.failed, e.IA)
-	slog.Info("Link seeded", "neighbor", e.IA, "why", why, "punched", punched,
+	slog.Debug("Link seeded", "neighbor", e.IA, "why", why, "punched", punched,
 		"interface", entry.IfID, "local", entry.Local, "remote", entry.Remote)
 	s.confirm(ctx, e, entry, why)
-	return true
+	return entry
 }
 
 // establishByRendezvous seeds a promotion through the rendezvous exchange —

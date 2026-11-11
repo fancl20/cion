@@ -9,6 +9,7 @@ import (
 	"github.com/scionproto/scion/pkg/addr"
 
 	"github.com/fancl20/cion/pkg/libs/bus"
+	"github.com/fancl20/cion/pkg/libs/evidence"
 	"github.com/fancl20/cion/pkg/libs/scion"
 	"github.com/fancl20/cion/pkg/libs/segment"
 	"github.com/fancl20/cion/pkg/modules/links"
@@ -73,11 +74,19 @@ func route(fresh time.Duration, oneWay time.Duration, links ...segment.LinkID) s
 	return c
 }
 
+// steadyBounds is the round trips a route probed every half minute holds
+// within scion.BoundSpan.
+const steadyBounds = 30
+
 // measured returns the route as the measurements leave it: healthy, at the
-// measured cost, read, its bounds at the cost — a route whose round trip
-// holds steady.
+// measured cost, read, its bounds at the cost, and the estimates they come
+// from — a route whose round trip holds steady.
 func measured(c scion.Candidate, cost time.Duration) scion.Candidate {
 	c.Health, c.Cost, c.Read, c.Low, c.High = scion.HealthHealthy, &cost, true, &cost, &cost
+	c.ReadingEvidence = evidence.Estimate{Span: scion.ReadingSpan,
+		Value: cost, Lo: cost, HasLo: true, Answered: scion.ReadingSamples, Sent: scion.ReadingSamples}
+	c.BoundsEvidence = evidence.Estimate{Span: scion.BoundSpan,
+		Value: cost, Lo: cost, Hi: cost, HasLo: true, HasHi: true, Answered: steadyBounds, Sent: steadyBounds}
 	return c
 }
 
@@ -144,7 +153,7 @@ func TestRouteCount(t *testing.T) {
 
 // TestCheapest checks the price of a set of routes: each at its cost, the
 // measured round trip or else the declared sum doubled, a route with neither
-// pricing nothing, and the cheapest winning.
+// pricing nothing, and the cheapest winning, the route returned beside it.
 func TestCheapest(t *testing.T) {
 	ms := time.Millisecond
 	slow := measured(cand(), 30*ms)
@@ -154,14 +163,23 @@ func TestCheapest(t *testing.T) {
 		name   string
 		routes []*scion.Candidate
 		want   time.Duration
+		route  int
 	}{
-		{"a declaration under a measurement", ptrs(slow, declared, cand()), 16 * ms},
-		{"a measurement under a declaration", ptrs(fast, declared), 12 * ms},
-		{"routes without a cost", ptrs(cand(), cand()), 0},
+		{"a declaration under a measurement", ptrs(slow, declared, cand()), 16 * ms, 1},
+		{"a measurement under a declaration", ptrs(fast, declared), 12 * ms, 0},
+		{"routes without a cost", ptrs(cand(), cand()), 0, -1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := cheapest(tc.routes); got != tc.want {
+			c, got := cheapest(tc.routes)
+			if got != tc.want {
 				t.Errorf("price = %v, want %v", got, tc.want)
+			}
+			var want *scion.Candidate
+			if tc.route >= 0 {
+				want = tc.routes[tc.route]
+			}
+			if c != want {
+				t.Errorf("route = %p, want %p", c, want)
 			}
 		})
 	}
@@ -176,8 +194,9 @@ func TestCheapest(t *testing.T) {
 // or not; the route count reads the tier's other up links beside the
 // survivors; the bounds read the read routes alone, the survivors' upper
 // bounds and the lower bounds of the routes crossing the link, the tier's at
-// their costs and each member's at their prices; a link every route crosses
-// leaves no survivor and no price; and a down link takes no measurement.
+// their costs and each member's at their prices; the tier's price and bounds
+// keep the routes they come from; a link every route crosses leaves no
+// survivor and no price; and a down link takes no measurement.
 func TestMeasureExcluded(t *testing.T) {
 	verdicts := map[uint16]bool{1: true, 2: true, 4: false, 5: true}
 	neighbors := map[addr.IA]*links.Link{
@@ -219,15 +238,17 @@ func TestMeasureExcluded(t *testing.T) {
 	// one transit: 22ms and its charge. No read route crosses A's link.
 	viaB := 22*time.Millisecond + transitCost
 	want := excludedSample{
-		survivor: &b.candidates[0],
-		dst:      selB,
-		answered: true,
-		price:    22 * time.Millisecond,
-		routes:   2,
-		prices:   map[addr.IA]time.Duration{selA: viaB, selB: 26 * time.Millisecond},
-		cheapest: map[addr.IA]*scion.Candidate{selA: &a.candidates[0], selB: &b.candidates[0]},
-		high:     22 * time.Millisecond,
-		highs:    map[addr.IA]time.Duration{selA: viaB, selB: 26 * time.Millisecond},
+		survivor:   &b.candidates[0],
+		dst:        selB,
+		answered:   true,
+		price:      22 * time.Millisecond,
+		priceRoute: &a.candidates[0],
+		routes:     2,
+		prices:     map[addr.IA]time.Duration{selA: viaB, selB: 26 * time.Millisecond},
+		cheapest:   map[addr.IA]*scion.Candidate{selA: &a.candidates[0], selB: &b.candidates[0]},
+		high:       22 * time.Millisecond,
+		highRoute:  &a.candidates[0],
+		highs:      map[addr.IA]time.Duration{selA: viaB, selB: 26 * time.Millisecond},
 	}
 	if diff := cmp.Diff(want, fast.excluded[selA], opts...); diff != "" {
 		t.Errorf("A's excluded measurement (-want +got):\n%s", diff)
@@ -243,6 +264,7 @@ func TestMeasureExcluded(t *testing.T) {
 		cheapest: map[addr.IA]*scion.Candidate{selB: &b.candidates[1]},
 		crossed:  true,
 		low:      22 * time.Millisecond,
+		lowRoute: &a.candidates[0],
 		lows:     map[addr.IA]time.Duration{selA: viaB, selB: 26 * time.Millisecond},
 	}
 	if diff := cmp.Diff(want, fast.excluded[selB], opts...); diff != "" {
