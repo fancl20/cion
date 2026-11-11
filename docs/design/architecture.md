@@ -113,8 +113,9 @@ run no loops of their own and hold no policy.
 Modules are the parts of the node where an implementation could differ —
 its pluggable surface
 ([ADR-0013](/docs/adrs/0013-file-the-nodes-seams-as-modules.md)). Each
-declares a kind, and the kind fixes the selection: storage is bound by the
-composition root, policy and the source by the operator's run arguments.
+declares a kind. Storage is bound by the composition root, as is the beacon
+policy, which no operator configures; the other policies and the source are
+selected by the operator's run arguments.
 
 *   **Trust database** — storage: where trust material persists.
 *   **Path database** — storage: where registered segments persist.
@@ -136,6 +137,9 @@ composition root, policy and the source by the operator's run arguments.
     membership is the newest chain the founder issued for its key, or none,
     under which every chain stands as its own membership
     ([ADR-0034](/docs/adrs/0034-verify-each-chains-membership-and-remove-cores-at-once.md)).
+*   **Beacon policy** — policy: which of the routes each receiver can take
+    the node's beacons carry, bound by the composition root
+    ([ADR-0042](/docs/adrs/0042-file-the-beacon-policy-as-a-module.md)).
 *   **Topology source** — source: where topology decisions come from; the
     measured provider by default — loading it is what makes a node
     zero-conf — the file provider when `--topology.link-set` names a
@@ -209,12 +213,12 @@ only once the founder signed it.
 ### Path discovery
 
 Cores originate beacons; each AS appends a signed entry and forwards them,
-and receivers verify every entry against the TRC. A node sends each
-neighbor, among the routes it can take, each core's cheapest route, backups,
-and each link's cheapest route
-([ADR-0036](/docs/adrs/0036-select-beacons-per-origin-and-link.md)), its
-fellow group members also the cheapest route over each link into their
-group, and registers its own selection: up segments locally, down
+and receivers verify every entry against the TRC. Among the routes each
+neighbor can take, the beacon policy chooses what the node sends: each
+core's cheapest route, backups, and each link's cheapest route
+([ADR-0036](/docs/adrs/0036-select-beacons-per-origin-and-link.md)), and to
+its fellow group members also the cheapest route over each link into their
+group. The node registers its own selection: up segments locally, down
 segments at the originating core. The path provider composes segments into
 end-to-end paths, the one seam every consumer uses, the control endpoint's
 transport included.

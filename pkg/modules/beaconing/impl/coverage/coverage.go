@@ -1,4 +1,12 @@
-package controlplane
+// Package coverage is the coverage method of the beacon policy module. A
+// set holds each origin's cheapest route, the founding core's first; then,
+// while some link is crossed by every route picked and another route avoids
+// one such link, the cheapest such route; then the cheapest route over each
+// interface no picked route arrived over; then, for a receiver in the
+// node's group, the cheapest route over each link into the group at another
+// member that no picked route entered by. Routes rank by price, as the SCION
+// library prices paths.
+package coverage
 
 import (
 	"cmp"
@@ -10,18 +18,40 @@ import (
 	"github.com/fancl20/cion/pkg/libs/bus"
 	"github.com/fancl20/cion/pkg/libs/scion"
 	"github.com/fancl20/cion/pkg/libs/segment"
+	"github.com/fancl20/cion/pkg/modules/beaconing"
 )
 
-// maxSetSize bounds a set: a receiver keeps at most storePerInterface
-// candidates per interface, so more routes over one link would only evict
-// one another.
-const maxSetSize = storePerInterface
+// Policy is the coverage method.
+type Policy struct {
+	ia   addr.IA
+	tags *bus.Topic[bus.NodeTags]
+}
 
-// route is a qualifying candidate with the facts its rank and the picks
-// read.
+var _ beaconing.Policy = (*Policy)(nil)
+
+// New returns the coverage method of the node ia, whose group the last event
+// on tags names; a nil topic names none.
+func New(ia addr.IA, tags *bus.Topic[bus.NodeTags]) *Policy {
+	return &Policy{ia: ia, tags: tags}
+}
+
+// Select picks the receiver's set among cands. The routes into the node's
+// group count for a receiver in the group, the node itself among them.
+func (p *Policy) Select(
+	receiver, founder addr.IA, cands []beaconing.Candidate) []beaconing.Candidate {
+
+	members := groupOf(p.tags.Latest(), p.ia)
+	var into group
+	if members.has(receiver) {
+		into = members
+	}
+	return pickSet(rankRoutes(cands), founder, into)
+}
+
+// route is a candidate with the facts its rank and the picks read.
 type route struct {
-	Candidate
-	// key is the route's identity, the store's.
+	beaconing.Candidate
+	// key is the route's identity, the beacon store's.
 	key string
 	// price is what the route costs, set when priced.
 	price  time.Duration
@@ -34,10 +64,10 @@ type route struct {
 // rankRoutes returns the candidates in rank order: priced before unpriced,
 // the lower price first, then the fewer entries, the newer origination, and
 // the lower key and ingress.
-func rankRoutes(cands []Candidate) []route {
+func rankRoutes(cands []beaconing.Candidate) []route {
 	routes := make([]route, len(cands))
 	for i, c := range cands {
-		r := route{Candidate: c, key: routeOf(c.PCB)}
+		r := route{Candidate: c, key: c.PCB.RouteKey()}
 		r.price, r.priced = priceOf(c.PCB)
 		for _, e := range c.PCB.Entries {
 			r.links = append(r.links, segment.LinkID{IA: e.IA, IfID: e.Hop.ConsEgress})
@@ -126,37 +156,29 @@ func (r route) entry(g group) (segment.LinkID, bool) {
 	return segment.LinkID{}, false
 }
 
-// pickSet picks a set among the ranked routes: each origin's cheapest
-// route, the founder's first; then, while some link is crossed by every
-// route picked and an unpicked route avoids one such link, the cheapest such
-// route; then, for each interface with routes of which none was picked, its
-// cheapest route; then, for each link into the node's group at another
-// member with routes of which none was picked, its cheapest route. The set
-// keeps its first maxSetSize picks, in pick order.
-func pickSet(ranked []route, founder addr.IA, g group) []Candidate {
-	picked := make([]bool, len(ranked))
+// pickSet picks a set among the ranked routes, in pick order: each origin's
+// cheapest route, the founder's first; then, while some link is crossed by
+// every route picked and an unpicked route avoids one such link, the
+// cheapest such route; then, for each interface with routes of which none
+// was picked, its cheapest route; then, for each link into the node's group
+// at another member with routes of which none was picked, its cheapest
+// route.
+func pickSet(ranked []route, founder addr.IA, g group) []beaconing.Candidate {
 	var picks []int
-	pick := func(i int) {
-		if len(picks) < maxSetSize {
-			picked[i] = true
-			picks = append(picks, i)
-		}
-	}
-
 	if i := slices.IndexFunc(ranked, func(r route) bool {
 		return r.PCB.FirstIA().Equal(founder)
 	}); i >= 0 {
-		pick(i)
+		picks = append(picks, i)
 	}
 	origins := map[addr.IA]bool{founder: true}
 	for i, r := range ranked {
 		if origin := r.PCB.FirstIA(); !origins[origin] {
 			origins[origin] = true
-			pick(i)
+			picks = append(picks, i)
 		}
 	}
 
-	for len(picks) > 0 && len(picks) < maxSetSize {
+	for len(picks) > 0 {
 		shared := make(map[segment.LinkID]bool)
 		for _, l := range ranked[picks[0]].links {
 			shared[l] = true
@@ -169,14 +191,14 @@ func pickSet(ranked []route, founder addr.IA, g group) []Candidate {
 			}
 		}
 		// Every route picked crosses each shared link, so the cheapest route
-		// avoiding one is unpicked.
+		// avoiding one is unpicked, and each pick shrinks the shared links.
 		next := slices.IndexFunc(ranked, func(r route) bool {
 			return avoidsOne(r.links, shared)
 		})
 		if next < 0 {
 			break
 		}
-		pick(next)
+		picks = append(picks, next)
 	}
 
 	covered := make(map[uint16]bool)
@@ -186,7 +208,7 @@ func pickSet(ranked []route, founder addr.IA, g group) []Candidate {
 	for i, r := range ranked {
 		if !covered[r.Ingress] {
 			covered[r.Ingress] = true
-			pick(i)
+			picks = append(picks, i)
 		}
 	}
 
@@ -199,11 +221,11 @@ func pickSet(ranked []route, founder addr.IA, g group) []Candidate {
 	for i, r := range ranked {
 		if l, ok := r.entry(g); ok && !entered[l] {
 			entered[l] = true
-			pick(i)
+			picks = append(picks, i)
 		}
 	}
 
-	set := make([]Candidate, len(picks))
+	set := make([]beaconing.Candidate, len(picks))
 	for k, i := range picks {
 		set[k] = ranked[i].Candidate
 	}

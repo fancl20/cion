@@ -414,6 +414,33 @@ func TestContainsIA(t *testing.T) {
 	}
 }
 
+// TestRouteKey checks the route's key: two originations of one route share
+// it, whatever their segment IDs and timestamps, and another AS, ingress, or
+// egress on the route, or one entry more, changes it.
+func TestRouteKey(t *testing.T) {
+	entry := func(ia addr.IA, ingress, egress uint16) segment.ASEntry {
+		return segment.ASEntry{IA: ia, Hop: path.HopField{ConsIngress: ingress, ConsEgress: egress}}
+	}
+	beacon := func(id uint16, ts time.Time, entries ...segment.ASEntry) *segment.PCB {
+		return &segment.PCB{Info: segment.Info{Timestamp: ts, ID: id}, Entries: entries}
+	}
+	now := time.Now()
+	key := beacon(1, now, entry(iaA, 0, 1), entry(iaB, 2, 3)).RouteKey()
+	if got := beacon(2, now.Add(time.Second), entry(iaA, 0, 1), entry(iaB, 2, 3)).RouteKey(); got != key {
+		t.Error("two originations of one route have different keys")
+	}
+	for name, other := range map[string]*segment.PCB{
+		"another AS":      beacon(1, now, entry(iaA, 0, 1), entry(iaC, 2, 3)),
+		"another ingress": beacon(1, now, entry(iaA, 0, 1), entry(iaB, 4, 3)),
+		"another egress":  beacon(1, now, entry(iaA, 0, 1), entry(iaB, 2, 4)),
+		"one entry more":  beacon(1, now, entry(iaA, 0, 1), entry(iaB, 2, 3), entry(iaC, 4, 5)),
+	} {
+		if other.RouteKey() == key {
+			t.Errorf("%s keeps the route's key", name)
+		}
+	}
+}
+
 // TestParseRoundTrip checks that the parsed wire form survives
 // re-serialization unchanged.
 func TestParseRoundTrip(t *testing.T) {

@@ -26,6 +26,7 @@ import (
 	"github.com/fancl20/cion/pkg/core/webpki"
 	"github.com/fancl20/cion/pkg/libs/scion"
 	"github.com/fancl20/cion/pkg/libs/scionrpc"
+	"github.com/fancl20/cion/pkg/modules/beaconing/impl/coverage"
 	"github.com/fancl20/cion/pkg/modules/links"
 	linkbbolt "github.com/fancl20/cion/pkg/modules/links/impl/bbolt"
 	"github.com/fancl20/cion/pkg/modules/membership"
@@ -481,7 +482,7 @@ func (n *node) buildBeaconing() error {
 		DB:                   n.pathDB,
 		Links:                n.bus.Links(),
 		Latencies:            n.bus.Latencies(),
-		NodeTags:             n.bus.NodeTags(),
+		Policy:               coverage.New(n.ident.ia, n.bus.NodeTags()),
 		Sender:               n.peerClt,
 		Core:                 coreTier,
 		PropagationInterval:  n.cfg.Pacing.Propagation,

@@ -7,6 +7,7 @@ package segment
 import (
 	"context"
 	"crypto/rand"
+	"encoding/binary"
 	"hash"
 	"time"
 
@@ -244,6 +245,20 @@ func (p *PCB) IndexOfIA(ia addr.IA) int {
 // ContainsIA reports whether any entry names the given ISD-AS.
 func (p *PCB) ContainsIA(ia addr.IA) bool {
 	return p.IndexOfIA(ia) >= 0
+}
+
+// RouteKey encodes the route the entries cross: each entry's ISD-AS and its
+// ingress and egress interface IDs in construction order. Every origination
+// of one route shares the key, each drawing a fresh segment ID and
+// timestamp over the same links.
+func (p *PCB) RouteKey() string {
+	key := make([]byte, 0, 12*len(p.Entries))
+	for _, e := range p.Entries {
+		key = binary.BigEndian.AppendUint64(key, uint64(e.IA))
+		key = binary.BigEndian.AppendUint16(key, e.Hop.ConsIngress)
+		key = binary.BigEndian.AppendUint16(key, e.Hop.ConsEgress)
+	}
+	return string(key)
 }
 
 // Expiration returns the earliest absolute hop expiration of the segment

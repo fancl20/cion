@@ -1,12 +1,12 @@
 package controlplane
 
 import (
-	"encoding/binary"
 	"sort"
 	"sync"
 	"time"
 
 	"github.com/fancl20/cion/pkg/libs/segment"
+	"github.com/fancl20/cion/pkg/modules/beaconing"
 )
 
 // storePerInterface bounds the routes kept per ingress interface, the
@@ -21,19 +21,6 @@ type beaconKey struct {
 	route   string
 }
 
-// routeOf encodes the route a beacon's entries cross: each entry's ISD-AS
-// and its ingress and egress interface IDs in construction order, the path
-// database's key.
-func routeOf(pcb *segment.PCB) string {
-	key := make([]byte, 0, 12*len(pcb.Entries))
-	for _, e := range pcb.Entries {
-		key = binary.BigEndian.AppendUint64(key, uint64(e.IA))
-		key = binary.BigEndian.AppendUint16(key, e.Hop.ConsIngress)
-		key = binary.BigEndian.AppendUint16(key, e.Hop.ConsEgress)
-	}
-	return string(key)
-}
-
 // BeaconStore holds candidate PCBs in memory (draft Section 2.3.2): keyed by
 // ingress interface and route, keeping each route's latest origination and
 // when it arrived, expiring entries with their hops. A restarted node is
@@ -43,21 +30,12 @@ type BeaconStore struct {
 	beacons map[beaconKey]candidate
 }
 
-// Candidate is a stored beacon with the interface it arrived on.
-type Candidate struct {
-	// Ingress is the interface the beacon arrived on: the node's parent
-	// side of that link.
-	Ingress uint16
-	// PCB is the candidate beacon.
-	PCB *segment.PCB
-}
-
 func NewBeaconStore() *BeaconStore {
 	return &BeaconStore{beacons: make(map[beaconKey]candidate)}
 }
 
 type candidate struct {
-	Candidate
+	beaconing.Candidate
 	timestamp time.Time
 	arrived   time.Time
 }
@@ -69,7 +47,7 @@ type candidate struct {
 func (s *BeaconStore) Insert(ingress uint16, pcb *segment.PCB) {
 	s.mtx.Lock()
 	defer s.mtx.Unlock()
-	key := beaconKey{ingress: ingress, route: routeOf(pcb)}
+	key := beaconKey{ingress: ingress, route: pcb.RouteKey()}
 	if existing, ok := s.beacons[key]; ok && !pcb.Timestamp().After(existing.timestamp) {
 		return
 	}
@@ -110,11 +88,13 @@ func (s *BeaconStore) evictStale(ingress uint16) {
 // Qualifying returns the unexpired candidates keep admits whose latest
 // origination arrived within the window, in no particular order. keep runs
 // under the store's lock.
-func (s *BeaconStore) Qualifying(window time.Duration, keep func(Candidate) bool) []Candidate {
+func (s *BeaconStore) Qualifying(
+	window time.Duration, keep func(beaconing.Candidate) bool) []beaconing.Candidate {
+
 	s.mtx.Lock()
 	defer s.mtx.Unlock()
 	now := time.Now()
-	var out []Candidate
+	var out []beaconing.Candidate
 	for _, cand := range s.beacons {
 		if cand.PCB.Expiration().After(now) && now.Sub(cand.arrived) <= window &&
 			keep(cand.Candidate) {

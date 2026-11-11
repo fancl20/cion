@@ -1,6 +1,6 @@
 # File the Beacon Policy as a Module
 
-*   Status: proposed
+*   Status: accepted
 *   Date: 2026-11-11
 
 [TOC]

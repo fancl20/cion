@@ -8,6 +8,7 @@ import (
 	"crypto/x509"
 	"errors"
 	"hash"
+	"maps"
 	"net"
 	"path/filepath"
 	"slices"
@@ -30,6 +31,7 @@ import (
 	"github.com/fancl20/cion/pkg/libs/bus"
 	"github.com/fancl20/cion/pkg/libs/scion"
 	"github.com/fancl20/cion/pkg/libs/segment"
+	"github.com/fancl20/cion/pkg/modules/beaconing"
 	"github.com/fancl20/cion/pkg/modules/links"
 	"github.com/fancl20/cion/pkg/modules/pathdb"
 	pathdbbbolt "github.com/fancl20/cion/pkg/modules/pathdb/impl/bbolt"
@@ -133,6 +135,49 @@ func (s *fakeSender) attempt(ctx context.Context, ia addr.IA) error {
 	}
 }
 
+// askRecorder is the beaconer tests' beacon policy: it answers each ask with
+// every candidate handed, in ingress and route order, or the reverse, and
+// records the last ask of each receiver.
+type askRecorder struct {
+	reverse bool
+
+	mtx  sync.Mutex
+	asks map[addr.IA]policyAsk
+}
+
+// policyAsk is one ask of the policy and its answer.
+type policyAsk struct {
+	founder        addr.IA
+	handed, answer []beaconing.Candidate
+}
+
+func (p *askRecorder) Select(receiver, founder addr.IA, cands []beaconing.Candidate) []beaconing.Candidate {
+	answer := slices.Clone(cands)
+	slices.SortFunc(answer, func(a, b beaconing.Candidate) int {
+		if a.Ingress != b.Ingress {
+			return int(a.Ingress) - int(b.Ingress)
+		}
+		return strings.Compare(a.PCB.RouteKey(), b.PCB.RouteKey())
+	})
+	if p.reverse {
+		slices.Reverse(answer)
+	}
+	p.mtx.Lock()
+	defer p.mtx.Unlock()
+	if p.asks == nil {
+		p.asks = make(map[addr.IA]policyAsk)
+	}
+	p.asks[receiver] = policyAsk{founder: founder, handed: cands, answer: answer}
+	return answer
+}
+
+// recorded returns the last ask of each receiver.
+func (p *askRecorder) recorded() map[addr.IA]policyAsk {
+	p.mtx.Lock()
+	defer p.mtx.Unlock()
+	return maps.Clone(p.asks)
+}
+
 // beaconFixture is a three-AS line — the core A, the middle B under test,
 // and C below — with engines anchored in one TRC and a path database.
 type beaconFixture struct {
@@ -142,6 +187,7 @@ type beaconFixture struct {
 	engines  map[addr.IA]*trust.Engine
 	store    *BeaconStore
 	sender   *fakeSender
+	policy   *askRecorder
 	beaconer *Beaconer
 	// links is B's link state, which the beaconer reads on every pass.
 	links *bus.Topic[bus.LinkState]
@@ -173,6 +219,7 @@ func newBeaconFixture(t *testing.T) *beaconFixture {
 	links := tableTopic(map[uint16]addr.IA{1: coreIATest, 2: iaLineC, 3: iaCore2Test})
 	store := NewBeaconStore()
 	sender := &fakeSender{}
+	policy := &askRecorder{}
 	beaconer, err := NewBeaconer(BeaconerConfig{
 		IA:     nodeIATest,
 		Engine: engines[nodeIATest],
@@ -180,6 +227,7 @@ func newBeaconFixture(t *testing.T) *beaconFixture {
 		Store:  store,
 		DB:     pathDB,
 		Links:  links,
+		Policy: policy,
 		Sender: sender,
 	})
 	if err != nil {
@@ -187,7 +235,7 @@ func newBeaconFixture(t *testing.T) *beaconFixture {
 	}
 	return &beaconFixture{
 		founder: founder, db: founder.DB, pathDB: pathDB, engines: engines, store: store,
-		sender: sender, beaconer: beaconer, links: links,
+		sender: sender, policy: policy, beaconer: beaconer, links: links,
 	}
 }
 
@@ -346,7 +394,7 @@ func originatedRoute(
 }
 
 // keepAll admits every candidate.
-func keepAll(Candidate) bool { return true }
+func keepAll(beaconing.Candidate) bool { return true }
 
 // storedRoutes returns the timestamps of the qualifying candidates, by
 // ingress interface and origin.
@@ -1142,8 +1190,8 @@ func crossingBeacon(
 	return pcb
 }
 
-// beaconerOver builds B's beaconer over the fixture's stores and sender, its
-// link state read from links on every pass.
+// beaconerOver builds B's beaconer over the fixture's stores, policy, and
+// sender, its link state read from links on every pass.
 func beaconerOver(t *testing.T, f *beaconFixture, links *bus.Topic[bus.LinkState]) *Beaconer {
 	t.Helper()
 	beaconer, err := NewBeaconer(BeaconerConfig{
@@ -1153,6 +1201,7 @@ func beaconerOver(t *testing.T, f *beaconFixture, links *bus.Topic[bus.LinkState
 		Store:  f.store,
 		DB:     f.pathDB,
 		Links:  links,
+		Policy: f.policy,
 		Sender: f.sender,
 	})
 	if err != nil {
@@ -1209,34 +1258,8 @@ func TestPropagateOnceSkipsNeighborsTheBeaconCrosses(t *testing.T) {
 	}
 }
 
-// declaredBeacon builds the beacon the hops forwarded in order to B, each
-// entry naming the next hop and the last naming B, with the interfaces and
-// declarations the hops give.
-func declaredBeacon(t *testing.T, f *beaconFixture, now time.Time, hops ...hopSpec) *segment.PCB {
-	t.Helper()
-	pcb, err := segment.NewPCB(now)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for i, h := range hops {
-		next := nodeIATest
-		if i+1 < len(hops) {
-			next = hops[i+1].ia
-		}
-		if err := pcb.AppendEntry(context.Background(), h.ia, segment.EntryOptions{
-			Next:          next,
-			IngressIfID:   h.ingress,
-			EgressIfID:    h.egress,
-			EgressLatency: h.latency,
-		}, macFactory(), f.engines[h.ia]); err != nil {
-			t.Fatal(err)
-		}
-	}
-	return pcb
-}
-
 // hopsOf returns the ISD-ASes the candidates' beacons cross, in order.
-func hopsOf(cands []Candidate) [][]addr.IA {
+func hopsOf(cands []beaconing.Candidate) [][]addr.IA {
 	out := make([][]addr.IA, 0, len(cands))
 	for _, c := range cands {
 		hops := make([]addr.IA, 0, len(c.PCB.Entries))
@@ -1248,134 +1271,85 @@ func hopsOf(cands []Candidate) [][]addr.IA {
 	return out
 }
 
-// TestPropagateOncePicksEachNeighborsSetAmongTheRoutesItCanTake checks that a
-// neighbor's set is picked among the routes it can take, not cut from the
-// node's own. B — beside C on link 2 and D on link 4 — holds [A, D, C], the
-// founder's cheapest route, and the dearer [A, C], both from C, and [A2, D]
-// from D. Its own set is [A, D, C] and [A2, D]. D can take neither, yet
-// receives [A, C], the founder's cheapest route avoiding it; C receives
-// [A2, D], the one route avoiding it.
-func TestPropagateOncePicksEachNeighborsSetAmongTheRoutesItCanTake(t *testing.T) {
+// TestBeaconingAsksThePolicyAmongTheRoutesEachReceiverCanTake checks the
+// asks and their answers. B — under the core A on link 1, beside C on link 2
+// and D on link 4 — holds [A] from A, [A, C] from C, and [A2, D] from D. C,
+// which has not enrolled, is asked with [A] alone: [A, C] crosses it, and
+// [A2, D] is not the founder's. D is asked with [A] and [A, C], the core A
+// never, and B itself, registering, with all three. Each answer, the reverse
+// of the order the candidates sort in, goes out in its order.
+func TestBeaconingAsksThePolicyAmongTheRoutesEachReceiverCanTake(t *testing.T) {
 	f := newBeaconFixture(t)
 	ctx := context.Background()
-	b := beaconerOver(t, f, tableTopic(map[uint16]addr.IA{2: iaLineC, 4: iaLineD}))
+	f.policy.reverse = true
+	b := beaconerOver(t, f, tableTopic(map[uint16]addr.IA{1: coreIATest, 2: iaLineC, 4: iaLineD}))
 	now := time.Now()
 	for _, held := range []struct {
 		ingress uint16
 		pcb     *segment.PCB
 	}{
-		{2, declaredBeacon(t, f, now,
-			hopSpec{coreIATest, 0, 1, ms}, hopSpec{iaLineD, 2, 3, ms}, hopSpec{iaLineC, 4, 5, ms})},
-		{2, declaredBeacon(t, f, now,
-			hopSpec{coreIATest, 0, 6, 30 * ms}, hopSpec{iaLineC, 7, 5, ms})},
-		{4, declaredBeacon(t, f, now,
-			hopSpec{iaCore2Test, 0, 1, ms}, hopSpec{iaLineD, 8, 9, ms})},
+		{1, lineBeacon(t, f, now)},
+		{2, crossingBeacon(t, f, now, coreIATest, iaLineC)},
+		{4, crossingBeacon(t, f, now, iaCore2Test, iaLineD)},
 	} {
 		if err := b.HandleBeacon(ctx, held.pcb, held.ingress); err != nil {
 			t.Fatal(err)
 		}
 	}
-	own, err := b.ownSet()
-	if err != nil {
-		t.Fatal(err)
-	}
-	wantOwn := [][]addr.IA{{coreIATest, iaLineD, iaLineC}, {iaCore2Test, iaLineD}}
-	if diff := cmp.Diff(wantOwn, hopsOf(own)); diff != "" {
-		t.Fatalf("own set (-want +got):\n%s", diff)
-	}
-
+	f.sender.mtx.Lock()
+	f.sender.unenrolled = map[addr.IA]bool{iaLineC: true}
+	f.sender.mtx.Unlock()
 	b.propagateOnce(ctx)
+	b.registerOnce(ctx)
 	b.sends.Wait()
-	want := map[addr.IA][][]addr.IA{
-		iaLineC: {{iaCore2Test, iaLineD, nodeIATest}},
-		iaLineD: {{coreIATest, iaLineC, nodeIATest}},
+
+	handed := make(map[addr.IA][][]addr.IA)
+	for receiver, ask := range f.policy.recorded() {
+		if !ask.founder.Equal(coreIATest) {
+			t.Errorf("asked for %v's set with the founder %v, want %v", receiver, ask.founder, coreIATest)
+		}
+		hops := hopsOf(ask.handed)
+		slices.SortFunc(hops, slices.Compare)
+		handed[receiver] = hops
 	}
-	if diff := cmp.Diff(want, propagatedHops(t, f)); diff != "" {
+	wantHanded := map[addr.IA][][]addr.IA{
+		iaLineC:    {{coreIATest}},
+		iaLineD:    {{coreIATest}, {coreIATest, iaLineC}},
+		nodeIATest: {{coreIATest}, {coreIATest, iaLineC}, {iaCore2Test, iaLineD}},
+	}
+	if diff := cmp.Diff(wantHanded, handed); diff != "" {
+		t.Errorf("candidates handed by receiver (-want +got):\n%s", diff)
+	}
+	wantSent := map[addr.IA][][]addr.IA{
+		iaLineC: {{coreIATest, nodeIATest}},
+		iaLineD: {{coreIATest, iaLineC, nodeIATest}, {coreIATest, nodeIATest}},
+	}
+	if diff := cmp.Diff(wantSent, propagatedHops(t, f)); diff != "" {
 		t.Errorf("propagated hops by peer (-want +got):\n%s", diff)
 	}
 }
 
-// TestBeaconingCarriesTheRoutesIntoTheGroup checks the routes into the
-// node's group, which the node tags name: B and its neighbors C and E; F,
-// also B's neighbor, in another group, and D in none, lie outside. Over C, B
-// holds [A, C] and [A, D, C], the route that entered the group from D; over
-// A, it holds [A]. B's own set and E's take [A, D, C] beside [A] and its
-// backup [A, C]; F, outside the group, takes only [A] and [A, C]. With no
-// node tags topic, B keeps [A, D, C] to itself.
-func TestBeaconingCarriesTheRoutesIntoTheGroup(t *testing.T) {
-	iaLineE := addr.MustIAFrom(20, 0xff0000000006)
-	iaLineF := addr.MustIAFrom(20, 0xff0000000007)
-	tags := new(bus.Topic[bus.NodeTags])
-	tags.Publish(bus.NodeTags{}.With(bus.TagGroup, map[addr.IA]string{
-		nodeIATest: "g", iaLineC: "g", iaLineE: "g", iaLineF: "h",
-	}))
-	for _, tc := range []struct {
-		name    string
-		tags    *bus.Topic[bus.NodeTags]
-		wantOwn [][]addr.IA
-		wantE   [][]addr.IA
-	}{
-		{"in the group", tags,
-			[][]addr.IA{{coreIATest}, {coreIATest, iaLineC}, {coreIATest, iaLineD, iaLineC}},
-			[][]addr.IA{{coreIATest, nodeIATest}, {coreIATest, iaLineC, nodeIATest},
-				{coreIATest, iaLineD, iaLineC, nodeIATest}}},
-		{"with no node tags topic", nil,
-			[][]addr.IA{{coreIATest}, {coreIATest, iaLineC}},
-			[][]addr.IA{{coreIATest, nodeIATest}, {coreIATest, iaLineC, nodeIATest}}},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			f := newBeaconFixture(t)
-			ctx := context.Background()
-			for _, ia := range []addr.IA{iaLineE, iaLineF} {
-				f.engines[ia] = f.founder.Engine(t, ia)
-			}
-			b, err := NewBeaconer(BeaconerConfig{
-				IA:       nodeIATest,
-				Engine:   f.engines[nodeIATest],
-				MACKey:   []byte(testMACKey),
-				Store:    f.store,
-				DB:       f.pathDB,
-				Links:    tableTopic(map[uint16]addr.IA{1: coreIATest, 2: iaLineC, 4: iaLineE, 5: iaLineF}),
-				NodeTags: tc.tags,
-				Sender:   f.sender,
-			})
-			if err != nil {
-				t.Fatal(err)
-			}
-			now := time.Now()
-			for _, held := range []struct {
-				ingress uint16
-				pcb     *segment.PCB
-			}{
-				{1, declaredBeacon(t, f, now, hopSpec{coreIATest, 0, 1, ms})},
-				{2, declaredBeacon(t, f, now,
-					hopSpec{coreIATest, 0, 2, ms}, hopSpec{iaLineC, 3, 4, ms})},
-				{2, declaredBeacon(t, f, now,
-					hopSpec{coreIATest, 0, 5, ms}, hopSpec{iaLineD, 6, 7, ms}, hopSpec{iaLineC, 8, 4, ms})},
-			} {
-				if err := b.HandleBeacon(ctx, held.pcb, held.ingress); err != nil {
-					t.Fatal(err)
-				}
-			}
-			own, err := b.ownSet()
-			if err != nil {
-				t.Fatal(err)
-			}
-			if diff := cmp.Diff(tc.wantOwn, hopsOf(own)); diff != "" {
-				t.Errorf("own set (-want +got):\n%s", diff)
-			}
-
-			b.propagateOnce(ctx)
-			b.sends.Wait()
-			want := map[addr.IA][][]addr.IA{
-				iaLineC: {{coreIATest, nodeIATest}},
-				iaLineE: tc.wantE,
-				iaLineF: {{coreIATest, nodeIATest}, {coreIATest, iaLineC, nodeIATest}},
-			}
-			if diff := cmp.Diff(want, propagatedHops(t, f)); diff != "" {
-				t.Errorf("propagated hops by peer (-want +got):\n%s", diff)
-			}
-		})
+// TestChooseKeepsWhatAReceiverStores checks the bound on a set: of an answer
+// longer than a receiver's store keeps per interface, the first
+// storePerInterface candidates, in the policy's order.
+func TestChooseKeepsWhatAReceiverStores(t *testing.T) {
+	cands := make([]beaconing.Candidate, storePerInterface+6)
+	for i := range cands {
+		cands[i] = beaconing.Candidate{Ingress: uint16(i + 1), PCB: &segment.PCB{}}
+	}
+	policy := &askRecorder{reverse: true}
+	b := &Beaconer{policy: policy}
+	ingresses := func(cands []beaconing.Candidate) []uint16 {
+		out := make([]uint16, len(cands))
+		for i, c := range cands {
+			out[i] = c.Ingress
+		}
+		return out
+	}
+	got := ingresses(b.choose(nodeIATest, coreIATest, cands))
+	want := ingresses(policy.recorded()[nodeIATest].answer[:storePerInterface])
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("set's ingresses (-want +got):\n%s", diff)
 	}
 }
 
@@ -1715,6 +1689,7 @@ func TestCoreTierBeaconerRunsTheCoreLoops(t *testing.T) {
 		Store:  f.store,
 		DB:     f.pathDB,
 		Links:  tableTopic(map[uint16]addr.IA{1: nodeIATest, 2: iaCore2Test}),
+		Policy: f.policy,
 		Sender: f.sender,
 		Core:   true,
 	})
@@ -2309,6 +2284,7 @@ func TestBeaconingRunReturnsOnCancel(t *testing.T) {
 			Store:                f.store,
 			DB:                   f.pathDB,
 			Links:                tableTopic(map[uint16]addr.IA{1: nodeIATest}),
+			Policy:               f.policy,
 			Sender:               f.sender,
 			Core:                 true,
 			PropagationInterval:  time.Millisecond,

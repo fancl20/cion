@@ -114,3 +114,23 @@ Nothing on the wire changes, and a node sends and registers the same routes.
     import it.
 *   **The labs.** The labs pass, and the regions, site, and stranded
     benchmarks run against the commit before.
+
+## Implementation history
+
+*   **The beaconer's tests bind a policy of their own,** which answers each
+    ask with every candidate handed, in ingress and route order, and records
+    the asks, so a new rule changes no test of the control plane. The test
+    of the routes into the group moved to the coverage method.
+*   ADR-0042 is accepted.
+*   Mutations: 13 of 13 killed. The first run's replacement for a peer not
+    enrolled offered every origin's routes left a variable unused and failed
+    to build; rewritten, it was killed.
+*   The pipeline passed.
+*   Benchmarks against the commit before, one run each: every lab reached
+    every pair. The regions lab settled on the same paths at 30 links after
+    19 changes within 7.8 minutes, against 18 within 7.7; each site
+    placement on the same paths with one change more, within 4.7 to 10.2
+    minutes against 4.8 to 9.5; the stranded lab with every pair on its
+    best path at 9 links within 10 seconds, against 8 links within 6.2
+    minutes and a worst pair at 1.075 times its best. The regions and
+    stranded cuts recovered within 10 seconds, as the commit before's.

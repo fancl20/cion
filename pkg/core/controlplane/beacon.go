@@ -21,6 +21,7 @@ import (
 	"github.com/fancl20/cion/pkg/libs/bus"
 	"github.com/fancl20/cion/pkg/libs/scion"
 	"github.com/fancl20/cion/pkg/libs/segment"
+	"github.com/fancl20/cion/pkg/modules/beaconing"
 	"github.com/fancl20/cion/pkg/modules/pathdb"
 )
 
@@ -85,7 +86,7 @@ type Beaconer struct {
 	db           pathdb.DB
 	links        *bus.Topic[bus.LinkState]
 	latencies    *bus.Topic[bus.LinkLatencies]
-	nodeTags     *bus.Topic[bus.NodeTags]
+	policy       beaconing.Policy
 	sender       SegmentSender
 	core         bool
 	propagation  time.Duration
@@ -154,9 +155,9 @@ type BeaconerConfig struct {
 	// estimates the entries the beaconer signs declare. A nil topic declares
 	// nothing.
 	Latencies *bus.Topic[bus.LinkLatencies]
-	// NodeTags is the node tags topic, whose last event's group tags name
-	// the members of the node's group. A nil topic names none.
-	NodeTags *bus.Topic[bus.NodeTags]
+	// Policy chooses, among the routes each receiver can take, those its
+	// beacons carry.
+	Policy beaconing.Policy
 	// Sender sends beacon and registration RPCs over the SCION-native
 	// channel.
 	Sender SegmentSender
@@ -195,7 +196,7 @@ func NewBeaconer(cfg BeaconerConfig) (*Beaconer, error) {
 		db:               cfg.DB,
 		links:            cfg.Links,
 		latencies:        cfg.Latencies,
-		nodeTags:         cfg.NodeTags,
+		policy:           cfg.Policy,
 		sender:           cfg.Sender,
 		core:             cfg.Core,
 		propagation:      propagation,
@@ -625,21 +626,19 @@ func (b *Beaconer) originateOnce(ctx context.Context) {
 // propagateOnce sends each neighbor a set of its own, each route extended
 // with this AS's signed entry, on every external interface except
 // interfaces whose neighbor the TRC names as a core — beacons never travel
-// toward a core (Section 2.3.5). A neighbor's set is picked among the
-// qualifying routes that do not cross it, which it would discard as a loop
-// (Section 2.3.1): the neighbor a route arrived from, and on links between
-// non-cores, which carry beacons both ways, any neighbor it passed on its way
-// here. A neighbor that has not enrolled receives a set picked among the
-// founder's routes alone, and a probe that records its enrollment once it
-// has. A neighbor in the node's group also receives the routes into the
-// group; a neighbor outside it receives none of them. The propagation
-// targets are the neighbors' control services as service destinations on
-// the one-hop paths. Each neighbor's beacons go out off the loop in pick
-// order, until a call fails short of the neighbor's answer — a refused or
-// failed dial, which every further call would repeat — while a beacon the
-// neighbor rejects as invalid leaves the rest to go; the next round retries.
-// A neighbor whose previous beacons are still in flight gets none this
-// round.
+// toward a core (Section 2.3.5). A neighbor's set is the policy's answer
+// among the qualifying routes that do not cross it, which it would discard
+// as a loop (Section 2.3.1): the neighbor a route arrived from, and on links
+// between non-cores, which carry beacons both ways, any neighbor it passed
+// on its way here. A neighbor that has not enrolled is offered the founder's
+// routes alone, and a probe that records its enrollment once it has. The
+// propagation targets are the neighbors' control services as service
+// destinations on the one-hop paths. Each neighbor's beacons go out off the
+// loop in the policy's order, until a call fails short of the neighbor's
+// answer — a refused or failed dial, which every further call would repeat
+// — while a beacon the neighbor rejects as invalid leaves the rest to go;
+// the next round retries. A neighbor whose previous beacons are still in
+// flight gets none this round.
 func (b *Beaconer) propagateOnce(ctx context.Context) {
 	cores, err := b.coreASes()
 	if err != nil {
@@ -652,8 +651,7 @@ func (b *Beaconer) propagateOnce(ctx context.Context) {
 		return
 	}
 	state := b.links.Latest()
-	ranked := rankRoutes(b.qualifying(state))
-	members := groupOf(b.nodeTags.Latest(), b.ia)
+	qualifying := b.qualifying(state)
 	for egress, neighborIA := range state.Table() {
 		if neighborIA.IsZero() {
 			continue // a link whose neighbor establishment has not named
@@ -676,18 +674,14 @@ func (b *Beaconer) propagateOnce(ctx context.Context) {
 		if b.pending(target) {
 			continue
 		}
-		var takeable []route
-		for _, r := range ranked {
-			if (origin.IsZero() || r.PCB.FirstIA().Equal(origin)) && !r.PCB.ContainsIA(neighborIA) {
-				takeable = append(takeable, r)
+		var takeable []beaconing.Candidate
+		for _, c := range qualifying {
+			if (origin.IsZero() || c.PCB.FirstIA().Equal(origin)) && !c.PCB.ContainsIA(neighborIA) {
+				takeable = append(takeable, c)
 			}
 		}
-		var into group
-		if members.has(neighborIA) {
-			into = members
-		}
 		var beacons []*control_plane.PathSegment
-		for _, cand := range pickSet(takeable, founder, into) {
+		for _, cand := range b.choose(neighborIA, founder, takeable) {
 			extended, err := cand.PCB.Clone()
 			if err != nil {
 				slog.Error("Copying candidate beacon", "err", err)
@@ -723,18 +717,18 @@ func (b *Beaconer) propagateOnce(ctx context.Context) {
 	}
 }
 
-// registerOnce terminates the node's own set, picked among every qualifying
-// route, per Section 3.1.1 — a final AS entry with unset next AS and egress
-// interface, signed — storing the resulting up segments in the local path
-// database and registering each origin's down segments with the control
-// service of the core that originated the PCBs (Sections 3.1.2, 3.1.3, and
-// 3.3). The peer is named by ISD-AS and service alone: the peer client's
-// dial resolves the route per destination — one hop over the link to a
-// neighboring core, else the freshest up segment's reversal, stored by this
-// same pass. Each origin's registration runs off the loop, so the next pass
-// stores newly arrived up segments on time whatever a registration waits
-// on; an origin whose previous registration is still in flight is skipped
-// this round, and a dial that fails logs and a later pass retries.
+// registerOnce terminates the node's own set, the policy's answer among every
+// qualifying route, per Section 3.1.1 — a final AS entry with unset next AS
+// and egress interface, signed — storing the resulting up segments in the
+// local path database and registering each origin's down segments with the
+// control service of the core that originated the PCBs (Sections 3.1.2,
+// 3.1.3, and 3.3). The peer is named by ISD-AS and service alone: the peer
+// client's dial resolves the route per destination — one hop over the link
+// to a neighboring core, else the freshest up segment's reversal, stored by
+// this same pass. Each origin's registration runs off the loop, so the next
+// pass stores newly arrived up segments on time whatever a registration
+// waits on; an origin whose previous registration is still in flight is
+// skipped this round, and a dial that fails logs and a later pass retries.
 func (b *Beaconer) registerOnce(ctx context.Context) {
 	set, err := b.ownSet()
 	if err != nil {
@@ -815,23 +809,31 @@ func (b *Beaconer) registerCoreOnce(ctx context.Context) {
 // ID, names an ingress interface that no longer leads to its sender, and a
 // hop extended or terminated through it would publish a route the data
 // plane cannot carry: the beaconer neither propagates nor terminates it.
-func (b *Beaconer) qualifying(state bus.LinkState) []Candidate {
+func (b *Beaconer) qualifying(state bus.LinkState) []beaconing.Candidate {
 	table := state.Table()
-	return b.store.Qualifying(qualifyingIntervals*b.propagation, func(c Candidate) bool {
+	return b.store.Qualifying(qualifyingIntervals*b.propagation, func(c beaconing.Candidate) bool {
 		return table[c.Ingress].Equal(c.PCB.LastIA())
 	})
 }
 
-// ownSet returns the set the node terminates: picked among every qualifying
-// route, the founder's cheapest first, the routes into the node's group
-// included.
-func (b *Beaconer) ownSet() ([]Candidate, error) {
+// ownSet returns the set the node terminates: the policy's answer for the
+// node itself among every qualifying route.
+func (b *Beaconer) ownSet() ([]beaconing.Candidate, error) {
 	founder, err := b.engine.FounderAS(b.ia.ISD())
 	if err != nil {
 		return nil, err
 	}
-	return pickSet(rankRoutes(b.qualifying(b.links.Latest())), founder,
-		groupOf(b.nodeTags.Latest(), b.ia)), nil
+	return b.choose(b.ia, founder, b.qualifying(b.links.Latest())), nil
+}
+
+// choose returns the receiver's set: the first storePerInterface routes of
+// the policy's answer among cands. A receiver keeps no more candidates per
+// interface, so more routes over one link would only evict one another.
+func (b *Beaconer) choose(
+	receiver, founder addr.IA, cands []beaconing.Candidate) []beaconing.Candidate {
+
+	set := b.policy.Select(receiver, founder, cands)
+	return set[:min(len(set), storePerInterface)]
 }
 
 // probe sends the peer the sender's probe off the loop, unless the previous
@@ -854,7 +856,7 @@ func (b *Beaconer) probe(ctx context.Context, peerIA addr.IA) {
 
 // terminate appends the terminating AS entry to a candidate: ingress the
 // receiving interface, egress and next AS unset, signed (Section 3.1.1).
-func (b *Beaconer) terminate(cand Candidate) (*segment.PCB, error) {
+func (b *Beaconer) terminate(cand beaconing.Candidate) (*segment.PCB, error) {
 	terminated, err := cand.PCB.Clone()
 	if err != nil {
 		return nil, err

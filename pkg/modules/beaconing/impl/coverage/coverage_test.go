@@ -1,4 +1,4 @@
-package controlplane
+package coverage
 
 import (
 	"maps"
@@ -13,10 +13,12 @@ import (
 	"github.com/fancl20/cion/pkg/libs/bus"
 	"github.com/fancl20/cion/pkg/libs/scion"
 	"github.com/fancl20/cion/pkg/libs/segment"
+	"github.com/fancl20/cion/pkg/modules/beaconing"
+	"github.com/fancl20/cion/pkg/modules/beaconing/impl/beaconingtest"
 )
 
-// The ASes of the selection's pure tests: F the founder, O another origin,
-// and M, N, K on their routes.
+// The ASes of the tests: F the founder, O another origin, and M, N, K on
+// their routes.
 var (
 	selF = addr.MustIAFrom(30, 0xff0000000001)
 	selO = addr.MustIAFrom(30, 0xff0000000002)
@@ -36,9 +38,9 @@ type hopSpec struct {
 	latency         time.Duration
 }
 
-// rawRoute builds an unsigned candidate for the selection's pure tests: the
-// hops in construction order, originated at ts, arrived over ingress.
-func rawRoute(ingress uint16, ts time.Time, hops ...hopSpec) Candidate {
+// rawRoute builds an unsigned candidate: the hops in construction order,
+// originated at ts, arrived over ingress.
+func rawRoute(ingress uint16, ts time.Time, hops ...hopSpec) beaconing.Candidate {
 	pcb := &segment.PCB{Info: segment.Info{Timestamp: ts}}
 	for _, h := range hops {
 		e := segment.ASEntry{IA: h.ia, Hop: path.HopField{ConsIngress: h.ingress, ConsEgress: h.egress}}
@@ -47,15 +49,15 @@ func rawRoute(ingress uint16, ts time.Time, hops ...hopSpec) Candidate {
 		}
 		pcb.Entries = append(pcb.Entries, e)
 	}
-	return Candidate{Ingress: ingress, PCB: pcb}
+	return beaconing.Candidate{Ingress: ingress, PCB: pcb}
 }
 
 // labeled holds the candidates a test built, by label.
-type labeled map[string]Candidate
+type labeled map[string]beaconing.Candidate
 
 // all returns the candidates in label order.
-func (l labeled) all() []Candidate {
-	var out []Candidate
+func (l labeled) all() []beaconing.Candidate {
+	var out []beaconing.Candidate
 	for _, name := range slices.Sorted(maps.Keys(l)) {
 		out = append(out, l[name])
 	}
@@ -63,7 +65,7 @@ func (l labeled) all() []Candidate {
 }
 
 // names returns the labels of the candidates, in their order.
-func (l labeled) names(cands []Candidate) []string {
+func (l labeled) names(cands []beaconing.Candidate) []string {
 	out := make([]string, 0, len(cands))
 	for _, c := range cands {
 		for name, built := range l {
@@ -85,7 +87,7 @@ func TestPriceOf(t *testing.T) {
 	bothEnds.PCB.Entries[1].Latency[segment.LinkID{IA: selM, IfID: 2}] = 4 * ms
 	for _, tc := range []struct {
 		name   string
-		c      Candidate
+		c      beaconing.Candidate
 		want   time.Duration
 		priced bool
 	}{
@@ -123,7 +125,7 @@ func TestRankRoutes(t *testing.T) {
 		"unpriced older": rawRoute(5, now,
 			hopSpec{selF, 0, 9, 0}, hopSpec{selK, 10, 11, 0}),
 	}
-	var got []Candidate
+	var got []beaconing.Candidate
 	for _, r := range rankRoutes(routes.all()) {
 		got = append(got, r.Candidate)
 	}
@@ -271,19 +273,20 @@ func TestPickSetCoversEveryLinkIntoTheGroup(t *testing.T) {
 	}
 }
 
-// TestPickSetKeepsItsFirstPicks checks the bound: of more origins than a set
-// holds, the set keeps the first maxSetSize picks, the cheapest origins.
-func TestPickSetKeepsItsFirstPicks(t *testing.T) {
+// TestPickSetKeepsEveryPick checks that a set keeps every pick, however
+// many: of 70 origins, each origin's route, the cheapest first. The
+// beaconer, not the method, bounds what a receiver gets.
+func TestPickSetKeepsEveryPick(t *testing.T) {
 	now := time.Now()
-	var cands []Candidate
-	for i := range maxSetSize + 6 {
+	var cands []beaconing.Candidate
+	for i := range 70 {
 		origin := addr.MustIAFrom(30, 0xff0000001000+addr.AS(i))
 		cands = append(cands, rawRoute(uint16(i+1), now,
 			hopSpec{origin, 0, 1, time.Duration(i+1) * ms}))
 	}
 	set := pickSet(rankRoutes(cands), selF, group{})
-	if len(set) != maxSetSize {
-		t.Fatalf("set holds %d routes, want %d", len(set), maxSetSize)
+	if len(set) != len(cands) {
+		t.Fatalf("set holds %d routes, want %d", len(set), len(cands))
 	}
 	for k, c := range set {
 		if c.PCB != cands[k].PCB {
@@ -294,4 +297,59 @@ func TestPickSetKeepsItsFirstPicks(t *testing.T) {
 	if got := pickSet(nil, selF, group{}); len(got) != 0 {
 		t.Errorf("set of no routes = %d routes, want none", len(got))
 	}
+}
+
+// TestSelectCarriesTheRoutesIntoTheGroup checks whom the routes into the
+// node's group reach. The node tags put the node B, C, and E in one group
+// and G in another; D carries none. B holds [F], [F, C], and [F, D, C], the
+// route that entered the group from D. B's own set and E's take [F, D, C]
+// beside [F] and its backup [F, C]; G, outside the group, takes [F] and
+// [F, C] alone. With no node tags topic, B keeps [F, D, C] out of its own
+// set too.
+func TestSelectCarriesTheRoutesIntoTheGroup(t *testing.T) {
+	var (
+		iaB = addr.MustIAFrom(30, 0xff0000000010)
+		iaC = addr.MustIAFrom(30, 0xff0000000011)
+		iaD = addr.MustIAFrom(30, 0xff0000000012)
+		iaE = addr.MustIAFrom(30, 0xff0000000013)
+		iaG = addr.MustIAFrom(30, 0xff0000000014)
+	)
+	tags := new(bus.Topic[bus.NodeTags])
+	tags.Publish(bus.NodeTags{}.With(bus.TagGroup, map[addr.IA]string{
+		iaB: "g", iaC: "g", iaE: "g", iaG: "h",
+	}))
+	now := time.Now()
+	routes := labeled{
+		"direct": rawRoute(1, now, hopSpec{selF, 0, 1, ms}),
+		"via C": rawRoute(2, now,
+			hopSpec{selF, 0, 2, ms}, hopSpec{iaC, 3, 4, ms}),
+		"from D": rawRoute(2, now,
+			hopSpec{selF, 0, 5, ms}, hopSpec{iaD, 6, 7, ms}, hopSpec{iaC, 8, 4, ms}),
+	}
+	inside := []string{"direct", "via C", "from D"}
+	outside := []string{"direct", "via C"}
+	for _, tc := range []struct {
+		name     string
+		tags     *bus.Topic[bus.NodeTags]
+		receiver addr.IA
+		want     []string
+	}{
+		{"the node itself", tags, iaB, inside},
+		{"a member", tags, iaE, inside},
+		{"another group's node", tags, iaG, outside},
+		{"the node itself with no node tags topic", nil, iaB, outside},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := routes.names(New(iaB, tc.tags).Select(tc.receiver, selF, routes.all()))
+			if diff := cmp.Diff(tc.want, got); diff != "" {
+				t.Errorf("set (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+// TestContract runs the beacon policy contract suite against the coverage
+// method.
+func TestContract(t *testing.T) {
+	beaconingtest.Run(t, func(ia addr.IA) beaconing.Policy { return New(ia, nil) })
 }
