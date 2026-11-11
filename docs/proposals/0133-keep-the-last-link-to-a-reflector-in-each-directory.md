@@ -55,11 +55,10 @@ Today
 *   Regaining a reflector once lost: a node whose last reflector's link
     went down, or whose far end evicted it, holds none until the floor or a
     stranded tier promotes a link to a dialable neighbor.
-*   Where a punch reflects once clusters become scopes (ADR-0039, principle
-    10): a cluster of nodes behind NATs then holds no dialable member in its
-    own directory, so a punch there finds no reflector whatever links its
-    members keep, and the proposal that makes clusters scopes settles where
-    it reflects.
+*   Where a punch reflects once clusters become scopes: a cluster of nodes
+    behind NATs then holds no dialable member in its own directory, so a
+    punch there finds no reflector whatever links its members keep, and the
+    proposal that makes clusters scopes settles where it reflects.
 
 ## Proposal
 

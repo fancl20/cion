@@ -1,6 +1,6 @@
 # Let Paths React, Links Settle, and Clusters Hold Still
 
-*   Status: proposed
+*   Status: accepted
 *   Date: 2026-11-07
 
 [TOC]
@@ -58,15 +58,10 @@ trip its signer measured
 and only the cap bounds a node's links. Yet small networks are rarely flat:
 a few operators run nodes in a few datacenters, metros, or homes, a few
 milliseconds apart and steady inside each, tens of milliseconds between.
-CION already treats one such group as a unit, by accident of addressing: a
-site behind a translator keeps a directory of its own, its nodes without a
-link outside publish no entry outside and are no candidates there, and paths
-reach them through the site's nodes that link outside (ADR-0032, decision
-5).
 
 How should the policies divide the work, so that each acts on what it can
-judge at its own pace, noise moves none of them, and the costs follow the
-network's groups rather than its size?
+judge at its own pace, noise moves none of them, and a node's links follow
+the network's groups rather than its size?
 
 ## Decision drivers
 
@@ -81,14 +76,12 @@ network's groups rather than its size?
     that the system defines, never a number fitted to a lab.
 *   **Links stay bounded:** the cap bounds beaconing (ADR-0017, decision
     1), and its slots go to the links worth the most.
-*   **Cost by locality:** a node's links, probes, and directory grow with
-    its own group and the number of groups, not with the network.
+*   **Cost by locality:** a node's links grow with its own group and the
+    number of groups, not with the network.
 *   **Paths stay near the best:** what grouping costs a pair is bounded,
     and known before a group forms.
 *   **Measurement over description:** groups come from measured round
     trips; no operator names them (ADR-0017).
-*   **One notion of group:** a site and a cluster of nearby nodes behave
-    alike.
 *   **Topology, not trust:** no new keys, roles, or TRCs.
 
 ## Considered options
@@ -129,7 +122,7 @@ clusters**, on these principles:
     acts on conditions that outlast the path policy's answer, never in its
     place. A link that falls behind needs no prompt retirement: the path
     policy stops choosing its routes first. Clusters act beneath the links,
-    on what neither policy can change: the costs that grow with the
+    on what neither policy can change: how a node's links grow with the
     network. A change of membership reshapes links, which reshape paths, so
     it waits for the most confidence of all.
 2.  **A link is worth the routes it gives the path policy.** A link's worth
@@ -196,7 +189,9 @@ clusters**, on these principles:
     predicts each pair's round trip exactly, from the round trips the
     directory publishes, before a clustering takes effect, and a cluster
     whose pairs the prediction puts beyond the budget splits. A node in no
-    cluster stands alone, so a network without groups stays flat.
+    cluster stands alone, so a network without groups stays flat. Clusters
+    group into no larger clusters; a later decision nests them if they grow
+    too many to treat flat.
 8.  **Forming costs more than keeping.** Every node computes the clusters
     from the round trips the directory publishes, by one rule that reads no
     clock and no order of arrival, so nodes that hold the same entries
@@ -221,14 +216,6 @@ clusters**, on these principles:
     between two clusters can start at any member. The path policy prices as
     it does, charging every member a path crosses, so forming links and
     serving traffic still price a route the same way (ADR-0035).
-10. **A cluster is a scope chosen by distance, one level deep.** Its
-    members share a directory of their own, as a site's do. Outside, the
-    cluster shows only the members that hold its links to other clusters,
-    and through them its round trips and its membership; its other members
-    publish no entry outside, are no candidates for nodes outside, and are
-    reached over paths through those members. A site is a cluster and meets
-    the network the same way. Clusters group into no larger clusters; a
-    later decision nests them if they grow too many to treat flat.
 
 The lines, the confidence, the history each decision reads, and the rule
 that computes clusters are the proposals' to set, each from the principle it
@@ -241,10 +228,8 @@ beside the candidate. It replaces ADR-0026's ratio pair (decision 3).
 ADR-0038's readings remain the evidence, and the records keep the longer
 history that confidence reads. The clusters narrow ADR-0017's decision 1, so
 that a node's candidates are its cluster's members and the far ends of the
-links between clusters it holds; ADR-0032's decision 5, under which scopes
-follow addresses alone; ADR-0036's decision 4, so that a node's beacons also
-cover each link into its cluster; and ADR-0037's decision 1, so that an
-entry reports the round trips of its own scope. Links settle only where
+links between clusters it holds, and ADR-0036's decision 4, so that a node's
+beacons also cover each link into its cluster. Links settle only where
 their retirements can go, so this narrows ADR-0037's decision 6 as well:
 retirements that rest on each other in a cycle let the cycle's heaviest link
 go first, as two that rest on each other do.
@@ -265,9 +250,8 @@ go first, as two that rest on each other do.
     falls short of a reading's room for error still gets the link.
 *   At the cap, slots follow worth, not the order the links formed in: a
     candidate that gains more than a link saves takes its slot.
-*   A node's probes and directory grow with its cluster and the number of
-    clusters, and its links follow the structure: dense inside a cluster,
-    few between. The cap binds less.
+*   A node's links follow the structure: dense inside a cluster, few
+    between. The cap binds less.
 *   What a cluster costs any pair is bounded before it forms, and every
     node predicts it exactly.
 *   A network without groups loses nothing: no cluster forms, and it stays
@@ -284,14 +268,13 @@ go first, as two that rest on each other do.
     route keeps more history.
 *   Paths between clusters cross the members that hold the links between
     them, and their round trips grow by up to the budget.
-*   A node no longer measures other clusters' members, so a pair across
-    clusters closer than their clusters' links can go unnoticed until the
-    clusters' round trips show it.
+*   Probes and the directory stay flat: every node measures every peer of
+    its scopes, holds every entry, and computes the clusters over the whole
+    directory, so these costs grow with the network until a decision of
+    their own cuts them.
 *   Clusters are a shared computation over the directory: nodes whose views
     differ disagree on membership until the entries meet, and the
     confidence slows every change of membership.
-*   A node's place moves between scopes as it joins and leaves a cluster:
-    its entry outside appears and withdraws, and its links change scope.
 *   A member forwards to its fellow members, and registers, a route over
     each link into its cluster, so beaconing grows with the links between
     clusters.
@@ -341,8 +324,8 @@ go first, as two that rest on each other do.
 
 *   Good, because every pair is judged on its own, and paths run nearest to
     the best.
-*   Bad, because probes and the directory grow with the square of the
-    network, and links fill every node's cap.
+*   Bad, because links fill every node's cap, whatever groups the network
+    holds.
 
 ### Regions the operator declares
 

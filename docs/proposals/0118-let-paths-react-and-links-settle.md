@@ -46,7 +46,7 @@ Today:
 
 *   The path library's picks, leases, health, and cost.
 *   The coordination of link changes, the streaks, the floor, and the cap.
-*   ADR-0039's clusters (principles 7 to 10).
+*   ADR-0039's clusters (principles 7 to 9).
 
 ## Proposal
 

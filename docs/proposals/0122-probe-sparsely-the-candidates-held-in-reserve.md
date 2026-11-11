@@ -46,8 +46,8 @@ Today:
 
 ### Non-goals
 
-*   Clusters as scopes (ADR-0039, principle 10): every node still measures
-    every peer, holds every entry, and enumerates every route.
+*   Clusters as scopes: every node still measures every peer, holds every
+    entry, and enumerates every route.
 *   The routes' probes: the prober probes each priced route every half
     minute, and a route reading needs five probes within its five minutes,
     so they leave little room.

@@ -60,7 +60,7 @@ Today:
 ### Non-goals
 
 *   Clusters as scopes: every node still measures every peer, holds every
-    entry, and enumerates every route (principle 10).
+    entry, and enumerates every route.
 *   The path policy and its prices.
 *   Clusters of clusters.
 
@@ -281,11 +281,11 @@ carry no routes into a cluster, so it beacons as before.
     nodes for stay as they were: every node still measures every peer,
     holds every entry, and computes over the whole directory, its
     coordination's shortest paths and its clusters' dendrogram growing with
-    the cube of the network. They fall only once clusters become scopes
-    (principle 10): members measure and hold each other, and nodes outside
-    see only the members that hold links out. That proposal comes next,
-    after a lab of fifty to a hundred nodes shows where the flat costs
-    begin to bind; below that, the clusters' worth is the links they save.
+    the cube of the network. They fall only once clusters become scopes:
+    members measure and hold each other, and nodes outside see only the
+    members that hold links out. That proposal comes next, after a lab of
+    fifty to a hundred nodes shows where the flat costs begin to bind;
+    below that, the clusters' worth is the links they save.
 *   Mutations: 65 of 65 killed, after three conditions they showed
     redundant were removed.
 *   The pipeline passed but for `TestPingSkipsExpiredPath` under the race
