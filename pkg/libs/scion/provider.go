@@ -201,6 +201,11 @@ const ReadingSamples = 5
 // lasting change moves the bound it crosses after about one horizon.
 const BoundSpan = 3 * StaleAfter
 
+// BoundSamples is the most samples a reading's bounds read: the thirty a
+// route probed every half minute holds over BoundSpan, so that a subject
+// probed more often reacts within its last thirty.
+const BoundSamples = 30
+
 // BoundConfidence is the one-sided confidence of a reading's bounds.
 const BoundConfidence = 0.95
 
@@ -218,12 +223,12 @@ func ReadingEstimate(samples []bus.PathSample, now time.Time) evidence.Estimate 
 }
 
 // BoundsEstimate returns the estimate a reading's bounds come from at now:
-// the 80th percentile of the samples within BoundSpan, divided by their
-// delivery rate, with its bounds at BoundConfidence. Each bound is the order
-// statistic the count of round trips below the percentile, binomial over
-// them, reaches with that confidence, so the bounds assume nothing of how
-// the round trips spread: the lower takes two answered samples, the upper
-// fourteen.
+// the 80th percentile of the last BoundSamples samples within BoundSpan,
+// divided by their delivery rate, with its bounds at BoundConfidence. Each
+// bound is the order statistic the count of round trips below the
+// percentile, binomial over them, reaches with that confidence, so the
+// bounds assume nothing of how the round trips spread: the lower takes two
+// answered samples, the upper fourteen.
 func BoundsEstimate(samples []bus.PathSample, now time.Time) evidence.Estimate {
 	return boundKind.Of(samples, now)
 }
@@ -296,8 +301,8 @@ type Candidate struct {
 	Reading *time.Duration
 	Read    bool
 	// Low and High bound the round trip the reading estimates: the bounds
-	// of the path's probes answered within BoundSpan, divided by their
-	// delivery rate; nil where the probes give none.
+	// of the path's last BoundSamples probes within BoundSpan, divided by
+	// their delivery rate; nil where the probes give none.
 	Low, High *time.Duration
 	// ReadingEvidence and BoundsEvidence are the estimates its reading and
 	// its bounds come from, as ReadingEstimate and BoundsEstimate read its

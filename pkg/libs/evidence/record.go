@@ -19,7 +19,8 @@ type Record struct {
 	From, To string
 	// Why is the reason the decision gives.
 	Why string
-	// Line is the margin the decision weighed against; zero for none.
+	// Line is the margin the decision weighed against, negative for the
+	// room it allows; zero for none.
 	Line time.Duration
 	// Weighed are the estimates the decision weighed.
 	Weighed []Weighed
@@ -44,7 +45,7 @@ func (r Record) LogLine() (string, []slog.Attr) {
 		slog.String("to", r.To),
 		slog.String("why", r.Why),
 	}
-	if r.Line > 0 {
+	if r.Line != 0 {
 		attrs = append(attrs, slog.Duration("line", r.Line))
 	}
 	weighed := make([]slog.Attr, 0, len(r.Weighed))

@@ -7,6 +7,7 @@ import (
 
 	"github.com/scionproto/scion/pkg/addr"
 
+	"github.com/fancl20/cion/pkg/libs/evidence"
 	"github.com/fancl20/cion/pkg/libs/scion"
 	"github.com/fancl20/cion/pkg/libs/segment"
 	"github.com/fancl20/cion/pkg/modules/links"
@@ -27,24 +28,17 @@ type tier struct {
 	// route count's first term — one link ID per link: every composed path
 	// over an up segment of the node names the interface it leaves through.
 	upLinks []segment.LinkID
-	// price is the cheapest clean read route into the tier at its price, and
-	// priceRoute that route. Zero and nil when no read route prices the
-	// tier, and no priced rule fires on it.
-	price      time.Duration
-	priceRoute *scion.Candidate
-	// prices is each member's own price: the cheapest clean read route into
-	// the member at its price, and priceRoutes that route. A member no read
+	// price is the cheapest clean read route into the tier at its price,
+	// which an exclusion's harm reads, and estimate the least of those
+	// routes' price estimates, the tier's price as the comparisons weigh it.
+	// Zero and the zero estimate when no read route prices the tier, and no
+	// priced rule fires on it.
+	price    time.Duration
+	estimate evidence.Estimate
+	// prices is each member's own price as the comparisons weigh it: the
+	// least of the price estimates of its clean read routes. A member no read
 	// route prices is absent.
-	prices      map[addr.IA]time.Duration
-	priceRoutes map[addr.IA]*scion.Candidate
-	// low is the lowest lower bound of the tier's clean read routes, and
-	// lows each member's over its own, each at their prices: what the
-	// price stays above with confidence; lowRoute and lowRoutes are the
-	// routes they come from. Zero, or absent, where no read route bounds it.
-	low       time.Duration
-	lowRoute  *scion.Candidate
-	lows      map[addr.IA]time.Duration
-	lowRoutes map[addr.IA]*scion.Candidate
+	prices map[addr.IA]evidence.Estimate
 	// cheapest holds each member's cheapest clean route at its price, read
 	// or not, requested priced so it is read, and one through a dead link is
 	// ejected and the price rises to the routes that serve. A member no
@@ -59,18 +53,16 @@ type tier struct {
 	excluded map[addr.IA]excludedSample
 }
 
-// member is one classed peer with its direct round trip and the round
-// trip's lower bound.
+// member is one classed peer with its direct round trip.
 type member struct {
 	ia     addr.IA
 	direct time.Duration
-	low    time.Duration
 }
 
 // excludedSample is one up link's excluded measurement: the tier's clean
 // candidates that avoid the link — its survivors — the freshest of them
 // requested priced. One measurement answering the useless test, the
-// cut-critical reading, and the eviction ranking.
+// cut-critical reading, and the eviction's tests and ranking.
 type excludedSample struct {
 	// survivor is the freshest survivor, and dst the member it resolves
 	// into; nil when none resolved.
@@ -80,16 +72,19 @@ type excludedSample struct {
 	// measurements heard it within the trust window, and nothing doubted it
 	// since. Otherwise the window decides nothing about the link.
 	answered bool
-	// price is the cheapest read survivor at its price, and priceRoute that
-	// survivor. Zero and nil when no read survivor prices the tier.
-	price      time.Duration
-	priceRoute *scion.Candidate
+	// price is the cheapest read survivor at its price, which an
+	// exclusion's harm reads. Zero when no read survivor prices the tier.
+	price time.Duration
 	// routes is the tier's route count without the link: its other up links
 	// beside the survivors, saturated at two.
 	routes int
-	// prices is each member's price over its read survivors, each at its
-	// price. A member no read survivor prices is absent.
-	prices map[addr.IA]time.Duration
+	// survivors is the least of the read survivors' price estimates, the
+	// tier's price without the link as the comparisons weigh it, and
+	// crossing the same over the read routes crossing the link; the zero
+	// estimate where none prices. survivorsOf and crossingOf hold each
+	// member's over its own; a member none of them reaches is absent.
+	survivors, crossing     evidence.Estimate
+	survivorsOf, crossingOf map[addr.IA]evidence.Estimate
 	// cheapest holds each member's cheapest survivor at its price, read or
 	// not, requested priced so it is read, and one through a dead link is
 	// ejected before its price retires the link. A member no survivor
@@ -99,19 +94,6 @@ type excludedSample struct {
 	// the link reaches: the link's own neighbor, which the link reaches
 	// whatever composes, is cut off unless a survivor reaches it.
 	cutOff map[addr.IA]bool
-	// The bounds the history confirms a judgment by, each at its price.
-	// crossed reports that a clean read route into the tier crosses the
-	// link; low is the lowest lower bound of those routes and high the
-	// lowest upper bound of the read survivors. lows holds each member a
-	// read route crossing the link reaches, at the lowest lower bound of
-	// those routes, and highs each member's lowest upper bound over its read
-	// survivors. A bound the probes do not give is zero. lowRoute and
-	// highRoute are the routes low and high come from.
-	crossed             bool
-	low, high           time.Duration
-	lowRoute, highRoute *scion.Candidate
-	lows                map[addr.IA]time.Duration
-	highs               map[addr.IA]time.Duration
 }
 
 // deriveTiers classes the window's samples by direct round trip: walked
@@ -123,7 +105,7 @@ func deriveTiers(samples map[addr.IA]sample) []tier {
 	var walk []member
 	for ia, s := range samples {
 		if s.direct > 0 {
-			walk = append(walk, member{ia: ia, direct: s.direct, low: s.lo})
+			walk = append(walk, member{ia: ia, direct: s.direct})
 		}
 	}
 	sort.Slice(walk, func(i, j int) bool {
@@ -176,28 +158,16 @@ func (s *selection) windowTiers(
 				}
 			}
 		}
-		t.priceRoute, t.price = cheapest(readRoutes(routes))
-		t.prices = make(map[addr.IA]time.Duration, len(t.members))
-		t.priceRoutes = make(map[addr.IA]*scion.Candidate, len(t.members))
-		t.lows = make(map[addr.IA]time.Duration, len(t.members))
-		t.lowRoutes = make(map[addr.IA]*scion.Candidate, len(t.members))
+		_, t.price = cheapest(readRoutes(routes))
+		t.estimate = leastPrice(readRoutes(routes))
+		t.prices = make(map[addr.IA]evidence.Estimate, len(t.members))
 		t.cheapest = make(map[addr.IA]*scion.Candidate, len(t.members))
-		for _, c := range readRoutes(routes) {
-			if lo, _ := boundsOf(c); lo > 0 && (t.low == 0 || lo < t.low) {
-				t.low, t.lowRoute = lo, c
-			}
-		}
 		for _, m := range t.members {
 			if c, _ := cheapest(clean[m.ia]); c != nil {
 				t.cheapest[m.ia] = c
 			}
-			if c, price := cheapest(readRoutes(clean[m.ia])); price > 0 {
-				t.prices[m.ia], t.priceRoutes[m.ia] = price, c
-			}
-			for _, c := range readRoutes(clean[m.ia]) {
-				if lo, _ := boundsOf(c); lo > 0 && (t.lows[m.ia] == 0 || lo < t.lows[m.ia]) {
-					t.lows[m.ia], t.lowRoutes[m.ia] = lo, c
-				}
+			if price := leastPrice(readRoutes(clean[m.ia])); price.Answered > 0 {
+				t.prices[m.ia] = price
 			}
 		}
 		t.routes = routeCount(t.upLinks, routes)
@@ -248,37 +218,25 @@ func measureExcluded(
 		return ex
 	}
 	ex.answered = ex.survivor.Health == scion.HealthHealthy
-	ex.priceRoute, ex.price = cheapest(readRoutes(survivors))
-	ex.prices = make(map[addr.IA]time.Duration, len(t.members))
+	_, ex.price = cheapest(readRoutes(survivors))
+	ex.survivors = leastPrice(readRoutes(survivors))
+	ex.survivorsOf = make(map[addr.IA]evidence.Estimate, len(t.members))
+	ex.crossingOf = make(map[addr.IA]evidence.Estimate)
 	ex.cheapest = make(map[addr.IA]*scion.Candidate, len(t.members))
 	ex.cutOff = make(map[addr.IA]bool)
-	ex.lows = make(map[addr.IA]time.Duration)
-	ex.highs = make(map[addr.IA]time.Duration)
+	var crossing []*scion.Candidate
 	for _, m := range t.members {
-		for _, c := range readRoutes(clean[m.ia]) {
-			lo, hi := boundsOf(c)
-			if slices.Contains(survivors, c) {
-				if hi > 0 {
-					ex.highs[m.ia] = lower(ex.highs[m.ia], hi)
-					if ex.high == 0 || hi < ex.high {
-						ex.high, ex.highRoute = hi, c
-					}
-				}
-				continue
-			}
-			ex.crossed = true
-			ex.lows[m.ia] = lower(ex.lows[m.ia], lo)
-			if lo > 0 && (ex.low == 0 || lo < ex.low) {
-				ex.low, ex.lowRoute = lo, c
-			}
-		}
-	}
-	for _, m := range t.members {
-		var own []*scion.Candidate
+		var own, crossed []*scion.Candidate
 		for _, c := range clean[m.ia] {
 			if slices.Contains(survivors, c) {
 				own = append(own, c)
+			} else {
+				crossed = append(crossed, c)
 			}
+		}
+		crossing = append(crossing, readRoutes(crossed)...)
+		if price := leastPrice(readRoutes(crossed)); price.Answered > 0 {
+			ex.crossingOf[m.ia] = price
 		}
 		if len(own) == 0 && (len(clean[m.ia]) > 0 || m.ia.Equal(neighbor)) {
 			ex.cutOff[m.ia] = true
@@ -287,36 +245,45 @@ func measureExcluded(
 		if c, _ := cheapest(own); c != nil {
 			ex.cheapest[m.ia] = c
 		}
-		if _, price := cheapest(readRoutes(own)); price > 0 {
-			ex.prices[m.ia] = price
+		if price := leastPrice(readRoutes(own)); price.Answered > 0 {
+			ex.survivorsOf[m.ia] = price
 		}
 	}
+	ex.crossing = leastPrice(crossing)
 	return ex
 }
 
-// judge reads an up link's useless test off its tier this window. The
-// window decides when a read route prices the tier and the freshest route
-// avoiding the link answered. It decides useless when the link helps no one,
-// by the readings and by the history: its exclusion leaves the tier's route
-// count and price unchanged, cuts no member off, and leaves every priced
-// member a read survivor no dearer than its own price — the link's own
-// neighbor than its direct round trip, the sample promotion compares with
-// the same price — and the bounds confirm each such price, the survivors'
-// upper bound no higher than the link's lower bound. A link that helps
-// anyone stays, so a pair between promotion's line and no help at all keeps
-// its link, and so does one whose uselessness the history does not confirm
-// yet: the history lags a change, the readings follow it. A member the
-// survivors reach but no read survivor prices, or one whose routes none
-// read, leaves the window undecided: its price is unknown, not unchanged. A
-// member no route prices holds nothing against the link. A link no answered
-// route avoids decides nothing — the cut-critical link, which no useless
-// retirement takes.
-func judge(t *tier, ia addr.IA) (decided, useless bool) {
-	decided, useless = weigh(t, ia, func(with, without time.Duration) bool { return without > with })
-	if !decided || !useless {
-		return decided, useless
+// judge reads an up link's useless test off its tier this window, the
+// direct side of the link's own neighbor given. Better when the link helps
+// no one: its exclusion keeps the tier's route count and cuts no member off,
+// and the survivors beat the read routes crossing the link, for the tier and
+// for every member those routes reach, and the neighbor's direct side, each
+// by no line. Not better once the link helps anyone, so a pair between
+// promotion's line and no help at all keeps its link. Undecided while no
+// read route prices the tier, the freshest survivor went unanswered, a
+// member's routes none read, or a comparison lacks its evidence — a member
+// the survivors reach but no read survivor prices among them: a price
+// unknown is not unchanged. A link no answered route avoids decides
+// nothing: the cut-critical link, which no useless retirement takes.
+func judge(t *tier, ia addr.IA, direct evidence.Estimate) evidence.Verdict {
+	ex, ok := excludedOf(t, ia)
+	if !ok {
+		return evidence.Undecided
 	}
-	return true, confirmed(t, ia, func(low, high time.Duration) bool { return high <= low })
+	if ex.routes != t.routes || len(ex.cutOff) > 0 {
+		return evidence.NotBetter
+	}
+	verdicts := []evidence.Verdict{compare(ex.survivorsOf[ia], direct, 0)}
+	if ex.crossing.Answered > 0 {
+		verdicts = append(verdicts, compare(ex.survivors, ex.crossing, 0))
+	}
+	for m, crossing := range ex.crossingOf {
+		verdicts = append(verdicts, compare(ex.survivorsOf[m], crossing, 0))
+	}
+	if t.unread(ia) {
+		verdicts = append(verdicts, evidence.Undecided)
+	}
+	return fold(verdicts)
 }
 
 // judgeOutside reads the useless test of an up link the clustering does not
@@ -342,97 +309,95 @@ func judgeOutside(t *tier, ia addr.IA, joined bool) (decided, useless bool) {
 	return true, true
 }
 
-// yields reads an up link's eviction test off its tier this window: judge's,
-// with each price the link holds down weighed as promotion weighs a direct
-// round trip — the link helps where its reading would earn its place, by
-// PromotionRatio and MarginFloor — and the bounds confirming that it gains
-// no member what the path policy moves a lease for. A link that would not
-// earn its place today, and whose history confirms it, yields its slot to a
-// candidate that does; one whose worth noise holds near the line keeps it.
-func yields(t *tier, ia addr.IA) (decided, weak bool) {
-	decided, weak = weigh(t, ia, func(with, without time.Duration) bool {
-		return with < ratioOf(without, PromotionRatio) && without-with >= MarginFloor
-	})
-	if !decided || !weak {
-		return decided, weak
-	}
-	return true, confirmed(t, ia, func(low, high time.Duration) bool { return !gains(low, high) })
-}
-
-// outgained reads whether an up link yields its slot to a candidate gaining
-// gain on its price and sure as the tier's gain has it: judge's test,
-// with what the link saves each price it holds down — the price without it
-// less the price with it — beaten by the gain by the line to buy, and the
-// bounds confirming it: what the link saves at its lower bound against the
-// survivors' upper bound beaten by the sure gain as well. A link whose
-// saving noise holds near the gain keeps its slot.
-func outgained(t *tier, ia addr.IA, gain, sure time.Duration) (decided, weak bool) {
-	beaten := func(saving, gain time.Duration) bool {
-		return saving < ratioOf(gain, PromotionRatio) && gain-saving >= MarginFloor
-	}
-	decided, weak = weigh(t, ia, func(with, without time.Duration) bool { return !beaten(without-with, gain) })
-	if !decided || !weak {
-		return decided, weak
-	}
-	return true, confirmed(t, ia, func(low, high time.Duration) bool { return beaten(high-low, sure) })
-}
-
-// confirmed reports whether the history confirms a judgment of an up link:
-// for the tier, where a read route crosses the link, and for every member a
-// read route crossing the link reaches, the link's lower bound and the
-// survivors' upper bound stand as holds has them — the link's own neighbor
-// by its direct side's lower bound. A bound the probes do not give confirms
-// nothing.
-func confirmed(t *tier, ia addr.IA, holds func(low, high time.Duration) bool) bool {
-	ex := t.excluded[ia]
-	if ex.crossed && (ex.low == 0 || ex.high == 0 || !holds(ex.low, ex.high)) {
+// yields reads whether an up link would not earn its place today, the
+// direct side of the link's own neighbor given: its exclusion keeps the
+// tier's route count and cuts no member off, and the read routes crossing
+// it beat the survivors by the band for no price they reach — the tier's,
+// every member's those routes reach, and the neighbor's by its direct side
+// — each comparison not better. A link that would not earn its place today
+// yields its slot to a candidate that does; one better or undecided
+// anywhere, its worth near the line, keeps it, as does one beside a member
+// whose routes none read.
+func yields(t *tier, ia addr.IA, direct evidence.Estimate) bool {
+	ex, ok := excludedOf(t, ia)
+	if !ok || ex.routes != t.routes || len(ex.cutOff) > 0 || t.unread(ia) {
 		return false
 	}
-	for _, m := range t.members {
-		low, ok := ex.lows[m.ia]
-		if m.ia.Equal(ia) {
-			low, ok = m.low, true
-		}
-		if !ok {
-			continue
-		}
-		if high := ex.highs[m.ia]; low == 0 || high == 0 || !holds(low, high) {
+	if byBand(direct, ex.survivorsOf[ia]) != evidence.NotBetter {
+		return false
+	}
+	if ex.crossing.Answered > 0 && byBand(ex.crossing, ex.survivors) != evidence.NotBetter {
+		return false
+	}
+	for m, crossing := range ex.crossingOf {
+		if byBand(crossing, ex.survivorsOf[m]) != evidence.NotBetter {
 			return false
 		}
 	}
 	return true
 }
 
-// weigh runs the test judge and yields share, the link helping a price it
-// holds down when helps reports so, given the price with it and without it.
-func weigh(t *tier, ia addr.IA, helps func(with, without time.Duration) bool) (decided, idle bool) {
-	if t == nil || t.price == 0 {
-		return false, false
+// outgained reads whether an up link yields its slot to a candidate gaining
+// gain on its price, the direct side of the link's own neighbor given: its
+// exclusion keeps the tier's route count and cuts no member off, and the
+// gain beats what the link saves every price it reaches by the band of the
+// two — the survivors' price less the crossing routes', for the tier and
+// every member those routes reach, and the neighbor's survivors less its
+// direct side. A saving the gain does not beat, or one undecided, keeps the
+// link's slot, as does a member whose routes none read.
+func outgained(t *tier, ia addr.IA, direct, gain evidence.Estimate) bool {
+	ex, ok := excludedOf(t, ia)
+	if !ok || ex.routes != t.routes || len(ex.cutOff) > 0 || t.unread(ia) {
+		return false
+	}
+	beaten := func(saving evidence.Estimate) bool { return byBand(saving, gain) == evidence.Better }
+	if !beaten(ex.survivorsOf[ia].Minus(direct)) {
+		return false
+	}
+	if ex.crossing.Answered > 0 && !beaten(ex.survivors.Minus(ex.crossing)) {
+		return false
+	}
+	for m, crossing := range ex.crossingOf {
+		if !beaten(ex.survivorsOf[m].Minus(crossing)) {
+			return false
+		}
+	}
+	return true
+}
+
+// seen returns the survivors whose fresh probes a useless retirement's hold
+// reads: those reaching the link's own neighbor, else the tier's, else the
+// freshest survivor, which answered for any window that decides.
+func (ex excludedSample) seen(neighbor addr.IA) evidence.Estimate {
+	switch {
+	case ex.survivorsOf[neighbor].Answered > 0:
+		return ex.survivorsOf[neighbor]
+	case ex.survivors.Answered > 0:
+		return ex.survivors
+	case ex.survivor != nil:
+		return priceBounds(ex.survivor)
+	}
+	return evidence.Estimate{}
+}
+
+// excludedOf returns the excluded measurement of the up link to the peer
+// when the window can judge it: a read route prices the tier, and the
+// freshest survivor answered.
+func excludedOf(t *tier, ia addr.IA) (excludedSample, bool) {
+	if t == nil || t.estimate.Answered == 0 {
+		return excludedSample{}, false
 	}
 	ex, ok := t.excluded[ia]
-	if !ok || !ex.answered {
-		return false, false
-	}
-	if ex.routes != t.routes || helps(t.price, ex.price) {
-		return true, false
-	}
-	unpriced := false
-	for _, m := range t.members {
-		price := t.prices[m.ia]
-		if m.ia.Equal(ia) {
-			price = m.direct
-		}
-		switch {
-		case ex.cutOff[m.ia]:
-			return true, false
-		case price == 0 && t.cheapest[m.ia] == nil:
-		case price == 0, ex.prices[m.ia] == 0:
-			unpriced = true
-		case helps(price, ex.prices[m.ia]):
-			return true, false
-		}
-	}
-	return !unpriced, !unpriced
+	return ex, ok && ex.answered
+}
+
+// unread reports whether a member of the tier other than the link's own
+// neighbor has clean routes none of which is read: its price is unknown.
+func (t *tier) unread(neighbor addr.IA) bool {
+	return slices.ContainsFunc(t.members, func(m member) bool {
+		_, priced := t.prices[m.ia]
+		return !m.ia.Equal(neighbor) && !priced && t.cheapest[m.ia] != nil
+	})
 }
 
 // harm is how far a link's exclusion moves its tier's price.
@@ -457,87 +422,94 @@ func tierOf(ts []tier, ia addr.IA) *tier {
 	return nil
 }
 
-// qualifies reports whether the member's direct round trip, beside its
-// upper bound, earns a link under the priced admission cases: a second route
-// for a single-route tier within SecondRouteRatio of the tier's price —
-// redundancy purchased at a bounded latency price — or a round trip beating
-// its own price as beats has it. An unpriced tier qualifies nothing.
-func (t *tier) qualifies(ia addr.IA, direct, high time.Duration) bool {
-	if t.price == 0 {
-		return false
-	}
-	return t.beats(ia, direct, high) || (t.routes == 1 && direct <= ratioOf(t.price, SecondRouteRatio))
-}
-
-// beats reports whether the member's direct round trip beats its own price,
-// the tier's when no route prices the member, in one of two ways. On the
-// readings alone, by the promotion ratio and by at least the margin floor:
-// what the path policy moves a lease for, with room for the readings'
-// error. Or confirmed: by what the path policy moves a lease for, on the
-// readings and on the bounds, the direct side's upper bound against the
-// price's lower bound, where the confidence holds the error. A member whose
-// routes none read beats nothing until one is: its price is unknown. An
-// unpriced tier beats nothing.
-func (t *tier) beats(ia addr.IA, direct, high time.Duration) bool {
-	if t.price == 0 {
-		return false
-	}
-	price, low := t.prices[ia], t.lows[ia]
-	if price == 0 {
+// beats weighs the member's direct side against its own price, the tier's
+// when no route prices the member, by the band of the two, and returns the
+// verdict beside the price weighed: better when the direct link buys what
+// the path policy moves a lease for. A member whose routes none read weighs
+// nothing until one is: its price is unknown. An unpriced tier weighs
+// nothing.
+func (t *tier) beats(ia addr.IA, direct evidence.Estimate) (evidence.Verdict, evidence.Estimate) {
+	price, ok := t.prices[ia]
+	if !ok {
 		if t.cheapest[ia] != nil {
-			return false
+			return evidence.Undecided, evidence.Estimate{}
 		}
-		price, low = t.price, t.low
+		price = t.estimate
 	}
-	if direct < ratioOf(price, PromotionRatio) && price-direct >= MarginFloor {
-		return true
-	}
-	return gains(direct, price) && high > 0 && gains(high, low)
+	return byBand(direct, price), price
 }
 
-// gain returns what the member's direct round trip saves on its own price,
-// the tier's when no route prices the member, as beats reads the two: on
-// the price's reading, and sure, on the lower of the price's reading and
-// its lower bound. Noise raises round trips: a price's reading long before
-// its lower bound, which then stays up a while after the noise ends, and a
-// direct round trip only to shrink the gain, so the sure gain is the one
-// both the readings and the history confirm. Zero for an unpriced tier,
-// for a member whose routes none read, and for a direct side that saves
-// nothing; the sure gain zero as well for a lower bound the probes do not
-// give.
-func (t *tier) gain(ia addr.IA, direct time.Duration) (gain, sure time.Duration) {
-	if t.price == 0 {
-		return 0, 0
+// secondRoute weighs the member's direct side against the price of a tier
+// of one route, by the room SecondRouteRatio leaves above the price's value:
+// better when the direct link, the tier's second route, costs no more than
+// that — redundancy purchased at a bounded latency price. A tier of other
+// than one route weighs nothing.
+func (t *tier) secondRoute(direct evidence.Estimate) evidence.Verdict {
+	if t.routes != 1 {
+		return evidence.Undecided
 	}
-	price, low := t.prices[ia], t.lows[ia]
-	if price == 0 {
-		if t.cheapest[ia] != nil {
-			return 0, 0
+	return compare(direct, t.estimate, secondRouteLine(t.estimate))
+}
+
+// secondRouteLine returns the line a second route clears against the price:
+// the room SecondRouteRatio leaves above its value, a negative margin.
+func secondRouteLine(price evidence.Estimate) time.Duration {
+	return price.Value - ratioOf(price.Value, SecondRouteRatio)
+}
+
+// gain returns what the member's direct side saves on its price as beats
+// weighs the two: the price's estimate less the direct side's; the zero
+// estimate where beats weighs nothing.
+func (t *tier) gain(ia addr.IA, direct evidence.Estimate) evidence.Estimate {
+	_, price := t.beats(ia, direct)
+	return price.Minus(direct)
+}
+
+// compare weighs whether a beats b by the line, as evidence.Beats does;
+// undecided where either rests on no answered sample.
+func compare(a, b evidence.Estimate, line time.Duration) evidence.Verdict {
+	if a.Answered == 0 || b.Answered == 0 {
+		return evidence.Undecided
+	}
+	return evidence.Beats(a, b, line)
+}
+
+// byBand weighs whether a beats b by the band of their values: what the
+// path policy moves a lease for.
+func byBand(a, b evidence.Estimate) evidence.Verdict {
+	return compare(a, b, scion.Band(a.Value, b.Value))
+}
+
+// fold returns the verdict of comparisons that must all be better: not
+// better at any not better, else undecided at any undecided, else better.
+func fold(verdicts []evidence.Verdict) evidence.Verdict {
+	out := evidence.Better
+	for _, v := range verdicts {
+		switch v {
+		case evidence.NotBetter:
+			return evidence.NotBetter
+		case evidence.Undecided:
+			out = evidence.Undecided
 		}
-		price, low = t.price, t.low
 	}
-	if low > 0 {
-		sure = max(min(price, low)-direct, 0)
-	}
-	return max(price-direct, 0), sure
+	return out
 }
 
-// gains reports whether a round trip of to gains on one of from what the
-// path policy moves a lease for: it is lower, by the band or more.
-func gains(to, from time.Duration) bool {
-	return to < from && scion.BeyondBand(to, from)
+// leastPrice returns the least of the routes' price estimates: each route's
+// bounds' estimate at its price.
+func leastPrice(routes []*scion.Candidate) evidence.Estimate {
+	prices := make([]evidence.Estimate, len(routes))
+	for i, c := range routes {
+		prices[i] = priceBounds(c)
+	}
+	return evidence.Least(prices...)
 }
 
-// boundsOf returns the route's bounds at its price — each charged as its
-// price charges its cost — zero for a bound its probes do not give.
-func boundsOf(c *scion.Candidate) (low, high time.Duration) {
-	if c.Low != nil {
-		low = *c.Low + c.Charge()
-	}
-	if c.High != nil {
-		high = *c.High + c.Charge()
-	}
-	return low, high
+// priceBounds returns the estimate a route's price and its bounds come from:
+// its bounds' estimate, charged scion.TransitPenalty for every AS it crosses
+// between its ends, each way.
+func priceBounds(c *scion.Candidate) evidence.Estimate {
+	return c.BoundsEvidence.Plus(c.Charge())
 }
 
 // readRoutes returns the routes whose readings decide: those resting on at
@@ -562,12 +534,4 @@ func cheapest(routes []*scion.Candidate) (*scion.Candidate, time.Duration) {
 		}
 	}
 	return out, price
-}
-
-// lower returns the smaller of two prices, a zero pricing nothing.
-func lower(a, b time.Duration) time.Duration {
-	if a == 0 || b > 0 && b < a {
-		return b
-	}
-	return a
 }

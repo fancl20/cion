@@ -24,6 +24,7 @@ import (
 
 	"github.com/fancl20/cion/pkg/core/dataplane/dataplanetest"
 	"github.com/fancl20/cion/pkg/libs/bus"
+	"github.com/fancl20/cion/pkg/libs/evidence"
 	"github.com/fancl20/cion/pkg/libs/scion"
 	"github.com/fancl20/cion/pkg/libs/scionrpc"
 	"github.com/fancl20/cion/pkg/libs/segment"
@@ -37,9 +38,12 @@ import (
 // selFixture is the selection loop's test harness: a memory link store, the
 // directory's entries and the monitor's verdicts, which each pass publishes
 // first, injected samples, their routes' health and cost as the
-// measurements leave them, and injected candidate-grace probes. The
-// establishment is recorded rather than performed; the promotion and
-// retirement rules are what the tests assert.
+// measurements leave them, and injected candidate-grace probes. Each pass
+// reads a peer's direct side as a steady round trip at its sample's, a full
+// window of probes, and its routes' estimates as freshly probed, unless the
+// fixture is historic: then the direct side reads the probes the passes
+// took, one a pass. The establishment is recorded rather than performed; the
+// promotion and retirement rules are what the tests assert.
 type selFixture struct {
 	t              *testing.T
 	store          *memory.DB
@@ -63,7 +67,34 @@ type selFixture struct {
 	// writes counts the loop's own writes, signaled through its store as
 	// the node's store signals them; the fixture's writes bypass it.
 	writes int
-	sel    *selection
+	// historic reads the direct side from the passes' probes, and unprobed
+	// leaves the routes' estimates as they were made.
+	historic, unprobed bool
+	sel                *selection
+}
+
+// steadyDirect returns the direct side's estimates of a steady round trip: a
+// full window of probes answered at it now; none for a zero round trip.
+func steadyDirect(rtt time.Duration) (reading, bounds evidence.Estimate) {
+	if rtt == 0 {
+		return evidence.Estimate{}, evidence.Estimate{}
+	}
+	now := time.Now()
+	samples := slices.Repeat([]bus.PathSample{{At: now, RTT: rtt}}, scion.BoundSamples)
+	return scion.ReadingEstimate(samples, now), scion.BoundsEstimate(samples, now)
+}
+
+// probedNow returns the routes as a probe answered them now: each estimate
+// resting on an answer, its newest one now.
+func probedNow(routes []scion.Candidate) {
+	now := time.Now()
+	for i := range routes {
+		for _, e := range []*evidence.Estimate{&routes[i].ReadingEvidence, &routes[i].BoundsEvidence} {
+			if e.Answered > 0 {
+				e.Newest = now
+			}
+		}
+	}
 }
 
 // The fixture's ISD-ASes. The node's is picked so that its second-route
@@ -159,6 +190,12 @@ func newSelFixture(t *testing.T, neighbors ...addr.IA) *selFixture {
 			f.probedAt[e.IA] = e.RendezvousAddr
 			sm := f.samples[e.IA]
 			sm.baseline = f.sel.freshest(sm.candidates)
+			if !f.unprobed {
+				probedNow(sm.candidates)
+			}
+			if !f.historic {
+				sm.reading, sm.bounds = steadyDirect(sm.direct)
+			}
 			return sm
 		},
 		establishFn: func(_ context.Context, e target, _ string) *links.Link {
@@ -682,17 +719,18 @@ func TestSelectionPromotionWaits(t *testing.T) {
 }
 
 // TestSelectionReports checks the window's reports: every peer measured, in
-// the directory that named it, at the round trip last reported unless the
-// measurement moved past the step, naming no link.
+// the directory that named it, at the round trip and the bounds last
+// reported unless the measurement moved past the step, naming no link.
 func TestSelectionReports(t *testing.T) {
 	f := newSelFixture(t, selPeer, selA)
 	f.candidate(selB, 30*time.Millisecond, 0)
 	f.candidate(selC, 0, 0) // unreachable
 	f.pass(t)
+	ms := time.Millisecond
 	want := []bus.PeerReport{
-		{IA: selPeer, RTT: 10 * time.Millisecond},
-		{IA: selA, RTT: 10 * time.Millisecond},
-		{IA: selB, RTT: 30 * time.Millisecond},
+		{IA: selPeer, RTT: 10 * ms, Low: 10 * ms, High: 10 * ms},
+		{IA: selA, RTT: 10 * ms, Low: 10 * ms, High: 10 * ms},
+		{IA: selB, RTT: 30 * ms, Low: 30 * ms, High: 30 * ms},
 	}
 	if diff := cmp.Diff(map[bus.DirectoryID][]bus.PeerReport{selScope: want}, f.reports); diff != "" {
 		t.Fatalf("reports (-want +got):\n%s", diff)
@@ -716,6 +754,7 @@ func TestSelectionReports(t *testing.T) {
 func TestSelectionLostProbesRaiseTheReading(t *testing.T) {
 	ms := time.Millisecond
 	f := newSelFixture(t, selPeer, selA)
+	f.historic = true
 	f.candidate(selB, 30*ms, 0)
 	f.pass(t)
 	answering := f.samples[selB]
@@ -784,6 +823,34 @@ func TestSelectionSingleRoutePromotion(t *testing.T) {
 	}
 	if f.hasEntry(t, selC) {
 		t.Error("a member outside SecondRouteRatio of the price was admitted")
+	}
+}
+
+// TestSelectionSecondRouteRestartsItsHold checks the second route's hold: a
+// window that finds the member past the ratio's room releases it, so the
+// purchase waits its pair's windows again from the next window within it.
+func TestSelectionSecondRouteRestartsItsHold(t *testing.T) {
+	ms := time.Millisecond
+	windows := promoteWindows(selIA, selB)
+	f := newSelFixture(t, selPeer, selA) // at the floor
+	// 22ms is within SecondRouteRatio of the tier's 20ms price; 26ms is
+	// past it.
+	f.candidate(selB, 22*ms, 20*ms, cand(link(selX)))
+	for range windows - 1 {
+		f.pass(t)
+	}
+	f.carried(selB, 26*ms, 20*ms, cand(link(selX)))
+	f.pass(t)
+	f.carried(selB, 22*ms, 20*ms, cand(link(selX)))
+	for range windows - 1 {
+		f.pass(t)
+		if len(f.established) != 0 {
+			t.Fatalf("promoted %v before its hold stood again", f.established)
+		}
+	}
+	f.pass(t)
+	if !slices.Equal(f.established, []addr.IA{selB}) {
+		t.Fatalf("promoted %v, want the member once its hold stood again", f.established)
 	}
 }
 
@@ -874,15 +941,15 @@ func TestSelectionFlappingCandidate(t *testing.T) {
 	}
 }
 
-// TestSelectionReadingDamps checks the damping the readings add, the seam's
-// direct side one sample a window: a slow window holds a candidate back
-// while its round trip stands above four fifths of the samples, and the
-// promotion's streak starts once it no longer does; fast windows among slow
-// ones promote nothing.
+// TestSelectionReadingDamps checks the damping the readings add to the round
+// trips the node reports, the seam's direct side one sample a window: a slow
+// window stands while its round trip stands above four fifths of the
+// samples, and fast windows among slow ones leave the slow round trip.
 func TestSelectionReadingDamps(t *testing.T) {
 	fast, slow, price := 8*time.Millisecond, 18*time.Millisecond, 20*time.Millisecond
 	t.Run("a slow window", func(t *testing.T) {
 		f := newSelFixture(t, selPeer, selA)
+		f.historic = true
 		f.candidate(selB, fast, price)
 		f.pass(t)
 		f.carried(selB, slow, price)
@@ -895,21 +962,14 @@ func TestSelectionReadingDamps(t *testing.T) {
 				t.Fatalf("reported %v, want the slow window's %v", r.RTT, slow)
 			}
 		}
-		for range PromoteWindows {
-			if len(f.established) != 0 {
-				t.Fatalf("promoted %v short of its windows since the slow one", f.established)
-			}
-			f.pass(t)
-			if r, _ := f.reported(selB); r.RTT != fast {
-				t.Fatalf("reported %v, want %v once the slow window is a fifth", r.RTT, fast)
-			}
-		}
-		if len(f.established) != 1 || !f.established[0].Equal(selB) {
-			t.Fatalf("promoted %v, want the candidate once its readings run fast", f.established)
+		f.pass(t)
+		if r, _ := f.reported(selB); r.RTT != fast {
+			t.Fatalf("reported %v, want %v once the slow window is a fifth", r.RTT, fast)
 		}
 	})
 	t.Run("fast windows", func(t *testing.T) {
 		f := newSelFixture(t, selPeer, selA)
+		f.historic = true
 		f.candidate(selB, slow, price)
 		for range 4 {
 			f.pass(t)
@@ -920,9 +980,6 @@ func TestSelectionReadingDamps(t *testing.T) {
 		}
 		if r, _ := f.reported(selB); r.RTT != slow {
 			t.Errorf("reported %v, want the slow windows' %v", r.RTT, slow)
-		}
-		if len(f.established) != 0 {
-			t.Errorf("promoted %v on fast windows among slow ones", f.established)
 		}
 	})
 }
@@ -1119,9 +1176,10 @@ func TestSelectionOneEstablishment(t *testing.T) {
 
 // TestSelectionUselessRetirement checks the useless rule: an up link whose
 // exclusion leaves its tier's route count and price unchanged, and every
-// member a route no dearer than its own price, retires on the third
-// consecutive window decided useless — the survivor answering each window,
-// and the history confirming — and never at the floor of up links.
+// member a route no dearer than its own price, is announced at the first
+// window that finds it useless and retires once that verdict has stood for
+// DemoteWindows windows, the survivor answering each — and never at the
+// floor of up links.
 func TestSelectionUselessRetirement(t *testing.T) {
 	f := newSelFixture(t, selPeer, selA, selB) // above the floor of two
 	// A's baseline rides Peer's link at 8ms: excluding A's link leaves the
@@ -1130,12 +1188,6 @@ func TestSelectionUselessRetirement(t *testing.T) {
 	// useless — and A's own round trip earns nothing.
 	f.carried(selA, 18*time.Millisecond, 8*time.Millisecond, f.via(t, selPeer, 0, selPeer, selA))
 
-	// The first window holds one sample of A's link, too few to bound it:
-	// the history confirms nothing yet.
-	f.pass(t)
-	if r, _ := f.reported(selA); r.Retiring {
-		t.Fatal("the report announces retiring A before its history confirms it")
-	}
 	f.pass(t)
 	// The survivor through Peer and B's own route, each member's cheapest.
 	want := []segment.LinkID{link(selPeer), link(selA), link(selB),
@@ -1147,9 +1199,11 @@ func TestSelectionUselessRetirement(t *testing.T) {
 	if r, _ := f.reported(selB); r.Retiring {
 		t.Fatal("the report announces retiring B, which no window judged useless")
 	}
-	f.pass(t)
+	for range DemoteWindows - 2 {
+		f.pass(t)
+	}
 	if f.state(t, selA) != links.StateEstablished {
-		t.Fatal("a neighbor was retired before three useless windows")
+		t.Fatal("a neighbor was retired before its useless verdict stood its windows")
 	}
 	f.pass(t)
 	if f.state(t, selA) != links.StateRetired {
@@ -1583,12 +1637,14 @@ func TestSelectionHeldReadsTheHistory(t *testing.T) {
 }
 
 // TestSelectionRetirementWaitsForTheHistory checks that a useless
-// retirement waits for the history: A's link, read fast twenty times, slows
-// past the route around it. The reading turns at the sixth slow sample, the
-// lower bound only once the fast samples fall short of its rank, at the
-// eleventh; the link retires on the third window after.
+// retirement waits for the bounds: A's link, read fast twenty times, slows
+// past the route around it. Its lower bound reaches the slow round trip only
+// once its last thirty samples hold too few fast ones for its rank, at the
+// eleventh slow one, which announces the retirement; the link retires once
+// that verdict has stood its windows.
 func TestSelectionRetirementWaitsForTheHistory(t *testing.T) {
 	f := newSelFixture(t, selPeer, selA, selB) // above the floor of two
+	f.historic = true
 	by := instrument{ia: selA, ifID: f.ifID(t, selA)}
 	f.sel.history = map[instrument][]heard{
 		by: slices.Repeat([]heard{{at: time.Now().Add(-time.Minute), rtt: 10 * time.Millisecond}}, 20),
@@ -1597,10 +1653,10 @@ func TestSelectionRetirementWaitsForTheHistory(t *testing.T) {
 	// A's route through Peer prices it at 14ms with its transit, beside its
 	// own round trip of 20ms now, which keeps A in its tier.
 	f.carried(selA, 20*time.Millisecond, 14*time.Millisecond-transitCost, f.via(t, selPeer, 0, selPeer, selA))
-	for window := 1; window <= 12; window++ {
+	for window := 1; window <= 10+DemoteWindows-1; window++ {
 		f.pass(t)
 		if f.state(t, selA) != links.StateEstablished {
-			t.Fatalf("the link retired in window %d, before its history confirmed it useless", window)
+			t.Fatalf("the link retired in window %d, before its verdict stood its windows", window)
 		}
 		if r, _ := f.reported(selA); r.Retiring != (window >= 11) {
 			t.Fatalf("window %d announced A's retirement %v, want from the eleventh", window, r.Retiring)
@@ -1608,7 +1664,7 @@ func TestSelectionRetirementWaitsForTheHistory(t *testing.T) {
 	}
 	f.pass(t)
 	if f.state(t, selA) != links.StateRetired {
-		t.Fatal("the link stayed once its history confirmed it useless")
+		t.Fatal("the link stayed once its useless verdict stood its windows")
 	}
 }
 
@@ -1616,7 +1672,7 @@ func TestSelectionRetirementWaitsForTheHistory(t *testing.T) {
 // price: on a long path, a round trip that beats its price by the band's
 // cap, though by less than a fifth, promotes once the history bounds it —
 // its upper bound gaining on the price's lower bound by the band — and one
-// within the band never does.
+// within the band never does. The direct side reads the passes' probes.
 func TestSelectionConfidentPromotion(t *testing.T) {
 	ms := time.Millisecond
 	for _, tc := range []struct {
@@ -1629,19 +1685,21 @@ func TestSelectionConfidentPromotion(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newSelFixture(t, selPeer, selA) // at the floor
+			f.historic = true
 			// D's two disjoint routes price it at 200ms.
 			f.candidate(selD, tc.direct, 200*ms,
 				route(-time.Hour, 0, link(selX), link(selD)),
 				measured(route(-time.Hour, 0, link(selE), segment.LinkID{IA: selD, IfID: 2}), 210*ms))
-			// Fourteen samples bound a round trip from above: until then the
-			// candidate neither counts a window nor is announced.
+			// Fourteen samples bound a round trip from above: until then
+			// the candidate's comparison decides nothing, and it is not
+			// announced.
 			for window := 1; window <= 13; window++ {
 				f.pass(t)
 				if len(f.established) != 0 {
 					t.Fatalf("promoted %v in window %d, before the history bounds the round trip", f.established, window)
 				}
-				if r, _ := f.reported(selD); r.Promoting || f.sel.streak(selD).promote != 0 {
-					t.Fatalf("window %d counted or announced D before the history bounds its round trip", window)
+				if r, _ := f.reported(selD); r.Promoting || f.sel.promotions[selD].beaten == evidence.Better {
+					t.Fatalf("window %d weighed or announced D before the history bounds its round trip", window)
 				}
 			}
 			f.pass(t) // announced
@@ -1695,6 +1753,62 @@ func TestSelectionRetirementWaits(t *testing.T) {
 	f.pass(t)
 	if f.state(t, selA) != links.StateRetired {
 		t.Fatal("the useless link stood past the announcement's withdrawal")
+	}
+}
+
+// TestSelectionHoldAsksFreshProbes checks a promotion's hold: a candidate
+// that beats its price window after window is not promoted while no probe
+// of its price answers anew, and is once one does.
+func TestSelectionHoldAsksFreshProbes(t *testing.T) {
+	f := newSelFixture(t, selPeer, selA) // at the floor
+	f.unprobed = true
+	f.candidate(selB, 8*time.Millisecond, 20*time.Millisecond)
+	for range 3 * PromoteWindows {
+		f.pass(t)
+	}
+	if len(f.established) != 0 {
+		t.Fatalf("promoted %v while no probe of the price answered anew", f.established)
+	}
+	f.unprobed = false
+	f.pass(t)
+	if !slices.Equal(f.established, []addr.IA{selB}) {
+		t.Fatalf("promoted %v once the price's probe answered, want B", f.established)
+	}
+}
+
+// TestSelectionRetirementSurvivesAnUndecidedWindow checks a retirement's
+// announcement through a window that decides nothing: the announcement
+// stands, unwithdrawn, while the hold starts over, and the link retires once
+// its verdict has stood through DemoteWindows windows again.
+func TestSelectionRetirementSurvivesAnUndecidedWindow(t *testing.T) {
+	f := newSelFixture(t, selPeer, selA, selB) // above the floor of two
+	f.carried(selA, 18*time.Millisecond, 8*time.Millisecond, f.via(t, selPeer, 0, selPeer, selA))
+	f.pass(t)
+	if r, _ := f.reported(selA); !r.Retiring {
+		t.Fatal("the first useless window announced nothing")
+	}
+	// The survivor's upper bound goes missing: the window decides nothing.
+	survivor := &f.samples[selA].candidates[0].BoundsEvidence
+	survivor.HasHi = false
+	f.pass(t)
+	if r, _ := f.reported(selA); !r.Retiring {
+		t.Fatal("a window that decided nothing withdrew the announcement")
+	}
+	survivor.HasHi = true
+	for window := 1; window < DemoteWindows; window++ {
+		f.pass(t)
+		if f.state(t, selA) != links.StateEstablished {
+			t.Fatalf("the link retired %d windows after its hold started over", window-1)
+		}
+	}
+	f.pass(t)
+	if f.state(t, selA) != links.StateRetired {
+		t.Fatal("the link stood once its verdict stood again")
+	}
+	for _, r := range f.records(t) {
+		if r.Change == RetirementWithdrawn {
+			t.Errorf("recorded %+v through a window that decided nothing", r)
+		}
 	}
 }
 
@@ -1817,39 +1931,46 @@ func TestSelectionLinkKeptForItsRoutes(t *testing.T) {
 	}
 }
 
-// TestSelectionRetirementCounts checks that each rule counts its own
-// windows: a down window holds the useless count, an up window resets the
-// down count alone, an undecided window holds the useless count, and a
-// count at DemoteWindows retires a link only in a window decided useless.
+// TestSelectionRetirementCounts checks that each rule weighs its own
+// windows: a down window releases the useless hold, the announcement standing
+// through it while the dialed up links stay above the floor; an up window
+// resets the down count alone; an undecided window releases the useless hold;
+// and a hold that stood at the floor retires nothing until it stands again
+// above it.
 func TestSelectionRetirementCounts(t *testing.T) {
-	// A down window between useless ones holds the useless count: the link
-	// retires on the third useless window, not on the down one. C keeps the
-	// dialed up links above the floor through the down window, so the
-	// retirement's announcement stands.
-	// The first window of each holds one sample of A's link, which confirms
-	// nothing.
+	// A down window between useless ones releases the useless hold: the link
+	// retires once its verdict has stood its windows after it, not on the
+	// down one. C keeps the dialed up links above the floor through the down
+	// window, so the retirement's announcement stands.
 	f := newSelFixture(t, selPeer, selA, selB, selC)
 	f.carried(selA, 18*time.Millisecond, 8*time.Millisecond, f.via(t, selPeer, 0, selPeer, selA))
-	f.pass(t)
 	f.pass(t)
 	f.pass(t)
 	f.down[selA] = true
 	f.pass(t)
 	if f.state(t, selA) != links.StateEstablished {
-		t.Fatal("a down window added to the useless windows retired the link")
+		t.Fatal("a down window among the useless windows retired the link")
+	}
+	if r, _ := f.reported(selA); !r.Retiring {
+		t.Fatal("a down window withdrew the retirement above the floor")
 	}
 	f.down[selA] = false
+	for range DemoteWindows - 1 {
+		f.pass(t)
+		if f.state(t, selA) != links.StateEstablished {
+			t.Fatal("the link retired before its verdict stood its windows after the down one")
+		}
+	}
 	f.pass(t)
 	if f.state(t, selA) != links.StateRetired {
-		t.Fatal("the third useless window did not retire the link")
+		t.Fatal("the useless verdict standing its windows did not retire the link")
 	}
 
 	// Without C, the down window drops the dialed up links to the floor,
-	// which withdraws the announcement: announced again on the third
-	// useless window, the link retires on the fourth.
+	// which withdraws the announcement: announced again on the next useless
+	// window, the link retires once its verdict has stood its windows.
 	f = newSelFixture(t, selPeer, selA, selB)
 	f.carried(selA, 18*time.Millisecond, 8*time.Millisecond, f.via(t, selPeer, 0, selPeer, selA))
-	f.pass(t)
 	f.pass(t)
 	f.pass(t)
 	f.down[selA] = true
@@ -1859,12 +1980,18 @@ func TestSelectionRetirementCounts(t *testing.T) {
 	}
 	f.down[selA] = false
 	f.pass(t)
+	if r, _ := f.reported(selA); !r.Retiring {
+		t.Fatal("the next useless window did not announce the retirement again")
+	}
+	for range DemoteWindows - 2 {
+		f.pass(t)
+	}
 	if f.state(t, selA) != links.StateEstablished {
-		t.Fatal("the link retired in the window its announcement resumed")
+		t.Fatal("the link retired before its verdict stood its windows")
 	}
 	f.pass(t)
 	if f.state(t, selA) != links.StateRetired {
-		t.Fatal("the fourth useless window did not retire the link")
+		t.Fatal("the useless verdict standing its windows did not retire the link")
 	}
 
 	// An up window resets the down count: two down windows, an up one, and
@@ -1886,10 +2013,10 @@ func TestSelectionRetirementCounts(t *testing.T) {
 		t.Fatal("the third consecutive down window did not retire the link")
 	}
 
-	// The floor holds A while its useless count passes the threshold; a
-	// third up link lifts the floor in a window A's survivor is ejected, so
-	// the freshest survivor left is unknown, which decides nothing; the next
-	// window decided useless retires A.
+	// The floor holds A while its useless hold stands; a third up link lifts
+	// the floor in a window A's survivor is ejected, so the freshest
+	// survivor left is unknown, which decides nothing and releases the hold;
+	// the useless windows after retire A once its verdict stands again.
 	f = newSelFixture(t, selPeer, selA)
 	carrier := f.via(t, selPeer, 0, selPeer, selA)
 	around := route(-time.Minute, 0, local(9), link(selX), link(selA))
@@ -1909,12 +2036,18 @@ func TestSelectionRetirementCounts(t *testing.T) {
 	f.carried(selA, 18*time.Millisecond, 0, with(carrier, scion.HealthEjected), around)
 	f.pass(t)
 	if f.state(t, selA) != links.StateEstablished {
-		t.Fatal("a count at the threshold retired the link in an undecided window")
+		t.Fatal("a hold that stood at the floor retired the link in an undecided window")
 	}
 	f.carried(selA, 18*time.Millisecond, 8*time.Millisecond, carrier, around)
+	for range DemoteWindows - 1 {
+		f.pass(t)
+		if f.state(t, selA) != links.StateEstablished {
+			t.Fatal("the link retired before its verdict stood its windows after the undecided one")
+		}
+	}
 	f.pass(t)
 	if f.state(t, selA) != links.StateRetired {
-		t.Fatal("a window decided useless past the threshold did not retire the link")
+		t.Fatal("the useless verdict standing its windows above the floor did not retire the link")
 	}
 }
 
@@ -1992,9 +2125,8 @@ func TestSelectionOneUpLinkPerWindow(t *testing.T) {
 		}
 		return n
 	}
-	// The first window holds one sample of each link, which confirms
-	// nothing.
-	for range DemoteWindows {
+	// Each useless verdict stands its windows on the DemoteWindows-th.
+	for range DemoteWindows - 1 {
 		f.pass(t)
 	}
 	for _, want := range []int{1, 2, 3, 3} {
@@ -2160,11 +2292,11 @@ func TestSelectionCapEviction(t *testing.T) {
 }
 
 // TestSelectionCapWeighsGains checks displacement at the cap by worth: a
-// candidate whose gain on its price beats what a link saves by the line to
-// buy, on the readings and on the price's lower bound, displaces the link
+// candidate whose gain on its price beats what a link saves by the band, the
+// gain's lower bound against the saving's upper bound, displaces the link
 // though the link would earn its place today, the least harm first, ties to
 // the slower direct sample; one whose gain does not, or whose price's lower
-// bound does not confirm it, waits.
+// bound leaves the comparison undecided, waits.
 func TestSelectionCapWeighsGains(t *testing.T) {
 	ms := time.Millisecond
 	for _, tc := range []struct {
@@ -2194,11 +2326,11 @@ func TestSelectionCapWeighsGains(t *testing.T) {
 			// 20ms or on a 20ms lower bound: each beats the price.
 			viaX := measured(route(-time.Hour, 0, link(selX), link(selD)), tc.price)
 			if tc.low > 0 {
-				viaX.Low = &tc.low
+				viaX.Low, viaX.BoundsEvidence.Lo = &tc.low, tc.low
 			}
 			f.candidate(selD, 8*ms, 0, viaX)
-			f.pass(t) // streak 1
-			f.pass(t) // streak 2
+			f.pass(t) // its hold begins
+			f.pass(t) // its hold stands
 			if !tc.displaces {
 				if len(f.established) != 0 || !f.sel.coord.promote.Equal(selD) {
 					t.Fatalf("promoted %v, announced %v; want the candidate announced and waiting",
@@ -2383,7 +2515,8 @@ func TestSelectionCapCountsCandidates(t *testing.T) {
 
 // TestSelectionCapRetryEvictsNothing checks an admission the far end does
 // not answer: the displacement frees one slot, the candidate's own entry
-// holds it, and the next window's retry evicts nothing more.
+// holds it, and the next window's retry evicts nothing more — whatever else
+// the window retires on its own verdicts.
 func TestSelectionCapRetryEvictsNothing(t *testing.T) {
 	f := capFixture(t)
 	attempts := 0
@@ -2397,19 +2530,20 @@ func TestSelectionCapRetryEvictsNothing(t *testing.T) {
 		}
 		return nil
 	}
-	f.pass(t) // streak 1
-	f.pass(t) // streak 2: evicts B, and the far end does not answer
+	f.pass(t) // its hold begins
+	f.pass(t) // its hold stands: evicts B, and the far end does not answer
 	f.pass(t) // the retry
 	if attempts != 2 {
 		t.Fatalf("establishments tried %d times, want 2", attempts)
 	}
-	if f.state(t, selB) != links.StateRetired {
-		t.Error("the displacement retired no link")
-	}
-	for _, ia := range []addr.IA{selPeer, selA, selC} {
-		if f.state(t, ia) != links.StateEstablished {
-			t.Errorf("the retry displaced %s as well", ia)
+	var displaced []string
+	for _, r := range f.records(t) {
+		if r.Change == LinkRetired && strings.HasPrefix(r.Why, "displaced by the least-harm eviction") {
+			displaced = append(displaced, r.Subject)
 		}
+	}
+	if !slices.Equal(displaced, []string{selB.String()}) {
+		t.Errorf("displaced %v, want B alone", displaced)
 	}
 }
 

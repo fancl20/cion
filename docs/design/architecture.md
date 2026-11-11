@@ -91,7 +91,7 @@ run no loops of their own and hold no policy.
     bounds or answer undecided, holds, and the records of the changes the
     decisions make
     ([ADR-0040](/docs/adrs/0040-decide-from-measured-evidence-in-one-library-and-record-every-change.md)).
-    The leases decide through it.
+    The leases and the topology source's link changes decide through it.
 *   **SCION RPC** — the SCION-native channel: HTTP/3 over QUIC riding SCION
     paths, peers authenticated by their chains against the TRC, and the
     drafts' service resolution.

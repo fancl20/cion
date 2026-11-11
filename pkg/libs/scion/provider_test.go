@@ -1641,7 +1641,7 @@ func TestReadingEstimate(t *testing.T) {
 // trips sample: the order statistics the binomial count reaches with
 // BoundConfidence, the lower from two round trips and the upper from
 // fourteen, a few ranks either side of the reading, in whatever order the
-// round trips come; none for too few.
+// round trips come; none for too few; and over the last BoundSamples alone.
 func TestBoundsEstimate(t *testing.T) {
 	ms := time.Millisecond
 	now := time.Now()
@@ -1664,8 +1664,6 @@ func TestBoundsEstimate(t *testing.T) {
 		{13, 8 * ms, 0},
 		{14, 9 * ms, 14 * ms},
 		{30, 20 * ms, 28 * ms},
-		{90, 66 * ms, 79 * ms},
-		{180, 135 * ms, 154 * ms},
 	} {
 		samples := heardAt(now, ranks(tc.n))
 		in := slices.Clone(samples)
@@ -1677,5 +1675,11 @@ func TestBoundsEstimate(t *testing.T) {
 		if !slices.Equal(samples, in) {
 			t.Errorf("%d round trips: the bounds reordered the samples", tc.n)
 		}
+	}
+	// Sixty slow round trips before the thirty: the bounds read the thirty.
+	samples := append(heardAt(now, slices.Repeat([]time.Duration{time.Second}, 60)), heardAt(now, ranks(30))...)
+	if e := BoundsEstimate(samples, now); e.Lo != 20*ms || e.Hi != 28*ms || e.Answered != BoundSamples {
+		t.Errorf("ninety round trips: bounds %v, %v over %d, want 20ms, 28ms over the last %d",
+			e.Lo, e.Hi, e.Answered, BoundSamples)
 	}
 }

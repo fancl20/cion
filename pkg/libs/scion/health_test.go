@@ -381,9 +381,9 @@ func TestHealth(t *testing.T) {
 // TestCandidateReading checks the reading a candidate carries beside its
 // cost: its record's reading over ReadingSpan, read once ReadingSamples of
 // its probes answered, else twice its declared one-way sum, never read —
-// while its health reads its last bus.PathSamples probes, and its cost those
-// of them within ReadingSpan — and the estimates its reading and its bounds
-// come from.
+// while its health reads its last bus.PathSamples probes, its cost those of
+// them within ReadingSpan, and its bounds its last BoundSamples probes within
+// BoundSpan — and the estimates its reading and its bounds come from.
 func TestCandidateReading(t *testing.T) {
 	ms := time.Millisecond
 	probes := func(at time.Time, n int, rtt time.Duration, lost bool) []bus.PathSample {
@@ -449,7 +449,7 @@ func TestCandidateReading(t *testing.T) {
 		cost:     10 * ms,
 		reading:  50 * ms,
 		read:     true,
-		low:      50 * ms, // the 31st of 45, past the twenty fast ones
+		low:      10 * ms, // the 20th of the last thirty, the fast twenty's last
 		high:     50 * ms,
 		answered: 45,
 	}, {
@@ -465,7 +465,7 @@ func TestCandidateReading(t *testing.T) {
 		cost:     40 * ms,       // 10ms over a delivery of one in four
 		reading:  100 * ms,      // 10ms over the delivery of one in ten
 		read:     true,          // five answered
-		low:      100 * ms,
+		low:      60 * ms,       // over the delivery of its last thirty, one in six
 		answered: 5,
 	}} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -586,10 +586,10 @@ func TestReadingKind(t *testing.T) {
 	}
 }
 
-// TestBoundKind checks a record's reading bounds: those of its probes sent
-// within BoundSpan of now, the one at the span's edge among them, each
-// divided by their delivery rate, the loss counted up to nine in ten; zero
-// for a bound they do not give.
+// TestBoundKind checks a record's reading bounds: those of its last
+// BoundSamples probes sent within BoundSpan of now, the one at the span's
+// edge among them, each divided by their delivery rate, the loss counted up
+// to nine in ten; zero for a bound they do not give.
 func TestBoundKind(t *testing.T) {
 	ms := time.Millisecond
 	now := time.Now()
@@ -608,6 +608,11 @@ func TestBoundKind(t *testing.T) {
 		}
 		return samples
 	}
+	// over returns a round trip divided by the delivery of the answered
+	// samples of those sent.
+	over := func(rtt time.Duration, answered, sent int) time.Duration {
+		return time.Duration(float64(rtt) / (1 - float64(sent-answered)/float64(sent)))
+	}
 	for _, tc := range []struct {
 		name    string
 		samples []bus.PathSample
@@ -619,10 +624,12 @@ func TestBoundKind(t *testing.T) {
 		{"two answered fourteen minutes ago, two sixteen", []bus.PathSample{at(16*time.Minute, ms), at(16*time.Minute, ms),
 			at(14*time.Minute, 10*ms), at(14*time.Minute, 10*ms)}, 10 * ms, 0},
 		{"thirty answered, past the readings' span", thirty(), 20 * ms, 28 * ms},
-		{"thirty answered, six lost", append(thirty(), slices.Repeat([]bus.PathSample{lost(0)}, 6)...),
-			24 * ms, 33600 * time.Microsecond},
+		{"twenty-four answered, six lost", append(thirty()[:24], slices.Repeat([]bus.PathSample{lost(0)}, 6)...),
+			over(16*ms, 24, 30), over(23*ms, 24, 30)},
+		{"the last thirty of more", append(slices.Repeat([]bus.PathSample{at(time.Minute, 90*ms)}, 10),
+			slices.Repeat([]bus.PathSample{at(0, 10*ms)}, 30)...), 10 * ms, 10 * ms},
 		{"losses past the cap", append([]bus.PathSample{at(0, 10*ms), at(0, 10*ms)},
-			slices.Repeat([]bus.PathSample{lost(0)}, 38)...), 100 * ms, 0},
+			slices.Repeat([]bus.PathSample{lost(0)}, 28)...), 100 * ms, 0},
 	} {
 		if e := boundKind.Of(tc.samples, now); e.Lo != tc.lo || e.Hi != tc.hi {
 			t.Errorf("%s: bounds %v, %v, want %v, %v", tc.name, e.Lo, e.Hi, tc.lo, tc.hi)

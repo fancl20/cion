@@ -71,7 +71,8 @@ var (
 	costKind = evidence.Kind{Quantile: 0.5, Confidence: BoundConfidence, Span: ReadingSpan,
 		Count: bus.PathSamples}
 	readingKind = evidence.Kind{Quantile: readingQuantile, Confidence: BoundConfidence, Span: ReadingSpan}
-	boundKind   = evidence.Kind{Quantile: readingQuantile, Confidence: BoundConfidence, Span: BoundSpan}
+	boundKind   = evidence.Kind{Quantile: readingQuantile, Confidence: BoundConfidence, Span: BoundSpan,
+		Count: BoundSamples}
 )
 
 // report is what callers' traffic saw of one path: when it last delivered,

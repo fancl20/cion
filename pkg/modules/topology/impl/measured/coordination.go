@@ -254,8 +254,7 @@ func (v *coordView) onPath(a, b addr.IA, p pair) bool {
 }
 
 // violatesAt reports whether a pair of the given weight beats a path cost by
-// the promotion ratio and the margin floor, as the selection's priced case
-// beats a member's price; a pair no path joins violates.
+// the promotion ratio and the margin floor; a pair no path joins violates.
 func violatesAt(w, path time.Duration, joined bool) bool {
 	return !joined || w < ratioOf(path, PromotionRatio) && path-w >= MarginFloor
 }

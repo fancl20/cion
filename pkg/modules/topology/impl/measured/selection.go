@@ -30,12 +30,11 @@ import (
 // The selection loop's constants (no operator tuning). A node keeps at least
 // NeighborFloor up links no single failure can partition it from, caps the
 // count to bound beaconing fan-out, promotes a candidate whose direct link
-// beats its own price by a fifth on its readings, or by what the path policy
-// moves a lease for once the history bounds it, demotes a neighbor whose
-// exclusion serves its tier and every member no worse on its readings and
-// its history — a pair between the two keeps what it has — and damps both
-// directions to sustained evidence: every link change re-shapes segments
-// network-wide.
+// beats its own price, with confidence, by what the path policy moves a
+// lease for, demotes a neighbor whose exclusion serves its tier and every
+// member no worse, with confidence — a pair between the two keeps what it
+// has — and holds both directions through windows of fresh evidence: every
+// link change re-shapes segments network-wide.
 const (
 	// SelectionInterval is the evaluation window.
 	SelectionInterval = 30 * time.Second
@@ -45,30 +44,30 @@ const (
 	NeighborFloor = 2
 	// MaxNeighbors caps the neighbor count.
 	MaxNeighbors = 8
-	// PromotionRatio: on its readings alone, a direct link must beat its
-	// peer's price by it — the room the readings' error takes beside what
-	// the path policy moves a lease for.
+	// PromotionRatio and MarginFloor are what the coordination reads another
+	// node's pair by on the round trips the nodes report: a direct link
+	// beats the path between its ends by the ratio and by at least the
+	// floor, a smaller gain being jitter on a fast link.
 	PromotionRatio = 0.8
 	// SecondRouteRatio: a second route for a single-route tier may lose to
 	// the tier's price by it — redundancy purchased at a bounded latency
 	// price.
 	SecondRouteRatio = 1.25
-	// MarginFloor is the least a direct round trip must beat its peer's
-	// price by to promote: a smaller gain is jitter on a fast link.
-	MarginFloor = 2 * time.Millisecond
+	MarginFloor      = 2 * time.Millisecond
 	// TierGap is the multiple of a tier's median direct round trip at which
 	// a peer opens the next tier.
 	TierGap = 2.0
-	// PromoteWindows is the least consecutive good windows a priced
-	// promotion needs.
+	// PromoteWindows is the windows a beaten price's verdict stands through
+	// before its promotion, the first counted.
 	PromoteWindows = 2
 	// PromoteJitter is the most windows a second-route promotion waits
 	// beyond PromoteWindows: scion.StaleAfter's worth, the horizon in which
 	// a link change plays out in every node's segments. Each pair of ends
 	// draws its own share, so the nodes one change moves promote in turn,
-	// and most see the first link's routes before their streaks end.
+	// and most see the first link's routes before their holds stand.
 	PromoteJitter = int(scion.StaleAfter / SelectionInterval)
-	// DemoteWindows is the consecutive bad windows a retirement needs.
+	// DemoteWindows is the windows a retirement's verdict stands through,
+	// the first counted: a useless link's hold, a down verdict's count.
 	DemoteWindows = 3
 	// ProbeRuns is the probes per measurement run, each answered one a
 	// sample of the instrument that sent it.
@@ -222,8 +221,21 @@ func jitter(interval time.Duration) time.Duration {
 
 type selection struct {
 	cfg SelectionConfig
-	// streaks damp the decisions: consecutive windows of the same evidence.
+	// streaks count each established link's consecutive windows whose
+	// verdict is down.
 	streaks map[addr.IA]*peerStreak
+	// windows counts the evaluation windows run: the clock the holds read,
+	// one SelectionInterval a window.
+	windows int
+	// promotionHolds hold each candidate's priced promotion, and
+	// retirementHolds each link's useless retirement, until the verdict has
+	// stood for its windows with a fresh sample of both sides.
+	promotionHolds  map[addr.IA]*evidence.Hold
+	retirementHolds map[addr.IA]*evidence.Hold
+	// promotions is what this window found of each candidate's priced
+	// cases, and useless of each established link's useless test.
+	promotions map[addr.IA]promotion
+	useless    map[addr.IA]uselessness
 	// upLeft records that an up link left this window, by retirement or
 	// eviction: each departure changes the routes every other exclusion was
 	// measured against, so one up link leaves per window.
@@ -308,13 +320,28 @@ type peer struct {
 	targets []target
 }
 
-// peerStreak counts a peer's consecutive windows of evidence, one count per
-// rule: promote for a candidate's priced admission, down for an
-// established link's verdict, and useless for an up link's useless test.
+// peerStreak counts an established link's consecutive windows whose verdict
+// is down: liveness judges its protocol's silence, which a count of windows
+// weighs.
 type peerStreak struct {
-	promote int
-	down    int
-	useless int
+	down int
+}
+
+// promotion is what a window found of a candidate's priced cases: the
+// beaten price's verdict and the price it weighed, and whether the hold of
+// each case stands.
+type promotion struct {
+	beaten     evidence.Verdict
+	price      evidence.Estimate
+	beatenHeld bool
+	secondHeld bool
+}
+
+// uselessness is what a window found of an established link's useless test:
+// its verdict, and whether its hold stands.
+type uselessness struct {
+	verdict evidence.Verdict
+	held    bool
 }
 
 // sample is one peer's window record: its direct side beside the routes to
@@ -328,8 +355,8 @@ type sample struct {
 	// reaches. Zero when none of the window's probes answered.
 	direct time.Duration
 	// lo and hi bound the direct side's round trip over the instrument's
-	// probes within scion.BoundSpan; zero where they give no bound, and
-	// when none of the window's probes answered.
+	// last scion.BoundSamples probes within scion.BoundSpan; zero where they
+	// give no bound, and when none of the window's probes answered.
 	lo, hi time.Duration
 	// reading and bounds are the estimates the direct side's reading and
 	// its bounds come from, as scion.ReadingEstimate and
@@ -349,6 +376,7 @@ func (s *selection) pass(ctx context.Context) {
 	if s.streaks == nil {
 		s.streaks = make(map[addr.IA]*peerStreak)
 	}
+	s.windows++
 	s.hosts = nil
 	s.forget(time.Now())
 	entries, err := s.cfg.Store.All(ctx)
@@ -423,15 +451,10 @@ func (s *selection) pass(ctx context.Context) {
 	v.units = newUnits(v, s.cfg.IA, s.cluster)
 	s.reserve = s.reserved(v, samples)
 	s.tagGroups(v)
-	s.count(v, neighbors, ts)
-	// Damp the promotions: a candidate is promoted on sustained evidence
-	// only, a flapping one never.
+	s.count(v, neighbors, samples, ts)
+	s.promotions = make(map[addr.IA]promotion, len(candidates))
 	for _, e := range candidates {
-		if s.qualifies(e.IA, samples, ts) {
-			s.streak(e.IA).promote++
-		} else {
-			s.streak(e.IA).promote = 0
-		}
+		s.weighPromotion(e.IA, samples, ts)
 	}
 	s.coord.observe(v, time.Now())
 	s.upLeft = false
@@ -637,26 +660,29 @@ func (s *selection) choose(ctx context.Context, p peer) target {
 // direct side over the samples of the instrument that probed it. The seam's
 // direct side is one probe, of the link's echoes for a neighbor and of the
 // binding requests to the target's address for a candidate: answered at the
-// seam's round trip, lost where it is zero.
+// seam's round trip, lost where it is zero; a seam that reads the direct
+// side's estimates itself sets them instead.
 func (s *selection) measure(
 	ctx context.Context, e target, l *links.Link,
 ) sample {
-	var sm sample
-	var by instrument
-	var got outcomes
-	if s.probeFn != nil {
-		sm, by = s.probeFn(ctx, e, l), instrument{ia: e.IA, at: e.RendezvousAddr}
-		if l != nil {
-			by = instrument{ia: e.IA, ifID: l.IfID}
-		}
-		got.lost = 1
-		if sm.direct > 0 {
-			got = outcomes{rtts: []time.Duration{sm.direct}}
-		}
-	} else {
-		sm, by, got = s.probe(ctx, e, l)
+	if s.probeFn == nil {
+		sm, by, got := s.probe(ctx, e, l)
+		sm.readDirect(s.read(by, got, time.Now()))
+		return sm
 	}
-	sm.readDirect(s.read(by, got, time.Now()))
+	sm, by := s.probeFn(ctx, e, l), instrument{ia: e.IA, at: e.RendezvousAddr}
+	if l != nil {
+		by = instrument{ia: e.IA, ifID: l.IfID}
+	}
+	got := outcomes{lost: 1}
+	if sm.direct > 0 {
+		got = outcomes{rtts: []time.Duration{sm.direct}}
+	}
+	reading, bounds := s.read(by, got, time.Now())
+	if sm.bounds.Answered > 0 {
+		reading, bounds = sm.reading, sm.bounds
+	}
+	sm.readDirect(reading, bounds)
 	return sm
 }
 
@@ -737,8 +763,8 @@ func (s *selection) read(by instrument, got outcomes, now time.Time) (reading, b
 // readingOf returns the estimates the direct side's reading and bounds come
 // from over the outcomes heard before now, each divided by the delivery of
 // its samples: the reading's, over those within scion.ReadingSpan, and the
-// bounds', over those within scion.BoundSpan; zeros when no round trip lies
-// within the reading's span.
+// bounds', over the last scion.BoundSamples within scion.BoundSpan; zeros
+// when no round trip lies within the reading's span.
 func readingOf(hs []heard, now time.Time) (reading, bounds evidence.Estimate) {
 	samples := make([]bus.PathSample, len(hs))
 	for i, h := range hs {
@@ -1079,17 +1105,17 @@ func (s *selection) echoes(ctx context.Context, dst *scion.Addr) outcomes {
 // network-wide, so the window's budget is one establishment, as today.
 // Below the floor of up links, reachability alone admits, the fastest
 // reachable candidate the clustering allows, else the fastest. A stranded
-// tier admits a reachable member at once, no streak, by the same
+// tier admits a reachable member at once, no hold, by the same
 // preference — the clause that keeps every cut transient, for no up link
 // reaches the tier and the measurements doubt every route into it, and the
 // establishment rides the rendezvous exchange that reaches where no path
-// does. A single-route tier admits a second member within the second-route
-// ratio of the price, and a candidate whose direct round trip beats its own
-// price by the promotion ratio and the margin floor is admitted — the priced
-// cases sustained for the pair's own windows, the sustained winner the
-// fastest direct sample among qualifiers, and only among the candidates the
-// clustering allows. At the cap every case requires an eviction that
-// qualifies against the candidate, the floor and stranded cases included.
+// does. A single-route tier admits a second member whose direct side beats
+// the price by the room the second-route ratio leaves, and a candidate
+// whose direct side beats its own price by the band is admitted — each
+// priced case once its hold stands, the winner the fastest direct sample
+// among those, and only among the candidates the clustering allows. At the
+// cap every case requires an eviction that qualifies against the candidate,
+// the floor and stranded cases included.
 func (s *selection) promote(
 	ctx context.Context,
 	entries []*links.Link,
@@ -1145,45 +1171,100 @@ func (s *selection) promote(
 
 	// The priced cases, among the candidates the clustering allows — a
 	// second route for a single-route tier first, redundancy purchased at a
-	// bounded latency price, sustained for the pair's drawn windows, then
-	// any beaten price — the fastest winner either way.
+	// bounded latency price, held for the pair's drawn windows, then any
+	// beaten price — the fastest winner either way.
 	for _, e := range reachable {
 		t := tierOf(ts, e.IA)
-		if t == nil || t.routes != 1 || t.price == 0 || !s.allowed(v, e.IA) {
+		if t == nil || !s.allowed(v, e.IA) || !s.promotions[e.IA].secondHeld {
 			continue
 		}
-		if s.streak(e.IA).promote >= promoteWindows(s.cfg.IA, e.IA) &&
-			samples[e.IA].direct <= ratioOf(t.price, SecondRouteRatio) {
-			s.admit(ctx, entries, neighbors, ts, samples, v, e, secondRouteVerdict(t, samples[e.IA]))
-			return
-		}
+		s.admit(ctx, entries, neighbors, ts, samples, v, e, secondRouteVerdict(t, samples[e.IA]))
+		return
 	}
-	// The beaten prices: the fastest candidate whose round trip beats its
+	// The beaten prices: the fastest candidate whose direct side beats its
 	// price and that waits on no other node's change is announced, and
-	// promoted at a later window once its streak holds — every node
-	// reading the announcement first.
+	// promoted at a later window once its hold stands — every node reading
+	// the announcement first.
 	for _, e := range reachable {
-		if !s.allowed(v, e.IA) || !s.beatsPrice(e.IA, samples, ts) {
+		p := s.promotions[e.IA]
+		if !s.allowed(v, e.IA) || p.beaten != evidence.Better {
 			continue
 		}
 		if s.coord.waitsToPromote(v, s.cfg.IA, e.IA, samples[e.IA].candidates, time.Now()) {
 			slog.Debug("Promotion waits on another node's change", "neighbor", e.IA)
 			continue
 		}
-		beaten := beatenVerdict(tierOf(ts, e.IA), e.IA, samples[e.IA])
+		beaten := beatenVerdict(samples[e.IA], p.price)
 		if s.coord.promote != e.IA {
-			s.withdrawPromotion(neighbors, reachable, samples, ts, v, e.IA)
+			s.withdrawPromotion(neighbors, reachable, samples, v, e.IA)
 			s.coord.promote = e.IA
 			s.record(PromotionAnnounced, e.IA.String(), "", "", beaten)
 			return
 		}
-		if s.streak(e.IA).promote >= PromoteWindows {
+		if p.beatenHeld {
 			s.admit(ctx, entries, neighbors, ts, samples, v, e, beaten)
 		}
 		return
 	}
-	s.withdrawPromotion(neighbors, reachable, samples, ts, v, 0)
+	s.withdrawPromotion(neighbors, reachable, samples, v, 0)
 	s.coord.promote = 0
+}
+
+// weighPromotion weighs a candidate's priced cases this window: its direct
+// side against its own price by the band, and against a single-route tier's
+// price by the second-route room. A verdict better holds the candidate's
+// promotion — the beaten price's for PromoteWindows windows, the second
+// route's for the pair's drawn windows — on the direct side and the price
+// it weighed; a window better in neither case releases it. An unmeasured or
+// unclassed candidate weighs nothing.
+func (s *selection) weighPromotion(ia addr.IA, samples map[addr.IA]sample, ts []tier) {
+	sm, t := samples[ia], tierOf(ts, ia)
+	var p promotion
+	second := evidence.Undecided
+	if sm.direct > 0 && t != nil {
+		p.beaten, p.price = t.beats(ia, sm.bounds)
+		second = t.secondRoute(sm.bounds)
+	}
+	defer func() { s.promotions[ia] = p }()
+	if p.beaten != evidence.Better && second != evidence.Better {
+		delete(s.promotionHolds, ia)
+		return
+	}
+	price := p.price
+	if price.Answered == 0 {
+		price = t.estimate
+	}
+	h := hold(&s.promotionHolds, ia)
+	if p.beaten == evidence.Better {
+		p.beatenHeld = h.Stands(ia.String(), sm.bounds, price, windowsOf(PromoteWindows-1), s.clock())
+	}
+	if second == evidence.Better {
+		p.secondHeld = h.Stands(ia.String(), sm.bounds, price, windowsOf(promoteWindows(s.cfg.IA, ia)-1), s.clock())
+	}
+}
+
+// hold returns the hold a map keeps for the peer, made on first use.
+func hold(holds *map[addr.IA]*evidence.Hold, ia addr.IA) *evidence.Hold {
+	if *holds == nil {
+		*holds = make(map[addr.IA]*evidence.Hold)
+	}
+	h, ok := (*holds)[ia]
+	if !ok {
+		h = new(evidence.Hold)
+		(*holds)[ia] = h
+	}
+	return h
+}
+
+// clock returns the instant the holds read: the windows run, each one
+// SelectionInterval, so that a hold counts windows however long each takes.
+func (s *selection) clock() time.Time {
+	return time.Time{}.Add(windowsOf(s.windows))
+}
+
+// windowsOf returns the span of n windows on the holds' clock.
+func windowsOf(n int) time.Duration {
+	return time.Duration(n) * SelectionInterval
 }
 
 // withdrawPromotion records the withdrawal of the promotion the node
@@ -1195,7 +1276,6 @@ func (s *selection) withdrawPromotion(
 	neighbors map[addr.IA]*links.Link,
 	reachable []target,
 	samples map[addr.IA]sample,
-	ts []tier,
 	v *coordView,
 	next addr.IA,
 ) {
@@ -1213,7 +1293,7 @@ func (s *selection) withdrawPromotion(
 		why = "its peer is no longer a reachable candidate"
 	case !s.allowed(v, old):
 		why = "the clusters no longer allow its link"
-	case !s.beatsPrice(old, samples, ts):
+	case s.promotions[old].beaten != evidence.Better:
 		why = "its direct link no longer beats its own price"
 	case s.coord.waitsToPromote(v, s.cfg.IA, old, samples[old].candidates, time.Now()):
 		why = "it waits on another node's change"
@@ -1260,60 +1340,39 @@ func (s *selection) preferAllowed(v *coordView, ranked []target, takes func(targ
 	return ranked[first]
 }
 
-// judge reads an up link's useless test: the clustering's for a link it
-// does not allow, else the priced test.
-func (s *selection) judge(v *coordView, t *tier, ia addr.IA) (decided, useless bool) {
-	if !s.allowed(v, ia) {
-		return judgeOutside(t, ia, v.units.joined(v, s.cfg.IA, ia))
+// judge reads an up link's useless test, the neighbor's direct side given:
+// the clustering's for a link it does not allow — better once it decides the
+// link useless, not better once it decides otherwise — else the priced test.
+func (s *selection) judge(v *coordView, t *tier, ia addr.IA, direct evidence.Estimate) evidence.Verdict {
+	if s.allowed(v, ia) {
+		return judge(t, ia, direct)
 	}
-	return judge(t, ia)
+	switch decided, useless := judgeOutside(t, ia, v.units.joined(v, s.cfg.IA, ia)); {
+	case !decided:
+		return evidence.Undecided
+	case useless:
+		return evidence.Better
+	default:
+		return evidence.NotBetter
+	}
 }
 
 // yields reads whether an up link yields its slot to a candidate gaining
-// gain on its price, and sure as the tier's gain has it: for a link the
-// clustering does not allow, its useless test; for any other, the priced
-// test or the savings test.
-func (s *selection) yields(v *coordView, t *tier, ia addr.IA, gain, sure time.Duration) bool {
+// gain on its price, the neighbor's direct side given: for a link the
+// clustering does not allow, its useless test; for any other, a link that
+// would not earn its place today, or one the gain outgains.
+func (s *selection) yields(v *coordView, t *tier, ia addr.IA, direct, gain evidence.Estimate) bool {
 	if !s.allowed(v, ia) {
 		decided, useless := judgeOutside(t, ia, v.units.joined(v, s.cfg.IA, ia))
 		return decided && useless
 	}
-	if decided, weak := yields(t, ia); decided && weak {
-		return true
-	}
-	decided, weak := outgained(t, ia, gain, sure)
-	return decided && weak
+	return yields(t, ia, direct) || outgained(t, ia, direct, gain)
 }
 
-// qualifies reports whether the candidate's sample earns promotion under
-// the priced cases of its tier this window. Only a classed, reachable peer
-// promotes: an unmeasured peer carries no label to compare and no sample
-// to compare with.
-func (s *selection) qualifies(ia addr.IA, samples map[addr.IA]sample, ts []tier) bool {
-	sm := samples[ia]
-	if sm.direct == 0 {
-		return false
-	}
-	t := tierOf(ts, ia)
-	return t != nil && t.qualifies(ia, sm.direct, sm.hi)
-}
-
-// beatsPrice reports whether the candidate's sample beats its own price this
-// window, the priced case announcements order.
-func (s *selection) beatsPrice(ia addr.IA, samples map[addr.IA]sample, ts []tier) bool {
-	sm := samples[ia]
-	if sm.direct == 0 {
-		return false
-	}
-	t := tierOf(ts, ia)
-	return t != nil && t.beats(ia, sm.direct, sm.hi)
-}
-
-// promoteWindows returns the consecutive good windows the node's
-// second-route promotion of the peer needs: PromoteWindows plus the pair's
-// draw of up to PromoteJitter, from SHA-256 over both ends' ISD-ASes. The
-// draw never changes; the ISD-ASes' own random draws spread it across
-// pairs.
+// promoteWindows returns the windows the node's second-route promotion of
+// the peer stands through: PromoteWindows plus the pair's draw of up to
+// PromoteJitter, from SHA-256 over both ends' ISD-ASes. The draw never
+// changes; the ISD-ASes' own random draws spread it across pairs.
 func promoteWindows(self, peer addr.IA) int {
 	b := binary.BigEndian.AppendUint64(nil, uint64(self))
 	b = binary.BigEndian.AppendUint64(b, uint64(peer))
@@ -1345,8 +1404,8 @@ func (s *selection) admit(
 		cap = MaxNeighbors
 	}
 	if namedLive(entries) >= cap && !liveNeighbor(entries, e.IA) {
-		gain, sure := tierOf(ts, e.IA).gain(e.IA, samples[e.IA].direct)
-		victim := s.evict(neighbors, ts, samples, v, gain, sure)
+		gain := tierOf(ts, e.IA).gain(e.IA, samples[e.IA].bounds)
+		victim := s.evict(neighbors, ts, samples, v, gain)
 		if victim == nil {
 			return
 		}
@@ -1364,9 +1423,8 @@ func (s *selection) admit(
 // evict returns the cap's victim among the qualifying neighbors: a down
 // link whose down count reached DemoteWindows, at no harm, and, while up
 // links exceed the floor, an up link this window decides yields to a
-// candidate gaining gain on its price, and sure as the tier's gain has it —
-// one that would not earn its place today, one whose every saving the gain
-// beats by the line to buy and the sure gain at the bounds, and one the
+// candidate gaining gain on its price — one that would not earn its place
+// today, one whose every saving the gain beats by the band, and one the
 // clustering does not allow that the clustering's test judges useless.
 // The victim is the one whose exclusion moves its tier's price least, ties
 // to the slower direct sample. Nil when none qualifies — no promotion
@@ -1380,7 +1438,7 @@ func (s *selection) evict(
 	ts []tier,
 	samples map[addr.IA]sample,
 	v *coordView,
-	gain, sure time.Duration,
+	gain evidence.Estimate,
 ) *links.Link {
 	up := s.upCount(neighbors)
 	var worst *links.Link
@@ -1396,7 +1454,7 @@ func (s *selection) evict(
 				continue // an up link leaves only while up links exceed the floor
 			}
 			t := tierOf(ts, ia)
-			if !s.yields(v, t, ia, gain, sure) {
+			if !s.yields(v, t, ia, samples[ia].bounds, gain) {
 				continue
 			}
 			cost = harm(t, ia)
@@ -1423,52 +1481,56 @@ func slower(a, b time.Duration) bool {
 	return a > b
 }
 
-// count advances each established link's retirement counts by the window's
+// count weighs each established link's retirement by the window's
 // evidence. The down count grows in a window whose verdict is down and
-// resets in one whose verdict is up. The useless count grows in a window
-// that decides the link useless, resets in one that decides it useful, and
-// holds in a window that decides nothing — a down one included: no
-// evidence, no change.
-func (s *selection) count(v *coordView, neighbors map[addr.IA]*links.Link, ts []tier) {
+// resets in one whose verdict is up. The useless test's verdict better
+// holds the link's useless retirement for DemoteWindows windows, on the
+// direct side and the survivors; any other window releases the hold, a down
+// one included, which weighs nothing.
+func (s *selection) count(v *coordView, neighbors map[addr.IA]*links.Link, samples map[addr.IA]sample, ts []tier) {
+	s.useless = make(map[addr.IA]uselessness, len(neighbors))
 	for ia, l := range neighbors {
 		st := s.streak(ia)
 		if !s.linkUp(l.IfID) {
 			st.down++
+			delete(s.retirementHolds, ia)
 			continue
 		}
 		st.down = 0
-		switch decided, useless := s.judge(v, tierOf(ts, ia), ia); {
-		case decided && useless:
-			st.useless++
-		case decided:
-			st.useless = 0
+		t, direct := tierOf(ts, ia), samples[ia].bounds
+		u := uselessness{verdict: s.judge(v, t, ia, direct)}
+		if u.verdict != evidence.Better {
+			delete(s.retirementHolds, ia)
+			s.useless[ia] = u
+			continue
 		}
+		u.held = hold(&s.retirementHolds, ia).Stands(ia.String(), direct, t.excluded[ia].seen(ia),
+			windowsOf(DemoteWindows-1), s.clock())
+		s.useless[ia] = u
 	}
 }
 
-// prune applies the two retirement rules, each on its own count. A link
-// whose verdict stayed down for DemoteWindows windows retires, with no
-// guard: a down link carries no route and is no redundancy. Then at most
-// one up link retires as useless — none in a window whose eviction took an
-// up link, for each departure changes the routes every other exclusion was
-// measured against — and only while the up links this node dialed exceed
-// the floor. Meanwhile each dialed link whose useless count runs is
-// announced, with the links the routes its last decided window judged it
-// by cross. Of the links announced since an earlier window whose useless
-// count reached DemoteWindows, whose window decides them useless, and whose
-// judgment no other node's announced retirement would undo, the one whose
-// exclusion moves its tier's price least retires, ties to the slower
-// direct sample. A link a peer dialed is the peer's to judge, so the two
-// ends' tiers never disagree over one link: at this end only its verdict or
-// the cap's eviction retires it, and it never counts toward the floor this
-// retirement guards, so a link a node accepted cannot free it to shed a
-// link it dialed for its own floor. The useless test is measured each
-// window and decides only when a route avoiding the link answered, so a
-// cut-critical link never retires as useless; it reads the prices
-// promotion's priced cases read, against the line to keep rather than the
-// line to buy, and waits for the history to confirm what the readings show.
-// A link the clustering does not allow is judged by the clustering's test
-// instead, whatever its prices.
+// prune applies the two retirement rules. A link whose verdict stayed down
+// for DemoteWindows windows retires, with no guard: a down link carries no
+// route and is no redundancy. Then at most one up link retires as useless —
+// none in a window whose eviction took an up link, for each departure
+// changes the routes every other exclusion was measured against — and only
+// while the up links this node dialed exceed the floor. Meanwhile each
+// dialed link a window found useless is announced until a window finds it
+// useful, with the links the routes its last useless window judged it by
+// cross. Of the links announced since an earlier window whose useless hold
+// stands, and whose judgment no other node's announced retirement would
+// undo, the one whose exclusion moves its tier's price least retires, ties
+// to the slower direct sample. A link a peer dialed is the peer's to judge,
+// so the two ends' tiers never disagree over one link: at this end only its
+// verdict or the cap's eviction retires it, and it never counts toward the
+// floor this retirement guards, so a link a node accepted cannot free it to
+// shed a link it dialed for its own floor. The useless test is measured
+// each window and decides only when a route avoiding the link answered, so
+// a cut-critical link never retires as useless; it weighs the prices
+// promotion's priced cases weigh, against the line to keep rather than the
+// line to buy. A link the clustering does not allow is judged by the
+// clustering's test instead, whatever its prices.
 func (s *selection) prune(
 	ctx context.Context,
 	entries []*links.Link,
@@ -1502,16 +1564,19 @@ func (s *selection) prune(
 	var worstHarm, worstDirect time.Duration
 	for _, l := range entries {
 		ia := l.NeighborIA
-		if l.State != links.StateEstablished || !dialed(l) || s.streak(ia).useless == 0 {
+		if l.State != links.StateEstablished || !dialed(l) {
+			continue
+		}
+		u := s.useless[ia]
+		r, ok := s.coord.retiring[ia]
+		if u.verdict != evidence.Better && (!ok || u.verdict == evidence.NotBetter) {
 			continue
 		}
 		t := tierOf(ts, ia)
-		decided, useless := s.judge(v, t, ia)
-		r, ok := s.coord.retiring[ia]
 		if !ok {
 			r.since = s.coord.window
 		}
-		if decided {
+		if u.verdict == evidence.Better {
 			r.relies = reliance(t.excluded[ia])
 		}
 		if !ok {
@@ -1519,8 +1584,7 @@ func (s *selection) prune(
 				verdict{why: "a window found its link useless", weighed: uselessWeighed(t, ia, samples[ia])})
 		}
 		announced[ia] = r
-		if s.upLeft || !s.linkUp(l.IfID) || s.streak(ia).useless < DemoteWindows ||
-			!decided || !useless {
+		if s.upLeft || !u.held {
 			continue
 		}
 		if r.since == s.coord.window || s.coord.waitsToRetire(v, s.cfg.IA, ia, r.relies) {
@@ -1625,7 +1689,7 @@ func dialed(l *links.Link) bool {
 	return l.Rendezvous.IsValid()
 }
 
-// streak returns the peer's damping counters.
+// streak returns the peer's down count.
 func (s *selection) streak(ia addr.IA) *peerStreak {
 	st, ok := s.streaks[ia]
 	if !ok {
@@ -1645,9 +1709,11 @@ func (s *selection) retire(ctx context.Context, l *links.Link, v verdict) bool {
 		slog.Error("Retiring a link", "neighbor", l.NeighborIA, "err", err)
 		return false
 	}
-	// The damping starts over: a retired peer re-earns promotion from
-	// scratch, and its demotion evidence is spent.
+	// The holds start over: a retired peer re-earns promotion from scratch,
+	// and its demotion evidence is spent.
 	delete(s.streaks, l.NeighborIA)
+	delete(s.promotionHolds, l.NeighborIA)
+	delete(s.retirementHolds, l.NeighborIA)
 	s.record(LinkRetired, l.NeighborIA.String(), linkName(l.IfID), "", v)
 	return true
 }
@@ -1679,7 +1745,7 @@ func (s *selection) establishLink(ctx context.Context, e target, why string) *li
 			return nil
 		}
 	}
-	s.streak(e.IA).promote = 0
+	delete(s.promotionHolds, e.IA)
 	delete(s.failed, e.IA)
 	slog.Debug("Link seeded", "neighbor", e.IA, "why", why, "punched", punched,
 		"interface", entry.IfID, "local", entry.Local, "remote", entry.Remote)

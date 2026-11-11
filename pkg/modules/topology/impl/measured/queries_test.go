@@ -1,6 +1,7 @@
 package measured
 
 import (
+	"slices"
 	"testing"
 	"time"
 
@@ -76,17 +77,18 @@ func route(fresh time.Duration, oneWay time.Duration, links ...segment.LinkID) s
 
 // steadyBounds is the round trips a route probed every half minute holds
 // within scion.BoundSpan.
-const steadyBounds = 30
+const steadyBounds = scion.BoundSamples
 
 // measured returns the route as the measurements leave it: healthy, at the
 // measured cost, read, its bounds at the cost, and the estimates they come
-// from — a route whose round trip holds steady.
+// from — a route whose round trip holds steady, its reading resting on
+// scion.ReadingSamples probes and its bounds on steadyBounds.
 func measured(c scion.Candidate, cost time.Duration) scion.Candidate {
 	c.Health, c.Cost, c.Read, c.Low, c.High = scion.HealthHealthy, &cost, true, &cost, &cost
-	c.ReadingEvidence = evidence.Estimate{Span: scion.ReadingSpan,
-		Value: cost, Lo: cost, HasLo: true, Answered: scion.ReadingSamples, Sent: scion.ReadingSamples}
-	c.BoundsEvidence = evidence.Estimate{Span: scion.BoundSpan,
-		Value: cost, Lo: cost, Hi: cost, HasLo: true, HasHi: true, Answered: steadyBounds, Sent: steadyBounds}
+	now := time.Now()
+	held := func(n int) []bus.PathSample { return slices.Repeat([]bus.PathSample{{At: now, RTT: cost}}, n) }
+	c.ReadingEvidence = scion.ReadingEstimate(held(scion.ReadingSamples), now)
+	c.BoundsEvidence = scion.BoundsEstimate(held(steadyBounds), now)
 	return c
 }
 
@@ -200,39 +202,35 @@ func TestMeasureExcluded(t *testing.T) {
 	opts := []cmp.Option{cmp.AllowUnexported(excludedSample{}), cmpopts.EquateEmpty()}
 	// Excluding A's link: B's measured route is the freshest survivor,
 	// answered, and A's surviving route the price, riding B's link, one
-	// transit: 22ms and its charge, no dearer than B's own 26ms, which comes
-	// after. B's link and the declared third route keep two routes. No read
-	// route crosses A's link.
-	viaB := 22*time.Millisecond + transitCost
+	// transit: 22ms and its charge, no dearer than B's own 26ms. The
+	// survivors' price is the least of the two at their prices, each
+	// member's its own. B's link and the declared third route keep two
+	// routes. No read route crosses A's link.
+	viaA, ownB := priceBounds(&a.candidates[0]), priceBounds(&b.candidates[0])
 	want := excludedSample{
-		survivor:   &b.candidates[0],
-		dst:        selB,
-		answered:   true,
-		price:      viaB,
-		priceRoute: &a.candidates[0],
-		routes:     2,
-		prices:     map[addr.IA]time.Duration{selA: viaB, selB: 26 * time.Millisecond},
-		cheapest:   map[addr.IA]*scion.Candidate{selA: &a.candidates[0], selB: &b.candidates[0]},
-		high:       viaB,
-		highRoute:  &a.candidates[0],
-		highs:      map[addr.IA]time.Duration{selA: viaB, selB: 26 * time.Millisecond},
+		survivor:    &b.candidates[0],
+		dst:         selB,
+		answered:    true,
+		price:       22*time.Millisecond + transitCost,
+		routes:      2,
+		survivors:   evidence.Least(viaA, ownB),
+		survivorsOf: map[addr.IA]evidence.Estimate{selA: evidence.Least(viaA), selB: evidence.Least(ownB)},
+		cheapest:    map[addr.IA]*scion.Candidate{selA: &a.candidates[0], selB: &b.candidates[0]},
 	}
 	if diff := cmp.Diff(want, fast.excluded[selA], opts...); diff != "" {
 		t.Errorf("A's excluded measurement (-want +got):\n%s", diff)
 	}
 	// Excluding B's link: A's own route is the freshest survivor, unknown,
 	// so the window decides nothing; the declared route, read by nothing,
-	// prices nothing, though it is B's cheapest survivor, and bounds
-	// nothing. Both measured routes cross B's link.
+	// prices nothing, though it is B's cheapest survivor. Both measured
+	// routes cross B's link, each its member's crossing price.
 	want = excludedSample{
-		survivor: &a.candidates[1],
-		dst:      selA,
-		routes:   2,
-		cheapest: map[addr.IA]*scion.Candidate{selB: &b.candidates[1]},
-		crossed:  true,
-		low:      viaB,
-		lowRoute: &a.candidates[0],
-		lows:     map[addr.IA]time.Duration{selA: viaB, selB: 26 * time.Millisecond},
+		survivor:   &a.candidates[1],
+		dst:        selA,
+		routes:     2,
+		crossing:   evidence.Least(viaA, ownB),
+		crossingOf: map[addr.IA]evidence.Estimate{selA: evidence.Least(viaA), selB: evidence.Least(ownB)},
+		cheapest:   map[addr.IA]*scion.Candidate{selB: &b.candidates[1]},
 	}
 	if diff := cmp.Diff(want, fast.excluded[selB], opts...); diff != "" {
 		t.Errorf("B's excluded measurement (-want +got):\n%s", diff)

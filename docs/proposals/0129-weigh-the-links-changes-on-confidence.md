@@ -162,3 +162,55 @@ subject's last thirty samples.
 *   **The labs.** The labs pass, and the benchmarks run against the commit
     before: the settled labs, the cuts, the delay changes, the jitter and
     loss sweeps, and the bursts.
+
+## Implementation history
+
+*   **The library.** `evidence.Least` and `Estimate.Minus` join the
+    library, and `scion.BoundSamples` the bounds' kind. A record logs its
+    line whenever it has one, a negative line, the room a second route is
+    allowed, included.
+*   **The holds' clock.** Each hold reads the windows run, one
+    `SelectionInterval` a window, so that it counts windows however long
+    each takes; its fresh samples are each side's newest answered one, the
+    direct side's probes and the price's routes.
+*   **One hold a candidate.** A candidate's two priced cases share one
+    hold, kept while either finds it better, each standing on its own
+    windows: `PromoteWindows` for a beaten price, the pair's draw for a
+    second route. A window better in neither releases it.
+*   **The announcements.** A retirement stays announced through the
+    windows that decide nothing, a down one included, its hold starting
+    over after them.
+*   **The fixture.** The selection tests read each peer's direct side as a
+    steady round trip at its sample's, a full window of probes, so that a
+    comparison decides at once, and the routes' estimates as freshly
+    probed; the tests that watch evidence gather read the passes' probes,
+    one a pass. The tests of streaks restate as holds, and the records
+    weigh the bounds.
+*   `architecture.md` names the topology source's link changes among the
+    decisions the library takes.
+*   Mutations: 23 of 23 killed. The first run let one live, a promotion's
+    hold kept through a window better in neither case, which a beaten
+    price's announcement already spaces;
+    `TestSelectionSecondRouteRestartsItsHold` now releases a second route's
+    hold, which no announcement spaces.
+*   The pipeline passed, its behavior labs on a second run. The first lost
+    `TestNATNetworkReaches` once: two nodes behind NATs, whose promotions of
+    each other now wait for fourteen samples, punched their link as the
+    clusters retired their parents' links; the punch timed out, and each
+    read the other unreachable through the lab's budget. Three runs of the
+    lab alone passed, as three did of the commit before.
+*   Benchmarks against the commit before, interleaved, one run each: the
+    settled labs reached every pair, their links within two (metros 25
+    against 27, the ring 47 against 45), the NAT and the inside site
+    settling in 9.3 and 9.5 minutes against 5.5 and 5.7 as priced promotions
+    wait for fourteen samples; the loss sweeps churned less (the regions
+    lab's 50% loss 0 link changes against 113, the stranded lab's 128
+    against 244) and left no regions level unsettled; the regions jitter
+    runs promoted direct links at 10ms on the way down and retired them at
+    0 (18 and 8 link changes), every pair within 1.01 of its best; the
+    metros delay raise moved one link 220 s after the raise and none on its
+    restore. The regions cut's restore changed no link within the
+    benchmark's five quiet minutes, its worst pair at 1.32: the restored
+    link's direct side holds the cut's lost probes among its last thirty
+    until new ones push them out, about five minutes, and a diagnostic run
+    saw its promotion announced at five.

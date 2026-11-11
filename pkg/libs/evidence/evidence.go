@@ -102,6 +102,77 @@ func (e Estimate) Plus(d time.Duration) Estimate {
 	return e
 }
 
+// Least returns the estimate of the least of the subjects the estimates
+// read: the least value; the least lower bound, which needs every
+// estimate's, for the least of several lies above the least of their lower
+// bounds only where each has one; the least upper bound of those giving one;
+// the samples answered and sent across them; and the newest answered sample
+// of any. An estimate without an answered sample states nothing and takes
+// no part; none answered leaves the zero estimate. Estimates of different
+// kinds are a caller's mistake.
+func Least(es ...Estimate) Estimate {
+	var out Estimate
+	allLo := true
+	for _, e := range es {
+		if e.Answered == 0 {
+			continue
+		}
+		if out.Answered == 0 {
+			out = Estimate{Kind: e.Kind, Value: e.Value, Lo: e.Lo, Hi: e.Hi, HasHi: e.HasHi}
+		} else if e.Kind != out.Kind {
+			panic(fmt.Sprintf("evidence: the least of a %+v estimate and a %+v one", out.Kind, e.Kind))
+		}
+		out.Value = min(out.Value, e.Value)
+		allLo = allLo && e.HasLo
+		if e.HasLo {
+			out.Lo = min(out.Lo, e.Lo)
+		}
+		if e.HasHi && (!out.HasHi || e.Hi < out.Hi) {
+			out.Hi, out.HasHi = e.Hi, true
+		}
+		out.Answered += e.Answered
+		out.Sent += e.Sent
+		if e.Newest.After(out.Newest) {
+			out.Newest = e.Newest
+		}
+	}
+	if out.HasLo = out.Answered > 0 && allLo; !out.HasLo {
+		out.Lo = 0
+	}
+	if !out.HasHi {
+		out.Hi = 0
+	}
+	return out
+}
+
+// Minus returns the estimate of the difference between the subject e reads
+// and the one o reads: the values' difference; the lower bound e's lower
+// bound less o's upper, and the upper bound e's upper bound less o's lower,
+// each where both stand; the samples answered and sent of the side resting
+// on fewer; and the staler side's newest answered sample. A side without an
+// answered sample leaves the zero estimate. Estimates of different kinds are
+// a caller's mistake.
+func (e Estimate) Minus(o Estimate) Estimate {
+	if e.Answered == 0 || o.Answered == 0 {
+		return Estimate{}
+	}
+	if e.Kind != o.Kind {
+		panic(fmt.Sprintf("evidence: a %+v estimate less a %+v one", e.Kind, o.Kind))
+	}
+	d := Estimate{Kind: e.Kind, Value: e.Value - o.Value, Answered: min(e.Answered, o.Answered),
+		Sent: min(e.Sent, o.Sent), Newest: e.Newest}
+	if o.Newest.Before(d.Newest) {
+		d.Newest = o.Newest
+	}
+	if d.HasLo = e.HasLo && o.HasHi; d.HasLo {
+		d.Lo = e.Lo - o.Hi
+	}
+	if d.HasHi = e.HasHi && o.HasLo; d.HasHi {
+		d.Hi = e.Hi - o.Lo
+	}
+	return d
+}
+
 // Quantile returns the q-quantile of the sorted round trips by nearest rank:
 // the first that at least a q share of them lie at or below. Zero for none.
 func Quantile(sorted []time.Duration, q float64) time.Duration {

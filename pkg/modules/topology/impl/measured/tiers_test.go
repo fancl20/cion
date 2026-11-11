@@ -9,6 +9,7 @@ import (
 	"github.com/scionproto/scion/pkg/addr"
 
 	"github.com/fancl20/cion/pkg/libs/bus"
+	"github.com/fancl20/cion/pkg/libs/evidence"
 	"github.com/fancl20/cion/pkg/libs/scion"
 	"github.com/fancl20/cion/pkg/modules/links"
 )
@@ -76,12 +77,12 @@ func TestDeriveTiers(t *testing.T) {
 // TestWindowTierFacts checks what one helper turns a tier into: up links
 // from the verdicts alone; the price of the cheapest clean read route at
 // its price — a declared route under a measured one prices nothing, nor do
-// an ejected route and one over a local down interface; each member's own
-// price over its own read routes, beside its cheapest route, read or not,
-// which the window requests; the lowest lower bound of the read routes, the
-// tier's and each member's, at their prices; the route count reading the
-// clean candidates alone; and strandedness, once no up link reaches a tier
-// and the measurements doubt every route into it.
+// an ejected route and one over a local down interface — and the least of
+// the read routes' price estimates, the tier's and each member's over its
+// own, beside each member's cheapest route, read or not, which the window
+// requests; the route count reading the clean candidates alone; and
+// strandedness, once no up link reaches a tier and the measurements doubt
+// every route into it.
 func TestWindowTierFacts(t *testing.T) {
 	verdicts := map[uint16]bool{3: true, 4: false, 7: false} // B's link down, the node's own 7 dead
 	up := &links.Link{NeighborIA: selA, IfID: 3, State: links.StateEstablished}
@@ -102,6 +103,7 @@ func TestWindowTierFacts(t *testing.T) {
 	// ejected, and E, whose one route is suspect.
 	bounded := func(c scion.Candidate, low time.Duration) scion.Candidate {
 		c.Low = &low
+		c.BoundsEvidence.Lo, c.BoundsEvidence.HasLo = low, c.BoundsEvidence.Answered > 0
 		return c
 	}
 	a := sm(5,
@@ -131,29 +133,23 @@ func TestWindowTierFacts(t *testing.T) {
 	if fast.price != 20*time.Millisecond {
 		t.Errorf("price = %v, want A's own route's 20ms", fast.price)
 	}
-	// A's declared route undercuts its measured 20ms route but is read by
+	// The tier's price as the comparisons weigh it, and A's, is the least
+	// of A's two read routes' estimates at their prices: A's own 20ms, its
+	// lower bound 18ms, as low as the route through D's at its price. A's
+	// declared route undercuts its measured 20ms route but is read by
 	// nothing; B's and C's routes are dirty or undeclared.
-	wantPrices := map[addr.IA]time.Duration{selA: 20 * time.Millisecond}
-	if diff := cmp.Diff(wantPrices, fast.prices); diff != "" {
+	price := evidence.Least(priceBounds(&a.candidates[0]), priceBounds(&a.candidates[2]))
+	if price.Value != 20*time.Millisecond || price.Lo != 18*time.Millisecond {
+		t.Errorf("the least of A's routes = %+v, want 20ms bounded below at 18ms", price)
+	}
+	if diff := cmp.Diff(price, fast.estimate); diff != "" {
+		t.Errorf("the tier's price (-want +got):\n%s", diff)
+	}
+	if diff := cmp.Diff(map[addr.IA]evidence.Estimate{selA: price}, fast.prices); diff != "" {
 		t.Errorf("member prices (-want +got):\n%s", diff)
 	}
 	if len(fast.cheapest) != 1 || fast.cheapest[selA].ID != a.candidates[1].ID {
 		t.Errorf("the members' cheapest routes = %v, want A's declared route", fast.cheapest)
-	}
-	// The route through D bounds the tier and A at its price no lower than
-	// A's own route, 18ms, which comes first; the declared route bounds
-	// nothing.
-	if fast.low != 18*time.Millisecond {
-		t.Errorf("low = %v, want A's own route's 18ms", fast.low)
-	}
-	if diff := cmp.Diff(map[addr.IA]time.Duration{selA: 18 * time.Millisecond}, fast.lows); diff != "" {
-		t.Errorf("member lows (-want +got):\n%s", diff)
-	}
-	// Each price and bound keeps the route it comes from.
-	if fast.priceRoute != &a.candidates[0] || fast.priceRoutes[selA] != &a.candidates[0] ||
-		fast.lowRoute != &a.candidates[0] || fast.lowRoutes[selA] != &a.candidates[0] {
-		t.Errorf("the routes of the price, A's price, the low, and A's low = %p, %p, %p, %p, want A's own %p",
-			fast.priceRoute, fast.priceRoutes[selA], fast.lowRoute, fast.lowRoutes[selA], &a.candidates[0])
 	}
 	// The up link beside a clean route that avoids it: the declared route
 	// and C's clean route share no link with the up link.
@@ -217,9 +213,8 @@ func TestExcludedCutsOffTheLinksOwnNeighbor(t *testing.T) {
 	if !ts[0].excluded[selA].cutOff[selA] {
 		t.Error("excluding A's link left A uncut, though no survivor reaches it")
 	}
-	if decided, useless := judge(&ts[0], selA); !decided || useless {
-		t.Errorf("judge = (%v, %v), want (true, false): the link is A's only route",
-			decided, useless)
+	if got := judge(&ts[0], selA, steadyAt(10*ms)); got != evidence.NotBetter {
+		t.Errorf("judge = %v, want not better: the link is A's only route", got)
 	}
 }
 
@@ -309,8 +304,8 @@ func TestWindowTiersWithoutMeasurements(t *testing.T) {
 		t.Error("a tier a clean route reaches is stranded")
 	}
 	for _, ia := range []addr.IA{selA, selB} {
-		if decided, _ := judge(fast, ia); decided {
-			t.Errorf("a window nothing measured decided %s's link", ia)
+		if got := judge(fast, ia, steadyAt(10*ms)); got != evidence.Undecided {
+			t.Errorf("a window nothing measured decided %s's link: %v", ia, got)
 		}
 	}
 }
@@ -355,97 +350,124 @@ func TestCheapest(t *testing.T) {
 	}
 }
 
-// TestTierQualifies checks the priced admission cases. On the readings, a
-// direct round trip beating the member's own price by the promotion ratio
-// qualifies however cheap the tier's price, one short of the ratio or
-// beating the price by less than the margin floor does not, a member no
-// route prices takes the tier's price, and one whose routes none read beats
-// nothing. Confirmed, a round trip short of the ratio qualifies where it and
-// its upper bound both gain on the price and on its lower bound by the band
-// the path policy moves a lease for, at most one transit's charge on a long
-// path. A single-route tier admits within SecondRouteRatio of its price, and
-// an unpriced tier qualifies nothing.
-func TestTierQualifies(t *testing.T) {
+// boundsKind is the kind of the estimates the comparisons weigh.
+var boundsKind = scion.BoundsEstimate(nil, time.Time{}).Kind
+
+// estimateOf returns an estimate of the bounds' kind at the value, bounded at
+// lo and hi, resting on a route's steady probes; a zero bound is none.
+func estimateOf(value, lo, hi time.Duration) evidence.Estimate {
+	return evidence.Estimate{Kind: boundsKind, Value: value, Lo: lo, Hi: hi, HasLo: lo > 0, HasHi: hi > 0,
+		Answered: steadyBounds, Sent: steadyBounds, Newest: time.Now()}
+}
+
+// steadyAt returns the estimate of a round trip that holds steady: bounded
+// at its value.
+func steadyAt(rtt time.Duration) evidence.Estimate {
+	return estimateOf(rtt, rtt, rtt)
+}
+
+// TestTierBeats checks the priced cases' comparisons. A member's direct side
+// beats its own price by the band: better once its upper bound and the band
+// lie at or below the price's lower bound, not better once its lower bound
+// and the band pass the price's upper bound, undecided between and without
+// a bound it needs — at most one transit's charge on a long path. A member
+// no route prices weighs the tier's price, one whose routes none read
+// weighs nothing, and an unpriced tier weighs nothing. A tier of one route
+// takes a second within the room SecondRouteRatio leaves above its price.
+func TestTierBeats(t *testing.T) {
 	ms := time.Millisecond
 	unread := route(0, 30*ms, link(selX), link(selD))
 	priced := tier{
-		price:    10 * ms,
-		prices:   map[addr.IA]time.Duration{selA: 30 * ms, selB: 9 * ms, selE: 200 * ms},
-		low:      9 * ms,
-		lows:     map[addr.IA]time.Duration{selA: 29600 * time.Microsecond, selB: 8 * ms, selE: 199 * ms},
+		estimate: steadyAt(10 * ms),
+		prices: map[addr.IA]evidence.Estimate{
+			selA: steadyAt(30 * ms), selB: steadyAt(9 * ms), selE: steadyAt(200 * ms)},
 		cheapest: map[addr.IA]*scion.Candidate{selD: &unread},
 		routes:   2,
 	}
-	single := tier{price: 10 * ms, routes: 1}
-	long := tier{price: 200 * ms, low: 199 * ms, routes: 2}
-
+	single := tier{estimate: steadyAt(20 * ms), routes: 1}
 	for _, tc := range []struct {
-		name         string
-		tier         tier
-		ia           addr.IA
-		direct, high time.Duration
-		want         bool
+		name          string
+		tier          tier
+		ia            addr.IA
+		direct        evidence.Estimate
+		beats, second evidence.Verdict
+		price         evidence.Estimate
 	}{
-		{"beating its own price", priced, selA, 20 * ms, 0, true},
-		{"short of the promotion ratio", priced, selA, 25 * ms, 26 * ms, false},
-		{"within the margin floor", priced, selB, 7100 * time.Microsecond, 7100 * time.Microsecond, false},
-		{"past the margin floor", priced, selB, 6900 * time.Microsecond, 0, true},
-		{"beating the tier's price", priced, selC, 7 * ms, 0, true},
-		{"short of the tier's price", priced, selC, 9 * ms, 9 * ms, false},
-		{"its routes none read", priced, selD, ms, ms, false},
-		{"short of the ratio, confirmed past the band", priced, selA, 24500 * time.Microsecond, 24600 * time.Microsecond, true},
-		{"short of the ratio, its bound within the band", priced, selA, 24500 * time.Microsecond, 26 * ms, false},
-		{"short of the ratio, unbounded", priced, selA, 24500 * time.Microsecond, 0, false},
-		{"a long path, confirmed past the cap", priced, selE, 185 * ms, 187 * ms, true},
-		{"a long path, its bound within the cap", priced, selE, 185 * ms, 199*ms - transitCost + ms, false},
-		{"a long path, its reading within the cap", priced, selE, 200*ms - transitCost + ms, 185 * ms, false},
-		{"no route pricing the member, confirmed against a long tier's", long, selC, 185 * ms, 187 * ms, true},
-		{"a second route within SecondRouteRatio", single, selC, 12 * ms, 0, true},
-		{"a second route past it", single, selC, 13 * ms, 0, false},
-		{"an unpriced tier", tier{routes: 1}, selC, ms, ms, false},
+		{"beating its own price", priced, selA, steadyAt(20 * ms), evidence.Better, evidence.Undecided,
+			priced.prices[selA]},
+		{"at the band", priced, selA, steadyAt(26 * ms), evidence.Better, evidence.Undecided, priced.prices[selA]},
+		{"within the band", priced, selA, steadyAt(27 * ms), evidence.NotBetter, evidence.Undecided,
+			priced.prices[selA]},
+		{"bounds straddling the band", priced, selA, estimateOf(20*ms, 18*ms, 28*ms), evidence.Undecided,
+			evidence.Undecided, priced.prices[selA]},
+		{"no upper bound", priced, selA, estimateOf(20*ms, 18*ms, 0), evidence.Undecided, evidence.Undecided,
+			priced.prices[selA]},
+		{"a fast price within the floor", priced, selB, steadyAt(7100 * time.Microsecond), evidence.NotBetter,
+			evidence.Undecided, priced.prices[selB]},
+		{"a fast price past the floor", priced, selB, steadyAt(6900 * time.Microsecond), evidence.Better,
+			evidence.Undecided, priced.prices[selB]},
+		{"the tier's price", priced, selC, steadyAt(7 * ms), evidence.Better, evidence.Undecided, priced.estimate},
+		{"its routes none read", priced, selD, steadyAt(ms), evidence.Undecided, evidence.Undecided,
+			evidence.Estimate{}},
+		{"a long path past the cap", priced, selE, steadyAt(195 * ms), evidence.Better, evidence.Undecided,
+			priced.prices[selE]},
+		{"a long path within the cap", priced, selE, steadyAt(197 * ms), evidence.NotBetter, evidence.Undecided,
+			priced.prices[selE]},
+		{"an unpriced tier", tier{routes: 1}, selC, steadyAt(ms), evidence.Undecided, evidence.Undecided,
+			evidence.Estimate{}},
+		{"a second route within the room", single, selC, steadyAt(25 * ms), evidence.NotBetter, evidence.Better,
+			single.estimate},
+		{"a second route past it", single, selC, steadyAt(26 * ms), evidence.NotBetter, evidence.NotBetter,
+			single.estimate},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := tc.tier.qualifies(tc.ia, tc.direct, tc.high); got != tc.want {
-				t.Errorf("qualifies = %v, want %v", got, tc.want)
+			beats, price := tc.tier.beats(tc.ia, tc.direct)
+			if beats != tc.beats || tc.tier.secondRoute(tc.direct) != tc.second {
+				t.Errorf("beats = %v, second route = %v, want %v and %v", beats,
+					tc.tier.secondRoute(tc.direct), tc.beats, tc.second)
+			}
+			if diff := cmp.Diff(tc.price, price); diff != "" {
+				t.Errorf("the price weighed (-want +got):\n%s", diff)
 			}
 		})
 	}
 }
 
-// TestTierGain checks what a candidate's direct round trip gains: its own
-// price less the round trip, the tier's price when no route prices the
-// member, and sure on the lower of the price and its lower bound; zero for
-// a member whose routes none read, for an unpriced tier, and for a round
-// trip that saves nothing, and the sure gain zero for a price no bound
-// bounds.
+// TestTierGain checks what a candidate's direct side gains: the price beats
+// weighs less the direct side, each bound against the other side's opposite
+// bound; nothing for a member whose routes none read and for an unpriced
+// tier.
 func TestTierGain(t *testing.T) {
 	ms := time.Millisecond
 	unread := route(0, 30*ms, link(selX), link(selD))
 	priced := tier{
-		price:    10 * ms,
-		prices:   map[addr.IA]time.Duration{selA: 30 * ms, selB: 9 * ms, selE: 30 * ms, selPeer: 20 * ms},
-		low:      9 * ms,
-		lows:     map[addr.IA]time.Duration{selA: 24 * ms, selB: 8 * ms, selPeer: 26 * ms},
+		estimate: estimateOf(10*ms, 9*ms, 11*ms),
+		prices:   map[addr.IA]evidence.Estimate{selA: estimateOf(30*ms, 28*ms, 31*ms)},
 		cheapest: map[addr.IA]*scion.Candidate{selD: &unread},
 	}
 	for _, tc := range []struct {
-		name       string
-		tier       tier
-		ia         addr.IA
-		direct     time.Duration
-		gain, sure time.Duration
+		name               string
+		tier               tier
+		ia                 addr.IA
+		direct             evidence.Estimate
+		value, lo, hi      time.Duration
+		answered, unpriced bool
 	}{
-		{"its own price", priced, selA, 20 * ms, 10 * ms, 4 * ms},
-		{"a round trip saving nothing", priced, selB, 12 * ms, 0, 0},
-		{"the tier's price", priced, selC, 7 * ms, 3 * ms, 2 * ms},
-		{"a price no bound bounds", priced, selE, 20 * ms, 10 * ms, 0},
-		{"a lower bound above the price", priced, selPeer, 10 * ms, 10 * ms, 10 * ms},
-		{"its routes none read", priced, selD, ms, 0, 0},
-		{"an unpriced tier", tier{}, selC, ms, 0, 0},
+		{"its own price", priced, selA, estimateOf(20*ms, 19*ms, 22*ms), 10 * ms, 6 * ms, 12 * ms, true, false},
+		{"the tier's price", priced, selC, estimateOf(7*ms, 6*ms, 8*ms), 3 * ms, ms, 5 * ms, true, false},
+		{"its routes none read", priced, selD, steadyAt(ms), 0, 0, 0, false, true},
+		{"an unpriced tier", tier{}, selC, steadyAt(ms), 0, 0, 0, false, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if gain, sure := tc.tier.gain(tc.ia, tc.direct); gain != tc.gain || sure != tc.sure {
-				t.Errorf("gain = %v, %v, want %v, %v", gain, sure, tc.gain, tc.sure)
+			got := tc.tier.gain(tc.ia, tc.direct)
+			if tc.unpriced {
+				if got.Answered != 0 {
+					t.Errorf("gain = %+v, want none", got)
+				}
+				return
+			}
+			if got.Value != tc.value || got.Lo != tc.lo || got.Hi != tc.hi || !got.HasLo || !got.HasHi {
+				t.Errorf("gain = %+v, want %v within %v..%v", got, tc.value, tc.lo, tc.hi)
 			}
 		})
 	}
@@ -461,14 +483,15 @@ func TestJudgeOutside(t *testing.T) {
 		return &tier{
 			members:  []member{{ia: selA, direct: 10 * ms}, {ia: selB, direct: 12 * ms}},
 			price:    20 * ms,
-			prices:   map[addr.IA]time.Duration{selA: 16 * ms, selB: 20 * ms},
+			estimate: steadyAt(20 * ms),
 			routes:   2,
 			excluded: map[addr.IA]excludedSample{selA: ex},
 		}
 	}
 	// held keeps the routes and cuts nobody off, at prices far above the
 	// link's: a priced test would keep the link.
-	held := excludedSample{answered: true, price: 90 * ms, routes: 2, cutOff: map[addr.IA]bool{}}
+	held := excludedSample{answered: true, price: 90 * ms, survivors: steadyAt(90 * ms), routes: 2,
+		cutOff: map[addr.IA]bool{}}
 	unanswered := held
 	unanswered.answered = false
 	fewer := held
@@ -497,252 +520,216 @@ func TestJudgeOutside(t *testing.T) {
 	}
 }
 
-// TestJudge checks the useless test and the eviction's. With the tier's
-// route count held, the useless test finds a link useless only while its
-// exclusion raises no price — the tier's, each priced member's, the link's
-// own neighbor's against its direct round trip — and the bounds confirm it:
-// for the tier and for each member a route over the link reaches, the
-// survivors' upper bound no higher than the link's lower bound, the
-// neighbor's by its direct side's. The eviction's finds a link weak while
-// its exclusion raises no price by promotion's fifth and its floor, and the
-// bounds confirm it gains no one the band. A member the survivors reach but
-// no read survivor prices, or one whose routes none read, leaves the window
-// undecided, unless another member decides the link useful; a survivor of a
-// member no route prices counts for nothing, and a member cut off, priced or
-// not, decides the link useful, as does a bound missing. A tier no read
-// route prices, or a survivor that did not answer, decides nothing.
+// TestJudge checks the useless test and whether a link would not earn its
+// place. With the tier's route count held and no member cut off, the useless
+// test finds a link useless once the survivors beat the routes crossing it
+// by no line — for the tier, for each member those routes reach, and for
+// the link's own neighbor against its direct side — useful once one of them
+// does not, and undecided while one lacks its evidence. A link would not
+// earn its place once the routes crossing it, and the neighbor's direct
+// side, beat the survivors by the band for none of them. A member the
+// survivors reach but no read survivor prices, or one whose routes none
+// read, leaves the window undecided; a survivor of a member no route over
+// the link reaches counts for nothing, and a member cut off, priced or not,
+// decides the link useful. A tier no read route prices, or a survivor that
+// did not answer, decides nothing.
 func TestJudge(t *testing.T) {
 	ms := time.Millisecond
-	type prices = map[addr.IA]time.Duration
-	// The link is A's, its round trip 10ms and its own price 16ms. B prices
-	// at 20ms over a route crossing the link, and no route reaches C.
+	type prices = map[addr.IA]evidence.Estimate
+	direct := steadyAt(10 * ms)
+	// The link is A's, its direct side 10ms. B prices at 20ms over a route
+	// crossing the link, as the tier does, and no route reaches C.
 	tierWith := func(ex excludedSample) *tier {
 		return &tier{
 			members: []member{
-				{ia: selA, direct: 10 * ms, low: 10 * ms},
+				{ia: selA, direct: 10 * ms},
 				{ia: selB, direct: 12 * ms},
 				{ia: selC, direct: 14 * ms},
 			},
 			price:    20 * ms,
-			prices:   prices{selA: 16 * ms, selB: 20 * ms},
+			estimate: steadyAt(20 * ms),
+			prices:   prices{selA: steadyAt(16 * ms), selB: steadyAt(20 * ms)},
 			cheapest: make(map[addr.IA]*scion.Candidate),
 			routes:   2,
 			excluded: map[addr.IA]excludedSample{selA: ex},
 		}
 	}
-	// held is an excluded measurement of the tier's route count, priced as
-	// given, the members given cut off, its bounds those of steady routes:
-	// the tier's and B's routes over the link at 20ms, the survivors at
-	// their prices.
-	held := func(price time.Duration, p prices, cutOff ...addr.IA) excludedSample {
+	// held is an excluded measurement of the tier's route count, the
+	// survivors at the tier's price and each member's given, the members
+	// given cut off, and the routes over the link at 20ms.
+	held := func(survivors time.Duration, of prices, cutOff ...addr.IA) excludedSample {
 		ex := excludedSample{
-			answered: true,
-			price:    price,
-			routes:   2,
-			prices:   p,
-			cutOff:   make(map[addr.IA]bool),
-			crossed:  true,
-			low:      20 * ms,
-			high:     price,
-			lows:     prices{selB: 20 * ms},
-			highs:    maps.Clone(p),
+			answered:    true,
+			price:       survivors,
+			routes:      2,
+			survivors:   steadyAt(survivors),
+			crossing:    steadyAt(20 * ms),
+			survivorsOf: of,
+			crossingOf:  prices{selB: steadyAt(20 * ms)},
+			cutOff:      make(map[addr.IA]bool),
 		}
 		for _, ia := range cutOff {
 			ex.cutOff[ia] = true
 		}
 		return ex
 	}
-	// bounded returns the measurement with its bounds changed.
-	bounded := func(ex excludedSample, change func(ex *excludedSample)) excludedSample {
-		ex.lows, ex.highs = maps.Clone(ex.lows), maps.Clone(ex.highs)
+	at := func(a, b time.Duration) prices { return prices{selA: steadyAt(a), selB: steadyAt(b)} }
+	// changed returns the measurement held at no rise with a change made.
+	changed := func(change func(ex *excludedSample)) excludedSample {
+		ex := held(20*ms, at(10*ms, 20*ms))
+		ex.survivorsOf = maps.Clone(ex.survivorsOf)
 		change(&ex)
 		return ex
 	}
-	none := prices{selA: 10 * ms, selB: 20 * ms}
-	band := prices{selA: 11900 * time.Microsecond, selB: 23900 * time.Microsecond}
-	fifth := prices{selA: 12 * ms, selB: 25 * ms}
-
+	us := time.Microsecond
 	for _, tc := range []struct {
-		name          string
-		ex            excludedSample
-		decided, idle bool
-		yields        bool
+		name   string
+		ex     excludedSample
+		judge  evidence.Verdict
+		yields bool
 	}{
-		{"no price rises", held(20*ms, none), true, true, true},
-		{"the neighbor's survivors slower than its round trip",
-			held(20*ms, prices{selA: 11 * ms, selB: 20 * ms}), true, false, true},
-		{"another member's price rises", held(20*ms, prices{selA: 10 * ms, selB: 21 * ms}), true, false, true},
-		{"the tier's price rises", held(21*ms, none), true, false, true},
-		{"every price within the band", held(23900*time.Microsecond, band), true, false, true},
-		{"every price within the fifth, past the band", held(25*ms, fifth), true, false, false},
-		{"the neighbor's past the fifth", held(25*ms, prices{selA: 13 * ms, selB: 25 * ms}), true, false, false},
-		{"another member's past the fifth", held(25*ms, prices{selA: 12 * ms, selB: 26 * ms}), true, false, false},
-		{"the tier's past the fifth", held(26*ms, fifth), true, false, false},
-		{"a member no survivor prices", held(20*ms, prices{selA: 10 * ms}), false, false, false},
-		{"the neighbor no survivor prices", held(20*ms, prices{selB: 20 * ms}), false, false, false},
-		{"a member no survivor prices, another past the fifth",
-			held(20*ms, prices{selA: 13 * ms}), true, false, false},
-		{"a member cut off", held(20*ms, none, selB), true, false, false},
-		{"a member no route reaches, cut off", held(20*ms, none, selC), true, false, false},
-		{"a survivor of a member no route reaches",
-			held(20*ms, prices{selA: 10 * ms, selB: 20 * ms, selC: 100 * ms}), true, true, true},
-		{"a route lost", excludedSample{answered: true, price: 20 * ms, routes: 1, prices: none}, true, false, false},
-		{"the survivor unanswered", excludedSample{price: 20 * ms, routes: 2, prices: none}, false, false, false},
+		{"no price rises", held(20*ms, at(10*ms, 20*ms)), evidence.Better, true},
+		{"the neighbor's survivors slower than its direct side", held(20*ms, at(11*ms, 20*ms)),
+			evidence.NotBetter, true},
+		{"another member's price rises", held(20*ms, at(10*ms, 21*ms)), evidence.NotBetter, true},
+		{"the tier's price rises", held(21*ms, at(10*ms, 20*ms)), evidence.NotBetter, true},
+		{"every price within the band", held(23900*us, at(11900*us, 23900*us)), evidence.NotBetter, true},
+		{"the tier's past the band", held(24*ms, at(11900*us, 23900*us)), evidence.NotBetter, false},
+		{"the neighbor's past the band", held(23900*us, at(12*ms, 23900*us)), evidence.NotBetter, false},
+		{"another member's past the band", held(23900*us, at(11900*us, 24*ms)), evidence.NotBetter, false},
+		{"a member no survivor prices", held(20*ms, prices{selA: steadyAt(10 * ms)}), evidence.Undecided, false},
+		{"the neighbor no survivor prices", held(20*ms, prices{selB: steadyAt(20 * ms)}), evidence.Undecided, false},
+		{"a member no survivor prices, the neighbor's price risen", held(20*ms, prices{selA: steadyAt(13 * ms)}),
+			evidence.NotBetter, false},
+		{"a member cut off", held(20*ms, at(10*ms, 20*ms), selB), evidence.NotBetter, false},
+		{"a member no route reaches, cut off", held(20*ms, at(10*ms, 20*ms), selC), evidence.NotBetter, false},
+		{"a survivor of a member no route over the link reaches",
+			changed(func(ex *excludedSample) { ex.survivorsOf[selC] = steadyAt(100 * ms) }), evidence.Better, true},
+		{"a route lost", changed(func(ex *excludedSample) { ex.routes = 1 }), evidence.NotBetter, false},
+		{"the survivor unanswered", changed(func(ex *excludedSample) { ex.answered = false }), evidence.Undecided,
+			false},
 		{"a member's survivors bounded above the link's routes",
-			bounded(held(20*ms, none), func(ex *excludedSample) { ex.highs[selB] = 22 * ms }), true, false, true},
+			changed(func(ex *excludedSample) { ex.survivorsOf[selB] = estimateOf(20*ms, 18*ms, 22*ms) }),
+			evidence.Undecided, true},
 		{"a member's survivors bounded past the band",
-			bounded(held(20*ms, none), func(ex *excludedSample) { ex.highs[selB] = 25 * ms }), true, false, false},
+			changed(func(ex *excludedSample) { ex.survivorsOf[selB] = estimateOf(20*ms, 18*ms, 25*ms) }),
+			evidence.Undecided, false},
 		{"the tier's survivors bounded above its routes",
-			bounded(held(20*ms, none), func(ex *excludedSample) { ex.high = 22 * ms }), true, false, true},
-		{"the neighbor's survivors bounded above its round trip",
-			bounded(held(20*ms, none), func(ex *excludedSample) { ex.highs[selA] = 11 * ms }), true, false, true},
-		{"a member's survivors unbounded",
-			bounded(held(20*ms, none), func(ex *excludedSample) { delete(ex.highs, selB) }), true, false, false},
-		{"the tier's survivors unbounded",
-			bounded(held(20*ms, none), func(ex *excludedSample) { ex.high = 0 }), true, false, false},
-		{"the readings showing a rise the history does not",
-			bounded(held(20*ms, prices{selA: 11 * ms, selB: 20 * ms}), func(ex *excludedSample) { ex.highs[selA] = 10 * ms }),
-			true, false, true},
-		{"the tier's price rising on the readings alone",
-			bounded(held(21*ms, none), func(ex *excludedSample) { ex.high = 20 * ms }), true, false, true},
+			changed(func(ex *excludedSample) { ex.survivors = estimateOf(20*ms, 18*ms, 22*ms) }),
+			evidence.Undecided, true},
+		{"the neighbor's survivors bounded above its direct side",
+			changed(func(ex *excludedSample) { ex.survivorsOf[selA] = estimateOf(10*ms, 9*ms, 11*ms) }),
+			evidence.Undecided, true},
+		{"the neighbor's survivors unbounded",
+			changed(func(ex *excludedSample) { ex.survivorsOf[selA] = estimateOf(10*ms, 0, 0) }),
+			evidence.Undecided, false},
 		{"no route crossing the link but the neighbor's",
-			bounded(held(20*ms, none), func(ex *excludedSample) {
-				ex.crossed, ex.low, ex.high = false, 0, 0
-				delete(ex.lows, selB)
-				delete(ex.highs, selB)
-			}), true, true, true},
+			changed(func(ex *excludedSample) { ex.crossing, ex.crossingOf = evidence.Estimate{}, nil }),
+			evidence.Better, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			decided, useless := judge(tierWith(tc.ex), selA)
-			if decided != tc.decided || useless != tc.idle {
-				t.Errorf("judge = (%v, %v), want (%v, %v)", decided, useless, tc.decided, tc.idle)
+			if got := judge(tierWith(tc.ex), selA, direct); got != tc.judge {
+				t.Errorf("judge = %v, want %v", got, tc.judge)
 			}
-			decided, weak := yields(tierWith(tc.ex), selA)
-			if want := tc.decided || tc.yields; decided != want || weak != tc.yields {
-				t.Errorf("yields = (%v, %v), want (%v, %v)", decided, weak, want, tc.yields)
+			if got := yields(tierWith(tc.ex), selA, direct); got != tc.yields {
+				t.Errorf("yields = %v, want %v", got, tc.yields)
 			}
 		})
 	}
 
-	// A fast neighbor's survivor past the fifth of its 4ms round trip by less
-	// than the margin floor: its link would not earn its place.
-	fast := tierWith(held(20*ms, prices{selA: 5200 * time.Microsecond, selB: 20 * ms}))
-	fast.members[0].direct, fast.members[0].low = 4*ms, 4*ms
-	if decided, weak := yields(fast, selA); !decided || !weak {
-		t.Errorf("yields within the margin floor = (%v, %v), want (true, true)", decided, weak)
-	}
-	unbounded := tierWith(held(20*ms, none))
-	unbounded.members[0].low = 0
-	if decided, useless := judge(unbounded, selA); !decided || useless {
-		t.Errorf("judge without the neighbor's bound = (%v, %v), want (true, false)", decided, useless)
-	}
-
 	unread := route(-time.Hour, 10*ms, link(selX), link(selC))
-	readless := tierWith(held(20*ms, none))
+	readless := tierWith(held(20*ms, at(10*ms, 20*ms)))
 	readless.cheapest[selC] = &unread
-	if decided, _ := judge(readless, selA); decided {
-		t.Error("the useless test decided while C's routes none read")
+	if got := judge(readless, selA, direct); got != evidence.Undecided {
+		t.Errorf("the useless test decided %v while C's routes none read", got)
 	}
-	if decided, _ := yields(readless, selA); decided {
-		t.Error("the eviction's test decided while C's routes none read")
+	if yields(readless, selA, direct) {
+		t.Error("the link yields while C's routes none read")
 	}
-	unpriced := tierWith(held(20*ms, none))
-	unpriced.price = 0
-	if decided, _ := judge(unpriced, selA); decided {
-		t.Error("a tier no read route prices decided a link")
+	unpriced := tierWith(held(20*ms, at(10*ms, 20*ms)))
+	unpriced.estimate = evidence.Estimate{}
+	if got := judge(unpriced, selA, direct); got != evidence.Undecided {
+		t.Errorf("a tier no read route prices decided a link: %v", got)
 	}
 }
 
 // TestOutgained checks the eviction's test against a candidate's gain: a
-// link yields its slot while every price it holds down — the tier's, each
-// priced member's, its own neighbor's against its direct round trip — saves
-// less than the gain by the promotion ratio and the margin floor, and the
-// bounds confirm it: the survivors' upper bound less the link's lower bound
-// beaten by the sure gain as well. A member cut off, a route lost, a bound
-// missing, or a gain the history does not confirm keeps the link its slot;
-// a member no survivor prices, or a survivor that did not answer, decides
-// nothing.
+// link yields its slot once the gain beats what the link saves every price
+// it reaches by the band — the survivors' less the crossing routes', for the
+// tier and each member those routes reach, and the neighbor's survivors
+// less its direct side — each comparison better. A saving the gain does not
+// beat, one undecided, a member cut off, a route lost, a member whose routes
+// none read, or a survivor that did not answer keeps the link its slot.
 func TestOutgained(t *testing.T) {
 	ms := time.Millisecond
-	type prices = map[addr.IA]time.Duration
-	// The link is A's, its round trip 10ms. B prices at 20ms over a route
-	// crossing the link, and so does the tier.
+	type prices = map[addr.IA]evidence.Estimate
+	direct := steadyAt(10 * ms)
+	// The link is A's, its direct side 10ms. B prices at 20ms over a route
+	// crossing the link, as the tier does.
 	tierWith := func(ex excludedSample) *tier {
 		return &tier{
-			members:  []member{{ia: selA, direct: 10 * ms, low: 10 * ms}, {ia: selB, direct: 12 * ms}},
+			members:  []member{{ia: selA, direct: 10 * ms}, {ia: selB, direct: 12 * ms}},
 			price:    20 * ms,
-			prices:   prices{selA: 16 * ms, selB: 20 * ms},
+			estimate: steadyAt(20 * ms),
+			prices:   prices{selA: steadyAt(16 * ms), selB: steadyAt(20 * ms)},
 			cheapest: make(map[addr.IA]*scion.Candidate),
 			routes:   2,
 			excluded: map[addr.IA]excludedSample{selA: ex},
 		}
 	}
-	// held is an excluded measurement saving the tier 5ms, A 8ms on its
-	// round trip, and B 6ms, its bounds those of steady routes; changed
-	// returns it changed.
-	held := func() excludedSample {
-		return excludedSample{
-			answered: true,
-			price:    25 * ms,
-			routes:   2,
-			prices:   prices{selA: 18 * ms, selB: 26 * ms},
-			cutOff:   make(map[addr.IA]bool),
-			crossed:  true,
-			low:      20 * ms,
-			high:     25 * ms,
-			lows:     prices{selB: 20 * ms},
-			highs:    prices{selA: 18 * ms, selB: 26 * ms},
-		}
-	}
+	// changed returns an excluded measurement saving the tier 5ms, A 8ms on
+	// its direct side, and B 6ms, with a change made.
 	changed := func(change func(ex *excludedSample)) excludedSample {
-		ex := held()
+		ex := excludedSample{
+			answered:    true,
+			price:       25 * ms,
+			routes:      2,
+			survivors:   steadyAt(25 * ms),
+			crossing:    steadyAt(20 * ms),
+			survivorsOf: prices{selA: steadyAt(18 * ms), selB: steadyAt(26 * ms)},
+			crossingOf:  prices{selB: steadyAt(20 * ms)},
+			cutOff:      make(map[addr.IA]bool),
+		}
 		change(&ex)
 		return ex
 	}
-	// small saves A 2.5ms and nothing else.
-	small := changed(func(ex *excludedSample) {
-		ex.price, ex.high = 20*ms, 20*ms
-		ex.prices = prices{selA: 12500 * time.Microsecond, selB: 20 * ms}
-		ex.highs = maps.Clone(ex.prices)
-	})
-
+	held := changed(func(*excludedSample) {})
 	for _, tc := range []struct {
-		name          string
-		ex            excludedSample
-		gain, sure    time.Duration
-		decided, weak bool
+		name string
+		ex   excludedSample
+		gain evidence.Estimate
+		want bool
 	}{
-		{"every saving beaten", held(), 15 * ms, 15 * ms, true, true},
-		{"a gain the history does not confirm", held(), 15 * ms, 9 * ms, true, false},
-		{"a gain no bound confirms", held(), 15 * ms, 0, true, false},
-		{"the neighbor's saving within the ratio", held(), 9 * ms, 9 * ms, true, false},
-		{"the tier's saving within the ratio",
-			changed(func(ex *excludedSample) { ex.price, ex.high = 33*ms, 33*ms }), 15 * ms, 15 * ms, true, false},
-		{"another member's saving within the ratio",
-			changed(func(ex *excludedSample) { ex.prices[selB], ex.highs[selB] = 33*ms, 33*ms }), 15 * ms, 15 * ms, true, false},
-		{"past the margin floor", small, 5 * ms, 5 * ms, true, true},
-		{"within the margin floor", small, 4 * ms, 4 * ms, true, false},
-		{"no gain", held(), 0, 0, true, false},
-		{"the tier's saving bounded near the gain",
-			changed(func(ex *excludedSample) { ex.high = 33 * ms }), 15 * ms, 15 * ms, true, false},
+		{"every saving beaten", held, steadyAt(15 * ms), true},
+		{"a gain the history does not confirm", held, estimateOf(15*ms, 9*ms, 16*ms), false},
+		{"a gain no bound confirms", held, estimateOf(15*ms, 0, 0), false},
+		{"the neighbor's saving within the band", held, steadyAt(9 * ms), false},
+		{"the tier's saving near the gain",
+			changed(func(ex *excludedSample) { ex.survivors = steadyAt(33 * ms) }), steadyAt(15 * ms), false},
+		{"another member's saving near the gain",
+			changed(func(ex *excludedSample) { ex.survivorsOf[selB] = steadyAt(33 * ms) }), steadyAt(15 * ms), false},
 		{"a member's saving bounded near the gain",
-			changed(func(ex *excludedSample) { ex.highs[selB] = 33 * ms }), 15 * ms, 15 * ms, true, false},
-		{"the neighbor's saving bounded near the gain",
-			changed(func(ex *excludedSample) { ex.highs[selA] = 23 * ms }), 15 * ms, 15 * ms, true, false},
-		{"a saving the readings show and the history does not",
-			changed(func(ex *excludedSample) { ex.prices[selB] = 33 * ms }), 15 * ms, 15 * ms, true, false},
-		{"a bound missing", changed(func(ex *excludedSample) { delete(ex.highs, selB) }), 15 * ms, 15 * ms, true, false},
-		{"a member cut off", changed(func(ex *excludedSample) { ex.cutOff[selB] = true }), 15 * ms, 15 * ms, true, false},
-		{"a route lost", changed(func(ex *excludedSample) { ex.routes = 1 }), 15 * ms, 15 * ms, true, false},
+			changed(func(ex *excludedSample) { ex.survivorsOf[selB] = estimateOf(26*ms, 24*ms, 34*ms) }),
+			steadyAt(15 * ms), false},
+		{"no gain", held, evidence.Estimate{}, false},
+		{"a member cut off", changed(func(ex *excludedSample) { ex.cutOff[selB] = true }), steadyAt(15 * ms), false},
+		{"a route lost", changed(func(ex *excludedSample) { ex.routes = 1 }), steadyAt(15 * ms), false},
 		{"a member no survivor prices",
-			changed(func(ex *excludedSample) { delete(ex.prices, selB) }), 15 * ms, 15 * ms, false, false},
-		{"the survivor unanswered", changed(func(ex *excludedSample) { ex.answered = false }), 15 * ms, 15 * ms, false, false},
+			changed(func(ex *excludedSample) { delete(ex.survivorsOf, selB) }), steadyAt(15 * ms), false},
+		{"the survivor unanswered", changed(func(ex *excludedSample) { ex.answered = false }), steadyAt(15 * ms),
+			false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			decided, weak := outgained(tierWith(tc.ex), selA, tc.gain, tc.sure)
-			if decided != tc.decided || weak != tc.weak {
-				t.Errorf("outgained = (%v, %v), want (%v, %v)", decided, weak, tc.decided, tc.weak)
+			if got := outgained(tierWith(tc.ex), selA, direct, tc.gain); got != tc.want {
+				t.Errorf("outgained = %v, want %v", got, tc.want)
 			}
 		})
+	}
+	unread := route(-time.Hour, 10*ms, link(selX), link(selC))
+	readless := tierWith(held)
+	readless.members = append(readless.members, member{ia: selC, direct: 14 * ms})
+	readless.cheapest[selC] = &unread
+	if outgained(readless, selA, direct, steadyAt(15*ms)) {
+		t.Error("the gain outgained the link while C's routes none read")
 	}
 }

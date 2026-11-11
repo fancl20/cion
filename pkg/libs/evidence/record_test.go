@@ -10,9 +10,9 @@ import (
 )
 
 // TestRecordLogLine checks a record's log line: its change the message, then
-// its subject, options, why, the line when there is one, and each estimate
-// weighed with the bounds it has, grouped apart from the options of the same
-// names.
+// its subject, options, why, the line when there is one, a negative one
+// included, and each estimate weighed with the bounds it has, grouped apart
+// from the options of the same names.
 func TestRecordLogLine(t *testing.T) {
 	ms := time.Millisecond
 	bounded := Estimate{Value: 30 * ms, Lo: 25 * ms, Hi: 35 * ms, HasLo: true, HasHi: true, Answered: 5, Sent: 6}
@@ -28,6 +28,10 @@ func TestRecordLogLine(t *testing.T) {
 		want: `level=INFO msg="Lease moved" subject=1-ff00:0:1 from=a to=b why="a reason" line=4ms ` +
 			`weighed.from.value=10ms weighed.from.answered=2 weighed.from.sent=2 ` +
 			`weighed.to.value=30ms weighed.to.lo=25ms weighed.to.hi=35ms weighed.to.answered=5 weighed.to.sent=6`,
+	}, {
+		name: "room allowed",
+		r:    Record{Change: "Link promoted", Subject: "s", To: "b", Why: "w", Line: -5 * ms},
+		want: `level=INFO msg="Link promoted" subject=s from="" to=b why=w line=-5ms`,
 	}, {
 		name: "a first read",
 		r:    Record{Change: "Lease moved", Subject: "s", To: "b", Why: "w"},
