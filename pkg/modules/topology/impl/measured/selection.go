@@ -236,6 +236,9 @@ type selection struct {
 	// cases, and useless of each established link's useless test.
 	promotions map[addr.IA]promotion
 	useless    map[addr.IA]uselessness
+	// tiers holds the last window's tiers as its walk classed them, their
+	// members alone, from which the next walk keeps each peer's side.
+	tiers []tier
 	// upLeft records that an up link left this window, by retirement or
 	// eviction: each departure changes the routes every other exclusion was
 	// measured against, so one up link leaves per window.

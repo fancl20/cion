@@ -20,10 +20,42 @@ func sm(direct time.Duration, candidates ...scion.Candidate) sample {
 	return sample{direct: direct, candidates: candidates}
 }
 
-// TestDeriveTiers checks the sorted walk: a peer within the gap joins, one
-// past twice the median opens a new tier, the median recomputes as a tier
-// grows, an unmeasured peer classes into none, and equal samples are stable
-// across recomputation.
+// boundedSm builds a window sample of the given direct round trip whose
+// bounds estimate reads it between lo and hi.
+func boundedSm(direct, lo, hi time.Duration) sample {
+	return sample{direct: direct, bounds: scion.PublishedEstimate(direct, lo, hi)}
+}
+
+// lastTiers builds the last window's tiers of the peers given, a tier per
+// group, in order.
+func lastTiers(groups ...[]addr.IA) []tier {
+	ts := make([]tier, len(groups))
+	for i, g := range groups {
+		for _, ia := range g {
+			ts[i].members = append(ts[i].members, member{ia: ia})
+		}
+	}
+	return ts
+}
+
+// classes returns each tier's members, in the walk's order.
+func classes(ts []tier) [][]addr.IA {
+	var out [][]addr.IA
+	for _, t := range ts {
+		var ias []addr.IA
+		for _, m := range t.members {
+			ias = append(ias, m.ia)
+		}
+		out = append(out, ias)
+	}
+	return out
+}
+
+// TestDeriveTiers checks the sorted walk of a first window, which places
+// every peer by its value: a peer within the gap joins, one past twice the
+// median opens a new tier, the median recomputes as a tier grows, an
+// unmeasured peer classes into none, and equal samples are stable across
+// recomputation.
 func TestDeriveTiers(t *testing.T) {
 	samples := map[addr.IA]sample{
 		selA: sm(5),
@@ -35,7 +67,7 @@ func TestDeriveTiers(t *testing.T) {
 	}
 	// The median recomputes as the tier grows — {5} then {5,6} then
 	// {5,6,7} then {5,6,7,9} — and every peer stays within the gap.
-	ts := deriveTiers(samples)
+	ts := deriveTiers(samples, nil)
 	if len(ts) != 1 || len(ts[0].members) != 4 {
 		t.Fatalf("tiers = %d of %d members, want one of four", len(ts), len(ts[0].members))
 	}
@@ -48,7 +80,7 @@ func TestDeriveTiers(t *testing.T) {
 
 	// A peer past twice the median opens the next tier.
 	samples[selE] = sm(30)
-	ts = deriveTiers(samples)
+	ts = deriveTiers(samples, nil)
 	if len(ts) != 2 {
 		t.Fatalf("tiers = %d, want two", len(ts))
 	}
@@ -62,7 +94,7 @@ func TestDeriveTiers(t *testing.T) {
 		selA: sm(10), selB: sm(10), selC: sm(10), selD: sm(10),
 	}
 	for range 3 {
-		ts = deriveTiers(equal)
+		ts = deriveTiers(equal, nil)
 		if len(ts) != 1 {
 			t.Fatalf("tiers of equal samples = %d, want one", len(ts))
 		}
@@ -72,6 +104,145 @@ func TestDeriveTiers(t *testing.T) {
 			}
 		}
 	}
+}
+
+// TestDeriveTiersKeepsSides checks the walk against the last window's
+// tiers: a peer crosses the line only once its bounds and the median's lie
+// apart by it, an undecided one keeping the side the last window held it
+// on, and a peer the last window did not class is placed by its value.
+func TestDeriveTiersKeepsSides(t *testing.T) {
+	ms := time.Millisecond
+	// A and B sit steady at 8ms and 10ms: a third peer weighs against B,
+	// the median as walked, whose line lies at 20ms.
+	a, b := boundedSm(8*ms, 8*ms, 8*ms), boundedSm(10*ms, 10*ms, 10*ms)
+	straddling, past := boundedSm(25*ms, 15*ms, 30*ms), boundedSm(25*ms, 20*ms, 30*ms)
+	for _, tc := range []struct {
+		name    string
+		samples map[addr.IA]sample
+		last    [][]addr.IA
+		want    [][]addr.IA
+	}{{
+		name:    "a peer past the line by its value but not its bounds keeps its tier",
+		samples: map[addr.IA]sample{selA: a, selB: b, selC: straddling},
+		last:    [][]addr.IA{{selA, selB, selC}},
+		want:    [][]addr.IA{{selA, selB, selC}},
+	}, {
+		name:    "a peer whose lower bound clears the line opens the next tier",
+		samples: map[addr.IA]sample{selA: a, selB: b, selC: past},
+		last:    [][]addr.IA{{selA, selB, selC}},
+		want:    [][]addr.IA{{selA, selB}, {selC}},
+	}, {
+		// B's upper bound at 11ms puts the line's far side at 21ms.
+		name:    "the median's bounds count",
+		samples: map[addr.IA]sample{selA: a, selB: boundedSm(10*ms, 9*ms, 11*ms), selC: past},
+		last:    [][]addr.IA{{selA, selB, selC}},
+		want:    [][]addr.IA{{selA, selB, selC}},
+	}, {
+		name:    "a peer from above keeps out while its bounds straddle the line",
+		samples: map[addr.IA]sample{selA: a, selB: b, selC: boundedSm(15*ms, 12*ms, 25*ms)},
+		last:    [][]addr.IA{{selA, selB}, {selC}},
+		want:    [][]addr.IA{{selA, selB}, {selC}},
+	}, {
+		name:    "a peer from above joins once its upper bound lies within the line",
+		samples: map[addr.IA]sample{selA: a, selB: b, selC: boundedSm(15*ms, 12*ms, 19*ms)},
+		last:    [][]addr.IA{{selA, selB}, {selC}},
+		want:    [][]addr.IA{{selA, selB, selC}},
+	}, {
+		name:    "a peer the last window did not class opens by its value",
+		samples: map[addr.IA]sample{selA: a, selB: b, selC: straddling},
+		last:    [][]addr.IA{{selA, selB}},
+		want:    [][]addr.IA{{selA, selB}, {selC}},
+	}, {
+		name:    "a peer the last window did not class joins by its value",
+		samples: map[addr.IA]sample{selA: a, selB: b, selC: boundedSm(15*ms, 12*ms, 25*ms)},
+		last:    [][]addr.IA{{selA, selB}},
+		want:    [][]addr.IA{{selA, selB, selC}},
+	}, {
+		// A and C shared the last window's second tier — E, gone, held its
+		// first — and the first tier continues A's: C, straddling A's line
+		// at 16ms, joins it.
+		name:    "the first tier continues its first peer's tier",
+		samples: map[addr.IA]sample{selA: a, selC: straddling},
+		last:    [][]addr.IA{{selE}, {selA, selC}},
+		want:    [][]addr.IA{{selA, selC}},
+	}, {
+		// C, from the tier above A's, fell to 9ms, its bounds straddling A's
+		// line at 16ms; B and D, which the tier held, lie within it.
+		name: "a peer whose round trip fell into the tier below joins it whole",
+		samples: map[addr.IA]sample{selA: a, selB: b, selC: boundedSm(9*ms, 5*ms, 25*ms),
+			selD: boundedSm(11*ms, 10*ms, 12*ms)},
+		last: [][]addr.IA{{selA, selB, selD}, {selC}},
+		want: [][]addr.IA{{selA, selC, selB, selD}},
+	}, {
+		// C's lower bound clears B's line, and the tier it opens continues
+		// the one after the first: D, from that tier and undecided against
+		// C, whose bounds run from 20ms to 30ms, joins it.
+		name: "a tier a peer of the tier opens continues the one after",
+		samples: map[addr.IA]sample{selA: a, selB: b, selC: past,
+			selD: boundedSm(40*ms, 30*ms, 60*ms)},
+		last: [][]addr.IA{{selA, selB, selC}, {selD}},
+		want: [][]addr.IA{{selA, selB}, {selC, selD}},
+	}, {
+		// C, from two tiers above A's — E, gone, held the one between —
+		// straddles A's line, and D lies past it: C opens the tier, which
+		// continues C's, so D, from that tier and undecided against C, whose
+		// bounds run from 12ms to 30ms, joins it.
+		name: "a tier a peer from above opens continues that peer's tier",
+		samples: map[addr.IA]sample{selA: a, selC: boundedSm(20*ms, 12*ms, 30*ms),
+			selD: boundedSm(50*ms, 45*ms, 55*ms)},
+		last: [][]addr.IA{{selA}, {selE}, {selC, selD}},
+		want: [][]addr.IA{{selA}, {selC, selD}},
+	}} {
+		t.Run(tc.name, func(t *testing.T) {
+			if diff := cmp.Diff(tc.want, classes(deriveTiers(tc.samples, lastTiers(tc.last...)))); diff != "" {
+				t.Errorf("tiers (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+// TestWindowTiersCarryTheSides checks that the selection carries each
+// peer's tier from window to window: a peer keeps its tier while its bounds
+// straddle the line, whichever side its value lies on, and two peers
+// trading places at the line settle in one window and stay.
+func TestWindowTiersCarryTheSides(t *testing.T) {
+	ms := time.Millisecond
+	a, b := boundedSm(8*ms, 8*ms, 8*ms), boundedSm(10*ms, 10*ms, 10*ms)
+	t.Run("one peer", func(t *testing.T) {
+		s := &selection{cfg: SelectionConfig{IA: selIA}}
+		// C joins by its value in the first window, keeps its tier past the
+		// line, leaves once its lower bound clears it, and keeps out once
+		// back within it by its value.
+		for i, w := range []struct {
+			c    sample
+			want [][]addr.IA
+		}{
+			{boundedSm(15*ms, 12*ms, 25*ms), [][]addr.IA{{selA, selB, selC}}},
+			{boundedSm(25*ms, 15*ms, 30*ms), [][]addr.IA{{selA, selB, selC}}},
+			{boundedSm(25*ms, 20*ms, 30*ms), [][]addr.IA{{selA, selB}, {selC}}},
+			{boundedSm(15*ms, 12*ms, 25*ms), [][]addr.IA{{selA, selB}, {selC}}},
+		} {
+			ts := s.windowTiers(nil, map[addr.IA]sample{selA: a, selB: b, selC: w.c})
+			if diff := cmp.Diff(w.want, classes(ts)); diff != "" {
+				t.Errorf("window %d tiers (-want +got):\n%s", i+1, diff)
+			}
+		}
+	})
+	t.Run("two peers trading places", func(t *testing.T) {
+		// C, from the tier above, walks below D, which the tier held, both
+		// straddling the line: C joins with D. Traded back, both stay.
+		s := &selection{cfg: SelectionConfig{IA: selIA},
+			tiers: lastTiers([]addr.IA{selA, selB, selD}, []addr.IA{selC})}
+		low, high := boundedSm(19*ms, 15*ms, 25*ms), boundedSm(21*ms, 15*ms, 25*ms)
+		ts := s.windowTiers(nil, map[addr.IA]sample{selA: a, selB: b, selC: low, selD: high})
+		if diff := cmp.Diff([][]addr.IA{{selA, selB, selC, selD}}, classes(ts)); diff != "" {
+			t.Errorf("tiers (-want +got):\n%s", diff)
+		}
+		ts = s.windowTiers(nil, map[addr.IA]sample{selA: a, selB: b, selC: high, selD: low})
+		if diff := cmp.Diff([][]addr.IA{{selA, selB, selD, selC}}, classes(ts)); diff != "" {
+			t.Errorf("tiers traded back (-want +got):\n%s", diff)
+		}
+	})
 }
 
 // TestWindowTierFacts checks what one helper turns a tier into: up links

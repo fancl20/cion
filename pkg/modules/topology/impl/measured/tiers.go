@@ -18,8 +18,8 @@ import (
 // measurement.
 
 // tier is one latency class of the window's sample map beside the facts the
-// rules read — a decision label local to the node, recomputed each window,
-// keyed by nothing stable, exchanged with no one.
+// rules read — a decision label local to the node, derived each window from
+// the samples and the last window's tiers, exchanged with no one.
 type tier struct {
 	// members are the classed peers, ascending by direct round trip.
 	members []member
@@ -53,10 +53,12 @@ type tier struct {
 	excluded map[addr.IA]excludedSample
 }
 
-// member is one classed peer with its direct round trip.
+// member is one classed peer with its direct round trip, and the estimate
+// its direct side's bounds come from, which the walk weighs.
 type member struct {
 	ia     addr.IA
 	direct time.Duration
+	bounds evidence.Estimate
 }
 
 // excludedSample is one up link's excluded measurement: the tier's clean
@@ -96,16 +98,35 @@ type excludedSample struct {
 	cutOff map[addr.IA]bool
 }
 
-// deriveTiers classes the window's samples by direct round trip: walked
-// ascending, a peer joins the current tier while its round trip is at most
-// TierGap times the median of that tier's members as walked and opens the
-// next when it exceeds it. Unmeasured peers class into none — a peer with
-// routes but no direct answer is not placed.
-func deriveTiers(samples map[addr.IA]sample) []tier {
+// deriveTiers classes the window's samples by direct round trip, walked
+// ascending, from the last window's tiers: at each peer, the median member
+// of the current tier as walked weighs against it by TierGap less one times
+// the median's value, over the two bounds estimates, and the peer
+//
+//   - opens the next tier on better, and joins the current one on not
+//     better;
+//   - on undecided, keeps the side the last tiers held it on: a peer they
+//     held in the tier the current one continues, or below it, joins, and
+//     one they held above it opens the next tier, unless the first later
+//     peer not so kept joins, for the tiers are runs of the walk;
+//   - when none of the last tiers holds it, as in the first window, opens
+//     the next tier when its round trip exceeds TierGap times the median's.
+//
+// Each tier continues one of the last: the first tier its first peer's, and
+// a tier a peer opens that peer's when it was higher, else the one after.
+// Unmeasured peers class into none — a peer with routes but no direct
+// answer is not placed.
+func deriveTiers(samples map[addr.IA]sample, last []tier) []tier {
+	prev := make(map[addr.IA]int)
+	for i, t := range last {
+		for _, m := range t.members {
+			prev[m.ia] = i
+		}
+	}
 	var walk []member
 	for ia, s := range samples {
 		if s.direct > 0 {
-			walk = append(walk, member{ia: ia, direct: s.direct})
+			walk = append(walk, member{ia: ia, direct: s.direct, bounds: s.bounds})
 		}
 	}
 	sort.Slice(walk, func(i, j int) bool {
@@ -115,11 +136,25 @@ func deriveTiers(samples map[addr.IA]sample) []tier {
 		return uint64(walk[i].ia) < uint64(walk[j].ia)
 	})
 	var ts []tier
-	start := 0
+	start, cur := 0, 0
 	for i, m := range walk {
-		if i > start && m.direct > ratioOf(walk[(start+i)/2].direct, TierGap) {
-			ts = append(ts, tier{members: walk[start:i]})
-			start = i
+		if i == 0 {
+			cur = prev[m.ia]
+			continue
+		}
+		med := walk[(start+i)/2]
+		opens, kept := step(m, med, prev, cur)
+		for j := i + 1; kept && j < len(walk); j++ {
+			opens, kept = step(walk[j], med, prev, cur)
+		}
+		if !opens {
+			continue
+		}
+		ts = append(ts, tier{members: walk[start:i]})
+		start = i
+		cur++
+		if was, ok := prev[m.ia]; ok && was > cur {
+			cur = was
 		}
 	}
 	if start < len(walk) {
@@ -128,17 +163,38 @@ func deriveTiers(samples map[addr.IA]sample) []tier {
 	return ts
 }
 
-// windowTiers derives the window's tiers, computes their facts from the
-// store, the verdicts, and the per-peer enumerations, and runs each up
-// member link's excluded measurement over the window's candidates. A
-// candidate that is not clean is no route, so it prices nothing and counts
-// as nothing; one whose reading is not read prices no decision.
+// step weighs a peer against the tier being walked, whose median member is
+// med and which continues the last tiers' place cur, as deriveTiers does:
+// whether the peer opens the next tier, and whether it opens only because
+// the weighing is undecided and the last tiers held it above cur. prev
+// holds the place of each peer's tier among the last tiers.
+func step(m, med member, prev map[addr.IA]int, cur int) (opens, kept bool) {
+	was, ok := prev[m.ia]
+	if !ok {
+		return m.direct > ratioOf(med.direct, TierGap), false
+	}
+	switch compare(med.bounds, m.bounds, ratioOf(med.bounds.Value, TierGap-1)) {
+	case evidence.Better:
+		return true, false
+	case evidence.NotBetter:
+		return false, false
+	}
+	return was > cur, was > cur
+}
+
+// windowTiers derives the window's tiers from the samples and the last
+// window's, which they replace, computes their facts from the store, the
+// verdicts, and the per-peer enumerations, and runs each up member link's
+// excluded measurement over the window's candidates. A candidate that is
+// not clean is no route, so it prices nothing and counts as nothing; one
+// whose reading is not read prices no decision.
 func (s *selection) windowTiers(
 	neighbors map[addr.IA]*links.Link,
 	samples map[addr.IA]sample,
 ) []tier {
 
-	ts := deriveTiers(samples)
+	ts := deriveTiers(samples, s.tiers)
+	s.tiers = slices.Clone(ts) // the members alone: the facts below fill ts
 	for i := range ts {
 		t := &ts[i]
 		up := make(map[addr.IA]segment.LinkID)

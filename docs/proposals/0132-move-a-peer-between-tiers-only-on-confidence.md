@@ -130,3 +130,23 @@ reading. A node's first window classes its peers as today.
 *   **The labs.** The labs pass, and the benchmarks run against the commit
     before: the settled labs, the jitter sweeps across the network and on
     one link, the cuts, and the delay changes.
+
+## Implementation history
+
+*   **The tiers' memory.** The selection keeps the last window's tiers, their
+    members alone, and `deriveTiers` derives each window's from the samples
+    and those: each tier continues one of the last by its place in their
+    ascending walk.
+*   **A later peer decides a kept one.** A peer from a tier above left
+    undecided opens the next tier only when the first later peer not so
+    left would open it too: otherwise a peer whose round trip fell among a
+    lower tier's members would cut that tier in two, carrying members its
+    comparisons placed confidently.
+*   **The tier a peer opens** continues that peer's last tier when it came
+    from above, else the one after the tier it leaves; the first tier
+    continues its first peer's.
+*   The selection's tests pass unchanged: a first window places every peer
+    by its value, and their tiers split on steady samples whose bounds part.
+*   ADR-0040 is accepted.
+*   Mutations: 14 of 14 killed.
+*   The pipeline passed.

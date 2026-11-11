@@ -1,6 +1,6 @@
 # Decide From Measured Evidence in One Library and Record Every Change
 
-*   Status: proposed
+*   Status: accepted
 *   Date: 2026-11-10
 
 [TOC]
