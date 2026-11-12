@@ -1,7 +1,7 @@
 # Mark Congestion, Slow Each Source, and Route Around Hot Nodes
 
 *   Status: proposed
-*   Date: 2026-11-12
+*   Date: 2026-11-13
 
 [TOC]
 
@@ -68,8 +68,8 @@ and how should the senders whose paths cross it learn of it and react?
     the path policy's answer, and goes once its traffic fits elsewhere
     (ADR-0039, principle 1).
 *   **Standard, with few moving parts:** ECN where the data-plane draft
-    carries it, and congestion control end to end as TCP and QUIC run it;
-    no rate to estimate, and no packet sent for the signal alone.
+    carries it, and congestion control end to end as DCTCP runs it; no rate
+    to configure, and no packet sent for the signal beyond the path probes.
 *   **Judged where bandwidth is scarce:** a lab with links of unequal and
     varying capacity.
 
@@ -86,12 +86,18 @@ and how should the senders whose paths cross it learn of it and react?
 *   **A shaper at each uplink:** each node shapes its egress to a rate it
     learns from the round trips to its neighbors, puts its own traffic
     first, and marks its own queue.
+*   **A brake at each link:** a node limits a link's egress while that link
+    reads congested, and lets go once it reads clean.
 *   **The hosts react:** each node marks its queue, and the WireGuard
     gateway carries the marks into the hosts' packets (RFC 6040), so their
     transports slow.
-*   **The marker echoes:** the node at a link's receiving end writes its
-    marks into the replies of the path probes that cross the link, as Frame
-    Relay's backward notification and ATM's ABR service did.
+*   **The probes measure each hop, the sources slow:** every node a path
+    probe crosses keeps when it passed, writes its times into the reply on
+    the way back, and reads from the times of the node after it the one-way
+    delay of the link between them; a node marks the replies that cross a
+    congested link, as Frame Relay's backward notification and ATM's ABR
+    service did, and each source slows on the marks in its own probes'
+    replies.
 *   **The destination echoes, the sources slow:** the receiving end of each
     link marks the packets that crossed a queue, the destination returns
     the marks to their source on the packets it sends back, and each source
@@ -99,41 +105,54 @@ and how should the senders whose paths cross it learn of it and react?
 
 ## Decision outcome
 
-Chosen option: **the destination echoes, the sources slow**, realized as
-follows:
+Chosen option: **the probes measure each hop, the sources slow**, with **a
+brake at each link**, realized as follows:
 
-1.  **Each node sends ECN-capable and slows on the marks echoed to it.** A
-    node sets ECT(1), the codepoint RFC 9331 gives senders whose response
-    scales with the marks, in the SCION header of every packet it sends into
-    the network, its sockets' and its hosts' alike; only nodes read these
-    bits, as no host sees a SCION header. It keeps a rate for each
-    destination node, unset until an echo shows marks: it cuts the rate in
-    proportion to the share of its bytes echoed as marked, raises it while
-    the echoes come back clean, and holds it while none come back. The
-    excess waits or drops at the node, whatever transport sent it. The
-    control class is not paced.
-2.  **The receiving end of a link marks.** BFD sends a control packet every
-    second on the link's own socket, beneath the sender's queues, so how
-    late each arrives against that beat measures the queue it crossed. While
-    that queue stays over a target, the receiving end marks the
-    ECN-capable packets arriving over the link congested, with a
-    probability that rises the longer it stays. Copying in the marks the
-    underlay's own routers set in the outer IP header (RFC 6040) is a later
-    step.
-3.  **The destination echoes the marks.** For each source node, it counts
-    the bytes it delivered and those that arrived marked, and returns both
-    running totals in an end-to-end option on every packet it sends that
-    source with room for it. The path library's probe replies are such
-    packets, so a source hears at least once per heartbeat on a path in
-    use. No packet carries the echo alone, and a lost one costs nothing:
-    the next carries the totals.
-4.  **Probes carry ECN.** The path library's probes are ECN-capable as data
-    is, and each reply reports whether its probe arrived marked, beside its
-    round trip. Beside the paths in use, the library probes a random sample
-    of each destination's other paths, as Prequal samples servers by probe
-    rather than by their reports. A path whose probes return marked, or
-    whose queueing delay passes a line, is hot. Health stays as ADR-0035
-    judges it.
+1.  **Probes measure each hop.** The ping application
+    ([ADR-0035](/docs/adrs/0035-choose-paths-by-measured-health.md),
+    decision 6) probes the path each destination's traffic rides with an
+    SCMP informational message of CION's own, answered by another, beside
+    the echoes it keeps for health. Every node the probe crosses keeps a
+    record of when it passed the probe on. As the reply passes back, each
+    node writes into it when it passed the probe and when it passes the
+    reply. From those times and its own, the node before it reads the
+    one-way delay of the link between them, each way, and keeps how far each
+    stands over the least it has seen, in which the two ends' clocks cancel.
+    A probe that does not return counts for nothing: its loss is the path's
+    health, not its load.
+2.  **A node marks the replies whose link's queue stands.** While a link's
+    egress queue in the node holds packets, the node sets CE in the SCION
+    header of the replies passing back over that link, as large a share of
+    them as the queue is full. The marks keep the queue from filling, not
+    its wait short: the fuller it gets, the more the sources slow, before it
+    drops. The queue fills only while the link's brake holds it (decision
+    10), and the node knows its size, so no clock, jitter, or buffer beyond
+    the node enters a mark. Every packet a node sends into the network
+    carries ECT(0), the codepoint of RFC 3168; only nodes read these bits,
+    as no host sees a SCION header. The marks come back once per probe
+    rather than once per packet, so ECT(1) and the scalable response RFC
+    9331 asks of its senders do not fit. Copying in the marks the underlay's
+    routers set in the outer IP header (RFC 6040), and choosing what
+    codepoint to show them, is a later step.
+3.  **Each source slows on the marks in its own probes' replies.** A node
+    keeps a rate for each destination node, unset until a reply to one of
+    its probes comes back marked. As DCTCP does, it averages the share of
+    its replies that come back marked, cuts the rate by half that share at
+    most once per probe sent after the last cut, and raises it slowly while
+    the replies come back clean. The average starts at none and moves with
+    every reply, so a stray mark cuts little: the brake, not the sources,
+    takes a load's first strain. The excess waits briefly or drops at the
+    node, whatever transport sent it. The control class is not paced. A
+    source probes the path its traffic rides in proportion to that traffic,
+    so the loop runs at the traffic's pace, and the node's own traffic
+    answers only its own probes, as every source's does.
+4.  **Probes carry ECN.** The probes are ECN-capable as data is, so a reply
+    returns marked if any link its probe crossed is congested. Beside the
+    paths in use, the ping application probes a random sample of each
+    destination's other paths, as Prequal samples servers by probe rather
+    than by their reports. A path whose replies return marked, or whose
+    queueing delay passes a line, is hot. Health stays as ADR-0035 judges
+    it.
 5.  **Leases leave hot paths gradually and return by the margin.** A lease
     on a hot path moves to the fastest healthy path that is not hot, after a
     hold drawn at random, so the leases crossing one hot node leave it over
@@ -147,19 +166,20 @@ follows:
     cuts the transit routes it carries while the node stays hot, and
     restores them one at a time, far apart, while it stays cool; a route
     restored that heats the node again goes at once. It never sheds its own
-    routes nor a receiver's last. Both read the marks echoed on the node's
-    own traffic, which no other node is told.
+    routes nor a receiver's last. Both read the node's readings of its own
+    links, which no other node is told.
 7.  **Prices stay unloaded; lasting shortage buys capacity.** The link
     policy reads only the probes that return cool, so the readings ADR-0038
     defines carry no more queueing than a cool path holds, and no busy hour
     moves a price; a route that stays hot gives it no reading until it
     cools, and the decisions that need one wait. Capacity is a worth of its
     own, beside the peers and the independent routes a link gives (ADR-0039,
-    principle 2): a node whose traffic to a destination stays marked while
-    every path to it is hot, for longer than the path policy takes to
-    answer, buys a link that opens a route around the hot hops, announced
-    and staggered as ADR-0037 has every promotion. Until the link stands,
-    the flow has nowhere else to go, and its source slows on the marks.
+    principle 2): a node whose probes to a destination keep returning
+    marked while every path to it is hot, for longer than the path policy
+    takes to answer, buys a link that opens a route around the hot hops,
+    announced and staggered as ADR-0037 has every promotion. Until the link
+    stands, the flow has nowhere else to go, and its source slows on the
+    marks.
 8.  **A link that carries traffic leaves only after a drain.** Before
     retiring a link that a lease rode since its last drain, the node drains
     it: the link stays up, its leases move to other paths, and it takes no
@@ -171,38 +191,66 @@ follows:
     alone.
 9.  **Load stays local.** No directory entry, tag, or beacon declares it;
     each node learns of another's load from the marks and delays its own
-    packets meet.
-10. **Node-held queues and hop-by-hop control wait for the lab.** A shaper
-    that holds the node's queue and puts its own traffic first, pause or
-    credit between neighbors, and active probing are weighed against this
-    loop once it stands there, by what each adds to it: an order for the
-    node's own traffic, a shorter tail, a faster loop. So is a breaker for
-    a node that does not slow.
+    probes meet.
+10. **Each link brakes on its delay, and its queue marks.** A node limits a
+    link's egress while the link's forward delay stands over a target. Its
+    data plane holds the link's queue, a fixed number of packets, and one
+    module rules both what leaves the queue and what its fill tells the
+    sources (decision 2). The module drains the queue at a rate taken from
+    what the link sent in the last second, cuts it each second the reading
+    stays over, in proportion to how far over it stands, as Swift cuts its
+    window, and releases it once the link has read clean for a second. The
+    control class skips the queue but counts against the rate, and probes
+    skip it too, so a link's reading never counts the brake's own wait. The
+    reading takes the least of the link's last few delays, as LEDBAT filters
+    its own, so jitter that leaves some probes fast reads as no queue; a
+    step in the link's base delay, from a route's change or the clocks'
+    drift, reads as queue until the least it is read against ages out.
+    Under a steady load the marks hold the sources and the brake stands only
+    until they do. Each link brakes on its own reading, so a queue past one
+    neighbor slows only the link toward it. The brake and the marks are
+    built together. Pause or credit between neighbors stays rejected, and a
+    breaker for a node that does not slow waits for the lab.
 11. **A lab with bandwidth judges it.** The fabric gains links with a
     bandwidth limit and a finite queue, their rate varying, and the labs'
     flows answer their senders as transports do. The labs show the queue at
     a thin, well-placed node's uplink staying short while its sources slow
-    and transit moves off it.
+    and transit moves off it. Before the brake is built, they gain the
+    cases it changes: a queue past one neighbor, traffic moving between
+    links, a node with one link, a path that crosses two queues, and jitter
+    on a loaded link.
 
 This is the later decision ADR-0035 left load to. It narrows that record's
-decision 6, so that probes carry ECN and the link policy reads those that
-return cool, and its decision 5, so that a hot path repels the leases on it.
-It extends ADR-0039's principle 2, so that a link is also worth the capacity
-it adds, and its principle 5, so that a link that carries traffic retires on
-a drain. The cap on a node's links stays as ADR-0017 and ADR-0039 set it;
-raising it, with a cost for keeping a link and beaconing that scales with
-links, is a decision of its own, once this one stands in the lab.
+decision 6, so that probes measure each hop and carry ECN, go in proportion
+to the traffic a path carries rather than only where traffic leaves a gap,
+and the link policy reads those that return cool; and its decision 5, so
+that a hot path repels the leases on it. It extends ADR-0039's principle 2,
+so that a link is also worth the capacity it adds, and its principle 5, so
+that a link that carries traffic retires on a drain. The cap on a node's
+links stays as ADR-0017 and ADR-0039 set it; raising it, with a cost for
+keeping a link and beaconing that scales with links, is a decision of its
+own, once this one stands in the lab.
 
 ### Positive consequences
 
 *   The queue at a congested uplink stays short for all who cross it, with
-    no rate to estimate: the sources slow as the marks come back.
+    no rate to configure: the brake holds the excess in the node at once,
+    and the sources slow as the marks come back.
+*   Jitter that leaves some probes fast reads as no queue, and a step in a
+    link's base delay reads as one only until its least ages out; the marks
+    come only from the queue the brake fills.
 *   Every flow is held, whatever its transport: the node reacts for its
     hosts, so a host that ignores ECN, or loss, slows too.
-*   Congestion anywhere on a path reaches its source: the marks of every
-    hop collect on the packet, and one echo returns them.
-*   No bandwidth is configured, no load published, and no packet sent for
-    the signal: marks and echoes ride packets already flowing.
+*   Congestion anywhere on a path reaches its source: every hop marks the
+    same reply.
+*   Each link is read one way: a queue on the way back slows only the
+    traffic it holds, not the traffic crossing the link the other way.
+*   Probes follow traffic, so the busier a link, the more often it is read
+    and the faster its loop runs.
+*   No bandwidth is configured and no load published: the marks ride the
+    probes' replies.
+*   A link's brake holds its queue in the node only until the marks catch
+    up, slows only that link, and lets go once the link reads clean.
 *   Transit leaves a hot node over time and returns as it cools.
 *   Demand that outlasts the path policy's answer gets capacity: a link
     opens a route around a hot node, and stays while its traffic would not
@@ -214,18 +262,28 @@ links, is a decision of its own, once this one stands in the lab.
 
 ### Negative consequences
 
-*   Nothing is ordered: the node's own traffic and other nodes' control
-    calls share the queue with transit, which is short but first-come.
-*   A link reads its queue once a second, from BFD: bursts outrun the marks,
-    and the reading drifts with the two ends' clocks.
-*   An echo waits for a packet going back: one-way traffic hears only from
-    its source's probe replies, once per heartbeat.
+*   Nothing is ordered while no brake stands: the node's own traffic and
+    other nodes' control calls share the uplink's queue with transit,
+    first-come, until the link's reading crosses the target.
+*   Probes grow with traffic, each answered, and each costs work at every
+    node it crosses.
+*   Every node a probe crosses writes into its reply, and is trusted to
+    write truly.
+*   A link carrying little traffic is read only every few seconds: bursts
+    outrun the brake and the marks.
+*   A delay the brake cannot move, such as jitter that slows every probe,
+    brakes the link to its floor until the reading clears.
+*   The brake's queue is bounded in packets, not in wait, as the marks keep
+    it from overflowing rather than short: 64 packets are half a second at
+    1 Mbit/s.
+*   The readings drift with the two ends' clocks until each link's least is
+    relearned.
+*   A path that crosses two queues is marked at both, and slows more than
+    either would ask alone.
 *   A node that does not slow goes unchecked until a breaker stands.
-*   Each packet back to a source grows by the echo, which the data plane
-    inserts; a full-size packet on a long path has no room and goes
-    without.
-*   The echo rides an option type the SCION specification reserves for
-    experiments; a wider deployment needs one assigned.
+*   The probe and its reply take SCMP types no specification assigns, which
+    scionproto sets aside for experiments; a wider deployment needs types
+    assigned.
 *   Probes spend more of the prober's budget, sampling paths no lease rides.
 *   A route that stays hot leaves the link policy without a reading of it
     until it cools.
@@ -286,6 +344,20 @@ links, is a decision of its own, once this one stands in the lab.
     traffic, but its rate overshot between rises and the buffer still
     filled.
 
+### A brake at each link
+
+*   Good, because the node holds a link's queue only while the marks have
+    not caught up, so the control class skips it when it matters most, a
+    queue past one neighbor slows only the link toward it, and a limit
+    never outlives its load. Its reading comes from probes that skip the
+    queue, so unlike the shaper it never reads its own wait as the uplink's,
+    and its queue gives the marks a measure the node knows exactly.
+*   Bad, because each link brakes on its own reading: while brakes stand,
+    the uplink splits by link rather than by flow, and a path that crosses
+    two queues brakes at both. One rate for all a node's links would split
+    by flow, but it needs the uplink's wait told apart from a neighbor's,
+    which probes as sparse as these read at different moments.
+
 ### The hosts react
 
 *   Good, because the hosts already run congestion control, and ECN spares
@@ -293,13 +365,21 @@ links, is a decision of its own, once this one stands in the lab.
 *   Bad, because the mesh's WireGuard carries no ECN across its encryption,
     not every host negotiates ECN, and some traffic reacts to nothing.
 
-### The marker echoes
+### The probes measure each hop, the sources slow
 
 *   Good, because the node that sees the congestion tells the sources
-    itself, with nothing for the destination to count.
-*   Bad, because only the probes are sure to pass back through it, the
-    destination's traffic riding its own lease, so the loop runs at the
-    probes' pace.
+    itself, nothing waits for a packet going back, each link is read one
+    way so a queue counts only against the traffic that crosses it, and
+    the loop runs as fast as the traffic it holds.
+*   Bad, because the loop runs at the probes' pace, each probe costs work at
+    every node it crosses, and every node must be trusted to stamp truly.
+    Marked from the delays themselves, without the brake, it misjudged both
+    labs. On the hub's 1 Mbit/s uplink, whose queue stood over the target
+    while the load fit, the sources cut flows the line carried: the hub's
+    own flow kept a third to two thirds of its traffic under load. With the
+    cuts in proportion to the marks, the hub's transit stayed whole, but in
+    the flow lab a full buffer lost the probes, and in four runs of ten the
+    cuts had not caught up after a minute.
 
 ### The destination echoes, the sources slow
 
@@ -307,4 +387,7 @@ links, is a decision of its own, once this one stands in the lab.
     holding every flow whatever its transport, and returning every
     congested hop in one echo.
 *   Bad, because it orders nothing, an echo waits for a packet going back,
-    and a link reads its queue only as often as BFD beats.
+    and a link reads its queue only as often as BFD beats. Built and run in
+    the hub lab, it left the uplink's wait about where latency alone left
+    it, and its sources' repeated cuts sank the hub's own traffic to two
+    thirds of what it carried without them.
