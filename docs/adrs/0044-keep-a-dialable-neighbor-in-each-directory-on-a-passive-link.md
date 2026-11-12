@@ -134,7 +134,7 @@ links leave alike; that is a decision of its own, once a lab weighs it.
 *   A link can leave without dropping traffic: turned passive, it carries
     the paths that cross it until they age out, five minutes after its last
     beacon, and then closes.
-    [ADR-0043](/docs/adrs/0043-shape-each-nodes-uplink-and-route-around-hot-nodes.md)'s
+    [ADR-0043](/docs/adrs/0043-mark-congestion-slow-each-source-and-route-around-hot-nodes.md)'s
     drains can take the same step, which moves every node's paths off the
     link, not the node's own leases alone.
 
