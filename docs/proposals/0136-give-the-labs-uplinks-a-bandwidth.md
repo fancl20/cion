@@ -1,7 +1,7 @@
 # Give the labs' uplinks a bandwidth
 
-This proposal implements decision 11 of
-[ADR-0043](/docs/adrs/0043-mark-congestion-slow-each-source-and-route-around-hot-nodes.md):
+This proposal grounds on
+[ADR-0043](/docs/adrs/0043-grow-capacity-between-nodes-under-load.md):
 the fabric gains uplinks, each a rate and a finite queue that the lab may
 vary while it runs; a lab sends data between nodes over SCION; and a hub lab,
 where a thin and well-placed node draws its peers' transit, benchmarks what
@@ -45,7 +45,7 @@ ADR-0043 decided that the receiving end of each link marks the packets that
 crossed a queue, that each source slows on the marks its destinations echo,
 and that the senders whose probes meet the marks move. Each of those
 decisions is a proposal of its own, and each is judged in a lab where
-an uplink runs out (decision 11). The fabric models delay, jitter, and loss,
+an uplink runs out. The fabric models delay, jitter, and loss,
 and no link runs out; no lab sends the data that would fill one.
 
 ### Goals

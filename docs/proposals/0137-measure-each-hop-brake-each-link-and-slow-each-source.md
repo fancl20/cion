@@ -1,8 +1,8 @@
 # Measure each hop, brake each link, and slow each source
 
-This proposal implements decisions 1 to 3 and 10 of
-[ADR-0043](/docs/adrs/0043-mark-congestion-slow-each-source-and-route-around-hot-nodes.md),
-with the lab cases its decision 11 asks for before the brake. The ping
+This proposal implements decisions 2 and 3, and the fast stage of decision
+4, of [ADR-0043](/docs/adrs/0043-grow-capacity-between-nodes-under-load.md),
+with lab cases for the brake. The ping
 application probes the paths a node's traffic rides with an SCMP message of
 CION's own. Every node the probe crosses keeps when it passed it, and as the
 reply passes back, reads its next link's one-way delay from the times the
