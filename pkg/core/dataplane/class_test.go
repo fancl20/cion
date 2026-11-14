@@ -2,12 +2,15 @@ package dataplane
 
 import (
 	"context"
+	"maps"
 	"net"
 	"slices"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
+	"github.com/google/go-cmp/cmp"
 	"github.com/gopacket/gopacket"
 	"github.com/gopacket/gopacket/layers"
 	"github.com/scionproto/scion/pkg/private/util"
@@ -17,6 +20,7 @@ import (
 	"github.com/scionproto/scion/pkg/slayers/path/scion"
 	"golang.org/x/net/ipv4"
 
+	"github.com/fancl20/cion/pkg/libs/evidence"
 	"github.com/fancl20/cion/pkg/libs/underlay"
 )
 
@@ -394,9 +398,174 @@ func TestSenderTakesControlFirst(t *testing.T) {
 	}
 }
 
+// pacingPolicy is a congestion policy that paces every link at one rate,
+// marks nothing, and keeps what each link wrote.
+type pacingPolicy struct {
+	bps float64
+
+	mu    sync.Mutex
+	wrote map[uint16]wrote
+}
+
+// wrote is what one link wrote: its packets and their bytes, and whether
+// its rate held data back as it wrote any.
+type wrote struct {
+	packets, bytes int
+	held           bool
+}
+
+// newPacingPolicy returns a policy pacing every link at bps, none for zero.
+func newPacingPolicy(bps float64) *pacingPolicy {
+	return &pacingPolicy{bps: bps, wrote: make(map[uint16]wrote)}
+}
+
+func (p *pacingPolicy) Sampled(uint16, evidence.Sample) {}
+func (p *pacingPolicy) Rate(uint16) float64             { return p.bps }
+func (p *pacingPolicy) Mark(uint16, float64) bool       { return false }
+
+func (p *pacingPolicy) Wrote(ifID uint16, packets, bytes int, held bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	w := p.wrote[ifID]
+	p.wrote[ifID] = wrote{w.packets + packets, w.bytes + bytes, w.held || held}
+}
+
+// written returns what each link wrote so far.
+func (p *pacingPolicy) written() map[uint16]wrote {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return maps.Clone(p.wrote)
+}
+
+// timedConn is an underlay socket whose writes record when each batch went,
+// with the first byte of each of its packets, and report them all written.
+type timedConn struct {
+	underlay.UDPConn
+	mu     sync.Mutex
+	writes []timedWrite
+}
+
+// timedWrite is one batch a timedConn wrote: when, and its packets' tags.
+type timedWrite struct {
+	at   time.Time
+	tags string
+}
+
+func (c *timedConn) WriteBatch(msgs []ipv4.Message) (int, error) {
+	tags := make([]byte, len(msgs))
+	for i, m := range msgs {
+		tags[i] = m.Buffers[0][0]
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.writes = append(c.writes, timedWrite{time.Now(), string(tags)})
+	return len(msgs), nil
+}
+
+// TestPacedSenderHoldsDataToItsRate checks a paced link's sender, on virtual
+// time: with two control packets and five data packets queued, each of 1000
+// bytes, at 400 kbit/s, which sends the five within the paced sojourn, the
+// control packets go at once and count against the rate, while the data
+// waits in its queue and goes a packet's time at the rate apart, the last
+// one 120ms on, less the pacing's slack; the policy hears of all seven
+// packets, and that the rate held data back. Without a rate, everything
+// goes at once, held back by nothing.
+func TestPacedSenderHoldsDataToItsRate(t *testing.T) {
+	const (
+		batchSize = 8
+		size      = 1000
+		control   = 2
+		data      = 5
+	)
+	for _, tc := range []struct {
+		name string
+		bps  float64
+		last time.Duration
+	}{
+		{"paced", size * 8 * 50, (control+data-1)*20*time.Millisecond - pacingSlack},
+		{"unpaced", 0, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				pool := newTestPool(4*batchSize, minHeadroom)
+				el := &externalLink{}
+				el.locator.Store(&net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 1})
+				conn := &timedConn{}
+				policy := newPacingPolicy(tc.bps)
+				u := &udpConnection{
+					conn:         conn,
+					name:         "test",
+					link:         el,
+					policy:       policy,
+					ifID:         2,
+					queue:        make(chan *Packet, 2*batchSize),
+					controlQueue: make(chan *Packet, 2*batchSize),
+					stopSend:     make(chan struct{}),
+					metrics:      newTestMetrics(t, 2),
+				}
+				queue := func(q chan *Packet, count int, tag byte, isControl bool) {
+					for range count {
+						p := pool.Get()
+						p.RawPacket = append(p.RawPacket[:0], make([]byte, size)...)
+						p.RawPacket[0] = tag
+						p.control = isControl
+						q <- p
+					}
+				}
+				queue(u.controlQueue, control, 'c', true)
+				queue(u.queue, data, 'd', false)
+
+				start := time.Now()
+				u.running.Store(true)
+				done := make(chan struct{})
+				go func() {
+					defer close(done)
+					u.send(context.Background(), batchSize, pool)
+				}()
+				time.Sleep(50 * time.Millisecond)
+				if held := len(u.queue); tc.bps != 0 && held == 0 {
+					t.Error("the paced link's data queue holds nothing 50ms on, want its data waiting")
+				}
+				time.Sleep(time.Second)
+				close(u.stopSend)
+				<-done
+
+				var dataAt []time.Duration
+				for _, w := range conn.writes {
+					for _, tag := range []byte(w.tags) {
+						switch tag {
+						case 'c':
+							if w.at != start {
+								t.Errorf("a control packet went %v on, want at once", w.at.Sub(start))
+							}
+						case 'd':
+							dataAt = append(dataAt, w.at.Sub(start))
+						}
+					}
+				}
+				if len(dataAt) != data {
+					t.Fatalf("%d data packets went, want %d", len(dataAt), data)
+				}
+				if got := dataAt[data-1]; got != tc.last {
+					t.Errorf("the last data packet went %v on, want %v", got, tc.last)
+				}
+				for i := 2; tc.bps != 0 && i < data; i++ {
+					if gap := dataAt[i] - dataAt[i-1]; gap != 20*time.Millisecond {
+						t.Errorf("data packets %d and %d went %v apart, want 20ms", i-1, i, gap)
+					}
+				}
+				want := map[uint16]wrote{2: {control + data, (control + data) * size, tc.bps != 0}}
+				if diff := cmp.Diff(want, policy.written(), cmp.AllowUnexported(wrote{})); diff != "" {
+					t.Errorf("writes handed to the policy (-want +got):\n%s", diff)
+				}
+			})
+		})
+	}
+}
+
 // TestControlSurvivesFullDataQueue checks that a link whose data egress
-// queue is full refuses a data packet, takes a control packet, and writes it
-// in the next batch.
+// queue is full drops its oldest data packet for a new one, takes a control
+// packet, and writes both in the next batch, the oldest not at all.
 func TestControlSurvivesFullDataQueue(t *testing.T) {
 	far, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
 	if err != nil {
@@ -419,13 +588,13 @@ func TestControlSurvivesFullDataQueue(t *testing.T) {
 		return p
 	}
 
-	if !link.Send(packet('d', false)) {
+	// The pool a running link returns its drops to.
+	link.(*externalLink).pool = pool
+	if !link.Send(packet('o', false)) {
 		t.Fatal("the empty data queue refused a packet")
 	}
-	if p := packet('d', false); link.Send(p) {
-		t.Fatal("the full data queue took a packet")
-	} else {
-		pool.Put(p)
+	if !link.Send(packet('d', false)) {
+		t.Fatal("the full data queue refused a packet, want its oldest dropped for it")
 	}
 	if !link.Send(packet('c', true)) {
 		t.Fatal("the control queue refused a packet while the data queue was full")
@@ -445,8 +614,8 @@ func TestControlSurvivesFullDataQueue(t *testing.T) {
 		}
 		got = append(got, buf[:n]...)
 	}
-	if !slices.Contains(got, 'c') {
-		t.Fatalf("the link wrote %q, want the control packet among them", got)
+	if !slices.Contains(got, 'c') || !slices.Contains(got, 'd') || slices.Contains(got, 'o') {
+		t.Fatalf("the link wrote %q, want the control packet and the newest data packet", got)
 	}
 }
 
@@ -493,5 +662,75 @@ func TestSlowPathAnswersAsControl(t *testing.T) {
 	}
 	if got := len(ingress.queue); got != 0 {
 		t.Errorf("the ingress link's data queue holds %d packets, want none", got)
+	}
+}
+
+// TestPacerHolds checks when a paced queue holds data back: once it dropped
+// some past its bound, or holds more than half of what the bound lets it,
+// the bound at most the queue's room; never without a rate.
+func TestPacerHolds(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		bps     float64
+		queued  int
+		trimmed int
+		want    bool
+	}{
+		// 400 kbit/s keeps five 1000-byte packets in the sojourn.
+		{"half the bound or less", 400_000, 2, 0, false},
+		{"more than half the bound", 400_000, 3, 0, true},
+		{"trimmed", 400_000, 0, 1, true},
+		// 80 kbit/s keeps one: any packet waiting is more than half.
+		{"a one-packet bound", 80_000, 1, 0, true},
+		{"empty", 80_000, 0, 0, false},
+		// 1 Gbit/s would keep 12,500, past the queue's room of 64.
+		{"half the room or less", 1e9, 32, 0, false},
+		{"more than half the room", 1e9, 33, 0, true},
+		{"no rate", 0, 8, 1, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := pacer{bps: tc.bps, size: 1000, room: 64}
+			if got := p.holds(tc.queued, tc.trimmed); got != tc.want {
+				t.Errorf("holds(%d, %d) = %v, want %v", tc.queued, tc.trimmed, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestPacerTrimsPastTheSojourn checks the paced queue's bound: of five
+// queued data packets of 1000 bytes, the pacer keeps what its rate sends in
+// the paced sojourn, at most the queue's room, the newest, and drops the
+// oldest; without a rate, or before it took a packet, it drops nothing.
+func TestPacerTrimsPastTheSojourn(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		bps     float64
+		size    int
+		room    int
+		dropped string
+		left    string
+	}{
+		{"one packet's time", 80_000, 1000, 8, "abcd", "e"},
+		{"three packets' time", 240_000, 1000, 8, "ab", "cde"},
+		{"the room", 1e9, 1000, 3, "ab", "cde"},
+		{"no rate", 0, 1000, 8, "", "abcde"},
+		{"nothing taken yet", 80_000, 0, 8, "", "abcde"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			q := make(chan *Packet, 8)
+			for _, tag := range []byte("abcde") {
+				q <- &Packet{RawPacket: []byte{tag}}
+			}
+			p := pacer{bps: tc.bps, size: tc.size, room: tc.room}
+			var dropped []byte
+			p.trim(q, func(pkt *Packet) { dropped = append(dropped, pkt.RawPacket[0]) })
+			var left []byte
+			for len(q) > 0 {
+				left = append(left, (<-q).RawPacket[0])
+			}
+			if string(dropped) != tc.dropped || string(left) != tc.left {
+				t.Errorf("dropped %q and left %q, want %q and %q", dropped, left, tc.dropped, tc.left)
+			}
+		})
 	}
 }

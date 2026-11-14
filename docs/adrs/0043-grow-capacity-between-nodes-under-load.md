@@ -133,23 +133,20 @@ that holds the excess marks what returns**, realized as follows:
     there, and the reactions spread the load and grow the capacity, each at
     its own pace.
 2.  **Detect: each node finds its links' limits and keeps under them.**
-    *   **The brake** finds each link's limit and keeps the link under it.
-        The node echoes the neighbor across the link as the link's traffic
-        flows, reads the queue beyond the node from the round trips against
-        the least the link has shown and from the echoes lost, and while
-        that queue stands or loses, holds the link's data to what the line
-        beyond carries. The excess waits or drops in the node, where the
-        node can measure it, mark it, and drop data before control. The
-        brake's goal is the limit, not a short delay: delay is what it
-        reads. A brake stands only while its link needs it, and each link
-        brakes on its own reading, so a queue past one neighbor slows only
-        the link toward it.
+    *   **The brake** finds each link's limit and keeps the link under it. It
+        echoes the neighbor across the link as the link's traffic flows, reads
+        the queue beyond the node from the round trips against the least the
+        link has shown and from the echoes lost, and while that queue stands or
+        loses, holds the link's data to what the line beyond carries. The excess
+        waits or drops in the node, where the node can measure it, mark it, and
+        drop data before control. The brake's goal is the limit, not a short
+        delay: delay is what it reads. A brake stands only while its link needs
+        it, and each link brakes on its own reading, so a queue past one
+        neighbor slows only the link toward it.
     *   **The probes** measure each path a source's traffic rides, end to
         end, as
         [ADR-0035](/docs/adrs/0035-choose-paths-by-measured-health.md),
         decision 6, has them, and carry ECN as data does.
-    *   Both are the node's echoer, one loop in the node's core that sends
-        the probes and the link echoes alike.
 3.  **Signal: every sender whose traffic crosses a held queue learns of it, as
     fast as its traffic returns.** While a link's queue in the node holds data,
     the node sets CE in the SCION header of the packets that come back over that
@@ -204,9 +201,8 @@ that holds the excess marks what returns**, realized as follows:
 
 This narrows
 [ADR-0035](/docs/adrs/0035-choose-paths-by-measured-health.md)'s decision 6,
-so that the probes run in every node's core rather than in an application,
-which retires its decision 7, and carry ECN; and its decision 5, so that a
-hot path repels the leases on it. It narrows
+so that the probes carry ECN, and its decision 5, so that a hot path repels
+the leases on it. It narrows
 [ADR-0038](/docs/adrs/0038-read-round-trips-at-their-80th-percentile-over-five-minutes.md)'s
 decision 3, so that readings take cool samples alone. It extends ADR-0039's
 principle 2, so that a link is also worth the capacity it adds, and its

@@ -374,10 +374,10 @@ func TestAddrString(t *testing.T) {
 	}
 }
 
-// TestControlConnMarksItsPackets checks the traffic class a conn's packets
-// carry to the router: CS6, network control, from a control conn, its
-// datagrams and echo requests alike, and nothing from another conn.
-func TestControlConnMarksItsPackets(t *testing.T) {
+// TestConnTrafficClass checks the traffic class a conn's packets carry to
+// the router: ECT(0) on every packet — its datagrams and echo requests
+// alike — beneath CS6, network control, from a control conn.
+func TestConnTrafficClass(t *testing.T) {
 	const cs6 = 48 << 2 // the DSCP above the two ECN bits
 	router, err := net.ListenUDP("udp4", net.UDPAddrFromAddrPort(netip.AddrPortFrom(testHost, 0)))
 	if err != nil {
@@ -394,8 +394,8 @@ func TestControlConnMarksItsPackets(t *testing.T) {
 		control bool
 		want    uint8
 	}{
-		{"control conn", true, cs6},
-		{"other conn", false, 0},
+		{"control conn", true, cs6 | ecnECT0},
+		{"other conn", false, ecnECT0},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

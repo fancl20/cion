@@ -11,22 +11,34 @@ import (
 	"testing/synctest"
 	"time"
 
+	"github.com/google/go-cmp/cmp"
 	"github.com/scionproto/scion/pkg/addr"
 	spath "github.com/scionproto/scion/pkg/slayers/path/scion"
 
 	"github.com/fancl20/cion/pkg/libs/bus"
+	pinglib "github.com/fancl20/cion/pkg/libs/ping"
 	"github.com/fancl20/cion/pkg/libs/segment"
 )
 
 // fakeEcho answers each probe by its path's behavior: after its round trip,
-// or never while the path loses or drops its next probes.
+// marked where the path marks, or never while the path loses or drops its
+// next probes. It keeps the replies the prober hands the rates.
 type fakeEcho struct {
 	mu       sync.Mutex
 	sent     map[*spath.Decoded][]time.Time
 	rtt      map[*spath.Decoded]time.Duration
 	losing   map[*spath.Decoded]bool
 	dropping map[*spath.Decoded]int
-	replies  chan Reply
+	marking  map[*spath.Decoded]bool
+	answers  []answered
+	replies  chan pinglib.Reply
+}
+
+// answered is one reply the prober handed a destination's rate.
+type answered struct {
+	Dst    addr.IA
+	Marked bool
+	Sent   time.Time
 }
 
 func newFakeEcho() *fakeEcho {
@@ -35,7 +47,8 @@ func newFakeEcho() *fakeEcho {
 		rtt:      make(map[*spath.Decoded]time.Duration),
 		losing:   make(map[*spath.Decoded]bool),
 		dropping: make(map[*spath.Decoded]int),
-		replies:  make(chan Reply, 1024),
+		marking:  make(map[*spath.Decoded]bool),
+		replies:  make(chan pinglib.Reply, 1024),
 	}
 }
 
@@ -48,13 +61,38 @@ func (e *fakeEcho) Send(_ addr.IA, _ netip.Addr, path *spath.Decoded, seq uint16
 		return nil
 	}
 	if !e.losing[path] {
-		time.AfterFunc(e.rtt[path], func() { e.replies <- Reply{Seq: seq, At: time.Now()} })
+		marked := e.marking[path]
+		time.AfterFunc(e.rtt[path], func() { e.replies <- pinglib.Reply{Seq: seq, Marked: marked, At: time.Now()} })
 	}
 	return nil
 }
 
-func (e *fakeEcho) Replies() <-chan Reply   { return e.replies }
-func (e *fakeEcho) Run(ctx context.Context) { <-ctx.Done() }
+func (e *fakeEcho) Answer(dst addr.IA, marked bool, sent time.Time) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.answers = append(e.answers, answered{Dst: dst, Marked: marked, Sent: sent})
+}
+
+// handed returns the replies the prober handed the rates.
+func (e *fakeEcho) handed() []answered {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return slices.Clone(e.answers)
+}
+
+// mark has the path's replies come back marked from now on.
+func (e *fakeEcho) mark(path *spath.Decoded) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.marking[path] = true
+}
+
+func (e *fakeEcho) Replies() <-chan pinglib.Reply { return e.replies }
+
+func (e *fakeEcho) ReadReplies(ctx context.Context) error {
+	<-ctx.Done()
+	return nil
+}
 
 // sends returns how many probes the path drew.
 func (e *fakeEcho) sends(path *spath.Decoded) int {
@@ -137,6 +175,7 @@ func prober(t *testing.T, e *fakeEcho, r *fakeResolver, body func(b *bus.Bus)) {
 		InterfaceDown: b.InterfaceDown(),
 		Echo:          e,
 		Resolve:       r.resolve,
+		Answer:        e.Answer,
 	})
 	ctx, cancel := context.WithCancel(t.Context())
 	done := make(chan struct{})
@@ -643,6 +682,33 @@ func TestProberSkipsConfirmed(t *testing.T) {
 	})
 }
 
+// TestProberHandsInUseRepliesToTheRate checks that the reply to each probe
+// of a path in use goes to its destination's rate, marked as it came back,
+// with when its probe went, while the replies over the other paths go
+// nowhere.
+func TestProberHandsInUseRepliesToTheRate(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		e, r := newFakeEcho(), &fakeResolver{}
+		use, weighed := &spath.Decoded{}, &spath.Decoded{}
+		e.mark(weighed)
+		prober(t, e, r, func(b *bus.Bus) {
+			start := time.Now()
+			request(b, dstA,
+				entryOf("use", dstA, use, bus.PathInUse, start),
+				entryOf("weighed", dstA, weighed, bus.PathWeighed, start))
+			time.Sleep(time.Second)
+			synctest.Wait()
+			e.mark(use)
+			time.Sleep(Heartbeat)
+			synctest.Wait()
+			want := []answered{{Dst: dstA, Sent: start}, {Dst: dstA, Marked: true, Sent: start.Add(Heartbeat)}}
+			if diff := cmp.Diff(want, e.handed()); diff != "" {
+				t.Errorf("replies handed the rates (-want +got):\n%s", diff)
+			}
+		})
+	})
+}
+
 // TestProberBurstsOnDoubt checks that a caller's doubt newer than the path's
 // last answer calls a burst once, however often the requests repeat it, and
 // that one older than its last answer calls none.
@@ -714,6 +780,34 @@ func TestProberProbesPricedRoutes(t *testing.T) {
 				if got := e.sends(tc.path); got != tc.want {
 					t.Errorf("the %s route drew %d probes in %v, want %d", tc.name, got, RouteProbe+time.Second, tc.want)
 				}
+			}
+		})
+	})
+}
+
+// TestProberRecordsMarks checks that a path's record keeps whether each
+// probe's answer came back marked.
+func TestProberRecordsMarks(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		e, r := newFakeEcho(), &fakeResolver{}
+		path := &spath.Decoded{}
+		prober(t, e, r, func(b *bus.Bus) {
+			request(b, dstA, entryOf("use", dstA, path, bus.PathInUse, time.Now()))
+			time.Sleep(time.Second)
+			synctest.Wait()
+			e.mark(path)
+			time.Sleep(Heartbeat)
+			synctest.Wait()
+			rec, ok := record(b, "use")
+			if !ok {
+				t.Fatal("no record of the path")
+			}
+			var got []bool
+			for _, s := range rec.Samples {
+				got = append(got, s.Marked)
+			}
+			if diff := cmp.Diff([]bool{false, true}, got); diff != "" {
+				t.Errorf("the samples' marks (-want +got):\n%s", diff)
 			}
 		})
 	})

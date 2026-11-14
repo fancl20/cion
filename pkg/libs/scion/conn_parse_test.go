@@ -33,7 +33,7 @@ func TestParseDatagramPacket(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	payload, from, err := parseDatagramPacket(raw)
+	payload, from, _, err := parseDatagramPacket(raw)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -57,6 +57,12 @@ type PathProvider struct {
 	// each candidate its health and measured cost. A nil topic, or one
 	// nothing has been published on, measures nothing.
 	Measurements *bus.Topic[bus.PathMeasurements]
+	// Arrivals returns how many datagrams a destination sent the node's
+	// sockets within hotSpan of now, and how many came marked: a lease
+	// counts the path it holds hot where they came marked more than half the
+	// time, with hotConfidence, for what answers a flow returns by the
+	// reverse of its path. Nil counts nothing.
+	Arrivals func(dst addr.IA, now time.Time) (arrived, marked int)
 	// Requests is the node's path requests topic, on which each pick and
 	// each lease update the paths their destination needs measured. A nil
 	// topic requests nothing.
@@ -287,6 +293,11 @@ type Candidate struct {
 	// after its last answer: a router reported the path failing, and the
 	// picks rank it after the other suspects.
 	Signaled bool
+	// Hot reports whether its probes' answers within hotSpan came back
+	// marked more than half the time, with hotConfidence: a node on its way
+	// holds back traffic on a congested link. The picks rank it after the
+	// paths of its tier that are not hot.
+	Hot bool
 	// Retry is when an ejected path is due its half-open probe; zero for
 	// the others.
 	Retry time.Time

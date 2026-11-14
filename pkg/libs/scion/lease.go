@@ -2,6 +2,7 @@ package scion
 
 import (
 	"context"
+	"math/rand/v2"
 	"slices"
 	"sync"
 	"sync/atomic"
@@ -29,6 +30,10 @@ const (
 	// LeaseExpiryMargin is how close to its hop fields' expiry a path no
 	// longer serves: one that lapses within it is left before it fails.
 	LeaseExpiryMargin = 30 * time.Second
+	// LeaseHotHold bounds how long a lease on a hot path waits, drawn at
+	// random, before it leaves for the fastest healthy path that is not
+	// hot, so the leases crossing one hot node leave it over time.
+	LeaseHotHold = 10 * time.Second
 	// leasesRequester names the leases' entries among the path requests.
 	leasesRequester = "leases"
 )
@@ -43,6 +48,7 @@ const (
 	whyIdle      = "a cheaper path, taken at once by an idle lease"
 	whyEjected   = "the leased path was ejected"
 	whyExpiring  = "the leased path nears its hop fields' expiry"
+	whyHot       = "the leased path runs hot"
 	whyGone      = "the leased path no longer composes"
 	whyBootstrap = "no path composes, so the bootstrap route stands in"
 	whyComposes  = "a path composes where the bootstrap route stood"
@@ -66,13 +72,17 @@ type Leased struct {
 
 // Lease is the path every flow to one destination rides. It keeps its path
 // while the path composes and is not ejected, moves at once when it is
-// ejected, no longer composes, or nears its hop fields' expiry, and moves to
-// a healthy path cheaper beyond the band once confident of it: the bounds of
-// the two paths' prices part by the band, and that verdict stands for
-// LeaseSwitchHold across a probe of each path. An idle lease, one no caller
-// used for bus.RequestLapse, takes such a path at once. Each change of its
-// path appends a record to the provider's journal of changes. Its methods
-// are safe for concurrent use.
+// ejected, no longer composes, or nears its hop fields' expiry, leaves a hot
+// path for the fastest healthy path that is not hot after a hold drawn at
+// random within LeaseHotHold, and moves to a healthy path cheaper beyond the
+// band once confident of it: the bounds of the two paths' prices part by the
+// band, and that verdict stands for LeaseSwitchHold across a probe of each
+// path. Its path reads hot on the marks of its probes' answers, or of what
+// the destination sends back. A hot path takes no lease while a path that is
+// not hot serves, so a lease returns to a path only once it cooled. An idle
+// lease, one no caller used for bus.RequestLapse, takes a cheaper path at
+// once. Each change of its path appends a record to the provider's journal
+// of changes. Its methods are safe for concurrent use.
 type Lease struct {
 	p   *PathProvider
 	dst addr.IA
@@ -89,6 +99,11 @@ type Lease struct {
 	used time.Time
 	// hold holds the verdict that a cheaper path beats the leased one.
 	hold evidence.Hold
+	// hotSince is when the leased path first read hot with a path that is
+	// not hot to leave for, and hotHold the hold drawn then; zero while it
+	// reads cool.
+	hotSince time.Time
+	hotHold  time.Duration
 }
 
 // Lease returns the destination's lease, the one every caller shares. Once a
@@ -199,6 +214,15 @@ func (l *Lease) evaluate(now time.Time, idle bool) error {
 		expiring = expiring || late && prev != nil && prev.ID != "" && c.ID == prev.ID
 		return late
 	})
+	if l.cur != nil && l.cur.ID != "" && l.p.Arrivals != nil {
+		if arrived, marked := l.p.Arrivals(l.dst, now); hotShare(marked, arrived) {
+			for i := range candidates {
+				if candidates[i].ID == l.cur.ID {
+					candidates[i].Hot = true
+				}
+			}
+		}
+	}
 	best := bestOf(candidates)
 	if best == nil {
 		l.cur = l.p.bootstrap(l.dst, v)
@@ -207,6 +231,10 @@ func (l *Lease) evaluate(now time.Time, idle bool) error {
 		return nil
 	}
 	cur := l.freshest(candidates)
+	leaving := cur != nil && cur.Hot && !best.Hot && best.ID != cur.ID && best.Health == HealthHealthy
+	if !leaving {
+		l.hotSince = time.Time{}
+	}
 	switch {
 	case cur == nil:
 		l.cur = best
@@ -225,6 +253,17 @@ func (l *Lease) evaluate(now time.Time, idle bool) error {
 		l.cur = best
 		l.hold.Release()
 		l.record(prev, whyEjected, 0, nil, now)
+	case leaving:
+		l.cur = cur
+		l.hold.Release()
+		if l.hotSince.IsZero() {
+			l.hotSince, l.hotHold = now, rand.N(LeaseHotHold)
+		}
+		if now.Sub(l.hotSince) < l.hotHold {
+			break
+		}
+		l.cur, l.hotSince = best, time.Time{}
+		l.record(prev, whyHot, 0, nil, now)
 	case best.ID != cur.ID && best.Health == HealthHealthy && cheaper(best, cur):
 		l.cur = cur
 		price, own := best.PriceEstimate(), cur.PriceEstimate()

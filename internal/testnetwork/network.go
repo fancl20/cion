@@ -5,6 +5,16 @@
 // the core's certificate authority comes from pkg/core/webpki/webpkitest.
 // The labs import the node's assembly, so no package under pkg can host
 // them.
+//
+// Beside the brake's labs, which check that a link brakes under a load past
+// its line, and only then, and lets go once the load leaves, the brake's
+// benchmarks grade how well a braked link serves: what its line drops and
+// carries, what its flows deliver, and how long a link holds a rate under
+// jitter or after a step in its round trip. They are skipped unless
+// CION_BENCH is set, and each prints a benchmark result line on standard
+// output for benchstat:
+//
+//	CION_BENCH=1 go test -run Bench -count=5 -timeout 60m -v ./internal/testnetwork/
 package testnetwork
 
 import (

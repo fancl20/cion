@@ -76,7 +76,8 @@ func (a *Addr) String() string {
 // peer a resolved Addr names. It implements the interface quic-go requires of
 // a connection, so an HTTP/3 server or client rides the SCION data plane
 // unchanged, and carries SCMP echo messages beside the UDP datagrams
-// (scmp.go).
+// (scmp.go). Unless it is a control conn, the node's ECN state
+// paces its datagrams to each destination node (ecn.go).
 type Conn struct {
 	localIA addr.IA
 	// local is the bound underlay address of the endpoint: incoming packets
@@ -102,6 +103,8 @@ type Conn struct {
 	wildcardHost func(ctx context.Context) netip.Addr
 	// control marks every packet the conn sends with the control DSCP.
 	control bool
+	// ecn is the node's ECN state; nil paces and counts nothing.
+	ecn *ECN
 
 	conn underlay.UDPConn
 
@@ -143,6 +146,12 @@ type ConnConfig struct {
 	// Sockets is the socket source the underlay bind constructs through;
 	// the zero value is the kernel's.
 	Sockets underlay.Sockets
+	// ECN is the node's ECN state, which every conn the node opens shares:
+	// a conn other than a control one counts its datagrams to each
+	// destination node there and keeps to the destination's rate, and every
+	// conn hands it the answers to the node's echoes. Nil paces and counts
+	// nothing, and drops the answers.
+	ECN *ECN
 }
 
 // NewConn binds the endpoint's underlay address. Packets it sends are
@@ -182,6 +191,7 @@ func NewConn(cfg ConnConfig) (*Conn, error) {
 		ifDown:       cfg.InterfaceDown,
 		wildcardHost: cfg.WildcardHost,
 		control:      cfg.Control,
+		ecn:          cfg.ECN,
 		conn:         conn,
 	}, nil
 }
@@ -264,10 +274,13 @@ func (c *Conn) ReadFrom(b []byte) (int, net.Addr, error) {
 		if err != nil {
 			return 0, nil, err
 		}
-		payload, from, err := parseDatagramPacket(buf[:n])
+		payload, from, marked, err := parseDatagramPacket(buf[:n])
 		if err != nil {
 			c.recordInterfaceDown(buf[:n])
 			continue
+		}
+		if c.ecn != nil && !c.control {
+			c.ecn.arrived(from.IA, marked, time.Now())
 		}
 		if len(payload) > len(b) {
 			payload = payload[:len(b)]
@@ -284,7 +297,10 @@ func (c *Conn) ReadFrom(b []byte) (int, net.Addr, error) {
 // and resolved from the link table otherwise (client traffic). A peer
 // address carrying a service names the destination by it: the receiving AS's
 // internal link delivers to the registered backend, so no destination port
-// is consulted and the wire carries zero.
+// is consulted and the wire carries zero. A conn other than a control one
+// keeps to the rate the node's ECN state holds for the peer's node: a write
+// whose turn lies past the hold is dropped, as the network would drop it,
+// and reports success; none waits.
 func (c *Conn) WriteTo(b []byte, addr net.Addr) (int, error) {
 	peer, ok := addr.(*Addr)
 	if !ok || peer == nil {
@@ -299,6 +315,9 @@ func (c *Conn) WriteTo(b []byte, addr net.Addr) (int, error) {
 	})
 	if err != nil {
 		return 0, err
+	}
+	if c.ecn != nil && !c.control && !c.ecn.admit(peer.IA, len(raw), time.Now()) {
+		return len(b), nil
 	}
 	if _, err := c.conn.WriteToUDP(raw, c.internal); err != nil {
 		return 0, err
@@ -371,9 +390,9 @@ func (c *Conn) resolveLink(neighborIA addr.IA) (uint16, error) {
 
 // scionHeader returns the SCION layer addressing the peer, over the peer's
 // supplied path or over a fresh one-hop path on the given interface, naming
-// srcHost as the source, the control DSCP in its traffic class on a control
-// conn. It must be called with the mutex held: the one-hop hop-field MAC uses
-// the shared hasher.
+// srcHost as the source, ECT(0) in its traffic class, beneath the control
+// DSCP on a control conn. It must be called with the mutex held: the one-hop
+// hop-field MAC uses the shared hasher.
 func (c *Conn) scionHeader(
 	peer *Addr, ifID uint16, nextHdr slayers.L4ProtocolType, srcHost netip.Addr,
 ) (*slayers.SCION, error) {
@@ -381,10 +400,13 @@ func (c *Conn) scionHeader(
 		NextHdr: nextHdr,
 		SrcIA:   c.localIA,
 		DstIA:   peer.IA,
+		// The traffic class carries the DSCP above the two ECN bits. Every
+		// packet is ECN-capable, so the nodes on its way may mark it; only
+		// nodes read the bits, for no host sees a SCION header.
+		TrafficClass: ecnECT0,
 	}
 	if c.control {
-		// The traffic class carries the DSCP above the two ECN bits.
-		scn.TrafficClass = underlay.ControlDSCP << 2
+		scn.TrafficClass |= underlay.ControlDSCP << 2
 	}
 	if peer.Path != nil {
 		scn.PathType = spath.PathType
@@ -434,24 +456,24 @@ func serializeUDP(scn *slayers.SCION, srcPort, dstPort uint16, payload []byte) (
 // received SCION packet. A one-hop arrival records the interface it arrived
 // on, so replies take a fresh one-hop path over that link; a full SCION path
 // is reversed for the reply, generalizing the one-hop case.
-func parseDatagramPacket(raw []byte) ([]byte, *Addr, error) {
+func parseDatagramPacket(raw []byte) ([]byte, *Addr, bool, error) {
 	pkt := gopacket.NewPacket(raw, slayers.LayerTypeSCION, gopacket.NoCopy)
 	scnL := pkt.Layer(slayers.LayerTypeSCION)
 	if scnL == nil {
-		return nil, nil, errors.New("no SCION layer")
+		return nil, nil, false, errors.New("no SCION layer")
 	}
 	scn := scnL.(*slayers.SCION)
 	udpL := pkt.Layer(slayers.LayerTypeSCIONUDP)
 	if udpL == nil {
-		return nil, nil, errors.New("no UDP layer")
+		return nil, nil, false, errors.New("no UDP layer")
 	}
 	udp := udpL.(*slayers.UDP)
 	from, err := peerAddr(scn)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, false, err
 	}
 	from.Addr = netip.AddrPortFrom(from.Addr.Addr(), udp.SrcPort)
-	return udp.LayerPayload(), from, nil
+	return udp.LayerPayload(), from, scn.TrafficClass&ecnMask == ecnCE, nil
 }
 
 // peerAddr derives the reply route from a received packet's SCION layer: the

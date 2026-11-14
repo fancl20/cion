@@ -83,7 +83,7 @@ func addTuningFlags(flags *pflag.FlagSet, tuning *services.DataplaneOptions) {
 		"receive batch size per underlay socket")
 	_ = flags.MarkHidden("dataplane.batch-size")
 	flags.IntVar(&tuning.QueueSize, "dataplane.queue-size", defaults.QueueSize,
-		"queue depth of the internal and external links")
+		"data egress queue depth of the internal and external links")
 	_ = flags.MarkHidden("dataplane.queue-size")
 }
 

@@ -726,3 +726,145 @@ func TestLeaseDropped(t *testing.T) {
 		}
 	})
 }
+
+// marked returns a record of n probes of the round trip, a second apart, the
+// last sent at at, each answered marked.
+func marked(at time.Time, n int, rtt time.Duration) bus.PathRecord {
+	r := heartbeats(at, n, rtt)
+	for i := range r.Samples {
+		r.Samples[i].Marked = true
+	}
+	return r
+}
+
+// TestLeaseLeavesAHotPath checks a lease on a hot path: it stays while every
+// path is hot; once a path that is not hot serves, it leaves for it within
+// LeaseHotHold, slower though that path is; it takes no hot path back,
+// however cheaper; and once the path cools, it returns to it by the band as
+// it takes any cheaper path.
+func TestLeaseLeavesAHotPath(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		ms := time.Millisecond
+		f := newMeasuredFixture(t, time.Minute)
+		lease := f.p.Lease(iaDest)
+		f.measure(map[*Candidate]bus.PathRecord{
+			&f.viaMid: heartbeats(time.Now(), ReadingSamples, 5*ms),
+			&f.direct: heartbeats(time.Now(), ReadingSamples, 50*ms),
+		})
+		if got := leased(t, lease).ID; got != f.viaMid.ID {
+			t.Fatalf("the first read leased %q, want the cheaper %q", got, f.viaMid.ID)
+		}
+
+		for range 2 * LeaseHotHold / LeaseEvaluation {
+			f.measure(map[*Candidate]bus.PathRecord{
+				&f.viaMid: marked(time.Now(), ReadingSamples, 5*ms),
+				&f.direct: marked(time.Now(), ReadingSamples, 50*ms),
+			})
+			time.Sleep(LeaseEvaluation)
+			if got := leased(t, lease).ID; got != f.viaMid.ID {
+				t.Fatalf("with every path hot the lease moved to %q", got)
+			}
+		}
+
+		left := false
+		for range LeaseHotHold/LeaseEvaluation + 1 {
+			f.measure(map[*Candidate]bus.PathRecord{
+				&f.viaMid: marked(time.Now(), ReadingSamples, 5*ms),
+				&f.direct: heartbeats(time.Now(), ReadingSamples, 50*ms),
+			})
+			time.Sleep(LeaseEvaluation)
+			if leased(t, lease).ID == f.direct.ID {
+				left = true
+				break
+			}
+		}
+		if !left {
+			t.Fatalf("the lease stayed on the hot path %v past its hold", LeaseHotHold)
+		}
+
+		for range 3 * LeaseSwitchHold / LeaseEvaluation {
+			f.measure(map[*Candidate]bus.PathRecord{
+				&f.viaMid: marked(time.Now(), ReadingSamples, 5*ms),
+				&f.direct: heartbeats(time.Now(), ReadingSamples, 50*ms),
+			})
+			time.Sleep(LeaseEvaluation)
+			if got := leased(t, lease).ID; got != f.direct.ID {
+				t.Fatalf("the cheaper hot path took the lease back to %q", got)
+			}
+		}
+
+		returned := false
+		for range 2*LeaseSwitchHold/LeaseEvaluation + 1 {
+			f.measure(map[*Candidate]bus.PathRecord{
+				&f.viaMid: heartbeats(time.Now(), ReadingSamples, 5*ms),
+				&f.direct: heartbeats(time.Now(), ReadingSamples, 50*ms),
+			})
+			time.Sleep(LeaseEvaluation)
+			if leased(t, lease).ID == f.viaMid.ID {
+				returned = true
+				break
+			}
+		}
+		if !returned {
+			t.Error("the cheaper path cooled, but the lease never returned to it")
+		}
+	})
+}
+
+// TestLeaseLeavesAPathItsArrivalsMark checks a lease whose destination's
+// datagrams come back marked: the path it holds reads hot, so it leaves for
+// the fastest healthy path that is not hot within LeaseHotHold, though its
+// probes' answers come back unmarked; marks on fewer than half of them move
+// nothing.
+func TestLeaseLeavesAPathItsArrivalsMark(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		ms := time.Millisecond
+		f := newMeasuredFixture(t, time.Minute)
+		var mu sync.Mutex
+		arrived, marked := 0, 0
+		f.p.Arrivals = func(addr.IA, time.Time) (int, int) {
+			mu.Lock()
+			defer mu.Unlock()
+			return arrived, marked
+		}
+		set := func(a, m int) {
+			mu.Lock()
+			defer mu.Unlock()
+			arrived, marked = a, m
+		}
+		lease := f.p.Lease(iaDest)
+		measure := func() {
+			f.measure(map[*Candidate]bus.PathRecord{
+				&f.viaMid: heartbeats(time.Now(), ReadingSamples, 5*ms),
+				&f.direct: heartbeats(time.Now(), ReadingSamples, 50*ms),
+			})
+		}
+		measure()
+		if got := leased(t, lease).ID; got != f.viaMid.ID {
+			t.Fatalf("the first read leased %q, want the cheaper %q", got, f.viaMid.ID)
+		}
+
+		set(100, 40)
+		for range 2 * LeaseHotHold / LeaseEvaluation {
+			measure()
+			time.Sleep(LeaseEvaluation)
+			if got := leased(t, lease).ID; got != f.viaMid.ID {
+				t.Fatalf("marks on fewer than half the arrivals moved the lease to %q", got)
+			}
+		}
+
+		set(100, 80)
+		left := false
+		for range LeaseHotHold/LeaseEvaluation + 1 {
+			measure()
+			time.Sleep(LeaseEvaluation)
+			if leased(t, lease).ID == f.direct.ID {
+				left = true
+				break
+			}
+		}
+		if !left {
+			t.Errorf("the lease stayed on the path its arrivals mark %v past its hold", LeaseHotHold)
+		}
+	})
+}

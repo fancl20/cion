@@ -180,6 +180,15 @@ func TestSetupFounderServesTheConsole(t *testing.T) {
 	}
 }
 
+// TestConnsShareTheECNState checks that every conn the node opens shares
+// the node's one ECN state.
+func TestConnsShareTheECNState(t *testing.T) {
+	n := setupFounderNode(t, func(*NodeConfig) {})
+	if got := n.connConfig(0).ECN; n.ecn == nil || got != n.ecn {
+		t.Fatalf("the conns' ECN state = %p, want the node's %p", got, n.ecn)
+	}
+}
+
 // TestLinkStoreWritesSignal checks the node's link store: a write through
 // it, whoever makes it, wakes the data plane loop and nudges the link state,
 // whose next publish carries the entry the write lands.

@@ -115,11 +115,29 @@ func queueArrival(
 
 // egressQueue returns the egress queue of the packet's class among a link's
 // two.
-func egressQueue(p *Packet, data, control chan<- *Packet) chan<- *Packet {
+func egressQueue(p *Packet, data, control chan *Packet) chan *Packet {
 	if p.control {
 		return control
 	}
 	return data
+}
+
+// enqueueOverOldest queues the packet on an egress queue without blocking: a
+// full queue drops its oldest packet to take it, for the oldest has waited
+// longest and its sender is likeliest to count it lost already, and a drop
+// at the head tells the sender's transport of the queue a queue's wait
+// sooner than one at the tail. It returns the packet dropped, nil for none,
+// and whether the queue took the new one, which a sender racing for the
+// freed room can deny.
+func enqueueOverOldest(q chan *Packet, p *Packet) (dropped *Packet, ok bool) {
+	if enqueue(q, p) {
+		return nil, true
+	}
+	select {
+	case dropped = <-q:
+	default:
+	}
+	return dropped, enqueue(q, p)
 }
 
 // enqueue queues the packet without blocking, reporting whether the queue

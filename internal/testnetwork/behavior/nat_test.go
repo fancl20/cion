@@ -16,9 +16,9 @@ import (
 	"github.com/fancl20/cion/internal/services"
 	"github.com/fancl20/cion/internal/testnetwork"
 	"github.com/fancl20/cion/internal/testnetwork/fabric"
-	"github.com/fancl20/cion/pkg/apps/ping"
 	"github.com/fancl20/cion/pkg/core/webpki/webpkitest"
 	"github.com/fancl20/cion/pkg/libs/bus"
+	"github.com/fancl20/cion/pkg/libs/ping"
 	"github.com/fancl20/cion/pkg/modules/links"
 )
 

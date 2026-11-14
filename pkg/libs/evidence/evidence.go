@@ -23,6 +23,9 @@ type Sample struct {
 	RTT time.Duration
 	// Lost reports whether it went unanswered.
 	Lost bool
+	// Marked reports whether its answer came back marked: a node on its way
+	// read a link it crossed congested.
+	Marked bool
 }
 
 // Kind is what an estimate states: a quantile of the round trips its window

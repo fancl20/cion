@@ -1,9 +1,11 @@
-// Package ping is CION's SCMP-echo application, the network's probe. Its
-// resident prober measures the paths the node's picks and leases ask it to,
-// and publishes their records on the node bus; its pinger, the client behind
-// `cion ping`, rides a destination's lease, sends a count of requests, and
-// reports per-reply RTT, the reply's path hops, and a loss summary. The
-// responder that answers both is the node's own, part of the core.
+// Package ping is CION's SCMP echo library. It holds the mechanics the
+// node's echoes share: a conn that sends echo requests and delivers the
+// replies to them; the requests awaiting their replies, each settled with its
+// round trip or as lost after its wait; and the responder hosts the requests
+// go to, resolved off the caller's loop. Its client, behind `cion ping`,
+// rides a destination's lease, sends a count of requests, and reports
+// per-reply RTT, the reply's path hops, and a loss summary. The responder
+// that answers is the destination node's own, part of its core.
 package ping
 
 import (

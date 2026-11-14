@@ -43,8 +43,9 @@ import (
 // monitor, beaconing (the lookup, beaconer, and path provider closing their
 // cycle), the wiring of the loaded topology provider over what the phases
 // built, the control endpoint's socket and the provider's mounted services,
-// and the echo responder. Each phase registers what it acquires with the
-// node's group as it goes, so a failed boot's Stop releases a partial node.
+// the echo responder, and the congestion module with the conns its echoes
+// ride. Each phase registers what it acquires with the node's group as it
+// goes, so a failed boot's Stop releases a partial node.
 func (n *node) setupControlPlane(ctx context.Context) error {
 	if err := n.openState(ctx); err != nil {
 		return err
@@ -66,7 +67,10 @@ func (n *node) setupControlPlane(ctx context.Context) error {
 	if err := n.assembleEndpoint(); err != nil {
 		return err
 	}
-	return n.assembleResponder()
+	if err := n.assembleResponder(); err != nil {
+		return err
+	}
+	return n.assembleCongestion()
 }
 
 // storeLockTimeout bounds the wait on a database's file lock. A node holds
@@ -502,6 +506,7 @@ func (n *node) buildBeaconing() error {
 		InterfaceDown: n.bus.InterfaceDown(),
 		Links:         n.bus.Links(),
 		Measurements:  n.bus.PathMeasurements(),
+		Arrivals:      n.ecn.Arrivals,
 		Requests:      n.bus.PathRequests(),
 		Changes:       n.bus.Changes(),
 	}
@@ -600,12 +605,12 @@ func (n *node) assembleEndpoint() error {
 
 // scionConn returns a SCION connection bound to the control address's host
 // with the given port, sending through the node's internal link. Every conn
-// resolves its one-hop writes over the links the node can send over and
+// resolves its one-hop writes over the links the node can send over,
 // publishes on the node's interface-down topic — each receive path recognizes
-// the signal the data plane's egress-down branch sends back — and, under the
-// wildcard bind, which names no host itself, names the wildcard host as its
-// packets' source and its service-resolution answers' host: an address the
-// node's own router delivers to.
+// the signal the data plane's egress-down branch sends back — and shares the
+// node's ECN state, and, under the wildcard bind, which names no host itself,
+// names the wildcard host as its packets' source and its service-resolution
+// answers' host: an address the node's own router delivers to.
 func (n *node) scionConn(port uint16) (*scion.Conn, error) {
 	return scion.NewConn(n.connConfig(port))
 }
@@ -632,6 +637,7 @@ func (n *node) connConfig(port uint16) scion.ConnConfig {
 		InterfaceDown: n.bus.InterfaceDown(),
 		WildcardHost:  n.wildcardHost.resolve,
 		Sockets:       n.sockets,
+		ECN:           n.ecn,
 	}
 }
 

@@ -882,6 +882,7 @@ func (p *scionPacketProcessor) process() disposition {
 			return disp
 		}
 		p.pkt.trafficType = ttIn
+		p.markArrival()
 		return pForward
 	}
 
@@ -942,6 +943,7 @@ func (p *scionPacketProcessor) process() disposition {
 			tt = ttBrTransit
 		}
 		p.pkt.trafficType = tt
+		p.markArrival()
 		return pForward
 	}
 

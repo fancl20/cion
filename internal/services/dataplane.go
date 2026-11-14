@@ -45,16 +45,16 @@ const (
 type DataplaneOptions struct {
 	Processors int // RunConfig.NumProcessors
 	BatchSize  int // RunConfig.BatchSize and the UDP provider's batch
-	QueueSize  int // internal and external link queue depth
+	QueueSize  int // internal and external links' data egress queue depth
 }
 
 // DefaultDataplaneOptions returns the data-plane tuning the daemon and the
-// ping application run with unless the run command overrides it.
+// ping client run with unless the run command overrides it.
 func DefaultDataplaneOptions() DataplaneOptions {
 	return DataplaneOptions{
 		Processors: max(1, runtime.NumCPU()/2),
 		BatchSize:  64,
-		QueueSize:  64,
+		QueueSize:  1024,
 	}
 }
 
@@ -175,6 +175,7 @@ func (n *node) startGeneration(ctx context.Context, prev *generation) (*generati
 	observations := carryObservations(prev, entries)
 	provider := dataplane.NewUDPProvider(
 		n.opts.BatchSize, receiveBufferSize, sendBufferSize, n.sockets, n.nudgeLinkState)
+	provider.PaceBy(n.congestion)
 
 	dlinks := make([]dataplane.Link, 0, len(entries)+1)
 	internalLink, err := provider.NewInternalLink(
@@ -234,6 +235,7 @@ func (n *node) startGeneration(ctx context.Context, prev *generation) (*generati
 		BatchSize:             n.opts.BatchSize,
 		ReceiveBufferSize:     receiveBufferSize,
 		SendBufferSize:        sendBufferSize,
+		Congestion:            n.congestion,
 	}
 	genCtx, cancel := context.WithCancel(ctx)
 	done := make(chan struct{})

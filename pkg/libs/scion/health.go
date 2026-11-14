@@ -55,6 +55,13 @@ const (
 	bandCap   = 2 * TransitPenalty
 	// picksRequester names the picks' entries among the path requests.
 	picksRequester = "picks"
+	// hotSpan is how far back a path's marked answers read: six heartbeats
+	// of a path in use. hotLine is the share of its answers unmarked under
+	// which a path is hot, with hotConfidence: three answers marked in a row
+	// make it so.
+	hotSpan       = 30 * time.Second
+	hotLine       = 0.5
+	hotConfidence = 0.8
 )
 
 // The kinds of estimate a candidate carries, each over its record's probes
@@ -133,6 +140,7 @@ func (v view) assess(c *Candidate) {
 	default:
 		c.Health = HealthUnknown
 	}
+	c.Hot = hot(r.Samples, v.now)
 	c.Evidence = costKind.Of(r.Samples, v.now)
 	if c.Evidence.Answered > 0 {
 		cost := c.Evidence.Value
@@ -224,13 +232,16 @@ func suspectLinks(m bus.PathMeasurements, now time.Time) map[segment.LinkID]bool
 }
 
 // ranksAbove reports whether a ranks above b among the picks: by health,
-// a healthy or unknown path before a suspect one, a suspect one no signal
-// names since its last answer before a signaled one, an ejected one last;
-// then by price, where both have one and the two differ beyond the band;
-// then by Outranks.
+// a healthy or unknown path before a suspect one, an ejected one last; then
+// a path that is not hot before a hot one, and a suspect one no signal names
+// since its last answer before a signaled one; then by price, where both
+// have one and the two differ beyond the band; then by Outranks.
 func ranksAbove(a, b *Candidate) bool {
 	if ta, tb := tier(a.Health), tier(b.Health); ta != tb {
 		return ta < tb
+	}
+	if a.Hot != b.Hot {
+		return !a.Hot
 	}
 	if a.Health == HealthSuspect && a.Signaled != b.Signaled {
 		return !a.Signaled
@@ -375,4 +386,27 @@ func sharesLink(a, b *Candidate) bool {
 	return slices.ContainsFunc(a.Crossed, func(l segment.LinkID) bool {
 		return slices.Contains(b.Crossed, l)
 	})
+}
+
+// hot reports whether the probes answered within hotSpan of now came back
+// marked more than half the time, with hotConfidence.
+func hot(samples []bus.PathSample, now time.Time) bool {
+	answered, marked := 0, 0
+	for _, s := range samples {
+		if s.Lost || now.Sub(s.At) > hotSpan {
+			continue
+		}
+		answered++
+		if s.Marked {
+			marked++
+		}
+	}
+	return hotShare(marked, answered)
+}
+
+// hotShare reports whether marked of sent outcomes stand more than half,
+// with hotConfidence.
+func hotShare(marked, sent int) bool {
+	unmarked := evidence.Proportion{Answered: sent - marked, Sent: sent, Confidence: hotConfidence}
+	return unmarked.Under(hotLine) == evidence.Better
 }

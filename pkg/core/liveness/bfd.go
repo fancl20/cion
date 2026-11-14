@@ -71,8 +71,11 @@ type BFDSession struct {
 	neighborIA addr.IA
 	localHost  netip.Addr
 	remoteHost netip.Addr
-	// lastRX is the last arrival; the detection time expires from it.
+	// lastRX is the last control message's arrival, and heard the last
+	// other arrival from the peer, in nanoseconds since the Unix epoch; the
+	// detection time expires from the later.
 	lastRX time.Time
+	heard  atomic.Int64
 	// started is when the session began, its startup grace's origin, and
 	// reachedUp records whether the handshake ever completed: only a
 	// session that never reached Up holds its verdict up on the grace.
@@ -188,6 +191,14 @@ func (s *BFDSession) ReceiveMessage(msg *layers.BFD) {
 	s.refresh(now)
 }
 
+// Heard notes an arrival from the peer other than a control message: the
+// link carries the peer's packets, so the session's silence restarts. RFC
+// 5880's asynchronous mode counts control messages alone; the session
+// departs from it so that a queue dropping the control messages with the
+// rest downs no link whose peer's traffic still arrives. Only control
+// messages advance the protocol state.
+func (s *BFDSession) Heard() { s.heard.Store(time.Now().UnixNano()) }
+
 // advance moves the local state by RFC 5880's reception rules (Section
 // 6.8.6): the peer's AdminDown downs any session not Down; a Down session
 // moves to Init on the peer's Down and to Up on its Init; an Init session
@@ -266,8 +277,12 @@ func (s *BFDSession) tick() {
 		return
 	}
 	now := time.Now()
+	last := s.lastRX
+	if heard := time.Unix(0, s.heard.Load()); heard.After(last) {
+		last = heard
+	}
 	if (s.localState == layers.BFDStateInit || s.localState == layers.BFDStateUp) &&
-		now.Sub(s.lastRX) >= time.Duration(s.detectMult)*s.interval {
+		now.Sub(last) >= time.Duration(s.detectMult)*s.interval {
 		s.localState = layers.BFDStateDown
 		s.diagnostic = layers.BFDDiagnosticTimeExpired
 	}

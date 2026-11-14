@@ -20,6 +20,7 @@
 package dataplane
 
 import (
+	"sync"
 	"unsafe"
 
 	"github.com/scionproto/scion/pkg/slayers"
@@ -142,13 +143,25 @@ func (p *Packet) WithHeader(n int) []byte {
 	return p.buffer[headroom:]
 }
 
+// poolBlock is how many packets a pool makes at once.
+const poolBlock = 64
+
 // PacketPool allocates and resets packets. There is one packet pool per instance of the dataplane,
-// shared between all its underlay instances. This structure can be shared by copying (and doing so
-// is more efficient) because headroom is never changed after construction and channel is a
-// reference type.
+// shared between all its underlay instances. It makes its packets on demand, a block of poolBlock
+// at a time as its Gets find it empty, up to its size, so its memory follows the most packets the
+// data plane held at once. This structure can be shared by copying (and doing so is more
+// efficient) because headroom is never changed after construction and the channel and the blocks
+// are references.
 type PacketPool struct {
 	pool     chan *Packet
 	headroom int
+	blocks   *poolBlocks
+}
+
+// poolBlocks counts the packets a pool has yet to make, under its mutex.
+type poolBlocks struct {
+	mu   sync.Mutex
+	left int
 }
 
 // Get fetches a packet from the pool and returns it initialized with the proper headroom. That is,
@@ -157,9 +170,43 @@ type PacketPool struct {
 // However they may only use the preceding portion of the packet buffer to store a link-layer
 // header. See also WithHeader
 func (p *PacketPool) Get() *Packet {
-	pkt := <-p.pool
+	var pkt *Packet
+	select {
+	case pkt = <-p.pool:
+	default:
+		if pkt = p.grow(); pkt == nil {
+			pkt = <-p.pool
+		}
+	}
 	pkt.reset(p.headroom)
 	return pkt
+}
+
+// grow hands a Get that found the pool empty a packet: one the pool holds
+// again, as another Get grew it meanwhile or a packet came back, or else one
+// of the next block it makes, whose rest goes to the pool. Taking the packet
+// under the mutex keeps a Get from waiting while the pool may make more. It
+// returns nil once the pool made all it may, and the Get waits for a packet
+// to come back.
+func (p *PacketPool) grow() *Packet {
+	p.blocks.mu.Lock()
+	defer p.blocks.mu.Unlock()
+	select {
+	case pkt := <-p.pool:
+		return pkt
+	default:
+	}
+	n := min(poolBlock, p.blocks.left)
+	if n == 0 {
+		return nil
+	}
+	p.blocks.left -= n
+	buffers := make([][bufSize]byte, n)
+	packets := make([]Packet, n)
+	for i := range n - 1 {
+		p.pool <- packets[i].init(&buffers[i])
+	}
+	return packets[n-1].init(&buffers[n-1])
 }
 
 // Put returns the given packet to the pool.
@@ -168,8 +215,12 @@ func (p *PacketPool) Put(pkt *Packet) {
 
 }
 
-// makePacketPool creates a packetpool of size poolSize, that configures packet buffers with the
-// given headroom. The pool is initially empty. Packets must be added separately.
+// makePacketPool creates a packetpool that makes up to poolSize packets and configures their
+// buffers with the given headroom.
 func makePacketPool(poolSize, headroom int) PacketPool {
-	return PacketPool{pool: make(chan *Packet, poolSize), headroom: headroom}
+	return PacketPool{
+		pool:     make(chan *Packet, poolSize),
+		headroom: headroom,
+		blocks:   &poolBlocks{left: poolSize},
+	}
 }

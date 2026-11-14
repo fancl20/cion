@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/go-cmp/cmp"
 	"github.com/scionproto/scion/pkg/addr"
 	"github.com/scionproto/scion/pkg/slayers"
 	"github.com/scionproto/scion/pkg/slayers/path/onehop"
@@ -41,6 +42,7 @@ func badL4Datagram() []byte {
 // allocated and ready for use.
 func newTestPool(size, headroom int) PacketPool {
 	pool := makePacketPool(size, headroom)
+	pool.blocks.left = 0
 	buffers := make([][bufSize]byte, size)
 	packets := make([]Packet, size)
 	for i := range size {
@@ -72,6 +74,31 @@ func recvFromQueues(t *testing.T, qs []chan *Packet) *Packet {
 		t.Fatal("timed out waiting for packet")
 	}
 	return val.Interface().(*Packet)
+}
+
+// TestPacketPoolCoversTheQueues checks that the packet pool holds a buffer
+// for every packet the plane can hold at once: per link a receive batch, its
+// egress queues, and the sender's batch, beside the processors' queues.
+func TestPacketPoolCoversTheQueues(t *testing.T) {
+	provider := NewUDPProvider(4, 0, 0, underlay.Kernel, nil)
+	defer provider.Stop()
+	link, err := provider.NewExternalLink(100, nil, nil, freeUDPAddr(t), freeUDPAddr(t), 1, newTestMetrics(t, 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	d, err := NewDataPlane(benchLocal, benchHost, benchKey, provider, []Link{link})
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.RunConfig = RunConfig{NumProcessors: 1, BatchSize: 4}
+	d.initPacketPool(4)
+	// A receive batch and a sender's batch, the data and the control egress
+	// queues, and the queues of one processor, the control class, and no
+	// slow path, each with one packet in hand.
+	want := 2*4 + 100 + controlQueueSize + 2*(4+1)
+	if got := cap(d.packetPool.pool); got != want {
+		t.Errorf("the pool makes %d packets at most, want %d", got, want)
+	}
 }
 
 // TestExternalLinkSendReceive exercises both directions of an external link
@@ -137,6 +164,70 @@ func TestExternalLinkSendReceive(t *testing.T) {
 	}
 	if !bytes.Equal(rpkt.RawPacket, in) {
 		t.Fatalf("received %q, want %q", rpkt.RawPacket, in)
+	}
+}
+
+// TestExternalLinksReportTheirWrites checks that a provider paced by a
+// policy hands it the packets and bytes its external links write, under
+// their interfaces, and nothing its internal link writes.
+func TestExternalLinksReportTheirWrites(t *testing.T) {
+	remote, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = remote.Close() }()
+	host, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = host.Close() }()
+
+	provider := NewUDPProvider(64, 0, 0, underlay.Kernel, nil)
+	policy := newPacingPolicy(0)
+	provider.PaceBy(policy)
+	ext, err := provider.NewExternalLink(
+		64, nil, nil, "127.0.0.1:0", remote.LocalAddr().String(), 1, newTestMetrics(t, 1),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	internal, err := provider.NewInternalLink(freeUDPAddr(t), 64, newTestMetrics(t, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pool := newTestPool(256, 512)
+	provider.Start(context.Background(), pool,
+		[]chan *Packet{make(chan *Packet, 4)}, make(chan *Packet, 4))
+
+	packet := func() *Packet {
+		out := scionLikeDatagram([]byte("counted or not"))
+		pkt := pool.Get()
+		pkt.RawPacket = pkt.RawPacket[:len(out)]
+		copy(pkt.RawPacket, out)
+		return pkt
+	}
+	if !ext.Send(packet()) {
+		t.Fatal("external send queue full")
+	}
+	toHost := packet()
+	if err := internal.Resolve(toHost, addr.HostIP(netip.MustParseAddr("127.0.0.1")),
+		uint16(host.LocalAddr().(*net.UDPAddr).Port)); err != nil {
+		t.Fatal(err)
+	}
+	if !internal.Send(toHost) {
+		t.Fatal("internal send queue full")
+	}
+	got := make([]byte, bufSize)
+	for _, c := range []*net.UDPConn{remote, host} {
+		_ = c.SetReadDeadline(time.Now().Add(testTimeout))
+		if _, err := c.Read(got); err != nil {
+			t.Fatal(err)
+		}
+	}
+	provider.Stop()
+	want := map[uint16]wrote{1: {packets: 1, bytes: len(scionLikeDatagram([]byte("counted or not")))}}
+	if diff := cmp.Diff(want, policy.written(), cmp.AllowUnexported(wrote{})); diff != "" {
+		t.Errorf("writes handed to the policy (-want +got):\n%s", diff)
 	}
 }
 

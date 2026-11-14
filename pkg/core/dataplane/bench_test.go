@@ -73,6 +73,7 @@ type idleSession struct {
 }
 
 func (s *idleSession) ReceiveMessage(*layers.BFD) { s.arrivals.Add(1) }
+func (s *idleSession) Heard()                     {}
 func (s *idleSession) IsUp() bool                 { return true }
 func (s *idleSession) SetRawWriter(RawWriter)     {}
 
@@ -116,6 +117,11 @@ func newBenchNode(tb testing.TB, rc RunConfig) *benchNode {
 		tb.Fatal(err)
 	}
 	provider := NewUDPProvider(rc.BatchSize, rc.ReceiveBufferSize, rc.SendBufferSize, underlay.Kernel, nil)
+	if rc.Congestion != nil {
+		// The external links take the policy as they are made, as the
+		// node's assembly binds it.
+		provider.PaceBy(rc.Congestion)
+	}
 	srcEnd, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
 	if err != nil {
 		tb.Fatal(err)
@@ -189,6 +195,16 @@ func fillBenchPacket(p *Packet, tmpl []byte, ingress Link) *Packet {
 	copy(p.RawPacket, tmpl)
 	p.Link = ingress
 	return p
+}
+
+// ectOf returns a copy of the template marked ECN-capable, ECT(0), as every
+// packet a node's sockets send is; nothing on the forwarding path covers the
+// traffic class.
+func ectOf(tmpl []byte) []byte {
+	out := make([]byte, len(tmpl))
+	copy(out, tmpl)
+	out[1] |= ecnECT0
+	return out
 }
 
 // varyFlow returns a copy of the template with the given flow ID patched

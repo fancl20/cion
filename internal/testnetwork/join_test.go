@@ -13,10 +13,10 @@ import (
 
 	"github.com/fancl20/cion/internal/services"
 	"github.com/fancl20/cion/pkg/apps"
-	"github.com/fancl20/cion/pkg/apps/ping"
 	"github.com/fancl20/cion/pkg/core/trust"
 	"github.com/fancl20/cion/pkg/core/webpki/webpkitest"
 	"github.com/fancl20/cion/pkg/libs/evidence"
+	"github.com/fancl20/cion/pkg/libs/ping"
 	"github.com/fancl20/cion/pkg/libs/scion"
 	"github.com/fancl20/cion/pkg/libs/underlay"
 	"github.com/fancl20/cion/pkg/modules/links"

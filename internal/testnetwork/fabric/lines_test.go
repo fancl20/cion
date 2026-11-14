@@ -8,6 +8,8 @@ import (
 	"testing/synctest"
 	"time"
 
+	"github.com/google/go-cmp/cmp"
+
 	"github.com/fancl20/cion/pkg/libs/underlay"
 )
 
@@ -68,11 +70,11 @@ func TestUplinkPacesAtItsRate(t *testing.T) {
 				t.Errorf("datagram %d arrived after %v, want exactly %v", k, held, want)
 			}
 		}
-		want := UplinkWindow{Sent: 5, Bytes: 5 * wireSize, Waited: 10 * slot, MaxWait: 4 * slot}
+		want := LineWindow{Sent: 5, Bytes: 5 * wireSize, Waited: 10 * slot, MaxWait: 4 * slot}
 		if got := u.Window(); got != want {
 			t.Errorf("the window counted %+v, want %+v", got, want)
 		}
-		if got := u.Window(); got != (UplinkWindow{}) {
+		if got := u.Window(); got != (LineWindow{}) {
 			t.Errorf("the next window counted %+v before any packet", got)
 		}
 	})
@@ -210,6 +212,127 @@ func TestUplinkHoldsTheTapsFromTheDeparture(t *testing.T) {
 			if held, least := time.Since(start), time.Duration(k+1)*slot+oneWay; held < least {
 				t.Errorf("datagram %d arrived after %v, before its departure and delay at %v", k, held, least)
 			}
+		}
+	})
+}
+
+// TestDownlinkPacesAtItsRate checks the downlink's line: a burst arrives at
+// a host behind it one packet after another, each holding the line for its
+// size at the rate, in the order sent, and the window counts what it carried
+// and how long each waited.
+func TestDownlinkPacesAtItsRate(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		f := New(t, UDPOnly())
+		a, b := f.Node(insideAddr), f.Node(upstreamAddr)
+		ca, _ := listen(t, a)
+		cb, ab := listen(t, b)
+		d := f.Downlink(proofRate, time.Second, upstreamAddr)
+
+		start := time.Now()
+		for k := range 5 {
+			send(t, ca, ab, payloadOf(strconv.Itoa(k)))
+		}
+		for k := range 5 {
+			got, _ := recv(t, cb, time.Second)
+			if label := strings.TrimRight(got, "."); label != strconv.Itoa(k) {
+				t.Fatalf("datagram %d arrived as %q", k, label)
+			}
+			if held, want := time.Since(start), time.Duration(k+1)*slot; held != want {
+				t.Errorf("datagram %d arrived after %v, want exactly %v", k, held, want)
+			}
+		}
+		want := LineWindow{Sent: 5, Bytes: 5 * wireSize, Waited: 10 * slot, MaxWait: 4 * slot}
+		if got := d.Window(); got != want {
+			t.Errorf("the window counted %+v, want %+v", got, want)
+		}
+	})
+}
+
+// TestDownlinkDropsPastItsQueue checks the downlink queue's bound: a packet
+// whose wait would pass it is dropped and counted.
+func TestDownlinkDropsPastItsQueue(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		f := New(t, UDPOnly())
+		a, b := f.Node(insideAddr), f.Node(upstreamAddr)
+		ca, _ := listen(t, a)
+		cb, ab := listen(t, b)
+		d := f.Downlink(proofRate, 5*slot/2, upstreamAddr)
+
+		start := time.Now()
+		for k := range 6 {
+			send(t, ca, ab, payloadOf(strconv.Itoa(k)))
+		}
+		got := arrivals(t, cb, 6, start, time.Second)
+		want := map[string]time.Duration{"0": slot, "1": 2 * slot, "2": 3 * slot}
+		if diff := cmp.Diff(want, got); diff != "" {
+			t.Errorf("the burst's arrivals (-want +got):\n%s", diff)
+		}
+		if w := d.Window(); w.Sent != 3 || w.Dropped != 3 {
+			t.Errorf("the window counted %+v, want 3 sent and 3 dropped", w)
+		}
+	})
+}
+
+// TestDownlinkCarriesOnlyArrivingPackets checks what crosses a downlink: the
+// packets between the hosts of one downlink pass at once, and those from any
+// other host arrive through the line.
+func TestDownlinkCarriesOnlyArrivingPackets(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		f := New(t, UDPOnly())
+		a, site, b := f.Node(insideAddr), f.Node(siteAddr), f.Node(upstreamAddr)
+		ca, aa := listen(t, a)
+		siteConn, _ := listen(t, site)
+		cb, _ := listen(t, b)
+		d := f.Downlink(proofRate, time.Second, insideAddr, siteAddr)
+
+		for _, c := range []struct {
+			name string
+			from underlay.UDPConn
+			want time.Duration
+		}{
+			{"from the site's other host", siteConn, 0},
+			{"from a host past the downlink", cb, slot},
+		} {
+			start := time.Now()
+			send(t, c.from, aa, payloadOf("x"))
+			if got := arrivals(t, ca, 1, start, time.Second); len(got) != 1 || got["x"] != c.want {
+				t.Errorf("a datagram %s arrived as %v, want after exactly %v", c.name, got, c.want)
+			}
+		}
+		if w := d.Window(); w.Sent != 1 {
+			t.Errorf("the downlink carried %d packets, want the one from the host past it", w.Sent)
+		}
+	})
+}
+
+// TestDownlinkTakesPacketsAfterTheUplinkAndTaps checks a path through both
+// lines: a packet reaches the downlink after the sender's uplink and the
+// pair's delay, and a burst the uplink spaced crosses a downlink of the same
+// rate without waiting.
+func TestDownlinkTakesPacketsAfterTheUplinkAndTaps(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		f := New(t, UDPOnly())
+		a, b := f.Node(insideAddr), f.Node(upstreamAddr)
+		ca, _ := listen(t, a)
+		cb, ab := listen(t, b)
+		const oneWay = 30 * time.Millisecond
+		f.Delay(insideAddr, upstreamAddr, oneWay)
+		f.Uplink(proofRate, time.Second, insideAddr)
+		d := f.Downlink(proofRate, time.Second, upstreamAddr)
+
+		start := time.Now()
+		for k := range 3 {
+			send(t, ca, ab, payloadOf(strconv.Itoa(k)))
+		}
+		got := arrivals(t, cb, 3, start, time.Second)
+		want := map[string]time.Duration{
+			"0": slot + oneWay + slot, "1": 2*slot + oneWay + slot, "2": 3*slot + oneWay + slot,
+		}
+		if diff := cmp.Diff(want, got); diff != "" {
+			t.Errorf("the burst's arrivals (-want +got):\n%s", diff)
+		}
+		if w := d.Window(); w.Waited != 0 {
+			t.Errorf("the downlink held the spaced burst %v, want no wait", w.Waited)
 		}
 	})
 }

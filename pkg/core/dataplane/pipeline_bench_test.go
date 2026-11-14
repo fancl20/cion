@@ -9,6 +9,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/fancl20/cion/pkg/libs/evidence"
+	"github.com/fancl20/cion/pkg/modules/congestion"
+	"github.com/fancl20/cion/pkg/modules/congestion/impl/brake"
+
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
@@ -67,88 +71,137 @@ func BenchmarkForwardPipeline(b *testing.B) {
 	for _, tc := range pipelineCases() {
 		b.Run(fmt.Sprintf("procs=%d/batch=%d/flows=%d",
 			tc.NumProcessors, tc.BatchSize, tc.flows), func(b *testing.B) {
-			// The configured provider makes the run's drop counters
-			// readable, so a divergence can be named.
-			reader := sdkmetric.NewManualReader()
-			mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
-			prev := otel.GetMeterProvider()
-			otel.SetMeterProvider(mp)
-			b.Cleanup(func() {
-				otel.SetMeterProvider(prev)
-				_ = mp.Shutdown(context.Background())
-			})
-
-			n := newBenchNode(b, tc.RunConfig)
-			ctx, cancel := context.WithCancel(context.Background())
-			serveDone := make(chan struct{})
-			go func() {
-				defer close(serveDone)
-				_ = n.d.Serve(ctx)
-			}()
-			b.Cleanup(func() {
-				cancel()
-				<-serveDone
-			})
-
-			tmpl := benchCases[0].build(b, n, benchPad)
-			datagrams := make([][]byte, tc.flows)
-			for i := range datagrams {
-				datagrams[i] = varyFlow(tmpl, benchFlow+uint32(i)*benchFlowStep)
-			}
-
-			// The sender plays the source AS's router: the socket the
-			// ingress link is connected to, writing into the link's own.
-			var sent, delivered atomic.Int64
-			window := int64(tc.BatchSize)
-			senderDone := make(chan struct{})
-			go func() {
-				defer close(senderDone)
-				dst := net.UDPAddrFromAddrPort(n.if1Addr)
-				for sent.Load() < int64(b.N) {
-					if sent.Load()-delivered.Load() >= window {
-						runtime.Gosched()
-						continue
-					}
-					if _, err := n.srcEnd.WriteToUDP(
-						datagrams[int(sent.Load())%len(datagrams)], dst,
-					); err != nil {
-						return
-					}
-					sent.Add(1)
-				}
-			}()
-
-			b.ResetTimer()
-			buf := make([]byte, bufSize)
-			var received int64
-			_ = n.dstEnd.SetReadDeadline(time.Now().Add(benchStallTimeout))
-			for received < int64(b.N) {
-				if received%benchDeadlineEvery == 0 {
-					_ = n.dstEnd.SetReadDeadline(time.Now().Add(benchStallTimeout))
-				}
-				m, err := n.dstEnd.Read(buf)
-				if err != nil {
-					b.Fatalf("stalled after %d of %d deliveries (sent %d): %v%s",
-						received, b.N, sent.Load(), err, dropSummary(reader))
-				}
-				if m != len(tmpl) {
-					b.Fatalf("received %dB datagram, want the %dB template", m, len(tmpl))
-				}
-				received++
-				delivered.Store(received)
-			}
-			b.StopTimer()
-
-			<-senderDone
-			if got := sent.Load(); got != int64(b.N) {
-				b.Fatalf("sent %d, want %d", got, b.N)
-			}
-			if drops := dropSummary(reader); drops != "" {
-				b.Fatalf("the run dropped packets:%s", drops)
-			}
-			b.ReportMetric(float64(received)/b.Elapsed().Seconds(), "packets/s")
+			forwardPipeline(b, tc.RunConfig, tc.flows, false)
 		})
 	}
+}
+
+// fixedRate is a congestion policy that holds every link at one rate and
+// marks nothing: at a rate no benchmark load reaches, the pacing's cost
+// alone.
+type fixedRate float64
+
+func (r fixedRate) Wrote(uint16, int, int, bool)    {}
+func (r fixedRate) Rate(uint16) float64             { return float64(r) }
+func (r fixedRate) Mark(uint16, float64) bool       { return false }
+func (r fixedRate) Sampled(uint16, evidence.Sample) {}
+
+// BenchmarkForwardPipelineCongestion drives the pipeline as
+// BenchmarkForwardPipeline does, its packets ECN-capable, under each
+// congestion policy: none; the brake, its links free, as a node runs them
+// until one congests; and a fixed rate of 10 Gbit/s, which paces every packet
+// and holds none back.
+func BenchmarkForwardPipelineCongestion(b *testing.B) {
+	for _, policy := range []struct {
+		name string
+		new  func() congestion.Policy
+	}{
+		{"none", func() congestion.Policy { return nil }},
+		{"brake", func() congestion.Policy { return brake.New(func(uint16) {}) }},
+		{"paced", func() congestion.Policy { return fixedRate(10e9) }},
+	} {
+		for _, procs := range []int{1, 4} {
+			b.Run(fmt.Sprintf("policy=%s/procs=%d/batch=64/flows=%d", policy.name, procs, benchFlowCount),
+				func(b *testing.B) {
+					forwardPipeline(b, RunConfig{
+						NumProcessors:         procs,
+						NumSlowPathProcessors: 1,
+						BatchSize:             64,
+						ReceiveBufferSize:     1 << 20,
+						SendBufferSize:        1 << 20,
+						Congestion:            policy.new(),
+					}, benchFlowCount, true)
+				})
+		}
+	}
+}
+
+// forwardPipeline runs one pipeline case: the plane shaped and paced by the
+// run config, flows distinct flows, each packet ECN-capable where ect holds.
+func forwardPipeline(b *testing.B, rc RunConfig, flows int, ect bool) {
+	// The configured provider makes the run's drop counters
+	// readable, so a divergence can be named.
+	reader := sdkmetric.NewManualReader()
+	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	prev := otel.GetMeterProvider()
+	otel.SetMeterProvider(mp)
+	b.Cleanup(func() {
+		otel.SetMeterProvider(prev)
+		_ = mp.Shutdown(context.Background())
+	})
+
+	n := newBenchNode(b, rc)
+	ctx, cancel := context.WithCancel(context.Background())
+	serveDone := make(chan struct{})
+	go func() {
+		defer close(serveDone)
+		_ = n.d.Serve(ctx)
+	}()
+	b.Cleanup(func() {
+		cancel()
+		<-serveDone
+	})
+
+	tmpl := benchCases[0].build(b, n, benchPad)
+	if ect {
+		tmpl = ectOf(tmpl)
+	}
+	datagrams := make([][]byte, flows)
+	for i := range datagrams {
+		datagrams[i] = varyFlow(tmpl, benchFlow+uint32(i)*benchFlowStep)
+	}
+
+	// The sender plays the source AS's router: the socket the
+	// ingress link is connected to, writing into the link's own.
+	var sent, delivered atomic.Int64
+	window := int64(rc.BatchSize)
+	senderDone := make(chan struct{})
+	go func() {
+		defer close(senderDone)
+		dst := net.UDPAddrFromAddrPort(n.if1Addr)
+		for sent.Load() < int64(b.N) {
+			if sent.Load()-delivered.Load() >= window {
+				runtime.Gosched()
+				continue
+			}
+			if _, err := n.srcEnd.WriteToUDP(
+				datagrams[int(sent.Load())%len(datagrams)], dst,
+			); err != nil {
+				return
+			}
+			sent.Add(1)
+		}
+	}()
+
+	b.ResetTimer()
+	buf := make([]byte, bufSize)
+	var received int64
+	_ = n.dstEnd.SetReadDeadline(time.Now().Add(benchStallTimeout))
+	for received < int64(b.N) {
+		if received%benchDeadlineEvery == 0 {
+			_ = n.dstEnd.SetReadDeadline(time.Now().Add(benchStallTimeout))
+		}
+		m, err := n.dstEnd.Read(buf)
+		if err != nil {
+			b.Fatalf("stalled after %d of %d deliveries (sent %d): %v%s",
+				received, b.N, sent.Load(), err, dropSummary(reader))
+		}
+		if m != len(tmpl) {
+			b.Fatalf("received %dB datagram, want the %dB template", m, len(tmpl))
+		}
+		received++
+		delivered.Store(received)
+	}
+	b.StopTimer()
+
+	<-senderDone
+	if got := sent.Load(); got != int64(b.N) {
+		b.Fatalf("sent %d, want %d", got, b.N)
+	}
+	if drops := dropSummary(reader); drops != "" {
+		b.Fatalf("the run dropped packets:%s", drops)
+	}
+	b.ReportMetric(float64(received)/b.Elapsed().Seconds(), "packets/s")
 }
 
 // dropSummary reads the drop counters the run recorded — the configured

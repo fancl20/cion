@@ -11,7 +11,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/fancl20/cion/internal/services"
-	"github.com/fancl20/cion/pkg/apps/ping"
+	"github.com/fancl20/cion/pkg/libs/ping"
 	"github.com/fancl20/cion/pkg/libs/underlay"
 )
 

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net"
 	"net/netip"
+	"slices"
 	"testing"
 	"time"
 
@@ -74,6 +75,21 @@ func TestEchoWireRoundTrip(t *testing.T) {
 	if echo.Identifier != conn.LocalPort() || echo.Seq != 7 {
 		t.Errorf("reply identifier/sequence = %d/%d, want %d/7",
 			echo.Identifier, echo.Seq, conn.LocalPort())
+	}
+	if echo.Marked {
+		t.Error("parsed a reply sent ECT(0) as marked")
+	}
+
+	// A node on the way marks the reply: CE in the traffic class's low two
+	// bits, the high nibble's low two of the second byte.
+	marked := slices.Clone(reply)
+	marked[1] |= ecnCE << 4
+	echo, _, err = parseEchoPacket(marked)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !echo.Marked {
+		t.Error("parsed a reply carrying CE as unmarked")
 	}
 }
 

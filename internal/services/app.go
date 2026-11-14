@@ -21,6 +21,7 @@ import (
 	"github.com/fancl20/cion/pkg/libs/bus"
 	"github.com/fancl20/cion/pkg/libs/scion"
 	"github.com/fancl20/cion/pkg/libs/underlay"
+	"github.com/fancl20/cion/pkg/modules/congestion"
 	"github.com/fancl20/cion/pkg/modules/links"
 	"github.com/fancl20/cion/pkg/modules/membership"
 	"github.com/fancl20/cion/pkg/modules/pathdb"
@@ -132,6 +133,10 @@ func (a *App) Monitor() *liveness.HealthMonitor { return a.node.monitor }
 // Bus returns the node's bus, the topics of the state the node's components
 // share.
 func (a *App) Bus() *bus.Bus { return a.node.bus }
+
+// Congestion returns the node's congestion policy, which paces and marks
+// every generation's links' egress queues.
+func (a *App) Congestion() congestion.Policy { return a.node.congestion }
 
 // TrustDB returns the node's trust database.
 func (a *App) TrustDB() trustdb.DB { return a.node.trustDB }

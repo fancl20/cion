@@ -1,66 +1,20 @@
 package services
 
 import (
-	"context"
 	"fmt"
-	"log/slog"
-	"sync"
 
-	"github.com/fancl20/cion/pkg/libs/scion"
+	"github.com/fancl20/cion/pkg/core/responder"
 	"github.com/fancl20/cion/pkg/libs/underlay"
 )
 
 // assembleResponder binds the node's SCMP echo responder to the control
-// address's host on the endhost port, sending through the internal link. The
-// responder is core, not application: every node's selection baseline is an
-// echo its peers must answer — a node that could decline the responder
-// silently disables the comparator on every neighbor — so it runs beside the
-// control-plane loops in every node, the one capability that moved out of an
-// application into the core. SCMP echo's read and write stay in
-// pkg/libs/scion, the vocabulary the pinger and the responder share.
+// address's host on the endhost port, sending through the internal link.
 func (n *node) assembleResponder() error {
 	conn, err := n.controlConn(underlay.EndhostPort)
 	if err != nil {
 		return fmt.Errorf("binding the echo responder (the control address's host must not share the internal link's port): %w", err)
 	}
 	n.group.Own("responder conn", conn.Close)
-	n.responder = &responder{conn: conn}
+	n.responder = responder.New(conn)
 	return nil
-}
-
-// responder answers SCMP echo requests with echo replies, each on its
-// reversed arrival path — the network's health probe. One conn serves it,
-// bound to the endhost port the data plane delivers echo requests to.
-type responder struct {
-	conn *scion.Conn
-}
-
-// Run serves echo replies until the context is canceled, returning nil, or
-// until the socket's read fails, returning the failure. The context's end
-// closes the socket, failing the read; Run returns with the socket closed
-// and released either way, waiting on a close already under way, for a
-// second Close returns before the first's release finishes.
-func (r *responder) Run(ctx context.Context) error {
-	release := sync.OnceValue(r.conn.Close)
-	stop := context.AfterFunc(ctx, func() { _ = release() })
-	defer func() {
-		stop()
-		_ = release()
-	}()
-	for {
-		echo, from, err := r.conn.ReadEchoFrom()
-		if err != nil {
-			if ctx.Err() != nil {
-				return nil
-			}
-			return fmt.Errorf("reading echo requests: %w", err)
-		}
-		if echo.Reply {
-			continue
-		}
-		if err := r.conn.WriteEchoReplyTo(from, echo.Identifier, echo.Seq,
-			echo.Payload); err != nil {
-			slog.Warn("Sending echo reply", "peer", from, "err", err)
-		}
-	}
 }

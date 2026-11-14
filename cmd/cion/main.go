@@ -15,7 +15,7 @@ import (
 )
 
 // newRootCommand builds the cion command tree: the run daemon's two roles
-// and the ping application. The root itself has no run function, so a bare
+// and the ping client. The root itself has no run function, so a bare
 // invocation prints the usage instead of starting a node by accident.
 func newRootCommand() *cobra.Command {
 	root := &cobra.Command{

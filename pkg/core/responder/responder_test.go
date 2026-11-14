@@ -1,4 +1,4 @@
-package services
+package responder
 
 import (
 	"context"
@@ -17,8 +17,8 @@ import (
 func TestResponderReleasesOnCancel(t *testing.T) {
 	conn, err := scion.NewConn(scion.ConnConfig{
 		IA:           addr.MustIAFrom(1, 0xff0000000110),
-		Bind:         "127.0.0.124:0",
-		InternalAddr: "127.0.0.124:9",
+		Bind:         "127.0.0.133:0",
+		InternalAddr: "127.0.0.133:9",
 		MACKey:       make([]byte, 16),
 	})
 	if err != nil {
@@ -27,7 +27,7 @@ func TestResponderReleasesOnCancel(t *testing.T) {
 	bound := conn.LocalAddr().(*scion.Addr).Addr
 	ctx, cancel := context.WithCancel(context.Background())
 	returned := make(chan error, 1)
-	go func() { returned <- (&responder{conn: conn}).Run(ctx) }()
+	go func() { returned <- New(conn).Run(ctx) }()
 	cancel()
 	if err := <-returned; err != nil {
 		t.Fatalf("Run = %v, want nil once its context ended", err)

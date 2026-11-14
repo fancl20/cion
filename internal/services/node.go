@@ -18,12 +18,14 @@ import (
 	"github.com/fancl20/cion/pkg/core/controlplane"
 	"github.com/fancl20/cion/pkg/core/dataplane"
 	"github.com/fancl20/cion/pkg/core/liveness"
+	"github.com/fancl20/cion/pkg/core/responder"
 	"github.com/fancl20/cion/pkg/core/trust"
 	"github.com/fancl20/cion/pkg/core/webpki"
 	"github.com/fancl20/cion/pkg/libs/bus"
 	"github.com/fancl20/cion/pkg/libs/scion"
 	"github.com/fancl20/cion/pkg/libs/scionrpc"
 	"github.com/fancl20/cion/pkg/libs/underlay"
+	"github.com/fancl20/cion/pkg/modules/congestion/impl/brake"
 	"github.com/fancl20/cion/pkg/modules/links"
 	"github.com/fancl20/cion/pkg/modules/membership"
 	"github.com/fancl20/cion/pkg/modules/pathdb"
@@ -54,6 +56,10 @@ type node struct {
 	// under a wildcard bind: the local address routing toward the node's own
 	// host or a link's peer, which the node's own router delivers to.
 	wildcardHost *wildcardHost
+	// ecn is the node's ECN state, which every conn the node opens shares:
+	// the counts of what the node sends each destination, and the rates its
+	// writes keep.
+	ecn *scion.ECN
 
 	// Link state: the neighbor table as the one source of truth, wrapped so
 	// that every write signals linkChanges and lands as the data plane's
@@ -71,6 +77,10 @@ type node struct {
 
 	// Data plane generations, served by the data plane loop.
 	metrics *dataplane.Metrics
+	// congestion paces and marks every generation's links' egress queues,
+	// so a link keeps its readings and its brake across the swaps, and
+	// sends the echoes its brake reads.
+	congestion *brake.Brake
 
 	// backendsMtx guards the serving generation, the observation records its
 	// links continue, and the applications' service backends, which each new
@@ -127,7 +137,7 @@ type node struct {
 	httpsLn      net.Listener
 	httpsHandler http.Handler
 	services     *controlplane.Services
-	responder    *responder
+	responder    *responder.Responder
 	// apps is the loaded resident applications in table order — the
 	// WireGuard application first, its borrowers after — constructed at
 	// setup with their borrows resolved. start launches them under the
@@ -260,6 +270,7 @@ func setupNode(
 		return nil, err
 	}
 	n.wildcardHost = newWildcardHost(n.bus.Self(), n.bus.Links(), n.sockets)
+	n.ecn = scion.NewECN()
 	if created {
 		// The one moment before the phases: the provider completes the
 		// provisional ISD draw — the measured provider's from a bootstrap
@@ -297,12 +308,12 @@ func setupNode(
 // core's — the data plane serving the generation boot built, the link state
 // publisher, the BFD health monitor, beaconing, the control endpoint, the
 // SCMP echo responder — and the HTTPS server under Fatal, a failure stopping
-// the node; the loaded topology provider's, the membership method's, the
-// change log, and the resident applications under Degrade, a failure logged
-// and the node serving on; and the role's own loops under the policies its
-// case in setupTrustRole gave them. The topology provider's drain runs on a
-// stop, while the loops still serve. Nothing serves before start, so
-// assembly and serving stay separate lifecycles.
+// the node; the congestion module's echoes, the loaded topology provider's,
+// the membership method's, the change log, and the resident applications
+// under Degrade, a failure logged and the node serving on; and the role's own
+// loops under the policies its case in setupTrustRole gave them. The topology
+// provider's drain runs on a stop, while the loops still serve. Nothing
+// serves before start, so assembly and serving stay separate lifecycles.
 func (n *node) start(gen *generation) {
 	g := n.group
 	g.Go("data plane", supervise.Fatal, func(ctx context.Context) error {
@@ -330,6 +341,7 @@ func (n *node) start(gen *generation) {
 			}))
 	})
 	g.Go("echo responder", supervise.Fatal, n.responder.Run)
+	g.Go("congestion", supervise.Degrade, n.congestion.Run)
 	g.Go("topology provider", supervise.Degrade, func(ctx context.Context) error {
 		n.topology.Run(ctx)
 		return nil

@@ -33,7 +33,7 @@ go in `internal/testnetwork`.
 ### Before commit
 
 Review changes to ensure they conform to all style requirements. For code
-changes, run tests with `go test -race -count=2 ./...` and
+changes, run tests with `go test -race -count=2 -timeout 20m ./...` and
 `go test -count=2 -timeout 20m ./internal/testnetwork/behavior/` first, then
 `golangci-lint`, then `git ls-files '*.go' ':!:proto/' | xargs -r goimports -w
 -local github.com/fancl20/cion`, `go fmt`, `go fix`, and `go vet`. Run test

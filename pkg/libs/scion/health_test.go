@@ -1090,3 +1090,53 @@ func TestPickRequests(t *testing.T) {
 		}
 	})
 }
+
+// TestHot checks when a path's answers read hot: three answered within
+// hotSpan, all marked, do; two of three marked do not, nor marks past the
+// span; lost probes count for neither side.
+func TestHot(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	answer := func(ago time.Duration, marked bool) bus.PathSample {
+		return bus.PathSample{At: now.Add(-ago), RTT: 10 * time.Millisecond, Marked: marked}
+	}
+	lost := func(ago time.Duration) bus.PathSample {
+		return bus.PathSample{At: now.Add(-ago), Lost: true}
+	}
+	s := time.Second
+	tests := []struct {
+		name    string
+		samples []bus.PathSample
+		want    bool
+	}{
+		{"three answers marked", []bus.PathSample{answer(10*s, true), answer(5*s, true), answer(0, true)}, true},
+		{"two of three marked", []bus.PathSample{answer(10*s, true), answer(5*s, false), answer(0, true)}, false},
+		{"marks past the span", []bus.PathSample{
+			answer(hotSpan+10*s, true), answer(hotSpan+5*s, true), answer(5*s, true), answer(0, true)}, false},
+		{"lost probes between marked answers", []bus.PathSample{
+			answer(10*s, true), lost(7 * s), answer(5*s, true), lost(2 * s), answer(0, true)}, true},
+		{"nothing answered", []bus.PathSample{lost(10 * s), lost(5 * s), lost(0)}, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := hot(tc.samples, now); got != tc.want {
+				t.Errorf("hot() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestHotRanksAfterCool checks the picks' order of a hot path: after a
+// healthy path that is not hot, however cheaper, and still before a suspect
+// one.
+func TestHotRanksAfterCool(t *testing.T) {
+	fast, slow := 5*time.Millisecond, 50*time.Millisecond
+	hotPath := Candidate{Health: HealthHealthy, Cost: &fast, Hot: true}
+	cool := Candidate{Health: HealthHealthy, Cost: &slow}
+	suspect := Candidate{Health: HealthSuspect, Cost: &fast}
+	if !ranksAbove(&cool, &hotPath) || ranksAbove(&hotPath, &cool) {
+		t.Error("a hot path ranked above a slower healthy path that is not hot")
+	}
+	if !ranksAbove(&hotPath, &suspect) {
+		t.Error("a suspect path ranked above a healthy hot one")
+	}
+}

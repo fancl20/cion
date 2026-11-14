@@ -63,13 +63,21 @@ policy chooses.
     ([ADR-0035](/docs/adrs/0035-choose-paths-by-measured-health.md)). Each
     generation serves a fixed link set until retired; a link's verdict,
     locator, and observed source change in place, and a link that keeps its
-    addresses keeps its observed source in the next generation.
+    addresses keeps its observed source in the next generation. It paces each
+    link's data at the rate the congestion module sets, holding the excess
+    in the link's queue, and marks the packets that come back over a link as
+    that queue's fill calls for
+    ([ADR-0043](/docs/adrs/0043-grow-capacity-between-nodes-under-load.md)).
 *   **Control endpoint** — speaks the control services to neighbor nodes
     over the SCION-native channel: beaconing, segment registration and
     lookup, trust material, and service resolution.
-*   **Liveness** — a BFD session on every serving link, and the monitor
-    that keeps the sessions across data plane generations and turns their
-    arrivals into each link's up or down verdict.
+*   **Liveness** — a BFD session on every serving link, which any arrival
+    from the peer keeps alive, and the monitor that keeps the sessions across
+    data plane generations and turns their arrivals into each link's up or
+    down verdict.
+*   **Echo responder** — answers every SCMP echo request the node receives,
+    on its reversed arrival path: the probes of the paths through the node,
+    and each neighbor's echoes across a link to it.
 *   **Trust engine** — holds and issues the network's trust material: the
     TRC, certificate chains, and their renewal, and runs the procedures that
     keep it current: the chain's lifecycle, the rotation watch, and the
@@ -85,7 +93,15 @@ run no loops of their own and hold no policy.
 *   **SCION library** — the socket that carries datagrams over SCION paths,
     and the path provider that composes paths from discovered segments and
     holds each destination's lease, the path every flow to it rides
-    ([ADR-0035](/docs/adrs/0035-choose-paths-by-measured-health.md)).
+    ([ADR-0035](/docs/adrs/0035-choose-paths-by-measured-health.md)). Its
+    sockets send every packet ECN-capable and pace each destination's traffic
+    on the marks the probes' replies bring back, and its leases leave the
+    paths that run hot
+    ([ADR-0043](/docs/adrs/0043-grow-capacity-between-nodes-under-load.md)).
+*   **Ping library** — the SCMP echo mechanics the node's echoes share:
+    resolving a destination's responder, sending echo requests, and settling
+    each by its reply, with its round trip, or as lost after its wait; and
+    the client behind `cion ping`.
 *   **Evidence** — how the paths and the topology source weigh what the node
     measures: estimates that carry their samples, comparisons that decide on
     their bounds or answer undecided, holds, and a record of every change
@@ -140,6 +156,10 @@ selected by the operator's run arguments.
 *   **Beacon policy** — policy: which of the routes each receiver can take
     the node's beacons carry, bound by the composition root
     ([ADR-0042](/docs/adrs/0042-file-the-beacon-policy-as-a-module.md)).
+*   **Congestion** — policy: how each link's egress queue is paced and
+    marked, from the echoes the module sends the link's next hop; bound by
+    the composition root
+    ([ADR-0043](/docs/adrs/0043-grow-capacity-between-nodes-under-load.md)).
 *   **Topology source** — source: where topology decisions come from; the
     measured provider by default — loading it is what makes a node
     zero-conf — the file provider when `--topology.link-set` names a
@@ -181,7 +201,9 @@ load refuses the boot with the fix named
 *   **Ping** — the network's probe: it measures the paths the SCION
     library's picks and leases and the topology selection ask about, and
     each chooses by its records
-    ([ADR-0035](/docs/adrs/0035-choose-paths-by-measured-health.md)).
+    ([ADR-0035](/docs/adrs/0035-choose-paths-by-measured-health.md)). Its
+    probes' replies bring back the marks each destination's traffic slows on
+    ([ADR-0043](/docs/adrs/0043-grow-capacity-between-nodes-under-load.md)).
 
 ## How the components interact
 
@@ -253,6 +275,15 @@ A new link set lands as a new data plane generation built from the neighbor
 table; within a generation, the liveness verdict stops and resumes
 forwarding on a link. The node bus carries link state to beaconing, path
 composition, the sockets, and the topology source.
+
+### Load
+
+Each node brakes each of its links at the limit its echoes to the next hop
+read, holding the excess in the link's queue, whose fill marks the packets
+that come back over the link. Each source slows its traffic to a destination
+on the marks its probes' replies bring back, and its leases leave the paths
+that run hot
+([ADR-0043](/docs/adrs/0043-grow-capacity-between-nodes-under-load.md)).
 
 ### Endhost service
 

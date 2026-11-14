@@ -67,22 +67,23 @@ type Fabric struct {
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
 
-	// mtx guards the drawn network: the stacks by host, the uplinks by the
-	// hosts they carry, the taps, the NATs, the names, the watches, and the
-	// tallies, beside when the last packet of each jittered direction is
-	// due. A packet's walk from one stack to another reads it twice — once
-	// for the uplink and the taps, once for the destination — so no tap draw
-	// or node boot waits on a packet in flight.
-	mtx     sync.Mutex
-	hosts   map[netip.Addr]*Node
-	uplinks map[netip.Addr]*Uplink
-	taps    []*tap
-	due     map[[2]netip.Addr]tcpip.MonotonicTime
-	nats    []*NAT
-	names   map[string]netip.Addr
-	watches []*watch
-	tallies []*tally
-	closed  bool
+	// mtx guards the drawn network: the stacks by host, the uplinks and the
+	// downlinks by the hosts they carry, the taps, the NATs, the names, the
+	// watches, and the tallies, beside when the last packet of each jittered
+	// direction is due. A packet's walk from one stack to another reads it
+	// apart for the uplink and the taps, for the downlink, and for the
+	// destination, so no tap draw or node boot waits on a packet in flight.
+	mtx       sync.Mutex
+	hosts     map[netip.Addr]*Node
+	uplinks   map[netip.Addr]*Uplink
+	downlinks map[netip.Addr]*Downlink
+	taps      []*tap
+	due       map[[2]netip.Addr]tcpip.MonotonicTime
+	nats      []*NAT
+	names     map[string]netip.Addr
+	watches   []*watch
+	tallies   []*tally
+	closed    bool
 
 	// udpOnly boots every stack with the UDP transport alone.
 	udpOnly bool
@@ -108,14 +109,15 @@ func New(t *testing.T, opts ...Option) *Fabric {
 	t.Helper()
 	ctx, cancel := context.WithCancel(t.Context())
 	f := &Fabric{
-		t:       t,
-		clock:   tcpip.NewStdClock(),
-		ctx:     ctx,
-		cancel:  cancel,
-		hosts:   make(map[netip.Addr]*Node),
-		uplinks: make(map[netip.Addr]*Uplink),
-		due:     make(map[[2]netip.Addr]tcpip.MonotonicTime),
-		names:   make(map[string]netip.Addr),
+		t:         t,
+		clock:     tcpip.NewStdClock(),
+		ctx:       ctx,
+		cancel:    cancel,
+		hosts:     make(map[netip.Addr]*Node),
+		uplinks:   make(map[netip.Addr]*Uplink),
+		downlinks: make(map[netip.Addr]*Downlink),
+		due:       make(map[[2]netip.Addr]tcpip.MonotonicTime),
+		names:     make(map[string]netip.Addr),
 	}
 	for _, opt := range opts {
 		opt(f)
@@ -416,9 +418,9 @@ func (f *Fabric) forward(n *Node) {
 }
 
 // carry moves one wire packet the forwarder drained: its source's uplink
-// and the taps shape it, the NATs translate it, and the destination's stack
-// receives it. A packet the uplink or a delay tap holds goes on to the NATs
-// on the fabric's clock.
+// and the taps shape it, the NATs translate it, its destination's downlink
+// takes it, and the destination's stack receives it. A packet the uplink, a
+// delay tap, or the downlink holds goes on on the fabric's clock.
 func (f *Fabric) carry(pkt []byte) {
 	if len(pkt) < header.IPv4MinimumSize || pkt[0]>>4 != 4 {
 		return
@@ -464,10 +466,28 @@ func (f *Fabric) crossNATs(pkt []byte) {
 	f.deliver(toNetip(header.IPv4(pkt).DestinationAddress()), pkt)
 }
 
-// deliver injects the packet into the stack that holds the destination
-// host, dropping it where none does, and notes it in the watches on its
-// destination address.
+// deliver takes the packet onto its destination's downlink, when one
+// carries the destination and not the source, and then injects it into the
+// stack that holds the destination host.
 func (f *Fabric) deliver(dst netip.Addr, pkt []byte) {
+	f.mtx.Lock()
+	d := f.downlinks[dst]
+	if d == nil || d.hosts[toNetip(header.IPv4(pkt).SourceAddress())] {
+		f.mtx.Unlock()
+		f.inject(dst, pkt)
+		return
+	}
+	held, ok := d.depart(f.clock.NowMonotonic(), len(pkt))
+	f.mtx.Unlock()
+	if ok {
+		f.clock.AfterFunc(held, func() { f.inject(dst, pkt) })
+	}
+}
+
+// inject injects the packet into the stack that holds the destination host,
+// dropping it where none does, and notes it in the watches on its
+// destination address.
+func (f *Fabric) inject(dst netip.Addr, pkt []byte) {
 	f.mtx.Lock()
 	n := f.hosts[dst]
 	if n != nil {

@@ -1,8 +1,9 @@
 // Package core is the node core's roof: the engines every node runs, core AS
 // or not, one package each beneath the roof — the data plane, the control
-// plane, link liveness, the trust engine, and the bootstrap channel. This
-// package is the check that asserts it: a walk of the roof and an import
-// rule, both run with the tests. The roof's root holds nothing else.
+// plane, link liveness, the echo responder, the trust engine, and the
+// bootstrap channel. This package is the check that asserts it: a walk of the
+// roof and an import rule, both run with the tests. The roof's root holds
+// nothing else.
 package core
 
 import (
@@ -18,7 +19,7 @@ import (
 
 // members are the core's packages. The core is frozen at this enumeration: a
 // package beneath the roof that is not one of them fails the walk.
-var members = []string{"controlplane", "dataplane", "liveness", "trust", "webpki"}
+var members = []string{"controlplane", "dataplane", "liveness", "responder", "trust", "webpki"}
 
 // TestWalk asserts the roof's shape: its root holds the check alone, and its
 // children are the core's members, each a package. The walk reads the tree at

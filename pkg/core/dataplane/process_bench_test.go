@@ -1,7 +1,10 @@
 package dataplane
 
 import (
+	"fmt"
 	"testing"
+
+	"github.com/fancl20/cion/pkg/modules/congestion/impl/brake"
 )
 
 // BenchmarkProcessPkt measures the fast path through the real processPkt,
@@ -24,6 +27,55 @@ func BenchmarkProcessPkt(b *testing.B) {
 			p := fillBenchPacket(pool.Get(), tmpl, ingress)
 			if disp := proc.processPkt(p); disp != tc.disposition {
 				b.Fatalf("warm-up disposition = %d, want %d", disp, tc.disposition)
+			}
+			pool.Put(p)
+
+			b.ReportAllocs()
+			b.ResetTimer()
+			for range b.N {
+				p := fillBenchPacket(pool.Get(), tmpl, ingress)
+				if proc.processPkt(p) != tc.disposition {
+					b.Fatal("processing drifted off the asserted path")
+				}
+				pool.Put(p)
+			}
+		})
+	}
+}
+
+// BenchmarkProcessPktMarking measures what the marks add to the fast path:
+// an ECN-capable transit packet through processPkt under the brake, with the
+// ingress link's egress queue empty, which asks the policy nothing, and full,
+// which has the policy mark every packet.
+func BenchmarkProcessPktMarking(b *testing.B) {
+	for _, full := range []bool{false, true} {
+		b.Run(fmt.Sprintf("queue_full=%v", full), func(b *testing.B) {
+			rc := benchRunConfig
+			rc.Congestion = brake.New(func(uint16) {})
+			n := newBenchNode(b, rc)
+			tc := benchCases[0]
+			tmpl := ectOf(tc.build(b, n, benchPad))
+			ingress := tc.ingress(n)
+			// The queue fills from a pool of its own, so the timed loop
+			// cycles the same few buffers BenchmarkProcessPkt does.
+			fill := newTestPool(benchEgressQSize, minHeadroom)
+			for range benchEgressQSize {
+				if !full {
+					break
+				}
+				if !ingress.Send(fillBenchPacket(fill.Get(), tmpl, ingress)) {
+					b.Fatal("the ingress link's egress queue refused a packet")
+				}
+			}
+			pool := newTestPool(64, minHeadroom)
+			proc := newPacketProcessor(n.d)
+
+			p := fillBenchPacket(pool.Get(), tmpl, ingress)
+			if disp := proc.processPkt(p); disp != tc.disposition {
+				b.Fatalf("warm-up disposition = %d, want %d", disp, tc.disposition)
+			}
+			if marked := p.RawPacket[1]&ecnMask == ecnCE; marked != full {
+				b.Fatalf("warm-up packet marked = %v, want %v", marked, full)
 			}
 			pool.Put(p)
 

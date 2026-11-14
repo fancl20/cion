@@ -21,6 +21,9 @@ import (
 type Echo struct {
 	// Reply reports an echo reply; false is an echo request.
 	Reply bool
+	// Marked reports that the packet arrived with CE in its traffic class:
+	// a node on its way read a link it crossed congested.
+	Marked bool
 	// Identifier is the echo identifier the reply returns to.
 	Identifier uint16
 	// Seq is the echo sequence number.
@@ -170,6 +173,7 @@ func parseEchoPacket(raw []byte) (Echo, *Addr, error) {
 	}
 	return Echo{
 		Reply:      scmp.TypeCode.Type() == slayers.SCMPTypeEchoReply,
+		Marked:     scn.TrafficClass&ecnMask == ecnCE,
 		Identifier: echo.Identifier,
 		Seq:        echo.SeqNumber,
 		Payload:    echo.LayerPayload(),

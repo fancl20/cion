@@ -1,3 +1,8 @@
+// Package ping is CION's SCMP-echo application, the network's probe: its
+// resident prober measures the paths the node's picks and leases ask it to,
+// and publishes their records on the node bus. The echo mechanics it rides,
+// and the client behind `cion ping`, are the ping library's; the responder
+// that answers is the node's own, part of the core.
 package ping
 
 import (
@@ -15,10 +20,9 @@ import (
 
 	"github.com/fancl20/cion/pkg/libs/bus"
 	"github.com/fancl20/cion/pkg/libs/loops"
+	pinglib "github.com/fancl20/cion/pkg/libs/ping"
 	"github.com/fancl20/cion/pkg/libs/scion"
-	"github.com/fancl20/cion/pkg/libs/scionrpc"
 	"github.com/fancl20/cion/pkg/libs/segment"
-	"github.com/fancl20/cion/pkg/libs/underlay"
 )
 
 // The prober's pacing. A destination is hot for HotWindow after its last
@@ -61,20 +65,10 @@ type Echoer interface {
 	// Send sends an echo request to the host in dst over the path.
 	Send(dst addr.IA, host netip.Addr, path *spath.Decoded, seq uint16) error
 	// Replies delivers each reply to one of the prober's own requests.
-	Replies() <-chan Reply
-	// Run delivers the replies until ctx ends.
-	Run(ctx context.Context)
+	Replies() <-chan pinglib.Reply
+	// ReadReplies reads the replies until ctx ends.
+	ReadReplies(ctx context.Context) error
 }
-
-// Reply is one echo reply to the prober's own request: its sequence number,
-// and when it arrived.
-type Reply struct {
-	Seq uint16
-	At  time.Time
-}
-
-// Resolver returns a destination's responder host, resolved over the path.
-type Resolver func(ctx context.Context, dst addr.IA, path *spath.Decoded) (netip.Addr, error)
 
 // ProberConfig configures a prober.
 type ProberConfig struct {
@@ -87,7 +81,10 @@ type ProberConfig struct {
 	// Echo sends the probes and delivers their replies.
 	Echo Echoer
 	// Resolve resolves each destination's responder host.
-	Resolve Resolver
+	Resolve pinglib.Resolver
+	// Answer hands dst's rate the reply to a probe of its path in use:
+	// whether it came back marked, and when the probe was sent.
+	Answer func(dst addr.IA, marked bool, sent time.Time)
 }
 
 // Prober is the resident ping application: it probes the paths the node's
@@ -99,19 +96,13 @@ type Prober struct {
 	closers []func() error
 	close   sync.Once
 
-	resolveReq chan resolveRequest
-	resolved   chan resolution
-
-	paths        map[bus.PathID]*probed
-	pending      map[uint16]probe
-	seq          uint16
-	hosts        map[addr.IA]netip.Addr
-	resolving    map[addr.IA]bool
-	resolveAfter map[addr.IA]time.Time
-	signaled     map[segment.LinkID]time.Time
-	tokens       float64
-	refilled     time.Time
-	changed      bool
+	paths    map[bus.PathID]*probed
+	pending  *pinglib.Pending[probe]
+	hosts    *pinglib.Hosts
+	signaled map[segment.LinkID]time.Time
+	tokens   float64
+	refilled time.Time
+	changed  bool
 }
 
 // probed is one path the prober measures: its latest request, its record,
@@ -151,38 +142,26 @@ func (ps *probed) routineAfter() time.Time {
 // probe is one probe awaiting its answer.
 type probe struct {
 	id    bus.PathID
-	sent  time.Time
+	dst   addr.IA
 	burst bool
 	// confirm reports whether the path was in use, weighed, priced, or
 	// suspect when the probe went: its routine probe's loss calls a burst.
 	confirm bool
-}
-
-type resolveRequest struct {
-	dst   addr.IA
-	paths []*spath.Decoded
-}
-
-type resolution struct {
-	dst  addr.IA
-	host netip.Addr
-	err  error
+	// inUse reports whether the path was in use when the probe went: its
+	// reply goes to the destination's rate.
+	inUse bool
 }
 
 // NewProber returns a prober over the configured topics, echoes, and
 // resolutions.
 func NewProber(cfg ProberConfig) *Prober {
 	return &Prober{
-		cfg:          cfg,
-		resolveReq:   make(chan resolveRequest, 16),
-		resolved:     make(chan resolution, 16),
-		paths:        make(map[bus.PathID]*probed),
-		pending:      make(map[uint16]probe),
-		hosts:        make(map[addr.IA]netip.Addr),
-		resolving:    make(map[addr.IA]bool),
-		resolveAfter: make(map[addr.IA]time.Time),
-		signaled:     make(map[segment.LinkID]time.Time),
-		tokens:       Budget,
+		cfg:      cfg,
+		paths:    make(map[bus.PathID]*probed),
+		pending:  pinglib.NewPending[probe](ProbeWait),
+		hosts:    pinglib.NewHosts(cfg.Resolve, resolveRetry),
+		signaled: make(map[segment.LinkID]time.Time),
+		tokens:   Budget,
 	}
 }
 
@@ -196,7 +175,8 @@ type ResidentConfig struct {
 }
 
 // NewResident binds the prober's two conns, one its echoes ride and one its
-// resolutions read alone, and returns the prober over the node's bus.
+// resolutions read alone, and returns the prober over the node's bus. The
+// replies to the probes of paths in use go to the echo conn's ECN state.
 func NewResident(cfg ResidentConfig) (*Prober, error) {
 	echoConn, err := cfg.NewConn()
 	if err != nil {
@@ -211,12 +191,11 @@ func NewResident(cfg ResidentConfig) (*Prober, error) {
 		Requests:      cfg.Bus.PathRequests(),
 		Measurements:  cfg.Bus.PathMeasurements(),
 		InterfaceDown: cfg.Bus.InterfaceDown(),
-		Echo:          &connEchoer{conn: echoConn, replies: make(chan Reply, 64)},
+		Echo:          pinglib.NewConn(echoConn),
 		Resolve: func(ctx context.Context, dst addr.IA, path *spath.Decoded) (netip.Addr, error) {
-			host, err := scionrpc.ResolveService(ctx, resolutionConn,
-				&scion.Addr{IA: dst, Service: addr.SvcCS, Path: path})
-			return host.Addr(), err
+			return pinglib.Resolve(ctx, resolutionConn, dst, path)
 		},
+		Answer: echoConn.Answer,
 	})
 	p.closers = []func() error{echoConn.Close, resolutionConn.Close}
 	return p, nil
@@ -225,8 +204,8 @@ func NewResident(cfg ResidentConfig) (*Prober, error) {
 // Run probes until ctx ends, then returns nil.
 func (p *Prober) Run(ctx context.Context) error {
 	var wg sync.WaitGroup
-	loops.Go(ctx, &wg, "ping replies", p.cfg.Echo.Run)
-	loops.Go(ctx, &wg, "ping resolutions", p.resolve)
+	loops.Go(ctx, &wg, "ping replies", p.readReplies)
+	loops.Go(ctx, &wg, "ping resolutions", p.hosts.Resolve)
 	loops.Go(ctx, &wg, "ping probes", p.probe)
 	<-ctx.Done()
 	wg.Wait()
@@ -242,26 +221,10 @@ func (p *Prober) Close() {
 	})
 }
 
-// resolve answers the probe loop's resolutions one at a time, each over the
-// paths it names in turn until one answers.
-func (p *Prober) resolve(ctx context.Context) {
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case req := <-p.resolveReq:
-			r := resolution{dst: req.dst}
-			for _, path := range req.paths {
-				if r.host, r.err = p.cfg.Resolve(ctx, req.dst, path); r.err == nil {
-					break
-				}
-			}
-			select {
-			case p.resolved <- r:
-			case <-ctx.Done():
-				return
-			}
-		}
+// readReplies reads the probes' replies until ctx ends or the read fails.
+func (p *Prober) readReplies(ctx context.Context) {
+	if err := p.cfg.Echo.ReadReplies(ctx); err != nil {
+		slog.Warn("Reading the prober's echoes", "err", err)
 	}
 }
 
@@ -285,7 +248,7 @@ func (p *Prober) probe(ctx context.Context) {
 			p.signal(s, time.Now())
 		case r := <-p.cfg.Echo.Replies():
 			p.answer(r)
-		case r := <-p.resolved:
+		case r := <-p.hosts.Landed():
 			p.resolution(r, time.Now())
 		case <-timer.C:
 		}
@@ -365,28 +328,27 @@ func (p *Prober) signal(s bus.InterfaceDownState, now time.Time) {
 	maps.Copy(p.signaled, seen)
 }
 
-// answer settles the probe a reply answers; a reply after the probe's wait
-// settles nothing, the probe already lost.
-func (p *Prober) answer(r Reply) {
-	pr, ok := p.pending[r.Seq]
+// answer settles the probe a reply answers, and hands the reply to the
+// destination's rate where the path was in use; a reply after the probe's
+// wait settles nothing, the probe already lost.
+func (p *Prober) answer(r pinglib.Reply) {
+	s, ok := p.pending.Answered(r)
 	if !ok {
 		return
 	}
-	delete(p.pending, r.Seq)
-	if ps := p.paths[pr.id]; ps != nil {
-		p.settle(ps, pr, r.At.Sub(pr.sent), false, r.At)
+	if ps := p.paths[s.Value.id]; ps != nil {
+		p.settle(ps, s.Value, s.Sample, r.At)
+	}
+	if s.Value.inUse {
+		p.cfg.Answer(s.Value.dst, r.Marked, s.Sample.At)
 	}
 }
 
 // expire settles each probe whose wait ran out as lost.
 func (p *Prober) expire(now time.Time) {
-	for seq, pr := range p.pending {
-		if now.Sub(pr.sent) < ProbeWait {
-			continue
-		}
-		delete(p.pending, seq)
-		if ps := p.paths[pr.id]; ps != nil {
-			p.settle(ps, pr, 0, true, now)
+	for _, s := range p.pending.Expire(now) {
+		if ps := p.paths[s.Value.id]; ps != nil {
+			p.settle(ps, s.Value, s.Sample, now)
 		}
 	}
 }
@@ -395,13 +357,14 @@ func (p *Prober) expire(now time.Time) {
 // first after a lost burst restarting the samples; a burst that settles
 // unanswered counts one more and has its destination's host resolved again;
 // and a lost routine probe of a path in use or suspect calls a burst.
-func (p *Prober) settle(ps *probed, pr probe, rtt time.Duration, lost bool, now time.Time) {
+func (p *Prober) settle(ps *probed, pr probe, s bus.PathSample, now time.Time) {
 	r := ps.record
+	lost := s.Lost
 	samples := r.Samples
 	if !lost && r.LostBursts > 0 {
 		samples = nil
 	}
-	samples = append(slices.Clone(samples), bus.PathSample{At: pr.sent, RTT: rtt, Lost: lost})
+	samples = append(slices.Clone(samples), s)
 	r.Samples = kept(samples, now)
 	if lost {
 		r.LastLoss = now
@@ -415,7 +378,7 @@ func (p *Prober) settle(ps *probed, pr probe, rtt time.Duration, lost bool, now 
 		ps.burstHit = ps.burstHit || !lost
 		if ps.burstLeft == 0 && ps.burstOut == 0 && !ps.burstHit {
 			r.LostBursts++
-			delete(p.hosts, r.Dst)
+			p.hosts.Forget(r.Dst)
 		}
 	case lost && pr.confirm:
 		p.startBurst(ps, now)
@@ -444,14 +407,11 @@ func (p *Prober) startBurst(ps *probed, now time.Time) {
 }
 
 // resolution adopts a resolved host, or spaces the retry of a failed one.
-func (p *Prober) resolution(r resolution, now time.Time) {
-	delete(p.resolving, r.dst)
-	if r.err != nil {
-		slog.Debug("Resolving a probed destination's responder", "isd_as", r.dst, "err", r.err)
-		p.resolveAfter[r.dst] = now.Add(resolveRetry)
-		return
+func (p *Prober) resolution(r pinglib.Resolution, now time.Time) {
+	if r.Err != nil {
+		slog.Debug("Resolving a probed destination's responder", "isd_as", r.Dst, "err", r.Err)
 	}
-	p.hosts[r.dst] = r.host
+	p.hosts.Adopt(r, now)
 }
 
 // due is one probe the dispatch may send: its path, its class, bursts first,
@@ -519,11 +479,13 @@ func (p *Prober) dispatch(now time.Time) time.Duration {
 			soonest(now.Add(time.Second / Budget))
 			break
 		}
-		host, ok := p.host(d.ps.req.Dst, now)
+		dst := d.ps.req.Dst
+		host, ok := p.hosts.Host(dst)
 		if !ok {
 			// A resolution in flight wakes the loop as it lands; a failed
 			// one is retried when its spacing elapses.
-			if retry := p.resolveAfter[d.ps.req.Dst]; retry.After(now) {
+			p.hosts.Ask(dst, p.resolutionPaths(dst), now)
+			if retry := p.hosts.RetryAt(dst); retry.After(now) {
 				soonest(retry)
 			}
 			continue
@@ -535,8 +497,8 @@ func (p *Prober) dispatch(now time.Time) time.Duration {
 			soonest(d.ps.routineAfter().Add(interval))
 		}
 	}
-	for _, pr := range p.pending {
-		soonest(pr.sent.Add(ProbeWait))
+	if at, ok := p.pending.Deadline(); ok {
+		soonest(at)
 	}
 	return max(0, next.Sub(now))
 }
@@ -561,22 +523,6 @@ func (p *Prober) interval(ps *probed, now time.Time) time.Duration {
 		}
 	}
 	return 0
-}
-
-// host returns the destination's responder host, asking the resolution loop
-// for it while it is unknown.
-func (p *Prober) host(dst addr.IA, now time.Time) (netip.Addr, bool) {
-	if h, ok := p.hosts[dst]; ok {
-		return h, true
-	}
-	if !p.resolving[dst] && !now.Before(p.resolveAfter[dst]) {
-		select {
-		case p.resolveReq <- resolveRequest{dst: dst, paths: p.resolutionPaths(dst)}:
-			p.resolving[dst] = true
-		default:
-		}
-	}
-	return netip.Addr{}, false
 }
 
 // resolutionPaths returns the requested paths to the destination in the
@@ -604,10 +550,10 @@ func (p *Prober) resolutionPaths(dst addr.IA) []*spath.Decoded {
 // send sends one due probe. A probe the conn refuses to send is lost at
 // once.
 func (p *Prober) send(d due, host netip.Addr, now time.Time) {
-	p.seq++
-	pr := probe{id: d.id, sent: now, burst: d.class == 0,
+	pr := probe{id: d.id, dst: d.ps.req.Dst, burst: d.class == 0,
 		confirm: slices.Contains([]bus.PathRole{bus.PathInUse, bus.PathWeighed, bus.PathPriced, bus.PathSuspect},
-			d.ps.req.Role)}
+			d.ps.req.Role),
+		inUse: d.ps.req.Role == bus.PathInUse}
 	p.tokens--
 	if pr.burst {
 		d.ps.burstLeft--
@@ -616,12 +562,12 @@ func (p *Prober) send(d due, host netip.Addr, now time.Time) {
 	} else {
 		d.ps.lastProbe = now
 	}
-	if err := p.cfg.Echo.Send(d.ps.req.Dst, host, d.ps.req.Path, p.seq); err != nil {
+	if err := p.pending.Send(now, pr, func(seq uint16) error {
+		return p.cfg.Echo.Send(d.ps.req.Dst, host, d.ps.req.Path, seq)
+	}); err != nil {
 		slog.Debug("Sending a probe", "isd_as", d.ps.req.Dst, "err", err)
-		p.settle(d.ps, pr, 0, true, now)
-		return
+		p.settle(d.ps, pr, bus.PathSample{At: now, Lost: true}, now)
 	}
-	p.pending[p.seq] = pr
 }
 
 // publish publishes the records when one changed.
@@ -635,47 +581,4 @@ func (p *Prober) publish() {
 	}
 	p.cfg.Measurements.Publish(bus.NewPathMeasurements(records))
 	p.changed = false
-}
-
-// connEchoer sends the prober's echoes on a conn of its own, and reads the
-// replies to them there.
-type connEchoer struct {
-	conn    *scion.Conn
-	replies chan Reply
-}
-
-func (e *connEchoer) Send(dst addr.IA, host netip.Addr, path *spath.Decoded, seq uint16) error {
-	return e.conn.WriteEchoRequestTo(&scion.Addr{
-		IA:   dst,
-		Addr: netip.AddrPortFrom(host, underlay.EndhostPort),
-		Path: path,
-	}, seq, nil)
-}
-
-func (e *connEchoer) Replies() <-chan Reply {
-	return e.replies
-}
-
-// Run reads the conn until ctx ends, whose end moves the read deadline to
-// the past, or until the conn fails.
-func (e *connEchoer) Run(ctx context.Context) {
-	stop := context.AfterFunc(ctx, func() { _ = e.conn.SetReadDeadline(time.Now()) })
-	defer stop()
-	for {
-		echo, _, err := e.conn.ReadEchoFrom()
-		if err != nil {
-			if ctx.Err() == nil {
-				slog.Warn("Reading the prober's echoes", "err", err)
-			}
-			return
-		}
-		if !echo.Reply || echo.Identifier != e.conn.LocalPort() {
-			continue
-		}
-		select {
-		case e.replies <- Reply{Seq: echo.Seq, At: time.Now()}:
-		case <-ctx.Done():
-			return
-		}
-	}
 }

@@ -48,6 +48,8 @@ type RawWriter interface {
 type Session interface {
 	// ReceiveMessage hands one received BFD control message to the session.
 	ReceiveMessage(msg *layers.BFD)
+	// Heard notes an arrival from the peer other than a control message.
+	Heard()
 	// IsUp returns the session's verdict: up until the detect multiplier
 	// expires without an arrival, up again on the next answered one.
 	IsUp() bool
@@ -86,6 +88,10 @@ type Link interface {
 	Send(p *Packet) bool
 	// SendBlocking queues the packet for sending over this link; blocking while the queue is full.
 	SendBlocking(p *Packet)
+	// EgressFill returns the share of its data egress queue the link holds, from 0 to 1.
+	EgressFill() float64
+	// EgressCapacity returns how many packets the link's egress queues hold.
+	EgressCapacity() int
 }
 
 // UnderlayProvider is a provider of connectivity over some underlay implementation. It owns the
@@ -117,7 +123,8 @@ type UnderlayProvider interface {
 
 	// NewInternalLink returns a link that addresses any host internal to the enclosing AS.
 	// Outgoing packets need to have a destination address as metadata. Incoming packets have
-	// no defined ingress ifID.
+	// no defined ingress ifID. On either kind of link, qSize is how many packets the data
+	// egress queue holds.
 	NewInternalLink(localAddr string, qSize int, metrics *InterfaceMetrics) (Link, error)
 
 	// Start puts the provider in the running state. In that state, the provider delivers

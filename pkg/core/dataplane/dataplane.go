@@ -39,6 +39,7 @@ import (
 	"github.com/scionproto/scion/pkg/slayers"
 
 	"github.com/fancl20/cion/pkg/libs/underlay"
+	"github.com/fancl20/cion/pkg/modules/congestion"
 )
 
 var (
@@ -74,9 +75,12 @@ type DataPlane struct {
 	localHost     addr.Host
 	interfaces    [math.MaxUint16 + 1]Link
 	numInterfaces int
-	macFactory    func() hash.Hash
-	underlays     []UnderlayProvider
-	running       atomic.Bool
+	// egressCapacity is how many packets the links' egress queues hold, all
+	// told.
+	egressCapacity int
+	macFactory     func() hash.Hash
+	underlays      []UnderlayProvider
+	running        atomic.Bool
 	// scmpCap rate-limits the SCMP notifications a down egress earns —
 	// the drafts' Section 6.2 — per interface per second.
 	scmpCap scmpNotifyLimiter
@@ -130,6 +134,7 @@ func NewDataPlane(
 	}
 	for _, l := range links {
 		d.interfaces[l.IfID()] = l
+		d.egressCapacity += l.EgressCapacity()
 	}
 	d.numInterfaces = len(links)
 	return d, nil
@@ -141,6 +146,11 @@ type RunConfig struct {
 	BatchSize             int
 	ReceiveBufferSize     int
 	SendBufferSize        int
+	// Congestion takes what each link writes, sets the rate each link's
+	// data egress queue drains at, and marks the packets that come back
+	// over the link as the queue's fill calls for. Nil paces and marks
+	// nothing.
+	Congestion congestion.Policy
 }
 
 func (d *DataPlane) Serve(ctx context.Context) error {
@@ -229,14 +239,14 @@ func handlePanic() {
 }
 
 // initializePacketPool calculates the size of the packet pool based on the
-// current dataplane settings and allocates all the buffers: a receive batch
-// per link, the processor queues (data, control, and slow path), and per link
-// the two egress queues and the sender's batch.
+// current dataplane settings, a buffer for every packet the plane can hold at
+// once: per link a receive batch, its egress queues, and the sender's batch,
+// and the processor queues (data, control, and slow path). The pool makes the
+// buffers as they are first needed.
 func (d *DataPlane) initPacketPool(processorQueueSize int) {
 	// collect pool size and headroom reqs
-	poolSize := d.numInterfaces*d.RunConfig.BatchSize +
-		(d.RunConfig.NumProcessors+1+d.RunConfig.NumSlowPathProcessors)*(processorQueueSize+1) +
-		d.numInterfaces*3*d.RunConfig.BatchSize
+	poolSize := d.numInterfaces*2*d.RunConfig.BatchSize + d.egressCapacity +
+		(d.RunConfig.NumProcessors+1+d.RunConfig.NumSlowPathProcessors)*(processorQueueSize+1)
 	headroom := 0
 	for _, u := range d.underlays {
 		h := u.Headroom()
@@ -253,11 +263,6 @@ func (d *DataPlane) initPacketPool(processorQueueSize int) {
 		headroom = minHeadroom
 	}
 	d.packetPool = makePacketPool(poolSize, headroom)
-	pktBuffers := make([][bufSize]byte, poolSize)
-	pktStructs := make([]Packet, poolSize)
-	for i := range poolSize {
-		d.packetPool.Put(pktStructs[i].init(&pktBuffers[i]))
-	}
 }
 
 // initializes the processing routines and queues: the data processors', the

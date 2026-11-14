@@ -29,6 +29,7 @@ import (
 	"slices"
 	"sync"
 	"sync/atomic"
+	"time"
 	"unsafe"
 
 	"golang.org/x/net/ipv4"
@@ -39,6 +40,7 @@ import (
 	"github.com/scionproto/scion/pkg/slayers/path/onehop"
 
 	"github.com/fancl20/cion/pkg/libs/underlay"
+	"github.com/fancl20/cion/pkg/modules/congestion"
 )
 
 var (
@@ -70,6 +72,9 @@ type UDPProvider struct {
 	sendBufferSize     int
 	sockets            underlay.Sockets
 	onObserved         func()
+	// policy paces the data the provider's external links write and takes
+	// what they write, nil for none.
+	policy congestion.Policy
 }
 
 // udpLink is the extension of Link implemented by all the links of this
@@ -104,6 +109,15 @@ func NewUDPProvider(
 		sockets:           sockets,
 		onObserved:        onObserved,
 	}
+}
+
+// PaceBy has the external links the provider makes from now on drain their
+// data egress queues at the policy's rates and hand it what they write; the
+// policy may outlive the provider.
+func (u *UDPProvider) PaceBy(policy congestion.Policy) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	u.policy = policy
 }
 
 // listen binds one of the provider's sockets through the socket source,
@@ -263,7 +277,7 @@ func (u *UDPProvider) newExternalLink(
 		return nil, err
 	}
 	queue := make(chan *Packet, qSize)
-	controlQueue := make(chan *Packet, qSize)
+	controlQueue := make(chan *Packet, controlQueueSize)
 	el := &externalLink{
 		name:           remoteAddr.String(),
 		egressQ:        queue,
@@ -289,12 +303,15 @@ func (u *UDPProvider) newExternalLink(
 		conn:         c,
 		name:         el.name,
 		link:         el,
+		policy:       u.policy,
+		ifID:         ifID,
 		queue:        queue,
 		controlQueue: controlQueue,
 		stopSend:     make(chan struct{}),
 		metrics:      metrics, // send() needs them.
 		receiverDone: make(chan struct{}),
 		senderDone:   make(chan struct{}),
+		bound:        &el.bound,
 	}
 	u.allConnections = append(u.allConnections, uc)
 	u.allLinks[ifID] = el
@@ -359,7 +376,7 @@ func (u *UDPProvider) NewInternalLink(
 	}
 	u.internalHashSeed = makeHashSeed()
 	queue := make(chan *Packet, qSize)
-	controlQueue := make(chan *Packet, qSize)
+	controlQueue := make(chan *Packet, controlQueueSize)
 	il := &internalLink{
 		egressQ:        queue,
 		egressControlQ: controlQueue,
@@ -399,6 +416,12 @@ type udpConnection struct {
 	senderDone   chan struct{}
 	running      atomic.Bool
 	stopped      atomic.Bool // Set by stop; a stopped connection cannot start.
+	// policy paces the connection's data and takes what it writes, as the
+	// link of interface ifID; nil for none. bound, where set, takes the
+	// packets the paced queue holds at most, zero while unpaced.
+	policy congestion.Policy
+	ifID   uint16
+	bound  *atomic.Int64
 }
 
 // start puts the connection in the running state. In that state, the
@@ -555,6 +578,8 @@ func (u *udpConnection) send(ctx context.Context, batchSize int, pool PacketPool
 	conn := u.conn
 	metrics := u.metrics
 	toWrite := 0
+	pace := pacer{room: cap(queue)}
+	var wake *time.Timer
 
 	// On the way out, whether by stop signal or by the running flag, the
 	// unsent packets and everything stranded on the queues go back to the
@@ -568,28 +593,63 @@ func (u *udpConnection) send(ctx context.Context, batchSize int, pool PacketPool
 	}()
 
 	for u.running.Load() {
+		var rate float64
+		if u.policy != nil {
+			rate = u.policy.Rate(u.ifID)
+		}
+		pace.setRate(rate, time.Now())
+		trimmed := pace.trim(queue, func(p *Packet) {
+			metrics[ClassOfSize(len(p.RawPacket))].DroppedPacketsBusyForwarder.Add(ctx, 1)
+			pool.Put(p)
+		})
+		if u.bound != nil {
+			u.bound.Store(int64(pace.keep()))
+		}
 		// Top-up our batch. The blocking wait for the first packet of a
 		// batch also watches for the stop signal, so the queues never have
-		// to be closed to unblock us.
+		// to be closed to unblock us. Paced data waits in its queue for its
+		// turn, which the wait wakes for.
 		if toWrite == 0 {
+			data, woken := (<-chan *Packet)(queue), (<-chan time.Time)(nil)
+			if wait := pace.wait(time.Now()); wait > 0 {
+				if wake == nil {
+					wake = time.NewTimer(wait)
+				} else {
+					wake.Reset(wait)
+				}
+				data, woken = nil, wake.C
+			}
 			select {
 			case p := <-controlQueue:
 				pkts[0] = p
 				toWrite = 1
-			case p := <-queue:
+			case p := <-data:
 				pkts[0] = p
 				toWrite = 1
+			case <-woken:
 			case <-u.stopSend:
 				return
 			}
+			if wake != nil {
+				wake.Stop()
+			}
+			if toWrite == 0 {
+				continue
+			}
+			pace.took(pkts[:1])
 		}
-		// Control first, at most its share of the batch, then data, then
-		// control again in the room data left: while data waits, control
-		// fills at most its share.
-		toWrite += readUpTo(controlQueue, min(batchSize/controlShare, batchSize-toWrite), false,
+		// Control first, at most its share of the batch, then data while its
+		// turn holds, then control again in the room data left: while data
+		// waits, control fills at most its share.
+		n := readUpTo(controlQueue, min(batchSize/controlShare, batchSize-toWrite), false,
 			pkts[toWrite:])
-		toWrite += readUpTo(queue, batchSize-toWrite, false, pkts[toWrite:])
-		toWrite += readUpTo(controlQueue, batchSize-toWrite, false, pkts[toWrite:])
+		pace.took(pkts[toWrite : toWrite+n])
+		toWrite += n
+		toWrite += pace.readData(queue, pkts[toWrite:], time.Now())
+		n = readUpTo(controlQueue, batchSize-toWrite, false, pkts[toWrite:])
+		pace.took(pkts[toWrite : toWrite+n])
+		toWrite += n
+		held := pace.holds(len(queue), trimmed)
 
 		// Turn the packets into underlay messages that WriteBatch can send.
 		// The connection's link names each packet's destination: the packet's
@@ -607,6 +667,13 @@ func (u *udpConnection) send(ctx context.Context, batchSize int, pool PacketPool
 			written = 0
 		}
 		UpdateOutputMetrics(ctx, metrics, pkts[:written])
+		if u.policy != nil {
+			bytes := 0
+			for _, p := range pkts[:written] {
+				bytes += len(p.RawPacket)
+			}
+			u.policy.Wrote(u.ifID, written, bytes, held)
+		}
 		for _, p := range pkts[:written] {
 			pool.Put(p)
 		}
@@ -624,6 +691,120 @@ func (u *udpConnection) send(ctx context.Context, batchSize int, pool PacketPool
 			toWrite = 0
 		}
 	}
+}
+
+// controlQueueSize is how many packets each link's control egress queue
+// holds: control traffic is light, and the sender takes it first.
+const controlQueueSize = 64
+
+// pacingSlack is how far ahead of its turn a paced connection's data may go,
+// so that a fast rate still writes in batches.
+const pacingSlack = time.Millisecond
+
+// pacedSojourn is the longest a paced connection's data waits in its queue:
+// the queue holds no more than the rate sends in it, about what an uplink's
+// buffer holds, so a brake adds no wait an uplink would not, and its drops
+// reach the senders as soon.
+const pacedSojourn = 100 * time.Millisecond
+
+// pacer holds the turn of a paced connection's next data packet: each packet
+// the connection takes, data or control, moves the turn on by the packet's
+// time at the rate, and leaves its size as the last. Without a rate, data
+// goes at once. Its room is how many packets the data egress queue holds.
+type pacer struct {
+	bps  float64
+	turn time.Time
+	size int
+	room int
+}
+
+// setRate takes the rate at now, in bits per second, zero for none. A turn
+// that has passed starts again from now, so an idle link saves no credit.
+func (p *pacer) setRate(bps float64, now time.Time) {
+	p.bps = bps
+	if p.turn.Before(now) {
+		p.turn = now
+	}
+}
+
+// wait returns how long data waits at now for its turn: none once the turn
+// lies within pacingSlack.
+func (p *pacer) wait(now time.Time) time.Duration {
+	if p.bps == 0 {
+		return 0
+	}
+	return max(0, p.turn.Sub(now.Add(pacingSlack)))
+}
+
+// took moves the turn on by the packets' time at the rate.
+func (p *pacer) took(pkts []*Packet) {
+	for _, pkt := range pkts {
+		p.size = len(pkt.RawPacket)
+		if p.bps != 0 {
+			p.turn = p.turn.Add(time.Duration(float64(p.size*8) * float64(time.Second) / p.bps))
+		}
+	}
+}
+
+// keep returns the packets a paced queue holds at most: what the rate sends
+// in pacedSojourn, at the size of the last packet the connection took, one
+// at least and the queue's room at most. Zero without a rate or before the
+// connection took a packet.
+func (p *pacer) keep() int {
+	if p.bps == 0 || p.size == 0 {
+		return 0
+	}
+	return min(p.room, max(1, int(p.bps*pacedSojourn.Seconds()/float64(8*p.size))))
+}
+
+// holds reports whether the rate holds data back, with queued packets left
+// in the queue after trimmed were dropped from it: some were, or more than
+// half of keep wait. Data that arrives in clumps waits its turn under any
+// rate, but only a rate that limits the link queues half the sojourn's
+// worth of it.
+func (p *pacer) holds(queued, trimmed int) bool {
+	return p.bps != 0 && (trimmed > 0 || 2*queued > p.keep())
+}
+
+// trim drops the oldest data the queue holds past keep, handing each to
+// drop, and returns how many it dropped.
+func (p *pacer) trim(queue <-chan *Packet, drop func(*Packet)) int {
+	keep := p.keep()
+	if keep == 0 {
+		return 0
+	}
+	dropped := 0
+	for len(queue) > keep {
+		select {
+		case pkt := <-queue:
+			drop(pkt)
+			dropped++
+		default:
+			return dropped
+		}
+	}
+	return dropped
+}
+
+// readData reads data packets from the queue into pkts without blocking:
+// as many as fit without a rate, and while the turn lies within pacingSlack
+// of now with one.
+func (p *pacer) readData(queue <-chan *Packet, pkts []*Packet, now time.Time) int {
+	if p.bps == 0 {
+		return readUpTo(queue, len(pkts), false, pkts)
+	}
+	n := 0
+	for n < len(pkts) && !p.turn.After(now.Add(pacingSlack)) {
+		select {
+		case pkt := <-queue:
+			pkts[n] = pkt
+			p.took(pkts[n : n+1])
+			n++
+		default:
+			return n
+		}
+	}
+	return n
 }
 
 // drain returns the packets stranded on one of the stopped connection's
@@ -662,10 +843,10 @@ type externalLink struct {
 	// controlQ is the processor queue of the link's control arrivals.
 	controlQ chan *Packet
 	name     string // For logs
-	egressQ  chan<- *Packet
+	egressQ  chan *Packet
 	// egressControlQ is the egress queue of the control class, which the
 	// sender takes from first.
-	egressControlQ chan<- *Packet
+	egressControlQ chan *Packet
 	metrics        *InterfaceMetrics
 	pool           PacketPool
 	bfdSession     Session
@@ -684,8 +865,11 @@ type externalLink struct {
 	observed *Observation
 	// onObserved runs after each move of observed; nil runs nothing.
 	onObserved func()
-	seed       uint32
-	ifID       uint16
+	// bound is the packets the paced data egress queue holds at most, which
+	// the sender sets; zero while unpaced.
+	bound atomic.Int64
+	seed  uint32
+	ifID  uint16
 }
 
 func (l *externalLink) start(
@@ -764,16 +948,45 @@ func (l *externalLink) Resolve(p *Packet, host addr.Host, port uint16) error {
 	return errResolveOnExternalLink
 }
 
-// Send queues the packet on the egress queue of its class, discarding it if
-// that queue is full.
+// Send queues the packet on the egress queue of its class, which drops its
+// oldest packet when full.
 func (l *externalLink) Send(p *Packet) bool {
-	return enqueue(egressQueue(p, l.egressQ, l.egressControlQ), p)
+	return l.sendOverOldest(egressQueue(p, l.egressQ, l.egressControlQ), p)
+}
+
+// sendOverOldest queues the packet on the queue over its oldest packet,
+// returning the one dropped to the pool as a busy forwarder's drop.
+func (l *externalLink) sendOverOldest(q chan *Packet, p *Packet) bool {
+	dropped, ok := enqueueOverOldest(q, p)
+	if dropped != nil {
+		l.metrics[ClassOfSize(len(dropped.RawPacket))].DroppedPacketsBusyForwarder.Add(
+			context.Background(), 1)
+		l.pool.Put(dropped)
+	}
+	return ok
 }
 
 // SendBlocking queues the packet on the egress queue of its class, blocking
 // while that queue is full.
 func (l *externalLink) SendBlocking(p *Packet) {
 	egressQueue(p, l.egressQ, l.egressControlQ) <- p
+}
+
+// EgressCapacity returns how many packets the link's egress queues hold.
+func (l *externalLink) EgressCapacity() int {
+	return cap(l.egressQ) + cap(l.egressControlQ)
+}
+
+// EgressFill returns how full the link's data egress queue is: the share of
+// its packets the queue holds, or, while paced, the share of its bound,
+// whichever is greater.
+func (l *externalLink) EgressFill() float64 {
+	n := float64(len(l.egressQ))
+	fill := n / float64(cap(l.egressQ))
+	if bound := l.bound.Load(); bound > 0 {
+		fill = max(fill, min(1, n/float64(bound)))
+	}
+	return fill
 }
 
 func (l *externalLink) receive(size int, srcAddr *net.UDPAddr, p *Packet) {
@@ -794,10 +1007,15 @@ func (l *externalLink) receive(size int, srcAddr *net.UDPAddr, p *Packet) {
 
 	p.Link = l
 
-	switch classOf(p.RawPacket, false) {
-	case classLink:
+	class := classOf(p.RawPacket, false)
+	if class == classLink {
 		l.receiveBFD(sc, p)
 		return
+	}
+	if l.bfdSession != nil {
+		l.bfdSession.Heard()
+	}
+	switch class {
 	case classControl:
 		p.control = true
 		queueArrival(l.controlQ, p, l.pool, metrics, sc)
@@ -989,11 +1207,17 @@ func (l *internalLink) egressAddr(p *Packet) *net.UDPAddr {
 	return (*net.UDPAddr)(p.RemoteAddr)
 }
 
-// Send queues the packet on the egress queue of its class, discarding it if
-// that queue is full. The packet's destination is already in the packet's
-// meta-data.
+// Send queues the packet on the egress queue of its class, which drops its
+// oldest packet when full. The packet's destination is already in the
+// packet's meta-data.
 func (l *internalLink) Send(p *Packet) bool {
-	return enqueue(egressQueue(p, l.egressQ, l.egressControlQ), p)
+	dropped, ok := enqueueOverOldest(egressQueue(p, l.egressQ, l.egressControlQ), p)
+	if dropped != nil {
+		l.metrics[ClassOfSize(len(dropped.RawPacket))].DroppedPacketsBusyForwarder.Add(
+			context.Background(), 1)
+		l.pool.Put(dropped)
+	}
+	return ok
 }
 
 // SendBlocking queues the packet on the egress queue of its class, blocking
@@ -1001,6 +1225,16 @@ func (l *internalLink) Send(p *Packet) bool {
 // packet's meta-data.
 func (l *internalLink) SendBlocking(p *Packet) {
 	egressQueue(p, l.egressQ, l.egressControlQ) <- p
+}
+
+// EgressCapacity returns how many packets the link's egress queues hold.
+func (l *internalLink) EgressCapacity() int {
+	return cap(l.egressQ) + cap(l.egressControlQ)
+}
+
+// EgressFill returns the share of its data egress queue the link holds.
+func (l *internalLink) EgressFill() float64 {
+	return float64(len(l.egressQ)) / float64(cap(l.egressQ))
 }
 
 func (l *internalLink) receive(size int, srcAddr *net.UDPAddr, p *Packet) {
