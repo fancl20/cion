@@ -499,6 +499,44 @@ func TestProberHalfOpen(t *testing.T) {
 	})
 }
 
+// TestProberRecoveryLeavesTheEdgeOut checks a half-open burst that ends an
+// outage: its first answer restarts the samples, and the burst's probes lost
+// after it, the outage's edge, count for nothing.
+func TestProberRecoveryLeavesTheEdgeOut(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		e, r := newFakeEcho(), &fakeResolver{}
+		path := &spath.Decoded{}
+		prober(t, e, r, func(b *bus.Bus) {
+			request(b, dstA, entryOf("path", dstA, path, bus.PathInUse, time.Now()))
+			time.Sleep(time.Second) // the heartbeat at 0s answered
+			synctest.Wait()
+			e.lose(path)
+			time.Sleep(8 * time.Second) // the heartbeat at 5s lost; the burst from 6s settles by 7.8s
+			synctest.Wait()
+			if rec, _ := record(b, "path"); rec.LostBursts != 1 {
+				t.Fatalf("record = %+v, want one burst lost", rec)
+			}
+			entry := entryOf("path", dstA, path, bus.PathHalfOpen, time.Now())
+			entry.Due = time.Now().Add(2 * time.Second)
+			request(b, dstA, entry)
+			time.Sleep(time.Second)
+			e.recover(path)
+			time.Sleep(time.Second + 100*time.Millisecond) // the burst's first probe, at its due time, answered
+			synctest.Wait()
+			e.lose(path)
+			time.Sleep(2 * time.Second) // the burst's last probe lost by its due time and 1.8s
+			synctest.Wait()
+			if got := e.sends(path); got != 2+2*BurstProbes {
+				t.Fatalf("probes = %d, want two heartbeats and two bursts", got)
+			}
+			rec, _ := record(b, "path")
+			if rec.LostBursts != 0 || len(rec.Samples) != 1 || rec.Samples[0].Lost || !rec.LastLoss.Before(rec.LastAnswer) {
+				t.Errorf("record = %+v, want the burst's answer alone", rec)
+			}
+		})
+	})
+}
+
 // TestProberBudget checks the node-wide budget: a full bucket's twenty
 // probes at once, the rest as it refills.
 func TestProberBudget(t *testing.T) {

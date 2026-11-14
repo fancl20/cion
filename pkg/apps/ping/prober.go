@@ -126,6 +126,10 @@ type probed struct {
 	burstNext time.Time
 	burstOut  int
 	burstHit  bool
+	// recovering reports whether an answer of the running burst restarted
+	// the samples after a lost burst: the burst's losses then describe the
+	// edge of the outage the answer ended.
+	recovering bool
 	// halfOpened is the due time of the half-open burst already sent.
 	halfOpened time.Time
 }
@@ -354,31 +358,37 @@ func (p *Prober) expire(now time.Time) {
 }
 
 // settle records one probe's outcome. An answer resets the bursts lost, the
-// first after a lost burst restarting the samples; a burst that settles
-// unanswered counts one more and has its destination's host resolved again;
-// and a lost routine probe of a path in use or suspect calls a burst.
+// first after a lost burst restarting the samples, and a burst's leaving its
+// burst's other losses out: they describe the edge of the outage it ended. A
+// burst that settles unanswered counts one more and has its destination's
+// host resolved again; and a lost routine probe of a path in use or suspect
+// calls a burst.
 func (p *Prober) settle(ps *probed, pr probe, s bus.PathSample, now time.Time) {
 	r := ps.record
 	lost := s.Lost
-	samples := r.Samples
 	if !lost && r.LostBursts > 0 {
-		samples = nil
+		r.Samples = nil
+		ps.recovering = pr.burst
 	}
-	samples = append(slices.Clone(samples), s)
-	r.Samples = kept(samples, now)
-	if lost {
-		r.LastLoss = now
-	} else {
-		r.LastAnswer = now
-		r.LostBursts = 0
+	if !lost || !pr.burst || !ps.recovering {
+		r.Samples = kept(append(slices.Clone(r.Samples), s), now)
+		if lost {
+			r.LastLoss = now
+		} else {
+			r.LastAnswer = now
+			r.LostBursts = 0
+		}
 	}
 	switch {
 	case pr.burst:
 		ps.burstOut--
 		ps.burstHit = ps.burstHit || !lost
-		if ps.burstLeft == 0 && ps.burstOut == 0 && !ps.burstHit {
-			r.LostBursts++
-			p.hosts.Forget(r.Dst)
+		if ps.burstLeft == 0 && ps.burstOut == 0 {
+			ps.recovering = false
+			if !ps.burstHit {
+				r.LostBursts++
+				p.hosts.Forget(r.Dst)
+			}
 		}
 	case lost && pr.confirm:
 		p.startBurst(ps, now)

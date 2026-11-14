@@ -169,7 +169,9 @@ type PathRecord struct {
 	// Samples are the path's last probes, oldest first: every probe sent
 	// within the readings' span, and at least the last PathSamples. The
 	// first answer after a lost burst restarts them: the probes lost before
-	// it describe an outage that ended.
+	// it describe an outage that ended. When a burst's probe gave that
+	// answer, the burst's other losses count for nothing either: they
+	// describe the outage's edge.
 	Samples []PathSample
 	// LastAnswer is when the path last answered; zero while it has not.
 	LastAnswer time.Time
