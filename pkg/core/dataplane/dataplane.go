@@ -257,8 +257,7 @@ func (d *DataPlane) initPacketPool(processorQueueSize int) {
 	d.underlayHeadroom = headroom
 
 	// We round-up the minimum headroom generously so that the extra room is sufficient to allow the
-	// quoting of most packets by SCMP cheaply (that is, without moving the bytes). Our packet
-	// buffers are sized at 9000 bytes while in most cases the interface MTU is lower.
+	// quoting of most packets by SCMP cheaply (that is, without moving the bytes).
 	if headroom < minHeadroom {
 		headroom = minHeadroom
 	}

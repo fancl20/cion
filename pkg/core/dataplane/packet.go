@@ -29,12 +29,8 @@ import (
 )
 
 const (
-	// TODO(karampok). Investigate whether that value should be higher.  In
-	// theory, PayloadLen in SCION header is 16 bits long, supporting a maximum
-	// payload size of 64KB. At the moment we are limited by Ethernet size
-	// usually ~1500B, but 9000B to support jumbo frames.
-	// TODO(multi_underlay): The buffer size should be a function of the collection of
-	// underlays (the largest frame size of all the enabled ones).
+	// bufSize holds a datagram of a standard 1500-byte MTU beside minHeadroom; a larger one,
+	// such as a jumbo frame, is truncated and dropped.
 	bufSize = underlay.BufferSize
 
 	// For SCMP packet quoting. A strict minimum of 28 is required. Much more is recommended.

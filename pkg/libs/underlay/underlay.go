@@ -12,9 +12,10 @@ import (
 	"strconv"
 )
 
-// BufferSize is the largest datagram the underlay carries, a jumbo frame: the
-// data plane's packet buffers and the SCION sockets' reads are this size.
-const BufferSize = 9000
+// BufferSize is the size of the data plane's packet buffers and the SCION
+// sockets' reads: a datagram of a standard 1500-byte MTU, which every CION
+// packet fits, beside the data plane's headroom.
+const BufferSize = 2048
 
 // ControlDSCP is the DSCP that marks the node's own control-plane traffic in
 // the SCION header's traffic class: CS6, network control. The node's data
