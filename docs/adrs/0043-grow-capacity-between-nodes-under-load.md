@@ -31,6 +31,10 @@ Nothing in CION measures bandwidth or reacts to load:
     prices, so they can retire the link the demand needs, or stop announcing
     its routes: the capacity between two nodes shrinks where their traffic
     needs more.
+*   **Load takes links down.** A link's liveness is its BFD control messages
+    alone, which a full queue drops with the rest: the link goes down while its
+    traffic still crosses it
+    ([scionproto/scion#4019](https://github.com/scionproto/scion/issues/4019)).
 
 The measured topology also crowds onto the node least able to carry it: one
 with short round trips and a thin uplink. Its round trips beat many prices,
@@ -117,11 +121,22 @@ To signal the load to the senders:
     packets that come back over a link whose queue in the node holds data, as
     Frame Relay's backward notification and ATM's ABR service did.
 
+To keep a loaded link up:
+
+*   **BFD's asynchronous mode, as today:** a link goes down after a detection
+    time without a control message from its peer.
+*   **Every arrival keeps a link up:** the detection time runs from any packet
+    from the peer.
+*   **Demand mode, kept up by proof:** when load loses a link's control
+    messages, its session asks the peer to stop them, and the echoes that
+    still cross the link keep it up.
+
 ## Decision outcome
 
-Chosen options: **detect, signal, and react**, detecting with **a brake at
-each link, read from echoes to the next hop**, and signaling as **the node
-that holds the excess marks what returns**, realized as follows:
+Chosen options: **detect, signal, and react**, detecting with **a brake at each
+link, read from echoes to the next hop**, signaling as **the node that holds the
+excess marks what returns**, and keeping links up in **demand mode, kept up by
+proof**, realized as follows:
 
 1.  **The capacity between two nodes grows under lasting load.** While a
     load is new, the network keeps the links it crosses under their limits
@@ -198,6 +213,14 @@ that holds the excess marks what returns**, realized as follows:
     back, counts for nothing, and a reading with no cool sample keeps its
     last value. Load then moves leases, which is the path policy's work, and
     never retires a link or withdraws a route.
+6.  **Load never takes a link down.** Taking down a link the load crosses
+    shrinks the capacity the load lacks. When a link's control messages stop
+    arriving while the congestion module's echoes still cross it, either way,
+    its BFD session switches to RFC 5880's demand mode instead of going down:
+    the peer stops its periodic control messages, which a loaded link loses
+    with the rest, and the echoes keep the link up. Once they stop, the session
+    returns to asynchronous mode. A link that carries neither an echo nor a
+    control message for a detection time goes down, as before.
 
 This narrows
 [ADR-0035](/docs/adrs/0035-choose-paths-by-measured-health.md)'s decision 6,
@@ -206,8 +229,11 @@ the leases on it. It narrows
 [ADR-0038](/docs/adrs/0038-read-round-trips-at-their-80th-percentile-over-five-minutes.md)'s
 decision 3, so that readings take cool samples alone. It extends ADR-0039's
 principle 2, so that a link is also worth the capacity it adds, and its
-principle 5, so that a link that carried traffic retires on a drain. The cap
-on a node's links stays as ADR-0017 and ADR-0039 set it.
+principle 5, so that a link that carried traffic retires on a drain. It narrows
+[ADR-0019](/docs/adrs/0019-give-link-liveness-a-core-package-of-its-own.md)'s
+review of liveness against the data-plane draft's Section 6.1, so that a
+loaded link's session leaves its asynchronous mode. The cap on a node's
+links stays as ADR-0017 and ADR-0039 set it.
 
 ### Positive consequences
 
@@ -225,6 +251,8 @@ on a node's links stays as ADR-0017 and ADR-0039 set it.
 *   A link leaves only once its traffic has fit elsewhere, at the load it
     served, so a busy hour neither prices links nor retires one bought for
     it.
+*   Once the brakes hold its line, load does not take down a link its
+    traffic still crosses.
 
 ### Negative consequences
 
@@ -248,6 +276,12 @@ on a node's links stays as ADR-0017 and ADR-0039 set it.
 *   A drain that fails moves its leases twice, and a link that served is held
     through its drain, its upkeep paid meanwhile.
 *   A node that does not slow goes unchecked until a breaker stands.
+*   A loaded link's liveness rests on the congestion module's echoes and the
+    neighbor's responder; an idle link keeps asynchronous mode, and behind a
+    congested line still loses its control messages.
+*   In the first seconds of a sudden overload, before the brakes engage, a
+    link that no packet crosses for a detection time still goes down, and
+    comes back once they do.
 
 ## Pros and cons of the options
 
@@ -351,3 +385,29 @@ on a node's links stays as ADR-0017 and ADR-0039 set it.
 *   Bad, because a mark is exact only where the returning traffic rides the
     reverse of the path it answers, and a sender whose traffic sees no return
     hears only through its probes' replies.
+
+### BFD's asynchronous mode, as today
+
+*   Good, because it is the data-plane draft's mode, and upstream's.
+*   Bad, because a loaded link loses its control messages with its traffic, and
+    goes down while the traffic still crosses it
+    ([scionproto/scion#4019](https://github.com/scionproto/scion/issues/4019)).
+    In the hub lab, ten minutes of load took down up to 14 links.
+
+### Every arrival keeps a link up
+
+*   Good, because it needs nothing new on the wire, and in the hub lab no link
+    went down under load.
+*   Bad, because it departs from RFC 5880, whose asynchronous mode counts
+    control messages alone, and it hooks the data plane's receive path into the
+    sessions.
+
+### Demand mode, kept up by proof
+
+*   Good, because it stays within RFC 5880: demand mode takes its proof from
+    the peer's traffic or from echoes, and lets the two directions prove
+    themselves differently. The brake's echoes already cross every busy link,
+    and the data plane stays out of liveness.
+*   Bad, because a loaded link's liveness rests on the brake's echoes and the
+    neighbor's responder, and an idle link behind a congested line, which no
+    echo crosses, still goes down as in asynchronous mode.
