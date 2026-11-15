@@ -39,13 +39,15 @@ import (
 // setupControlPlane brings up the node's control plane, in phases: the state
 // databases and keys — the link store among them — the trust role (the
 // role's parts, the products the later phases take, and the role's own
-// loops), the messenger (trust engine and peer client), the BFD health
-// monitor, beaconing (the lookup, beaconer, and path provider closing their
-// cycle), the wiring of the loaded topology provider over what the phases
-// built, the control endpoint's socket and the provider's mounted services,
-// the echo responder, and the congestion module with the conns its echoes
-// ride. Each phase registers what it acquires with the node's group as it
-// goes, so a failed boot's Stop releases a partial node.
+// loops), the messenger (trust engine and peer client), the congestion module
+// with the conns its echoes ride, the BFD health monitor, which reads the
+// module's echoes, beaconing (the lookup, beaconer, and path provider closing
+// their cycle), the wiring of the loaded topology provider over what the
+// phases built, the control endpoint's socket and the provider's mounted
+// services, and the echo responder, which hands the module the echo requests
+// its neighbors send across their links. Each phase registers what it
+// acquires with the node's group as it goes, so a failed boot's Stop releases
+// a partial node.
 func (n *node) setupControlPlane(ctx context.Context) error {
 	if err := n.openState(ctx); err != nil {
 		return err
@@ -55,6 +57,9 @@ func (n *node) setupControlPlane(ctx context.Context) error {
 	}
 	n.setupMembership()
 	if err := n.buildMessenger(); err != nil {
+		return err
+	}
+	if err := n.assembleCongestion(); err != nil {
 		return err
 	}
 	if err := n.assembleMonitor(); err != nil {
@@ -67,10 +72,7 @@ func (n *node) setupControlPlane(ctx context.Context) error {
 	if err := n.assembleEndpoint(); err != nil {
 		return err
 	}
-	if err := n.assembleResponder(); err != nil {
-		return err
-	}
-	return n.assembleCongestion()
+	return n.assembleResponder()
 }
 
 // storeLockTimeout bounds the wait on a database's file lock. A node holds
@@ -539,13 +541,15 @@ func (n *node) wireTopology() {
 // which makes answering a service of the node itself. It is assembled
 // before the first data plane generation, so every generation finds a
 // session per serving link, and the file provider's nodes get them too:
-// the monitor reads the store, not the provider. Each change of its
-// verdicts nudges the link state.
+// the monitor reads the store, not the provider. Its sessions read the
+// congestion module's echoes to keep a loaded link up in demand mode, and
+// each change of its verdicts nudges the link state.
 func (n *node) assembleMonitor() error {
 	monitor, err := liveness.NewHealthMonitor(liveness.HealthMonitorConfig{
 		IA:       n.ident.ia,
 		MACKey:   n.ident.key,
 		Store:    n.linkStore,
+		Echoed:   n.congestion.Echoed,
 		Interval: n.cfg.Pacing.BFD,
 		OnChange: n.nudgeLinkState,
 	})

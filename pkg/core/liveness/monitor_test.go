@@ -102,7 +102,7 @@ func TestMonitorSessionSurvivesSwap(t *testing.T) {
 	// The first generation attaches its writer and the session runs.
 	first := &fakeWriter{}
 	s.SetRawWriter(first)
-	s.tick()
+	s.tick(time.Time{})
 	if s.Transmitted() == 0 {
 		t.Fatal("the session never transmitted")
 	}
@@ -115,7 +115,7 @@ func TestMonitorSessionSurvivesSwap(t *testing.T) {
 	second := &fakeWriter{}
 	s.SetRawWriter(second)
 	before := s.Transmitted()
-	s.tick()
+	s.tick(time.Time{})
 	if s != m.Session(rebound) {
 		t.Fatal("the swap minted a second session for the interface")
 	}
@@ -237,7 +237,7 @@ func TestMonitorRetargetsSession(t *testing.T) {
 	w := &fakeWriter{}
 	s := m.Session(entry)
 	s.SetRawWriter(w)
-	s.tick()
+	s.tick(time.Time{})
 	scn, _ := decodeControl(t, lastPacket(t, w))
 	dst, err := scn.DstAddr()
 	if err != nil {
@@ -253,4 +253,55 @@ func (m *HealthMonitor) sessionsOf() int {
 	m.mtx.Lock()
 	defer m.mtx.Unlock()
 	return len(m.sessions)
+}
+
+// TestMonitorHandsEachSessionItsEchoes checks that each interval hands a
+// session when an echo last crossed its own link: at the detection time,
+// the session whose link carried an echo within the interval switches to
+// demand mode, and the one whose link carried none goes Down. Fake time in
+// the bubble holds still between the ticks.
+func TestMonitorHandsEachSessionItsEchoes(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		echoed := make(map[uint16]time.Time)
+		store := memory.New()
+		m, err := NewHealthMonitor(HealthMonitorConfig{
+			IA:     bfdIA,
+			MACKey: []byte("0123456789abcdef"),
+			Store:  store,
+			Echoed: func(ifID uint16) time.Time { return echoed[ifID] },
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		echoing, silent := servingEntry(bfdPeer), servingEntry(addr.MustIAFrom(20, 0xfd00000000a3))
+		silent.Local = netip.MustParseAddrPort("127.0.0.1:40003")
+		silent.Remote = netip.MustParseAddrPort("127.0.0.1:40004")
+		writers := make(map[uint16]*fakeWriter)
+		for _, e := range []*links.Link{echoing, silent} {
+			if err := store.Insert(context.Background(), e); err != nil {
+				t.Fatal(err)
+			}
+			m.reconcile()
+			s := m.Session(e)
+			writers[e.IfID] = &fakeWriter{}
+			s.SetRawWriter(writers[e.IfID])
+			for _, remote := range []layers.BFDState{
+				layers.BFDStateDown, layers.BFDStateInit, layers.BFDStateUp,
+			} {
+				s.ReceiveMessage(peerMessage(remote, 0x2a2a2a2a, s.myDisc))
+			}
+		}
+
+		time.Sleep(time.Duration(BFDDetectMultiplier) * BFDTransmissionInterval)
+		echoed[echoing.IfID] = time.Now()
+		m.tickAll()
+		if _, bfd := decodeControl(t, lastPacket(t, writers[echoing.IfID])); bfd.State != layers.BFDStateUp ||
+			!bfd.Demand {
+			t.Errorf("the echoing link's session: state %v, Demand bit %v, want Up in demand mode",
+				bfd.State, bfd.Demand)
+		}
+		if _, bfd := decodeControl(t, lastPacket(t, writers[silent.IfID])); bfd.State != layers.BFDStateDown {
+			t.Errorf("the silent link's session: state %v, want Down", bfd.State)
+		}
+	})
 }

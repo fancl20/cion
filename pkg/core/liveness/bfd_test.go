@@ -109,7 +109,7 @@ func decodeControl(
 // state and timers.
 func TestBFDControlPacketFrame(t *testing.T) {
 	s, w := newTestSession(t)
-	s.tick()
+	s.tick(time.Time{})
 
 	scn, bfd := decodeControl(t, lastPacket(t, w))
 	if scn.PathType != onehop.PathType {
@@ -197,7 +197,7 @@ func TestBFDSessionStateMachine(t *testing.T) {
 			w := &fakeWriter{}
 			s.SetRawWriter(w)
 			s.ReceiveMessage(peerMessage(tc.remote, 0x2a2a2a2a, s.myDisc))
-			s.tick()
+			s.tick(time.Time{})
 			_, bfd := decodeControl(t, lastPacket(t, w))
 			if bfd.State != tc.want || bfd.Diagnostic != tc.diag {
 				t.Errorf("state/diagnostic = %v/%v, want %v/%v",
@@ -237,14 +237,14 @@ func TestBFDVerdictDownAtSilence(t *testing.T) {
 		s := sessionIn(t, layers.BFDStateUp)
 		w := &fakeWriter{}
 		s.SetRawWriter(w)
-		s.tick()
+		s.tick(time.Time{})
 		if !s.IsUp() {
 			t.Fatal("the verdict went down before the silence window passed")
 		}
 
 		time.Sleep(time.Duration(BFDDetectMultiplier) * BFDTransmissionInterval)
 		before := len(w.packets)
-		s.tick()
+		s.tick(time.Time{})
 		if s.IsUp() {
 			t.Fatal("the verdict stayed up past the detection time's silence")
 		}
@@ -286,7 +286,7 @@ func TestBFDVerdictSettles(t *testing.T) {
 			// the detection time, so the verdict never goes down.
 			s.ReceiveMessage(peerMessage(layers.BFDStateUp, 0x2a2a2a2a, s.myDisc))
 			time.Sleep(2 * BFDTransmissionInterval)
-			s.tick()
+			s.tick(time.Time{})
 			time.Sleep(BFDTransmissionInterval)
 			if got := s.IsUp(); got != last {
 				flips++
@@ -310,12 +310,12 @@ func TestBFDStartupGrace(t *testing.T) {
 			t.Fatal("a new session's verdict is down; a node restarts with every link up")
 		}
 		time.Sleep(time.Duration(BFDDetectMultiplier)*BFDTransmissionInterval - time.Nanosecond)
-		s.tick()
+		s.tick(time.Time{})
 		if !s.IsUp() {
 			t.Fatal("the verdict fell inside the startup grace")
 		}
 		time.Sleep(time.Nanosecond)
-		s.tick()
+		s.tick(time.Time{})
 		if s.IsUp() {
 			t.Fatal("the verdict stayed up past the grace with no handshake")
 		}
@@ -363,8 +363,8 @@ func TestBFDSessionPair(t *testing.T) {
 		b.SetRawWriter(ba)
 		step := func() {
 			time.Sleep(BFDTransmissionInterval)
-			a.tick()
-			b.tick()
+			a.tick(time.Time{})
+			b.tick(time.Time{})
 			ab.deliver(b)
 			ba.deliver(a)
 		}
@@ -406,12 +406,333 @@ func TestBFDSessionPair(t *testing.T) {
 	})
 }
 
+// upSession returns a session Up whose peer last reported Up, writing to a
+// fresh writer: the handshake's end, in asynchronous mode.
+func upSession(t *testing.T) (*BFDSession, *fakeWriter) {
+	t.Helper()
+	s := sessionIn(t, layers.BFDStateUp)
+	s.ReceiveMessage(peerMessage(layers.BFDStateUp, 0x2a2a2a2a, s.myDisc))
+	w := &fakeWriter{}
+	s.SetRawWriter(w)
+	return s, w
+}
+
+// peerUp is the peer's Up control message with its Demand, Poll, and Final
+// bits as given.
+func peerUp(s *BFDSession, demand, poll, final bool) *layers.BFD {
+	msg := peerMessage(layers.BFDStateUp, 0x2a2a2a2a, s.myDisc)
+	msg.Demand, msg.Poll, msg.Final = demand, poll, final
+	return msg
+}
+
+// detectionTime is the test sessions' detection time.
+const detectionTime = time.Duration(BFDDetectMultiplier) * BFDTransmissionInterval
+
+// TestBFDEntersDemandModeOnEchoes checks the switch to demand mode: a session
+// hearing its peer's control messages sets no Demand bit, however fresh its
+// echoes, and once the detection time passes without one, it sets the bit,
+// with the Poll bit, and stays Up only if it is Up, its peer last reported
+// Up, and an echo crossed within the last interval; otherwise it goes Down.
+// Fake time in the bubble holds still between the ticks, so an echo's age is
+// exact.
+func TestBFDEntersDemandModeOnEchoes(t *testing.T) {
+	down, initial, up := layers.BFDStateDown, layers.BFDStateInit, layers.BFDStateUp
+	for _, tc := range []struct {
+		name string
+		// remote is the peer's states in the order they arrive.
+		remote []layers.BFDState
+		// age is the last echo's age at the detection time; negative when
+		// none crossed.
+		age  time.Duration
+		want layers.BFDState
+	}{
+		{"an echo just now", []layers.BFDState{down, initial, up}, 0, up},
+		{"an echo just inside the interval", []layers.BFDState{down, initial, up},
+			BFDTransmissionInterval - time.Nanosecond, up},
+		{"an echo an interval old", []layers.BFDState{down, initial, up},
+			BFDTransmissionInterval, down},
+		{"no echo", []layers.BFDState{down, initial, up}, -1, down},
+		{"the peer last reported Init", []layers.BFDState{down, initial}, 0, down},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				s, w := newTestSession(t)
+				for _, remote := range tc.remote {
+					s.ReceiveMessage(peerMessage(remote, 0x2a2a2a2a, s.myDisc))
+				}
+				s.tick(time.Now())
+				if _, bfd := decodeControl(t, lastPacket(t, w)); bfd.Demand || bfd.Poll {
+					t.Fatal("a session hearing its peer's control messages set the Demand or Poll bit")
+				}
+				time.Sleep(detectionTime)
+				var echo time.Time
+				if tc.age >= 0 {
+					echo = time.Now().Add(-tc.age)
+				}
+				s.tick(echo)
+				_, bfd := decodeControl(t, lastPacket(t, w))
+				if bfd.State != tc.want {
+					t.Fatalf("state at the detection time = %v, want %v", bfd.State, tc.want)
+				}
+				if demand := tc.want == up; bfd.Demand != demand || bfd.Poll != demand {
+					t.Errorf("Demand/Poll bits = %v/%v, want %v/%v", bfd.Demand, bfd.Poll, demand, demand)
+				}
+			})
+		})
+	}
+}
+
+// TestBFDPollSequence checks the Poll sequence a change of the Demand bit
+// runs (Section 6.5): the session's packets carry the Poll bit at every
+// interval until the peer's Final arrives; a Poll from the peer is answered
+// at once with the Final bit and no Poll, even while the session's own
+// sequence runs; and once the sequence ends, a session whose peer set its
+// Demand bit sends nothing. The intervals are fake-time sleeps in the bubble.
+func TestBFDPollSequence(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		s, w := upSession(t)
+		time.Sleep(detectionTime)
+		s.tick(time.Now())
+		for range 3 {
+			if _, bfd := decodeControl(t, lastPacket(t, w)); !bfd.Poll || !bfd.Demand {
+				t.Fatalf("Poll/Demand bits = %v/%v, want both set until the peer's Final",
+					bfd.Poll, bfd.Demand)
+			}
+			time.Sleep(BFDTransmissionInterval)
+			s.tick(time.Now())
+		}
+
+		before := len(w.packets)
+		s.ReceiveMessage(peerUp(s, true, true, false))
+		if len(w.packets) != before+1 {
+			t.Fatal("the peer's Poll went unanswered")
+		}
+		if _, bfd := decodeControl(t, lastPacket(t, w)); !bfd.Final || bfd.Poll {
+			t.Fatalf("the answer's Final/Poll bits = %v/%v, want set/clear", bfd.Final, bfd.Poll)
+		}
+
+		s.ReceiveMessage(peerUp(s, true, false, true))
+		before = len(w.packets)
+		for range 3 {
+			time.Sleep(BFDTransmissionInterval)
+			s.tick(time.Now())
+		}
+		if sent := len(w.packets) - before; sent != 0 {
+			t.Fatalf("%d packets once the sequence ended, want none while the peer set its Demand bit",
+				sent)
+		}
+	})
+}
+
+// demandSession returns a session in demand mode whose peer set its own
+// Demand bit and answered the session's Poll: neither sends, and the echoes
+// alone keep the session up.
+func demandSession(t *testing.T) (*BFDSession, *fakeWriter) {
+	t.Helper()
+	s, w := upSession(t)
+	time.Sleep(detectionTime)
+	s.tick(time.Now())
+	s.ReceiveMessage(peerUp(s, true, false, true))
+	return s, w
+}
+
+// TestBFDLeavesDemandMode checks the way back to asynchronous mode: a session
+// in demand mode stays Up on its echoes, however long its peer is silent,
+// until its link carries no echo for an interval; then it clears the Demand
+// bit and polls, and the peer's Final, its periodic messages resumed, leaves
+// it Up in asynchronous mode, while with no answer it goes Down once the
+// detection time from its last echo passes, as soon as asynchronous mode
+// would. The intervals are fake-time sleeps in the bubble.
+func TestBFDLeavesDemandMode(t *testing.T) {
+	for _, answered := range []bool{true, false} {
+		t.Run(fmt.Sprintf("answered=%v", answered), func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				s, w := demandSession(t)
+				for range 10 {
+					time.Sleep(BFDTransmissionInterval)
+					s.tick(time.Now())
+				}
+				if !s.IsUp() {
+					t.Fatal("a session in demand mode went down while echoes crossed its link")
+				}
+
+				echo := time.Now()
+				time.Sleep(BFDTransmissionInterval)
+				before := len(w.packets)
+				s.tick(echo)
+				if len(w.packets) != before+1 {
+					t.Fatal("the session sent nothing as its echoes stopped")
+				}
+				if _, bfd := decodeControl(t, lastPacket(t, w)); bfd.Demand || !bfd.Poll {
+					t.Fatalf("Demand/Poll bits = %v/%v, want clear/set", bfd.Demand, bfd.Poll)
+				}
+				if answered {
+					s.ReceiveMessage(peerUp(s, true, false, true))
+					for range 2 * BFDDetectMultiplier {
+						time.Sleep(BFDTransmissionInterval)
+						s.ReceiveMessage(peerUp(s, true, false, false))
+						s.tick(echo)
+					}
+					if !s.IsUp() || s.demandOf() {
+						t.Fatalf("answered: up = %v, Demand bit = %v, want up in asynchronous mode",
+							s.IsUp(), s.demandOf())
+					}
+					return
+				}
+				time.Sleep(BFDTransmissionInterval)
+				s.tick(echo)
+				if !s.IsUp() {
+					t.Fatal("the session went down before the detection time from its last echo")
+				}
+				time.Sleep(BFDTransmissionInterval)
+				s.tick(echo)
+				if s.IsUp() {
+					t.Fatal("the session stayed up past the detection time from its last echo")
+				}
+				if got := s.diagnosticOf(); got != layers.BFDDiagnosticTimeExpired {
+					t.Errorf("diagnostic = %v, want Control Detection Time Expired", got)
+				}
+			})
+		})
+	}
+}
+
+// TestBFDEchoesCountInDemandModeAlone checks that the echoes stand in for
+// control messages only in demand mode: a session Up whose peer last
+// reported Init cannot switch, so it goes Down a detection time after the
+// peer's last control message however fresh its echoes. The intervals are
+// fake-time sleeps in the bubble.
+func TestBFDEchoesCountInDemandModeAlone(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		s := sessionIn(t, layers.BFDStateUp)
+		for range BFDDetectMultiplier - 1 {
+			time.Sleep(BFDTransmissionInterval)
+			s.tick(time.Now())
+		}
+		if !s.IsUp() {
+			t.Fatal("the session went down inside the detection time")
+		}
+		time.Sleep(BFDTransmissionInterval)
+		s.tick(time.Now())
+		if s.IsUp() {
+			t.Fatal("echoes kept a session out of demand mode up past the detection time")
+		}
+	})
+}
+
+// TestBFDSessionPairDemand checks two sessions wired back to back whose
+// control packets the test drops while it hands each its echoes: the
+// handshake brings both Up in asynchronous mode, where neither sets the
+// Demand bit; once every control packet is lost, both switch to demand mode
+// at the detection time and stay Up on the echoes; once the packets cross
+// again, the Poll sequences end and neither sends; once the echoes stop, both
+// return to asynchronous mode, Up. With one direction lost and echoes at its
+// receiving end alone, that end switches while the other, hearing its
+// periodic packets, does not. A cut in demand mode takes both Down at the
+// detection time from their last echo. Each step is one interval of fake time
+// in the bubble.
+func TestBFDSessionPairDemand(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		a, _ := newTestSession(t)
+		b, _ := newTestSession(t)
+		ab, ba := &pairWriter{t: t}, &pairWriter{t: t}
+		a.SetRawWriter(ab)
+		b.SetRawWriter(ba)
+		// aEchoes and bEchoes are whether echoes keep crossing at each end,
+		// and aEcho and bEcho the last there.
+		aEchoes, bEchoes := true, true
+		var aEcho, bEcho time.Time
+		step := func() {
+			time.Sleep(BFDTransmissionInterval)
+			if aEchoes {
+				aEcho = time.Now()
+			}
+			if bEchoes {
+				bEcho = time.Now()
+			}
+			a.tick(aEcho)
+			b.tick(bEcho)
+			ab.deliver(b)
+			ba.deliver(a)
+		}
+		check := func(up, aDemand, bDemand bool, what string) {
+			t.Helper()
+			if a.IsUp() != up || b.IsUp() != up {
+				t.Fatalf("%s: verdicts %v/%v, want both %v", what, a.IsUp(), b.IsUp(), up)
+			}
+			if a.demandOf() != aDemand || b.demandOf() != bDemand {
+				t.Fatalf("%s: Demand bits %v/%v, want %v/%v", what, a.demandOf(), b.demandOf(),
+					aDemand, bDemand)
+			}
+		}
+
+		for range 6 {
+			step()
+		}
+		check(true, false, false, "control packets crossing")
+
+		ab.dropped, ba.dropped = true, true
+		for range 10 {
+			step()
+		}
+		check(true, true, true, "every control packet lost")
+
+		ab.dropped, ba.dropped = false, false
+		step()
+		step()
+		before := a.Transmitted() + b.Transmitted()
+		for range 5 {
+			step()
+		}
+		if sent := a.Transmitted() + b.Transmitted() - before; sent != 0 {
+			t.Fatalf("%d control packets in five intervals with both Demand bits set, want none", sent)
+		}
+		check(true, true, true, "the Poll sequences ended")
+
+		aEchoes, bEchoes = false, false
+		for range 2 * BFDDetectMultiplier {
+			step()
+		}
+		check(true, false, false, "the echoes stopped")
+
+		ab.dropped, bEchoes = true, true
+		for range 2 * BFDDetectMultiplier {
+			step()
+		}
+		check(true, false, true, "a's packets lost, echoes at b alone")
+
+		ab.dropped, bEchoes = false, false
+		for range 2 * BFDDetectMultiplier {
+			step()
+		}
+		check(true, false, false, "a's packets crossing again, b's echoes stopped")
+
+		aEchoes, bEchoes = true, true
+		ab.dropped, ba.dropped = true, true
+		for range BFDDetectMultiplier + 1 {
+			step()
+		}
+		check(true, true, true, "every control packet lost again")
+		aEchoes, bEchoes = false, false
+		for range BFDDetectMultiplier - 1 {
+			step()
+		}
+		if !a.IsUp() || !b.IsUp() {
+			t.Fatal("the cut link went down inside the detection time from its last echo")
+		}
+		step()
+		if a.IsUp() || b.IsUp() {
+			t.Fatal("the cut link stayed up past the detection time from its last echo")
+		}
+	})
+}
+
 // TestBFDStop checks the departed link: a stopped session records no
 // arrival and transmits nothing.
 func TestBFDStop(t *testing.T) {
 	s, w := newTestSession(t)
 	s.stop()
-	s.tick()
+	s.tick(time.Time{})
 	s.ReceiveMessage(peerMessage(layers.BFDStateUp, 1, 0))
 	if got := len(w.packets); got != 0 {
 		t.Fatalf("a stopped session transmitted %d packets", got)
@@ -428,13 +749,27 @@ func (s *BFDSession) localStateOf() layers.BFDState {
 	return s.localState
 }
 
+// demandOf reads the session's Demand bit for the assertions.
+func (s *BFDSession) demandOf() bool {
+	s.mtx.Lock()
+	defer s.mtx.Unlock()
+	return s.demand
+}
+
+// diagnosticOf reads the session's diagnostic for the assertions.
+func (s *BFDSession) diagnosticOf() layers.BFDDiagnostic {
+	s.mtx.Lock()
+	defer s.mtx.Unlock()
+	return s.diagnostic
+}
+
 // TestBFDControlPacketRoundTripThroughWire checks the control header's
 // serialization the other way: the bytes the session builds decode as the
 // data plane decodes them, field for field.
 func TestBFDControlPacketRoundTripThroughWire(t *testing.T) {
 	s, w := newTestSession(t)
 	s.ReceiveMessage(peerMessage(layers.BFDStateInit, 0x11223344, 0))
-	s.tick()
+	s.tick(time.Time{})
 
 	// The SCION header's length bookkeeping carries the whole control
 	// message, so the frame re-parses from the wire bytes alone.

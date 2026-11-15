@@ -155,3 +155,52 @@ keeps sending periodic control messages, which keep the session up as today.
     request across it.
 *   **The responder** hands on the requests that crossed one link to it.
 *   **The labs:** the idle link, and the hub benchmarks.
+
+## Implementation history
+
+*   **The keepalive goes.** The first cut ran demand mode on every link once
+    up, kept by any echo across it, and a keepalive at the end with the
+    higher ISD-AS echoed each link once a second where nothing else did. In
+    the hub lab it lost no link under steady load, but in one run of five
+    after the uplink's rate fell, two links the traffic had just left went
+    down: their only echoes, the keepalive's, crossed the hub's congested
+    uplink, and three in a row were lost. An idle link fares the same in
+    asynchronous mode and carries no load, so demand mode now waits until
+    load loses the control messages, and the brake's echoes, which follow
+    the traffic, keep it.
+*   **Leaving demand mode needs the peer.** While its peer is silent, a
+    session whose echoes stop cannot tell the traffic gone from a cut. Its
+    Poll sequence brings the peer's messages back within a round trip, and
+    the detection time still runs from the last echo, so a cut is seen as
+    soon as in asynchronous mode.
+*   **The receiving end counts the sender's requests.** Under a flow in one
+    direction, the receiving end's own brake echoes once in ten seconds at
+    most; its proof is the sender's echo requests, which the responder hands
+    the congestion module.
+*   **The congestion module keeps the echoes, not the bus.** The first cut
+    published each link's last request and reply on a bus topic. A journal
+    of every echo was rejected: it keeps 256 entries, about 0.6 seconds of a
+    hub's echoes when 20 links carry traffic, and a reader that falls behind
+    loses entries without learning which links they named. The module keeps
+    each link's last echo beside its brake and answers the sessions without
+    a loop.
+*   **The idle link.** In the fabric lab, both ends of an idle link sent a
+    control message every interval, and once the line was cut both marked
+    the link down 3 seconds later, within the 4 the goal allows.
+*   **The hub lab.** Over five runs of each test, load took down 5 links in
+    5 runs, 2 under steady load and 3 after the uplink's rate fell, each
+    back up within 2 seconds. Two were carrying flows when the rate fell,
+    while the brakes read up to 88% of their echoes lost; others were links
+    their traffic had just left. Proposal 0137's arrival rule lost none, its
+    ablation without the rule 22, and the first cut's keepalive 2. Delivery
+    matched proposal 0137's: under steady load, 91.5% of the hub's own
+    traffic and 89.4% of the transit arrived, against 90.9% and 89.9%; after
+    the fall, 96.7% and 97.2%, against 96.6% and 96.4%. The uplink dropped
+    0.7% and 1.2% of what it carried, against 0.6% and 1.6%, and leases moved
+    12.2 and 9.8 times, against 10.4 and 10.4.
+*   **A wider window does not remove them.** Accepting an echo within the
+    detection time at the switch, rather than within the last second, lost
+    3 links in 2 runs of ten, a difference ten runs cannot tell from chance:
+    in the first seconds of a sudden overload, before the brakes engage, no
+    control message or echo crosses some links for a detection time, which
+    only counting every arrival rides out.

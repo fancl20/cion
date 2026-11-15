@@ -1012,9 +1012,6 @@ func (l *externalLink) receive(size int, srcAddr *net.UDPAddr, p *Packet) {
 		l.receiveBFD(sc, p)
 		return
 	}
-	if l.bfdSession != nil {
-		l.bfdSession.Heard()
-	}
 	switch class {
 	case classControl:
 		p.control = true

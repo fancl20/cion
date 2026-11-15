@@ -78,8 +78,9 @@ type node struct {
 	// Data plane generations, served by the data plane loop.
 	metrics *dataplane.Metrics
 	// congestion paces and marks every generation's links' egress queues,
-	// so a link keeps its readings and its brake across the swaps, and
-	// sends the echoes its brake reads.
+	// so a link keeps its readings and its brake across the swaps, sends
+	// the echoes its brake reads, and tells the BFD sessions when an echo
+	// last crossed each link.
 	congestion *brake.Brake
 
 	// backendsMtx guards the serving generation, the observation records its

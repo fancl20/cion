@@ -85,6 +85,8 @@ func (r fixedRate) Wrote(uint16, int, int, bool)    {}
 func (r fixedRate) Rate(uint16) float64             { return float64(r) }
 func (r fixedRate) Mark(uint16, float64) bool       { return false }
 func (r fixedRate) Sampled(uint16, evidence.Sample) {}
+func (r fixedRate) Requested(uint16, time.Time)     {}
+func (r fixedRate) Echoed(uint16) time.Time         { return time.Time{} }
 
 // BenchmarkForwardPipelineCongestion drives the pipeline as
 // BenchmarkForwardPipeline does, its packets ECN-capable, under each

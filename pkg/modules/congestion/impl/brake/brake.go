@@ -23,7 +23,8 @@
 // of the link, which a resolution over that path names; an echo unanswered
 // within a second counts as lost, and eight lost in a row to one neighbor
 // have its host resolved again, the echoes keeping the host they have
-// meanwhile.
+// meanwhile. A link's last echo, either way, is the later of the last reply
+// to its own echoes and the last request the neighbor sent across it.
 package brake
 
 import (
@@ -95,14 +96,14 @@ const (
 var recent = evidence.Kind{Quantile: 0.1, Confidence: 0.8, Span: 4 * time.Second}
 
 // Policy is the brake method's policy, which a Brake runs beside its echoes.
-// One mutex guards its links' echoes and brakes, and the methods that take it
-// wait on nothing else: a link steps as Wrote, Rate, or Sampled touches it,
-// and the echoes a write calls for, and the log line of the step's change to
-// the link's brake, go out once the mutex is released. Mark, which the data
-// plane calls for each packet that comes back over a braked link, takes no
-// lock once its link has marked: what a link owes in marks is a count of its
-// own, moved atomically. Its clock is time.Now; a sample's At is when its
-// echo was sent.
+// One mutex guards its links' echoes, either way, and brakes, and the methods
+// that take it wait on nothing else: a link steps as Wrote, Rate, or Sampled
+// touches it, and the echoes a write calls for, and the log line of the
+// step's change to the link's brake, go out once the mutex is released. Mark,
+// which the data plane calls for each packet that comes back over a braked
+// link, takes no lock once its link has marked: what a link owes in marks is
+// a count of its own, moved atomically. Its clock is time.Now; a sample's At
+// is when its echo was sent.
 type Policy struct {
 	echo  func(ifID uint16)
 	mu    sync.Mutex
@@ -148,6 +149,9 @@ type link struct {
 	// zero while the link is not braked; ceiling is the rate its last cut
 	// came at.
 	rate, ceiling float64
+	// echoedAt is when an echo last crossed the link, either way: zero until
+	// a reply to one of its echoes or a request of the neighbor's arrived.
+	echoedAt time.Time
 }
 
 // minimum is the least answered round trip of the echoes sent in the
@@ -283,13 +287,41 @@ func (p *Policy) owedBy(ifID uint16) *atomic.Int64 {
 }
 
 // Sampled takes the echo's outcome once the link has stepped, fresh for the
-// link's next step.
+// link's next step, and an answered echo's reply as the link's last echo.
 func (p *Policy) Sampled(ifID uint16, s evidence.Sample) {
 	p.mu.Lock()
 	l, c := p.touch(ifID, time.Now())
 	l.add(s)
+	if !s.Lost {
+		l.echoed(s.At.Add(s.RTT))
+	}
 	p.mu.Unlock()
 	c.log(ifID)
+}
+
+// Requested takes the neighbor's echo request as the link's last echo.
+func (p *Policy) Requested(ifID uint16, at time.Time) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.linkOf(ifID).echoed(at)
+}
+
+// Echoed returns when an echo last crossed the link, either way.
+func (p *Policy) Echoed(ifID uint16) time.Time {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if l := p.links[ifID]; l != nil {
+		return l.echoedAt
+	}
+	return time.Time{}
+}
+
+// echoed takes an echo that crossed the link at as its last, unless a later
+// one did; the mutex must be held.
+func (l *link) echoed(at time.Time) {
+	if at.After(l.echoedAt) {
+		l.echoedAt = at
+	}
 }
 
 // touch returns ifID's link once it has stepped at now, and what the step

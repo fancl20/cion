@@ -2,9 +2,10 @@
 // every method keeps. A fresh policy brakes no link; a link whose echoes
 // come back at their least is not braked, however much it writes; a link
 // whose egress queue is empty marks nothing, whatever it owed before; a link
-// that writes calls for echoes across it; and the data plane's processors
-// and senders and the loop that hands the policy its echoes' outcomes may
-// call the methods at once. When a method brakes a link, how far, how many
+// that writes calls for echoes across it; a link's last echo is the latest
+// reply to its echoes or request of the neighbor's; and the data plane's
+// processors and senders, the loop that hands the policy its echoes'
+// outcomes, the responder, and the BFD sessions may call the methods at once. When a method brakes a link, how far, how many
 // replies it marks, and how often it calls for echoes are its own tests'.
 package congestiontest
 
@@ -150,6 +151,31 @@ func Run(t *testing.T, newPolicy NewPolicy) {
 		})
 	})
 
+	t.Run("a link's last echo is the latest reply or request across it", func(t *testing.T) {
+		p := newPolicy(newEchoes().call)
+		t0 := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+		if got := p.Echoed(1); !got.IsZero() {
+			t.Fatalf("Echoed(1) = %v on a fresh policy, want zero", got)
+		}
+		p.Sampled(1, evidence.Sample{At: t0, RTT: 20 * time.Millisecond})
+		if got, want := p.Echoed(1), t0.Add(20*time.Millisecond); !got.Equal(want) {
+			t.Fatalf("Echoed(1) = %v after a reply, want its arrival %v", got, want)
+		}
+		p.Requested(1, t0.Add(time.Second))
+		if got, want := p.Echoed(1), t0.Add(time.Second); !got.Equal(want) {
+			t.Fatalf("Echoed(1) = %v after a request, want its arrival %v", got, want)
+		}
+		p.Sampled(1, evidence.Sample{At: t0.Add(2 * time.Second), Lost: true})
+		p.Sampled(1, evidence.Sample{At: t0, RTT: 30 * time.Millisecond})
+		p.Requested(1, t0)
+		if got, want := p.Echoed(1), t0.Add(time.Second); !got.Equal(want) {
+			t.Errorf("Echoed(1) = %v after a lost echo and earlier arrivals, want still %v", got, want)
+		}
+		if got := p.Echoed(2); !got.IsZero() {
+			t.Errorf("Echoed(2) = %v, its link carrying no echo, want zero", got)
+		}
+	})
+
 	t.Run("the methods may be called at once", func(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
 			p := newPolicy(newEchoes().call)
@@ -188,6 +214,13 @@ func Run(t *testing.T, newPolicy NewPolicy) {
 						if fill := float64(i%5) / 4; p.Mark(l.ifID, fill) && fill == 0 {
 							t.Errorf("link %d marked a reply, its queue empty", l.ifID)
 						}
+					}
+				})
+				wg.Go(func() {
+					for range ticks {
+						time.Sleep(tick)
+						p.Requested(l.ifID, time.Now())
+						p.Echoed(l.ifID)
 					}
 				})
 			}

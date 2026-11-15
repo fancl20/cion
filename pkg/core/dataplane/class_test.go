@@ -420,6 +420,8 @@ func newPacingPolicy(bps float64) *pacingPolicy {
 }
 
 func (p *pacingPolicy) Sampled(uint16, evidence.Sample) {}
+func (p *pacingPolicy) Requested(uint16, time.Time)     {}
+func (p *pacingPolicy) Echoed(uint16) time.Time         { return time.Time{} }
 func (p *pacingPolicy) Rate(uint16) float64             { return p.bps }
 func (p *pacingPolicy) Mark(uint16, float64) bool       { return false }
 

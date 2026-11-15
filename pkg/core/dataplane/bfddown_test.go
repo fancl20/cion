@@ -20,7 +20,6 @@ import (
 type downSession struct{}
 
 func (downSession) ReceiveMessage(*layers.BFD) {}
-func (downSession) Heard()                     {}
 func (downSession) IsUp() bool                 { return false }
 func (downSession) SetRawWriter(RawWriter)     {}
 

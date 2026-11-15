@@ -48,10 +48,8 @@ type RawWriter interface {
 type Session interface {
 	// ReceiveMessage hands one received BFD control message to the session.
 	ReceiveMessage(msg *layers.BFD)
-	// Heard notes an arrival from the peer other than a control message.
-	Heard()
-	// IsUp returns the session's verdict: up until the detect multiplier
-	// expires without an arrival, up again on the next answered one.
+	// IsUp returns the session's verdict: down from the detection time's
+	// expiry or the peer's signaled Down until the handshake completes again.
 	IsUp() bool
 	// SetRawWriter attaches the link's writer for prebuilt packets.
 	SetRawWriter(w RawWriter)

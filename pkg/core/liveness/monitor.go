@@ -32,6 +32,7 @@ import (
 type HealthMonitor struct {
 	ia         addr.IA
 	store      links.DB
+	echoed     func(ifID uint16) time.Time
 	tick       time.Duration
 	detectMult uint8
 	macFactory func() hash.Hash
@@ -51,6 +52,10 @@ type HealthMonitorConfig struct {
 	// Store is the neighbor table, read live: the monitor starts a session
 	// for every serving entry and stops the departed ones'.
 	Store links.DB
+	// Echoed returns when an echo last crossed a link, either way, which
+	// keeps the link's session in demand mode up; nil reads none, and every
+	// session stays in asynchronous mode.
+	Echoed func(ifID uint16) time.Time
 	// Interval is the transmission interval; zero uses
 	// BFDTransmissionInterval.
 	Interval time.Duration
@@ -68,6 +73,13 @@ func (cfg HealthMonitorConfig) interval() time.Duration {
 		return BFDTransmissionInterval
 	}
 	return cfg.Interval
+}
+
+func (cfg HealthMonitorConfig) echoed() func(ifID uint16) time.Time {
+	if cfg.Echoed == nil {
+		return func(uint16) time.Time { return time.Time{} }
+	}
+	return cfg.Echoed
 }
 
 func (cfg HealthMonitorConfig) detectMultiplier() uint8 {
@@ -88,6 +100,7 @@ func NewHealthMonitor(cfg HealthMonitorConfig) (*HealthMonitor, error) {
 	return &HealthMonitor{
 		ia:         cfg.IA,
 		store:      cfg.Store,
+		echoed:     cfg.echoed(),
 		tick:       cfg.interval(),
 		detectMult: cfg.detectMultiplier(),
 		macFactory: macFactory,
@@ -196,12 +209,13 @@ func (m *HealthMonitor) reconcile() {
 	}
 }
 
-// tickAll runs every session's interval.
+// tickAll runs every session's interval, each given when an echo last
+// crossed its link.
 func (m *HealthMonitor) tickAll() {
 	m.mtx.Lock()
 	defer m.mtx.Unlock()
-	for _, s := range m.sessions {
-		s.tick()
+	for ifID, s := range m.sessions {
+		s.tick(m.echoed(ifID))
 	}
 }
 

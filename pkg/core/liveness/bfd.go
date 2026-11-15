@@ -35,18 +35,25 @@ const (
 // bfdVersion is RFC 5880's version, the only one the drafts frame.
 const bfdVersion = 1
 
-// BFDSession is one link's liveness session: the drafts' async-mode subset
-// of RFC 5880 — Down, Init, Up, advanced by the peer's arriving state and
-// our own, no authentication, demand mode, or echo function — its control
-// packets SCION-framed (NextHdr 203) on the link's one-hop path and sent on
-// the link's own underlay socket, beneath the forwarding plane. The session
-// doubles as the link's verdict: up while the session is Up, which the
-// three-way handshake reaches, and down once it leaves Up, on silence past
-// the detection time or on the peer's signaled Down — so a loss in either
-// direction downs both ends, and a lone arrival raises nothing. A new
-// session holds its verdict up for one detection time while the handshake
-// completes. The verdict is volatile: a node restarts with every link up and
-// re-derives within one detection time.
+// BFDSession is one link's liveness session: RFC 5880's Down, Init, and Up,
+// advanced by the peer's arriving state and our own — no authentication or
+// BFD Echo function — its control packets SCION-framed (NextHdr 203) on the
+// link's one-hop path and sent on the link's own underlay socket, beneath the
+// forwarding plane. It runs in asynchronous mode, and in demand mode where
+// load loses its control messages: when the detection time passes without
+// one while the congestion module's echoes still cross the link, it sets the
+// Demand bit instead of going Down, its peer stops its periodic control
+// messages, and the echoes keep the session up; once they stop for an
+// interval, it clears the bit, and its peer answers the Poll sequence and
+// resumes them. A change of the bit runs a Poll sequence, and a Poll from the
+// peer is answered at once with the Final bit. The session doubles as the
+// link's verdict: up while the session is Up, which the three-way handshake
+// reaches, and down once it leaves Up, on silence past the detection time or
+// on the peer's signaled Down — so a loss in either direction downs both
+// ends, and a lone arrival raises nothing. A new session holds its verdict up
+// for one detection time while the handshake completes. The verdict is
+// volatile: a node restarts with every link up and re-derives within one
+// detection time.
 type BFDSession struct {
 	ifID        uint16
 	myDisc      uint32
@@ -60,22 +67,25 @@ type BFDSession struct {
 	writer dataplane.RawWriter
 
 	mtx sync.Mutex
-	// localState, diagnostic, remoteState, and yourDisc are the protocol
-	// state the arrivals advance.
-	localState  layers.BFDState
-	diagnostic  layers.BFDDiagnostic
-	remoteState layers.BFDState
-	yourDisc    uint32
+	// localState, diagnostic, remoteState, remoteDemand, and yourDisc are the
+	// protocol state the arrivals advance, demand the Demand bit the session
+	// sets, and polling whether its Poll sequence awaits the peer's Final.
+	localState   layers.BFDState
+	diagnostic   layers.BFDDiagnostic
+	remoteState  layers.BFDState
+	remoteDemand bool
+	yourDisc     uint32
+	demand       bool
+	polling      bool
 	// header describes this session's frames: the two ISD-ASes and hosts.
 	localIA    addr.IA
 	neighborIA addr.IA
 	localHost  netip.Addr
 	remoteHost netip.Addr
-	// lastRX is the last control message's arrival, and heard the last
-	// other arrival from the peer, in nanoseconds since the Unix epoch; the
-	// detection time expires from the later.
+	// lastRX is the last control message's arrival, from which the detection
+	// time expires, and from the link's last echo when that is later in
+	// demand mode or while a Poll sequence runs.
 	lastRX time.Time
-	heard  atomic.Int64
 	// started is when the session began, its startup grace's origin, and
 	// reachedUp records whether the handshake ever completed: only a
 	// session that never reached Up holds its verdict up on the grace.
@@ -167,8 +177,10 @@ func (s *BFDSession) stop() {
 }
 
 // ReceiveMessage hands one received control message to the session — the
-// data plane's BFD branch calls it for every arrival on the link. The
-// arrival advances the protocol state, and the verdict follows the state.
+// data plane's BFD branch calls it for every control message the link
+// receives. The message advances the protocol state, and the verdict follows
+// the state; its Final bit ends the session's Poll sequence, and its Poll bit
+// is answered at once with a Final (Section 6.8.7).
 func (s *BFDSession) ReceiveMessage(msg *layers.BFD) {
 	s.mtx.Lock()
 	defer s.mtx.Unlock()
@@ -185,19 +197,19 @@ func (s *BFDSession) ReceiveMessage(msg *layers.BFD) {
 		s.yourDisc = uint32(msg.MyDiscriminator)
 	}
 	s.remoteState = msg.State
+	s.remoteDemand = msg.Demand
+	if msg.Final {
+		s.polling = false
+	}
 	s.advance(msg.State)
 	now := time.Now()
 	s.lastRX = now
+	s.settle()
 	s.refresh(now)
+	if msg.Poll {
+		s.transmit(now, true)
+	}
 }
-
-// Heard notes an arrival from the peer other than a control message: the
-// link carries the peer's packets, so the session's silence restarts. RFC
-// 5880's asynchronous mode counts control messages alone; the session
-// departs from it so that a queue dropping the control messages with the
-// rest downs no link whose peer's traffic still arrives. Only control
-// messages advance the protocol state.
-func (s *BFDSession) Heard() { s.heard.Store(time.Now().UnixNano()) }
 
 // advance moves the local state by RFC 5880's reception rules (Section
 // 6.8.6): the peer's AdminDown downs any session not Down; a Down session
@@ -266,31 +278,71 @@ func (s *BFDSession) refresh(now time.Time) {
 	slog.Info("Link down", "interface", s.ifID, "neighbor", s.neighborIA, "why", why)
 }
 
-// tick runs the session's interval: an Init or Up session silent for the
-// detection time goes Down (Section 6.8.4), the verdict follows, and a
-// control packet leaves either way — the stream survives its own down
-// verdict, which is how recovery is seen.
-func (s *BFDSession) tick() {
+// tick runs the session's interval, given when an echo last crossed its
+// link, either way. An Init or Up session goes Down once the detection time
+// passes with no control message (Section 6.8.4), nor, in demand mode or
+// while its Poll sequence runs, an echo — unless it is Up, its peer last
+// reported Up, and an echo crossed within the last interval: then it sets
+// the Demand bit instead, the echoes standing in for the control messages
+// the load loses (Section 6.6). A session in demand mode whose link carried
+// no echo for an interval clears the bit, and its Poll sequence brings back
+// the peer's periodic messages before the detection time from the last echo
+// passes. The bit is set only while both ends are Up, and the verdict
+// follows the state. A control packet leaves at every interval, the stream
+// surviving its own down verdict, which is how recovery is seen — except
+// while the peer set its Demand bit and both ends are Up, when only a Poll
+// sequence's packets leave (Section 6.8.7).
+func (s *BFDSession) tick(echoAt time.Time) {
 	s.mtx.Lock()
 	defer s.mtx.Unlock()
 	if s.stopped {
 		return
 	}
 	now := time.Now()
+	detection := time.Duration(s.detectMult) * s.interval
 	last := s.lastRX
-	if heard := time.Unix(0, s.heard.Load()); heard.After(last) {
-		last = heard
+	if (s.demand || s.polling) && echoAt.After(last) {
+		last = echoAt
 	}
 	if (s.localState == layers.BFDStateInit || s.localState == layers.BFDStateUp) &&
-		now.Sub(last) >= time.Duration(s.detectMult)*s.interval {
-		s.localState = layers.BFDStateDown
-		s.diagnostic = layers.BFDDiagnosticTimeExpired
+		now.Sub(last) >= detection {
+		if s.localState == layers.BFDStateUp && s.remoteState == layers.BFDStateUp &&
+			now.Sub(echoAt) < s.interval {
+			s.demand, s.polling = true, true
+		} else {
+			s.localState = layers.BFDStateDown
+			s.diagnostic = layers.BFDDiagnosticTimeExpired
+		}
 	}
+	if s.demand && now.Sub(echoAt) >= s.interval {
+		s.demand, s.polling = false, true
+	}
+	s.settle()
 	s.refresh(now)
+	if s.remoteDemand && s.localState == layers.BFDStateUp &&
+		s.remoteState == layers.BFDStateUp && !s.polling {
+		return
+	}
+	s.transmit(now, false)
+}
+
+// settle clears the Demand bit and the Poll sequence of a session that is
+// not Up or whose peer is not: the bit is set only while both are (Section
+// 6.8.7), and such a session sends at every interval. Must be called with
+// the mutex held.
+func (s *BFDSession) settle() {
+	if s.localState != layers.BFDStateUp || s.remoteState != layers.BFDStateUp {
+		s.demand, s.polling = false, false
+	}
+}
+
+// transmit sends one control packet on the link's writer, the Final bit set
+// when it answers the peer's Poll. Must be called with the mutex held.
+func (s *BFDSession) transmit(now time.Time, final bool) {
 	if s.writer == nil {
 		return
 	}
-	raw, err := s.controlPacket(now)
+	raw, err := s.controlPacket(now, final)
 	if err != nil {
 		slog.Error("Building BFD control packet", "interface", s.ifID, "err", err)
 		return
@@ -306,10 +358,11 @@ func (s *BFDSession) tick() {
 
 // controlPacket builds one SCION-framed control packet — the BFD control
 // header after a SCION header with NextHdr 203 over a fresh one-hop path,
-// exactly the frame the data plane's BFD branch parses on arrival. Must be
-// called with the mutex held: the one-hop hop-field MAC uses the shared
-// hasher.
-func (s *BFDSession) controlPacket(now time.Time) ([]byte, error) {
+// exactly the frame the data plane's BFD branch parses on arrival — with the
+// Final bit when final, and else the Poll bit while the session's Poll
+// sequence runs, never both (Section 6.5). Must be called with the mutex
+// held: the one-hop hop-field MAC uses the shared hasher.
+func (s *BFDSession) controlPacket(now time.Time, final bool) ([]byte, error) {
 	segID := make([]byte, 2)
 	if _, err := rand.Read(segID); err != nil {
 		return nil, err
@@ -339,6 +392,9 @@ func (s *BFDSession) controlPacket(now time.Time) ([]byte, error) {
 		Version:              bfdVersion,
 		Diagnostic:           s.diagnostic,
 		State:                s.localState,
+		Poll:                 s.polling && !final,
+		Final:                final,
+		Demand:               s.demand,
 		DetectMultiplier:     layers.BFDDetectMultiplier(s.detectMult),
 		MyDiscriminator:      layers.BFDDiscriminator(s.myDisc),
 		YourDiscriminator:    layers.BFDDiscriminator(s.yourDisc),

@@ -73,7 +73,6 @@ type idleSession struct {
 }
 
 func (s *idleSession) ReceiveMessage(*layers.BFD) { s.arrivals.Add(1) }
-func (s *idleSession) Heard()                     {}
 func (s *idleSession) IsUp() bool                 { return true }
 func (s *idleSession) SetRawWriter(RawWriter)     {}
 

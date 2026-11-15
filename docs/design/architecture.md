@@ -71,13 +71,15 @@ policy chooses.
 *   **Control endpoint** — speaks the control services to neighbor nodes
     over the SCION-native channel: beaconing, segment registration and
     lookup, trust material, and service resolution.
-*   **Liveness** — a BFD session on every serving link, which any arrival
-    from the peer keeps alive, and the monitor that keeps the sessions across
-    data plane generations and turns their arrivals into each link's up or
-    down verdict.
+*   **Liveness** — a BFD session on every serving link, in asynchronous
+    mode, and in demand mode where load loses its control messages while the
+    congestion module's echoes still cross the link; and the monitor that
+    keeps the sessions across data plane generations and turns them into
+    each link's up or down verdict.
 *   **Echo responder** — answers every SCMP echo request the node receives,
     on its reversed arrival path: the probes of the paths through the node,
-    and each neighbor's echoes across a link to it.
+    and each neighbor's echoes across a link to it, which it hands to the
+    congestion module.
 *   **Trust engine** — holds and issues the network's trust material: the
     TRC, certificate chains, and their renewal, and runs the procedures that
     keep it current: the chain's lifecycle, the rotation watch, and the
@@ -157,7 +159,8 @@ selected by the operator's run arguments.
     the node's beacons carry, bound by the composition root
     ([ADR-0042](/docs/adrs/0042-file-the-beacon-policy-as-a-module.md)).
 *   **Congestion** — policy: how each link's egress queue is paced and
-    marked, from the echoes the module sends the link's next hop; bound by
+    marked, from the echoes the module sends the link's next hop, and when an
+    echo last crossed each link, which the link's BFD session reads; bound by
     the composition root
     ([ADR-0043](/docs/adrs/0043-grow-capacity-between-nodes-under-load.md)).
 *   **Topology source** — source: where topology decisions come from; the
@@ -282,7 +285,8 @@ Each node brakes each of its links at the limit its echoes to the next hop
 read, holding the excess in the link's queue, whose fill marks the packets
 that come back over the link. Each source slows its traffic to a destination
 on the marks its probes' replies bring back, and its leases leave the paths
-that run hot
+that run hot. A link whose control messages the load loses stays up in
+demand mode on the echoes
 ([ADR-0043](/docs/adrs/0043-grow-capacity-between-nodes-under-load.md)).
 
 ### Endhost service

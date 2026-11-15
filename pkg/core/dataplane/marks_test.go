@@ -32,6 +32,8 @@ type askedMark struct {
 func (f *markingPolicy) Wrote(uint16, int, int, bool)    {}
 func (f *markingPolicy) Rate(uint16) float64             { return 0 }
 func (f *markingPolicy) Sampled(uint16, evidence.Sample) {}
+func (f *markingPolicy) Requested(uint16, time.Time)     {}
+func (f *markingPolicy) Echoed(uint16) time.Time         { return time.Time{} }
 
 func (f *markingPolicy) Mark(ifID uint16, fill float64) bool {
 	f.asked = append(f.asked, askedMark{ifID, fill})
